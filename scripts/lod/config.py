@@ -308,6 +308,14 @@ RECORDED_GATE_THRESHOLDS = (
 #: normals do on the same geometry. Beyond a few hundred metres shading stops being what changes and
 #: silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably wants a
 #: minimum resolvable footprint below which this gate abstains and says so.
+#:
+#: REFRESHED 2026-08-07 for the re-cut corpus, and the refresh is exactly what this constant is for.
+#: The shoe was welded and gate-repaired, so L0 fell 1 661 -> 764 triangles and the ladder rebased
+#: from four reductions to three. The `ruling` below is left VERBATIM: it is Yan's, made on the
+#: superseded corpus, and rewriting a person's finding to match new numbers would destroy the
+#: provenance the block exists to carry. It still holds, a fortiori — the corpus it judged produced
+#: a worst score of 1.674 against the ratified limit of 2.0, and this one produces 1.000. The
+#: `levels` under it ARE the new corpus, because those are measurements and measurements go stale.
 RATIFICATION_EVIDENCE = {
     # WHO RULED, ON WHAT, AND FROM WHAT. Recorded here and copied into the manifest, because the
     # threshold it settles is a taste call, and a taste call without its provenance is just a number.
@@ -322,13 +330,20 @@ RATIFICATION_EVIDENCE = {
     },
     "levels": (
         # (level, tris, switch_m, defect_score, verdict)
-        (1, 854, 55.9, 0.486600, "PASS"),
-        (2, 580, 126.6, 0.619408, "PASS"),
-        (3, 314, 501.0, 1.673924, "PASS"),
-        (4, 194, 1049.9, None, "ABSTAIN"),
+        (1, 432, 255.2, 1.000000, "PASS"),
+        (2, 270, 442.5, 1.000000, "PASS"),
+        (3, 182, 1016.8, None, "ABSTAIN"),
     ),
-    "enumerated_outputs": 736,
-    "skipped_rung": (3, 532, 580, 0.0828),  # rung, best tris, incumbent tris, shed fraction
+    "enumerated_outputs": 292,
+    # (rung, best tris, shed fraction) for EVERY rung the skip rule dropped. A tuple of them, not
+    # one: the old corpus happened to skip exactly one rung, and the single-entry shape carried an
+    # `incumbent` field that only meant anything because that skip happened to sit above L2. This
+    # corpus skips two (both against L0), so the evidence enumerates them and the coupling to a
+    # particular chain index is gone.
+    "skipped_rungs": (
+        (1, 662, 0.1335),
+        (2, 550, 0.2801),
+    ),
 }
 
 

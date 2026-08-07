@@ -700,6 +700,24 @@ class RederivationSweepTests(unittest.TestCase):
             self.skipTest(f"{CONFIG.MANIFEST_RELPATH} has not been generated yet")
         with open(path, encoding="utf-8") as handle:
             self.text = handle.read()
+        # The ladder's LENGTH is an OUTPUT of generation, never a constant: `skip_fraction` and the
+        # topology floor decide it, and this corpus has already gone from five levels to four when
+        # the shoe was re-cut from a welded 764-triangle source. A hardcoded `range(1, 5)` here
+        # turned every level the manifest no longer has into an IndexError — a sweep that errors is
+        # a sweep that proves nothing, which is exactly the failure mode this class exists to catch
+        # one layer down. So the count comes from the shipped manifest.
+        levels = json.loads(self.text)["assets"][0]["levels"]
+        self.level_count = len(levels)
+        # WHICH level abstains is a property of the corpus, not an index to remember: the gate
+        # abstains below `min_footprint_px`, so it is whichever level got small enough far enough
+        # away. Naming `levels[4]` hardcoded both the ladder's length AND which rung crossed that
+        # line; the re-cut moved it to L3 and three mutation tests turned into IndexErrors, which
+        # assert nothing at all.
+        abstaining = [
+            level["level"] for level in levels
+            if level.get("render_gate", {}).get("abstained")
+        ]
+        self.abstaining = abstaining[0] if abstaining else None
 
     def mutated(self, mutate):
         manifest = json.loads(self.text)
@@ -751,7 +769,7 @@ class RederivationSweepTests(unittest.TestCase):
         self.assert_caught("inverted under_absolute_floor", tamper)
 
     def test_every_recorded_switch_distance_is_rederived(self):
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} switch_m + 10",
@@ -775,7 +793,7 @@ class RederivationSweepTests(unittest.TestCase):
         derived switch distance moves. This is the direction that matters for a certificate — a
         level claiming a bigger lie than it tells is the shape of a forged bound.
         """
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             for key in ("dev_source_mm", "dev_source_mm_upper", "dev_source_bracket_mm",
                         "dev_source_to_level_mm", "dev_level_to_source_mm", "pairwise_mm_upper"):
                 with self.subTest(level=index, key=key):
@@ -796,7 +814,7 @@ class RederivationSweepTests(unittest.TestCase):
         pipeline re-measures them. `test_inflating_any_deviation_number_is_caught` covers the
         direction a forged certificate would actually move in.
         """
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             level = json.loads(self.text)["assets"][0]["levels"][index]
             driver = (
                 "dev_source_mm_upper"
@@ -812,7 +830,7 @@ class RederivationSweepTests(unittest.TestCase):
                 )
 
     def test_every_level_hash_is_compared_against_the_bytes(self):
-        for index in range(0, 5):
+        for index in range(0, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} glb_sha256 rewritten",
@@ -871,7 +889,7 @@ class RederivationSweepTests(unittest.TestCase):
         )
 
     def test_the_pairwise_lower_bound_cannot_exceed_its_upper(self):
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} pairwise_mm = 999",
@@ -882,7 +900,7 @@ class RederivationSweepTests(unittest.TestCase):
 
     def test_both_component_switch_distances_are_rederived(self):
         """Checking only their maximum let BOTH be set to -999 without a word."""
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             for key in ("switch_from_source_dev_m", "switch_from_pairwise_m"):
                 with self.subTest(level=index, key=key):
                     self.assert_caught(
@@ -899,7 +917,7 @@ class RederivationSweepTests(unittest.TestCase):
         self.assert_caught("both components = -999", wreck)
 
     def test_the_shed_fraction_is_rederived_from_the_triangle_counts(self):
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} shed_fraction_vs_parent = -999",
@@ -909,7 +927,7 @@ class RederivationSweepTests(unittest.TestCase):
                 )
 
     def test_a_validity_record_that_describes_another_mesh_is_caught(self):
-        for index in range(0, 5):
+        for index in range(0, self.level_count):
             for key in ("tris", "verts"):
                 with self.subTest(level=index, key=key):
                     self.assert_caught(
@@ -920,7 +938,7 @@ class RederivationSweepTests(unittest.TestCase):
                     )
 
     def test_the_rung_target_is_rederived_from_the_global_grid(self):
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} e_target_mm halved",
@@ -931,9 +949,13 @@ class RederivationSweepTests(unittest.TestCase):
 
     def test_abstention_is_rederived_from_the_geometry(self):
         """The one verdict claimable without rendering anything, so the one most worth recomputing."""
+        if self.abstaining is None:
+            self.skipTest("this corpus has no abstaining level")
         self.assert_caught(
-            "L4 claims it was scored",
-            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__("abstained", False),
+            f"L{self.abstaining} claims it was scored",
+            lambda m: m["assets"][0]["levels"][self.abstaining]["render_gate"].__setitem__(
+                "abstained", False
+            ),
         )
         self.assert_caught(
             "L1 claims it abstained",
@@ -941,13 +963,17 @@ class RederivationSweepTests(unittest.TestCase):
         )
 
     def test_an_abstention_may_not_carry_a_verdict(self):
+        if self.abstaining is None:
+            self.skipTest("this corpus has no abstaining level")
         self.assert_caught(
-            "L4 abstained but records a pass",
-            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__("pass", True),
+            f"L{self.abstaining} abstained but records a pass",
+            lambda m: m["assets"][0]["levels"][self.abstaining]["render_gate"].__setitem__(
+                "pass", True
+            ),
         )
 
     def test_the_recorded_footprint_is_rederived_from_the_bounding_box(self):
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} screen_footprint_px doubled",
@@ -958,16 +984,18 @@ class RederivationSweepTests(unittest.TestCase):
                 )
 
     def test_a_rewritten_abstention_threshold_is_refused(self):
+        if self.abstaining is None:
+            self.skipTest("this corpus has no abstaining level")
         self.assert_caught(
             "min_footprint_px = 1",
-            lambda m: m["assets"][0]["levels"][4]["render_gate"].__setitem__(
+            lambda m: m["assets"][0]["levels"][self.abstaining]["render_gate"].__setitem__(
                 "min_footprint_px", 1.0
             ),
         )
 
     def test_every_baked_tangent_count_is_gated(self):
         """The tangents that SHIP — the gate the UV proxy could not stand in for."""
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} degenerate_tangents = 1",
@@ -984,7 +1012,7 @@ class RederivationSweepTests(unittest.TestCase):
 
     def test_a_level_that_baked_no_tangents_is_refused(self):
         """Zero baked tangents scored a clean zero on the DEGENERATE counter and passed."""
-        for index in range(1, 5):
+        for index in range(1, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} baked_tangents = 0",
@@ -1125,7 +1153,7 @@ class RederivationSweepTests(unittest.TestCase):
         legalise a sliver by editing the manifest. The verifier now DERIVES the corpus floor from
         decoded L0 and this tree's config, and the recorded copy has to match it.
         """
-        for index in range(0, 5):
+        for index in range(0, self.level_count):
             with self.subTest(level=index):
                 self.assert_caught(
                     f"L{index} sliver floor lowered 10x",
@@ -1298,9 +1326,21 @@ class RederivationSweepTests(unittest.TestCase):
         poisoned = _rebuild_glb(gltf, bytes(blob))
 
         # The mutant is real, and it is the mutation this test says it is.
+        #
+        # The tolerance is a FLOAT32 ULP budget, not a decimal place. The step is added in f64 and
+        # then stored back as f32, so what survives into the bytes is the step ROUNDED to the
+        # spacing of f32 at the vertex's own magnitude — roughly 24 nm out at the 0.4 m coordinates
+        # this shoe lives at, against a 900 nm step. A fixed `places=9` was really asserting that
+        # the rounding happened to land inside 0.5 nm, which it did for one set of vertex
+        # coordinates and stopped doing the moment the shoe was re-cut. Four ULP is the honest
+        # statement: the step is the one intended, to the precision the format can hold it.
         mutant = measure_module.surface_from_bytes(poisoned, source["node"], "L0")
         moved = float(np.linalg.norm(mutant.verts[target] - surface.verts[target]))
-        self.assertAlmostEqual(moved, 0.9e-6, places=9, msg="the poison must be a 0.9 um move")
+        ulp = float(np.spacing(np.float32(np.abs(surface.verts[target]).max())))
+        self.assertAlmostEqual(
+            moved, 0.9e-6, delta=4 * ulp,
+            msg=f"the poison must be a 0.9 um move (f32 ulp here is {ulp:.3g} m)",
+        )
         self.assertEqual(mutant.components(), 1, "the weld must survive; a tear is another refusal")
         self.assertNotEqual(mutant.welded_digest(), source["welded_digest"])
 
@@ -1545,12 +1585,18 @@ class ShippedManifestTests(unittest.TestCase):
         self.assertEqual(
             asset["enumerated_outputs"], CONFIG.RATIFICATION_EVIDENCE["enumerated_outputs"]
         )
-        rung, best_tris, incumbent, shed = CONFIG.RATIFICATION_EVIDENCE["skipped_rung"]
         skipped = {entry["rung"]: entry for entry in asset["skipped_rungs"]}
-        self.assertIn(rung, skipped)
-        self.assertEqual(skipped[rung]["best_tris"], best_tris)
-        self.assertAlmostEqual(skipped[rung]["shed_fraction"], shed, places=4)
-        self.assertEqual(levels[2]["tris"], incumbent, "the rung the skip was measured against")
+        evidence = CONFIG.RATIFICATION_EVIDENCE["skipped_rungs"]
+        self.assertEqual(
+            sorted(skipped), sorted(rung for rung, _, _ in evidence),
+            "the evidence must enumerate EVERY skipped rung — one that vanishes from the list is a "
+            "rung the ladder silently stopped considering",
+        )
+        for rung, best_tris, shed in evidence:
+            self.assertEqual(skipped[rung]["best_tris"], best_tris, f"rung {rung} best tris")
+            self.assertAlmostEqual(
+                skipped[rung]["shed_fraction"], shed, places=4, msg=f"rung {rung} shed fraction"
+            )
 
     def test_the_right_wall_records_where_it_came_from(self):
         source = self.manifest["ladder"]["right_wall_source"]

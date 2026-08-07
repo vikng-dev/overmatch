@@ -212,7 +212,7 @@ const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 /// The MEASURED triangle count of the base shoe — the manifest's level 0, which is the tank glb's
 /// own `Link` primitive. Only ever used to report the reductions as a percentage.
-const SHOE_BASE_TRIS: usize = 1661;
+const SHOE_BASE_TRIS: usize = 764;
 
 /// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
 /// indexed to.
@@ -291,52 +291,52 @@ struct ShoeLevel {
 /// beyond — see [`shoe_lod_range`], which is the ONE place that arithmetic lives.
 ///
 /// A slice rather than a fixed-size array on purpose: the ladder's LENGTH is an output of
-/// generation (`skip_fraction` dropped rung 3 on this asset, which is why the glbs read rung1,
-/// rung2, rung4, rung5 with no rung3 between them), so nothing here may name a level count.
+/// generation (`skip_fraction` dropped rungs 1 and 2 on this asset, which is why the glbs start at
+/// rung3), so nothing here may name a level count. It has already changed once — the chain was four
+/// levels deep when it was cut from the 1 661-triangle pre-weld shoe, and is three deep now.
 ///
 /// # What the numbers are
 ///
 /// | level | glb | tris | dev (mm) | from (m) |
 /// |---|---|---|---|---|
-/// | L1 | `rung1` | 854 | 3.088 | 55.91 |
-/// | L2 | `rung2` | 580 | 7.019 | 126.60 |
-/// | L3 | `rung4` | 314 | 27.842 | 500.95 |
-/// | L4 | `rung5` | 194 | 58.373 | 1 049.86 |
+/// | L1 | `rung3` | 432 | 14.170 | 255.16 |
+/// | L2 | `rung4` | 270 | 24.593 | 442.53 |
+/// | L3 | `rung5` | 182 | 56.535 | 1 016.80 |
 ///
-/// L4 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
+/// RE-CUT 2026-08-07 against the welded, gate-clean shoe: L0 is 764 triangles now, not 1 661, so
+/// the ladder is REBASED rather than edited — every old rung was a reduction of a surface that no
+/// longer ships, and the old L1 (854 tris) was larger than the whole new source. Three rungs
+/// instead of four is the arithmetic working: a source with 46% of the triangles reaches the
+/// topology floor in fewer octaves.
+///
+/// L3 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
 /// destroying the shoe's component count — which is why the chain stops there rather than at the
 /// right wall (the map diagonal, 1 414 m).
 ///
-/// L4's band opens BEYOND THE MAP: 1 049.86 m on a 1 000 m world means nothing is ever far enough to
+/// L3's band opens BEYOND THE MAP: 1 016.80 m on a 1 000 m world means nothing is ever far enough to
 /// draw it in the game as it stands today. It is wired regardless, for two reasons. It costs one
 /// entity per shoe and no triangles (an out-of-range entity is walked, never submitted), and the
-/// alternative — a chain that stops at L3 — makes L3 the level that owns `[501, ∞)`, which is a
+/// alternative — a chain that stops at L2 — makes L2 the level that owns `[443, ∞)`, which is a
 /// DIFFERENT claim about a map that grows. When the world reaches 5 km (ADR 0033 §3's north star)
 /// this row starts earning its keep with no edit at all.
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung1.glb",
-        tris: 854,
-        worst_dev_mm: 3.087723,
-        from_m: 55.9124,
-    },
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung2.glb",
-        tris: 580,
-        worst_dev_mm: 7.019371,
-        from_m: 126.5971,
+        glb: "tiger_1/tiger_1_link.rung3.glb",
+        tris: 432,
+        worst_dev_mm: 14.170197,
+        from_m: 255.1575,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 314,
-        worst_dev_mm: 27.841808,
-        from_m: 500.9511,
+        tris: 270,
+        worst_dev_mm: 24.59259,
+        from_m: 442.5344,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung5.glb",
-        tris: 194,
-        worst_dev_mm: 58.373325,
-        from_m: 1049.8588,
+        tris: 182,
+        worst_dev_mm: 56.5349,
+        from_m: 1016.8048,
     },
 ];
 
@@ -1257,11 +1257,13 @@ mod tests {
                 SHOE_LOD_CHAIN.iter().map(|l| l.from_m).collect::<Vec<_>>(),
                 "the wired thresholds are the chain's, in order",
             );
-            // ...and the chain as it SHIPS is the manifest's four reductions. Spelled out so a level
-            // added or dropped is a deliberate edit here, not a silent one — the ladder's LENGTH is
-            // an output of generation, so it is exactly the thing a regeneration can change without
-            // anyone noticing.
-            assert_eq!(thresholds, vec![55.9124, 126.5971, 500.9511, 1049.8588]);
+            // ...and the chain as it SHIPS is the manifest's three reductions. Spelled out so a
+            // level added or dropped is a deliberate edit here, not a silent one — the ladder's
+            // LENGTH is an output of generation, so it is exactly the thing a regeneration can
+            // change without anyone noticing. It DID change: the 2026-08-07 re-cut against the
+            // welded 764-triangle shoe dropped the chain from four reductions to three, and this
+            // line is the one that made that visible rather than silent.
+            assert_eq!(thresholds, vec![255.1575, 442.5344, 1016.8048]);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
