@@ -284,6 +284,18 @@ struct ShoeLevel {
     /// in opposite directions (ADR 0033 §4).
     worst_dev_mm: f32,
     from_m: f32,
+    /// Did the manifest's rendered-difference gate ABSTAIN on this level (`render_gate.abstained`)?
+    ///
+    /// True means the level's screen footprint at its own switch distance fell under the ratified
+    /// 20 px floor, so the gate declined to have an opinion — at that size the defect reference
+    /// collapses and any score would be a ratio of two nothings. It is NOT a failure; it is the
+    /// gate saying the difference is too small to be measured, which is also the honest statement
+    /// that it is too small for a HUMAN to judge.
+    ///
+    /// Carried here because the showcase harness stages only the switches a person can actually
+    /// look at ([`crate::lod_showcase`]). A level that abstains is one nobody can eyeball, so
+    /// standing two tanks a kilometre away to compare them shows an empty pair of dots.
+    render_gate_abstained: bool,
 }
 
 /// The reduced levels below the base shoe, NEAREST FIRST. The base owns `[0, chain[0].from_m)`,
@@ -325,18 +337,24 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
         tris: 432,
         worst_dev_mm: 14.170197,
         from_m: 255.1575,
+        // 54.1 px at 255 m — judged, and PASSED at 1.000 against the ratified limit of 2.0.
+        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
         tris: 270,
         worst_dev_mm: 24.59259,
         from_m: 442.5344,
+        // 31.2 px at 443 m — judged, and PASSED at 1.000.
+        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung5.glb",
         tris: 182,
         worst_dev_mm: 56.5349,
         from_m: 1016.8048,
+        // 13.1 px at 1017 m — UNDER the ratified 20 px floor, so the gate abstained.
+        render_gate_abstained: true,
     },
 ];
 
@@ -345,6 +363,20 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
 /// importing its rows.
 pub(crate) fn shoe_lod_levels() -> usize {
     SHOE_LOD_CHAIN.len() + 1
+}
+
+/// Can a human judge the switch INTO `level` — i.e. did the rendered-difference gate have an
+/// opinion about it? `level` is 1-based over [`SHOE_LOD_CHAIN`]; level 0 is the base and is never a
+/// switch target.
+///
+/// The gate abstains below the ratified 20 px footprint floor, and that abstention is exactly the
+/// statement "there is nothing here an eye could resolve". Consumers that ask a person to compare
+/// two meshes should ask this first — see [`crate::lod_showcase::staged_pairs`].
+pub(crate) fn shoe_lod_switch_is_judgeable(level: usize) -> bool {
+    level
+        .checked_sub(1)
+        .and_then(|i| SHOE_LOD_CHAIN.get(i))
+        .is_some_and(|l| !l.render_gate_abstained)
 }
 
 /// Level `level`'s MEASURED triangle count — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
@@ -1379,6 +1411,58 @@ mod tests {
                 > 0.1,
             "the small-angle shortcut must NOT be what is wired",
         );
+    }
+
+    /// The one row-field arithmetic CANNOT re-derive: the render gate's verdict.
+    ///
+    /// `from_m` and `worst_dev_mm` are held together by the derivation above, and a stale `tris`
+    /// shows up the moment the glb is loaded. `render_gate_abstained` is a bare transcribed bool —
+    /// nothing about it is recomputable from the other columns — so it is read straight out of
+    /// `assets/lod_manifest.json` and compared. It decides which switches the showcase asks a human
+    /// to judge ([`crate::lod_showcase::staged_pairs`]), and a stale `true` here would silently
+    /// delete a pair the gate can now see.
+    #[test]
+    fn the_render_gate_verdicts_are_the_manifests() {
+        let path = crate::assets::asset_root().join("lod_manifest.json");
+        let text = std::fs::read_to_string(&path).expect("the shipped manifest is readable");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&text).expect("the shipped manifest is JSON");
+        let levels = manifest["assets"][0]["levels"]
+            .as_array()
+            .expect("the manifest's first asset has levels");
+        assert_eq!(
+            levels.len(),
+            SHOE_LOD_CHAIN.len() + 1,
+            "the wired chain has {} reduced levels and the manifest ships {} levels including L0 — \
+             one of them was regenerated without the other",
+            SHOE_LOD_CHAIN.len(),
+            levels.len(),
+        );
+        for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
+            let abstained = levels[i + 1]["render_gate"]["abstained"]
+                .as_bool()
+                .expect("every reduced level carries a render-gate verdict");
+            assert_eq!(
+                level.render_gate_abstained,
+                abstained,
+                "LOD{} ({}) is wired as {} but the manifest's render gate says {} ({:.1} px against \
+                 the {:.0} px floor) — re-transcribe the row",
+                i + 1,
+                level.glb,
+                if level.render_gate_abstained {
+                    "ABSTAINED"
+                } else {
+                    "judged"
+                },
+                if abstained { "ABSTAINED" } else { "judged" },
+                levels[i + 1]["render_gate"]["screen_footprint_px"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN),
+                levels[i + 1]["render_gate"]["min_footprint_px"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN),
+            );
+        }
     }
 
     /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,
