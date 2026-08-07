@@ -1,7 +1,7 @@
 // The global substance registry — the numeric half of the material library.
 //
 // The Blender side is `materials.blend` next to this file: one material datablock per entry,
-// LINKED (never appended) into each tank's .blend and assigned to `*_Ballistic` meshes. The
+// LINKED (never appended) into each tank's .blend and assigned to its ballistic meshes. The
 // datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
 // the model, §13.7: substance is authored per-plate, paint is a runtime livery).
 //
@@ -29,9 +29,10 @@
 // `paintable` = whether the runtime livery composes onto this substance (§ paint-scheme
 // discussion 2026-08-06): exterior steels yes, interior/organic substances no.
 //
-// NOT YET CONSUMED BY CODE: the bake still reads per-node material_factor from the tank RON.
-// This file becomes the source of truth when the §13 union-walk arc lands; until then it is
-// the authored contract the code will bind to.
+// THIS FILE IS THE CLASSIFIER (slice 3, 2026-08-07). A glTF primitive is a ballistic volume iff
+// its material name is a key here; per-node material_factor in the tank RON is gone. Adding a key
+// makes every mesh wearing that material armour — and removing one silently un-declares them, so
+// the bind test pins the substance census.
 (
     substances: {
         "RHA":         (factor: 1000.0, paintable: true),

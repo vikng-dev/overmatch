@@ -1293,7 +1293,7 @@ fn build_rig(
             ));
 
             // Solid-body collision (walls, hard bottoming): the ASSET'S OWN authored proxies — the
-            // `*_Collider` nodes the artist modelled, captured by `bake::captures_mesh` and turned
+            // `*_Collider` nodes the artist modelled, declared in the tank RON's `colliders` and turned
             // into convex hulls exactly the way `tank::spawn::assemble_tank_body` turns them (same
             // `MeshGeometry::convex_hull_collider` over the same node-local POSITION buffers, which
             // is precisely what avian's `ConvexHullFromMesh` does). Identical construction is the
