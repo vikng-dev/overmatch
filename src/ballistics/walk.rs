@@ -187,10 +187,10 @@ pub struct WalkLaws {
     pub weld_max_lookahead: f32,
     /// Cumulative omitted perpendicular gap allowed across a CHAIN of welds in one run.
     ///
-    /// FLAGGED RULING (conservative, awaiting Yan): single-linkage chaining alone would let an
-    /// arbitrarily long picket fence collapse into one run with one terminal spall budget. Capping
-    /// the total at the weld constant itself means A~B~C welds only while the voids it deletes
-    /// still sum to a micro-gap.
+    /// RULED 2026-08-07 (§13.4): chaining is transitive but budgeted, and the cap IS the tolerance —
+    /// the same 2 mm knob, deliberately, because one constant bounds both extremes at once. A single
+    /// two-plate sandwich welds across up to 2 mm of air; an arbitrarily long picket fence can never
+    /// collapse into one run with one terminal spall budget by chaining.
     pub weld_run_gap_budget: f32,
     /// LATERAL domain — two samples' entrance patches lie on one surface when their normals agree
     /// to this cosine …
@@ -884,13 +884,12 @@ fn weld_runs(
 /// Turn each welded run's material segments into the ordered field transitions the consequence step
 /// consumes. Spall fires at every DOWNWARD step (§13.2's field law), including the exit.
 ///
-/// FLAGGED RULING (§13 spec conflict, conservative reading): §13.2 says spall fires at every
-/// downward factor step; §13.4 says a welded run has "one exit, spall once". They disagree for a
-/// welded `RHA | 0.4 mm air | Cast` joint. Implemented: welding removes ONLY the air region's
-/// exit/entry pair, and the direct material step it exposes still obeys the field law. Equal-factor
-/// joints then emit nothing at all, so the common case still reads as "one exit"; a genuine
-/// downward step inside a weld throws fragments that the fragment march absorbs in millimetres
-/// (§13.2's own self-correcting note). "Spall once per welded run" is dropped — for Yan.
+/// RULED 2026-08-07 (§13.4, superseding its own original "spall once per welded run", which
+/// contradicted §13.2): welding deletes only the void's exit/entry face pair, and the direct
+/// material step it exposes still obeys the field law. A welded `RHA | 0.4 mm air | Cast` joint
+/// therefore spalls with its own budget; an equal-factor joint emits nothing at all, which is where
+/// the common case still reads as "one exit". A 0.4 mm void never "develops" spall of its own —
+/// voids have no events, material steps do.
 fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEvent> {
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
@@ -1573,9 +1572,12 @@ pub struct EntranceRead {
     /// Steel-equivalent thickness ALONG THE NORMAL (m) of the material actually engaged.
     ///
     /// §13.3's amendment: overmatch and ricochet consult `thickness × factor`, not geometry, or an
-    /// exposed forearm reads 80 mm "thick" and past 70° an arm ricochets an 88. Measured over the
-    /// COVERED samples (cost ÷ η), not the whole disc — FLAGGED: a partial engagement must not fake
-    /// a thin plate and suppress the ricochet that makes a graze a graze (§13.5).
+    /// exposed forearm reads 80 mm "thick" and past 70° an arm ricochets an 88.
+    ///
+    /// Measured over the COVERED samples (`cost ÷ η`), not the whole disc: a partial engagement must
+    /// not fake a thin plate and suppress the ricochet that makes a graze a graze (§13.5). Whether a
+    /// bounce happens at all lives here, in the factor-weighted overmatch law; how HARD the round is
+    /// turned is η's business, in [`Begin::Ricochet`].
     pub steel_equivalent: f32,
     pub overmatched: bool,
 }
@@ -1780,13 +1782,15 @@ pub enum Outcome {
     },
 }
 
-/// One entity's deposit from this crossing — and the material share slice 2 needs to settle impulse
-/// ownership.
+/// One entity's deposit from this crossing.
 ///
-/// OPEN FORK, deliberately undecided here: a union event can involve overlapping volumes owned by
-/// several bodies. Applying the full `m·Δv` to each duplicates momentum; giving it to the max-factor
-/// entity reintroduces the ownership tie-break §13.2 abolished. The plan therefore reports every
-/// entity's cost share and coverage and lets the caller apply whatever rule is ratified.
+/// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no priority, no
+/// argmax). The IMPULSE does, when a crossing's presence set spans several rigid bodies — which can
+/// only happen when distinct bodies overlap in space, since within one tank every volume shares the
+/// body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to the body owning the ENTRANCE
+/// surface, the first one physically touched; anything behind it is shoved through contact by the
+/// physics engine. So the caller routes the shove by [`ResolutionPlan::entrance`], not by these
+/// shares — they are the damage, and the diagnostic if that default is ever revisited.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityDeposit {
     pub entity: Entity,
