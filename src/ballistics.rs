@@ -1988,6 +1988,15 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
     shell.transform.translation = caught_up.position;
     if let Ok(direction) = Dir3::new(caught_up.velocity) {
         shell.transform.look_to(direction, Vec3::Y);
+        // The sampling basis is carried through the catch-up's direction change, exactly as the
+        // march carries it through gravity's bend and the authority's own ricochet. A frame left
+        // anchored on the pre-catch-up heading is not merely mis-rolled: it has a component ALONG
+        // the new travel axis, which puts ring samples in front of and behind the disc, and a sample
+        // that starts inside geometry the axis has not reached reports an exit it never entered.
+        shell.projectile.disc = shell
+            .projectile
+            .disc
+            .transport(shell.projectile.velocity, Vec3::from(direction));
     }
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
@@ -2228,6 +2237,13 @@ fn march_shell_step(
                     speed: sanctioned_speed,
                 } => {
                     if let Some(new_dir) = direction {
+                        // Carry the sampling basis through the sanctioned bend, exactly as the
+                        // authority's own ricochet arm does below. A replica that re-seeds on
+                        // server truth without transporting its frame keeps a basis built for the
+                        // INCOMING heading — one whose vectors have a component along the new travel
+                        // axis, so its ring samples sit in front of and behind the disc rather than
+                        // across it.
+                        frame = frame.transport(Vec3::from(dir), Vec3::from(new_dir));
                         dir = new_dir;
                     }
                     speed = sanctioned_speed;
@@ -5190,5 +5206,112 @@ mod march_tests {
                 "and it reported its one terminal",
             );
         }
+    }
+
+    /// A SANCTIONED BOUNCE IS A DIRECTION CHANGE, SO IT TRANSPORTS THE SAMPLING BASIS.
+    ///
+    /// The disc frame is spawn-anchored and parallel-transported through every bend the round takes
+    /// — gravity's, normalization's, the authority's own ricochet. A replica adopting server truth
+    /// takes the same bend, and must carry the basis through it for the same reason: `transport`
+    /// re-orthogonalizes, and a basis left behind on the incoming heading is not merely mis-rolled.
+    /// It has a component ALONG the new travel axis, so the ring samples sit in front of and behind
+    /// the disc instead of across it, and a sample ray that begins inside geometry the axis has not
+    /// reached reports an exit it never entered.
+    ///
+    /// The 75° fixture makes the defect exactly measurable rather than merely present: `v` is
+    /// `dir × Y`, the reflection off the +Z face turns the round back through the same angle, and
+    /// the stale basis vector ends up with a 0.5 component along travel — half the disc's reach
+    /// pointing down the barrel.
+    ///
+    /// BOTH re-seed paths, because they are different code: the march's own arm when the keyframe is
+    /// already buffered at contact, and the catch-up chain when it arrives while the shell is held.
+    #[test]
+    fn a_sanctioned_reseed_transports_the_disc_frame() {
+        // `u` and `v` span the disc, so both must be perpendicular to travel, and they must still be
+        // an orthonormal pair — a frame is what `transport` promises to return, not a rotated pair.
+        let assert_frame_spans_the_disc = |app: &App, shell: Entity, path: &str| {
+            let projectile = app.world().get::<Projectile>(shell).expect("shell alive");
+            let travel = projectile.velocity.normalize();
+            let frame = projectile.disc;
+            for (name, basis) in [("u", frame.u), ("v", frame.v)] {
+                assert!(
+                    basis.dot(travel).abs() < 1.0e-5,
+                    "{path}: {name} lies across travel, not along it (got {})",
+                    basis.dot(travel),
+                );
+                assert!(
+                    (basis.length() - 1.0).abs() < 1.0e-5,
+                    "{path}: {name} is a unit vector",
+                );
+            }
+            assert!(
+                frame.u.dot(frame.v).abs() < 1.0e-5,
+                "{path}: the pair is still orthogonal",
+            );
+        };
+
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+        let keyframe = SanctionedBounce {
+            origin: bounce.origin,
+            direction: bounce.direction,
+            speed: bounce.speed,
+            bounce_tick: 0,
+            sequence: 0,
+            victim: None,
+        };
+
+        // PATH ONE — pre-armed: the march's own re-seed arm consumes it at contact.
+        let mut buf = SanctionedShots::default();
+        buf.insert(shot, keyframe);
+        let mut app = replica_world(buf);
+        let shell = spawn_oblique_shell(&mut app, shot);
+        for _ in 0..8 {
+            app.update();
+            if !app
+                .world()
+                .get::<PenetrationMarks>(shell)
+                .unwrap()
+                .ricochets
+                .is_empty()
+            {
+                break;
+            }
+        }
+        assert_eq!(
+            app.world()
+                .get::<PenetrationMarks>(shell)
+                .unwrap()
+                .ricochets
+                .len(),
+            1,
+            "the pre-armed keyframe was consumed",
+        );
+        assert_frame_spans_the_disc(&app, shell, "pre-armed reseed");
+
+        // PATH TWO — held, then caught up: `resume_from_catch_up` re-anchors on the chain's end
+        // state, which is a different direction change through different code.
+        let mut app = replica_world(SanctionedShots::default());
+        let shell = spawn_oblique_shell(&mut app, shot);
+        app.world_mut().entity_mut(shell).insert(ShotSource {
+            tank: Entity::PLACEHOLDER,
+            weapon: 0,
+        });
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                break;
+            }
+        }
+        assert!(
+            app.world().get::<Held>(shell).is_some(),
+            "the shell held for its verdict",
+        );
+        app.world_mut()
+            .resource_mut::<SanctionedShots>()
+            .insert(shot, keyframe);
+        app.update();
+        assert!(app.world().get::<Held>(shell).is_none(), "the hold cleared");
+        assert_frame_spans_the_disc(&app, shell, "catch-up reseed");
     }
 }
