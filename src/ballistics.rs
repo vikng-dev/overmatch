@@ -43,6 +43,13 @@ mod resolve;
 )]
 mod collect;
 
+/// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
+/// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
+/// η. Its findings are adjudicated against `assets/tiger_1/tiger_1.bless.ron` — the list where
+/// deliberate weakspots are decided rather than discovered by players as bugs.
+#[cfg(any(feature = "dev_tools", test))]
+pub mod fuzz;
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };

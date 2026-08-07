@@ -186,12 +186,13 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
 
 /// Spawn the production simulation body without presentation assets.
 ///
-/// The differential harness is deliberately headless: it needs the same eagerly baked geometry,
-/// spec-derived components, colliders, and rollback-visible state as an authority tank, but no
-/// `WorldAssetRoot`, asset handle, or view-binding observer. This is feature-gated out of every
-/// production build; the shared [`assemble_tank_body`] remains the one simulation constructor.
-#[cfg(feature = "bitprobe")]
-pub(crate) fn spawn_bitprobe_tank<B: Bundle>(
+/// Two instruments are deliberately headless and share this: the bitprobe differential harness and
+/// the §13.6 ray fuzzer (`ballistics::fuzz`). Both need the same eagerly baked geometry,
+/// spec-derived components, colliders, and rollback-visible state as an authority tank, and neither
+/// wants a `WorldAssetRoot`, an asset handle, or a view-binding observer. Gated out of the shipped
+/// client; the shared [`assemble_tank_body`] remains the one simulation constructor.
+#[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
+pub(crate) fn spawn_headless_tank<B: Bundle>(
     commands: &mut Commands,
     content: TankContent,
     root_bundle: B,

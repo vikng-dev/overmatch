@@ -135,6 +135,18 @@ impl VolumeTable {
         Ok(Self { factors })
     }
 
+    /// Every `(volume, factor)` the table carries, in entity order.
+    ///
+    /// Exists for the §13.6 idempotence/monotonicity gate ([`super::fuzz`]), which re-walks a real
+    /// corridor with one volume DUPLICATED and therefore has to state the same table plus one row.
+    /// Reconstructing it from the world instead would prove the property about a table the walk was
+    /// never handed.
+    pub fn entries(&self) -> impl Iterator<Item = (Entity, f32)> + '_ {
+        self.factors
+            .iter()
+            .map(|(volume, factor)| (*volume, *factor))
+    }
+
     fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
         self.factors
             .get(&volume)
