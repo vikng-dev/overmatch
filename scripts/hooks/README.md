@@ -31,10 +31,21 @@ skip. It reads the committed bytes out of the local git-lfs object cache, not th
 
 A green pre-push does not certify the separately bounded CI stress lane; CI remains authoritative.
 
-## Escape hatch
+## Escape hatch — name the lane, never `--no-verify`
 
-`git commit --no-verify` and `git push --no-verify` skip the hook for one operation. Use sparingly;
-CI is still the backstop.
+```sh
+OVERMATCH_SKIP=lod git push          # skip one gate lane
+OVERMATCH_SKIP=lod,test git push     # or several: mip, lod, fmt, clippy, test
+```
+
+Every skip prints loudly, and CI re-runs the skipped lane on the pushed commit.
+
+**Do not use `git push --no-verify`**: the pre-push hook is the only git-lfs transport
+(`core.hooksPath` replaces `.git/hooks`, so the hook git-lfs installs never runs). Skipping the
+whole hook pushes pointers without objects. Recovery: `git lfs push --all origin` — the plain
+per-branch form computes an empty delta and uploads nothing.
+
+(`git commit --no-verify` remains fine — pre-commit is only a format check.)
 
 ## Trimming
 

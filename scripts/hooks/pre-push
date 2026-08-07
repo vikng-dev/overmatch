@@ -2,13 +2,32 @@
 # pre-push — mirrors CI's ordinary fmt, clippy, and test lanes. It skips the isolated
 # 30-receiver stress probe, which CI runs separately with resource limits. Compiles, so it is
 # slower than pre-commit (tens of seconds to a couple of minutes on a warm cache); it runs on
-# push, not on every commit. Bypass once with `git push --no-verify`.
+# push, not on every commit.
+#
+# NEVER BYPASS WITH `git push --no-verify`. This hook is the ONLY git-lfs transport
+# (core.hooksPath replaces .git/hooks, so the hook git-lfs installs there never runs):
+# skipping the whole hook ships pointers without objects. Recovery requires
+# `git lfs push --all origin` — the plain per-branch form computes an empty delta and
+# uploads nothing.
+#
+# To skip a failing gate, name it:  OVERMATCH_SKIP=lod git push
+# Comma-separate several: OVERMATCH_SKIP=lod,test — lanes: mip, lod, fmt, clippy, test.
+# The LFS upload is not a lane and cannot be named. CI re-runs skipped lanes on the
+# pushed commit.
 #
 # Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
 # cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
 # dev target dir). `--locked` catches Cargo.lock drift exactly as CI does.
 set -e
 cd "$(git rev-parse --show-toplevel)"
+
+# A lane is skipped iff its name appears in comma-separated $OVERMATCH_SKIP.
+skipped() {
+    case ",${OVERMATCH_SKIP:-}," in
+        *",$1,"*) printf '\033[33mpre-push ▸ SKIPPED %s (OVERMATCH_SKIP) — CI still runs it\033[0m\n' "$1"; return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # git-lfs upload. `core.hooksPath` REPLACES .git/hooks, so the hook git-lfs installs there
 # never runs — without this line a push ships the pointers but not the objects, and CI dies
@@ -35,6 +54,7 @@ printf '%s\n' "$refs" | git lfs pre-push "$@"
 # an ordinary `git push` of the current branch they are the same commit.) Falls back to the work
 # tree when the object was never fetched; `verify` no-ops on an unfetched pointer.
 # Costs ~30 ms: it reads the JSON chunk and 48 bytes per image, never the 63 MB payload.
+if ! skipped mip; then
 echo "pre-push ▸ tank glb is mip-baked (KTX2)"
 command -v python3 >/dev/null ||
     { printf '\033[31m  no python3\033[0m — needed by the tank glb gate and by the mip bake\n' >&2; exit 1; }
@@ -43,6 +63,7 @@ oid=$(git cat-file blob "HEAD:$glb" 2>/dev/null | sed -n 's/^oid sha256://p')
 obj="$(git rev-parse --git-common-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
 [ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
 python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
+fi
 
 # LOD chain. The manifest is the SINGLE SEAM between the generated geometry chain and the runtime
 # that selects from it, and a seam nobody checks is a ledger — the last hand-written one drifted by
@@ -58,6 +79,7 @@ python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
 # The scripts are taken from the pushed revision too: verifying a commit with a different tree's
 # rules would be the same category of mistake one level up. CI re-runs all of this after LFS
 # hydration, which is the backstop for `--no-verify`.
+if ! skipped lod; then
 echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
 lod_tmp=$(mktemp -d)
 trap 'rm -rf "$lod_tmp"' EXIT
@@ -90,15 +112,22 @@ python3 scripts/lod/test_chain.py >/dev/null 2>&1 ||
     { printf '\033[31m  lod test_chain failed\033[0m — run: python3 scripts/lod/test_chain.py\n' >&2; exit 1; }
 python3 scripts/lod/test_refusals.py >/dev/null 2>&1 ||
     { printf '\033[31m  lod test_refusals failed\033[0m — run: python3 scripts/lod/test_refusals.py\n' >&2; exit 1; }
+fi
 
+if ! skipped fmt; then
 echo "pre-push ▸ cargo fmt --all --check"
 cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
+fi
 
+if ! skipped clippy; then
 echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
 cargo clippy --quiet --locked --all-targets -- -D warnings
+fi
 
+if ! skipped test; then
 echo "pre-push ▸ cargo test --locked (skip isolated 30-receiver stress)"
 cargo test --quiet --locked -- \
   --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
+fi
 
 echo "pre-push ▸ ok"
