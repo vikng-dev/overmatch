@@ -207,21 +207,22 @@ pub struct WalkLaws {
     /// by `r·tan(incidence)`, so one sample can exit before another enters and one ordinary plate
     /// would split into several crossing events.
     pub event_plane_tolerance: f32,
-    /// Hard ceiling (m) on how far apart along the ray two runs may be and still belong to one
-    /// crossing — applied to BOTH association branches.
+    /// Ceiling on `2·tan(incidence)` when sizing the disc's own longitudinal reach — so the reach is
+    /// at most this many disc DIAMETERS, whatever the geometry says.
     ///
-    /// Its own tolerance domain, deliberately not the weld lookahead it happens to share a value
-    /// with. The weld bound answers "could a micro-void between these two runs be deleted"; this one
-    /// answers "could one surface patch, sampled by a disc, present these two runs at all". Reusing
-    /// the weld bound as a MERGE LICENCE was the defect: 50 mm of air is not a micro-gap, and a rule
-    /// that treats it as one merges genuinely separate crossings.
+    /// The reach itself is not a knob. How far apart along the ray one surface patch can present two
+    /// of a disc's runs is a GEOMETRIC fact: `2·r·tan(incidence)`, the spread between the extreme
+    /// ring samples where the plane cuts them. A fixed constant in its place is wrong in both
+    /// directions at once, and shipped that way — 50 mm shattered one plane into three events for an
+    /// 88 at 80° and for a 120 at 75° (the anticipated calibre/incidence cliff, MEASURED by codex
+    /// 2026-08-07), while at small calibre and steep incidence it was far more permissive than the
+    /// geometry ever is.
     ///
-    /// TIGHT, KNOWINGLY: a thin slab at ~72° spreads consecutive ring samples by ~47 mm, so the
-    /// oblique degeneracy clears this by millimetres. Raising it re-admits the merges the ceiling
-    /// exists to stop; lowering it shatters grazing hits. If a case ever needs both, the honest
-    /// replacement is the disc's own geometric reach, `2·r·tan(incidence)`, which is what physically
-    /// bounds the spread — measured, not guessed.
-    pub event_longitudinal_ceiling: f32,
+    /// What IS a knob is the numerical cap, because `tan` diverges as the ray goes parallel to the
+    /// surface. Ten diameters puts it at ~84°, comfortably above both measured cases (5.7 and 3.7
+    /// diameters) and far above the ricochet angle that keeps most rounds from getting there at all,
+    /// while an 88's samples reach at most 0.88 m — still one plate face at that angle.
+    pub event_reach_cap: f32,
     /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
     pub ricochet_angle: f32,
     /// Speed retained through a FULLY covered ricochet. Partial coverage bleeds proportionally less
@@ -261,7 +262,7 @@ impl Default for WalkLaws {
             // ~25°.
             event_plane_cos: 0.9,
             event_plane_tolerance: 2.0e-3,
-            event_longitudinal_ceiling: 5.0e-2,
+            event_reach_cap: 10.0,
             // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
             // retune.
             ricochet_angle: 1.221,
@@ -1364,7 +1365,8 @@ pub fn walk_disc(
             let gap_along = (run_b.start - run_a.end)
                 .max(run_a.start - run_b.end)
                 .max(0.0);
-            let within_ceiling = gap_along <= laws.event_longitudinal_ceiling;
+            let facing = unit_or_zero(run_a.entry_normal + run_b.entry_normal);
+            let within_ceiling = gap_along <= disc_reach(corridor, facing, laws);
 
             // BRANCH 1 — same primitive, and the runs actually touch.
             //
@@ -1379,7 +1381,6 @@ pub fn walk_disc(
                 .primitives
                 .iter()
                 .any(|key| run_b.primitives.binary_search(key).is_ok());
-            let facing = unit_or_zero(run_a.entry_normal + run_b.entry_normal);
             let weld_class = gap_along * corridor.axis.dot(facing).abs() <= laws.weld_perp;
 
             // BRANCH 2 — one surface, whatever the mesh partition.
@@ -1433,6 +1434,30 @@ pub fn walk_disc(
         walks,
         events,
     })
+}
+
+/// How far apart along the ray one surface patch can present two of THIS disc's runs.
+///
+/// `2·r·tan(incidence)` — the spread between the extreme ring samples where a plane at that
+/// incidence cuts them, which is the geometry §13.5 named when it rejected the fixed ceiling. It is
+/// derived, not tuned: a wider disc reaches further, and a shallower approach stretches the same
+/// disc down the ray. The measured cliff the constant caused (an 88 at 80° and a 120 at 75° each
+/// shattering one plane into three events) is the same statement read the other way — 50 mm is a
+/// tenth of what an 88 at 80° actually spans.
+///
+/// Two bounds keep it honest at the ends. The FLOOR is the plane tolerance: head-on, `tan` is zero
+/// and the reach would be too, so two reads of one flat face could not associate through the
+/// rounding that put them a hair apart. The CEILING is [`WalkLaws::event_reach_cap`], because `tan`
+/// diverges as the ray goes parallel to the surface, and a divergent bound is no bound.
+fn disc_reach(corridor: &DiscCorridor, facing: Vec3, laws: &WalkLaws) -> f32 {
+    let cos = corridor.axis.dot(facing).abs().clamp(0.0, 1.0);
+    // `tan = sin/cos`, capped rather than evaluated as the cosine goes to zero.
+    let doubled = if cos <= 0.0 {
+        laws.event_reach_cap
+    } else {
+        (2.0 * (1.0 - cos * cos).max(0.0).sqrt() / cos).min(laws.event_reach_cap)
+    };
+    (corridor.radius * doubled).max(laws.event_plane_tolerance)
 }
 
 fn build_event(

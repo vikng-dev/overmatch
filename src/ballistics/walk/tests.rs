@@ -1154,7 +1154,7 @@ fn a_weld_lookahead_sized_gap_is_not_a_merge_licence() {
     .unwrap();
 
     // 40 mm of air: inside the lookahead, twenty times the weld tolerance.
-    assert!(0.04 < laws.event_longitudinal_ceiling);
+    assert!(0.04 < laws.weld_max_lookahead);
     assert!(0.04 > laws.weld_perp);
     assert_eq!(walked.events.len(), 2, "40 mm of air is not one crossing");
     for event in &walked.events {
@@ -1162,54 +1162,90 @@ fn a_weld_lookahead_sized_gap_is_not_a_merge_licence() {
     }
 }
 
-/// The coplanar branch gets the longitudinal ceiling too.
+/// The coplanar branch is bounded longitudinally too — by the disc's own reach.
 ///
-/// At grazing incidence two runs 80 mm apart ALONG THE RAY can sit within a couple of millimetres of
-/// one plane — the plane test alone says "one surface" and means it. But no single surface patch
-/// sampled by a disc this size presents runs that far apart, so the ceiling is what refuses. Without
-/// it the plane test stretches down a grazing corridor without limit.
+/// At grazing incidence two runs far apart ALONG THE RAY can sit within a couple of millimetres of
+/// one plane, and the plane test alone says "one surface" and means it. What bounds it is not a
+/// constant: it is how far apart one surface patch can present two of THIS disc's runs, which is
+/// `2·r·tan(incidence)`. So the fixture states the bound from both sides at ONE incidence, with the
+/// perpendicular reading held inside tolerance throughout — the longitudinal bound is the only thing
+/// under test.
+///
+/// The old form of this test asserted that 80 mm apart at ~87° stays two crossings. That was the
+/// FIXED 50 mm ceiling speaking, and it is not true of the geometry: a 40 mm disc at that incidence
+/// spreads its samples across nearly a metre, so 80 mm is comfortably inside one patch. Ceilings
+/// that do not scale are wrong in both directions at once, which is the finding this replaces.
 #[test]
-fn the_coplanar_branch_is_bounded_longitudinally_too() {
+fn the_coplanar_branch_is_bounded_by_the_discs_own_reach() {
     let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
     let laws = WalkLaws::default();
     let normal = Vec3::new(0.0, 0.999, -0.045).normalize();
-    // Chosen so the two entry points land 1.8 mm apart along the shared normal — INSIDE the plane
-    // tolerance, so this fixture pins the ceiling and nothing else.
-    let offset = Vec3::new(0.0, 0.004_054, 0.0);
-    let (near, far) = (0.20f32, 0.33f32);
-    let separation = ((AXIS * near) - (offset + AXIS * far)).dot(normal).abs();
-    assert!(
-        separation < laws.event_plane_tolerance,
-        "the fixture must be coplanar within tolerance, got {separation}"
-    );
-    assert!(
-        far - 0.25 > laws.event_longitudinal_ceiling,
-        "and beyond the ceiling"
+    let radius = 0.02f32;
+    let near = 0.20f32;
+    let near_end = 0.25f32;
+    // The reach at this incidence, from the same geometry the law uses: `2·r·tan`, capped.
+    let cos = AXIS.dot(normal).abs();
+    let reach = (radius * (2.0 * (1.0 - cos * cos).sqrt() / cos).min(laws.event_reach_cap))
+        .max(laws.event_plane_tolerance);
+
+    // Lateral offset chosen so the two entry points land 1.8 mm apart along the shared normal —
+    // INSIDE the plane tolerance — whatever `far` is. Derived, so both arms are honestly coplanar.
+    let offset_for = |far: f32| Vec3::new(0.0, ((near - far) * normal.z - 0.0018) / normal.y, 0.0);
+    let events_at = |far: f32| {
+        let offset = offset_for(far);
+        let separation = ((AXIS * near) - (offset + AXIS * far)).dot(normal).abs();
+        assert!(
+            separation < laws.event_plane_tolerance,
+            "the fixture must stay coplanar within tolerance, got {separation}"
+        );
+        assert!(
+            offset.length() <= radius,
+            "and the offset must be a sample this disc actually has, got {}",
+            offset.length()
+        );
+        walk_disc(
+            &DiscCorridor {
+                origin: Vec3::ZERO,
+                axis: AXIS,
+                length: 2.0,
+                radius,
+                frame: DiscFrame {
+                    u: Vec3::X,
+                    v: Vec3::Y,
+                },
+                samples: vec![
+                    sample(
+                        Vec3::ZERO,
+                        oblique_plate(1, 0, near, near_end, normal, -normal),
+                    ),
+                    sample(
+                        offset,
+                        oblique_plate(2, 0, far, far + 0.05, normal, -normal),
+                    ),
+                ],
+            },
+            &volumes,
+            &laws,
+        )
+        .unwrap()
+        .events
+        .len()
+    };
+
+    // INSIDE the reach: one patch, and the plane test is believed.
+    let inside = near_end + reach * 0.4;
+    assert_eq!(
+        events_at(inside),
+        1,
+        "within the disc's reach ({reach} m) two coplanar runs ARE one surface",
     );
 
-    let walked = walk_disc(
-        &DiscCorridor {
-            origin: Vec3::ZERO,
-            axis: AXIS,
-            length: 2.0,
-            radius: 0.02,
-            frame: DiscFrame {
-                u: Vec3::X,
-                v: Vec3::Y,
-            },
-            samples: vec![
-                sample(Vec3::ZERO, oblique_plate(1, 0, near, 0.25, normal, -normal)),
-                sample(offset, oblique_plate(2, 0, far, 0.38, normal, -normal)),
-            ],
-        },
-        &volumes,
-        &laws,
-    )
-    .unwrap();
+    // BEYOND it: no disc this size can present both, whatever the plane test says.
+    let beyond = near_end + reach * 1.75;
     assert_eq!(
-        walked.events.len(),
+        events_at(beyond),
         2,
-        "80 mm apart is not one surface patch"
+        "past the disc's reach ({reach} m) the plane test alone must not merge them",
     );
 }
 
@@ -2235,5 +2271,76 @@ fn three_abutting_plates_are_byte_identical_to_one_slab_in_every_order() {
             assert_eq!(result.spans, one.spans);
             assert_eq!(result.events, one.events);
         }
+    }
+}
+
+/// ONE PLANE IS ONE EVENT, AT EVERY CALIBRE AND EVERY INCIDENCE.
+///
+/// The calibre/incidence cliff §13.5 anticipated, and codex MEASURED on 2026-08-07: with a fixed
+/// 50 mm longitudinal ceiling, one planar surface split into THREE events for an 88 mm round at 80°
+/// and for a 120 mm round at 75°. Nothing about the geometry changed between those and a head-on
+/// hit; only the disc's spread along the ray did, and a constant cannot follow it.
+///
+/// Three events out of one plate is not a cosmetic defect. Each carries its own entrance read, so
+/// the round is charged three entrance laws, offered three ricochet decisions and three overmatch
+/// thicknesses, and throws spall three times, for a plate it crossed once.
+///
+/// The bound that holds is the disc's own reach, `2·r·tan(incidence)`: 0.50 m for the 88 at 80° and
+/// 0.45 m for the 120 at 75°, both an order above the constant they were shattered by.
+#[test]
+fn one_plane_stays_one_event_across_the_calibre_incidence_cliff() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    // A whole disc laid on one plane: the axis plus the full ring, each meeting it where its own
+    // ray does.
+    let disc_on_one_plane = |radius: f32, incidence_deg: f32| {
+        let incidence = incidence_deg.to_radians();
+        let normal = Vec3::new(0.0, incidence.sin(), -incidence.cos());
+        let frame = DiscFrame {
+            u: Vec3::X,
+            v: Vec3::Y,
+        };
+        // A 10 mm plate presents this much line of sight at that incidence. Thickness matters to
+        // the defect, not just angle: a thick plate's chords still OVERLAP between adjacent ring
+        // samples, so the fixed ceiling chained them anyway and the cliff hid. Ten millimetres is
+        // where the chords part and the constant has to answer for itself — and it answered with
+        // exactly the three events codex measured.
+        let chord = 0.010 / incidence.cos();
+        let slab = Slab::at(1, 0, 1.0, normal, chord);
+        let samples = disc_offsets(&frame, radius, DEFAULT_RING)
+            .into_iter()
+            .map(|offset| sample(offset, slab.hits(offset, AXIS, 4.0, false)))
+            .collect();
+        DiscCorridor {
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 4.0,
+            radius,
+            frame,
+            samples,
+        }
+    };
+
+    for (caliber, incidence_deg) in [(0.088f32, 80.0f32), (0.120, 75.0)] {
+        let radius = caliber * 0.5;
+        let corridor = disc_on_one_plane(radius, incidence_deg);
+        // The spread the constant could not follow: an order of magnitude past 50 mm.
+        let spread = 2.0 * radius * incidence_deg.to_radians().tan();
+        assert!(
+            spread > 0.4,
+            "{caliber} m at {incidence_deg}° spreads {spread} m along the ray",
+        );
+
+        let walked = walk_disc(&corridor, &volumes, &laws).expect("one plane resolves");
+        assert_eq!(
+            walked.events.len(),
+            1,
+            "{caliber} m at {incidence_deg}°: one plane is one crossing, not {}",
+            walked.events.len(),
+        );
+        assert_eq!(
+            walked.events[0].coverage, 1.0,
+            "and the whole disc engaged it",
+        );
     }
 }
