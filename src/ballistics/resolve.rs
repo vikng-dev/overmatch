@@ -67,6 +67,20 @@ const SHOCK_K: f32 = 0.045;
 pub(crate) struct Crossing {
     pub outcome: ArmorCrossing,
     pub damage: f32,
+    /// Line-of-sight metres flown from the corridor origin to where the march resumes, SUMMED over
+    /// the segments actually flown.
+    ///
+    /// The driver cannot reconstruct this and must not try. A crossing is two segments, not one: the
+    /// round flies from the corridor origin to the AXIS handoff along the incoming direction, and
+    /// from there to the exit along the BENT one. The driver knows only where its cast first touched
+    /// armour — the nearest of k sample rays — and at oblique incidence that ray leads the axis by
+    /// `r·tan(incidence)`, which is 135 mm for an 88 at 72°. Charging to it skipped the approach and
+    /// handed the round that much free travel inside the same tick, which moves subsequent impacts
+    /// across tick and REV-25 accounting boundaries.
+    ///
+    /// The disc lift a ricochet resumes on is deliberately NOT counted: it is a repositioning of the
+    /// body clear of the face it bounced off, not distance the round flew.
+    pub travel: f32,
     /// Which primitives each disc sample is still inside where the march resumes.
     ///
     /// Empty unless the round perforated. This is the ONLY state a crossing leaves behind, and it
@@ -159,9 +173,9 @@ pub(crate) fn resolve_crossing(
                     exit: origin + dir * examined,
                     direction: dir,
                     speed,
-                    span: ENTRANCE_SPAN,
                 },
                 damage: 0.0,
+                travel: examined,
                 seeds: Vec::new(),
                 resume: None,
             })
@@ -175,6 +189,7 @@ pub(crate) fn resolve_crossing(
             Ok(ricochet(
                 shell,
                 context,
+                origin,
                 read.position,
                 read.normal,
                 read.incidence,
@@ -405,6 +420,8 @@ fn volume_table(
 fn ricochet(
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
+    // Where the corridor this bounce was resolved in began.
+    corridor_origin: Vec3,
     position: Vec3,
     normal: Vec3,
     incidence: f32,
@@ -486,6 +503,11 @@ fn ricochet(
             speed: bled,
         },
         damage,
+        // To the face it bounced off, along the way in. The lift the resume point carries is not
+        // travel — see [`Crossing::travel`].
+        travel: (position - corridor_origin)
+            .dot(Vec3::from(incoming))
+            .max(0.0),
         seeds: Vec::new(),
         resume: Some(position + normal * radius),
     }
@@ -540,7 +562,14 @@ fn perforate_or_embed(
         }
     }
 
-    let (outcome, terminal_at, seeds) = match plan.outcome {
+    // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
+    // then measures the rest, along the bend. Two segments, and the driver is told their sum rather
+    // than left to guess it from a contact distance that belongs to a different ray.
+    let approach = (transit.origin - entry_origin)
+        .dot(Vec3::from(incoming))
+        .max(0.0);
+
+    let (outcome, terminal_at, seeds, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => {
             shell.marks.events.push(PenetrationEvent {
                 entry: entrance.position,
@@ -558,8 +587,7 @@ fn perforate_or_embed(
                     ShockCause::Embed,
                 );
             }
-            let _ = t;
-            (ArmorCrossing::Embedded { at }, at, Vec::new())
+            (ArmorCrossing::Embedded { at }, at, Vec::new(), approach + t)
         }
         Outcome::Perforated { exit, t, .. } => {
             let residual = speed_for(shell.projectile.mass, {
@@ -613,10 +641,10 @@ fn perforate_or_embed(
                     exit: transit.origin + transit.axis * t,
                     direction: bent,
                     speed: residual,
-                    span: (t - transit.events[0].start).max(0.0),
                 },
                 entrance.position,
                 seeds,
+                approach + t,
             )
         }
     };
@@ -651,10 +679,10 @@ fn perforate_or_embed(
         });
     }
 
-    let _ = entry_origin;
     Crossing {
         outcome,
         damage,
+        travel: flown,
         seeds,
         resume: None,
     }

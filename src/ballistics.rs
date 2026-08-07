@@ -2327,6 +2327,11 @@ fn march_shell_step(
         damage_dealt += crossing.damage;
         interior = crossing.seeds;
         let crossing_resume = crossing.resume;
+        // What the crossing actually flew, summed over its segments by the only code that knows them
+        // (see `resolve::Crossing::travel`). `travelled` — the distance to the NEAREST sample's
+        // contact — is the driver's own cast talking, and at oblique incidence that ray leads the
+        // axis handoff by `r·tan(incidence)`.
+        let flown = crossing.travel;
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
         bent = true;
@@ -2339,7 +2344,7 @@ fn march_shell_step(
                 dir = direction;
                 speed = bled;
                 pos = crossing_resume.unwrap_or(entry);
-                remaining -= travelled;
+                remaining -= EPS + flown;
                 continue;
             }
             ArmorCrossing::Embedded { at } => {
@@ -2351,13 +2356,12 @@ fn march_shell_step(
                 exit,
                 direction,
                 speed: residual,
-                span,
             } => {
                 frame = frame.transport(Vec3::from(dir), Vec3::from(direction));
                 dir = direction;
                 speed = residual;
                 pos = exit;
-                remaining -= travelled + span;
+                remaining -= EPS + flown;
             }
         }
     }
@@ -2382,12 +2386,13 @@ enum ArmorCrossing {
     /// Defeated by the plate: buried partway through, where the march ends.
     Embedded { at: Vec3 },
     /// Punched through: the march resumes at the exit face carrying the residual speed.
+    ///
+    /// How much of the tick's budget the crossing cost is NOT here: it is [`resolve::Crossing::travel`],
+    /// because a crossing is two segments and only the resolver knows both.
     Perforated {
         exit: Vec3,
         direction: Dir3,
         speed: f32,
-        /// Line-of-sight metres spent inside the volume; the leftover travel budget pays for them.
-        span: f32,
     },
 }
 
@@ -5360,5 +5365,79 @@ mod march_tests {
             app.world().get::<Projectile>(shell).is_none(),
             "a fail-closed round is consumed, not left marching",
         );
+    }
+
+    /// A CROSSING IS TWO SEGMENTS, AND THE TICK PAYS FOR BOTH.
+    ///
+    /// The round flies from the corridor origin to the AXIS handoff along the way in, then from
+    /// there to the exit along the bend. The driver knew only where its own cast first touched
+    /// armour — the nearest of thirteen sample rays — and charged the budget to THAT. At oblique
+    /// incidence the nearest ray leads the axis by `r·tan(incidence)`: codex measured an 88 at 72°
+    /// charged 0.3934 m for a path whose segments total 0.5288 m, so 135.4 mm of the tick was flown
+    /// for free. Free travel inside a tick moves subsequent impacts across tick and REV-25
+    /// accounting boundaries, which is a netcode bug wearing a geometry costume.
+    ///
+    /// The observable needs no internals: a tick's route is a POLYLINE — start to entry, entry to
+    /// exit, exit to wherever the leftover budget ran out — and its total length is the budget. An
+    /// undercharge shows up as a shell that ended the tick further along than its own velocity
+    /// could carry it, by exactly the metres that were skipped.
+    #[test]
+    fn a_crossing_charges_the_whole_path_it_flew() {
+        let start = Vec3::new(0.0, 2.0, 2.0);
+        let dt = 0.016_f32;
+        // The budget the march works from: this tick's velocity after gravity and drag, times dt.
+        let (_, stepped) = advance_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
+        let budget = stepped.length() * dt;
+
+        for degrees in [0.0_f32, 40.0, 72.0] {
+            let mut app = world_with_trimesh_plates(&[]);
+            app.world_mut().spawn((
+                Transform::from_translation(Vec3::new(0.0, 2.0, 0.0))
+                    .with_rotation(Quat::from_rotation_y(degrees.to_radians())),
+                RigidBody::Static,
+                // 20 mm: thin enough that an 88 is overmatched at 72° and transits rather than
+                // bouncing, so every incidence under test resolves the same way.
+                box_trimesh(Vec3::new(3.0, 3.0, 0.02)),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                },
+            ));
+            for _ in 0..8 {
+                app.update();
+            }
+
+            let shell = spawn_headon_shell_at(&mut app, a_shot(), start);
+            app.update();
+
+            let marks = app
+                .world()
+                .get::<PenetrationMarks>(shell)
+                .expect("the shell survives a 20 mm plate");
+            assert_eq!(
+                marks.events.len(),
+                1,
+                "{degrees}°: one crossing, so the polyline below has one bend in it",
+            );
+            let (entry, exit) = (marks.events[0].entry, marks.events[0].exit);
+            let end = app.world().get::<Transform>(shell).unwrap().translation;
+
+            // Approach, transit, and the free flight the leftover budget bought.
+            let approach = start.distance(entry);
+            let through = entry.distance(exit);
+            let onward = exit.distance(end);
+            let flown = approach + through + onward;
+            assert!(
+                (flown - budget).abs() < 1.0e-3,
+                "{degrees}°: the tick flew {flown} m on a {budget} m budget                  (approach {approach}, through {through}, onward {onward})",
+            );
+            // The defect is invisible head-on and grows with the ring's spread, so the oblique arms
+            // are the ones that mean anything: name the reach they are testing.
+            let lead = 0.044 * degrees.to_radians().tan();
+            assert!(
+                degrees == 0.0 || lead > 0.03,
+                "{degrees}°: the nearest sample leads the axis by {lead} m, which is what was skipped",
+            );
+        }
     }
 }
