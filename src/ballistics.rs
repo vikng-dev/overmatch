@@ -5507,4 +5507,69 @@ mod march_tests {
             end.z,
         );
     }
+
+    /// CODEX'S MEASURED POINT: `(2499.9, 924.963, 1524.939)` at 38° incidence.
+    ///
+    /// The corridor origin used to be a WORLD position, and f32 out here resolves to 0.24 mm — so
+    /// the handoff and the very face it was computed from were quantised to that grid
+    /// INDEPENDENTLY, by different routes. Codex swept the live handoff arithmetic and measured it
+    /// landing 0.3848 mm off its own plane at this point: past the prune margin's 0.25 mm ceiling,
+    /// inside the playable envelope, and therefore a real entry face pruned in real combat. The
+    /// round then reported an exit it never entered and stopped dead on a plate it should have
+    /// crossed.
+    ///
+    /// No margin could fix that, because the floor the geometry demanded and the ceiling safety
+    /// demanded had crossed. Anchoring removes the cause: the world-scale subtraction happens once,
+    /// on the anchor, and the handoff is a small offset from the same origin the face positions were
+    /// measured from. The error is now corridor-scale wherever the shot is.
+    #[test]
+    fn a_crossing_resolves_at_the_far_corner_of_the_map() {
+        // Codex's point, and the incidence it measured there.
+        let at = Vec3::new(2499.9, 924.963, 1524.939);
+        let mut app = world_with_trimesh_plates(&[]);
+        // TWO plates, spaced. One crossing exercises the handoff once; a second corridor re-anchors
+        // downrange and exercises it again on geometry the first crossing already bent the round
+        // toward — which is where the error used to compound.
+        for z in [0.0_f32, -0.9] {
+            app.world_mut().spawn((
+                Transform::from_translation(at + Vec3::new(0.0, 0.0, z))
+                    .with_rotation(Quat::from_rotation_y(38.0_f32.to_radians())),
+                RigidBody::Static,
+                box_trimesh(Vec3::new(3.0, 3.0, 0.02)),
+                CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                },
+            ));
+        }
+        for _ in 0..8 {
+            app.update();
+        }
+
+        app.init_resource::<TerminalLog>();
+        app.add_observer(capture_terminal);
+        let shell = spawn_headon_shell_at(&mut app, a_shot(), at + Vec3::new(0.0, 0.0, 2.0));
+        app.update();
+
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(
+            impacts.len(),
+            2,
+            "two plates, two reads — not a pruned entry and a fail-closed stop: {:?}",
+            impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+        );
+        assert!(
+            impacts.iter().all(|impact| impact.penetrated),
+            "an 88 crosses 20 mm at 38° here exactly as it does at the world origin",
+        );
+        assert_eq!(
+            app.world().resource::<TerminalLog>().0.len(),
+            1,
+            "and the crossing reported its terminal",
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_some(),
+            "the round flew on; it was not stopped by arithmetic",
+        );
+    }
 }

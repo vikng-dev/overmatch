@@ -73,6 +73,7 @@ fn oblique_plate(
 
 fn corridor(length: f32, hits: Vec<FaceHit>) -> RayCorridor {
     RayCorridor {
+        anchor: Vec3::ZERO,
         origin: Vec3::ZERO,
         axis: AXIS,
         length,
@@ -92,6 +93,7 @@ fn walk(corridor: &RayCorridor, volumes: &VolumeTable) -> RayWalk {
 /// A `k = 1` disc: the fragment degeneracy (§13.5 — a fragment is a shell with r → 0).
 fn point_disc(length: f32, sample: SampleCorridor) -> DiscCorridor {
     DiscCorridor {
+        anchor: Vec3::ZERO,
         origin: Vec3::ZERO,
         axis: AXIS,
         length,
@@ -222,6 +224,7 @@ fn transit_disc(request: &TransitRequest, slabs: &[Slab], length: f32) -> DiscCo
         })
         .collect();
     DiscCorridor {
+        anchor: request.anchor,
         origin: request.origin,
         axis: request.axis,
         length,
@@ -258,6 +261,7 @@ fn disc_along(
         })
         .collect();
     DiscCorridor {
+        anchor: Vec3::ZERO,
         origin,
         axis,
         length,
@@ -780,6 +784,7 @@ fn large_world_coordinates_keep_the_millimetre_distinction() {
         hits.extend(plate(2, 0, 0.35 + gap, 0.45));
         walk(
             &RayCorridor {
+                anchor: Vec3::ZERO,
                 origin,
                 axis: AXIS,
                 length: 2.0,
@@ -1016,6 +1021,7 @@ fn a_flat_plate_disc_equals_the_point_sample() {
         .collect();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1067,6 +1073,7 @@ fn a_thin_oblique_slab_is_one_event_not_several() {
 
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1101,6 +1108,7 @@ fn a_concave_primitive_crossed_twice_stays_two_events() {
     };
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1135,6 +1143,7 @@ fn a_weld_lookahead_sized_gap_is_not_a_merge_licence() {
     let laws = WalkLaws::default();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1205,6 +1214,7 @@ fn the_coplanar_branch_is_bounded_by_the_discs_own_reach() {
         );
         walk_disc(
             &DiscCorridor {
+                anchor: Vec3::ZERO,
                 origin: Vec3::ZERO,
                 axis: AXIS,
                 length: 2.0,
@@ -1261,6 +1271,7 @@ fn a_concave_primitive_crossed_together_stays_one_event() {
     let b = slab(1, 0, 0.22, 0.32, Vec3::new(0.0, -0.7, -0.7));
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1301,6 +1312,7 @@ fn a_half_covered_disc_gives_half_coverage_and_half_cost() {
     let covered = samples.iter().filter(|s| !s.hits.is_empty()).count();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1353,6 +1365,7 @@ fn rolling_the_ring_phase_leaves_a_flat_plate_unchanged() {
             .collect();
         let walked = walk_disc(
             &DiscCorridor {
+                anchor: Vec3::ZERO,
                 origin: Vec3::ZERO,
                 axis: AXIS,
                 length: 2.0,
@@ -1415,6 +1428,7 @@ fn axis_only_and_ring_only_coverage_are_reported_honestly() {
         .collect();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1445,6 +1459,7 @@ fn axis_only_and_ring_only_coverage_are_reported_honestly() {
         .collect();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1475,6 +1490,7 @@ fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
     deep.extend(plate(2, 0, 0.6, 0.7));
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1527,6 +1543,7 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
     let b = slab(1, 0, 0.5, 0.55, Vec3::new(0.0, 1.0, -0.001));
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 2.0,
@@ -1790,6 +1807,7 @@ fn the_handoff_seeds_every_sample_that_starts_inside_material() {
         .collect();
     let walked = walk_disc(
         &DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 3.0,
@@ -1830,6 +1848,7 @@ fn the_handoff_seeds_every_sample_that_starts_inside_material() {
     // The seeded corridor resolves; the same corridor WITHOUT the seeds reports the unmatched exits
     // it inherits, which is the whole point of exporting them.
     let transit = DiscCorridor {
+        anchor: request.anchor,
         origin: request.origin,
         axis: request.axis,
         length: 3.0,
@@ -2312,6 +2331,7 @@ fn one_plane_stays_one_event_across_the_calibre_incidence_cliff() {
             .map(|offset| sample(offset, slab.hits(offset, AXIS, 4.0, false)))
             .collect();
         DiscCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 4.0,
@@ -2366,6 +2386,7 @@ fn a_boundary_at_the_restart_belongs_to_the_corridor_not_the_seed() {
     let laws = WalkLaws::default();
     let walked = walk(
         &RayCorridor {
+            anchor: Vec3::ZERO,
             origin: Vec3::ZERO,
             axis: AXIS,
             length: 1.0,

@@ -145,10 +145,17 @@ pub(crate) fn resolve_crossing(
     let frame = shell.projectile.disc;
 
     // --- ENTRANCE: the disc as it meets the surface, along the incoming axis.
+    //
+    // The march's contact point becomes the corridor ANCHOR, and every position from here to the end
+    // of the crossing is measured from it. The transit corridor inherits the same anchor, which is
+    // what makes its handoff a small offset from the face positions the entrance measured rather
+    // than an independently rounded world position (see `walk::RayCorridor::anchor`).
+    let anchor = origin;
     let entrance = closing_walk(
         context,
         not_own,
-        origin,
+        anchor,
+        Vec3::ZERO,
         Vec3::from(dir),
         frame,
         radius,
@@ -170,7 +177,7 @@ pub(crate) fn resolve_crossing(
             let examined = contact + ENTRANCE_SPAN;
             Ok(Crossing {
                 outcome: ArmorCrossing::Perforated {
-                    exit: origin + dir * examined,
+                    exit: anchor + dir * examined,
                     direction: dir,
                     speed,
                 },
@@ -189,7 +196,7 @@ pub(crate) fn resolve_crossing(
             Ok(ricochet(
                 shell,
                 context,
-                origin,
+                anchor,
                 read.position,
                 read.normal,
                 read.incidence,
@@ -212,6 +219,7 @@ pub(crate) fn resolve_crossing(
             let transit = closing_walk(
                 context,
                 not_own,
+                request.anchor,
                 request.origin,
                 request.axis,
                 request.frame,
@@ -225,7 +233,6 @@ pub(crate) fn resolve_crossing(
                 context,
                 &transit,
                 &plan,
-                origin,
                 dir,
                 bent,
                 speed,
@@ -251,6 +258,7 @@ pub(crate) fn resolve_crossing(
 fn closing_walk(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
+    anchor: Vec3,
     origin: Vec3,
     axis: Vec3,
     frame: DiscFrame,
@@ -260,8 +268,9 @@ fn closing_walk(
 ) -> Result<DiscWalk, WalkError> {
     let mut length = initial.clamp(ENTRANCE_SPAN, MAX_CORRIDOR);
     loop {
-        let corridor =
-            build_corridor(context, not_own, origin, axis, length, frame, radius, seeds)?;
+        let corridor = build_corridor(
+            context, not_own, anchor, origin, axis, length, frame, radius, seeds,
+        )?;
         let volumes = volume_table(context, &corridor)?;
         match walk::walk_disc(&corridor, &volumes, &context.laws) {
             Ok(walked) => {
@@ -322,6 +331,7 @@ fn candidates(
 fn build_corridor(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
+    anchor: Vec3,
     origin: Vec3,
     axis: Vec3,
     length: f32,
@@ -329,7 +339,7 @@ fn build_corridor(
     radius: f32,
     seeds: &[SampleSeed],
 ) -> Result<DiscCorridor, WalkError> {
-    let candidates = candidates(context, not_own, origin, axis, length, radius);
+    let candidates = candidates(context, not_own, anchor + origin, axis, length, radius);
     // Sample 0 is the axis, by the core's contract. When the march is resuming inside material the
     // offsets come from the SEEDS, which carry each sample's own resume point; otherwise the disc is
     // freshly laid out on the transported frame.
@@ -349,6 +359,7 @@ fn build_corridor(
         let mut hits = Vec::new();
         collect::collect(
             &Corridor {
+                anchor,
                 origin: origin + offset,
                 axis,
                 length,
@@ -366,6 +377,7 @@ fn build_corridor(
         });
     }
     Ok(DiscCorridor {
+        anchor,
         origin,
         axis,
         length,
@@ -420,9 +432,10 @@ fn volume_table(
 fn ricochet(
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
-    // Where the corridor this bounce was resolved in began.
-    corridor_origin: Vec3,
-    position: Vec3,
+    // The corridor's world anchor; `position` and the geometry around it are relative to it.
+    anchor: Vec3,
+    // Struck face, RELATIVE to the anchor.
+    local_position: Vec3,
     normal: Vec3,
     incidence: f32,
     struck: Entity,
@@ -441,6 +454,7 @@ fn ricochet(
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
+    let position = anchor + local_position;
     let out = Dir3::new(direction).unwrap_or(incoming);
     let bled = speed * speed_scale;
     let v_in = Vec3::from(incoming) * speed;
@@ -505,9 +519,7 @@ fn ricochet(
         damage,
         // To the face it bounced off, along the way in. The lift the resume point carries is not
         // travel — see [`Crossing::travel`].
-        travel: (position - corridor_origin)
-            .dot(Vec3::from(incoming))
-            .max(0.0),
+        travel: local_position.dot(Vec3::from(incoming)).max(0.0),
         seeds: Vec::new(),
         resume: Some(position + normal * radius),
     }
@@ -524,7 +536,6 @@ fn perforate_or_embed(
     context: &ResolveContext<'_, '_, '_>,
     transit: &DiscWalk,
     plan: &walk::ResolutionPlan,
-    entry_origin: Vec3,
     incoming: Dir3,
     bent: Dir3,
     speed: f32,
@@ -538,7 +549,12 @@ fn perforate_or_embed(
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
-    let entrance = plan.entrance;
+    let plan_entrance = plan.entrance;
+    // THE BOUNDARY. Everything the walk reports is anchor-relative; everything leaving this function
+    // — impacts, marks, impulse application points, the march's own resume — is world. One place to
+    // convert, so no other code has to know which frame it is holding.
+    let world = |local: Vec3| transit.anchor + local;
+    let entrance_position = world(plan_entrance.position);
     let struck = transit.events[0].entrance_volume;
     let body = context
         .world
@@ -565,16 +581,15 @@ fn perforate_or_embed(
     // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
     // then measures the rest, along the bend. Two segments, and the driver is told their sum rather
     // than left to guess it from a contact distance that belongs to a different ray.
-    let approach = (transit.origin - entry_origin)
-        .dot(Vec3::from(incoming))
-        .max(0.0);
+    let approach = transit.origin.dot(Vec3::from(incoming)).max(0.0);
 
     let (outcome, terminal_at, seeds, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => {
+            let at = world(at);
             shell.marks.events.push(PenetrationEvent {
-                entry: entrance.position,
+                entry: entrance_position,
                 exit: at,
-                overmatched: entrance.overmatched,
+                overmatched: plan_entrance.overmatched,
             });
             shell.path.points.push(at);
             // Stopped: the entrance surface's body absorbs the whole remaining momentum.
@@ -590,6 +605,7 @@ fn perforate_or_embed(
             (ArmorCrossing::Embedded { at }, at, Vec::new(), approach + t)
         }
         Outcome::Perforated { exit, t, .. } => {
+            let exit = world(exit);
             let residual = speed_for(shell.projectile.mass, {
                 let capability = capability(shell.projectile.mass, speed);
                 (capability - plan.cost_spent).max(0.0)
@@ -600,14 +616,14 @@ fn perforate_or_embed(
                     bodies,
                     body,
                     shell.projectile.mass * (v_in - Vec3::from(bent) * residual),
-                    entrance.position,
+                    entrance_position,
                     ShockCause::Perforation,
                 );
             }
             shell.marks.events.push(PenetrationEvent {
-                entry: entrance.position,
+                entry: entrance_position,
                 exit,
-                overmatched: entrance.overmatched,
+                overmatched: plan_entrance.overmatched,
             });
             shell.path.points.push(exit);
 
@@ -617,7 +633,7 @@ fn perforate_or_embed(
             for mark in &plan.spall {
                 damage += throw_spall_burst(
                     shell.spall,
-                    mark.position,
+                    world(mark.position),
                     bent,
                     mark.budget,
                     shell.projectile.caliber,
@@ -638,11 +654,11 @@ fn perforate_or_embed(
             let seeds = transit.resume_at(t + super::MARCH_EPS, &context.laws);
             (
                 ArmorCrossing::Perforated {
-                    exit: transit.origin + transit.axis * t,
+                    exit: world(transit.origin + transit.axis * t),
                     direction: bent,
                     speed: residual,
                 },
-                entrance.position,
+                entrance_position,
                 seeds,
                 approach + t,
             )
@@ -654,10 +670,10 @@ fn perforate_or_embed(
     // the steel.
     commands.trigger(Impact {
         position: match plan.outcome {
-            Outcome::Embedded { at, .. } => at,
-            Outcome::Perforated { .. } => entrance.position,
+            Outcome::Embedded { at, .. } => world(at),
+            Outcome::Perforated { .. } => entrance_position,
         },
-        normal: entrance.normal,
+        normal: plan_entrance.normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
         penetrated: true,
@@ -672,7 +688,7 @@ fn perforate_or_embed(
         commands.trigger(ShellTerminal {
             shot: shot.0,
             position: terminal_at,
-            normal: entrance.normal,
+            normal: plan_entrance.normal,
             penetrated: true,
             after_bounces: shell.marks.ricochets.len() as u32,
             victim,

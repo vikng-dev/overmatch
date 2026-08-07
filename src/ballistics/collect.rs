@@ -62,6 +62,9 @@ const BOUNDARY_PROBE: f32 = 1.0e-3;
 /// What the collector needs from the world. Borrowed rather than owned so the march can hand it the
 /// queries it already holds.
 pub(crate) struct Corridor<'a> {
+    /// WORLD position the corridor hangs off; see [`super::walk::RayCorridor::anchor`].
+    pub anchor: Vec3,
+    /// Corridor start, RELATIVE to [`anchor`](Self::anchor).
     pub origin: Vec3,
     /// Unit travel direction.
     pub axis: Vec3,
@@ -105,7 +108,13 @@ pub(crate) fn collect(
         // Into the collider's local frame: one inverse rotation, rather than transforming every
         // triangle out to world space.
         let inverse = rotation.inverse();
-        let local_origin = inverse * (corridor.origin - position.0);
+        // ORDER IS THE POINT. `anchor - position.0` is a difference of two WORLD positions, so it is
+        // near-exact when they are close (and its magnitude is metres, not kilometres); the
+        // corridor's own offset is then added at that scale. Forming the corridor's world position
+        // first and subtracting afterwards would round it to the world grid — 0.24 mm at the edge of
+        // the map — and hand the narrow phase a ray that starts a quarter millimetre off the face it
+        // was computed from.
+        let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
         let local_axis = inverse * corridor.axis;
         let seeded = corridor.seeded.contains(&PrimitiveKey {
             volume: node,
@@ -123,7 +132,7 @@ pub(crate) fn collect(
                 primitive,
                 seeded,
                 *rotation,
-                prune_margin(corridor),
+                prune_margin(local_origin, corridor.laws),
                 out,
             )?,
             _ => collect_convex(
@@ -158,24 +167,26 @@ pub(crate) fn collect(
 /// Same tolerance family, and the same scale-awareness, as [`super::walk::coincident`]: this is "the
 /// origin is ON that boundary", stated as a box.
 ///
-/// It is squeezed between two bounds that both matter, and the CEILING is not decoration:
+/// RE-DERIVED after the corridor became anchor-relative, because that changed which rounding is left
+/// to absorb. It is scaled on the LOCAL ray origin — the corridor's position in the collider's own
+/// frame — since that is now the only quantity the crossing arithmetic rounds at. A ray probing a
+/// tank part sits metres from its centre at most, so the floor lands near `topology_abs`: a few
+/// micrometres, wherever on the map the shot happens.
 ///
-/// - FROM BELOW, it must cover the corridor origin's own world-scale rounding, which is why it
-///   scales. Measured: a transit handoff two metres from the world origin lands ~2.4e-8 off the
-///   plane, and one at 2.4 km lands ~1.5e-4 off it — the same error in ULP, four orders apart in
-///   metres, because that is what f32 does across a 2.5 km map.
-/// - FROM ABOVE, it must stay clear of [`super::MARCH_EPS`]. The march resumes one nudge past every
-///   face it leaves, so a margin that reached a whole nudge would re-collect the EXIT face of the
-///   plate just perforated — an exit for a primitive the walk is not inside, `UnexpectedExit`, and a
-///   round stopped dead in mid-air one millimetre past the plate it just punched through. The
-///   unclamped scaling term reaches exactly `MARCH_EPS` at 2.5 km, which is the map.
+/// Before anchoring it had to scale on the WORLD position instead, and that is what made this a
+/// squeeze rather than a tolerance: `topology_rel · 2500 m` reaches [`super::MARCH_EPS`] exactly, so
+/// the floor the geometry demanded and the ceiling safety demanded crossed INSIDE the map. Codex
+/// measured a live handoff 0.3848 mm off its own plane at 2.5 km, past the 0.25 mm ceiling. The
+/// anchor removed the conflict; the ceiling stays as defence in depth.
 ///
-/// A quarter of the nudge holds both across the playable envelope — verified by sweep out to 2.5 km,
-/// which is where the margin has ~1 ULP of headroom left. Past that the two bounds cross and no
-/// constant satisfies both; the fix then is not a bigger margin but origin-relative corridor
-/// arithmetic, so the handoff stops being rounded at world scale in the first place.
-fn prune_margin(corridor: &Corridor<'_>) -> f32 {
-    (corridor.laws.topology_abs + corridor.laws.topology_rel * corridor.origin.abs().max_element())
+/// The CEILING is not decoration. The march resumes one `MARCH_EPS` past every face it leaves, so a
+/// margin that reached a whole nudge would re-collect the EXIT face of the plate just perforated —
+/// an exit for a primitive the walk is not inside, `UnexpectedExit`, and a round stopped dead in
+/// mid-air one millimetre past the plate it punched through. A quarter of the nudge is now orders
+/// above anything the floor asks for, which is exactly the state a clamp should be in: never
+/// reached, and still there.
+fn prune_margin(local_origin: Vec3, laws: &WalkLaws) -> f32 {
+    (laws.topology_abs + laws.topology_rel * local_origin.abs().max_element())
         .min(super::MARCH_EPS * PRUNE_MARGIN_SHARE)
 }
 
@@ -295,6 +306,11 @@ fn collect_convex(
     let Ok(axis) = Dir3::new(corridor.axis) else {
         return Ok(());
     };
+    // Parry is asked in world space, so this phase re-forms the world origin. It carries the world
+    // grid's rounding with it, and that is acceptable HERE and nowhere else: convex shapes are the
+    // sandbox slabs, no production armour takes this path, and its own boundary probe already looks
+    // a millimetre behind the origin — four orders more slack than the rounding could ever be.
+    let world_origin = corridor.anchor + corridor.origin;
     // Both ends are probed with `solid: true`, and that is the whole trick.
     //
     // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot distinguish
@@ -306,12 +322,12 @@ fn collect_convex(
     let entry = collider.cast_ray(
         position,
         rotation,
-        corridor.origin,
+        world_origin,
         Vec3::from(axis),
         corridor.length,
         true,
     );
-    let far = corridor.origin + corridor.axis * corridor.length;
+    let far = world_origin + corridor.axis * corridor.length;
     let exit = collider.cast_ray(
         position,
         rotation,
@@ -352,7 +368,7 @@ fn collect_convex(
                 match collider.cast_ray(
                     position,
                     rotation,
-                    corridor.origin,
+                    world_origin,
                     -Vec3::from(axis),
                     BOUNDARY_PROBE,
                     false,
@@ -524,28 +540,15 @@ mod tests {
     }
 
     /// Run the trimesh narrow phase against `collider` for a ray in the collider's own frame, at the
-    /// margin the live collector would compute for a corridor sitting `at` in the WORLD.
+    /// margin the live collector would compute for it.
     ///
-    /// The two positions are separate because the live collector separates them: the ray is walked
-    /// in local coordinates (small, near-exact), while the margin is sized from the world position
-    /// (large, and the sole source of the rounding the margin exists to absorb). A fixture that
-    /// conflated them could not state a law about combat range at all.
-    fn trimesh_hits(
-        collider: &Collider,
-        at: Vec3,
-        origin: Vec3,
-        axis: Vec3,
-        length: f32,
-    ) -> Vec<FaceHit> {
+    /// The origin is LOCAL, and after the anchor refactor that is the only frame the margin depends
+    /// on: the corridor's world position is subtracted once, on the anchor, before any of this. A
+    /// fixture that had to name a world position to state a law about rounding is exactly what
+    /// anchoring retired.
+    fn trimesh_hits(collider: &Collider, origin: Vec3, axis: Vec3, length: f32) -> Vec<FaceHit> {
         let node = Entity::from_raw_u32(1).expect("a test entity index");
         let laws = WalkLaws::default();
-        let corridor = Corridor {
-            origin: at,
-            axis,
-            length,
-            seeded: &[],
-            laws: &laws,
-        };
         let mut out = Vec::new();
         let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
             panic!("`Collider::trimesh` builds a trimesh");
@@ -559,7 +562,7 @@ mod tests {
             node,
             false,
             Rotation::default(),
-            prune_margin(&corridor),
+            prune_margin(origin, &laws),
             &mut out,
         )
         .expect("the fixture collects cleanly");
@@ -580,48 +583,31 @@ mod tests {
     fn a_face_the_origin_sits_a_hair_past_is_still_collected() {
         let collider = trimesh_box(Vec3::new(3.0, 3.0, 0.05));
         let face = 0.025_f32;
-        // Both places a corridor is ever anchored: beside the world origin, and out at combat range
-        // where the map ends. The margin scales, so the law has to hold at both.
-        for at in [Vec3::new(0.1, 2.0, 2.0), Vec3::new(2400.0, 2.0, 2400.0)] {
-            // In ULP, because that is the unit the defect is measured in — and in BOTH the units it
-            // is produced in. The live failure put the origin a dozen ULP of the 25 mm LOCAL
-            // coordinate past the face. Out at 2.4 km the same handoff arithmetic is rounded in ULP
-            // of 2400 instead, which is 2.4e-4 m — five orders larger, and the reason the margin
-            // scales at all. One full ULP of the corridor's own world position is the floor it must
-            // clear, and out where the ceiling binds it is very nearly all the margin buys.
-            let ulp = |x: f32| f32::from_bits(x.to_bits() + 1) - x;
-            let local = ulp(face);
-            let world = ulp(at.abs().max_element());
-            for past in [
-                0.0,
-                local,
-                8.0 * local,
-                64.0 * local,
-                0.5 * world,
-                1.0 * world,
-            ] {
-                let origin = face - past;
-                // Off the box's face diagonal, so each face presents ONE triangle and the count
-                // below reads as "the face" rather than "however the mesh was triangulated".
-                let hits = trimesh_hits(
-                    &collider,
-                    at,
-                    Vec3::new(0.1, -0.0003, origin),
-                    Vec3::NEG_Z,
-                    0.5,
-                );
-                let entries: Vec<&FaceHit> = hits
-                    .iter()
-                    .filter(|hit| hit.true_normal.dot(Vec3::NEG_Z) < 0.0)
-                    .collect();
-                assert_eq!(
-                    entries.len(),
-                    1,
-                    "the entry face is collected at {at:?} though the origin sits {past} past it: \
-                     {hits:?}",
-                );
-                assert_eq!(entries[0].t, 0.0, "and it lands at the corridor origin");
-            }
+        // In ULP, because that is the unit the defect is measured in. The live failure put the
+        // origin a dozen ULP of the 25 mm LOCAL coordinate past the face — and after anchoring,
+        // local ULP is the only rounding that reaches here at all. The corridor's world position is
+        // subtracted once, on the anchor, so a shot at the edge of the map arrives with the same low
+        // bits as one beside the world origin.
+        let ulp = f32::from_bits(face.to_bits() + 1) - face;
+        for past in [0.0, 1.0, 8.0, 64.0] {
+            // Off the box's face diagonal, so each face presents ONE triangle and the count below
+            // reads as "the face" rather than "however the mesh was triangulated".
+            let hits = trimesh_hits(
+                &collider,
+                Vec3::new(0.1, -0.0003, face - past * ulp),
+                Vec3::NEG_Z,
+                0.5,
+            );
+            let entries: Vec<&FaceHit> = hits
+                .iter()
+                .filter(|hit| hit.true_normal.dot(Vec3::NEG_Z) < 0.0)
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "the entry face is collected though the origin sits {past} ULP past it: {hits:?}",
+            );
+            assert_eq!(entries[0].t, 0.0, "and it lands at the corridor origin");
         }
     }
 
@@ -639,19 +625,16 @@ mod tests {
         let collider = trimesh_box(Vec3::new(3.0, 3.0, 0.05));
         // The corridor after a perforation: origin one nudge beyond the exit face at local −0.025.
         let resumed = -0.025_f32 - super::super::MARCH_EPS;
-        for at in [Vec3::new(0.1, 2.0, 2.0), Vec3::new(2500.0, 2.0, 2500.0)] {
-            let hits = trimesh_hits(
-                &collider,
-                at,
-                Vec3::new(0.1, -0.0003, resumed),
-                Vec3::NEG_Z,
-                0.5,
-            );
-            assert!(
-                hits.is_empty(),
-                "the plate behind the resumed corridor is gone, not re-entered, at {at:?}: {hits:?}",
-            );
-        }
+        let hits = trimesh_hits(
+            &collider,
+            Vec3::new(0.1, -0.0003, resumed),
+            Vec3::NEG_Z,
+            0.5,
+        );
+        assert!(
+            hits.is_empty(),
+            "the plate behind the resumed corridor is gone, not re-entered: {hits:?}",
+        );
     }
 
     #[test]

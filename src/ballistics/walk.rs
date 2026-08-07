@@ -152,6 +152,18 @@ impl VolumeTable {
 /// synthesized exit.
 #[derive(Clone, Debug, Default)]
 pub struct RayCorridor {
+    /// WORLD position this corridor's local frame hangs off. Every other position here — including
+    /// [`origin`](Self::origin) — is measured FROM it, and stays at corridor scale.
+    ///
+    /// f32 near the edge of a 2.5 km map resolves to 0.24 mm, so a world position and anything
+    /// derived from it are quantised at that step INDEPENDENTLY: two exact-equal quantities computed
+    /// by different routes come back up to a quarter millimetre apart. That is what put a transit
+    /// handoff 0.38 mm off the very face it was computed from (MEASURED by codex 2026-08-07 at
+    /// `(2499.9, 924.963, 1524.939)`, 38° incidence) and let a real entry face be pruned in-envelope.
+    /// Anchoring kills it at the source: the world-scale subtraction happens ONCE, on the anchor, and
+    /// every relationship the walk cares about is then arithmetic on small numbers.
+    pub anchor: Vec3,
+    /// Corridor start, RELATIVE to [`anchor`](Self::anchor).
     pub origin: Vec3,
     /// Unit travel direction.
     pub axis: Vec3,
@@ -1140,6 +1152,10 @@ pub struct SampleCorridor {
 /// The caliber-wide probe: k parallel sample corridors.
 #[derive(Clone, Debug)]
 pub struct DiscCorridor {
+    /// WORLD anchor; see [`RayCorridor::anchor`]. Every sample corridor inherits it unchanged, which
+    /// is what makes their `t` directly comparable.
+    pub anchor: Vec3,
+    /// Corridor start, RELATIVE to [`anchor`](Self::anchor).
     pub origin: Vec3,
     pub axis: Vec3,
     pub length: f32,
@@ -1259,6 +1275,9 @@ pub struct DiscEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscWalk {
     pub axis: Vec3,
+    /// WORLD anchor; see [`RayCorridor::anchor`]. Every position this walk reports is relative to it.
+    pub anchor: Vec3,
+    /// Corridor start, RELATIVE to [`anchor`](Self::anchor).
     pub origin: Vec3,
     pub frame: DiscFrame,
     pub radius: f32,
@@ -1327,6 +1346,7 @@ pub fn walk_disc(
         walks.push(walk_ray(
             index,
             &RayCorridor {
+                anchor: corridor.anchor,
                 origin: corridor.origin + sample.offset,
                 axis: corridor.axis,
                 length: corridor.length,
@@ -1437,6 +1457,7 @@ pub fn walk_disc(
 
     Ok(DiscWalk {
         axis: corridor.axis,
+        anchor: corridor.anchor,
         origin: corridor.origin,
         frame: corridor.frame,
         radius: corridor.radius,
@@ -1803,7 +1824,12 @@ pub struct TransitRequest {
     /// The NORMALIZED (bent) travel axis — the transit happens along this, not along the incoming
     /// direction the entrance was sampled on.
     pub axis: Vec3,
-    /// Where the DISC AXIS crosses the entrance surface.
+    /// WORLD anchor, carried through unchanged from the entrance corridor — see
+    /// [`RayCorridor::anchor`]. Sharing it is the point: the handoff below is then a LOCAL offset
+    /// from the same origin the entrance's face positions were measured from, so the two agree to
+    /// corridor-scale rounding however far downrange the shot is.
+    pub anchor: Vec3,
+    /// Where the DISC AXIS crosses the entrance surface, RELATIVE to [`anchor`](Self::anchor).
     ///
     /// Deliberately NOT the covered-sample centroid. A centroid drags the shell's line of flight
     /// sideways toward whatever part of the disc happened to touch geometry — a lateral kick, which
@@ -1930,6 +1956,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     Begin::Transit(TransitRequest {
         entrance: read,
         axis: Vec3::from(bent),
+        anchor: entrance.anchor,
         origin: handoff,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
@@ -1999,6 +2026,9 @@ fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), 
         return mismatch(
             "the corridor was collected along a different axis than the bend asked for",
         );
+    }
+    if transit.anchor != request.anchor {
+        return mismatch("the corridor was collected against a different world anchor");
     }
     if (transit.origin - request.origin).length() > 1.0e-4 {
         return mismatch("the corridor starts somewhere other than the entrance handoff point");
