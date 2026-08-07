@@ -87,6 +87,12 @@ well-defined.
 
 ## 3. The penetrator march — velocity is the source of truth
 
+> **Resolution model superseded by §13 (2026-08-03).** The laws below (capability, cost,
+> perforate/embed, residual velocity) stand unchanged — but "per volume crossed" as a *serial,
+> one-entity-at-a-time* resolution is retired. §13 replaces it with the union field walk:
+> overlapping volumes behave as their boolean union, and cost/damage/spall become field + boundary
+> laws over the material-factor field. Implement crossings from §13, magnitudes from here.
+
 For a fixed projectile (mass, caliber, hardness constant), penetration is a monotonic, invertible
 function of velocity (DeMarre, `pen ∝ vⁿ`). So **velocity is the stored state; penetration
 *capability* is its derivative.** The march, per volume crossed:
@@ -112,6 +118,11 @@ Properties:
   hard armor) is out of the slice.
 
 ## 4. Boundary interaction — the decision tree at each face
+
+> **Amended by §13.3 (2026-08-03):** overmatch and ricochet consult **factor-weighted**
+> (steel-equivalent) thickness, not geometric thickness, and surface behaviour gates on a
+> significant factor *step* at the boundary — otherwise a thick soft volume (a forearm, a fuel
+> tank) deflects main-gun rounds. The decision tree's structure is unchanged.
 
 When the path reaches a volume's face:
 
@@ -500,8 +511,14 @@ not edit the same files. Authored to by the model handoff and bound to by the co
   nodes — the model's mesh kinds split by *purpose*, not role) and powers the **drift lint** (a
   `Ballistic_*` node absent from `volumes` warns). The code reads the RON, never the prefix; every
   `volumes` key must have a matching node (asserted at bind).
-- **Mesh:** watertight / **manifold** solids; convex *not* required (penetration is a raycast query,
-  not the physics solver); non-rendering (the sandbox visualises them itself).
+- **Mesh:** watertight / **manifold** solids *per volume*; convex *not* required (penetration is a
+  raycast query, not the physics solver); non-rendering (the sandbox visualises them itself).
+  **Amended 2026-08-03/04 (§13.7):** manifold-per-volume is the only geometric gate.
+  **Face-to-face contact** is the preferred joint style (x-ray legibility, physical honesty);
+  overlap is tolerated (the union walk charges shared space once) and mutual exact-fit is NOT
+  required — sub-caliber slop in either direction is harmless (§13.5). Deliberate openings stay
+  honest (caliber-gated weakspots, fuzzer-blessed); accidental super-caliber corridors are
+  fuzzer-hunted.
 - **No numbers in the model.** `material_factor`, `hp`, and future facets live in RON keyed by node
   name (ADR-0010). Model = named manifold solids; code (RON) = all semantics.
 - **Mesh kinds split by purpose, not role** (restructure 2026-06-28): the rig is a **skeleton of
@@ -511,6 +528,231 @@ not edit the same files. Authored to by the model handoff and bound to by the co
   (the march's hitboxes, concave OK), `Collider_*` (convex physics proxy, Vehicle layer). No mesh is
   ever the parent of another mesh or a rig node, so the art carries no mechanism and the three shapes
   stay independent. `Collider_*` is matched by prefix in `on_tank_ready`.
+
+## 13. The union field model — overlaps, gaps, and the classless laws
+
+**Status: SPEC, finalized in design conversations 2026-08-03/04; not yet built.** Supersedes §3's
+*serial* crossing resolution and amends §4's overmatch/ricochet inputs; §5's spall budget and §12's
+binding contract survive (one §12 mesh bullet amended, §13.7). Three mechanisms on three orthogonal
+axes: **union** (shared space, §13.2), **ε-weld** (longitudinal micro-gaps, §13.4), **disc
+sampling** (lateral geometry — the shell is caliber-wide, §13.5). Motivated by the visual↔ballistic
+unification work on `tiger_1`: authoring exact plate abutment (no overlap, no gap) proved brutal in
+Blender — and inspection of the live resolver showed exact fit **has no consumer anyway** (§13.1).
+The precedent is instructive: War Thunder ran painted 2D armor for a decade, migrated to volumetric
+3D in 2019 because surface-model artifacts were unfixable, and their notorious volumetric bugs were
+exactly plate-junction overlaps and gaps. The fix here is not retreating to painted armor — on flat
+plates the volumetric chord *equals* `t/cosθ` exactly, and painting is worst precisely where we need
+it most (the cast mantlet). The fix is changing the resolution law so seams stop being special: overlap becomes *legal*
+(union), micro-gaps become invisible (ε-weld), and the shell meets geometry as a caliber-width
+body (disc sampling) rather than an infinitely thin line.
+
+### 13.1 What the serial resolver actually does at seams (findings, 2026-08-03)
+
+The march resolves one plate at a time: first armor hit, then thickness/exit probes **restricted to
+the struck entity** (`|e| e == hit.entity` — `ballistics.rs:2243`, `:2330`), charge that plate's
+chord, teleport to its exit, nudge `EPS = 1mm`, resume. Two parry facts govern the seams
+(verified in `parry3d-0.27.0/src/query/ray/ray_triangle.rs`): trimeshes have **no interior** (the
+`solid` flag is ignored for triangles — a ray born inside a plate just flies until it crosses a
+face), and triangles are **double-sided with the returned normal flipped to oppose the ray** (a
+backface hit from inside reads as a head-on entry). Consequences:
+
+| Seam geometry | Current behaviour |
+|---|---|
+| Disjoint plates, ≥1mm air | Correct — each crossing charged in full. |
+| **Overlap** | Shell pays plate A's full chord, exits *inside* B, next contact is B's **backface from inside** → thickness/span probes find nothing ahead → `unwrap_or(0.0)` → **B crossed at zero cost**, plus a spurious `penetrated: true` `Impact` (flame lick) and junk `PenetrationEvent` at the seam. **Undercharge** — the opposite of WT's double-count. |
+| **Exact abutment** | Same bug: the 1mm nudge hops the shared face into B's interior. Stacked plates (mantlet over turret face, appliqué) currently grant the **first plate's protection only**, however perfectly they abut. |
+| **Gap** | Shell enters untouched, hits the far wall's *inner* backface → reads as a head-on 0mm penetration → zero damage but a **fabricated `ShellTerminal` "penetrated" confirm** on the wire, at the wrong face. |
+| Hole in a plate (non-manifold) | Exit probe finds no face → `span = 0` → free perforation. (The known "non-watertight = zero armour silently".) |
+
+Conclusion: the no-overlap/no-gap authoring standard is unrewarded — perfect abutment produces the
+same free crossings as sloppy overlap. The geometry discipline and the resolver must be redesigned
+*together*.
+
+### 13.2 The model — a factor field and two kinds of laws
+
+Composition, not classes (§12's doctrine, extended to resolution). Along the march segment the base
+truths form a **material-factor field**: at each point, the set of volumes covering it, each
+contributing its `material_factor`; `hp` stays an independent facet. Two kinds of laws consume it:
+
+- **Field laws** (pointwise): cost and damage integrate over the field.
+- **Boundary laws** (at transitions): ricochet, normalization, spall, entry/exit reads fire where
+  the field *steps*.
+
+**Cost law:** `cost = ∫ max(factor over covering volumes) dt`. The combiner `max` is **forced** by
+the invariants, not chosen by taxonomy:
+
+- **Idempotent** — the same steel claimed twice charges once (the plate-junction fix).
+- **Monotone** — adding any volume never *reduces* protection anywhere (a gunner's arm clipped into
+  the turret wall cannot dilute the steel).
+- **Commutative** — authoring order can't matter.
+
+This is CSG union evaluated lazily on the 1D ray (Roth '82): overlapping *individually-manifold*
+plates behave exactly as their boolean union, without ever building the merged mesh. Boolean union
+is the special case of `max` over {absent, factor}; "steel beats flesh" is `1.0 ≫ 0.02`, a
+consequence rather than a rule.
+
+**Damage law:** every HP-bearing volume deposits transit damage **over its own presence chords, at
+its own factor** — no ownership, no priority, no argmax. "A shell hurts you in proportion to the
+material *of yours* it chewed." The error a component clipped into armor introduces is bounded by
+`overlap_depth × its_factor` (flesh: sub-noise), and is only reachable if the shell actually
+penetrated that deep — at which point it was hitting the component anyway. Two crew overlapping
+each other: both deposit, cost charged once, nothing needs to win.
+
+**Spall law:** at every **downward factor step**, emit spall scaled by the §5 budget of the
+contiguous run just exited, into the next region — then the fragments march under these same field
+laws. Everything on the wishlist emerges with no class rules:
+
+- Crew never spall — flesh can't accumulate cost (§5's body term, unchanged).
+- Crew pressed against an inner wall (steel→flesh contact, no air gap): spall throws off the steel
+  backface **directly into the body** — the overlap *created* that transition, correctly.
+- Buried steel faces (overlapped plates) stop being downward steps — no seam spall, no seam VFX.
+- A small drop into other steel (cast→RHA) emits fragments that the fragment march absorbs in
+  millimetres — self-correcting, no suppression rule needed.
+
+### 13.3 Surface-law amendment — factor-weighted thickness (required for classlessness)
+
+§4's overmatch consults **geometric** thickness (`caliber ≥ 3 × thickness`, `ballistics.rs:2253`).
+Classless union breaks here: an exposed forearm is ~80mm "thick" → not overmatched → past 70° **an
+arm ricochets an 88**. Amendment: overmatch, ricochet eligibility, and normalization consult
+**steel-equivalent thickness** (`thickness × factor`) and gate on a **meaningful factor step** at
+the surface. Flesh at 80mm ≈ 1.6mm-equivalent → overmatched by everything, never deflects, never
+bends the path. Bonus: fixes the latent thick-soft-volume bug (fuel, stowage, rubber) that exists
+today independent of unions.
+
+### 13.4 The walk (per sample ray) — welded runs
+
+1. **All-hits collection** along the segment (not first-hit), grouped per volume entity — parry's
+   double-sided triangles guarantee every crossing is seen.
+2. **Per-entity parity pairing** into `[enter, exit]` intervals — sound iff each volume is
+   individually manifold (§13.6's per-plate gate).
+3. **ε-weld:** runs separated by less than the weld tolerance merge into one run. Semantics
+   sharpened 2026-08-04:
+   - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
+     once, at the outer face), one exit (spall once, at the true inner face, budget = the run's
+     *summed* cost), overmatch against the run's summed factor-weighted thickness. No spall
+     "developing" in a 0.4mm void, no second ricochet check mid-sandwich.
+   - **It never charges the gap.** Cost integrates material chords only — welding deletes phantom
+     *faces*; it cannot create phantom *steel*.
+   - **Measure the gap perpendicular, not along the ray** — else grazing incidence un-welds exactly
+     when it matters most: `gap_perp = gap_along × |dot(dir, n_exit)|`. ε ≈ 2mm perpendicular
+     (knob): far above export jitter, two orders below real spaced armor (Schürzen at 100s of mm).
+   - Welds across differing factors are fine (RHA sandwiched with cast = one run for events; each
+     chord charges its own factor).
+4. **Walk the boundary list:** each sub-chord carries `max`-factor + the presence set. Integrate
+   cost; deposit per-entity damage; fire boundary laws at steps. Interior gaps ≥ ε between runs are
+   free flight — **spaced armor is emergent**.
+
+Entry-face semantics (incidence, normalization, ricochet test, the terminal/`Impact` reads) evaluate
+at the outermost *significant* factor step; spall at downward steps. The output per sample ray is a
+sequence of welded runs `[t_in, t_out]` with chords, factors, and entry/exit faces — the inputs
+§13.5 aggregates.
+
+### 13.5 The shell is a sampled disc — the finalized primitive (2026-08-04)
+
+> **The shell samples the world as a disc, not a point. The three-phase crossing — entrance,
+> transit, exit — survives unchanged; every scalar it consumed from one axis point sample becomes
+> an area aggregate over the frontal disc.**
+
+**k sample rays** (the axis + a ring at `r = caliber/2`; k ≈ 8–16, knob), each marched through
+§13.4's walk. A **crossing event** is the cluster of welded runs that overlap longitudinally across
+samples. Per event:
+
+- **Entrance:** `n̄` = area-mean entry normal over covered samples — yes, the normals *integrate*.
+  Incidence, the ricochet test, normalization, and overmatch (§13.3, factor-weighted) consume `n̄`
+  unchanged. This also *repairs* the point model: a point normal at an edge or on curved cast is
+  degenerate (today's `unwrap_or(-dir)`); the patch average is smooth everywhere — corners average
+  to their bisector. Ricochet bleed and impulse exchange scale by η.
+- **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral,
+  uncovered samples contributing 0 — automatically `η × mean covered chord cost`, where
+  **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.
+  Damage stays per-presence, now per-sample: each HP entity deposits for the samples crossing *it*
+  — a shell clipping the corner of a crew volume wounds fractionally. Emergent.
+- **Exit:** area-mean exit point/normal; spall budget = the event's cost (already η-weighted);
+  spall axis = exit direction as before.
+
+**What the uniform law dissolves** (each was a provisional rule during 2026-08-03/04 design;
+none survive — recorded so they aren't re-invented):
+
+- *Admission ("can the shell fit")* — there is no fit/no-fit, only material to defeat. Punching
+  through an undersized opening = paying the rim annulus's η-weighted cost; embed when capability
+  can't cover it.
+- *Side-counting / arc tests / encirclement / "n bodies"* — box-world proxies. The turret-ring
+  slit, the plate-edge graze, and the mantlet MG port are just different (η, n̄) pairs; the
+  geometry around the axis is the fact, indifferent to how steel is partitioned into meshes.
+- *Scrape thresholds* — an edge skim's covered samples see ~90° incidence on `n̄`, so the
+  **existing ricochet law** fires with η-scaled bleed: a graze IS a partial ricochet. Continuous,
+  no cliff, no lottery.
+- *Nearest-contact re-aim / capsule shapecast* — the aggregates are the resolution; the "capsule"
+  is implemented as the sub-ray ring itself (same raycast machinery, same determinism posture, no
+  new parry query type).
+
+**Emergent results:** the MG port in the cast mantlet is a *graded* weakspot (η ≈ 0.9 of the cast
+chord — most, not all, of the resistance; zero authored weakspot data); an 88 cannot thread the
+turret-ring slit while an MG round centered in it flies free (η = 0) — **caliber-gated weakspots
+from geometry**; sub-caliber accidental cracks self-heal (η ≈ 1, near-full charge); **fragments
+are shells with r→0, k=1** — the same primitive degenerates to the pure ray, so
+`cast_spall_fragment` needs no law of its own.
+
+**Deliberate costs, accepted 2026-08-04:**
+
+- **Armor-zone boundaries grade over ~one caliber** (partial-area engagement is the physical
+  truth). Chosen over sharp-line legibility — the sharp line is what bred every seam pathology.
+- **Lateral asymmetry unmodeled:** a corner clip physically torques the shell away from the plate;
+  the aggregate sees the mean, not the asymmetry. If ever wanted, the mean lateral offset of
+  covered samples is the ready-made kick direction. Knob, not now.
+- **Sampling noise at very small η** — k is the resolution dial; the sandbox chooses it.
+
+### 13.6 Invariants — the machine-checkable contract
+
+- **Idempotence:** duplicating any volume changes no outcome.
+- **Monotonicity:** adding a volume never lowers protection along any ray; removing one never
+  raises it.
+- **Order independence:** outcomes are authoring-order-free.
+- **Seam invisibility:** a shot near the seam of two flush same-material plates resolves
+  *identically* to a shot mid-plate — the union field gives every sample the same answer; the
+  shell cannot detect the seam. (This is also why a neighboring plate on the disc near a seam
+  contributes nothing extra: including it would make seams *anti*-weakspots.)
+- **Locality:** field laws are local to the overlap; boundary laws local to the overlap's *edges*
+  (an overlap deletes transitions — buried faces — and creates them — steel→flesh contact).
+- **No fabricated events:** a ray crossing no material produces no armor events (what makes gaps
+  *detectable* rather than event-noise).
+
+Enforced mechanically, not by eyeball:
+
+- **Ray fuzzer** (bake/CI gate): 10⁵–10⁶ random rays at the bound tank, asserting the invariants,
+  and reporting every corridor/opening that reaches crew/ammo with its **admitting caliber and
+  per-caliber η** ("this seam admits ≥8mm; at 88mm η = 0.93"). Each finding is either a real hole
+  (**fix**) or a deliberate opening (**bless** — turret ring, MG port, vision slits: historical
+  weakspots consciously kept as gameplay, with exact knowledge of how they'll play at every gun in
+  the game). The bless-list is where weakspots are decided, not discovered by players as bugs.
+- **Per-plate manifold gate:** weld-by-position, then closed-manifold test, per `Ballistic_*` node.
+  (The mesh-unification open tab's watertightness gate, now *per plate* — a far easier standard
+  than mutual fit, since each plate can be a dumb extruded solid.)
+
+### 13.7 Authoring contract (amends the §12 mesh bullet; revised 2026-08-04)
+
+- **Watertight per volume is the only hard mesh gate. Mutual exact-fit is retired as a
+  *requirement*.**
+- **Face-to-face contact is the preferred joint style** (Yan ruling 2026-08-04, revising the
+  earlier "overlap recommended"): physically honest — real plates are separate bodies joined at a
+  seam, not interpenetrating — and the garage **x-ray inspection** renders clean, where visible
+  overlaps would confuse the player. **Overlap is tolerated, not recommended** — the union law
+  makes it harmless (charged once), it's just not the style. Avoid exactly-coincident *coplanar*
+  faces (z-fighting in the x-ray render).
+- **Sub-caliber slop is harmless in both directions** — small overlaps union away; micro-gaps
+  ε-weld (longitudinal) or self-heal at η ≈ 1 (lateral cracks). Don't sweat sub-caliber precision.
+- Components may clip into walls; the damage law makes the slop harmless.
+- **Real openings are modeled honestly, not plugged** — the turret ring, MG ports, vision slits
+  become caliber-gated, η-graded weakspots by the disc law, and are *blessed* in the fuzzer.
+- The remaining geometry sin is the **super-caliber accidental corridor** — hunted by the fuzzer,
+  not the eyeball.
+
+**Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; equal-factor run
+merging for spall accounting (an ownership switch mid-steel is one run, keyed by factor value);
+whether ricochet-shock on exposed components adopts the same factor-step gate; what "significant
+step" means numerically (sandbox knob); the lateral-asymmetry kick (§13.5, deliberately omitted).
+Material near-ties need nothing: `max` needs no tie-break for cost, and damage has no ownership at
+all.
 
 ## Build status (2026-06-27)
 

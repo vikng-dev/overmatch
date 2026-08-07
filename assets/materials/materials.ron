@@ -1,0 +1,46 @@
+// The global substance registry — the numeric half of the material library.
+//
+// The Blender side is `materials.blend` next to this file: one material datablock per entry,
+// LINKED (never appended) into each tank's .blend and assigned to `*_Ballistic` meshes. The
+// datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
+// the model, §13.7: substance is authored per-plate, paint is a runtime livery).
+//
+// `factor` = shell-resistance in reference-mm per metre of chord (the §13.2 field value).
+// Baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
+// material research pass 2026-08-07 (Tiger metallurgy, sources in the session record):
+// DOCTRINE (Yan ruling 2026-08-07): factors are PHYSICS-HONEST, never bent for gameplay.
+// If flesh is 0.01 and a 7.92 penetrates, it penetrates, period. Feel belongs to the laws
+// and the hp/damage model, not to material constants. (Sibling of the VFX honesty doctrine.)
+//   - Tiger armor = rolled homogeneous nickel-steel, NOT face-hardened -> RHA everywhere, no
+//     FaceHardened substance needed for this tank.
+//   - `Cast` = 900: German cast armor ran ~5-15% below rolled ballistically; mid of range.
+//   - `GunSteel` unified at 1000 (was 800): forged autofrettaged gun steel >= RHA quality;
+//     the old barrel-1000/breech-800 split was unresearched gameplay residue, and gun-part
+//     fragility is the hp/damage model's job. Breech hardens 800->1000 at code-arc landing.
+//   - `MildSteel`: stamped/welded structural steel (wheel bodies, forged rims) at ~0.8x RHA.
+//     Wheels soften 1000->800 at code-arc landing; running-gear shots were a real weak axis.
+//   - `EngineBlock` = 150: homogenized box — grey cast iron ~0.4x RHA, ~30-40% metal fraction
+//     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
+//     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
+//     the substance for now (denser gear mass — split only if the sandbox ever cares).
+//   - `Flesh` = 10: ballistic-gelatin equivalence ~0.010-0.015, AP toward the low end.
+//     Through-and-through torso hits are the physical truth.
+//
+// `paintable` = whether the runtime livery composes onto this substance (§ paint-scheme
+// discussion 2026-08-06): exterior steels yes, interior/organic substances no.
+//
+// NOT YET CONSUMED BY CODE: the bake still reads per-node material_factor from the tank RON.
+// This file becomes the source of truth when the §13 union-walk arc lands; until then it is
+// the authored contract the code will bind to.
+(
+    substances: {
+        "RHA":         (factor: 1000.0, paintable: true),
+        "GunSteel":    (factor: 1000.0, paintable: true),
+        "Cast":        (factor:  900.0, paintable: true),
+        "MildSteel":   (factor:  800.0, paintable: true),
+        "EngineBlock": (factor:  150.0, paintable: false),
+        "Ammunition":  (factor:  200.0, paintable: false),
+        "Rubber":      (factor:   50.0, paintable: false),
+        "Flesh":       (factor:   10.0, paintable: false),
+    },
+)
