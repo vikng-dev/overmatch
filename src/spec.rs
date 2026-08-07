@@ -17,34 +17,48 @@ use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
 use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
-/// One tank variant's spec sheet — the typed contents of a `.tank.ron` file. Its fields *are* the
-/// components the sim consumes; `tank::spawn_complete_tank` copies them onto the rig once ready.
-/// One ballistic volume's data, keyed by model node name in [`TankSpec::volumes`]. **Composition
-/// over a `kind` enum** (design `armor-penetration-and-damage.md` §2/§12): `material_factor` is the
-/// base every volume has (shell-resistance per metre), and optional facets layer roles on top:
-/// `hp` makes it damageable, `crew` makes it a crewman, `ammo` makes depletion cook off, and
-/// `function` marks a repairable capability. Never add a central `kind` enum; "is it crew?" means
-/// "does it have the crew facet?"
+/// One COMPONENT's facets, keyed by model node name in [`TankSpec::volumes`].
+///
+/// **Behavior is RON facets; membership is the material** (design `armor-penetration-and-damage.md`
+/// §12, classifier precedent 2026-08-07). Which nodes march is decided entirely by the substance
+/// material each primitive wears — this map no longer says. What it says is what a volume *is*
+/// beyond armour: `hp` is the pool that makes it damageable at all, and `crew`/`ammo`/`function`
+/// layer consequences on top. **Composition over a `kind` enum**: "is it crew?" means "does it have
+/// the crew facet?", and a future consequence adds another optional field, never a central enum.
+///
+/// `material_factor` is GONE (slice 3): the numbers moved from per-node RON to the one substance
+/// registry, keyed by the material datablock name the model already carries. "No numbers in the
+/// model" survives — a plate's resistance is now a property of what it is made of, stated once.
+///
+/// Every entry is a component, so `hp` is REQUIRED. A pure armour plate has no entry at all.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeSpec {
-    /// Reference-mm of armour per metre of material — the shell-resistance cost, decoupled from role
-    /// (a steel barrel module carries the same factor as a steel plate).
-    pub material_factor: f32,
-    /// HP pool if damageable (module/crew/ammo); absent → pure armour, nothing to lose. The RON
-    /// enables `implicit_some`, so this is authored bare (`hp: 8.0`, not `hp: Some(8.0)`); omitting
-    /// it yields `None`. Future facets follow the same optional-field-per-facet shape.
-    #[serde(default)]
-    pub hp: Option<f32>,
-    /// Crew station served by this volume. Requires `hp`.
+    /// HP pool. Depleting it is what "damaged" means for this component; the consequences of
+    /// reaching zero come from the facets below.
+    pub hp: f32,
+    /// Crew station served by this volume.
     #[serde(default)]
     pub crew: Option<CrewStation>,
-    /// Ammunition volume: HP depletion cooks off and kills all crew. Requires `hp`.
+    /// Ammunition volume: HP depletion cooks off and kills all crew.
     #[serde(default)]
     pub ammo: bool,
     /// Repairable capability served by this module. Function loss is derived from HP.
     #[serde(default)]
     pub function: Option<FunctionRole>,
+}
+
+/// One roadwheel station: the model node, and which track it drives.
+///
+/// EXPLICIT, replacing the `Wheel_{L,R}_{n}` name pattern (§12 identity rule: names address, they
+/// never classify). The declaration ORDER is load-bearing — it is the `WheelIndex` slot order both
+/// wire ends derive — which is the second reason it is authored rather than derived-and-sorted: one
+/// file states it, in order, and no reader has to reproduce a sort to agree.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RoadwheelSpec {
+    pub node: String,
+    pub side: crate::tank::TrackSide,
 }
 
 /// Which fire input a weapon answers to (design: LMB = the main gun, Spacebar = the MGs). Pure fire
@@ -573,10 +587,18 @@ pub struct TankSpec {
     /// Pitch→X) and slew tuning; tank construction resolves each name and binds the servo.
     /// Replaces the old fixed `turret`/`gun` fields, so a variant can declare any number of mounts.
     pub servos: HashMap<String, ServoSpec>,
-    /// Ballistic volumes keyed by model node name — the **source of truth** for which nodes are
-    /// volumes and what they are (design §12). The march reads `material_factor`; tank construction
-    /// layers components from the facets. The `Armor_/Module_/...` name prefix is documentation only.
+    /// **Components** keyed by model node name — the facets that make a ballistic volume more than
+    /// armour (design §12, classifier precedent 2026-08-07). Not a membership list: which nodes are
+    /// volumes comes from the material each primitive wears, and a pure armour plate appears here
+    /// not at all. Every key must name a node that IS a ballistic volume — a facet on a node the
+    /// march never meets is an authoring error, caught at bind.
     pub volumes: HashMap<String, VolumeSpec>,
+    /// Collision-proxy nodes (convex hull, Vehicle layer), by node name. Explicit, replacing the
+    /// `*_Collider` suffix scan. A proxy must NOT wear a substance material — it is a physics
+    /// stand-in, not armour.
+    pub colliders: Vec<String>,
+    /// Roadwheel stations in wire-slot order. Explicit, replacing the `Wheel_{L,R}_{n}` pattern.
+    pub roadwheels: Vec<RoadwheelSpec>,
     /// Weapons keyed by logical name — the **source of truth** for the tank's armament. Each names
     /// its bore (+ optional recoiling barrel) node and carries its ballistics/reload/recoil; the
     /// binder attaches a `Weapon` the shooting systems read. Replaces the hardcoded `shooting.rs`
@@ -614,6 +636,41 @@ impl TankSpec {
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
     pub fn validate(&self) -> Result<(), BevyError> {
+        // Components: an HP pool that is not a positive number is a component that is dead on
+        // arrival (0) or can never be depleted (NaN compares false against every threshold).
+        for (node, volume) in &self.volumes {
+            if !volume.hp.is_finite() || volume.hp <= 0.0 {
+                return Err(format!(
+                    "component `{node}`: hp must be finite and > 0 (got {})",
+                    volume.hp
+                )
+                .into());
+            }
+        }
+        // The two explicit node-list declarations that replaced the name scans. Both are required
+        // structure — a tank with no collision proxy falls through the world, one with no roadwheel
+        // on a side has no belt to drive — and a duplicate is a node bound twice, which for
+        // roadwheels silently shifts every later wire slot.
+        if self.colliders.is_empty() {
+            return Err("colliders must declare at least one collision-proxy node".into());
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for name in &self.colliders {
+            if !seen.insert(name.as_str()) {
+                return Err(format!("colliders declares `{name}` twice").into());
+            }
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for wheel in &self.roadwheels {
+            if !seen.insert(wheel.node.as_str()) {
+                return Err(format!("roadwheels declares `{}` twice", wheel.node).into());
+            }
+        }
+        for side in [crate::tank::TrackSide::Left, crate::tank::TrackSide::Right] {
+            if !self.roadwheels.iter().any(|wheel| wheel.side == side) {
+                return Err(format!("roadwheels declares no station on the {side:?} track").into());
+            }
+        }
         // Track: values that parse but can never wrap a running gear. (The one check that needs
         // GEOMETRY — the material loop closing around the rest wheel circles — lives at rig
         // bind, where the baked wheel rests exist; these are the spec-local invariants.)
@@ -923,20 +980,28 @@ mod tests {
         };
         assert_eq!(spec.weapons["Coax"].fire_mode, mg_mode);
         assert_eq!(spec.weapons["HullMG"].fire_mode, mg_mode);
-        // Volumes: a steel-grade *module* (barrel) and a pure-armour plate (no hp) exercise the
-        // composition facet — material decoupled from role.
-        assert_eq!(spec.volumes["Gun_Barrel_Ballistic"].material_factor, 1000.0);
-        assert_eq!(spec.volumes["Gun_Barrel_Ballistic"].hp, Some(8.0));
+        // Components: the map is FACETS ONLY now — one entry per damageable thing, and no
+        // `material_factor` anywhere (resistance moved to the substance registry, keyed by the
+        // material each primitive wears). A module, a crewman, an ammo rack and an inert
+        // smoke launcher exercise every facet shape.
+        assert_eq!(spec.volumes["Main_Gun_Barrel"].hp, 8.0);
         assert_eq!(
-            spec.volumes["Gun_Barrel_Ballistic"].function,
+            spec.volumes["Main_Gun_Barrel"].function,
             Some(FunctionRole::GunBarrel)
         );
-        assert_eq!(
-            spec.volumes["Commander_Ballistic"].crew,
-            Some(CrewStation::Commander)
-        );
-        assert!(spec.volumes["Ammo_L_0_Ballistic"].ammo);
-        assert_eq!(spec.volumes["Hull_UFP_Ballistic"].hp, None);
+        assert_eq!(spec.volumes["Commander"].crew, Some(CrewStation::Commander));
+        assert!(spec.volumes["Ammo_L_0"].ammo);
+        assert_eq!(spec.volumes["Smoke_Launcher_0"].function, None);
+        assert!(!spec.volumes["Smoke_Launcher_0"].ammo);
+        // Pure armour has no entry at all — its membership is its material.
+        assert!(!spec.volumes.contains_key("Hull_UFP_Upper"));
+        // The two explicit node-list declarations that replaced the name scans.
+        assert_eq!(spec.colliders, ["Hull_Collider", "Turret_Collider"]);
+        assert_eq!(spec.roadwheels.len(), 16);
+        assert_eq!(spec.roadwheels[0].node, "Wheel_L_0");
+        assert_eq!(spec.roadwheels[0].side, crate::tank::TrackSide::Left);
+        assert_eq!(spec.roadwheels[15].node, "Wheel_R_7");
+        assert_eq!(spec.roadwheels[15].side, crate::tank::TrackSide::Right);
         // Capability requirements: the flat RON shape deserializes into requirement groups. Drive =
         // [Driver, Engine, Transmission] (all mandatory `Single`s); Traverse = [Gunner]. Exercises
         // the `#[serde(untagged)]` bare-`Part` parse.
@@ -1359,17 +1424,26 @@ mod tests {
         );
     }
 
-    /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in
-    /// the private tank assembler, but without launching Bevy: it reads glTF node names directly and
-    /// checks both directions. Every node the spec references must exist in the `.glb`; the fixed
-    /// structural nodes must be present; and every authored node the capture convention treats as a
-    /// ballistic solid — `*_Ballistic`, plus the roadwheel stations, whose unified mesh makes each
-    /// station its own armour volume — must be a declared volume (no orphans). This catches name
-    /// drift — a rename, a typo, a forgotten declaration — before it ever reaches a runtime panic.
+    /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in the private
+    /// tank assembler, but without launching Bevy: it reads the glTF directly and checks both
+    /// directions.
+    ///
+    /// FORWARD: every node the spec references — servos, weapon muzzles/barrels, view anchors,
+    /// component keys, the declared colliders and roadwheels, and the fixed structural singletons —
+    /// must exist in the `.glb`.
+    ///
+    /// REVERSE: the **material-implied lints** that replaced the old `*_Ballistic` orphan scan. The
+    /// suffix is gone, so "is this node armour?" is answered by the material it wears, and the
+    /// questions worth asking flip around: a Flesh volume that is not declared crew, an Ammunition
+    /// volume that will not cook off, an engine block with no component entry — each is a substance
+    /// whose whole point is a consequence the RON forgot to state. Plus the closure lint: a material
+    /// whose name is a registry key with Blender's `.001` duplicate suffix means the material library
+    /// stopped being LINKED and got appended, which silently un-declares every plate wearing it.
+    ///
     /// Add a tank variant → add a case here.
     #[test]
     fn tiger_1_spec_binds_to_model() {
-        use std::collections::HashSet;
+        use std::collections::{BTreeMap, BTreeSet, HashSet};
 
         let gltf = gltf::Gltf::open("assets/tiger_1/tiger_1.glb").expect("tiger_1.glb must open");
         let nodes: HashSet<String> = gltf
@@ -1378,6 +1452,7 @@ mod tests {
             .collect();
         let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
             .expect("tiger_1.tank.ron must parse");
+        let registry = crate::substances::SubstanceRegistry::shipped();
 
         let has = |name: &str| {
             assert!(
@@ -1396,42 +1471,129 @@ mod tests {
                 has(barrel);
             }
         }
-        for volume in spec.volumes.keys() {
-            has(volume);
+        for component in spec.volumes.keys() {
+            has(component);
         }
         for view in spec.views.values() {
             has(&view.node);
+        }
+        for collider in &spec.colliders {
+            has(collider);
+        }
+        for wheel in &spec.roadwheels {
+            has(&wheel.node);
         }
 
         // Fixed structural contract mirrored from complete tank assembly.
         has("Hull");
         has("Center_Of_Mass");
-        assert!(
-            nodes.iter().any(|n| n.ends_with("_Collider")),
-            "model has no `*_Collider` proxy"
-        );
-        // `bake::roadwheel_side`'s rule, restated — this test reads the glTF directly (no Bevy, no
-        // extractor), so the convention is mirrored rather than imported.
-        let roadwheel_side = |name: &str| {
-            ["Wheel_L_", "Wheel_R_"].into_iter().find(|side| {
-                name.strip_prefix(side).is_some_and(|rest| {
-                    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
-                })
-            })
-        };
-        let has_roadwheel = |side: &str| nodes.iter().any(|n| roadwheel_side(n) == Some(side));
-        assert!(has_roadwheel("Wheel_L_"), "model has no left roadwheel");
-        assert!(has_roadwheel("Wheel_R_"), "model has no right roadwheel");
 
-        // Reverse: no orphan volumes. A node is a ballistic solid if it is named `*_Ballistic` OR is
-        // a roadwheel station — the wheels ship as ONE unified mesh per station (station and armour
-        // in the same node), so their bare names carry geometry the march must see. Either way, an
-        // authored solid with no spec entry is armour the game would never resolve.
-        for node in &nodes {
-            if node.ends_with("_Ballistic") || roadwheel_side(node).is_some() {
+        // Which substances each node wears — the membership verdict, read straight off the model.
+        let mut worn: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut all_materials: BTreeSet<&str> = BTreeSet::new();
+        for node in gltf.nodes() {
+            let Some(name) = node.name() else { continue };
+            let Some(mesh) = node.mesh() else { continue };
+            for primitive in mesh.primitives() {
+                let Some(material) = primitive.material().name() else {
+                    continue;
+                };
+                all_materials.insert(material);
+                if registry.get(material).is_ok() {
+                    worn.entry(name).or_default().insert(material);
+                }
+            }
+        }
+        assert!(
+            !worn.is_empty(),
+            "no node in the model wears a registry substance — the material library link is broken"
+        );
+
+        // Closure + near-miss: every substance material in the glb is a registry key by
+        // construction (that IS the test above), so what is left to catch is a name that LOOKS like
+        // one. Blender appends `.001` when a datablock is duplicated instead of linked, and the
+        // result reads identically to a human while classifying as decor.
+        for material in &all_materials {
+            if registry.get(material).is_ok() {
+                continue;
+            }
+            let stem = material
+                .rsplit_once('.')
+                .map_or(*material, |(stem, suffix)| {
+                    if suffix.len() == 3 && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                        stem
+                    } else {
+                        material
+                    }
+                });
+            assert!(
+                registry.get(stem).is_err(),
+                "material `{material}` is a duplicate of the registry substance `{stem}` — the \
+                 material library was APPENDED instead of linked, so every mesh wearing this is \
+                 silently no longer a ballistic volume"
+            );
+        }
+
+        // Reverse, the material-implied lints: a substance whose meaning is a facet must have it.
+        for (node, substances) in &worn {
+            let facets = spec.volumes.get(*node);
+            if substances.contains("Flesh") {
                 assert!(
-                    spec.volumes.contains_key(node),
-                    "model node `{node}` is a ballistic solid but has no spec volume entry"
+                    facets.is_some_and(|facets| facets.crew.is_some()),
+                    "`{node}` is made of Flesh but declares no crew facet — a crewman nobody can \
+                     kill, and a seat nothing can knock out"
+                );
+            }
+            if substances.contains("Ammunition") {
+                assert!(
+                    facets.is_some_and(|facets| facets.ammo),
+                    "`{node}` is made of Ammunition but declares no ammo facet — a rack that \
+                     cannot cook off"
+                );
+            }
+            if substances.contains("EngineBlock") {
+                assert!(
+                    facets.is_some(),
+                    "`{node}` is an EngineBlock with no component entry — a powerplant with no hp \
+                     is armour pretending to be a module"
+                );
+            }
+        }
+
+        // A collision proxy must never wear a substance: it would be charged as armour AND stand in
+        // for the body, double-counting the hull.
+        for collider in &spec.colliders {
+            assert!(
+                !worn.contains_key(collider.as_str()),
+                "collision proxy `{collider}` wears a substance material"
+            );
+        }
+        // A roadwheel station must wear one: the station node IS its own armour volume.
+        for wheel in &spec.roadwheels {
+            assert!(
+                worn.contains_key(wheel.node.as_str()),
+                "roadwheel `{}` wears no substance — the wheel would be invisible to the march",
+                wheel.node
+            );
+        }
+
+        // Unused registry keys are a WARNING, not an error: the registry is global (every tank
+        // shares it), so a substance this vehicle happens not to use is legitimate.
+        let used: BTreeSet<&str> = worn.values().flatten().copied().collect();
+        for substance in [
+            "RHA",
+            "GunSteel",
+            "Cast",
+            "MildSteel",
+            "EngineBlock",
+            "Ammunition",
+            "Rubber",
+            "Flesh",
+        ] {
+            if !used.contains(substance) {
+                eprintln!(
+                    "note: registry substance `{substance}` is unused by tiger_1 (fine — the \
+                     registry is shared across vehicles)"
                 );
             }
         }

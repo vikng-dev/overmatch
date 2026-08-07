@@ -265,7 +265,9 @@ struct RigNodes<'a> {
     servo_nodes: Vec<usize>,
     weapon_entries: Vec<(&'a String, &'a WeaponSpec)>,
     weapon_nodes: Vec<(usize, Option<usize>)>,
-    volume_nodes: Vec<(&'a String, &'a VolumeSpec, usize)>,
+    /// Every ballistic volume the MATERIAL rule found, name-sorted, paired with its component
+    /// facets where the spec declares any (`None` = pure armour, which is most of the tank).
+    volume_nodes: Vec<(&'a str, Option<&'a VolumeSpec>, usize)>,
     /// The gunner view's node — the main mount's Pitch servo, anchor of the gun chain.
     gunner_pitch: usize,
     hull: usize,
@@ -280,7 +282,7 @@ struct RigNodes<'a> {
 /// assertion names ALL missing nodes at once rather than panicking on the first. Index-bearing
 /// collections are sorted here because wire-derived indices must never depend on `HashMap`
 /// iteration order.
-fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNodes<'a> {
+fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigNodes<'a> {
     let mut servo_entries: Vec<_> = spec.servos.iter().collect();
     servo_entries.sort_by_key(|(node, _)| node.as_str());
     let mut weapon_entries: Vec<_> = spec.weapons.iter().collect();
@@ -307,13 +309,31 @@ fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNode
             )
         })
         .collect();
-    // Volumes have no wire index, but stable creation order remains part of deterministic spawn.
-    let mut volume_entries: Vec<_> = spec.volumes.iter().collect();
-    volume_entries.sort_by_key(|(name, _)| name.as_str());
-    let volume_nodes: Vec<_> = volume_entries
+    // Volumes are the EXTRACTOR's list (membership is the material, §12), already name-sorted —
+    // volumes have no wire index, but stable creation order remains part of deterministic spawn.
+    // The spec contributes facets only, joined by node name.
+    let volume_nodes: Vec<_> = geometry
+        .ballistic_volumes
         .iter()
-        .map(|(name, volume)| (*name, *volume, resolve(name)))
+        .map(|&index| {
+            let name = geometry.nodes[index].name.as_str();
+            (name, spec.volumes.get(name), index)
+        })
         .collect();
+    // The other direction: a declared component whose node is not a ballistic volume is a facet
+    // hung on something the march will never meet — silently inert, so it fails here by name.
+    let mut inert: Vec<&str> = spec
+        .volumes
+        .keys()
+        .map(String::as_str)
+        .filter(|name| !geometry.is_ballistic(name))
+        .collect();
+    inert.sort_unstable();
+    assert!(
+        inert.is_empty(),
+        "spec declares components on nodes that are not ballistic volumes (no primitive of theirs \
+         wears a registry substance material, so the march can never reach them): {inert:?}"
+    );
     // The gunner view's node is the main mount's Pitch servo — the anchor of the gun chain.
     let gunner_pitch = spec
         .views
@@ -367,22 +387,15 @@ fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNode
     if turret_index.is_none() {
         missing.push("<a Yaw servo above the Primary weapon's muzzle>".into());
     }
+    // The declared lists resolved at extraction (a missing name fails there, naming it), so these
+    // only restate the structural minimum the assembler needs.
     if geometry.collision_proxies.is_empty() {
-        missing.push("*_Collider".into());
+        missing.push("<a declared collision proxy>".into());
     }
-    if !geometry
-        .roadwheels
-        .iter()
-        .any(|&(_, side)| side == TrackSide::Left)
-    {
-        missing.push("Wheel_L*".into());
-    }
-    if !geometry
-        .roadwheels
-        .iter()
-        .any(|&(_, side)| side == TrackSide::Right)
-    {
-        missing.push("Wheel_R*".into());
+    for side in [TrackSide::Left, TrackSide::Right] {
+        if !geometry.roadwheels.iter().any(|&(_, s)| s == side) {
+            missing.push(format!("<a declared {side:?} roadwheel>"));
+        }
     }
     assert!(
         missing.is_empty(),
@@ -398,10 +411,7 @@ fn resolve_rig_nodes<'a>(geometry: &TankGeometry, spec: &'a TankSpec) -> RigNode
             .into_iter()
             .map(|(muzzle, barrel)| (checked(muzzle), barrel))
             .collect(),
-        volume_nodes: volume_nodes
-            .into_iter()
-            .map(|(name, volume, index)| (name, volume, checked(index)))
-            .collect(),
+        volume_nodes,
         gunner_pitch: checked(gunner_pitch),
         hull: checked(hull_index),
         center_of_mass: checked(com_index),
@@ -558,19 +568,35 @@ fn insert_weapons(
     }
 }
 
-/// Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12;
-/// composition, not a `kind` enum — `material_factor` every volume has, optional facets layer
-/// roles on top) + a query-only trimesh collider per captured primitive, built from the
-/// extracted buffers. `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry
-/// construction avian's `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on
-/// the `Armor` layer with NO collision response (`filters = NONE`) so it never perturbs the
-/// body — watertight solids may be concave, fine for the march's raycast (ADR-0008).
+/// Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12; composition,
+/// not a `kind` enum — the substance carries resistance, optional facets layer roles on top) + a
+/// query-only trimesh collider per captured primitive, built from the extracted buffers.
+/// `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry construction avian's
+/// `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on the `Armor` layer with NO
+/// collision response (`filters = NONE`) so it never perturbs the body — watertight solids may be
+/// concave, fine for the march's raycast (ADR-0008).
 ///
-/// The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of
-/// its volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales
-/// onto the shape, so a volume authored at scale != 1 (the coax MG plates, and the roadwheels
-/// until their export bakes scale away) is sized right without pre-baking anything here — and
-/// stays right once the export DOES bake it, since identity scale composes to identity.
+/// The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of its
+/// volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales onto
+/// the shape, so a volume authored at scale != 1 is sized right without pre-baking anything here.
+///
+/// # Where the factor lands, and why it is not always the node
+///
+/// A `BallisticVolume` is the unit the walk reads a factor from AND the entity damage is addressed
+/// to (`ballistics::walk`'s `VolumeTable`, `resolve`'s deposits), so those two must be the same
+/// entity. That works exactly while a node is ONE substance, which is every part of this tank but
+/// the road wheels — §13.7 authors a mixed-substance part as one object holding one closed shell per
+/// substance region, and the wheel is `MildSteel` bodies + `Rubber` rims in a single object.
+///
+/// So: a single-substance node carries `BallisticVolume` itself (unchanged). A mixed-substance node
+/// hands the role down to its per-primitive collider entities — one glTF primitive is one material
+/// by construction, so each is a volume of exactly one substance, and the walk (which already tracks
+/// presence per primitive) sees two honest volumes instead of one averaged lie.
+///
+/// The cost is that a mixed node cannot address damage: `hp` lives on the node, the deposits name
+/// the shard. That is REFUSED here rather than silently dropped. Lifting it means keying the walk's
+/// factor table per primitive instead of per volume — a §13 core change, deliberately not smuggled
+/// into this slice.
 fn insert_ballistic_volumes(
     commands: &mut Commands,
     geometry: &TankGeometry,
@@ -578,84 +604,109 @@ fn insert_ballistic_volumes(
     nodes: &RigNodes,
     entity_at: impl Fn(usize) -> Entity,
 ) {
-    for &(name, volume, index) in &nodes.volume_nodes {
+    for &(name, facets, index) in &nodes.volume_nodes {
         let node = &geometry.nodes[index];
         let entity = entity_at(index);
+        let groups = node.substance_groups();
+        // The extractor only lists a node here if a primitive of its wears a substance.
         assert!(
-            volume.hp.is_some()
-                || (volume.crew.is_none() && !volume.ammo && volume.function.is_none()),
-            "tank volume `{name}` declares a consequence facet but has no hp"
+            !groups.is_empty(),
+            "ballistic volume `{name}` captured no substance primitive"
         );
-        // A declared volume without captured mesh data would be invisible to penetration queries.
+        let split = groups.len() > 1;
         assert!(
-            !node.primitives.is_empty(),
-            "ballistic volume `{name}` captured no mesh data (does its node name follow \
-             `bake::captures_mesh` — `*_Ballistic`, `*_Collider`, or a `Wheel_<side>_<n>` station?)"
+            !(split && facets.is_some()),
+            "volume `{name}` is authored from {} substances AND declares component facets — the \
+             facets sit on the node while each substance is its own volume, so its HP would never \
+             be deposited to. Author it as one substance, or split the object",
+            groups.len()
         );
+
         {
             let mut entity = commands.entity(entity);
-            entity.insert((
-                BallisticVolume {
-                    material_factor: volume.material_factor,
-                },
-                VolumeOf(root),
-            ));
-            if let Some(crew) = volume.crew {
-                // Seat role + its native occupant (topology B): `home == seat` at spawn, so
-                // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
-                entity.insert((crew, Crewman { home: crew }));
-            }
-            if volume.ammo {
-                entity.insert(Ammo);
-            }
-            if let Some(function) = volume.function {
-                entity.insert(function);
-            }
-            match volume.hp {
+            entity.insert(VolumeOf(root));
+            if let Some(volume) = facets {
+                if let Some(crew) = volume.crew {
+                    // Seat role + its native occupant (topology B): `home == seat` at spawn, so
+                    // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
+                    entity.insert((crew, Crewman { home: crew }));
+                }
+                if volume.ammo {
+                    entity.insert(Ammo);
+                }
+                if let Some(function) = volume.function {
+                    entity.insert(function);
+                }
                 // Damageable (module/crew/ammo): an HP pool the march depletes.
-                Some(hp) => {
-                    entity.insert((
-                        ComponentVolume,
-                        ComponentHealth {
-                            current: hp,
-                            max: hp,
-                        },
-                    ));
-                }
+                entity.insert((
+                    ComponentVolume,
+                    ComponentHealth {
+                        current: volume.hp,
+                        max: volume.hp,
+                    },
+                ));
+            } else {
                 // Pure armour: resists + shadows spall, nothing to lose.
-                None => {
-                    entity.insert(ArmorVolume);
-                }
+                entity.insert(ArmorVolume);
+            }
+            if !split {
+                let (substance, primitives) = groups.iter().next().expect("exactly one group");
+                entity.insert(BallisticVolume {
+                    material_factor: primitives[0]
+                        .substance
+                        .as_ref()
+                        .expect("grouped by substance")
+                        .factor,
+                    substance: (*substance).to_owned(),
+                });
             }
         }
-        for primitive in &node.primitives {
-            let vertices: Vec<Vec3> = primitive
-                .positions
-                .iter()
-                .copied()
-                .map(Vec3::from)
-                .collect();
-            let triangles: Vec<[u32; 3]> = primitive
-                .indices
-                .chunks_exact(3)
-                .map(|t| [t[0], t[1], t[2]])
-                .collect();
-            // Name the broken volume before Avian rejects an empty triangle list.
-            assert!(
-                !triangles.is_empty(),
-                "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
-            );
-            commands.spawn((
-                ChildOf(entity),
-                // ADR-0015 shields this authored local pose from position sync.
-                authored_attachment(Transform::IDENTITY),
-                Collider::trimesh_with_config(
-                    vertices,
-                    triangles,
-                    TrimeshFlags::MERGE_DUPLICATE_VERTICES,
-                ),
-                CollisionLayers::new([Layer::Armor], LayerMask::NONE),
-            ));
+
+        for (substance, primitives) in &groups {
+            for primitive in primitives {
+                let vertices: Vec<Vec3> = primitive
+                    .positions
+                    .iter()
+                    .copied()
+                    .map(Vec3::from)
+                    .collect();
+                let triangles: Vec<[u32; 3]> = primitive
+                    .indices
+                    .chunks_exact(3)
+                    .map(|t| [t[0], t[1], t[2]])
+                    .collect();
+                // Name the broken volume before Avian rejects an empty triangle list.
+                assert!(
+                    !triangles.is_empty(),
+                    "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
+                );
+                let mut collider = commands.spawn((
+                    ChildOf(entity),
+                    // ADR-0015 shields this authored local pose from position sync.
+                    authored_attachment(Transform::IDENTITY),
+                    Collider::trimesh_with_config(
+                        vertices,
+                        triangles,
+                        TrimeshFlags::MERGE_DUPLICATE_VERTICES,
+                    ),
+                    CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+                ));
+                if split {
+                    // The primitive IS the volume here (see the doc above): it carries the factor
+                    // the walk reads and the ownership the impulse path resolves.
+                    collider.insert((
+                        BallisticVolume {
+                            material_factor: primitive
+                                .substance
+                                .as_ref()
+                                .expect("grouped by substance")
+                                .factor,
+                            substance: (*substance).to_owned(),
+                        },
+                        VolumeOf(root),
+                    ));
+                }
+            }
         }
     }
 }

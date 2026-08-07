@@ -212,7 +212,7 @@ const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 /// The MEASURED triangle count of the base shoe — the manifest's level 0, which is the tank glb's
 /// own `Link` primitive. Only ever used to report the reductions as a percentage.
-const SHOE_BASE_TRIS: usize = 1661;
+const SHOE_BASE_TRIS: usize = 764;
 
 /// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
 /// indexed to.
@@ -284,6 +284,18 @@ struct ShoeLevel {
     /// in opposite directions (ADR 0033 §4).
     worst_dev_mm: f32,
     from_m: f32,
+    /// Did the manifest's rendered-difference gate ABSTAIN on this level (`render_gate.abstained`)?
+    ///
+    /// True means the level's screen footprint at its own switch distance fell under the ratified
+    /// 20 px floor, so the gate declined to have an opinion — at that size the defect reference
+    /// collapses and any score would be a ratio of two nothings. It is NOT a failure; it is the
+    /// gate saying the difference is too small to be measured, which is also the honest statement
+    /// that it is too small for a HUMAN to judge.
+    ///
+    /// Carried here because the showcase harness stages only the switches a person can actually
+    /// look at ([`crate::lod_showcase`]). A level that abstains is one nobody can eyeball, so
+    /// standing two tanks a kilometre away to compare them shows an empty pair of dots.
+    render_gate_abstained: bool,
 }
 
 /// The reduced levels below the base shoe, NEAREST FIRST. The base owns `[0, chain[0].from_m)`,
@@ -291,52 +303,58 @@ struct ShoeLevel {
 /// beyond — see [`shoe_lod_range`], which is the ONE place that arithmetic lives.
 ///
 /// A slice rather than a fixed-size array on purpose: the ladder's LENGTH is an output of
-/// generation (`skip_fraction` dropped rung 3 on this asset, which is why the glbs read rung1,
-/// rung2, rung4, rung5 with no rung3 between them), so nothing here may name a level count.
+/// generation (`skip_fraction` dropped rungs 1 and 2 on this asset, which is why the glbs start at
+/// rung3), so nothing here may name a level count. It has already changed once — the chain was four
+/// levels deep when it was cut from the 1 661-triangle pre-weld shoe, and is three deep now.
 ///
 /// # What the numbers are
 ///
 /// | level | glb | tris | dev (mm) | from (m) |
 /// |---|---|---|---|---|
-/// | L1 | `rung1` | 854 | 3.088 | 55.91 |
-/// | L2 | `rung2` | 580 | 7.019 | 126.60 |
-/// | L3 | `rung4` | 314 | 27.842 | 500.95 |
-/// | L4 | `rung5` | 194 | 58.373 | 1 049.86 |
+/// | L1 | `rung3` | 432 | 14.170 | 255.16 |
+/// | L2 | `rung4` | 270 | 24.593 | 442.53 |
+/// | L3 | `rung5` | 182 | 56.535 | 1 016.80 |
 ///
-/// L4 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
+/// RE-CUT 2026-08-07 against the welded, gate-clean shoe: L0 is 764 triangles now, not 1 661, so
+/// the ladder is REBASED rather than edited — every old rung was a reduction of a surface that no
+/// longer ships, and the old L1 (854 tris) was larger than the whole new source. Three rungs
+/// instead of four is the arithmetic working: a source with 46% of the triangles reaches the
+/// topology floor in fewer octaves.
+///
+/// L3 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
 /// destroying the shoe's component count — which is why the chain stops there rather than at the
 /// right wall (the map diagonal, 1 414 m).
 ///
-/// L4's band opens BEYOND THE MAP: 1 049.86 m on a 1 000 m world means nothing is ever far enough to
+/// L3's band opens BEYOND THE MAP: 1 016.80 m on a 1 000 m world means nothing is ever far enough to
 /// draw it in the game as it stands today. It is wired regardless, for two reasons. It costs one
 /// entity per shoe and no triangles (an out-of-range entity is walked, never submitted), and the
-/// alternative — a chain that stops at L3 — makes L3 the level that owns `[501, ∞)`, which is a
+/// alternative — a chain that stops at L2 — makes L2 the level that owns `[443, ∞)`, which is a
 /// DIFFERENT claim about a map that grows. When the world reaches 5 km (ADR 0033 §3's north star)
 /// this row starts earning its keep with no edit at all.
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung1.glb",
-        tris: 854,
-        worst_dev_mm: 3.087723,
-        from_m: 55.9124,
-    },
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung2.glb",
-        tris: 580,
-        worst_dev_mm: 7.019371,
-        from_m: 126.5971,
+        glb: "tiger_1/tiger_1_link.rung3.glb",
+        tris: 432,
+        worst_dev_mm: 14.170197,
+        from_m: 255.1575,
+        // 54.1 px at 255 m — judged, and PASSED at 1.000 against the ratified limit of 2.0.
+        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 314,
-        worst_dev_mm: 27.841808,
-        from_m: 500.9511,
+        tris: 270,
+        worst_dev_mm: 24.59259,
+        from_m: 442.5344,
+        // 31.2 px at 443 m — judged, and PASSED at 1.000.
+        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung5.glb",
-        tris: 194,
-        worst_dev_mm: 58.373325,
-        from_m: 1049.8588,
+        tris: 182,
+        worst_dev_mm: 56.5349,
+        from_m: 1016.8048,
+        // 13.1 px at 1017 m — UNDER the ratified 20 px floor, so the gate abstained.
+        render_gate_abstained: true,
     },
 ];
 
@@ -345,6 +363,20 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
 /// importing its rows.
 pub(crate) fn shoe_lod_levels() -> usize {
     SHOE_LOD_CHAIN.len() + 1
+}
+
+/// Can a human judge the switch INTO `level` — i.e. did the rendered-difference gate have an
+/// opinion about it? `level` is 1-based over [`SHOE_LOD_CHAIN`]; level 0 is the base and is never a
+/// switch target.
+///
+/// The gate abstains below the ratified 20 px footprint floor, and that abstention is exactly the
+/// statement "there is nothing here an eye could resolve". Consumers that ask a person to compare
+/// two meshes should ask this first — see [`crate::lod_showcase::staged_pairs`].
+pub(crate) fn shoe_lod_switch_is_judgeable(level: usize) -> bool {
+    level
+        .checked_sub(1)
+        .and_then(|i| SHOE_LOD_CHAIN.get(i))
+        .is_some_and(|l| !l.render_gate_abstained)
 }
 
 /// Level `level`'s MEASURED triangle count — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
@@ -1257,11 +1289,13 @@ mod tests {
                 SHOE_LOD_CHAIN.iter().map(|l| l.from_m).collect::<Vec<_>>(),
                 "the wired thresholds are the chain's, in order",
             );
-            // ...and the chain as it SHIPS is the manifest's four reductions. Spelled out so a level
-            // added or dropped is a deliberate edit here, not a silent one — the ladder's LENGTH is
-            // an output of generation, so it is exactly the thing a regeneration can change without
-            // anyone noticing.
-            assert_eq!(thresholds, vec![55.9124, 126.5971, 500.9511, 1049.8588]);
+            // ...and the chain as it SHIPS is the manifest's three reductions. Spelled out so a
+            // level added or dropped is a deliberate edit here, not a silent one — the ladder's
+            // LENGTH is an output of generation, so it is exactly the thing a regeneration can
+            // change without anyone noticing. It DID change: the 2026-08-07 re-cut against the
+            // welded 764-triangle shoe dropped the chain from four reductions to three, and this
+            // line is the one that made that visible rather than silent.
+            assert_eq!(thresholds, vec![255.1575, 442.5344, 1016.8048]);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
@@ -1377,6 +1411,58 @@ mod tests {
                 > 0.1,
             "the small-angle shortcut must NOT be what is wired",
         );
+    }
+
+    /// The one row-field arithmetic CANNOT re-derive: the render gate's verdict.
+    ///
+    /// `from_m` and `worst_dev_mm` are held together by the derivation above, and a stale `tris`
+    /// shows up the moment the glb is loaded. `render_gate_abstained` is a bare transcribed bool —
+    /// nothing about it is recomputable from the other columns — so it is read straight out of
+    /// `assets/lod_manifest.json` and compared. It decides which switches the showcase asks a human
+    /// to judge ([`crate::lod_showcase::staged_pairs`]), and a stale `true` here would silently
+    /// delete a pair the gate can now see.
+    #[test]
+    fn the_render_gate_verdicts_are_the_manifests() {
+        let path = crate::assets::asset_root().join("lod_manifest.json");
+        let text = std::fs::read_to_string(&path).expect("the shipped manifest is readable");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&text).expect("the shipped manifest is JSON");
+        let levels = manifest["assets"][0]["levels"]
+            .as_array()
+            .expect("the manifest's first asset has levels");
+        assert_eq!(
+            levels.len(),
+            SHOE_LOD_CHAIN.len() + 1,
+            "the wired chain has {} reduced levels and the manifest ships {} levels including L0 — \
+             one of them was regenerated without the other",
+            SHOE_LOD_CHAIN.len(),
+            levels.len(),
+        );
+        for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
+            let abstained = levels[i + 1]["render_gate"]["abstained"]
+                .as_bool()
+                .expect("every reduced level carries a render-gate verdict");
+            assert_eq!(
+                level.render_gate_abstained,
+                abstained,
+                "LOD{} ({}) is wired as {} but the manifest's render gate says {} ({:.1} px against \
+                 the {:.0} px floor) — re-transcribe the row",
+                i + 1,
+                level.glb,
+                if level.render_gate_abstained {
+                    "ABSTAINED"
+                } else {
+                    "judged"
+                },
+                if abstained { "ABSTAINED" } else { "judged" },
+                levels[i + 1]["render_gate"]["screen_footprint_px"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN),
+                levels[i + 1]["render_gate"]["min_footprint_px"]
+                    .as_f64()
+                    .unwrap_or(f64::NAN),
+            );
+        }
     }
 
     /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,

@@ -615,11 +615,24 @@ impl ShellPath {
 
 /// A ballistic volume: a solid the penetrator marches *through*, taxing it over the geometric
 /// line-of-sight distance (the unified primitive — armor plates and modules alike, design doc §2).
-/// On the `Armor` layer. `material_factor` (density/hardness → reference-mm per metre) is authored;
-/// the march doesn't spend it yet — that is the next increment.
+/// On the `Armor` layer.
+///
+/// Both fields come from the SUBSTANCE the model's primitives wear (§12, classifier precedent
+/// 2026-08-07): `bake` resolves the material datablock name against `assets/materials/materials.ron`
+/// once, at extraction, so the walk never does a string lookup per query and no per-node number is
+/// authored anywhere.
 #[derive(Component)]
 pub struct BallisticVolume {
+    /// The §13.2 field value: reference-mm of armour per metre of chord.
     pub material_factor: f32,
+    /// The substance's registry name — identity, for diagnostics/inspection and the paint livery.
+    /// Never parsed for behaviour.
+    #[allow(
+        dead_code,
+        reason = "carried from the bake for the x-ray readout and the paintable-livery pass; the \
+                  walk reads only the factor, deliberately"
+    )]
+    pub substance: String,
 }
 
 /// Role tags layered on a ballistic volume for the sandbox's visibility passes: armor plates vs
@@ -2805,6 +2818,7 @@ mod march_tests {
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material_factor: STEEL,
+                substance: "RHA".to_string(),
             },
         ));
 
@@ -3204,6 +3218,7 @@ mod march_tests {
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {
                         material_factor: 1.0,
+                        substance: "RHA".to_string(),
                     },
                     ComponentHealth {
                         current,
@@ -4505,6 +4520,7 @@ mod march_tests {
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material_factor: STEEL,
+                substance: "RHA".to_string(),
             },
         ));
         for _ in 0..8 {
@@ -4901,6 +4917,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
         }
@@ -5018,6 +5035,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
         };
@@ -5401,6 +5419,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
             for _ in 0..8 {
@@ -5468,9 +5487,12 @@ mod march_tests {
             RigidBody::Static,
             box_trimesh(Vec3::new(3.0, 3.0, 0.05)),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-            // Real geometry, no material. The cast still finds it; the field never rises.
+            // Real geometry, no material. The cast still finds it; the field never rises. The
+            // substance name is empty to match: this fixture is deliberately un-declared, and
+            // naming a registry substance here would assert the opposite of what it tests.
             BallisticVolume {
                 material_factor: 0.0,
+                substance: String::new(),
             },
         ));
         for _ in 0..8 {
@@ -5539,6 +5561,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
         }

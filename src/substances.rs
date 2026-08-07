@@ -2,15 +2,15 @@
 //! (`assets/materials/materials.ron`).
 //!
 //! The Blender side is `assets/materials/materials.blend`: one material datablock per entry,
-//! LINKED into each tank's `.blend` and assigned to its `*_Ballistic` meshes. The datablock NAME is
+//! LINKED into each tank's `.blend` and assigned to its ballistic meshes. The datablock NAME is
 //! the join key; this module owns the parsed scalars. Design doc §12 ("no numbers in the model")
 //! and §13.7 (substance is authored per plate, paint is a runtime livery).
 //!
-//! SEAM — NOT YET CONSUMED BY THE GAME. The bake still reads per-node `material_factor` out of
-//! `<tank>.tank.ron` ([`crate::spec::VolumeSpec`]). Slice 3 of the §13 union-walk arc replaces that
-//! with a lookup here, keyed by the substance name the glTF material carries on each ballistic
-//! primitive. Until then this is the authored contract, parsed and asserted by tests so the file
-//! cannot drift before the consumer arrives.
+//! THIS IS THE CLASSIFIER, not just a table. [`crate::bake`] asks it about every glTF primitive's
+//! material name: `Ok` means the primitive IS a ballistic volume made of that substance, `Err`
+//! means it is ordinary art. Membership and resistance therefore come from one lookup and cannot
+//! disagree — which is the whole point of retiring the `*_Ballistic` name marker. Per-node
+//! `material_factor` in `<tank>.tank.ron` is gone.
 //!
 //! FAIL-LOUD, NO DEFAULTS (ADR-0011, and §13.1's defect class): an unknown substance name is a hard
 //! error naming the name, never a fallback factor. Silent-zero armour is exactly what §13 exists to
@@ -149,10 +149,6 @@ impl SubstanceRegistry {
     /// The shipped registry. Panics on a malformed file, matching [`crate::bake`]'s treatment of the
     /// embedded tank spec: a broken authored contract is a build defect, not a runtime condition to
     /// degrade through.
-    #[allow(
-        dead_code,
-        reason = "slice-3 seam: the bake binds to this when the walk lands"
-    )]
     pub fn shipped() -> Self {
         Self::from_ron(MATERIALS_RON)
             .unwrap_or_else(|err| panic!("substances: embedded materials.ron is unusable: {err}"))
@@ -160,10 +156,6 @@ impl SubstanceRegistry {
 
     /// Look a substance up by material datablock name. Hard error on an unknown name — never a
     /// default (module doc).
-    #[allow(
-        dead_code,
-        reason = "slice-3 seam: the bake binds to this when the walk lands"
-    )]
     pub fn get(&self, name: &str) -> Result<Substance, SubstanceError> {
         self.substances.0.get(name).copied().ok_or_else(|| {
             SubstanceError::Unknown {
@@ -172,24 +164,6 @@ impl SubstanceRegistry {
                 known: self.substances.0.keys().cloned().collect(),
             }
         })
-    }
-
-    /// The §13.2 field value for a named substance — the one number the union walk consumes.
-    #[allow(
-        dead_code,
-        reason = "slice-3 seam: the bake binds to this when the walk lands"
-    )]
-    pub fn factor(&self, name: &str) -> Result<f32, SubstanceError> {
-        self.get(name).map(|substance| substance.factor)
-    }
-
-    /// How many substances the registry carries.
-    #[allow(
-        dead_code,
-        reason = "slice-3 seam: the bake binds to this when the walk lands"
-    )]
-    pub fn len(&self) -> usize {
-        self.substances.0.len()
     }
 }
 
@@ -213,7 +187,7 @@ mod tests {
     #[test]
     fn shipped_materials_ron_parses() {
         let registry = SubstanceRegistry::shipped();
-        assert_eq!(registry.len(), EXPECTED.len());
+        assert_eq!(registry.substances.0.len(), EXPECTED.len());
     }
 
     #[test]
@@ -235,7 +209,7 @@ mod tests {
     #[test]
     fn rha_is_the_thousand_reference_mm_per_metre_identity() {
         let registry = SubstanceRegistry::shipped();
-        assert_eq!(registry.factor("RHA").unwrap(), 1000.0);
+        assert_eq!(registry.get("RHA").unwrap().factor, 1000.0);
     }
 
     #[test]
@@ -252,7 +226,7 @@ mod tests {
             other => panic!("expected Unknown, got {other:?}"),
         }
         assert!(err.to_string().contains("Unobtainium"));
-        assert!(registry.factor("Unobtainium").is_err());
+        assert!(registry.get("Unobtainium").is_err());
     }
 
     #[test]
@@ -315,6 +289,9 @@ mod tests {
             r#"(substances: { "Void": (factor: -0.0, paintable: false) })"#,
         )
         .expect("zero resistance is legal, it is just nothing");
-        assert_eq!(registry.factor("Void").unwrap().to_bits(), 0.0f32.to_bits());
+        assert_eq!(
+            registry.get("Void").unwrap().factor.to_bits(),
+            0.0f32.to_bits()
+        );
     }
 }

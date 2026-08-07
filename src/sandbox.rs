@@ -463,6 +463,7 @@ fn spawn_targets(
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
                 material_factor: STEEL,
+                substance: "RHA".to_string(),
             },
         ));
     }
@@ -629,28 +630,30 @@ fn paint_volume(
 
 /// Tag the hull's *visual* meshes (and remember their material), so x-ray can swap them translucent.
 /// A hull mesh is any mesh that is neither a ballistic volume nor a collider proxy — checked up
-/// the hierarchy by component (the sandbox's standalone plates carry both on the mesh entity) and
-/// by the authoring name convention (in the tank's glb view tree the volume/proxy roles live on
-/// the sim skeleton, so the mesh's ancestors only *name* them — the same `*_Ballistic`/
-/// `*_Collider` rule `tank::bind_tank_view` hides by). Runs each frame; `Without<HullMesh>` makes
-/// it tag each mesh just once.
+/// the hierarchy by component (the sandbox's standalone plates carry both on the mesh entity) and,
+/// in the tank's glb view tree (where the volume/proxy roles live on the sim skeleton, so the mesh's
+/// ancestors only *name* them), by asking the BAKE what those names classify as — the same material
+/// verdict `tank::bind_tank_view` hides by, now that the `*_Ballistic` suffix is retired. Runs each
+/// frame; `Without<HullMesh>` makes it tag each mesh just once.
 fn tag_hull_meshes(
     candidates: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>),
         (With<Mesh3d>, Without<HullMesh>, Without<VolumePaint>),
     >,
+    blueprint: Option<Res<crate::bake::TankBlueprint>>,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     volumes: Query<(), Or<(With<ArmorVolume>, With<ComponentVolume>)>>,
     colliders: Query<(), With<Collider>>,
     mut commands: Commands,
 ) {
+    let geometry = blueprint.as_deref().map(|blueprint| &blueprint.geometry);
     for (entity, material) in &candidates {
         let mut probe = entity;
         let mut is_hull = true;
         loop {
             let physics_name = names.get(probe).is_ok_and(|name| {
-                name.as_str().ends_with("_Ballistic") || name.as_str().ends_with("_Collider")
+                geometry.is_some_and(|geometry| geometry.is_physics_only(name.as_str()))
             });
             if physics_name || volumes.contains(probe) || colliders.contains(probe) {
                 is_hull = false;

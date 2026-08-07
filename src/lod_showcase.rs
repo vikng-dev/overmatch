@@ -53,7 +53,9 @@
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 
-use crate::track::link_view::{ShoeLod, shoe_lod_levels, shoe_lod_range, shoe_lod_tris};
+use crate::track::link_view::{
+    ShoeLod, shoe_lod_levels, shoe_lod_range, shoe_lod_switch_is_judgeable, shoe_lod_tris,
+};
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
 ///
@@ -154,6 +156,28 @@ fn pair_range_m(pair: usize) -> (f32, Option<f32>) {
     }
 }
 
+/// The switches this harness stages: those a human can actually judge.
+///
+/// DERIVED FROM THE MANIFEST, never listed (Yan ruling, 2026-08-07). Pair `p` compares level `p`
+/// against level `p + 1`, so it is the switch INTO `p + 1`; it is staged iff the rendered-difference
+/// gate had an OPINION about that level ([`shoe_lod_switch_is_judgeable`]). Where the gate abstained
+/// — the asset is under the ratified 20 px floor at its own switch distance — there is by
+/// construction nothing an eye could resolve, and parking two tanks out there to compare them shows
+/// a person two identical specks and asks them to prefer one.
+///
+/// On today's three-rung ladder that drops exactly the L2|L3 pair (13.1 px at 1 017 m, on a 1 000 m
+/// map it could not even be reached) and stages two. A future five-rung ladder stages whatever
+/// subset of ITS switches clears the floor, with no edit here: the rule is a property of the gate's
+/// verdicts, not a count.
+///
+/// The two-pair result is also what buys the alternating lanes their clearance — see
+/// [`LANE_OFFSET_M`] and `no_pair_stands_in_front_of_another_from_the_player_spawn`.
+pub(crate) fn staged_pairs() -> Vec<usize> {
+    (0..shoe_lod_levels() - 1)
+        .filter(|&pair| shoe_lod_switch_is_judgeable(pair + 1))
+        .collect()
+}
+
 /// Which lane pair `pair` stands in: the world Z its two tanks straddle. See [`LANE_OFFSET_M`].
 fn pair_lane_z(pair: usize) -> f32 {
     if pair.is_multiple_of(2) {
@@ -180,9 +204,13 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
         name: "Tiger I (player)".to_string(),
         controlled: true,
     }];
-    for pair in 0..shoe_lod_levels() - 1 {
+    // `slot` is the position in the STAGED sequence, not the pair's index in the chain — the lanes
+    // must alternate over the pairs that are actually laid out. Keying the lane off `pair` would
+    // put two consecutive staged pairs in the SAME lane the moment a skipped switch fell between
+    // them, which is the occlusion the alternation exists to prevent.
+    for (slot, pair) in staged_pairs().into_iter().enumerate() {
         let (range, _) = pair_range_m(pair);
-        let lane = pair_lane_z(pair);
+        let lane = pair_lane_z(slot);
         // LEFT is the FINER level, and left is −Z: with +X forward and +Y up, `left = up × forward`
         // = Y × X = −Z. Fine on the left every time, so a sweep down the range is read the same way
         // at every pair rather than remembered per pair.
@@ -204,8 +232,10 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
 /// Written as text rather than logged here so the spawn can emit it beside the tanks it describes —
 /// a legend in a different part of the log from the scene it labels is a legend nobody reads.
 pub(crate) fn legend() -> Vec<String> {
-    (0..shoe_lod_levels() - 1)
-        .map(|pair| {
+    staged_pairs()
+        .into_iter()
+        .enumerate()
+        .map(|(slot, pair)| {
             let (range, beyond) = pair_range_m(pair);
             let note = beyond.map_or(String::new(), |switch| {
                 format!(" (true switch {switch:.1} m is beyond the map edge)")
@@ -214,7 +244,7 @@ pub(crate) fn legend() -> Vec<String> {
                 "lod showcase: L{pair}|L{} pair at {range:.1} m{note}, {} of the sight line — \
                  LEFT L{pair} ({} tris), RIGHT L{} ({} tris)",
                 pair + 1,
-                if pair_lane_z(pair) < 0.0 {
+                if pair_lane_z(slot) < 0.0 {
                     "left"
                 } else {
                     "right"
@@ -289,17 +319,21 @@ fn aim_camera_down_range(mut done: Local<bool>, mut camera: Query<&mut Transform
 mod tests {
     use super::*;
 
-    /// The layout is the CHAIN's, not a table: one pair per switch, standing at the distance that
-    /// switch happens, with the finer level on the left.
+    /// The layout is the CHAIN's, not a table: one pair per JUDGEABLE switch, standing at the
+    /// distance that switch happens, with the finer level on the left.
     ///
-    /// Driven off `shoe_lod_range`/`shoe_lod_levels` so a regenerated ladder re-lays itself out —
+    /// Driven off `shoe_lod_range`/`staged_pairs` so a regenerated ladder re-lays itself out —
     /// which is the property that makes this harness worth keeping rather than re-writing each time
     /// the meshes change.
     #[test]
-    fn every_switch_in_the_chain_gets_a_pair_at_its_own_distance() {
+    fn every_judgeable_switch_gets_a_pair_at_its_own_distance() {
         let tanks = layout();
-        let pairs = shoe_lod_levels() - 1;
-        assert_eq!(tanks.len(), 1 + 2 * pairs, "the player plus two per switch");
+        let staged = staged_pairs();
+        assert_eq!(
+            tanks.len(),
+            1 + 2 * staged.len(),
+            "the player plus two per staged switch"
+        );
 
         assert!(tanks[0].controlled, "the player is the controlled tank");
         assert_eq!(tanks[0].clamp, None, "and its shoes select normally");
@@ -308,8 +342,8 @@ mod tests {
             "the probes are scenery — a controlled probe would drive out of its own pair",
         );
 
-        for pair in 0..pairs {
-            let (left, right) = (&tanks[1 + 2 * pair], &tanks[2 + 2 * pair]);
+        for (slot, &pair) in staged.iter().enumerate() {
+            let (left, right) = (&tanks[1 + 2 * slot], &tanks[2 + 2 * slot]);
             assert_eq!(left.clamp, Some(pair), "left is the FINER level");
             assert_eq!(right.clamp, Some(pair + 1), "right is the COARSER level");
 
@@ -321,10 +355,34 @@ mod tests {
             let expected = switch.min(MAX_RANGE_M);
             assert!((left.xz.x - START_XZ.x - expected).abs() < 1e-3);
             assert!((right.xz.x - START_XZ.x - expected).abs() < 1e-3);
-            let lane = START_XZ.y + pair_lane_z(pair);
+            let lane = START_XZ.y + pair_lane_z(slot);
             assert_eq!(left.xz.y, lane - LATERAL_HALF_M, "left is −Z");
             assert_eq!(right.xz.y, lane + LATERAL_HALF_M);
         }
+    }
+
+    /// The staging RULE, stated against the gate's verdicts rather than against a count — so this
+    /// keeps meaning the same thing when the ladder is next re-cut.
+    ///
+    /// Every staged pair is a switch the rendered-difference gate had an opinion about, every
+    /// skipped one is a switch it abstained on, and the harness is not empty. On today's ladder
+    /// that is pairs 0 and 1 staged and the L2|L3 pair dropped (13.1 px at 1 017 m).
+    #[test]
+    fn the_harness_stages_exactly_the_switches_the_gate_could_judge() {
+        let staged = staged_pairs();
+        for pair in 0..shoe_lod_levels() - 1 {
+            assert_eq!(
+                staged.contains(&pair),
+                shoe_lod_switch_is_judgeable(pair + 1),
+                "pair {pair} (the switch into L{}) is staged iff the render gate judged it",
+                pair + 1,
+            );
+        }
+        assert!(
+            !staged.is_empty(),
+            "a showcase that stages nothing is a showcase nobody can use — if a re-cut ladder \
+             ever abstains on every switch, the harness needs a new idea, not a silent empty scene",
+        );
     }
 
     /// NO PAIR HIDES BEHIND ANOTHER, from the one place the harness is meant to be used from.
@@ -477,10 +535,10 @@ mod tests {
     fn the_legend_describes_the_tanks_that_are_spawned() {
         let lines = legend();
         let tanks = layout();
-        assert_eq!(lines.len(), shoe_lod_levels() - 1);
+        assert_eq!(lines.len(), staged_pairs().len());
 
-        for (pair, line) in lines.iter().enumerate() {
-            let (left, right) = (&tanks[1 + 2 * pair], &tanks[2 + 2 * pair]);
+        for (slot, line) in lines.iter().enumerate() {
+            let (left, right) = (&tanks[1 + 2 * slot], &tanks[2 + 2 * slot]);
             let range = left.xz.x - START_XZ.x;
             assert!(
                 line.contains(&format!("{range:.1} m")),
@@ -499,7 +557,8 @@ mod tests {
             .iter()
             .filter(|l| l.contains("beyond the map edge"))
             .collect();
-        let expected = (0..shoe_lod_levels() - 1)
+        let expected = staged_pairs()
+            .into_iter()
             .filter(|&p| shoe_lod_range(p + 1).start_margin.start > MAX_RANGE_M)
             .count();
         assert_eq!(

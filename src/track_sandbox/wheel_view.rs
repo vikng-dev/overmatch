@@ -134,8 +134,11 @@ pub(super) struct GearNode {
 /// `pub(super)` so [`super::mesh_layers`] can ask "is this node running gear?" with the same parser —
 /// one source of truth for what the sandbox treats as a driven wheel/sprocket/idler.
 pub(super) fn gear_slot(name: &str) -> Option<(Side, GearRole)> {
-    // `Wheel_L_0_Visual` / `Wheel_L_0_Ballistic` are sibling volumes, not the wheel: only a purely
-    // numeric tail is a station (the same rule `bake::roadwheel_side` enforces).
+    // Only a purely numeric tail is a station: a `Wheel_L_0_*` sibling (a decor mesh, a proxy) names
+    // something parented to the wheel, never the wheel itself. The GAME no longer parses this at all
+    // — it reads the explicit `roadwheels` list in `<tank>.tank.ron` (see [`crate::spec::RoadwheelSpec`],
+    // §12's identity rule: names address, they never classify). This parser is the SANDBOX's own read
+    // of the scene, so it stays a pattern; it just no longer mirrors a bake-side scan that exists.
     for (prefix, side) in [("Wheel_L_", Side::Left), ("Wheel_R_", Side::Right)] {
         if let Some(tail) = name.strip_prefix(prefix)
             && !tail.is_empty()
