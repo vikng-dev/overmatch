@@ -133,6 +133,7 @@ pub(crate) fn collect(
                 seeded,
                 *rotation,
                 prune_margin(local_origin, corridor.laws),
+                corridor.laws,
                 out,
             )?,
             _ => collect_convex(
@@ -209,6 +210,7 @@ fn collect_trimesh(
     seeded: bool,
     rotation: Rotation,
     margin: f32,
+    laws: &WalkLaws,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
@@ -238,7 +240,7 @@ fn collect_trimesh(
         else {
             continue;
         };
-        if let Some(hit) = admit(t, length, seeded) {
+        if let Some(hit) = admit(t, length, seeded, laws) {
             out.push(FaceHit {
                 volume: node,
                 primitive,
@@ -344,7 +346,7 @@ fn collect_convex(
         } else {
             -normal
         };
-        if let Some(t) = admit(t, corridor.length, seeded) {
+        if let Some(t) = admit(t, corridor.length, seeded, corridor.laws) {
             out.push(FaceHit {
                 volume: node,
                 primitive,
@@ -373,7 +375,12 @@ fn collect_convex(
                     BOUNDARY_PROBE,
                     false,
                 ) {
-                    Some((behind, normal)) => push(-behind, normal, true, 0),
+                    // At `t = 0` deliberately, NOT at `-behind`. This phase has already made the
+                    // "sitting on the face" judgement itself, and BOUNDED it: the probe reaches one
+                    // `BOUNDARY_PROBE` and no further, so nothing farther behind can arrive here at
+                    // all. `admit`'s clamp is the trimesh phase's bound, where no such probe limits
+                    // how far back a sloped face may be found.
+                    Some((_, normal)) => push(0.0, normal, true, 0),
                     // Inside, undeclared, and the entry face is nowhere near — see the note above.
                     // Silence here is free penetration, so this is where it stops.
                     None => {
@@ -403,14 +410,37 @@ fn collect_convex(
 /// Whether a crossing at `t` belongs to this corridor, and where.
 ///
 /// The seed contract, from the driving side: behind the origin and seeded → the seed already
-/// accounts for it; behind the origin and NOT seeded → the ray is sitting on the face, so it lands
+/// accounts for it; behind the origin and NOT seeded → the ray is SITTING ON the face, so it lands
 /// at `t = 0`; at or past the far end → it belongs to the next corridor (the interval is half-open).
-fn admit(t: f32, length: f32, seeded: bool) -> Option<f32> {
+///
+/// # The clamp is bounded, and the bound is the whole rule
+///
+/// "Sitting on the face" is what the unseeded clamp exists for, and it is a statement about a
+/// rounding hair — the corridor origin IS that face's position, recomputed. Applied to any distance
+/// behind the origin it says something else entirely: that a face the ray traversed long ago is
+/// still ahead of it.
+///
+/// That is not hypothetical. A transit corridor restarts at the plate's own exit, and on a SLOPED
+/// plate the exit triangles have extent along the ray, so the collector finds them well behind the
+/// origin and the clamp dragged them back to `t = 0` — an exit with nothing open, `UnexpectedExit`,
+/// fail-closed. The §13.6 fuzzer measured 40 of 40 head-on lines across the UFP stopping at the
+/// plate's own exit face, losing the exit, the spall and everything behind it. Square plates hide
+/// it: their exit triangles are perpendicular to the ray and have no extent along it, which is why
+/// every axis-aligned fixture passed.
+///
+/// So the clamp reaches exactly as far as "on the face" means — [`super::walk::coincident`], the
+/// module's own answer to whether two `t` name one boundary. Anything farther behind is already
+/// traversed and is dropped. The seeded-drop / unseeded-clamp dichotomy is untouched; only the
+/// unbounded reach dies.
+fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
     if !t.is_finite() || t >= length {
         return None;
     }
     if t < 0.0 {
-        return (!seeded).then_some(0.0);
+        // Seeded: the seed owns it. Unseeded and ON the origin: the ray is sitting on this face.
+        // Unseeded and genuinely behind: the ray has already crossed it, and this corridor starts
+        // after it.
+        return (!seeded && super::walk::coincident(0.0, t, laws)).then_some(0.0);
     }
     Some(t)
 }
@@ -563,6 +593,7 @@ mod tests {
             false,
             Rotation::default(),
             prune_margin(origin, &laws),
+            &laws,
             &mut out,
         )
         .expect("the fixture collects cleanly");
@@ -639,14 +670,26 @@ mod tests {
 
     #[test]
     fn admission_honours_the_seed_contract() {
+        let laws = WalkLaws::default();
         // Inside the corridor: kept as-is.
-        assert_eq!(admit(0.5, 1.0, false), Some(0.5));
+        assert_eq!(admit(0.5, 1.0, false, &laws), Some(0.5));
         // Half-open at the far end: this one is the next corridor's.
-        assert_eq!(admit(1.0, 1.0, false), None);
+        assert_eq!(admit(1.0, 1.0, false, &laws), None);
         // Behind the origin, seeded: the seed already accounts for the entry.
-        assert_eq!(admit(-1.0e-7, 1.0, true), None);
+        assert_eq!(admit(-1.0e-7, 1.0, true, &laws), None);
         // Behind the origin, NOT seeded: the ray is sitting on the face.
-        assert_eq!(admit(-1.0e-7, 1.0, false), Some(0.0));
-        assert_eq!(admit(f32::NAN, 1.0, false), None);
+        assert_eq!(admit(-1.0e-7, 1.0, false, &laws), Some(0.0));
+        assert_eq!(admit(f32::NAN, 1.0, false, &laws), None);
+        // BEHIND THE ORIGIN AND MEANING IT: already traversed, and not this corridor's to report.
+        // A sloped plate's exit triangles have extent along the ray, so a transit corridor that
+        // restarts at that exit finds them here — and dragging them to `t = 0` is an exit with
+        // nothing open, which the driver fails closed on.
+        for behind in [-1.0e-3, -0.05, -1.0] {
+            assert_eq!(
+                admit(behind, 1.0, false, &laws),
+                None,
+                "{behind} m behind the origin is traversed, not underfoot",
+            );
+        }
     }
 }
