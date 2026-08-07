@@ -569,8 +569,23 @@ enum Toggle {
 }
 
 /// The live union field: which primitives are open, and therefore what `max(factor)` is.
+///
+/// Openness is a DEPTH, not a flag, because §13.7 legalizes several closed shells inside one
+/// primitive — the road wheels are the standing precedent, with bodies and axle authored as one
+/// MildSteel primitive. A ray through one of those meets `enter, enter, exit, exit`, and a boolean
+/// pairing reads the second entry as a topology error. The §13.6 fuzzer measured 0.47% of a million
+/// rays failing closed on exactly that shape: the sixteen wheels, `Hull_Rear` and `Turret_Cupola`.
+///
+/// Depth changes nothing about the field's meaning. Presence is `depth > 0`, so the interval a
+/// primitive contributes is the UNION of its shells, and §13.2 takes `max(factor)` over whatever is
+/// present — shell multiplicity inside one primitive charges exactly once, which is the same answer
+/// the per-ENTITY union already gives for two overlapping primitives of one volume. It is also why
+/// §13.6's idempotence still holds: a duplicated shell coincides face-for-face with the original, so
+/// the topology reduction collapses it to one toggle before the field ever sees it.
 struct Field {
-    open: BTreeMap<PrimitiveKey, f32>,
+    /// Per primitive: how many shells the ray is currently inside, and where the OUTERMOST one
+    /// opened — the start of the union interval this primitive will contribute.
+    open: BTreeMap<PrimitiveKey, (u32, f32)>,
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -633,7 +648,10 @@ pub fn walk_ray(
         per_entity: BTreeMap::new(),
     };
     for key in &corridor.initial_presence {
-        if field.open.insert(*key, 0.0).is_none() {
+        // Declared presence opens at depth ONE, whatever nesting produced it upstream: the seed says
+        // the ray is inside this primitive, and the exits it will meet close that presence from the
+        // inside out.
+        if field.open.insert(*key, (1, 0.0)).is_none() {
             *field.per_entity.entry(key.volume).or_insert(0) += 1;
         }
         volumes.factor(key.volume)?;
@@ -712,22 +730,25 @@ pub fn walk_ray(
         for (key, toggle, triangles, normal) in toggles {
             match toggle {
                 Toggle::Enter => {
-                    if field.open.contains_key(&key) {
-                        return Err(WalkError::UnexpectedEntry {
-                            sample,
-                            key,
-                            t,
-                            triangles,
-                        });
-                    }
                     volumes.factor(key.volume)?;
-                    field.open.insert(key, t);
-                    *field.per_entity.entry(key.volume).or_insert(0) += 1;
+                    match field.open.get_mut(&key) {
+                        // A further shell of a primitive the ray is already inside (§13.7). Presence
+                        // does not change — it is already present — so no interval opens and the
+                        // entity count does not move; only the depth that must be unwound.
+                        Some((depth, _)) => *depth += 1,
+                        None => {
+                            field.open.insert(key, (1, t));
+                            *field.per_entity.entry(key.volume).or_insert(0) += 1;
+                        }
+                    }
                     entry_normal += normal;
                     any_entry = true;
                 }
                 Toggle::Exit => {
-                    let Some(open_at) = field.open.remove(&key) else {
+                    // FAIL-LOUD SURVIVES. Balanced nesting is legal; an exit with no shell open is
+                    // still a dropped entry, an inverted winding or a hole in the mesh, and still an
+                    // error. What changed is only that "already inside" stopped being a contradiction.
+                    let Some((depth, open_at)) = field.open.get_mut(&key) else {
                         return Err(WalkError::UnexpectedExit {
                             sample,
                             key,
@@ -735,6 +756,15 @@ pub fn walk_ray(
                             triangles,
                         });
                     };
+                    *depth -= 1;
+                    if *depth > 0 {
+                        // Out of an inner shell and still inside the primitive: presence is
+                        // unbroken, the union interval stays open, and this face is NOT a field
+                        // boundary — so it must not contribute to the boundary normal either.
+                        continue;
+                    }
+                    let open_at = *open_at;
+                    field.open.remove(&key);
                     if let Some(count) = field.per_entity.get_mut(&key.volume) {
                         *count -= 1;
                     }

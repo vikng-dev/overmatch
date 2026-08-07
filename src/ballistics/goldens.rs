@@ -1,6 +1,6 @@
 //! Frozen end-to-end shots at the REAL Tiger — CHARACTERIZATION, not specification.
 //!
-//! Every other ballistics test builds a synthetic plate and asserts a law. These four fire through
+//! Every other ballistics test builds a synthetic plate and asserts a law. These five fire through
 //! the whole shipped stack — `bake`'s glb extraction, the material registry, the per-primitive
 //! trimeshes, the disc walk, the resolver, the damage deposit — at the bound tank at spawn pose, and
 //! pin the OUTCOME TUPLE: which events fired, what perforated, who lost health.
@@ -108,6 +108,10 @@ struct Outcome {
     survivors: usize,
     /// Ricochet points the shell recorded along its whole flight.
     ricochets: usize,
+    /// Volume crossings (entry→exit) the shell recorded along its whole flight, in march order.
+    crossings: Vec<(Vec3, Vec3)>,
+    /// Where each spall cone was thrown from — one per perforation exit.
+    spall_origins: Vec<Vec3>,
 }
 
 /// Fire one round from a tank-local origin along a tank-local direction, march it to rest, and
@@ -146,17 +150,32 @@ fn fire(
     ));
     // Eight ticks at 16 ms: ~100 m of flight for a main-gun round, which is far more than the whole
     // tank plus the run-out past it.
+    // The marks live ON the shell and are freed with it, so each tick's fullest reading is kept
+    // while the shell is still there to be read from.
     let mut ricochets = 0;
+    let mut crossings: Vec<(Vec3, Vec3)> = Vec::new();
+    let mut spall_origins: Vec<Vec3> = Vec::new();
     for _ in 0..8 {
         app.update();
-        ricochets = app
+        for marks in app
             .world_mut()
             .query::<&PenetrationMarks>()
             .iter(app.world())
-            .map(|marks| marks.ricochets.len())
-            .max()
-            .unwrap_or(ricochets)
-            .max(ricochets);
+        {
+            ricochets = ricochets.max(marks.ricochets.len());
+            if marks.events.len() > crossings.len() {
+                crossings = marks
+                    .events
+                    .iter()
+                    .map(|event| (event.entry, event.exit))
+                    .collect();
+            }
+        }
+        for marks in app.world_mut().query::<&SpallMarks>().iter(app.world()) {
+            if marks.bursts.len() > spall_origins.len() {
+                spall_origins = marks.bursts.iter().map(|burst| burst.origin).collect();
+            }
+        }
     }
     let health = app
         .world_mut()
@@ -175,6 +194,8 @@ fn fire(
         health,
         survivors,
         ricochets,
+        crossings,
+        spall_origins,
     }
 }
 
@@ -193,26 +214,29 @@ const EIGHTY_EIGHT: (f32, f32, f32) = (0.088, 10.2, 773.0);
 /// The Tiger's own 7.92 mm coax/hull MG.
 const MG: (f32, f32, f32) = (0.0079, 0.0118, 755.0);
 
-/// The driver's line: dead level, across the tank along `+X`, at the driver's own height.
+/// The driver's line: dead level, HEAD ON along `+Z`, at the driver's own height.
 ///
-/// `Hull_Side_Upper_L` is a flat vertical plate at local `x -1.631..-1.541`, `y 1.102..1.809`; the
-/// `Driver` volume sits at `x -0.800..-0.348`, `y 0.534..1.652`, `z -1.962..-1.268` behind it. At
-/// `y = 1.50` the line clears the sponson floor (`Hull_Side_Track_L`, up to `y 1.315`), the lower
-/// side plate and the road wheels, so it crosses exactly one plate of armour before flesh.
+/// It meets `Hull_UFP_Upper` — the Tiger's sloped 100 mm front plate — square across the tank's
+/// width at local `x = -0.57`, and the `Driver` volume (`x -0.800..-0.348`, `y 0.534..1.652`,
+/// `z -1.962..-1.268`) sits directly behind it. MEASURED on the bound tank: the plate is entered at
+/// `z -2.247` and left at `z -2.146`, 101 mm of line-of-sight steel.
 ///
-/// A FLANK shot rather than the obvious head-on one through `Hull_UFP_Upper`, and deliberately so:
-/// the front plate is sloped, and every sloped plate currently kills the round at its own exit face
-/// (see [`a_sloped_plate_stops_the_round_at_its_own_exit_face`]). Pointing the reference golden at a
-/// defective line would pin the defect as if it were the physics.
-const DRIVER_LINE_FROM: Vec3 = Vec3::new(-6.0, 1.5, -1.6);
-const DRIVER_LINE_DIR: Vec3 = Vec3::X;
+/// This is the obvious shot, and for one release it was NOT the one these goldens fired: while the
+/// unbounded behind-origin clamp lived, every sloped plate killed the round at its own exit face, so
+/// the reference golden was aimed down a flank line instead rather than pin a defect as if it were
+/// the physics. The clamp is bounded now
+/// (see [`a_sloped_plate_perforates_and_throws_spall_from_its_exit_face`]), and the reference shot
+/// is the obvious one again.
+const DRIVER_LINE_FROM: Vec3 = Vec3::new(-0.57, 1.45, -6.5);
+const DRIVER_LINE_DIR: Vec3 = Vec3::Z;
 
 /// GOLDEN 1 — the 88 through the driver's plate.
 ///
-/// The reference shot of the whole model: a main-gun round meets one plate of rolled armour head on,
-/// perforates it, and kills what is behind it. It also carries the §13.3 half of
-/// "an arm does not ricochet an 88": the crewman the round crosses on the way through deflects
-/// nothing, so the flight records no bounce at all.
+/// The reference shot of the whole model: a main-gun round meets the sloped front plate head on,
+/// perforates it, kills the driver behind it, and — with 250 reference-mm against ~101 mm of front
+/// plate — keeps going, out through three more plates and the rear of the tank. It also carries the
+/// §13.3 half of "an arm does not ricochet an 88": the crewman the round crosses on the way through
+/// deflects nothing, so the flight records no bounce at all.
 #[test]
 fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     let mut app = golden_world();
@@ -245,14 +269,14 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     );
     assert_eq!(
         armor.len(),
-        2,
-        "PHYSICS CHANGED — diff consciously. The 88 crosses the near side plate and the far one on \
-         its way out: {armor:?}"
+        4,
+        "PHYSICS CHANGED — diff consciously. The 88 reads the front plate, two plates inside the \
+         hull and the rear plate on its way out: {armor:?}"
     );
     assert_eq!(
         out.survivors, 1,
-        "PHYSICS CHANGED — diff consciously. 250 reference-mm of capability against ~90 mm of side \
-         plate plus a crewman leaves the round flying"
+        "PHYSICS CHANGED — diff consciously. 250 reference-mm of capability against ~101 mm of \
+         front plate, the crew behind it and ~79 mm of rear plate leaves the round flying"
     );
     assert_eq!(
         out.ricochets, 0,
@@ -277,8 +301,8 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
 ///
 /// The other half of "an arm does not ricochet an 88", stated as its converse: identical geometry,
 /// opposite outcome, decided by CAPABILITY alone (8 reference-mm against 250). The MG bites into the
-/// same plate and dies inside it; the driver behind it is untouched, and no confirmation rides the
-/// wire. The plate stops it — the crewman never gets a say either way.
+/// same front plate and dies inside it; the driver behind it is untouched, and no confirmation rides
+/// the wire. The plate stops it — the crewman never gets a say either way.
 #[test]
 fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     let mut app = golden_world();
@@ -292,8 +316,8 @@ fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     assert_eq!(
         armor.len(),
         1,
-        "PHYSICS CHANGED — diff consciously. The MG round should read the side plate exactly once: \
-         {:?}",
+        "PHYSICS CHANGED — diff consciously. The MG round should read the front plate exactly \
+         once: {:?}",
         out.impacts
     );
     assert!(
@@ -304,8 +328,8 @@ fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     assert_eq!(
         out.health_of("Driver"),
         3.0,
-        "PHYSICS CHANGED — diff consciously. A 7.92 mm round stopped by 90 mm of plate cannot cost \
-         the driver a single hit point"
+        "PHYSICS CHANGED — diff consciously. A 7.92 mm round stopped by 101 mm of plate cannot \
+         cost the driver a single hit point"
     );
     assert!(
         out.damage.is_empty(),
@@ -428,56 +452,86 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
     );
 }
 
-/// KNOWN DEFECT, pinned so its fix is noticed — NOT a statement of intended physics.
+/// GOLDEN 5 — the sloped front plate perforates, and its exit throws spall.
 ///
-/// A head-on 88 into `Hull_UFP_Upper` (the driver's front plate) bites in, and then the round STOPS
-/// DEAD INSIDE THE PLATE. The march's second corridor starts one [`super::MARCH_EPS`] past the
-/// perforation exit and the collector re-reports the exit face it has just left: `collect::admit`
-/// clamps any UNSEEDED crossing behind the corridor origin to `t = 0` ("the ray is sitting on the
-/// face") with no bound on how far behind, so the walk is handed an exit for a primitive it is not
-/// inside — `WalkError::UnexpectedExit { t: 0.0 }` — and fails closed.
+/// THE OBITUARY of a defect. For one release this test asserted the OPPOSITE, and its name said so:
+/// `a_sloped_plate_stops_the_round_at_its_own_exit_face`. A head-on 88 into `Hull_UFP_Upper` bit in
+/// and then STOPPED DEAD INSIDE THE PLATE — the march's second corridor started one
+/// [`super::MARCH_EPS`] past the perforation exit, `collect::admit` clamped that traversed exit face
+/// to `t = 0` because its clamp had no bound on how far behind the origin it would reach, and the
+/// walk was handed an exit for a primitive it was not inside: `UnexpectedExit`, fail-closed. Square
+/// plates could not show it — their exit triangles have no extent along the ray and the collector's
+/// prune drops them before `admit` is consulted — so every axis-aligned fixture in the module passed
+/// while the real front plate did not. The §13.6 fuzzer measured 40 / 40 head-on lines across the
+/// UFP stopping exactly there.
 ///
-/// It bites SLOPED plates only, which is why the flank goldens above are green: a plate square to
-/// the ray has exit-face triangles of zero extent along it, so the collector's prune drops them
-/// before `admit` is ever consulted. On a slope the same triangles reach forward past the corridor
-/// origin, survive the prune, and cross at `t ≈ −MARCH_EPS`. Measured 2026-08-07: 40 / 40 head-on
-/// lines across the whole front plate, and 4 / 20 flank lines that clip the sloped sponson floor.
+/// The clamp now reaches exactly as far as `coincident` — "on the face" — and no further, so this
+/// test states the physics instead of the defect: the round crosses the plate, LEAVES it through a
+/// real exit face, and throws a spall cone from that exit. Everything the defect used to eat.
 ///
-/// FAIL-CLOSED, so it is a stopped round rather than free penetration — the §13 doctrine working as
-/// designed. The consequence is not an immune tank: the crossing that DID resolve still deposits its
-/// transit damage, so the driver behind the plate still dies. What is lost is everything past that
-/// contact — the exit, the spall cone, every volume deeper in, and the round itself.
+/// It fires [`DRIVER_LINE_FROM`] — the same line the reference golden was pointed back at once the
+/// clamp was bounded. That golden pins the whole outcome tuple; this one pins the two facts the
+/// defect destroyed, so a regression names itself.
 ///
-/// WHEN THIS TEST FAILS: the defect is fixed. Delete it, and point
-/// [`eighty_eight_through_the_driver_plate_perforates_and_wounds_him`] back at the head-on line —
-/// `(-0.57, 1.45, -6.5)` along `+Z`, which crosses `Hull_UFP_Upper` and then the driver.
+/// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
+/// whether the exit face came back or the spall model moved, not which number to re-bake.
 #[test]
-fn a_sloped_plate_stops_the_round_at_its_own_exit_face() {
+fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     let mut app = golden_world();
-    let out = fire(
-        &mut app,
-        Vec3::new(-0.57, 1.45, -6.5),
-        Vec3::Z,
-        EIGHTY_EIGHT,
-    );
+    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, EIGHTY_EIGHT);
 
     let stopped = out.impacts.iter().any(|hit| {
         hit.surface == ImpactSurface::Armor && !hit.penetrated && hit.deflection.is_none()
     });
     assert!(
-        stopped,
-        "the sloped-plate exit-face defect is GONE — see this test's doc comment for what to do \
-         about it: {:?}",
+        !stopped,
+        "PHYSICS CHANGED — diff consciously. The sloped-plate exit-face defect is BACK: a round \
+         that neither bit nor bounced is one that failed closed mid-armour: {:?}",
         out.impacts
     );
-    assert_eq!(
-        out.survivors, 0,
-        "the fail-closed round is despawned at the contact it could not resolve"
+
+    let (entry, exit) = *out.crossings.first().unwrap_or_else(|| {
+        panic!(
+            "PHYSICS CHANGED — diff consciously. The 88 recorded no volume crossing at all on the \
+             head-on line: {:?}",
+            out.impacts
+        )
+    });
+    let thickness = (exit - entry).length();
+    assert!(
+        (0.09..0.11).contains(&thickness),
+        "PHYSICS CHANGED — diff consciously. The first crossing is the ~101 mm front plate, entered \
+         and LEFT; a thickness of {thickness} m is a different plate or a different exit face"
+    );
+    assert!(
+        exit.z > entry.z,
+        "PHYSICS CHANGED — diff consciously. The exit must lie DOWNRANGE of the entry along `+Z` — \
+         the defect's signature was an exit face reported behind the corridor origin: entry \
+         {entry:?}, exit {exit:?}"
+    );
+
+    let spall = out.spall_origins.first().copied().unwrap_or_else(|| {
+        panic!(
+            "PHYSICS CHANGED — diff consciously. A perforation exit throws a cone; this one threw \
+             none: {:?}",
+            out.crossings
+        )
+    });
+    assert!(
+        spall.distance(exit) < 1.0e-3,
+        "PHYSICS CHANGED — diff consciously. The first cone comes off the front plate's own exit \
+         face: expected {exit:?}, got {spall:?}"
     );
     assert_eq!(
-        out.impacts.len(),
+        out.spall_origins.len(),
         2,
-        "the shape of the defect: one honest bite, then the stop — never an exit: {:?}",
-        out.impacts
+        "PHYSICS CHANGED — diff consciously. Two of this line's four crossings perforate into a \
+         space worth spalling into — the front plate and the rear one: {:?}",
+        out.spall_origins
+    );
+    assert_eq!(
+        out.survivors, 1,
+        "PHYSICS CHANGED — diff consciously. The round is not despawned at a contact it could not \
+         resolve any more; it leaves the tank"
     );
 }
