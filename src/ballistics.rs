@@ -4411,7 +4411,13 @@ mod march_tests {
 
     /// A head-on shell at the standard plate (fired from z=+2 down −Z), carrying `shot`.
     fn spawn_headon_shell(app: &mut App, shot: ShotId) -> Entity {
-        let origin = Vec3::new(0.0, 2.0, 2.0);
+        spawn_headon_shell_at(app, shot, Vec3::new(0.0, 2.0, 2.0))
+    }
+
+    /// The same shell, anywhere on the map. Position is a LAW input here, not decoration: f32 spacing
+    /// coarsens with distance from the world origin, so a fixture that only ever fires two metres
+    /// from it cannot see the tolerances that matter at combat range.
+    fn spawn_headon_shell_at(app: &mut App, shot: ShotId, origin: Vec3) -> Entity {
         let dir = Vec3::NEG_Z;
         let speed = 800.0;
         app.world_mut()
@@ -5081,5 +5087,56 @@ mod march_tests {
             "the terminal reads at the FIRST plate's entry face, got z={}",
             terminals[0].position.z,
         );
+    }
+
+    /// The same spaced pair, out where the map ends.
+    ///
+    /// Position is a LAW input, and this is the fixture that says so. f32 spacing coarsens with
+    /// distance, so at 2.4 km the transit handoff lands ~1.5e-4 m off the face it was computed from
+    /// — four orders coarser than the 2.4e-8 that produced the original defect two metres from the
+    /// world origin, and the reason the prune margin scales instead of being a constant. It is also
+    /// where the margin's CEILING starts to bind: the unclamped scaling term reaches the march's own
+    /// boundary nudge at 2.5 km, and a margin that large re-collects the exit face of the plate just
+    /// perforated. Combat happens here, so the outcome is asserted here.
+    ///
+    /// HONEST SCOPE: this is an end-to-end guard, not the deterministic statement of either bound.
+    /// Which side of the plane the handoff rounds to is a property of the coordinates, and a sweep of
+    /// 480 far-map arrangements found it landing SHORT every time — so this fixture would survive the
+    /// margin being deleted. The bounds themselves are pinned where they can be stated exactly, in
+    /// the collector: `a_face_the_origin_sits_a_hair_past_is_still_collected` walks the ULP ladder at
+    /// this same distance, and `the_face_the_march_stepped_past_is_not_re_collected` holds the
+    /// ceiling at 2.5 km.
+    #[test]
+    fn spaced_plates_perforate_at_the_far_edge_of_the_map() {
+        let far = Vec3::new(2400.0, 2.0, 2400.0);
+        let plate = |z: f32| (Vec3::new(3.0, 3.0, 0.05), far + Vec3::new(0.0, 0.0, z));
+        let mut app = world_with_trimesh_plates(&[plate(-2.0), plate(-2.95)]);
+        app.init_resource::<TerminalLog>();
+        app.add_observer(capture_terminal);
+        spawn_headon_shell_at(&mut app, a_shot(), far);
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(
+            impacts.len(),
+            2,
+            "two plates, two armour reads, 2.4 km from the world origin: {:?}",
+            impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+        );
+        for (impact, face) in impacts.iter().zip([-1.975, -2.925]) {
+            assert!(matches!(impact.surface, ImpactSurface::Armor));
+            assert!(impact.penetrated, "an 88 still goes through 50 mm out here");
+            assert!(
+                (impact.position.z - (far.z + face)).abs() < 1.0e-3,
+                "the read is at the plate's own entry face (expected z={}, got {})",
+                far.z + face,
+                impact.position.z,
+            );
+        }
+        let terminals = app.world().resource::<TerminalLog>().0.clone();
+        assert_eq!(terminals.len(), 1, "one terminal per shot");
+        assert!(terminals[0].penetrated);
     }
 }
