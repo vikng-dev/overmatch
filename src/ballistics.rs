@@ -5419,6 +5419,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
             for _ in 0..8 {
@@ -5486,9 +5487,12 @@ mod march_tests {
             RigidBody::Static,
             box_trimesh(Vec3::new(3.0, 3.0, 0.05)),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-            // Real geometry, no material. The cast still finds it; the field never rises.
+            // Real geometry, no material. The cast still finds it; the field never rises. The
+            // substance name is empty to match: this fixture is deliberately un-declared, and
+            // naming a registry substance here would assert the opposite of what it tests.
             BallisticVolume {
                 material_factor: 0.0,
+                substance: String::new(),
             },
         ));
         for _ in 0..8 {
@@ -5557,6 +5561,7 @@ mod march_tests {
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
                     material_factor: STEEL,
+                    substance: "RHA".to_string(),
                 },
             ));
         }
