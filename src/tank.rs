@@ -29,8 +29,8 @@ pub(crate) use servo::RemoteServos;
 #[cfg(test)]
 pub(crate) use servo::ServoRest;
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
-#[cfg(feature = "bitprobe")]
-pub(crate) use spawn::spawn_bitprobe_tank;
+#[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
+pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{
     PendingTankAssets, TIGER_GLB_PATH, TankContent, TankPresentation, TankSimSource,
     attach_replicated_tank_body, load_tank_assets, spawn_complete_tank,

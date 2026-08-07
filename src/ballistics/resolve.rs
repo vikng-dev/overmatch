@@ -296,7 +296,7 @@ fn closing_walk(
 /// Broad phase by AABB rather than by ray so a volume that CONTAINS the whole corridor is still a
 /// candidate — a ray query would report nothing for it, and "nothing" is the answer that must never
 /// come back from armour the shell is inside.
-fn candidates(
+pub(super) fn candidates(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     origin: Vec3,
@@ -324,11 +324,14 @@ fn candidates(
 }
 
 /// Build the k sample corridors and collect every crossing along each.
+///
+/// Shared with the §13.6 fuzzer ([`super::fuzz`]) rather than re-derived there: a gate that builds
+/// its own corridors proves things about a corridor the march never casts.
 #[expect(
     clippy::too_many_arguments,
-    reason = "private kernel of `closing_walk`; every argument is corridor geometry"
+    reason = "the corridor kernel of `closing_walk` and the fuzzer; every argument is geometry"
 )]
-fn build_corridor(
+pub(super) fn build_corridor(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     anchor: Vec3,
@@ -390,7 +393,7 @@ fn build_corridor(
 /// The factor of every volume the corridor met. Fail-loud by construction: a volume with no
 /// `BallisticVolume` never becomes a hit in the first place, and one with an unusable factor is
 /// rejected here rather than integrated.
-fn volume_table(
+pub(super) fn volume_table(
     context: &ResolveContext<'_, '_, '_>,
     corridor: &DiscCorridor,
 ) -> Result<VolumeTable, WalkError> {

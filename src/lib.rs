@@ -26,6 +26,10 @@ mod assets;
 /// equivalent to the instantiated scene on every view bind.
 mod bake;
 mod ballistics;
+/// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate
+/// itself also rides `cargo test` at CI scale — see `ballistics::fuzz`.
+#[cfg(any(feature = "dev_tools", test))]
+pub use ballistics::fuzz::run_ballistic_fuzzer;
 #[cfg(feature = "bitprobe")]
 mod bitprobe;
 #[cfg(feature = "bitprobe")]

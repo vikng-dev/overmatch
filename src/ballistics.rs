@@ -43,6 +43,18 @@ mod resolve;
 )]
 mod collect;
 
+/// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
+/// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
+/// η. Its findings are adjudicated against `assets/tiger_1/tiger_1.bless.ron` — the list where
+/// deliberate weakspots are decided rather than discovered by players as bugs.
+#[cfg(any(feature = "dev_tools", test))]
+pub mod fuzz;
+
+/// Frozen end-to-end shots through the real march at the real Tiger — CHARACTERIZATION, not
+/// specification. A red golden here means the physics moved; see the module doc before re-pinning.
+#[cfg(test)]
+mod goldens;
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };

@@ -24,7 +24,7 @@ use crate::SimPlugin;
 use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::state::AppState;
-use crate::tank::{Controlled, TankSimSource, spawn_bitprobe_tank};
+use crate::tank::{Controlled, TankSimSource, spawn_headless_tank};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect};
 use crate::track::terrain::TrackField;
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
@@ -420,7 +420,7 @@ fn spawn_fixture(
     let Some(content) = source.get() else {
         return;
     };
-    let tank = spawn_bitprobe_tank(
+    let tank = spawn_headless_tank(
         &mut commands,
         content,
         (
