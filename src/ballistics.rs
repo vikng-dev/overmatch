@@ -19,6 +19,17 @@ use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
 /// penetration and spall math below never reads it.
 mod sanctioned;
 
+/// The §13 union field walk — the pure resolution core (overlaps charge their union, micro-gaps
+/// ε-weld, the shell samples the world as a caliber-wide disc). NOT WIRED: the march below still
+/// runs the serial [`resolve_armor_crossing`]; slice 2 of the arc replaces it with this. Everything
+/// in there is a pure function over pre-collected hit lists, which is what makes the §13.6
+/// invariants testable to the bit.
+#[allow(
+    dead_code,
+    reason = "slice-1 pure core; slice 2 wires it into the march and retires the serial resolver"
+)]
+mod walk;
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };

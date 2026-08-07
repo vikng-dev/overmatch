@@ -1,0 +1,1706 @@
+//! The §13 union field walk — the pure core.
+//!
+//! NOT YET WIRED. The live march still runs the serial resolver ([`super::resolve_armor_crossing`]);
+//! slice 2 replaces it with this. Everything here is a pure function over pre-collected data: no
+//! ECS, no spatial queries, no commands, no wall clock, no RNG. Those live outside (slice 2's Avian
+//! adapter), which is what makes the laws testable to the bit.
+//!
+//! # What it replaces
+//!
+//! The serial resolver charges one volume at a time and probes ahead *restricted to the struck
+//! entity*, so an overlapping or exactly-abutting neighbour is entered from inside, its exit probe
+//! finds nothing, and it is crossed at ZERO cost (§13.1's table). §13.2's answer is not a special
+//! case for seams but a different law: along the ray the volumes form a **material-factor field**,
+//! cost is `∫ max(factor) dt` over it, and every boundary law fires where the field *steps*. `max`
+//! is forced by the invariants (idempotent, monotone, commutative — §13.2), not chosen.
+//!
+//! # The three mechanisms, on three orthogonal axes (§13)
+//!
+//! - **union** (§13.2) — shared space is charged once. Implemented as the canonical span stream.
+//! - **ε-weld** (§13.4) — a longitudinal micro-gap deletes phantom *faces*, never creates phantom
+//!   *steel*.
+//! - **disc sampling** (§13.5) — the shell meets the world as a caliber-wide body: k sample rays,
+//!   aggregated into `(η, n̄, cost)` per crossing event.
+//!
+//! # Staged, because normalization bends the axis
+//!
+//! Entry faces are sampled along the INCOMING axis, but the transit happens along the bent one (the
+//! serial resolver bends at `ballistics.rs`'s `bend_toward` call before probing the exit). One
+//! pre-collected hit list therefore cannot describe both. So the core is a two-stage continuation:
+//! [`begin`] consumes the entrance disc and returns either a ricochet plan or a
+//! [`TransitRequest`] naming the axis and frame the caller must collect the transit corridor along;
+//! [`finish`] consumes that corridor and returns the [`ResolutionPlan`]. Slice-1 tests answer the
+//! request from fixtures; slice 2 answers it with real casts.
+//!
+//! # Fail loud, never repair
+//!
+//! Unpairable topology returns a structured [`WalkError`] naming the sample, volume, primitive and
+//! violated invariant. The core NEVER synthesizes a missing exit, infers "we must have started
+//! inside", or charges zero and moves on — silent-zero armour is the exact defect class §13.1
+//! exists to kill. Deciding what to do with the error (bake/CI: hard failure; production authority:
+//! deterministic fail-closed) is the slice-2 adapter's job, not this module's.
+//!
+//! # Three tolerance domains, deliberately separate
+//!
+//! [`WalkLaws::topology_abs`]/[`WalkLaws::topology_rel`] group numerically coincident face hits into
+//! one boundary; [`WalkLaws::weld_perp`] is the §13.4 physical event-topology knob (~2 mm
+//! perpendicular); [`WalkLaws::event_plane_tolerance`] is the lateral surface-patch relation the
+//! disc uses to associate samples. They are three orders of magnitude apart and must never be
+//! collapsed into one "epsilon" — a march/query offset in particular must never reach this module,
+//! since the old marcher's 1 mm nudge alone would eat half the weld budget.
+
+use bevy::prelude::*;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[cfg(test)]
+mod tests;
+
+// ---------------------------------------------------------------------------------------------
+// Input vocabulary
+// ---------------------------------------------------------------------------------------------
+
+/// One closed island of one ballistic volume — the unit presence is tracked on.
+///
+/// Primitive identity is load-bearing and cannot be replaced by entity identity (§13.4's
+/// per-entity parity pairing is unsound the moment one mesh carries two overlapping islands: the
+/// hit order reads `enter A, enter B, exit A, exit B`, and adjacent pairing produces
+/// `[enter, enter]`, which is not material presence). Two coplanar triangles of ONE face must
+/// collapse to one crossing; two different shells sharing an entry plane must stay distinct,
+/// because their exits differ. Only primitive identity separates those cases.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct PrimitiveKey {
+    pub volume: Entity,
+    pub primitive: u32,
+}
+
+/// One triangle crossing along a sample ray, as the spatial adapter reports it.
+///
+/// `true_normal` is the face's OUTWARD normal recovered from triangle winding — NOT parry's
+/// reported normal, which is flipped to oppose the ray, so a backface read from inside is
+/// indistinguishable from a head-on entry (§13.1). Recovering the true orientation is the adapter's
+/// contract; this module classifies entry/exit from it and would silently invert the whole walk if
+/// handed the flipped one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FaceHit {
+    pub volume: Entity,
+    pub primitive: u32,
+    /// Diagnostic identity only. It never participates in coincidence clustering or in the
+    /// topological reduction (those are geometric, so a re-triangulated mesh cannot change the
+    /// answer); it exists so a [`WalkError`] can name the offending faces.
+    pub triangle: u32,
+    /// Distance along the sample ray from the corridor origin.
+    pub t: f32,
+    pub true_normal: Vec3,
+}
+
+impl FaceHit {
+    fn key(&self) -> PrimitiveKey {
+        PrimitiveKey {
+            volume: self.volume,
+            primitive: self.primitive,
+        }
+    }
+}
+
+/// The factor of every volume the corridor can meet, supplied ONCE per volume.
+///
+/// Not per hit: a volume has one substance (§13.7), and repeating the scalar on every face invites
+/// two faces of one plate disagreeing — an unrepresentable state that the union `max` would then
+/// have to arbitrate.
+#[derive(Clone, Debug, Default)]
+pub struct VolumeTable {
+    factors: BTreeMap<Entity, f32>,
+}
+
+impl VolumeTable {
+    /// Build the table, rejecting factors that cannot participate in `max` or in a deterministic
+    /// sum. A `NaN` poisons both the field maximum and the sort; a negative factor breaks
+    /// monotonicity (§13.6). Zero is canonicalized so `-0.0` cannot produce a second bit pattern
+    /// for "no material" and defeat the bit-equality coalescing in [`walk_ray`].
+    pub fn new(entries: impl IntoIterator<Item = (Entity, f32)>) -> Result<Self, WalkError> {
+        let mut factors = BTreeMap::new();
+        for (volume, factor) in entries {
+            if !factor.is_finite() || factor < 0.0 {
+                return Err(WalkError::BadFactor { volume, factor });
+            }
+            factors.insert(volume, if factor == 0.0 { 0.0 } else { factor });
+        }
+        Ok(Self { factors })
+    }
+
+    fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
+        self.factors
+            .get(&volume)
+            .copied()
+            .ok_or(WalkError::UnknownVolume { volume })
+    }
+}
+
+/// One sample ray's pre-collected corridor.
+///
+/// The interval is HALF-OPEN, `[0, length)`. Parry reports a hit exactly at its maximum TOI, so two
+/// adjacent closed corridors would both claim a boundary sitting on their shared end; half-open
+/// gives that boundary exactly one owner. Hits at or past `length` are therefore not this
+/// corridor's, and a primitive left open at the end is [`WalkError::IncompleteCorridor`] — never a
+/// synthesized exit.
+#[derive(Clone, Debug, Default)]
+pub struct RayCorridor {
+    pub origin: Vec3,
+    /// Unit travel direction.
+    pub axis: Vec3,
+    pub length: f32,
+    /// Primitives the corridor origin is ALREADY inside, declared by the caller.
+    ///
+    /// Never inferred. "The first hit is an exit, so we must have started inside" silently converts
+    /// a dropped entry face into legitimate topology — which is how a hole in a mesh becomes free
+    /// armour. An exit with neither declared presence nor a prior entry is an error.
+    pub initial_presence: Vec<PrimitiveKey>,
+    pub hits: Vec<FaceHit>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Laws / knobs
+// ---------------------------------------------------------------------------------------------
+
+/// Every tunable the walk consumes. Sandbox knobs (§4: "the structure is the design; the magnitudes
+/// are live knobs"), gathered so no law reads a hidden constant.
+#[derive(Clone, Copy, Debug)]
+pub struct WalkLaws {
+    /// TOPOLOGY domain — absolute floor (m) under which two face hits are the same boundary.
+    pub topology_abs: f32,
+    /// TOPOLOGY domain — relative term, so a corridor anchored far downrange (where f32 spacing is
+    /// coarser) still groups the two triangles of one face diagonal.
+    pub topology_rel: f32,
+    /// A face is tangent — and toggles nothing — when `|axis · n|` is at most this. A tangent face
+    /// bounds zero material, so refusing to toggle on it cannot lose armour.
+    pub tangent_cos: f32,
+    /// WELD domain (§13.4) — maximum PERPENDICULAR gap that merges event topology (~2 mm: far above
+    /// export jitter, two orders below real spaced armour).
+    pub weld_perp: f32,
+    /// Weld face compatibility: the exit face and the next entry face must describe approximately
+    /// opposing sides of one gap, `n_exit · n_entry <= -weld_face_cos`. Without it the grazing
+    /// formula lets a near-tangent SIDE face weld to unrelated geometry arbitrarily far downrange —
+    /// `|axis · n| → 0` makes any gap "perpendicular-small".
+    pub weld_face_cos: f32,
+    /// Weld lookahead ceiling (m) along the ray. Guarantees corridor termination and bounds the
+    /// same runaway from the other side. Deliberately far below real spaced armour.
+    pub weld_max_lookahead: f32,
+    /// Cumulative omitted perpendicular gap allowed across a CHAIN of welds in one run.
+    ///
+    /// FLAGGED RULING (conservative, awaiting Yan): single-linkage chaining alone would let an
+    /// arbitrarily long picket fence collapse into one run with one terminal spall budget. Capping
+    /// the total at the weld constant itself means A~B~C welds only while the voids it deletes
+    /// still sum to a micro-gap.
+    pub weld_run_gap_budget: f32,
+    /// LATERAL domain — two samples' entrance patches lie on one surface when their normals agree
+    /// to this cosine …
+    pub event_plane_cos: f32,
+    /// … and their entry points are within this perpendicular distance (m) of the shared plane.
+    /// Longitudinal overlap alone cannot associate samples: on a thin oblique slab the ring shifts
+    /// by `r·tan(incidence)`, so one sample can exit before another enters and one ordinary plate
+    /// would split into several crossing events.
+    pub event_plane_tolerance: f32,
+    /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
+    pub ricochet_angle: f32,
+    /// Speed retained through a FULLY covered ricochet. Partial coverage bleeds proportionally less
+    /// (§13.5: "a graze IS a partial ricochet").
+    pub ricochet_bleed: f32,
+    /// Share of the incidence angle the round straightens toward the normal as it bites in.
+    pub normalization: f32,
+    /// Overmatch when caliber ≥ this × the crossing's factor-weighted perpendicular thickness.
+    pub overmatch_ratio: f32,
+    /// Reference-mm per metre of the reference substance (RHA), the divisor turning a cost back
+    /// into steel-equivalent METRES so it can be compared against a caliber.
+    pub rha_reference: f32,
+    /// Minimum factor step that counts as a surface for the boundary laws (§13.3's "meaningful
+    /// factor step").
+    ///
+    /// OPEN KNOB, deliberately 0.0 (§13's own open tab: "what 'significant step' means numerically
+    /// — sandbox knob"). At 0.0 every step is a surface, and the thick-soft-volume pathology is
+    /// killed by the factor-weighted overmatch instead: an 80 mm forearm is ~1.6 mm steel-
+    /// equivalent, so every caliber overmatches it and nothing deflects off an arm (§13.3). Raising
+    /// this is a second, independent lever and must not be tuned without a measured reason.
+    pub significant_step: f32,
+}
+
+impl Default for WalkLaws {
+    fn default() -> Self {
+        Self {
+            // 1 µm: three orders below the weld tolerance and below any authored feature.
+            topology_abs: 1.0e-6,
+            // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (slice 2 anchors it at
+            // first contact), so `t` stays in metres and this term only has to cover intersection
+            // rounding — a relative term large enough to matter at world scale would swallow the
+            // millimetre distinction the weld tolerance is written in.
+            topology_rel: 4.0e-7,
+            tangent_cos: 1.0e-4,
+            weld_perp: 2.0e-3,
+            // ~60°: parallel plates read -1; anything less opposed is not two sides of one gap.
+            weld_face_cos: 0.5,
+            weld_max_lookahead: 5.0e-2,
+            weld_run_gap_budget: 2.0e-3,
+            // ~25°.
+            event_plane_cos: 0.9,
+            event_plane_tolerance: 2.0e-3,
+            // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
+            // retune.
+            ricochet_angle: 1.221,
+            ricochet_bleed: 0.6,
+            normalization: 0.2,
+            overmatch_ratio: 3.0,
+            rha_reference: 1000.0,
+            significant_step: 0.0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------------------------
+
+/// A violated invariant, named precisely enough to fix the mesh or the adapter that produced it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WalkError {
+    /// A factor that cannot participate in `max` or in a deterministic sum.
+    BadFactor { volume: Entity, factor: f32 },
+    /// A hit named a volume the table does not carry — a bind gap, never a defaultable factor.
+    UnknownVolume { volume: Entity },
+    /// The corridor itself is malformed (non-unit axis, non-finite length, a hit behind the origin).
+    BadCorridor { sample: usize, reason: &'static str },
+    /// An exit face for a primitive the walk is not inside: a dropped entry, an inverted winding, or
+    /// an undeclared start-inside. NOT repaired by inventing an interval from the corridor origin.
+    UnexpectedExit {
+        sample: usize,
+        key: PrimitiveKey,
+        t: f32,
+        triangles: Vec<u32>,
+    },
+    /// An entry face for a primitive the walk is already inside — a self-overlapping island, which
+    /// means the mesh is not the closed positively-oriented shell the bake gate promises.
+    UnexpectedEntry {
+        sample: usize,
+        key: PrimitiveKey,
+        t: f32,
+        triangles: Vec<u32>,
+    },
+    /// The corridor ran out with material still open. The caller must extend the corridor until the
+    /// crossing closes (§13.4's atomic resolution corridor); the core will not synthesize the exit.
+    IncompleteCorridor {
+        sample: usize,
+        open: Vec<PrimitiveKey>,
+        length: f32,
+    },
+    /// The covered samples' entry normals cancelled, so no aggregate `n̄` exists.
+    ///
+    /// Defensive: the tangent gate ([`WalkLaws::tangent_cos`]) admits a face as an ENTRY only when
+    /// `axis · n < -tangent_cos`, so every contributing normal leans against the axis and their sum
+    /// cannot vanish — `n̄` is well-defined by construction, which is precisely §13.5's repair of
+    /// the point model's degenerate normal. The arm exists so that a future zeroed tangent gate
+    /// fails loud instead of normalizing a zero vector.
+    DegenerateEntryNormal { coverage: f32 },
+}
+
+// ---------------------------------------------------------------------------------------------
+// Single-ray output
+// ---------------------------------------------------------------------------------------------
+
+/// One maximal stretch of CONSTANT union factor. The canonical cost representation.
+///
+/// Spans are cut only where `max(factor)` actually changes — never where the presence *set* changes
+/// underneath an unchanged maximum. That is what makes seam invisibility (§13.6) bit-exact rather
+/// than merely approximate: `(b−a)·F` is not bit-equal to `(s−a)·F + (b−s)·F`, so a plate split at
+/// `s` would otherwise cost differently from one thick plate, and a low-factor volume buried inside
+/// steel would change the cost bits purely by subdividing the interval.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Span {
+    pub start: f32,
+    pub end: f32,
+    pub factor: f32,
+}
+
+impl Span {
+    fn len(&self) -> f64 {
+        self.end as f64 - self.start as f64
+    }
+
+    fn cost(&self) -> f64 {
+        self.len() * self.factor as f64
+    }
+}
+
+/// One constant-factor stretch of MATERIAL inside a welded run, with any welded voids removed.
+///
+/// `start`/`end` are the outer extent (they may straddle a deleted micro-gap); `material` is the
+/// metres actually charged. Welding deletes faces, never creates steel (§13.4).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialSegment {
+    pub start: f32,
+    pub end: f32,
+    pub factor: f32,
+    pub material: f32,
+    pub cost: f32,
+}
+
+/// A contiguous crossing after ε-welding: one entrance, one exit, and the material steps between.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeldedRun {
+    pub start: f32,
+    pub end: f32,
+    pub cost: f32,
+    /// Outward normal of the outermost entry face — the surface the entrance laws read.
+    pub entry_normal: Vec3,
+    /// Outward normal of the innermost exit face.
+    pub exit_normal: Vec3,
+    pub segments: Vec<MaterialSegment>,
+    /// How many micro-gaps this run swallowed.
+    pub joints: u32,
+    /// Everything present anywhere in the run — the "shares a primitive" half of disc event
+    /// association.
+    pub primitives: Vec<PrimitiveKey>,
+}
+
+/// Where the field steps, and what the step means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoundaryKind {
+    /// Air → material at the outermost face: incidence, ricochet, normalization and overmatch read
+    /// here, exactly once per run (§13.4).
+    Entrance,
+    /// A material → material step inside a run.
+    Step,
+    /// Material → air at the innermost face.
+    Exit,
+}
+
+/// One field transition. Spall fires wherever the step is DOWNWARD, including the exit (§13.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoundaryEvent {
+    pub kind: BoundaryKind,
+    pub t: f32,
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub factor_before: f32,
+    pub factor_after: f32,
+    /// §5's body term: the cost of the constant-factor stretch just exited. Zero unless the step is
+    /// downward. For a plain single-material plate this is the whole plate — identical to what the
+    /// serial resolver hands the spall cone today; for an equal-factor welded sandwich it is the
+    /// SUMMED cost, matching §13.4's "budget = the run's summed cost".
+    pub spall_budget: f32,
+    /// True when this step only exists because a micro-gap was welded away.
+    pub welded: bool,
+    pub run: usize,
+}
+
+/// What one volume of the tank presented to one sample ray.
+///
+/// Presence is the UNION of that entity's primitive intervals — never their sum. Two interpenetrating
+/// islands of one mesh must deposit once, or a shell rewards sloppy modelling with double damage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityPresence {
+    pub entity: Entity,
+    pub factor: f32,
+    pub chord: f32,
+    pub cost: f32,
+    pub spans: Vec<(f32, f32)>,
+}
+
+/// One sample ray's resolved walk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RayWalk {
+    /// Canonical constant-factor spans covering `[0, length)`, air included.
+    pub spans: Vec<Span>,
+    pub runs: Vec<WeldedRun>,
+    /// `∫ max(factor) dt`, accumulated in f64 over the canonical spans and cast ONCE.
+    pub cost: f32,
+    pub presence: Vec<EntityPresence>,
+    pub events: Vec<BoundaryEvent>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage 1 — topology reduction and the union field
+// ---------------------------------------------------------------------------------------------
+
+/// Whether two `t` values name the same topological boundary. Scale-aware, because f32 spacing
+/// coarsens with distance and a face diagonal at 400 m must still reduce to one crossing.
+fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
+    (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
+}
+
+/// What one primitive's faces in one coincident cluster mean.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Toggle {
+    Enter,
+    Exit,
+    /// Mixed entry and exit faces at one `t`, or nothing but tangents: a zero-measure touch. It must
+    /// not toggle presence — fabricating a zero-length interval here is how an edge graze grows a
+    /// spurious entrance/exit event pair out of no material at all.
+    Touch,
+}
+
+/// The live union field: which primitives are open, and therefore what `max(factor)` is.
+struct Field {
+    open: BTreeMap<PrimitiveKey, f32>,
+    per_entity: BTreeMap<Entity, u32>,
+}
+
+impl Field {
+    fn max_factor(&self, volumes: &VolumeTable) -> Result<f32, WalkError> {
+        let mut max = 0.0f32;
+        for (&entity, &count) in &self.per_entity {
+            if count > 0 {
+                max = max.max(volumes.factor(entity)?);
+            }
+        }
+        Ok(max)
+    }
+}
+
+/// Walk one sample ray: reduce topology, build presence, integrate the union field, ε-weld the runs
+/// and emit the boundary events.
+pub fn walk_ray(
+    sample: usize,
+    corridor: &RayCorridor,
+    volumes: &VolumeTable,
+    laws: &WalkLaws,
+) -> Result<RayWalk, WalkError> {
+    if !corridor.length.is_finite() || corridor.length < 0.0 {
+        return Err(WalkError::BadCorridor {
+            sample,
+            reason: "corridor length must be finite and non-negative",
+        });
+    }
+    if (corridor.axis.length_squared() - 1.0).abs() > 1.0e-3 {
+        return Err(WalkError::BadCorridor {
+            sample,
+            reason: "corridor axis must be unit length",
+        });
+    }
+
+    // Deterministic total order. Ties on `t` are BATCHED (below), not broken — neither entry-first
+    // nor exit-first is correct at an exact abutment, since either invents a transient air region or
+    // a transient overlap and with it a phantom factor step (§13.6 seam invisibility).
+    let mut order: Vec<&FaceHit> = corridor
+        .hits
+        .iter()
+        .filter(|hit| hit.t < corridor.length)
+        .collect();
+    if order.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0) {
+        return Err(WalkError::BadCorridor {
+            sample,
+            reason: "a face hit is behind the corridor origin or non-finite",
+        });
+    }
+    order.sort_by(|a, b| {
+        a.t.total_cmp(&b.t)
+            .then(a.volume.cmp(&b.volume))
+            .then(a.primitive.cmp(&b.primitive))
+            .then(a.triangle.cmp(&b.triangle))
+    });
+
+    let mut field = Field {
+        open: BTreeMap::new(),
+        per_entity: BTreeMap::new(),
+    };
+    for key in &corridor.initial_presence {
+        if field.open.insert(*key, 0.0).is_none() {
+            *field.per_entity.entry(key.volume).or_insert(0) += 1;
+        }
+        volumes.factor(key.volume)?;
+    }
+
+    // Per-primitive presence intervals, in close order.
+    let mut intervals: Vec<(PrimitiveKey, f32, f32)> = Vec::new();
+    // Field transitions: (t, factor_before, factor_after, entry_normal, exit_normal).
+    struct Transition {
+        t: f32,
+        before: f32,
+        after: f32,
+        entry_normal: Option<Vec3>,
+        exit_normal: Option<Vec3>,
+    }
+    let mut transitions: Vec<Transition> = Vec::new();
+
+    let mut i = 0usize;
+    while i < order.len() {
+        let anchor = order[i].t;
+        let mut j = i;
+        while j < order.len() && coincident(anchor, order[j].t, laws) {
+            j += 1;
+        }
+        let cluster = &order[i..j];
+        i = j;
+
+        // Reduce the cluster to at most one toggle per primitive.
+        let mut per_primitive: BTreeMap<PrimitiveKey, (bool, bool, Vec<u32>, Vec3, Vec3)> =
+            BTreeMap::new();
+        for hit in cluster {
+            let d = corridor.axis.dot(hit.true_normal);
+            let slot = per_primitive.entry(hit.key()).or_insert((
+                false,
+                false,
+                Vec::new(),
+                Vec3::ZERO,
+                Vec3::ZERO,
+            ));
+            slot.2.push(hit.triangle);
+            if d < -laws.tangent_cos {
+                slot.0 = true;
+                slot.3 += hit.true_normal;
+            } else if d > laws.tangent_cos {
+                slot.1 = true;
+                slot.4 += hit.true_normal;
+            }
+        }
+
+        let mut toggles: Vec<(PrimitiveKey, Toggle, Vec<u32>, Vec3)> = Vec::new();
+        for (key, (has_entry, has_exit, triangles, entry_sum, exit_sum)) in per_primitive {
+            let toggle = match (has_entry, has_exit) {
+                (true, false) => Toggle::Enter,
+                (false, true) => Toggle::Exit,
+                _ => Toggle::Touch,
+            };
+            let normal = match toggle {
+                Toggle::Enter => entry_sum,
+                Toggle::Exit => exit_sum,
+                Toggle::Touch => Vec3::ZERO,
+            };
+            toggles.push((key, toggle, triangles, normal));
+        }
+
+        // The whole batch is applied atomically: read the field, apply every exit AND entry, read it
+        // again, emit at most one transition. Entity or triangle order cannot influence the result.
+        let before = field.max_factor(volumes)?;
+        let mut entry_normal = Vec3::ZERO;
+        let mut exit_normal = Vec3::ZERO;
+        let mut any_entry = false;
+        let mut any_exit = false;
+        // The cluster's own position: the FIRST face reached, exactly representable and independent
+        // of how many triangles happen to sit on it.
+        let t = anchor;
+
+        for (key, toggle, triangles, normal) in toggles {
+            match toggle {
+                Toggle::Enter => {
+                    if field.open.contains_key(&key) {
+                        return Err(WalkError::UnexpectedEntry {
+                            sample,
+                            key,
+                            t,
+                            triangles,
+                        });
+                    }
+                    volumes.factor(key.volume)?;
+                    field.open.insert(key, t);
+                    *field.per_entity.entry(key.volume).or_insert(0) += 1;
+                    entry_normal += normal;
+                    any_entry = true;
+                }
+                Toggle::Exit => {
+                    let Some(open_at) = field.open.remove(&key) else {
+                        return Err(WalkError::UnexpectedExit {
+                            sample,
+                            key,
+                            t,
+                            triangles,
+                        });
+                    };
+                    if let Some(count) = field.per_entity.get_mut(&key.volume) {
+                        *count -= 1;
+                    }
+                    intervals.push((key, open_at, t));
+                    exit_normal += normal;
+                    any_exit = true;
+                }
+                Toggle::Touch => {}
+            }
+        }
+
+        let after = field.max_factor(volumes)?;
+        if after.to_bits() != before.to_bits() {
+            transitions.push(Transition {
+                t,
+                before,
+                after,
+                entry_normal: any_entry.then_some(entry_normal),
+                exit_normal: any_exit.then_some(exit_normal),
+            });
+        }
+    }
+
+    if !field.open.is_empty() {
+        return Err(WalkError::IncompleteCorridor {
+            sample,
+            open: field.open.keys().copied().collect(),
+            length: corridor.length,
+        });
+    }
+
+    // Canonical spans. Cut ONLY at factor changes, so equal-factor abutment and one thick plate
+    // produce the identical span list and therefore the identical cost bits.
+    let mut spans: Vec<Span> = Vec::new();
+    let mut cursor = 0.0f32;
+    let mut factor = if transitions.is_empty() {
+        // No steps at all: either empty air, or the corridor lies wholly inside declared presence.
+        field_start_factor(corridor, volumes)?
+    } else {
+        transitions[0].before
+    };
+    for transition in &transitions {
+        if transition.t > cursor {
+            spans.push(Span {
+                start: cursor,
+                end: transition.t,
+                factor,
+            });
+            cursor = transition.t;
+        }
+        factor = transition.after;
+    }
+    if corridor.length > cursor {
+        spans.push(Span {
+            start: cursor,
+            end: corridor.length,
+            factor,
+        });
+    }
+
+    let mut cost_acc = 0.0f64;
+    for span in &spans {
+        if span.factor > 0.0 {
+            cost_acc += span.cost();
+        }
+    }
+    let cost = cost_acc as f32;
+
+    // Runs: maximal stretches of factor > 0, as index ranges into `spans`.
+    let mut raw_runs: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (index, span) in spans.iter().enumerate() {
+        if span.factor > 0.0 {
+            open.get_or_insert(index);
+        } else if let Some(start) = open.take() {
+            raw_runs.push((start, index));
+        }
+    }
+    if let Some(start) = open.take() {
+        raw_runs.push((start, spans.len()));
+    }
+
+    // Boundary normals, looked up by the transition that opens/closes each run.
+    let normal_at = |t: f32, entry: bool| -> Vec3 {
+        transitions
+            .iter()
+            .find(|transition| transition.t == t)
+            .and_then(|transition| {
+                if entry {
+                    transition.entry_normal
+                } else {
+                    transition.exit_normal
+                }
+            })
+            .map(unit_or_zero)
+            // A run that opens at the corridor origin (declared initial presence) has no entry face
+            // in this corridor; the incoming axis is the honest stand-in — the same fallback the
+            // serial resolver uses for a degenerate normal.
+            .unwrap_or(if entry { -corridor.axis } else { corridor.axis })
+    };
+
+    let runs = weld_runs(corridor, &spans, &raw_runs, &intervals, &normal_at, laws);
+    let events = boundary_events(corridor, &runs);
+    let presence = entity_presence(&intervals, volumes)?;
+
+    Ok(RayWalk {
+        spans,
+        runs,
+        cost,
+        presence,
+        events,
+    })
+}
+
+/// The union factor at `t = 0`, from declared initial presence alone.
+fn field_start_factor(corridor: &RayCorridor, volumes: &VolumeTable) -> Result<f32, WalkError> {
+    let mut max = 0.0f32;
+    for key in &corridor.initial_presence {
+        max = max.max(volumes.factor(key.volume)?);
+    }
+    Ok(max)
+}
+
+fn unit_or_zero(v: Vec3) -> Vec3 {
+    let len = v.length();
+    if len > 1.0e-6 { v / len } else { Vec3::ZERO }
+}
+
+/// ε-weld the raw runs (§13.4) and build each welded run's material segments.
+fn weld_runs(
+    corridor: &RayCorridor,
+    spans: &[Span],
+    raw_runs: &[(usize, usize)],
+    intervals: &[(PrimitiveKey, f32, f32)],
+    normal_at: &dyn Fn(f32, bool) -> Vec3,
+    laws: &WalkLaws,
+) -> Vec<WeldedRun> {
+    let mut welded: Vec<WeldedRun> = Vec::new();
+    let mut group_start = 0usize;
+    let mut gap_budget = 0.0f32;
+
+    let flush = |from: usize, to: usize| {
+        let start = spans[raw_runs[from].0].start;
+        let end = spans[raw_runs[to].1 - 1].end;
+        let mut segments: Vec<MaterialSegment> = Vec::new();
+        let mut cost_acc = 0.0f64;
+        for run in &raw_runs[from..=to] {
+            for span in &spans[run.0..run.1] {
+                cost_acc += span.cost();
+                match segments.last_mut() {
+                    // Coalesce across a welded void so an equal-factor sandwich reads as ONE
+                    // stretch — that is what makes the welded exit's spall budget the SUMMED cost
+                    // (§13.4) without any special case.
+                    Some(last) if last.factor.to_bits() == span.factor.to_bits() => {
+                        last.end = span.end;
+                        last.material += span.end - span.start;
+                        last.cost = (last.cost as f64 + span.cost()) as f32;
+                    }
+                    _ => segments.push(MaterialSegment {
+                        start: span.start,
+                        end: span.end,
+                        factor: span.factor,
+                        material: span.end - span.start,
+                        cost: span.cost() as f32,
+                    }),
+                }
+            }
+        }
+        let mut primitives: Vec<PrimitiveKey> = intervals
+            .iter()
+            .filter(|(_, open, close)| *close > start && *open < end)
+            .map(|(key, _, _)| *key)
+            .collect();
+        primitives.sort();
+        primitives.dedup();
+        WeldedRun {
+            start,
+            end,
+            cost: cost_acc as f32,
+            entry_normal: normal_at(start, true),
+            exit_normal: normal_at(end, false),
+            segments,
+            joints: (to - from) as u32,
+            primitives,
+        }
+    };
+
+    for index in 0..raw_runs.len() {
+        if index + 1 == raw_runs.len() {
+            welded.push(flush(group_start, index));
+            break;
+        }
+        let this_end = spans[raw_runs[index].1 - 1].end;
+        let next_start = spans[raw_runs[index + 1].0].start;
+        let gap_along = next_start - this_end;
+        let n_exit = normal_at(this_end, false);
+        let n_entry = normal_at(next_start, true);
+
+        // Perpendicular, not along the ray (§13.4) — else grazing incidence un-welds exactly when it
+        // matters most. Both faces are consulted and the LARGER projection wins: for the parallel
+        // plates the rule is written for they agree, and where they disagree the conservative read
+        // welds less.
+        let projection = corridor
+            .axis
+            .dot(n_exit)
+            .abs()
+            .max(corridor.axis.dot(n_entry).abs());
+        let gap_perp = gap_along * projection;
+        let opposing = n_exit.dot(n_entry) <= -laws.weld_face_cos;
+        let weld = opposing
+            && gap_along <= laws.weld_max_lookahead
+            && gap_perp <= laws.weld_perp
+            && gap_budget + gap_perp <= laws.weld_run_gap_budget;
+
+        if weld {
+            gap_budget += gap_perp;
+        } else {
+            welded.push(flush(group_start, index));
+            group_start = index + 1;
+            gap_budget = 0.0;
+        }
+    }
+
+    welded
+}
+
+/// Turn each welded run's material segments into the ordered field transitions the consequence step
+/// consumes. Spall fires at every DOWNWARD step (§13.2's field law), including the exit.
+///
+/// FLAGGED RULING (§13 spec conflict, conservative reading): §13.2 says spall fires at every
+/// downward factor step; §13.4 says a welded run has "one exit, spall once". They disagree for a
+/// welded `RHA | 0.4 mm air | Cast` joint. Implemented: welding removes ONLY the air region's
+/// exit/entry pair, and the direct material step it exposes still obeys the field law. Equal-factor
+/// joints then emit nothing at all, so the common case still reads as "one exit"; a genuine
+/// downward step inside a weld throws fragments that the fragment march absorbs in millimetres
+/// (§13.2's own self-correcting note). "Spall once per welded run" is dropped — for Yan.
+fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEvent> {
+    let mut events = Vec::new();
+    for (index, run) in runs.iter().enumerate() {
+        let at = |t: f32| corridor.origin + corridor.axis * t;
+        let Some(first) = run.segments.first() else {
+            continue;
+        };
+        events.push(BoundaryEvent {
+            kind: BoundaryKind::Entrance,
+            t: run.start,
+            position: at(run.start),
+            normal: run.entry_normal,
+            factor_before: 0.0,
+            factor_after: first.factor,
+            spall_budget: 0.0,
+            welded: false,
+            run: index,
+        });
+        for pair in run.segments.windows(2) {
+            let (before, after) = (pair[0], pair[1]);
+            let downward = after.factor < before.factor;
+            events.push(BoundaryEvent {
+                kind: BoundaryKind::Step,
+                t: before.end,
+                position: at(before.end),
+                normal: corridor.axis,
+                factor_before: before.factor,
+                factor_after: after.factor,
+                spall_budget: if downward { before.cost } else { 0.0 },
+                welded: after.start != before.end,
+                run: index,
+            });
+        }
+        let last = run.segments[run.segments.len() - 1];
+        events.push(BoundaryEvent {
+            kind: BoundaryKind::Exit,
+            t: run.end,
+            position: at(run.end),
+            normal: run.exit_normal,
+            factor_before: last.factor,
+            factor_after: 0.0,
+            spall_budget: last.cost,
+            welded: false,
+            run: index,
+        });
+    }
+    events
+}
+
+/// Union each entity's primitive intervals, then charge its own chord at its own factor (§13.2's
+/// damage law: no ownership, no priority, no argmax).
+fn entity_presence(
+    intervals: &[(PrimitiveKey, f32, f32)],
+    volumes: &VolumeTable,
+) -> Result<Vec<EntityPresence>, WalkError> {
+    let mut by_entity: BTreeMap<Entity, Vec<(f32, f32)>> = BTreeMap::new();
+    for (key, open, close) in intervals {
+        by_entity
+            .entry(key.volume)
+            .or_default()
+            .push((*open, *close));
+    }
+    let mut out = Vec::new();
+    for (entity, mut spans) in by_entity {
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        let mut merged: Vec<(f32, f32)> = Vec::new();
+        for span in spans {
+            match merged.last_mut() {
+                Some(last) if span.0 <= last.1 => last.1 = last.1.max(span.1),
+                _ => merged.push(span),
+            }
+        }
+        let factor = volumes.factor(entity)?;
+        let chord: f64 = merged.iter().map(|(a, b)| *b as f64 - *a as f64).sum();
+        out.push(EntityPresence {
+            entity,
+            factor,
+            chord: chord as f32,
+            cost: (chord * factor as f64) as f32,
+            spans: merged,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage 2 — the disc (§13.5)
+// ---------------------------------------------------------------------------------------------
+
+/// The orthonormal basis the sample ring is laid out in.
+///
+/// It is an INPUT to the core, never reconstructed here. A finite ring is sensitive to rotation
+/// about the axis, and every "cross with world Y, else world X" rule has a discontinuous branch: a
+/// shell whose direction crosses it would have its sample pattern snap to a new phase mid-flight,
+/// and normalization/ricochet would re-roll the ring at every contact. Slice 2 anchors the basis at
+/// spawn (from the muzzle) and parallel-transports it, storing it in the shell's sim bundle — it
+/// affects collision results, so it belongs with the spawn-time invariants.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiscFrame {
+    pub u: Vec3,
+    pub v: Vec3,
+}
+
+impl DiscFrame {
+    /// Build the SPAWN basis from an explicit reference direction (the muzzle's up, in slice 2).
+    /// The caller owns the choice, so no world-axis branch can hide inside the core.
+    pub fn from_axis_and_reference(axis: Vec3, reference: Vec3) -> Option<Self> {
+        let axis = axis.normalize_or_zero();
+        let u = reference - axis * axis.dot(reference);
+        let len = u.length();
+        if axis == Vec3::ZERO || len < 1.0e-4 {
+            return None;
+        }
+        let u = u / len;
+        Some(Self {
+            u,
+            v: axis.cross(u),
+        })
+    }
+
+    /// Carry the basis through a direction change by the MINIMAL rotation taking `from` to `to`
+    /// (rotation-minimizing transport). Roll is therefore never re-rolled by a bend or a bounce.
+    pub fn transport(&self, from: Vec3, to: Vec3) -> Self {
+        let rotation = Quat::from_rotation_arc(from.normalize_or_zero(), to.normalize_or_zero());
+        Self {
+            u: rotation * self.u,
+            v: rotation * self.v,
+        }
+    }
+}
+
+/// The disc's sample offsets: the axis, then a ring of `ring` samples at `radius`.
+///
+/// This is a deterministic sample MEAN, not an equal-area quadrature — so `η` below is sampled
+/// coverage, not exact geometric area (§13.5's own note: k is the resolution dial).
+pub fn disc_offsets(frame: &DiscFrame, radius: f32, ring: usize) -> Vec<Vec3> {
+    let mut out = Vec::with_capacity(ring + 1);
+    out.push(Vec3::ZERO);
+    for index in 0..ring {
+        let angle = std::f32::consts::TAU * (index as f32) / (ring as f32);
+        out.push((frame.u * angle.cos() + frame.v * angle.sin()) * radius);
+    }
+    out
+}
+
+/// DERIVED from §13.5's `k ≈ 8–16`: the axis plus a twelve-sample ring.
+pub const DEFAULT_RING: usize = 12;
+
+/// One sample ray of a disc corridor.
+#[derive(Clone, Debug, Default)]
+pub struct SampleCorridor {
+    pub offset: Vec3,
+    pub initial_presence: Vec<PrimitiveKey>,
+    pub hits: Vec<FaceHit>,
+}
+
+/// The caliber-wide probe: k parallel sample corridors.
+#[derive(Clone, Debug)]
+pub struct DiscCorridor {
+    pub origin: Vec3,
+    pub axis: Vec3,
+    pub length: f32,
+    pub radius: f32,
+    pub frame: DiscFrame,
+    pub samples: Vec<SampleCorridor>,
+}
+
+/// A downward field step aggregated over the disc — one spall source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiscSpall {
+    pub t: f32,
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub from_factor: f32,
+    pub to_factor: f32,
+    /// §5's body term, already η-weighted: the contributing samples' budgets divided by k.
+    pub budget: f32,
+    /// The fraction of the disc that saw THIS step — entrance, internal-step and exit coverage are
+    /// different subsets and are not interchangeable (they describe different faces).
+    pub coverage: f32,
+}
+
+/// The disc-mean cumulative cost as a function of longitudinal progress.
+///
+/// Kept because embedding cannot use the serial resolver's uniform `span × cap/cost`: with several
+/// factors along the corridor the cost is not linear in progress, so the embed point is the
+/// INVERSE of this prefix integral, and per-entity transit damage is clipped at the same progress
+/// rather than scaled proportionally.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CostProfile {
+    pub ts: Vec<f32>,
+    pub cumulative: Vec<f64>,
+}
+
+impl CostProfile {
+    pub fn total(&self) -> f64 {
+        self.cumulative.last().copied().unwrap_or(0.0)
+    }
+
+    /// The progress `t` at which the accumulated cost first reaches `budget`, or `None` when the
+    /// whole profile costs less than that (i.e. the round perforates).
+    pub fn invert(&self, budget: f64) -> Option<f32> {
+        if budget >= self.total() {
+            return None;
+        }
+        for index in 1..self.ts.len() {
+            if self.cumulative[index] > budget {
+                let slice = self.cumulative[index] - self.cumulative[index - 1];
+                if slice <= 0.0 {
+                    return Some(self.ts[index - 1]);
+                }
+                let share = (budget - self.cumulative[index - 1]) / slice;
+                let a = self.ts[index - 1] as f64;
+                let b = self.ts[index] as f64;
+                return Some((a + (b - a) * share) as f32);
+            }
+        }
+        self.ts.last().copied()
+    }
+
+    /// Scale the whole profile — how overmatch charges the perpendicular projection instead of the
+    /// oblique chord without breaking the inversion (§4: overmatch cancels the slope cost).
+    fn scaled(&self, factor: f64) -> Self {
+        Self {
+            ts: self.ts.clone(),
+            cumulative: self.cumulative.iter().map(|c| c * factor).collect(),
+        }
+    }
+}
+
+/// One entity's share of a disc crossing — the damage deposit AND the material slice-2 needs to
+/// decide impulse ownership.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityShare {
+    pub entity: Entity,
+    pub factor: f32,
+    /// Disc-mean chord (m): the entity's covered chords summed over samples, divided by k.
+    pub chord: f32,
+    /// Disc-mean cost (reference-mm) — `chord × factor`, §13.2's damage law.
+    pub cost: f32,
+    /// Fraction of the disc that met this entity at all.
+    pub coverage: f32,
+    /// Per-sample presence spans, kept only to clip at an embed. Private detail of the plan.
+    spans: Vec<(f32, f32)>,
+}
+
+/// One crossing of the world by the disc: the cluster of sample runs that belong to the same
+/// physical surface (§13.5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscEvent {
+    pub start: f32,
+    pub end: f32,
+    /// Area-mean entry normal over covered samples. Normals integrate (§13.5) — this is what
+    /// repairs the point model's degenerate normal at an edge or on curved cast.
+    pub entry_normal: Vec3,
+    pub entry_position: Vec3,
+    pub exit_normal: Vec3,
+    pub exit_position: Vec3,
+    /// The ENGAGEMENT fraction: covered samples / k.
+    pub coverage: f32,
+    pub exit_coverage: f32,
+    /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
+    pub cost: f32,
+    pub profile: CostProfile,
+    pub spall: Vec<DiscSpall>,
+    pub shares: Vec<EntityShare>,
+}
+
+/// Every crossing the disc corridor met, in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DiscWalk {
+    pub axis: Vec3,
+    pub origin: Vec3,
+    pub frame: DiscFrame,
+    pub radius: f32,
+    pub samples: usize,
+    pub events: Vec<DiscEvent>,
+}
+
+/// Walk every sample and associate their runs into crossing events.
+pub fn walk_disc(
+    corridor: &DiscCorridor,
+    volumes: &VolumeTable,
+    laws: &WalkLaws,
+) -> Result<DiscWalk, WalkError> {
+    let k = corridor.samples.len();
+    if k == 0 {
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "a disc corridor needs at least the axis sample",
+        });
+    }
+
+    let mut walks: Vec<RayWalk> = Vec::with_capacity(k);
+    for (index, sample) in corridor.samples.iter().enumerate() {
+        walks.push(walk_ray(
+            index,
+            &RayCorridor {
+                origin: corridor.origin + sample.offset,
+                axis: corridor.axis,
+                length: corridor.length,
+                initial_presence: sample.initial_presence.clone(),
+                hits: sample.hits.clone(),
+            },
+            volumes,
+            laws,
+        )?);
+    }
+
+    // Association: union-find over (sample, run). Longitudinal overlap alone is NOT the relation
+    // (see `WalkLaws::event_plane_tolerance`); two runs join when they share a primitive, or when
+    // their entrance patches lie on one surface.
+    let mut nodes: Vec<(usize, usize)> = Vec::new();
+    for (sample, walk) in walks.iter().enumerate() {
+        for run in 0..walk.runs.len() {
+            nodes.push((sample, run));
+        }
+    }
+    let mut parent: Vec<usize> = (0..nodes.len()).collect();
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    for a in 0..nodes.len() {
+        for b in (a + 1)..nodes.len() {
+            let (sa, ra) = nodes[a];
+            let (sb, rb) = nodes[b];
+            if sa == sb {
+                continue;
+            }
+            let run_a = &walks[sa].runs[ra];
+            let run_b = &walks[sb].runs[rb];
+            let shares_primitive = run_a
+                .primitives
+                .iter()
+                .any(|key| run_b.primitives.binary_search(key).is_ok());
+            let compatible = shares_primitive || {
+                let na = run_a.entry_normal;
+                let nb = run_b.entry_normal;
+                let pa =
+                    corridor.origin + corridor.samples[sa].offset + corridor.axis * run_a.start;
+                let pb =
+                    corridor.origin + corridor.samples[sb].offset + corridor.axis * run_b.start;
+                let mean = unit_or_zero(na + nb);
+                na.dot(nb) >= laws.event_plane_cos
+                    && mean != Vec3::ZERO
+                    && (pa - pb).dot(mean).abs() <= laws.event_plane_tolerance
+            };
+            if compatible {
+                let (ra_root, rb_root) = (find(&mut parent, a), find(&mut parent, b));
+                if ra_root != rb_root {
+                    parent[ra_root.max(rb_root)] = ra_root.min(rb_root);
+                }
+            }
+        }
+    }
+
+    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for node in 0..nodes.len() {
+        let root = find(&mut parent, node);
+        clusters.entry(root).or_default().push(node);
+    }
+
+    let mut events: Vec<DiscEvent> = Vec::new();
+    for members in clusters.values() {
+        events.push(build_event(corridor, &walks, &nodes, members, k, laws)?);
+    }
+    events.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.end.total_cmp(&b.end)));
+
+    Ok(DiscWalk {
+        axis: corridor.axis,
+        origin: corridor.origin,
+        frame: corridor.frame,
+        radius: corridor.radius,
+        samples: k,
+        events,
+    })
+}
+
+fn build_event(
+    corridor: &DiscCorridor,
+    walks: &[RayWalk],
+    nodes: &[(usize, usize)],
+    members: &[usize],
+    k: usize,
+    _laws: &WalkLaws,
+) -> Result<DiscEvent, WalkError> {
+    let kf = k as f64;
+    let mut by_sample: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &node in members {
+        let (sample, run) = nodes[node];
+        by_sample.entry(sample).or_default().push(run);
+    }
+    for runs in by_sample.values_mut() {
+        runs.sort_unstable();
+    }
+
+    let mut start = f32::INFINITY;
+    let mut end = f32::NEG_INFINITY;
+    let mut entry_sum = Vec3::ZERO;
+    let mut entry_position = Vec3::ZERO;
+    let mut exit_sum = Vec3::ZERO;
+    let mut exit_position = Vec3::ZERO;
+    for (&sample, runs) in &by_sample {
+        let first = &walks[sample].runs[runs[0]];
+        let last = &walks[sample].runs[runs[runs.len() - 1]];
+        start = start.min(first.start);
+        end = end.max(last.end);
+        entry_sum += first.entry_normal;
+        exit_sum += last.exit_normal;
+        let base = corridor.origin + corridor.samples[sample].offset;
+        entry_position += base + corridor.axis * first.start;
+        exit_position += base + corridor.axis * last.end;
+    }
+    let covered = by_sample.len();
+    let coverage = (covered as f64 / kf) as f32;
+
+    // A single covered sample IS the mean: normalizing an already-unit vector perturbs its low bits
+    // and would break the r→0, k=1 fragment degeneracy (§13.5: a fragment is a shell with k=1, and
+    // it must reduce EXACTLY to the single-ray walk, not approximately).
+    let entry_normal = if covered == 1 {
+        entry_sum
+    } else {
+        let normal = unit_or_zero(entry_sum);
+        if normal == Vec3::ZERO {
+            return Err(WalkError::DegenerateEntryNormal { coverage });
+        }
+        normal
+    };
+    let exit_normal = if covered == 1 {
+        exit_sum
+    } else {
+        unit_or_zero(exit_sum)
+    };
+    let entry_position = entry_position / covered as f32;
+    let exit_position = exit_position / covered as f32;
+
+    // Disc-mean cumulative cost. Breakpoints are the union of every contributing sample's canonical
+    // span boundaries; between two of them every sample's factor is constant, so the mean slope is
+    // exact and the profile is piecewise linear.
+    let mut breaks: Vec<f32> = vec![start, end];
+    for (&sample, runs) in &by_sample {
+        for &run in runs {
+            let extent = &walks[sample].runs[run];
+            for span in &walks[sample].spans {
+                if span.end > extent.start && span.start < extent.end {
+                    breaks.push(span.start);
+                    breaks.push(span.end);
+                }
+            }
+        }
+    }
+    breaks.sort_by(f32::total_cmp);
+    breaks.dedup();
+    breaks.retain(|t| *t >= start && *t <= end);
+
+    let mut cumulative: Vec<f64> = Vec::with_capacity(breaks.len());
+    cumulative.push(0.0);
+    for window in breaks.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mid = 0.5 * (a as f64 + b as f64);
+        let mut slope = 0.0f64;
+        for (&sample, runs) in &by_sample {
+            // The CANONICAL spans carry the field, welded voids included at factor 0 — reading the
+            // material segments instead would smear steel across a deleted gap, and welding deletes
+            // faces, never material (§13.4).
+            let inside = runs.iter().any(|&run| {
+                let extent = &walks[sample].runs[run];
+                (extent.start as f64) <= mid && mid < (extent.end as f64)
+            });
+            if !inside {
+                continue;
+            }
+            if let Some(span) = walks[sample]
+                .spans
+                .iter()
+                .find(|span| (span.start as f64) <= mid && mid < (span.end as f64))
+            {
+                slope += span.factor as f64;
+            }
+        }
+        let last = *cumulative.last().unwrap();
+        cumulative.push(last + (b as f64 - a as f64) * slope / kf);
+    }
+    let profile = CostProfile {
+        ts: breaks,
+        cumulative,
+    };
+    let cost = profile.total() as f32;
+
+    // Per-entity shares, unioned per sample then averaged over the disc.
+    let mut shares: BTreeMap<Entity, (f32, Vec<(f32, f32)>, BTreeSet<usize>)> = BTreeMap::new();
+    for (&sample, runs) in &by_sample {
+        let (lo, hi) = (
+            walks[sample].runs[runs[0]].start,
+            walks[sample].runs[runs[runs.len() - 1]].end,
+        );
+        for presence in &walks[sample].presence {
+            for span in &presence.spans {
+                let clipped = (span.0.max(lo), span.1.min(hi));
+                if clipped.1 > clipped.0 {
+                    let slot = shares.entry(presence.entity).or_insert((
+                        presence.factor,
+                        Vec::new(),
+                        BTreeSet::new(),
+                    ));
+                    slot.1.push(clipped);
+                    slot.2.insert(sample);
+                }
+            }
+        }
+    }
+    let shares = shares
+        .into_iter()
+        .map(|(entity, (factor, spans, samples))| {
+            let chord: f64 = spans
+                .iter()
+                .map(|(a, b)| *b as f64 - *a as f64)
+                .sum::<f64>()
+                / kf;
+            EntityShare {
+                entity,
+                factor,
+                chord: chord as f32,
+                cost: (chord * factor as f64) as f32,
+                coverage: (samples.len() as f64 / kf) as f32,
+                spans,
+            }
+        })
+        .collect();
+
+    // Spall: cluster each sample's downward steps by their factor pair and their ordinal among
+    // same-pair steps in that sample. Longitudinal position cannot be the key — on an oblique slab
+    // the ring's exits are spread by `r·tan(incidence)` yet they are all one exit face.
+    let mut spall_groups: BTreeMap<(u32, u32, usize), (Vec<f32>, Vec3, Vec3, f64, usize)> =
+        BTreeMap::new();
+    let mut exit_covered = 0usize;
+    for (&sample, runs) in &by_sample {
+        let mut ordinals: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        let mut saw_exit = false;
+        for &run in runs {
+            for event in walks[sample].events.iter().filter(|e| e.run == run) {
+                if event.factor_after >= event.factor_before {
+                    continue;
+                }
+                if event.kind == BoundaryKind::Exit {
+                    saw_exit = true;
+                }
+                let pair = (event.factor_before.to_bits(), event.factor_after.to_bits());
+                let ordinal = ordinals.entry(pair).or_insert(0);
+                let slot = spall_groups.entry((pair.0, pair.1, *ordinal)).or_insert((
+                    Vec::new(),
+                    Vec3::ZERO,
+                    Vec3::ZERO,
+                    0.0,
+                    0,
+                ));
+                slot.0.push(event.t);
+                slot.1 += event.position;
+                slot.2 += event.normal;
+                slot.3 += event.spall_budget as f64;
+                slot.4 += 1;
+                *ordinal += 1;
+            }
+        }
+        if saw_exit {
+            exit_covered += 1;
+        }
+    }
+    let mut spall: Vec<DiscSpall> = spall_groups
+        .into_iter()
+        .map(|((from, to, _), (ts, position, normal, budget, count))| {
+            let n = count as f32;
+            DiscSpall {
+                t: ts.iter().map(|t| *t as f64).sum::<f64>() as f32 / n,
+                position: position / n,
+                normal: if count == 1 {
+                    normal
+                } else {
+                    unit_or_zero(normal)
+                },
+                from_factor: f32::from_bits(from),
+                to_factor: f32::from_bits(to),
+                budget: (budget / kf) as f32,
+                coverage: (count as f64 / kf) as f32,
+            }
+        })
+        .collect();
+    spall.sort_by(|a, b| a.t.total_cmp(&b.t));
+
+    Ok(DiscEvent {
+        start,
+        end,
+        entry_normal,
+        entry_position,
+        exit_normal,
+        exit_position,
+        coverage,
+        exit_coverage: (exit_covered as f64 / kf) as f32,
+        cost,
+        profile,
+        spall,
+        shares,
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stage 3 — the staged resolution (§13.3 surface laws, §5 spall, §3 capability)
+// ---------------------------------------------------------------------------------------------
+
+/// The striking round, reduced to what the laws read.
+#[derive(Clone, Copy, Debug)]
+pub struct Shot {
+    pub caliber: f32,
+    /// Reference-mm this round can defeat right now (`super::capability`). The core spends it and
+    /// reports what it spent; inverting back to a residual speed stays with the caller, which owns
+    /// the DeMarre constants.
+    pub capability: f32,
+}
+
+/// What the entrance disc decided, and what the surface laws read to decide it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EntranceRead {
+    pub position: Vec3,
+    /// `n̄`, the area-mean entry normal.
+    pub normal: Vec3,
+    pub coverage: f32,
+    pub incidence: f32,
+    /// Steel-equivalent thickness ALONG THE NORMAL (m) of the material actually engaged.
+    ///
+    /// §13.3's amendment: overmatch and ricochet consult `thickness × factor`, not geometry, or an
+    /// exposed forearm reads 80 mm "thick" and past 70° an arm ricochets an 88. Measured over the
+    /// COVERED samples (cost ÷ η), not the whole disc — FLAGGED: a partial engagement must not fake
+    /// a thin plate and suppress the ricochet that makes a graze a graze (§13.5).
+    pub steel_equivalent: f32,
+    pub overmatched: bool,
+}
+
+/// Where [`begin`] leaves the shot.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Begin {
+    /// The disc met no material.
+    Miss,
+    /// Too oblique, not overmatched: deflect off `n̄`, no entry, no spall (§4).
+    Ricochet {
+        entrance: EntranceRead,
+        direction: Vec3,
+        /// Speed retained. FULL bleed at η = 1, none at η → 0 — §13.5's "a graze IS a partial
+        /// ricochet", continuous, no cliff, no lottery.
+        ///
+        /// FLAGGED: only the BLEED (and the impulse) scale with η in §13.5; the deflected DIRECTION
+        /// is the full specular reflection at any coverage, so an η ≈ 0.05 edge skim currently turns
+        /// the round as hard as a square bounce. An η-scaled deflection ANGLE is the obvious
+        /// missing piece — for Yan, not invented here.
+        speed_scale: f32,
+    },
+    /// It bit in. The caller must now collect the transit corridor along `request.axis`.
+    Transit(TransitRequest),
+}
+
+/// The query the core needs answered to finish the crossing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TransitRequest {
+    pub entrance: EntranceRead,
+    /// The NORMALIZED (bent) travel axis — the transit happens along this, not along the incoming
+    /// direction the entrance was sampled on.
+    pub axis: Vec3,
+    pub origin: Vec3,
+    /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
+    pub frame: DiscFrame,
+    pub radius: f32,
+}
+
+/// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
+pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
+    let Some(event) = entrance.events.first() else {
+        return Begin::Miss;
+    };
+    if event.coverage <= 0.0 || event.entry_normal == Vec3::ZERO {
+        return Begin::Miss;
+    }
+    let normal = event.entry_normal;
+    let incidence = entrance.axis.angle_between(-normal);
+    // Covered-sample mean, then projected onto the normal: the thickness of the material that is
+    // actually there, along the direction "thickness" means.
+    let along_normal = entrance.axis.dot(normal).abs();
+    let steel_equivalent =
+        (event.cost / event.coverage.max(f32::MIN_POSITIVE)) / laws.rha_reference * along_normal;
+    let overmatched =
+        steel_equivalent > 0.0 && shot.caliber >= laws.overmatch_ratio * steel_equivalent;
+    let read = EntranceRead {
+        position: event.entry_position,
+        normal,
+        coverage: event.coverage,
+        incidence,
+        steel_equivalent,
+        overmatched,
+    };
+
+    let Ok(axis) = Dir3::new(entrance.axis) else {
+        return Begin::Miss;
+    };
+    let Ok(surface) = Dir3::new(normal) else {
+        return Begin::Miss;
+    };
+
+    if !overmatched && incidence > laws.ricochet_angle {
+        return Begin::Ricochet {
+            entrance: read,
+            direction: Vec3::from(super::reflect(axis, surface)),
+            speed_scale: 1.0 - event.coverage * (1.0 - laws.ricochet_bleed),
+        };
+    }
+
+    // Normalize: a modest bend toward the inward normal as it bites in. Overmatch does not bend it
+    // further — it cancels the SLOPE COST instead (charged in `finish`).
+    let bent = super::bend_toward(axis, -surface, laws.normalization * incidence);
+    Begin::Transit(TransitRequest {
+        entrance: read,
+        axis: Vec3::from(bent),
+        origin: event.entry_position,
+        frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
+        radius: entrance.radius,
+    })
+}
+
+/// How the crossing ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Outcome {
+    /// Defeated: buried where the prefix integral of the disc-mean cost reaches the capability.
+    Embedded { at: Vec3, t: f32 },
+    /// Punched through: the march resumes at the aggregate exit face.
+    Perforated {
+        exit: Vec3,
+        exit_normal: Vec3,
+        direction: Vec3,
+        t: f32,
+    },
+}
+
+/// One entity's deposit from this crossing — and the material share slice 2 needs to settle impulse
+/// ownership.
+///
+/// OPEN FORK, deliberately undecided here: a union event can involve overlapping volumes owned by
+/// several bodies. Applying the full `m·Δv` to each duplicates momentum; giving it to the max-factor
+/// entity reintroduces the ownership tie-break §13.2 abolished. The plan therefore reports every
+/// entity's cost share and coverage and lets the caller apply whatever rule is ratified.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityDeposit {
+    pub entity: Entity,
+    pub factor: f32,
+    pub chord: f32,
+    /// Reference-mm of ITS OWN material the round chewed — §6's transit damage, before the caller's
+    /// `TRANSIT_K`.
+    pub cost: f32,
+    pub coverage: f32,
+}
+
+/// Everything the crossing decided, as declarative facts for the caller to apply in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolutionPlan {
+    pub entrance: EntranceRead,
+    pub outcome: Outcome,
+    /// Reference-mm actually spent (the whole crossing when it perforates, the capability when it
+    /// embeds).
+    pub cost_spent: f32,
+    pub deposits: Vec<EntityDeposit>,
+    pub spall: Vec<DiscSpall>,
+}
+
+/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits).
+pub fn finish(
+    transit: &DiscWalk,
+    request: &TransitRequest,
+    shot: &Shot,
+    _laws: &WalkLaws,
+) -> Result<ResolutionPlan, WalkError> {
+    let Some(event) = transit.events.first() else {
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "the transit corridor met no material after the entrance decided to enter",
+        });
+    };
+
+    // Overmatch cannot be made to present its oblique line of sight to a round that dwarfs it, so it
+    // charges the perpendicular projection of the crossing instead of the full slope chord (§4).
+    let projection = if request.entrance.overmatched {
+        transit.axis.dot(request.entrance.normal).abs() as f64
+    } else {
+        1.0
+    };
+    let profile = event.profile.scaled(projection);
+    let total = profile.total();
+
+    let embed_t = profile.invert(shot.capability as f64);
+    let (outcome, cost_spent, cut) = match embed_t {
+        Some(t) => {
+            let at = transit.origin + transit.axis * t;
+            (
+                Outcome::Embedded { at, t },
+                shot.capability.min(total as f32),
+                t,
+            )
+        }
+        None => (
+            Outcome::Perforated {
+                exit: event.exit_position,
+                exit_normal: event.exit_normal,
+                direction: transit.axis,
+                t: event.end,
+            },
+            total as f32,
+            event.end,
+        ),
+    };
+
+    // Per-entity damage is clipped at the embed progress, never scaled: a round that stops in the
+    // first plate must deposit nothing in the crew behind it.
+    let deposits = event
+        .shares
+        .iter()
+        .map(|share| {
+            let chord: f64 = share
+                .spans
+                .iter()
+                .map(|(a, b)| (b.min(cut) as f64 - *a as f64).max(0.0))
+                .sum::<f64>()
+                / transit.samples as f64;
+            let covered = share
+                .spans
+                .iter()
+                .filter(|(a, _)| *a < cut)
+                .count()
+                .min(transit.samples);
+            EntityDeposit {
+                entity: share.entity,
+                factor: share.factor,
+                chord: chord as f32,
+                cost: (chord * share.factor as f64) as f32,
+                coverage: if covered == 0 { 0.0 } else { share.coverage },
+            }
+        })
+        .filter(|deposit| deposit.chord > 0.0)
+        .collect();
+
+    // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward
+    // steps it actually reached.
+    let spall = event
+        .spall
+        .iter()
+        .copied()
+        .filter(|mark| mark.t <= cut)
+        .collect();
+
+    Ok(ResolutionPlan {
+        entrance: request.entrance,
+        outcome,
+        cost_spent,
+        deposits,
+        spall,
+    })
+}
