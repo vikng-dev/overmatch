@@ -50,6 +50,11 @@ mod collect;
 #[cfg(any(feature = "dev_tools", test))]
 pub mod fuzz;
 
+/// Frozen end-to-end shots through the real march at the real Tiger — CHARACTERIZATION, not
+/// specification. A red golden here means the physics moved; see the module doc before re-pinning.
+#[cfg(test)]
+mod goldens;
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };
