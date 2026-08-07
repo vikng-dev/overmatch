@@ -5314,4 +5314,51 @@ mod march_tests {
         assert!(app.world().get::<Held>(shell).is_none(), "the hold cleared");
         assert_frame_spans_the_disc(&app, shell, "catch-up reseed");
     }
+
+    /// A CORRIDOR WHOLLY INSIDE ARMOUR IS NOT OPEN AIR.
+    ///
+    /// The convex narrow phase probes both ends with `solid: true`, and deep inside a solid both
+    /// answer zero while the backward boundary probe reaches no face. Reporting nothing is then the
+    /// obvious thing to do and the one thing that must not happen: an empty corridor is exactly what
+    /// open air looks like, so the walk finds no material, `begin` returns `Miss`, and the round
+    /// flies on through solid armour at zero cost with no `Impact` at all. Codex measured a shell
+    /// advancing a full tick inside a 100 m volume with nothing reported.
+    ///
+    /// Undeclared containment is now a `WalkError`, so the driver fails closed on it: the round
+    /// stops where it is, and there is a neutral armour read to see it by. Free penetration is the
+    /// one outcome worse than a stopped shell, because armour that silently is not there is
+    /// indistinguishable from armour that was never modelled.
+    #[test]
+    fn a_shell_inside_a_convex_volume_fails_closed_instead_of_flying_through() {
+        // A hundred metres of steel, and the shell starts in the middle of it. `world_with_plate`
+        // builds its plate as a CUBOID, which is the convex narrow phase.
+        let mut app = world_with_plate(Vec3::splat(100.0), Vec3::new(0.0, 2.0, 0.0));
+        app.init_resource::<TerminalLog>();
+        app.add_observer(capture_terminal);
+        let origin = Vec3::new(0.0, 2.0, 0.0);
+        let shell = spawn_headon_shell_at(&mut app, a_shot(), origin);
+        app.update();
+
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(
+            impacts.len(),
+            1,
+            "the round inside the block is reported, not flown through: {:?}",
+            impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+        );
+        assert!(matches!(impacts[0].surface, ImpactSurface::Armor));
+        assert!(
+            !impacts[0].penetrated,
+            "fail-closed is a neutral read: no perforation was resolved, so none is claimed",
+        );
+        assert!(
+            impacts[0].position.distance(origin) < 0.1,
+            "and it stops where it was, not a tick downrange: {:?}",
+            impacts[0].position,
+        );
+        assert!(
+            app.world().get::<Projectile>(shell).is_none(),
+            "a fail-closed round is consumed, not left marching",
+        );
+    }
 }

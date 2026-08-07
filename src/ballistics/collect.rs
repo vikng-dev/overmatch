@@ -128,7 +128,7 @@ pub(crate) fn collect(
             )?,
             _ => collect_convex(
                 collider, position.0, *rotation, corridor, node, primitive, seeded, out,
-            ),
+            )?,
         }
         if out.len() > MAX_FACES {
             return Err(WalkError::CorridorOverflow {
@@ -258,6 +258,26 @@ fn collect_trimesh(
 ///
 /// Normals are re-signed from the geometry (`entry opposes the ray, exit agrees`), which for a
 /// convex solid is exact and owes parry's normal convention nothing.
+///
+/// # Inside, undeclared, and unbounded is an ERROR
+///
+/// A corridor can lie wholly INSIDE a convex solid: both `solid: true` probes answer zero, the
+/// backward boundary probe reaches no face, and there is nothing honest to report. Reporting nothing
+/// is not honest either — an empty corridor is what open air looks like, so the walk finds no
+/// material, [`super::walk::begin`] returns `Miss`, and the round flies through a solid volume at
+/// zero cost with no `Impact` raised at all. Free penetration, silent, and indistinguishable from
+/// armour that was never modelled.
+///
+/// So it is a structured error. The seed contract is what carries containment legitimately: a sample
+/// that really is inside a volume arrives declared as such, read from a ray this module already
+/// walked. Undeclared containment means the caller lost track of where its samples are, and that is
+/// exactly the thing the walk refuses to infer its way past.
+///
+/// The trimesh phase cannot make this check — there is no cheap containment test on a mesh, and "no
+/// faces in reach" is the NORMAL reading of a corridor crossing the hollow interior of a hull. Its
+/// protection is the seed contract alone. Convex shapes are the sandbox slabs and carry no
+/// production armour, which is the reason to make this loud rather than permissive: nothing real
+/// depends on it staying quiet.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `collect`; the alternative is a struct used exactly once"
@@ -271,9 +291,9 @@ fn collect_convex(
     primitive: Entity,
     seeded: bool,
     out: &mut Vec<FaceHit>,
-) {
+) -> Result<(), WalkError> {
     let Ok(axis) = Dir3::new(corridor.axis) else {
-        return;
+        return Ok(());
     };
     // Both ends are probed with `solid: true`, and that is the whole trick.
     //
@@ -328,17 +348,26 @@ fn collect_convex(
         // The trimesh path needs none of this — its own kernel reports faces at negative `t`, and
         // `admit` places them.
         Some((distance, _)) if distance <= 0.0 => {
-            if !seeded
-                && let Some((behind, normal)) = collider.cast_ray(
+            if !seeded {
+                match collider.cast_ray(
                     position,
                     rotation,
                     corridor.origin,
                     -Vec3::from(axis),
                     BOUNDARY_PROBE,
                     false,
-                )
-            {
-                push(-behind, normal, true, 0);
+                ) {
+                    Some((behind, normal)) => push(-behind, normal, true, 0),
+                    // Inside, undeclared, and the entry face is nowhere near — see the note above.
+                    // Silence here is free penetration, so this is where it stops.
+                    None => {
+                        return Err(WalkError::CollectorFailed {
+                            volume: node,
+                            reason: "a sample begins inside a convex volume it was not seeded for, \
+                                     with no entry face within the boundary probe",
+                        });
+                    }
+                }
             }
         }
         Some((distance, normal)) => push(distance, normal, true, 0),
@@ -352,6 +381,7 @@ fn collect_convex(
         Some((distance, normal)) => push(corridor.length - distance, normal, false, 1),
         None => {}
     }
+    Ok(())
 }
 
 /// Whether a crossing at `t` belongs to this corridor, and where.
