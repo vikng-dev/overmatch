@@ -805,8 +805,8 @@ pub(crate) fn tiger_spec() -> crate::spec::TankSpec {
 #[cfg(test)]
 pub(crate) fn tiger_rig() -> RigGeom {
     let glb = crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH);
-    let geometry = crate::bake::extract_tank_geometry(&glb).expect("the Tiger glb extracts");
     let spec = tiger_spec();
+    let geometry = crate::bake::extract_tank_geometry(&glb, &spec).expect("the Tiger glb extracts");
     let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
     let blueprint = TankBlueprint {
         geometry: std::sync::Arc::new(geometry),

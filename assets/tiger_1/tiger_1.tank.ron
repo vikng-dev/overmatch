@@ -216,64 +216,75 @@ TankSpec(
         "Hull_MG_Yaw":     (role: Yaw,   max_speed: 45.0, accel: 90.0, travel: Limited(min: -30.0, max: 30.0),  requires: [BowGunner]),
         "Hull_MG_Pitch":   (role: Pitch, max_speed: 45.0, accel: 90.0, travel: Limited(min: -10.0, max: 20.0),  requires: [BowGunner]),
     },
+    // COMPONENTS — behaviour only (design §12, classifier precedent 2026-08-07).
+    //
+    // This map no longer decides WHICH nodes the shell marches through: membership is the MATERIAL,
+    // per primitive. A mesh is a ballistic volume iff it wears one of the substances in
+    // assets/materials/materials.ron (RHA / Cast / GunSteel / MildSteel / EngineBlock / Ammunition /
+    // Rubber / Flesh), linked in from assets/materials/materials.blend. Resistance comes from that
+    // one registry, keyed by the substance name — per-node `material_factor` is GONE, and with it
+    // the possibility of a plate and its own material disagreeing.
+    //
+    // So this map holds ONLY the nodes that are more than armour: an hp pool, and the consequence
+    // facets layered on it (crew / ammo / function). Every pure armour plate — the whole hull and
+    // turret, the mantlet, the MG bodies, the road wheels — is absent BY DESIGN. Both directions
+    // fail loud at bind: a key here that is not a ballistic volume is an error, and the
+    // material-implied lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo
+    // facet, EngineBlock with no entry).
     volumes: {
-        // --- Hull armour (steel; plate thickness is geometric, in the mesh) ---
-        "Hull_UFP_Ballistic":        (material_factor: 1000.0),
-        "Hull_LFP_Ballistic":        (material_factor: 1000.0),
-        "Hull_Rear_Ballistic":       (material_factor: 1000.0),
-        "Hull_Top_Ballistic":        (material_factor: 1000.0),
-        "Hull_Bottom_Ballistic":     (material_factor: 1000.0),
-        "Hull_Side_Upper_Ballistic": (material_factor: 1000.0),
-        "Hull_Side_Lower_Ballistic": (material_factor: 1000.0),
-        "Hull_Side_Track_Ballistic": (material_factor: 1000.0),
-        // --- Turret armour ---
-        "Turret_Front_Ballistic":    (material_factor: 1000.0),
-        "Turret_Side_Ballistic":     (material_factor: 1000.0),
-        "Turret_Top_Ballistic":      (material_factor: 1000.0),
-        "Turret_Bottom_Ballistic":   (material_factor: 1000.0),
-        "Turret_Mask_Ballistic":     (material_factor: 1000.0),
-        "Gun_Mantlet_Ballistic":             (material_factor: 1000.0),
-        "Gun_Mantlet_Sleeve_Ballistic":      (material_factor: 1000.0),
-        // --- Coax MG (pure armour for now; damageability/function deferred to the weapons work) ---
-        "Coax_MG_Body_Ballistic":    (material_factor:  300.0),
-        "Coax_MG_Barrel_Ballistic":  (material_factor: 1000.0),
-        // --- Roadwheels: the SAME node is the suspension station and its armour volume. The wheels
-        // are exported as one watertight mesh per station (no `_Visual`/`_Ballistic` split), so the
-        // key is the bare station name — `bake::captures_mesh` captures it under that name and
-        // `bake::roadwheel_side` classifies it as a station off the same node. ---
-        "Wheel_L_0":            (material_factor: 1000.0),
-        "Wheel_L_1":            (material_factor: 1000.0),
-        "Wheel_L_2":            (material_factor: 1000.0),
-        "Wheel_L_3":            (material_factor: 1000.0),
-        "Wheel_L_4":            (material_factor: 1000.0),
-        "Wheel_L_5":            (material_factor: 1000.0),
-        "Wheel_L_6":            (material_factor: 1000.0),
-        "Wheel_L_7":            (material_factor: 1000.0),
-        "Wheel_R_0":            (material_factor: 1000.0),
-        "Wheel_R_1":            (material_factor: 1000.0),
-        "Wheel_R_2":            (material_factor: 1000.0),
-        "Wheel_R_3":            (material_factor: 1000.0),
-        "Wheel_R_4":            (material_factor: 1000.0),
-        "Wheel_R_5":            (material_factor: 1000.0),
-        "Wheel_R_6":            (material_factor: 1000.0),
-        "Wheel_R_7":            (material_factor: 1000.0),
-        // --- Modules (damageable; HP = function/integrity, material = resistance, independent) ---
-        "Engine_Ballistic":         (material_factor:  600.0, hp: 10.0, function: Engine),
-        "Transmission_Ballistic":   (material_factor:  600.0, hp: 10.0, function: Transmission),
-        "Breech_Ballistic":         (material_factor:  800.0, hp: 8.0, function: Breech),
-        "Gun_Barrel_Ballistic":     (material_factor: 1000.0, hp: 8.0, function: GunBarrel),
-        // --- Crew
-        "Commander_Ballistic":        (material_factor:   30.0, hp: 3.0, crew: Commander),
-        "Gunner_Ballistic":           (material_factor:   30.0, hp: 3.0, crew: Gunner),
-        "Loader_Ballistic":           (material_factor:   30.0, hp: 3.0, crew: Loader),
-        "Driver_Ballistic":           (material_factor:   30.0, hp: 3.0, crew: Driver),
-        "BowGunner_Ballistic":        (material_factor:   30.0, hp: 3.0, crew: BowGunner),
+        // --- Modules (hp = integrity; the substance carries resistance, independently) ---
+        "Engine":           (hp: 10.0, function: Engine),
+        "Transmission":     (hp: 10.0, function: Transmission),
+        "Breech":           (hp:  8.0, function: Breech),
+        "Main_Gun_Barrel":  (hp:  8.0, function: GunBarrel),
+        // --- Crew ---
+        "Commander":        (hp: 3.0, crew: Commander),
+        "Gunner":           (hp: 3.0, crew: Gunner),
+        "Loader":           (hp: 3.0, crew: Loader),
+        "Driver":           (hp: 3.0, crew: Driver),
+        "BowGunner":        (hp: 3.0, crew: BowGunner),
         // --- Ammunition (ammo: true means cookoff when dead) ---
-        "Ammo_L_0_Ballistic":              (material_factor:  200.0, hp: 2.0, ammo: true),
-        "Ammo_L_1_Ballistic":              (material_factor:  200.0, hp: 2.0, ammo: true),
-        "Ammo_R_0_Ballistic":              (material_factor:  200.0, hp: 2.0, ammo: true),
-        "Ammo_R_1_Ballistic":              (material_factor:  200.0, hp: 2.0, ammo: true),
+        "Ammo_L_0":         (hp: 2.0, ammo: true),
+        "Ammo_L_1":         (hp: 2.0, ammo: true),
+        "Ammo_R_0":         (hp: 2.0, ammo: true),
+        "Ammo_R_1":         (hp: 2.0, ammo: true),
+        // --- Smoke launchers: damageable, deliberately INERT. They carry an hp pool so the round
+        // that shears one off is recorded, and no `function`, because nothing fires them yet. The
+        // facet is the seam the smoke-discharger work binds to; until then losing one costs the
+        // vehicle nothing. 2.0 hp = the ammo pool's value: a thin external fitting, not structure.
+        "Smoke_Launcher_0": (hp: 2.0),
+        "Smoke_Launcher_1": (hp: 2.0),
+        "Smoke_Launcher_2": (hp: 2.0),
+        "Smoke_Launcher_3": (hp: 2.0),
+        "Smoke_Launcher_4": (hp: 2.0),
+        "Smoke_Launcher_5": (hp: 2.0),
     },
+    // Collision proxies (convex hull, Vehicle layer) — DECLARED, replacing the `*_Collider` suffix
+    // scan. The suffix survives as a name because it reads well in Blender; nothing parses it.
+    colliders: ["Hull_Collider", "Turret_Collider"],
+    // Roadwheel stations — DECLARED, replacing the `Wheel_{L,R}_{n}` pattern match. The SAME node is
+    // the suspension station and its own armour volume: each wheel is one object holding five closed
+    // shells — two MildSteel bodies, two Rubber rims, one axle — so the wheel needs no volume
+    // declaration (its materials are the declaration) but it does need its station role and side
+    // stated. ORDER IS LOAD-BEARING: this is the `WheelIndex` slot order both wire ends derive.
+    roadwheels: [
+        (node: "Wheel_L_0", side: Left),
+        (node: "Wheel_L_1", side: Left),
+        (node: "Wheel_L_2", side: Left),
+        (node: "Wheel_L_3", side: Left),
+        (node: "Wheel_L_4", side: Left),
+        (node: "Wheel_L_5", side: Left),
+        (node: "Wheel_L_6", side: Left),
+        (node: "Wheel_L_7", side: Left),
+        (node: "Wheel_R_0", side: Right),
+        (node: "Wheel_R_1", side: Right),
+        (node: "Wheel_R_2", side: Right),
+        (node: "Wheel_R_3", side: Right),
+        (node: "Wheel_R_4", side: Right),
+        (node: "Wheel_R_5", side: Right),
+        (node: "Wheel_R_6", side: Right),
+        (node: "Wheel_R_7", side: Right),
+    ],
     weapons: {
         // fire_mode is the mechanism: the 88 is Single (one round per click, crew-gated reload —
         // and no belt fields to author); the 7.9 mm MGs are Automatic (held trigger, 750 rpm =

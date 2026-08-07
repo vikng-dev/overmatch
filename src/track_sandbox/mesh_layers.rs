@@ -50,6 +50,7 @@ use bevy::prelude::*;
 
 use super::wheel_view::gear_slot;
 use super::{Hull, VizLayers};
+use crate::bake::TankGeometry;
 use crate::track::link_view::TrackLink;
 
 /// Render layer for volumes drawn "on top" — the [`OverlayCamera`] renders only this, with its own
@@ -204,9 +205,10 @@ fn spawn_overlay_light(mut commands: Commands) {
 }
 
 /// Classify a view mesh by walking up its `ChildOf` chain to the first named ancestor that carries a
-/// role — the same name-suffix convention the game's `bind_tank_view` and the extractor's
-/// `captures_mesh` use. The nearest match wins (a `*_Ballistic` node's own name is hit before the
-/// plain `Hull` node above it).
+/// role — the same verdict the game's `bind_tank_view` hides by, which since the classifier
+/// precedent (2026-08-07) is the BAKE's: a collision proxy is declared in the tank RON and a
+/// ballistic volume is a node whose primitives wear a registry substance. The nearest match wins (a
+/// volume node's own name is hit before the plain `Hull` node above it).
 ///
 /// The hull fallback is SCOPED to the tank subtree by a real ancestry test against the [`Hull`] body
 /// entity: a role-less walk that passes through `hull` is a hull visual, and a role-less walk that
@@ -218,11 +220,12 @@ fn classify(
     hull: Entity,
     parents: &Query<&ChildOf>,
     names: &Query<&Name>,
+    geometry: Option<&TankGeometry>,
 ) -> ViewClass {
     let mut probe = entity;
     loop {
         if let Ok(name) = names.get(probe)
-            && let Some(class) = role_for_name(name.as_str())
+            && let Some(class) = role_for_name(name.as_str(), geometry)
         {
             return class;
         }
@@ -238,20 +241,29 @@ fn classify(
     }
 }
 
-/// The role a single node NAME carries, or `None` to keep walking up (an unnamed primitive, a plain
+/// The role a single node name carries, or `None` to keep walking up (an unnamed primitive, a plain
 /// structural node like `Hull` / `Turret_Yaw`). Never returns [`ViewClass::Hull`] — hull is the
-/// walk-exhausted fallback, not a name. Pure and self-contained, so the whole feature's
-/// classification is unit-testable without a `World`.
-fn role_for_name(name: &str) -> Option<ViewClass> {
-    if name.ends_with("_Collider") {
-        return Some(ViewClass::Collider);
-    }
-    if name.ends_with("_Ballistic") {
-        return Some(ViewClass::Ballistic);
-    }
+/// walk-exhausted fallback, not a name.
+///
+/// The running-gear / link check comes FIRST and is the one thing still keyed off the name, because
+/// it is an addressing question (which slot of the wheel layer is this?) rather than a
+/// classification one — and it must win over the ballistic verdict, since the road wheels are BOTH
+/// their own armour volume and the wheel layer's meshes. Everything below it asks the bake.
+fn role_for_name(name: &str, geometry: Option<&TankGeometry>) -> Option<ViewClass> {
     // Running gear and the link template/markers are other layers' meshes — skip.
     if gear_slot(name).is_some() || matches!(name, "Link" | "Link_Box" | "Pin_Start" | "Pin_End") {
         return Some(ViewClass::Skip);
+    }
+    let geometry = geometry?;
+    if geometry
+        .collision_proxies
+        .iter()
+        .any(|&index| geometry.nodes[index].name == name)
+    {
+        return Some(ViewClass::Collider);
+    }
+    if geometry.is_ballistic(name) {
+        return Some(ViewClass::Ballistic);
     }
     None
 }
@@ -288,11 +300,13 @@ fn tag_view_meshes(
     >,
     parents: Query<&ChildOf>,
     names: Query<&Name>,
+    blueprint: Option<Res<crate::bake::TankBlueprint>>,
     mut commands: Commands,
 ) {
     let hull = *hull;
+    let geometry = blueprint.as_deref().map(|blueprint| &*blueprint.geometry);
     for (entity, material) in &candidates {
-        let view = match classify(entity, hull, &parents, &names) {
+        let view = match classify(entity, hull, &parents, &names, geometry) {
             ViewClass::Hull => ViewMesh::Hull(material.0.clone()),
             ViewClass::Collider => ViewMesh::Collider,
             ViewClass::Ballistic => ViewMesh::Ballistic,
@@ -388,25 +402,42 @@ fn volume_target<'a>(
 mod tests {
     use super::*;
 
-    /// The name-suffix classifier, driven by the exact node names the shipped Tiger glb carries
-    /// (verified against the asset): the two `*_Collider` proxies and the ~30 `*_Ballistic` volumes
-    /// each land in their layer, the running gear / link template / pin markers are skipped, and the
-    /// `*_Visual` render meshes plus plain structural nodes fall through to the hull.
+    /// The shipped Tiger's own geometry, extracted the way the game extracts it — this classifier
+    /// answers off the bake now, so the test drives the real asset rather than a hand-written name
+    /// list that could agree with nothing.
+    fn tiger_geometry() -> TankGeometry {
+        let spec: crate::spec::TankSpec =
+            ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
+                .expect("tiger_1.tank.ron parses");
+        let glb = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(crate::tank::TIGER_GLB_PATH);
+        crate::bake::extract_tank_geometry(&glb, &spec).expect("the Tiger glb extracts")
+    }
+
+    /// The classifier, driven by the exact node names the shipped Tiger glb carries: the declared
+    /// collision proxies and the substance-wearing volumes each land in their layer, the running
+    /// gear / link template / pin markers are skipped (the ROAD WHEELS included — they are their own
+    /// armour volume, but the wheel layer owns their meshes), and the decor render meshes plus plain
+    /// structural nodes fall through to the hull.
     #[test]
     fn node_names_classify_into_the_right_layer() {
+        let geometry = tiger_geometry();
+        let role = |name: &str| role_for_name(name, Some(&geometry));
+
         // Collider proxies → the collider-volume layer.
-        assert_eq!(role_for_name("Hull_Collider"), Some(ViewClass::Collider));
-        assert_eq!(role_for_name("Turret_Collider"), Some(ViewClass::Collider));
+        assert_eq!(role("Hull_Collider"), Some(ViewClass::Collider));
+        assert_eq!(role("Turret_Collider"), Some(ViewClass::Collider));
 
         // Ballistic volumes (armour plates AND component volumes) → the ballistic-volume layer.
         for name in [
-            "Hull_UFP_Ballistic",
-            "Turret_Front_Ballistic",
-            "Engine_Ballistic",
-            "Ammo_L_0_Ballistic",
-            "Coax_MG_Body_Ballistic",
+            "Hull_UFP_Upper",
+            "Turret_Side",
+            "Engine",
+            "Ammo_L_0",
+            "Coax_MG_Body",
         ] {
-            assert_eq!(role_for_name(name), Some(ViewClass::Ballistic), "{name}");
+            assert_eq!(role(name), Some(ViewClass::Ballistic), "{name}");
         }
 
         // Running gear, the link template and its box, and the pin markers → skipped (other layers'
@@ -421,32 +452,31 @@ mod tests {
             "Pin_Start",
             "Pin_End",
         ] {
-            assert_eq!(role_for_name(name), Some(ViewClass::Skip), "{name}");
+            assert_eq!(role(name), Some(ViewClass::Skip), "{name}");
         }
 
-        // The visible render meshes and plain structural nodes carry no role name — they fall through
+        // The visible render meshes and plain structural nodes carry no role — they fall through
         // the walk to the hull layer.
-        for name in [
-            "Hull_Visual",
-            "Turret_Visual",
-            "Gun_Barrel_Visual",
-            "Final_Drive_L",
-            "Hull",
-            "Turret_Yaw",
-        ] {
-            assert_eq!(role_for_name(name), None, "{name}");
+        for name in ["Hull_Decor", "Turret_Decor", "Hull", "Turret_Yaw"] {
+            assert_eq!(role(name), None, "{name}");
         }
+
+        // Without a bake there is no verdict to give: everything but the name-addressed running
+        // gear falls through, which is what the track sandbox sees before `TankBlueprint` lands.
+        assert_eq!(role_for_name("Hull_UFP_Upper", None), None);
+        assert_eq!(role_for_name("Wheel_L_0", None), Some(ViewClass::Skip));
     }
 
     /// The tank-subtree ancestry scope: a role-less mesh UNDER the [`Hull`] body is a hull visual,
     /// the same mesh OUTSIDE the tank tree (a course/terrain mesh) is World not Hull — the fix for
-    /// x-ray-the-hull ghosting the terrain — and a role NAME still wins over ancestry either way (a
-    /// `*_Ballistic` node under the hull classifies Ballistic). Driven through a real `World` so the
-    /// `ChildOf` walk, not just [`role_for_name`], is exercised.
+    /// x-ray-the-hull ghosting the terrain — and a role still wins over ancestry either way (a
+    /// substance-wearing node under the hull classifies Ballistic). Driven through a real `World` so
+    /// the `ChildOf` walk, not just [`role_for_name`], is exercised.
     #[test]
     fn ancestry_scopes_the_hull_fallback_to_the_tank_subtree() {
         use bevy::ecs::system::SystemState;
 
+        let geometry = tiger_geometry();
         let mut world = World::new();
         let hull = world.spawn_empty().id();
         // A role-less render mesh nested two deep under the tank root → hull visual.
@@ -454,21 +484,25 @@ mod tests {
         let hull_mesh = world.spawn(ChildOf(structural)).id();
         // A parent-less course slab at the scene root → World, NOT Hull.
         let world_mesh = world.spawn_empty().id();
-        // A named armour volume under the hull → Ballistic (name beats ancestry).
+        // A named armour volume under the hull → Ballistic (the role beats ancestry).
         let ballistic = world
-            .spawn((Name::new("Hull_UFP_Ballistic"), ChildOf(hull)))
+            .spawn((Name::new("Hull_UFP_Upper"), ChildOf(hull)))
             .id();
 
         let mut state: SystemState<(Query<&ChildOf>, Query<&Name>)> = SystemState::new(&mut world);
         let (parents, names) = state.get(&world).unwrap();
+        let geometry = Some(&geometry);
 
-        assert_eq!(classify(hull_mesh, hull, &parents, &names), ViewClass::Hull);
         assert_eq!(
-            classify(world_mesh, hull, &parents, &names),
+            classify(hull_mesh, hull, &parents, &names, geometry),
+            ViewClass::Hull
+        );
+        assert_eq!(
+            classify(world_mesh, hull, &parents, &names, geometry),
             ViewClass::World
         );
         assert_eq!(
-            classify(ballistic, hull, &parents, &names),
+            classify(ballistic, hull, &parents, &names, geometry),
             ViewClass::Ballistic
         );
     }

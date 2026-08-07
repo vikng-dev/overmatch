@@ -390,6 +390,7 @@ mod spawn_contract_tests {
             by_name: HashMap::new(),
             roadwheels: Vec::new(),
             collision_proxies: Vec::new(),
+            ballistic_volumes: Vec::new(),
         };
 
         let mut app = App::new();

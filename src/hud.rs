@@ -162,10 +162,10 @@ fn volume_label(
     } else if let Some(function) = function {
         function.label().to_string()
     } else if ammo.is_some() {
-        name.map(|name| name.as_str().replace("_Ballistic", ""))
+        name.map(|name| name.as_str().to_string())
             .unwrap_or_else(|| "Ammo".to_string())
     } else {
-        name.map(|name| name.as_str().replace("_Ballistic", ""))
+        name.map(|name| name.as_str().to_string())
             .unwrap_or_else(|| "Component".to_string())
     }
 }

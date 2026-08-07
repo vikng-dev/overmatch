@@ -3,7 +3,7 @@
 //! Invariant (ADR-0014): simulation construction uses synchronously extracted data, never a loaded
 //! scene. The shadow verifier compares that data with instantiated view geometry.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
 use crate::spec::{TankSpec, TankSpecHandle};
+use crate::substances::SubstanceRegistry;
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
@@ -29,8 +30,8 @@ pub(crate) struct NodeGeometry {
     /// (`pos += rot * t; rot *= r`) so equal inputs give bit-equal outputs.
     pub root_position: Vec3,
     pub root_rotation: Quat,
-    /// Raw mesh buffers, captured only where the sim consumes them ([`captures_mesh`]): collision
-    /// proxies (convex hull source), ballistic volumes and roadwheel stations (trimesh source).
+    /// Raw mesh buffers, captured only where the sim consumes them ([`classify`]): collision
+    /// proxies (convex hull source) and ballistic volumes, the road wheels included (trimesh source).
     /// Vertices are **node-local and unscaled** — exactly the bytes the glb holds, which is what the
     /// shadow compare needs to diff against the loaded `Mesh` assets. Consumers that build colliders
     /// hang them under the node entity and let avian compose [`transform`](Self::transform)'s scale
@@ -40,10 +41,28 @@ pub(crate) struct NodeGeometry {
 }
 
 /// One glTF mesh primitive's sim-relevant buffers: what avian's `ConvexHullFromMesh` /
-/// `TrimeshFromMesh` read (`extract_mesh_vertices_indices`: POSITION + the index buffer).
+/// `TrimeshFromMesh` read (`extract_mesh_vertices_indices`: POSITION + the index buffer), plus the
+/// primitive's [substance](MeshGeometry::substance) where it has one.
 pub(crate) struct MeshGeometry {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
+    /// The §12 membership declaration, resolved here once: `Some` iff this primitive's glTF
+    /// material name is a key in the global substance registry (`assets/materials/materials.ron`).
+    /// `None` = not a ballistic primitive — a collision-proxy hull, or a decor primitive that was
+    /// never captured at all. Per PRIMITIVE, not per node, because glTF splits a mesh by material
+    /// and §13.7 authors a mixed-substance part as one object holding one closed shell per
+    /// substance region (the Tiger road wheel: `MildSteel` bodies + `Rubber` rims in one object).
+    pub substance: Option<PrimitiveSubstance>,
+}
+
+/// A ballistic primitive's substance, resolved against the registry at extraction so the walk never
+/// does a string lookup per query.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PrimitiveSubstance {
+    /// The material datablock name — the join key to `materials.ron` (§12: identity, never parsed).
+    pub name: String,
+    /// The §13.2 field value: reference-mm of armour per metre of chord.
+    pub factor: f32,
 }
 
 impl MeshGeometry {
@@ -59,14 +78,75 @@ impl MeshGeometry {
 pub(crate) struct TankGeometry {
     pub nodes: Vec<NodeGeometry>,
     pub by_name: HashMap<String, usize>,
-    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per `Wheel_L/R_<n>` node
-    /// ([`roadwheel_side`]), **sorted by node name** — a deterministic order every consumer
-    /// (spawn, the track gear build) can rely on, instead of `HashMap`/extraction order. These
-    /// nodes now carry the wheel mesh itself, so they are also ballistic volumes ([`captures_mesh`]).
+    /// Load-bearing roadwheel stations — `(node index, TrackSide)`, one per entry of the spec's
+    /// `roadwheels` list, **in declaration order**. That order is load-bearing: it is the
+    /// `WheelIndex` slot order both wire ends derive, so it comes from the authored file (one
+    /// source of truth, ordered by construction) rather than from a name pattern plus a sort.
+    /// These nodes carry the wheel mesh itself, so they are also ballistic volumes.
     pub roadwheels: Vec<(usize, TrackSide)>,
-    /// Collision-proxy nodes — `*_Collider` node indices in extraction order. No wire-shared index
-    /// derives from this order (each proxy just yields a convex hull), so it is not sorted.
+    /// Collision-proxy nodes — the spec's `colliders` list, in declaration order. No wire-shared
+    /// index derives from it (each proxy just yields a convex hull); the order is fixed anyway so
+    /// spawn is deterministic.
     pub collision_proxies: Vec<usize>,
+    /// Every node holding at least one ballistic primitive — MEMBERSHIP IS THE MATERIAL (§12,
+    /// classifier precedent 2026-08-07): a node is here iff one of its glTF primitives wears a
+    /// registry substance. Name-sorted, so spawn order is deterministic without depending on the
+    /// glTF node order. Nothing in the bind path scans names for this any more.
+    pub ballistic_volumes: Vec<usize>,
+}
+
+impl TankGeometry {
+    /// Whether a node name is a ballistic volume — the material verdict, published for the VIEW
+    /// layer (which must hide the armour meshes it now cannot recognise by name). Consult this,
+    /// never a suffix.
+    pub fn is_ballistic(&self, name: &str) -> bool {
+        self.by_name
+            .get(name)
+            .is_some_and(|index| self.nodes[*index].is_ballistic())
+    }
+
+    /// Whether a node exists for the SIM only and must never render — the rule the view binder
+    /// hides by, and the last thing the `*_Ballistic`/`*_Collider` suffixes used to answer.
+    ///
+    /// Collision proxies always. Ballistic volumes *unless they are also a roadwheel station*: the
+    /// wheels are the one place where the visual and the ballistic mesh are the SAME object (the
+    /// mesh-unification precedent), so hiding every volume would delete the running gear from the
+    /// picture. The .blend states this with collections — `Ballistic` vs `RunningGear` — which glTF
+    /// does not carry, so the roadwheel declaration is what carries it across: a station is by
+    /// definition a rendered part of the vehicle. A future unified part joins that list explicitly
+    /// rather than being guessed at from a material or a polygon count.
+    pub fn is_physics_only(&self, name: &str) -> bool {
+        let Some(&index) = self.by_name.get(name) else {
+            return false;
+        };
+        if self.collision_proxies.contains(&index) {
+            return true;
+        }
+        self.nodes[index].is_ballistic() && !self.roadwheels.iter().any(|&(w, _)| w == index)
+    }
+}
+
+impl NodeGeometry {
+    /// Whether this node holds any ballistic primitive.
+    pub fn is_ballistic(&self) -> bool {
+        self.primitives.iter().any(|p| p.substance.is_some())
+    }
+
+    /// This node's ballistic primitives grouped by substance, in name order — one group per
+    /// substance region (§13.7). One group is the ordinary case; more than one is the authored
+    /// mixed-substance part (the road wheels).
+    pub fn substance_groups(&self) -> BTreeMap<&str, Vec<&MeshGeometry>> {
+        let mut groups: BTreeMap<&str, Vec<&MeshGeometry>> = BTreeMap::new();
+        for primitive in &self.primitives {
+            if let Some(substance) = &primitive.substance {
+                groups
+                    .entry(substance.name.as_str())
+                    .or_default()
+                    .push(primitive);
+            }
+        }
+        groups
+    }
 }
 
 /// Runtime spawn data for the shipped Tiger, assembled before network receive can run. The spec is
@@ -81,44 +161,198 @@ pub(crate) struct TankBlueprint {
 
 const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
-/// Which nodes' mesh buffers the sim consumes: collision proxies (`*_Collider` → convex hull,
-/// Vehicle layer), ballistic volumes (`*_Ballistic` → trimesh, Armor layer), and the roadwheel
-/// stations ([`roadwheel_side`]).
+/// Which primitives' mesh buffers the sim consumes, and why (§12, classifier precedent 2026-08-07):
 ///
-/// Wheels are the one node class that is BOTH. The Tiger's wheels were re-exported as one unified
-/// watertight mesh per station (was: a `Wheel_L_0` empty parenting a `_Visual` + a `_Ballistic`
-/// child), so the same node is the suspension station AND its own armour volume — and its buffers
-/// have to be captured under the bare `Wheel_<side>_<n>` name or the spec's wheel volumes bind to
-/// empty geometry. Nothing downstream required a station to be transform-only: the station role is
-/// a marker component (`Roadwheel`) and the volume role a bundle + trimesh child, and they compose
-/// on one entity (`tank::spawn::assemble_tank_body`).
+/// * **Ballistic volumes — MEMBERSHIP IS THE MATERIAL.** A primitive marches iff its glTF material
+///   name is a key in the substance registry. Nothing is parsed out of a node name; the old
+///   `*_Ballistic` suffix is retired and stripped from the source .blend, and with it the last way
+///   a renamed volume could silently dodge capture. Wearing a registry material IS the declaration,
+///   which is also why decor must never wear one.
+/// * **Collision proxies — DECLARED.** The `colliders` list in `<tank>.tank.ron` names them; the
+///   `*_Collider` suffix scan is retired with the rest. Every primitive of a declared proxy is
+///   captured (a proxy is a hull source, not a substance).
 ///
-/// Volumes are spec-keyed at bind, not name-matched — the golden test pins every declared volume to
-/// this rule so a differently-suffixed volume can't silently dodge capture.
-fn captures_mesh(name: &str) -> bool {
-    name.ends_with("_Collider") || name.ends_with("_Ballistic") || roadwheel_side(name).is_some()
+/// Roadwheels are the one node class that is BOTH a rig station and a volume: the wheels ship as one
+/// watertight mesh per station, so the same node is the suspension station AND its own armour. The
+/// station role is a marker component (`Roadwheel`) and the volume role a bundle + trimesh children,
+/// and they compose on one entity (`tank::spawn::assemble_tank_body`). Their capture needs no rule
+/// of its own — the wheel meshes wear `MildSteel`/`Rubber`, so the material rule already takes them.
+///
+/// A node that mixes substance and non-substance primitives is REFUSED (see
+/// [`extract_tank_geometry`]): half-armour has no honest meaning here, and the shadow compare's
+/// whole-node mesh diff would quietly stop covering the uncaptured half.
+fn classify(
+    primitive: &gltf::Primitive,
+    registry: &SubstanceRegistry,
+) -> Option<PrimitiveSubstance> {
+    // An unnamed material cannot be a registry key, so it cannot declare membership. (The coax MG's
+    // physics-only meshes were exactly this case before the restructure.)
+    let material = primitive.material().name()?;
+    // Not a substance ⇒ ordinary art. The registry's `Unknown` arm IS the classifier; the error case
+    // is a name that only LOOKS like a substance, which the bind test's near-miss lint catches (a
+    // `.001` duplicate means the material-library link drifted from LINKED to appended).
+    let substance = registry.get(material).ok()?;
+    Some(PrimitiveSubstance {
+        name: material.to_owned(),
+        factor: substance.factor,
+    })
 }
 
-/// The track side of a roadwheel station — `Wheel_L_<n>` / `Wheel_R_<n>` with a purely numeric
-/// index, and nothing else. The numeric check is load-bearing: it is what keeps a *typed* sibling
-/// (`Wheel_L_0_Visual`, a spare `Wheel_L_0_Collider`) from being classified as a second station on
-/// the same axle, which would double-count the wheel in the name-sorted slot order both wire ends
-/// derive. Lives here (not in the sim) because classifying a node name into sim meaning is the
-/// extractor's job (design §8 step 3); [`TrackSide`] itself is sim vocabulary, imported from
-/// `crate::tank`.
-fn roadwheel_side(name: &str) -> Option<TrackSide> {
-    for (prefix, side) in [
-        ("Wheel_L_", TrackSide::Left),
-        ("Wheel_R_", TrackSide::Right),
-    ] {
-        if let Some(rest) = name.strip_prefix(prefix)
-            && !rest.is_empty()
-            && rest.bytes().all(|b| b.is_ascii_digit())
-        {
-            return Some(side);
+/// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
+/// outward orientation per connected shell.
+///
+/// Runs on every substance primitive, at extraction, before anything downstream can consume it. A
+/// non-watertight ballistic mesh is SILENT ZERO ARMOUR — the walk pairs entry/exit per closed
+/// surface, and a hole means the exit is never found — which is the exact defect class §13 exists to
+/// kill, so a failure names the node, the primitive and the defect and refuses the whole extraction.
+///
+/// **Weld first.** glTF splits a vertex wherever the normal or UV differs, so every flat-shaded
+/// plate arrives with each face's corners duplicated: a naive index-level edge-parity test
+/// false-positives on literally every seam. Welding by exact position first is what makes the test
+/// measure the surface instead of the export's vertex-splitting.
+///
+/// Per connected shell, two conditions:
+/// * every undirected edge is shared by exactly two triangles, and each DIRECTED edge appears
+///   exactly once — closed, and consistently wound (an inconsistent winding shows up as a directed
+///   edge traversed twice the same way);
+/// * the signed volume `Σ v₀·(v₁×v₂)/6` is positive — the winding is outward, not inward. An
+///   inward-wound shell is closed but every normal points the wrong way, and the walk would read
+///   its entry faces as exits.
+///
+/// Multiple closed shells in one primitive are legal and expected (§13.7: one shell per substance
+/// region, and a substance region may be several islands — the wheel's two steel bodies plus axle).
+fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(), String> {
+    let defect = |what: String| format!("node `{node}` primitive {index}: {what}");
+
+    if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
+        return Err(defect(format!(
+            "{} indices is not a non-empty multiple of 3 — a substance primitive must be an \
+             indexed triangle soup",
+            primitive.indices.len()
+        )));
+    }
+
+    // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
+    // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
+    // a non-finite coordinate cannot be welded or integrated at all.
+    let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
+    for position in &primitive.positions {
+        let mut key = [0u32; 3];
+        for (slot, value) in key.iter_mut().zip(position) {
+            if !value.is_finite() {
+                return Err(defect(format!(
+                    "a vertex coordinate is not finite ({value})"
+                )));
+            }
+            *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
+        }
+        let next = canonical.len() as u32;
+        welded.push(*canonical.entry(key).or_insert(next));
+    }
+
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(primitive.indices.len() / 3);
+    for (triangle, corners) in primitive.indices.chunks_exact(3).enumerate() {
+        let mut welded_corners = [0u32; 3];
+        for (slot, &corner) in welded_corners.iter_mut().zip(corners) {
+            *slot = *welded.get(corner as usize).ok_or_else(|| {
+                defect(format!(
+                    "triangle {triangle} indexes vertex {corner}, out of range"
+                ))
+            })?;
+        }
+        let [a, b, c] = welded_corners;
+        if a == b || b == c || a == c {
+            return Err(defect(format!(
+                "triangle {triangle} is degenerate after welding (corners {welded_corners:?}) — a \
+                 zero-area face has no orientation and breaks edge parity"
+            )));
+        }
+        triangles.push(welded_corners);
+    }
+
+    // Directed-edge census: closure AND winding consistency. A `BTreeMap` and two ORDERED passes,
+    // so the diagnostic is the same sentence every run — a defect that reports differently each time
+    // is one nobody can grep for. Winding is checked FIRST, because a duplicated or same-wound face
+    // also looks like a closure failure, and naming it that way sends the fix the wrong way.
+    let mut directed: BTreeMap<(u32, u32), u32> = BTreeMap::new();
+    for &[a, b, c] in &triangles {
+        for edge in [(a, b), (b, c), (c, a)] {
+            *directed.entry(edge).or_insert(0) += 1;
         }
     }
-    None
+    if let Some((&(a, b), &count)) = directed.iter().find(|&(_, &count)| count != 1) {
+        return Err(defect(format!(
+            "directed edge {a}→{b} is traversed {count} times — two triangles wind the same face \
+             the same way (inconsistent orientation, or a duplicated face)"
+        )));
+    }
+    if let Some((&(a, b), _)) = directed
+        .iter()
+        .find(|&(&(a, b), _)| directed.get(&(b, a)).copied().unwrap_or(0) != 1)
+    {
+        let opposite = directed.get(&(b, a)).copied().unwrap_or(0);
+        return Err(defect(format!(
+            "edge {a}—{b} is shared by {} triangle(s), not 2 — the shell is not closed (a hole, a \
+             boundary edge, or a non-manifold fin)",
+            1 + opposite
+        )));
+    }
+
+    // Connected shells, by shared welded edge. Union-find over triangles.
+    let mut parent: Vec<usize> = (0..triangles.len()).collect();
+    fn find(parent: &mut [usize], mut node: usize) -> usize {
+        while parent[node] != node {
+            parent[node] = parent[parent[node]];
+            node = parent[node];
+        }
+        node
+    }
+    let mut owner: HashMap<(u32, u32), usize> = HashMap::new();
+    for (triangle, &[a, b, c]) in triangles.iter().enumerate() {
+        for (u, v) in [(a, b), (b, c), (c, a)] {
+            let edge = if u < v { (u, v) } else { (v, u) };
+            match owner.get(&edge) {
+                Some(&other) => {
+                    let (x, y) = (find(&mut parent, triangle), find(&mut parent, other));
+                    parent[x] = y;
+                }
+                None => {
+                    owner.insert(edge, triangle);
+                }
+            }
+        }
+    }
+
+    // Signed volume per shell, from the ORIGINAL positions (welding only merged coincident points,
+    // so the coordinates are unchanged). f64 because the divergence-theorem sum of a thin plate far
+    // from the origin cancels hard.
+    let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
+    for triangle in 0..triangles.len() {
+        let shell = find(&mut parent, triangle);
+        let corner = |slot: usize| -> [f64; 3] {
+            let position = primitive.positions[primitive.indices[triangle * 3 + slot] as usize];
+            [position[0] as f64, position[1] as f64, position[2] as f64]
+        };
+        let (a, b, c) = (corner(0), corner(1), corner(2));
+        let cross = [
+            b[1] * c[2] - b[2] * c[1],
+            b[2] * c[0] - b[0] * c[2],
+            b[0] * c[1] - b[1] * c[0],
+        ];
+        *volumes.entry(shell).or_insert(0.0) +=
+            (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+    }
+    for (shell, volume) in &volumes {
+        if !volume.is_finite() || *volume <= 0.0 {
+            return Err(defect(format!(
+                "shell rooted at triangle {shell} has signed volume {volume} — a closed shell must \
+                 enclose positive volume with outward winding (a negative one is inside-out; zero \
+                 is a degenerate/flat shell)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn plugin(app: &mut App) {
@@ -138,7 +372,13 @@ fn extract_at_startup(mut commands: Commands) {
     // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
     let root = crate::assets::asset_root();
     let path = root.join(crate::tank::TIGER_GLB_PATH);
-    let geometry = extract_tank_geometry(&path).unwrap_or_else(|err| {
+    // The spec is parsed BEFORE the glb because extraction now consumes it: `colliders` and
+    // `roadwheels` are explicit declarations there, not name patterns here (§12 identity rule).
+    let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON)
+        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed to parse: {err}"));
+    spec.validate()
+        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed validation: {err}"));
+    let geometry = extract_tank_geometry(&path, &spec).unwrap_or_else(|err| {
         panic!(
             "bake: extracting {} failed: {err}\n\
              bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir; \
@@ -155,14 +395,11 @@ fn extract_at_startup(mut commands: Commands) {
         .filter(|n| !n.primitives.is_empty())
         .count();
     info!(
-        "bake: extracted tank geometry — {} nodes, {} mesh-captured",
+        "bake: extracted tank geometry — {} nodes, {} mesh-captured, {} ballistic volumes",
         geometry.nodes.len(),
-        mesh_nodes
+        mesh_nodes,
+        geometry.ballistic_volumes.len(),
     );
-    let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON)
-        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed to parse: {err}"));
-    spec.validate()
-        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed validation: {err}"));
 
     commands.insert_resource(TankBlueprint {
         geometry: Arc::new(geometry),
@@ -172,9 +409,13 @@ fn extract_at_startup(mut commands: Commands) {
 
 /// Parse the glb as data into [`TankGeometry`]. Pure with respect to the app: `gltf` crate only,
 /// usable identically from the runtime (step 0/phase 1) and the offline compiler (phase 2).
-pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String> {
+pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<TankGeometry, String> {
     let gltf::Gltf { document, mut blob } =
         gltf::Gltf::open(path).map_err(|e| format!("open: {e}"))?;
+    // The one substance vocabulary, shared with `materials.blend`. A malformed registry panics
+    // inside `shipped()` — a broken authored contract is a build defect, not a runtime condition.
+    let registry = SubstanceRegistry::shipped();
+    let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`); external `.bin`
     // URIs are read relative to the glb (not used by our assets, supported for completeness).
@@ -245,10 +486,47 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
         let root_rotation = nodes[parent].root_rotation * transform.rotation;
 
         let mut primitives = Vec::new();
-        if captures_mesh(&name)
-            && let Some(mesh) = node.mesh()
-        {
+        if let Some(mesh) = node.mesh() {
+            let is_collider = declared_colliders.contains(name.as_str());
+            let mut captured: Vec<(usize, Option<PrimitiveSubstance>)> = Vec::new();
+            let mut ballistic = 0usize;
+            let mut plain = 0usize;
             for primitive in mesh.primitives() {
+                match classify(&primitive, &registry) {
+                    Some(substance) => {
+                        ballistic += 1;
+                        captured.push((primitive.index(), Some(substance)));
+                    }
+                    None => {
+                        plain += 1;
+                        if is_collider {
+                            captured.push((primitive.index(), None));
+                        }
+                    }
+                }
+            }
+            // Half-armour has no honest meaning: the shadow compare diffs a node's mesh bytes as a
+            // whole, so a partially-captured node would quietly stop being covered, and the walk
+            // would meet a solid whose other half it cannot see.
+            if ballistic > 0 && plain > 0 {
+                return Err(format!(
+                    "node `{name}` mixes {ballistic} substance primitive(s) with {plain} \
+                     non-substance one(s) — a mesh is either a ballistic solid or it is art. \
+                     Membership is the material (§12): split the object, or give every primitive a \
+                     registry substance"
+                ));
+            }
+            if is_collider && ballistic > 0 {
+                return Err(format!(
+                    "node `{name}` is declared a collision proxy but wears a registry substance — a \
+                     convex hull that is ALSO armour would be charged twice by the march"
+                ));
+            }
+            for (index, substance) in captured {
+                let primitive = mesh
+                    .primitives()
+                    .nth(index)
+                    .ok_or_else(|| format!("node `{name}`: primitive {index} vanished"))?;
                 let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
                 let positions: Vec<[f32; 3]> = reader
                     .read_positions()
@@ -258,7 +536,15 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
                     .read_indices()
                     .map(|i| i.into_u32().collect())
                     .unwrap_or_default();
-                primitives.push(MeshGeometry { positions, indices });
+                let geometry = MeshGeometry {
+                    positions,
+                    indices,
+                    substance,
+                };
+                if geometry.substance.is_some() {
+                    manifold_gate(&name, index, &geometry)?;
+                }
+                primitives.push(geometry);
             }
         }
 
@@ -281,28 +567,38 @@ pub(crate) fn extract_tank_geometry(path: &Path) -> Result<TankGeometry, String>
         }
     }
 
-    // Classify the sim's name-convention parts once, here — the runtime consumes these typed lists
-    // and never re-scans node names for sim meaning (design §8 step 3). glTF nodes only: the
-    // extractor never captures the loader's per-material render leaves, so these lists can't be
-    // polluted by mesh names the way the old runtime scene walk could. Index 0 is the scene-root
-    // wrapper, skipped.
-    let mut roadwheels: Vec<(usize, TrackSide)> = Vec::new();
+    // The sim's typed lists, resolved once here (design §8 step 3): two from the spec's explicit
+    // declarations, one from the material verdict. Nothing scans a node name for sim meaning.
+    let resolve = |name: &str, what: &str| -> Result<usize, String> {
+        by_name
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("spec declares {what} `{name}`, which is absent from the model"))
+    };
     let mut collision_proxies: Vec<usize> = Vec::new();
-    for (index, node) in nodes.iter().enumerate().skip(1) {
-        if let Some(side) = roadwheel_side(&node.name) {
-            roadwheels.push((index, side));
-        } else if node.name.ends_with("_Collider") {
-            collision_proxies.push(index);
-        }
+    for name in &spec.colliders {
+        collision_proxies.push(resolve(name, "collision proxy")?);
     }
-    // Name-sorted: the deterministic consumer order (see the field doc).
-    roadwheels.sort_by(|a, b| nodes[a.0].name.cmp(&nodes[b.0].name));
+    let mut roadwheels: Vec<(usize, TrackSide)> = Vec::new();
+    for wheel in &spec.roadwheels {
+        roadwheels.push((resolve(&wheel.node, "roadwheel")?, wheel.side));
+    }
+    // Name-sorted so spawn order never depends on the glTF node order.
+    let mut ballistic_volumes: Vec<usize> = nodes
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(_, node)| node.is_ballistic())
+        .map(|(index, _)| index)
+        .collect();
+    ballistic_volumes.sort_by(|a, b| nodes[*a].name.cmp(&nodes[*b].name));
 
     Ok(TankGeometry {
         nodes,
         by_name,
         roadwheels,
         collision_proxies,
+        ballistic_volumes,
     })
 }
 
@@ -408,8 +704,10 @@ fn shadow_compare_on_instance_ready(
         }
 
         // Mesh bytes, where the sim consumes them: the node's primitive children vs the captured
-        // buffers, compared as order-insensitive multisets of exact bits.
-        if captures_mesh(name.as_str()) {
+        // buffers, compared as order-insensitive multisets of exact bits. Extraction refuses a node
+        // that mixes substance and non-substance primitives, so "captured anything" means "captured
+        // the whole node" and the multiset compare stays total.
+        if !node.primitives.is_empty() {
             let mut scene_prims: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
             if let Ok(node_children) = children.get(entity) {
                 for &child in node_children {
@@ -535,19 +833,30 @@ mod tests {
     use super::*;
     use crate::spec::TankSpec;
 
-    /// The extractor's golden test: extract the Tiger and hold it to the same contract the
-    /// binder enforces at runtime — every spec-declared node present, the structural singletons,
-    /// wheels per side, and sim-consumed mesh data captured with the buffers avian requires
-    /// (indices are mandatory for BOTH collider paths: avian's `extract_mesh_vertices_indices`
-    /// bails on unindexed meshes even for the hull).
+    fn tiger_spec() -> TankSpec {
+        ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("tiger_1.tank.ron must parse")
+    }
+
+    fn tiger_glb() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(crate::tank::TIGER_GLB_PATH)
+    }
+
+    fn tiger_geometry(spec: &TankSpec) -> TankGeometry {
+        extract_tank_geometry(&tiger_glb(), spec).expect("tiger_1.glb must extract")
+    }
+
+    /// The extractor's golden test: extract the Tiger and hold it to the same contract the binder
+    /// enforces at runtime — every spec-declared node present, the structural singletons, the
+    /// declared proxies and stations, and sim-consumed mesh data captured with the buffers avian
+    /// requires (indices are mandatory for BOTH collider paths: avian's
+    /// `extract_mesh_vertices_indices` bails on unindexed meshes even for the hull).
     #[test]
     fn tiger_1_extracts_to_contract() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(crate::tank::TIGER_GLB_PATH);
-        let geometry = extract_tank_geometry(&path).expect("tiger_1.glb must extract");
-        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("tiger_1.tank.ron must parse");
+        let spec = tiger_spec();
+        let geometry = tiger_geometry(&spec);
 
         let node = |name: &str| -> &NodeGeometry {
             let index = geometry
@@ -567,31 +876,69 @@ mod tests {
                 node(barrel);
             }
         }
-        for volume in spec.volumes.keys() {
-            // Every declared volume must fall under the mesh-capture rule AND carry an indexed
-            // mesh — a differently-suffixed or unindexed volume would silently break phase 1.
-            assert!(
-                captures_mesh(volume),
-                "volume `{volume}` dodges the mesh-capture rule"
-            );
-            let n = node(volume);
-            assert!(
-                !n.primitives.is_empty(),
-                "volume `{volume}` captured no mesh data"
-            );
-            for p in &n.primitives {
-                assert!(p.positions.len() >= 3, "volume `{volume}`: degenerate mesh");
-                assert!(!p.indices.is_empty(), "volume `{volume}`: unindexed mesh");
-            }
-        }
         for view in spec.views.values() {
             node(&view.node);
         }
         node("Hull");
         node("Center_Of_Mass");
 
+        // Every ballistic volume the MATERIAL rule found carries usable geometry: a substance on
+        // every primitive, a positive factor, and an indexed mesh. (Watertightness is not asserted
+        // here — extraction REFUSES a non-manifold substance primitive outright, so reaching this
+        // line already proves every shell closed and outward-wound.)
+        assert!(
+            !geometry.ballistic_volumes.is_empty(),
+            "the material rule found no ballistic volume at all"
+        );
+        for &index in &geometry.ballistic_volumes {
+            let volume = &geometry.nodes[index];
+            let name = &volume.name;
+            assert!(
+                !volume.primitives.is_empty(),
+                "volume `{name}` captured no mesh data"
+            );
+            for primitive in &volume.primitives {
+                let substance = primitive.substance.as_ref().unwrap_or_else(|| {
+                    panic!("volume `{name}` holds a primitive with no substance")
+                });
+                assert!(
+                    substance.factor > 0.0,
+                    "volume `{name}` is `{}`, whose factor is not positive",
+                    substance.name
+                );
+                assert!(
+                    primitive.positions.len() >= 3,
+                    "volume `{name}`: degenerate"
+                );
+                assert!(!primitive.indices.is_empty(), "volume `{name}`: unindexed");
+            }
+        }
+        // Name-sorted: the deterministic spawn order.
+        let volume_names: Vec<&str> = geometry
+            .ballistic_volumes
+            .iter()
+            .map(|&index| geometry.nodes[index].name.as_str())
+            .collect();
+        let mut sorted = volume_names.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            volume_names, sorted,
+            "volumes must be extracted name-sorted"
+        );
+
+        // Every declared component names a ballistic volume — a facet on a node the march never
+        // meets is inert, and the binder refuses it, so the shipped pair must agree here first.
+        for component in spec.volumes.keys() {
+            assert!(
+                geometry.is_ballistic(component),
+                "component `{component}` is not a ballistic volume (no primitive of its node wears \
+                 a registry substance)"
+            );
+        }
+
         // Wheels: 8 per side on the Tiger (snapshot; SIM-EVIDENCE's 16/16), via the extractor's
-        // typed list.
+        // typed list, in the DECLARED order — the load-bearing `WheelIndex` slot order both wire
+        // ends derive.
         let per_side = |want| {
             geometry
                 .roadwheels
@@ -601,38 +948,39 @@ mod tests {
         };
         assert_eq!(per_side(crate::tank::TrackSide::Left), 8);
         assert_eq!(per_side(crate::tank::TrackSide::Right), 8);
-        // The wheel list is name-sorted — the load-bearing `WheelIndex` slot order both wire ends
-        // derive — so pin that too, not just the per-side counts.
         let wheel_names: Vec<&str> = geometry
             .roadwheels
             .iter()
             .map(|&(index, _)| geometry.nodes[index].name.as_str())
             .collect();
-        let mut sorted = wheel_names.clone();
-        sorted.sort_unstable();
         assert_eq!(
-            wheel_names, sorted,
-            "roadwheels must be extracted name-sorted"
+            wheel_names,
+            spec.roadwheels
+                .iter()
+                .map(|wheel| wheel.node.as_str())
+                .collect::<Vec<_>>()
         );
-        // Station AND armour in one node: the unified wheel mesh means every station is also a
-        // volume, so it must be declared (the volume loop above then proves its geometry captured).
-        // Re-split the asset into `Wheel_L_0` + a `_Ballistic` child and this fails at CI time
-        // instead of leaving the wheels silently invisible to the penetration march.
+        // Station AND armour in one node: the wheels ship as one object per station, so every
+        // station must also have been classified a volume by its materials. Re-split the asset, or
+        // strip a wheel's substance, and this fails at CI time instead of leaving the wheels
+        // silently invisible to the penetration march.
         for &name in &wheel_names {
             assert!(
-                spec.volumes.contains_key(name),
-                "roadwheel `{name}` carries the wheel mesh but has no volume declaration"
+                geometry.is_ballistic(name),
+                "roadwheel `{name}` carries the wheel mesh but wears no substance"
             );
         }
 
-        // Collision proxies: present (extraction order), captured, indexed — via the typed list.
-        assert!(
-            !geometry.collision_proxies.is_empty(),
-            "no *_Collider proxies extracted"
-        );
+        // Collision proxies: the declared list, captured, indexed, and NOT armour.
+        assert_eq!(geometry.collision_proxies.len(), spec.colliders.len());
         for &index in &geometry.collision_proxies {
             let collider = &geometry.nodes[index];
             assert!(!collider.primitives.is_empty());
+            assert!(
+                !collider.is_ballistic(),
+                "`{}` is a collision proxy AND armour",
+                collider.name
+            );
             for p in &collider.primitives {
                 assert!(
                     p.positions.len() >= 4,
@@ -664,6 +1012,137 @@ mod tests {
         }
     }
 
+    /// The SUBSTANCE CENSUS — the pin that makes "decor must never wear a substance material" a
+    /// mechanical fact rather than an eyeball rule.
+    ///
+    /// Membership is the material now, so a decor object that acquires a registry material silently
+    /// becomes armour: it would march, it would be charged, and nothing else in the pipeline would
+    /// object. Nothing can detect that from the material alone (wearing one IS the declaration), so
+    /// the guard is this snapshot: the exact number of volumes, and the exact number of PRIMITIVES
+    /// per substance. A deliberate model change updates these numbers in the same commit; an
+    /// accidental one fails CI naming the substance whose count moved.
+    #[test]
+    fn tiger_1_substance_census_is_pinned() {
+        let geometry = tiger_geometry(&tiger_spec());
+        let mut census: BTreeMap<&str, usize> = BTreeMap::new();
+        for node in &geometry.nodes {
+            for primitive in &node.primitives {
+                if let Some(substance) = &primitive.substance {
+                    *census.entry(substance.name.as_str()).or_default() += 1;
+                }
+            }
+        }
+        assert_eq!(
+            census,
+            BTreeMap::from([
+                ("Ammunition", 4),
+                ("Cast", 5),
+                ("EngineBlock", 2),
+                ("Flesh", 5),
+                ("GunSteel", 6),
+                ("MildSteel", 22),
+                ("RHA", 17),
+                ("Rubber", 16),
+            ]),
+            "the Tiger's substance census moved — see the doc above before re-pinning"
+        );
+        assert_eq!(geometry.ballistic_volumes.len(), 61);
+    }
+
+    /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
+    /// synthetic primitives, because the shipped asset must (and does) pass — the gate's value is
+    /// entirely in what it rejects.
+    #[test]
+    fn the_manifold_gate_refuses_open_inverted_and_degenerate_shells() {
+        // A unit tetrahedron, outward-wound: the smallest closed positive-volume shell.
+        let tetra = |indices: Vec<u32>| MeshGeometry {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+        };
+        let closed = vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
+        manifold_gate("Good", 0, &tetra(closed.clone())).expect("a closed tetrahedron passes");
+
+        // One face removed: an open shell. This is the defect that makes armour worth ZERO — the
+        // walk never finds the exit face and the volume is never charged.
+        let mut open = closed.clone();
+        open.truncate(9);
+        let err =
+            manifold_gate("Open", 0, &tetra(open)).expect_err("an open shell must be refused");
+        assert!(err.contains("Open") && err.contains("not closed"), "{err}");
+
+        // Every face flipped: closed, but wound inward — the walk would read entries as exits.
+        let inverted: Vec<u32> = closed
+            .chunks_exact(3)
+            .flat_map(|t| [t[0], t[2], t[1]])
+            .collect();
+        let err = manifold_gate("Inverted", 0, &tetra(inverted))
+            .expect_err("an inside-out shell must be refused");
+        assert!(err.contains("Inverted") && err.contains("volume"), "{err}");
+
+        // A duplicated face: closed by undirected count, but one directed edge is traversed twice.
+        let mut doubled = closed.clone();
+        doubled.extend_from_slice(&[0, 2, 1]);
+        let err = manifold_gate("Doubled", 0, &tetra(doubled))
+            .expect_err("a duplicated face must be refused");
+        assert!(
+            err.contains("Doubled") && err.contains("directed edge"),
+            "{err}"
+        );
+
+        // A degenerate (zero-area) triangle has no orientation to check.
+        let mut degenerate = closed.clone();
+        degenerate.extend_from_slice(&[0, 1, 1]);
+        let err = manifold_gate("Degenerate", 0, &tetra(degenerate))
+            .expect_err("a zero-area face must be refused");
+        assert!(
+            err.contains("Degenerate") && err.contains("degenerate"),
+            "{err}"
+        );
+    }
+
+    /// Weld-by-position is what makes the gate measure the SURFACE instead of the export's vertex
+    /// splitting: glTF duplicates a vertex wherever the normal or UV differs, so a flat-shaded
+    /// plate arrives with every corner split and a naive index-level edge test false-positives on
+    /// every seam of every volume in the model.
+    #[test]
+    fn the_gate_welds_before_it_measures() {
+        // The same tetrahedron with EVERY corner split per face — 12 vertices, 4 faces, no shared
+        // index anywhere. Index-level, it is four disconnected triangles; welded, it is closed.
+        let corners = [
+            [0.0f32, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let faces = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for face in faces {
+            for corner in face {
+                indices.push(positions.len() as u32);
+                positions.push(corners[corner]);
+            }
+        }
+        let split = MeshGeometry {
+            positions,
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+        };
+        manifold_gate("Split", 0, &split).expect("welding by position closes the split shell");
+    }
+
     /// Every node that SPINS must carry its axle in its own origin.
     ///
     /// A rotating part is driven by writing a local rotation onto its node — which turns the mesh
@@ -678,10 +1157,7 @@ mod tests {
     /// `track::marker_model`), just that an origin was authored at all.
     #[test]
     fn rotating_nodes_carry_their_own_axle_origin() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(crate::tank::TIGER_GLB_PATH);
-        let geometry = extract_tank_geometry(&path).expect("tiger_1.glb must extract");
+        let geometry = tiger_geometry(&tiger_spec());
 
         // Roadwheels come from the extractor's typed list; the drive/idler hubs are named directly
         // (they are rig meshes, not `Wheel_<side>_<n>` empties, so no typed list carries them).

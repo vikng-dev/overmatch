@@ -35,6 +35,7 @@ pub struct ViewServo;
 /// whose sim part detached before presentation arrived. It never creates simulation state.
 pub fn bind_tank_view(
     ready: On<WorldInstanceReady>,
+    blueprint: Option<Res<crate::bake::TankBlueprint>>,
     roots: Query<&SimParts>,
     children: Query<&Children>,
     names: Query<&Name>,
@@ -48,6 +49,13 @@ pub fn bind_tank_view(
     let Ok(parts) = roots.get(ready.entity) else {
         return;
     };
+    // Which glb nodes are physics-only, and therefore must not render. The BAKE decides: a
+    // collision proxy is a declared node and a ballistic volume is one whose primitives wear a
+    // substance material (§12, classifier precedent 2026-08-07). The `*_Ballistic` suffix that used
+    // to answer this is retired and stripped from the source .blend — asking the extraction is the
+    // replacement, and it is the same verdict the march itself rides on, so the two cannot drift.
+    let geometry = blueprint.as_deref().map(|blueprint| &blueprint.geometry);
+    let hidden = |name: &str| geometry.is_some_and(|geometry| geometry.is_physics_only(name));
     // Both trees share names; skip sim entities so links cannot point back to themselves.
     let skeleton: HashSet<Entity> = parts.0.values().copied().collect();
     for entity in children.iter_descendants(ready.entity) {
@@ -57,7 +65,7 @@ pub fn bind_tank_view(
         let Ok(name) = names.get(entity) else {
             continue;
         };
-        if name.as_str().ends_with("_Collider") || name.as_str().ends_with("_Ballistic") {
+        if hidden(name.as_str()) {
             commands.entity(entity).insert(Visibility::Hidden);
         }
         // Mesh leaves may share object names but are not part anchors.

@@ -73,7 +73,9 @@ pub struct Weapon {
 }
 
 /// Which track a roadwheel drives (for differential thrust). Left wheels sit at −X, right at +X.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `Deserialize` because each station's side is AUTHORED in `<tank>.tank.ron` now
+/// ([`crate::spec::RoadwheelSpec`]) rather than parsed out of the node name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
 pub enum TrackSide {
     Left,
     Right,

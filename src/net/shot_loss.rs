@@ -710,6 +710,7 @@ fn spawn_plate(app: &mut App) {
         CollisionLayers::new([Layer::Armor], LayerMask::ALL),
         BallisticVolume {
             material_factor: STEEL,
+            substance: "RHA".to_string(),
         },
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every
         // shot generate one real authority-side `ShellDamage` while preserving the same bounce geometry.
