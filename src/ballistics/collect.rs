@@ -75,8 +75,9 @@ pub(crate) struct Corridor<'a> {
     /// f32 falls.
     pub seeded: &'a [PrimitiveKey],
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
-    /// face — the convex narrow phase has to make that judgement, and a second opinion about it is
-    /// how an entry gets counted twice or not at all.
+    /// face — a second opinion about that is how an entry gets counted twice or not at all. The
+    /// trimesh prune reads it through [`prune_margin`], to decide when a corridor origin is ON a
+    /// face rather than past it.
     pub laws: &'a WalkLaws,
 }
 
@@ -122,6 +123,7 @@ pub(crate) fn collect(
                 primitive,
                 seeded,
                 *rotation,
+                prune_margin(corridor),
                 out,
             )?,
             _ => collect_convex(
@@ -143,6 +145,23 @@ pub(crate) fn collect(
     Ok(())
 }
 
+/// How far outside the corridor's own extent the trimesh prune reaches, so that the prune cannot be
+/// the thing that decides whether a face EXISTS — [`admit`] owns that decision.
+///
+/// A transit corridor's origin IS an entry face's position, recomputed through a walk, a handoff and
+/// a world-to-local subtraction, so it lands a few ULP on one side of that plane or the other. When
+/// it lands PAST, the face's own AABB — degenerate in the axis it is perpendicular to — falls
+/// outside the corridor's box by that same hair and the leaf is never tested. `admit` is written for
+/// exactly this ("behind the origin and unseeded → the ray is sitting on the face") and never gets
+/// the chance.
+///
+/// Same tolerance family, and the same scale-awareness, as [`super::walk::coincident`]: this is "the
+/// origin is ON that boundary", stated as a box. Micrometres — three orders below the march's own
+/// boundary nudge, so a face the march deliberately stepped past stays outside.
+fn prune_margin(corridor: &Corridor<'_>) -> f32 {
+    corridor.laws.topology_abs + corridor.laws.topology_rel * corridor.origin.abs().max_element()
+}
+
 /// Every triangle the ray crosses, with the winding normal.
 #[expect(
     clippy::too_many_arguments,
@@ -157,6 +176,7 @@ fn collect_trimesh(
     primitive: Entity,
     seeded: bool,
     rotation: Rotation,
+    margin: f32,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
@@ -165,11 +185,13 @@ fn collect_trimesh(
     // DEGENERATE (zero thickness in one axis), and a corridor origin sitting exactly on such a face
     // — which the transit corridor's does, every time, because it IS that face's position — can miss
     // it entirely. The entry then vanishes and the walk reports an exit it never entered. Overlap
-    // has no such boundary case, prunes nearly as well, and every surviving leaf still gets an exact
-    // intersection test, so the prune cannot change WHICH crossings exist either way.
+    // prunes nearly as well, and every surviving leaf still gets an exact intersection test, so the
+    // prune cannot change WHICH crossings exist either way — PROVIDED it is grown by
+    // [`prune_margin`], because a box tested with a bare inequality has its own exact boundary, and
+    // an origin one ULP past the face lands on the wrong side of it.
     let far = origin + axis * length;
-    let lo = origin.min(far);
-    let hi = origin.max(far);
+    let lo = origin.min(far) - Vec3::splat(margin);
+    let hi = origin.max(far) + Vec3::splat(margin);
     for index in mesh.bvh().leaves(|node| {
         let aabb = node.aabb();
         aabb.maxs.x >= lo.x
@@ -415,6 +437,106 @@ mod tests {
     fn a_crossing_behind_the_origin_keeps_its_negative_distance() {
         let (t, _) = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::Z).expect("the plane is behind it");
         assert!(t < 0.0, "{t}");
+    }
+
+    /// An axis-aligned trimesh box, wound outwards, centred on the origin.
+    fn trimesh_box(size: Vec3) -> Collider {
+        let h = size * 0.5;
+        let vertices: Vec<Vec3> = [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| Vec3::new(x * h.x, y * h.y, z * h.z))
+        .collect();
+        let indices = vec![
+            [0, 3, 2],
+            [0, 2, 1],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ];
+        Collider::trimesh(vertices, indices)
+    }
+
+    /// Run the trimesh narrow phase against `collider` for a ray in the collider's own frame, at the
+    /// margin the live collector would compute for that corridor.
+    fn trimesh_hits(collider: &Collider, origin: Vec3, axis: Vec3, length: f32) -> Vec<FaceHit> {
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let laws = WalkLaws::default();
+        let corridor = Corridor {
+            origin,
+            axis,
+            length,
+            seeded: &[],
+            laws: &laws,
+        };
+        let mut out = Vec::new();
+        let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
+            panic!("`Collider::trimesh` builds a trimesh");
+        };
+        collect_trimesh(
+            mesh,
+            origin,
+            axis,
+            length,
+            node,
+            node,
+            false,
+            Rotation::default(),
+            prune_margin(&corridor),
+            &mut out,
+        )
+        .expect("the fixture collects cleanly");
+        out
+    }
+
+    /// THE PRUNE MUST NOT DECIDE WHETHER A FACE EXISTS.
+    ///
+    /// A transit corridor's origin IS the entry face's own position, recomputed through a walk and a
+    /// handoff — so one f32 ulp of rounding puts it a hair PAST that face about half the time. The
+    /// face's own AABB is DEGENERATE in the axis it is perpendicular to, so it then lies entirely
+    /// outside the corridor's box and the prune drops it. [`admit`] is written for exactly this case
+    /// ("behind the origin and unseeded → the ray is sitting on the face, clamp to `t = 0`") and
+    /// never got the chance: the entry vanished, and the walk reported an exit it never entered
+    /// ([`WalkError::UnexpectedExit`]), which the driver fails closed on — a round that stopped dead
+    /// on a plate it should have punched straight through.
+    #[test]
+    fn a_face_the_origin_sits_a_hair_past_is_still_collected() {
+        let collider = trimesh_box(Vec3::new(3.0, 3.0, 0.05));
+        let face = 0.025_f32;
+        // In ULP, because that is the unit the defect is measured in: the live failure put the
+        // corridor origin a dozen ULP past a 25 mm face, purely from the `world_origin −
+        // collider_position` that takes the corridor into the collider's frame.
+        for past in [0, 1, 8, 64] {
+            let origin = f32::from_bits(face.to_bits() - past);
+            // Off the box's face diagonal, so each face presents ONE triangle and the count below
+            // reads as "the face" rather than "however the mesh was triangulated".
+            let hits = trimesh_hits(&collider, Vec3::new(0.1, -0.0003, origin), Vec3::NEG_Z, 0.5);
+            let entries: Vec<&FaceHit> = hits
+                .iter()
+                .filter(|hit| hit.true_normal.dot(Vec3::NEG_Z) < 0.0)
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "the entry face is collected though the origin sits {past} past it: {hits:?}",
+            );
+            assert_eq!(entries[0].t, 0.0, "and it lands at the corridor origin");
+        }
     }
 
     #[test]
