@@ -5019,4 +5019,67 @@ mod march_tests {
             turn(full)
         );
     }
+
+    /// SPACED ARMOUR, end to end: two 50 mm trimesh plates with 900 mm of air between them.
+    ///
+    /// The air is what this pins, from both sides. It must fabricate nothing — 900 mm is eighteen
+    /// weld lookaheads, so the two plates are two crossings and the gap costs the round nothing but
+    /// flight — and it must not swallow anything either: an 88 defeats 50 mm of RHA head-on without
+    /// effort, so BOTH plates are punched, in sequence, each read at its own real face.
+    ///
+    /// It is also the arrangement that caught the collector's prune boundary: a transit corridor's
+    /// origin IS the entry face's own position, and one ULP of rounding put it past that face, so
+    /// the face's degenerate AABB fell outside the corridor's box, the entry vanished, and the walk
+    /// reported an exit it had never entered. The round stopped dead on a plate it should have gone
+    /// through — no terminal, no perforation, one bare `penetrated: false` spark.
+    #[test]
+    fn plates_across_a_900_mm_gap_are_two_crossings_and_both_perforate() {
+        let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5), slab(0.05, -0.45)]);
+        app.init_resource::<TerminalLog>();
+        app.add_observer(capture_terminal);
+        spawn_headon_shell(&mut app, a_shot());
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(
+            impacts.len(),
+            2,
+            "two plates, two armour reads — the gap merges nothing and hides nothing",
+        );
+        for (impact, face) in impacts.iter().zip([0.525, -0.425]) {
+            assert!(matches!(impact.surface, ImpactSurface::Armor));
+            assert!(
+                impact.penetrated,
+                "an 88 goes through 50 mm of RHA head-on: {:?}",
+                impact.position,
+            );
+            assert!(
+                (impact.position.z - face).abs() < 1.0e-3,
+                "the read is at the plate's own entry face (expected z={face}, got {})",
+                impact.position.z,
+            );
+        }
+        // Nothing may be reported in the air itself: a fabricated weld across the gap would report
+        // ONE crossing spanning both plates, and a fabricated surface would report a third read
+        // between them.
+        assert!(
+            impacts
+                .iter()
+                .all(|impact| !(-0.425..=0.475).contains(&impact.position.z)),
+            "no armour was invented in 900 mm of air: {impacts:?}",
+            impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+        );
+
+        let terminals = app.world().resource::<TerminalLog>().0.clone();
+        assert_eq!(terminals.len(), 1, "one terminal per shot");
+        assert!(terminals[0].penetrated, "the terminal breached the plate");
+        assert_eq!(terminals[0].after_bounces, 0, "nothing deflected head-on");
+        assert!(
+            (terminals[0].position.z - 0.525).abs() < 1.0e-3,
+            "the terminal reads at the FIRST plate's entry face, got z={}",
+            terminals[0].position.z,
+        );
+    }
 }
