@@ -154,6 +154,13 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
         "Same ledger: REMOVED because the steering servo became an exact semi-implicit law, so no \
          proportional band exists to tune. The entry also records that its droop was a bug.",
     ),
+    (
+        "src/ballistics/fuzz.rs",
+        "KNOWN_MULTI_SHELL_VOLUMES",
+        "`DEGENERATE_BAKE_RESIDUE`'s doc names the broad list it replaced, so that a reader who \
+         finds the old name in a commit or a report knows which excuse was retired and why. \
+         Deleting the sentence would delete the record of the narrowing.",
+    ),
 ];
 
 /// Line-number citations that stay, each with the reason it cannot be pinned by symbol.
