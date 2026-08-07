@@ -374,6 +374,13 @@ pub struct WeldedRun {
     /// Outward normal of the innermost exit face.
     pub exit_normal: Vec3,
     pub segments: Vec<MaterialSegment>,
+    /// The volume whose primitive OPENS the run — the entrance surface, physically the first thing
+    /// touched. §13.5's ratified impulse rule routes the whole momentum exchange to its rigid body
+    /// (2026-08-07): applying `m·Δv` to every present body would duplicate momentum, and picking by
+    /// factor would reintroduce the ownership tie-break §13.2 abolished. Ties at an exact abutment
+    /// are broken by the lowest entity, which is arbitrary but deterministic — at an abutment either
+    /// face IS the entrance surface.
+    pub entry_volume: Entity,
     /// How many micro-gaps this run swallowed.
     pub joints: u32,
     /// Everything present anywhere in the run — the "shares a primitive" half of disc event
@@ -481,7 +488,7 @@ impl RayWalk {
 
 /// Whether two `t` values name the same topological boundary. Scale-aware, because f32 spacing
 /// coarsens with distance and a face diagonal at 400 m must still reduce to one crossing.
-fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
+pub(crate) fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
     (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
 }
 
@@ -851,12 +858,19 @@ fn weld_runs(
             .collect();
         primitives.sort();
         primitives.dedup();
+        let entry_volume = intervals
+            .iter()
+            .filter(|(_, open, _)| *open == start)
+            .map(|(key, _, _)| key.volume)
+            .min()
+            .unwrap_or_else(|| primitives.first().map_or(Entity::PLACEHOLDER, |k| k.volume));
         WeldedRun {
             start,
             end,
             cost: cost_acc as f32,
             entry_normal: normal_at(start, true),
             exit_normal: normal_at(end, false),
+            entry_volume,
             segments,
             joints: (to - from) as u32,
             primitives,
@@ -1015,8 +1029,25 @@ pub struct DiscFrame {
 }
 
 impl DiscFrame {
-    /// Build the SPAWN basis from an explicit reference direction (the muzzle's up, in slice 2).
-    /// The caller owns the choice, so no world-axis branch can hide inside the core.
+    /// The SPAWN basis for a shell fired along `axis`, with no external roll reference.
+    ///
+    /// A gun does have a roll about its bore, but the shell is axisymmetric and the ring is a
+    /// SAMPLING pattern, not a physical feature — what matters (and what this buys) is that the
+    /// pattern never snaps mid-flight, which [`transport`](Self::transport) guarantees from here on.
+    /// Anchoring to the muzzle's actual up-vector would need it on `FireShell`, and therefore on the
+    /// wire, for a phase the aggregates are near-invariant to.
+    ///
+    /// The branch is evaluated ONCE, at spawn: two shots either side of it sample differently, but
+    /// they are different shots, and the aggregates (η, `n̄`, cost) barely notice — the residual is
+    /// the sampling noise at small η that §13.5 already accepts as k's business.
+    pub fn anchored(axis: Vec3) -> Option<Self> {
+        // The less-aligned of two world axes, so the Gram-Schmidt below is never near-degenerate.
+        let reference = if axis.y.abs() > 0.9 { Vec3::X } else { Vec3::Y };
+        Self::from_axis_and_reference(axis, reference)
+    }
+
+    /// Build the SPAWN basis from an explicit reference direction. The caller owns the choice, so no
+    /// world-axis branch can hide inside the core.
     pub fn from_axis_and_reference(axis: Vec3, reference: Vec3) -> Option<Self> {
         let axis = axis.normalize_or_zero();
         let u = reference - axis * axis.dot(reference);
@@ -1033,11 +1064,23 @@ impl DiscFrame {
 
     /// Carry the basis through a direction change by the MINIMAL rotation taking `from` to `to`
     /// (rotation-minimizing transport). Roll is therefore never re-rolled by a bend or a bounce.
+    ///
+    /// The result is re-orthogonalized against `to`, which is the operation's actual contract: what
+    /// comes back is a basis FOR `to`, not merely a rotated pair of vectors. Rotation alone preserves
+    /// perpendicularity only when the input already had it, and a basis with a component ALONG the
+    /// travel axis is not a sampling artefact — it puts sample rays in FRONT of and BEHIND the disc,
+    /// so a ring ray starts inside geometry the axis has not reached and the walk reports an exit it
+    /// never entered.
     pub fn transport(&self, from: Vec3, to: Vec3) -> Self {
-        let rotation = Quat::from_rotation_arc(from.normalize_or_zero(), to.normalize_or_zero());
-        Self {
-            u: rotation * self.u,
-            v: rotation * self.v,
+        let to = to.normalize_or_zero();
+        let rotation = Quat::from_rotation_arc(from.normalize_or_zero(), to);
+        let carried = rotation * self.u;
+        let u = carried - to * to.dot(carried);
+        match Self::from_axis_and_reference(to, u) {
+            Some(frame) => frame,
+            // The carried vector collapsed onto the axis (a near-reversal, or a frame that was never
+            // perpendicular). Re-anchor rather than return a basis that is not one.
+            None => Self::anchored(to).unwrap_or(*self),
         }
     }
 }
@@ -1172,6 +1215,10 @@ pub struct DiscEvent {
     /// The ENGAGEMENT fraction: covered samples / k.
     pub coverage: f32,
     pub exit_coverage: f32,
+    /// The volume owning the entrance surface — the first body physically touched, and the one
+    /// §13.5's ratified rule hands the whole momentum exchange to. Taken from the sample that
+    /// touched FIRST, ties broken by sample index.
+    pub entrance_volume: Entity,
     /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
     pub cost: f32,
     pub profile: CostProfile,
@@ -1200,6 +1247,26 @@ impl DiscWalk {
     /// k — the sample count the disc aggregates over.
     pub fn samples(&self) -> usize {
         self.walks.len()
+    }
+
+    /// The seed state a corridor RESUMED at progress `t` would need — the same lookup [`begin`] makes
+    /// at the handoff, on a plane square to the axis instead of on the entrance surface.
+    ///
+    /// This is what lets the march step out of one crossing and into the next without ever inferring
+    /// its own interior state: a shell that perforates an outer plate while a ring sample is already
+    /// inside the crewman behind it resumes KNOWING that, because the ray it would have to guess
+    /// about is one this walk already covered.
+    pub fn resume_at(&self, t: f32) -> Vec<SampleSeed> {
+        self.walks
+            .iter()
+            .enumerate()
+            .map(|(sample, walk)| SampleSeed {
+                sample,
+                offset: self.offsets[sample],
+                t,
+                inside: walk.inside_at(t),
+            })
+            .collect()
     }
 }
 
@@ -1361,6 +1428,7 @@ fn build_event(
 
     let mut start = f32::INFINITY;
     let mut end = f32::NEG_INFINITY;
+    let mut entrance_volume = None;
     let mut entry_sum = Vec3::ZERO;
     let mut entry_position = Vec3::ZERO;
     let mut exit_sum = Vec3::ZERO;
@@ -1368,6 +1436,9 @@ fn build_event(
     for (&sample, runs) in &by_sample {
         let first = &walks[sample].runs[runs[0]];
         let last = &walks[sample].runs[runs[runs.len() - 1]];
+        if first.start < start {
+            entrance_volume = Some(first.entry_volume);
+        }
         start = start.min(first.start);
         end = end.max(last.end);
         entry_sum += first.entry_normal;
@@ -1555,6 +1626,7 @@ fn build_event(
     Ok(DiscEvent {
         start,
         end,
+        entrance_volume: entrance_volume.unwrap_or(Entity::PLACEHOLDER),
         entry_normal,
         entry_position,
         exit_normal,

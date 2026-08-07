@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use avian3d::prelude::{Forces, SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{Collider, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
@@ -30,6 +30,10 @@ mod sanctioned;
 )]
 mod walk;
 
+/// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
+/// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
+mod resolve;
+
 /// The spatial half of the §13 walk: turning a corridor of world rays into EVERY face crossing along
 /// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
 /// see the module doc.
@@ -43,6 +47,15 @@ pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };
 use sanctioned::{SanctionedCatchUp, catch_up_sanctioned_chain};
+
+/// The march's boundary nudge: every segment cast starts this far along the direction so a shell
+/// does not immediately re-touch the face it is leaving.
+///
+/// Shared with [`resolve`] because the two must agree: the interior seed a crossing hands forward
+/// describes the point the NEXT corridor starts from, and that point is nudged. A seed read one
+/// nudge earlier can say "inside" about a plate the corridor has already left, which the walk then
+/// reports as an entry with no exit.
+pub(crate) const MARCH_EPS: f32 = 1.0e-3;
 
 /// Gravity applied to shells each fixed tick (m/s²).
 const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
@@ -327,6 +340,96 @@ fn cast_march_segment(
     }
 }
 
+/// First contact along one march segment, with ARMOUR probed as the caliber-wide disc it is.
+///
+/// The axis alone is not first contact (codex finding 5): §13.5's shell meets the world as a disc, so
+/// a round whose centre threads a gap while its rim clips a plate MUST resolve — otherwise the whole
+/// η law is unreachable in the live march and every graze silently becomes a clean miss.
+///
+/// Terrain stays axis-only. The ground is one continuous surface that stops the round outright; there
+/// is no η to grade and no union to integrate, and [`HeightGrid::cast_ray`] is the deterministic
+/// caster the sim depends on.
+///
+/// Cost posture: one broad-phase AABB traversal decides whether ANY armour is near the corridor. In
+/// open air — where a shell spends nearly all of its life — that is the whole armour cost, cheaper
+/// than the ray cast it replaces. The k sample casts are paid only within reach of geometry, and only
+/// by rounds big enough for the ring to mean anything (see `resolve::DISC_MIN_CALIBER`).
+fn cast_disc_segment(
+    world: &ProjectileMarchWorld,
+    frame: &walk::DiscFrame,
+    radius: f32,
+    origin: Vec3,
+    dir: Dir3,
+    max: f32,
+    not_own: &dyn Fn(Entity) -> bool,
+) -> Option<SegmentHit> {
+    let armor = if radius <= 0.0 {
+        world.spatial.cast_ray_predicate(
+            origin,
+            dir,
+            max,
+            true,
+            &SpatialQueryFilter::from_mask(Layer::Armor),
+            not_own,
+        )
+    } else {
+        let mut near_armor = false;
+        world.spatial.aabb_intersections_with_aabb_callback(
+            collect::swept_aabb(origin, Vec3::from(dir), max, radius),
+            |entity| {
+                near_armor = hit_ancestor(entity, &world.volumes, &world.parents).is_some()
+                    && not_own(entity);
+                // Stop at the first candidate: this asks IF, not WHICH.
+                !near_armor
+            },
+        );
+        if near_armor {
+            let mut nearest: Option<avian3d::prelude::RayHitData> = None;
+            for offset in walk::disc_offsets(frame, radius, walk::DEFAULT_RING) {
+                let hit = world.spatial.cast_ray_predicate(
+                    origin + offset,
+                    dir,
+                    max,
+                    true,
+                    &SpatialQueryFilter::from_mask(Layer::Armor),
+                    not_own,
+                );
+                if let Some(hit) = hit
+                    && nearest.is_none_or(|best| hit.distance < best.distance)
+                {
+                    nearest = Some(hit);
+                }
+            }
+            nearest
+        } else {
+            None
+        }
+    };
+    let terrain: Option<(f32, Vec3)> = match world.grid.as_deref() {
+        Some(grid) => grid
+            .cast_ray(origin, Vec3::from(dir), max)
+            .map(|hit| (hit.t, hit.normal)),
+        None => world
+            .spatial
+            .cast_ray(
+                origin,
+                dir,
+                max,
+                true,
+                &SpatialQueryFilter::from_mask(Layer::Terrain),
+            )
+            .map(|hit| (hit.distance, hit.normal)),
+    };
+    match (armor, terrain) {
+        (Some(armor), Some((distance, normal))) if distance < armor.distance => {
+            Some(SegmentHit::Terrain { distance, normal })
+        }
+        (Some(armor), _) => Some(SegmentHit::Armor(armor)),
+        (None, Some((distance, normal))) => Some(SegmentHit::Terrain { distance, normal }),
+        (None, None) => None,
+    }
+}
+
 /// Whether a spent shell freezes in place — keeping its stuck mesh, tracer, and penetration marks
 /// for inspection — instead of despawning. The game despawns (default); the sandbox opts in.
 #[derive(Resource, Default)]
@@ -466,6 +569,17 @@ pub(crate) struct Projectile {
     mass: f32,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
     drag_k: f32,
+    /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
+    /// where the disc's rays go and therefore what the shell hits.
+    ///
+    /// Anchored at spawn from the fire direction ([`DiscFrame::anchored`]) and parallel-transported
+    /// on every direction change afterwards — gravity's per-tick bend, normalization, a ricochet.
+    /// Rebuilding it from the current direction instead would snap the sample pattern mid-flight the
+    /// moment the direction crossed the anchoring branch.
+    ///
+    /// Deterministic from spawn inputs alone, so a replica reconstructs the identical frame from the
+    /// same `FireShell`; nothing about it rides the wire.
+    disc: walk::DiscFrame,
 }
 
 /// Per-shell latch: one [`ShellDamage`] report per damaging shot.
@@ -1107,6 +1221,14 @@ fn on_fire_shell(
             caliber: fire.caliber,
             mass: fire.mass,
             drag_k: drag,
+            // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
+            // catch-up must anchor its ring exactly where the locally fired one did.
+            disc: walk::DiscFrame::anchored(Vec3::from(fire.direction)).unwrap_or(
+                walk::DiscFrame {
+                    u: Vec3::X,
+                    v: Vec3::Y,
+                },
+            ),
         },
         DamageReport::default(),
         TerminalReport::default(),
@@ -1288,6 +1410,9 @@ fn integrate_projectiles(
         Option<&ShotSource>,
     )>,
     world: ProjectileMarchWorld,
+    // Collider poses + shapes, for the §13 corridor collector: it walks each candidate's geometry
+    // itself rather than asking Avian for a nearest hit (see `ballistics::collect`).
+    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
     mut bodies: Query<(
         Forces,
         Option<&mut crate::track::sim::TrackGripWake>,
@@ -1400,6 +1525,7 @@ fn integrate_projectiles(
         let Some(step) = march_shell_step(
             &mut shell,
             &world,
+            &colliders,
             &mut health,
             &mut bodies,
             sanctioned,
@@ -1877,6 +2003,7 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
 fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
+    colliders: &Query<(&'static Position, &'static Rotation, &'static Collider)>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<(
         Forces,
@@ -1949,16 +2076,30 @@ fn march_shell_step(
     // Ray-march the step: free flight until a surface, then resolve it — terrain stops the
     // shell; a ballistic volume ricochets (too oblique) or is crossed (normalize → spend cost →
     // perforate or embed) — and keep marching the leftover budget along the new direction.
+    // The disc's sampling basis, carried through this tick's gravity bend so the ring never re-rolls
+    // (§13.5: the frame is spawn-anchored and transported, never rebuilt from the current direction).
+    // Transported from the direction the frame was LAST left on — the pre-step velocity — not from
+    // the shell's visual forward: `looking_to` is degenerate for a round travelling straight down,
+    // and the sampling basis is sim state that must not read a view detail.
+    let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
+    let mut frame = shell
+        .projectile
+        .disc
+        .transport(Vec3::from(previous), Vec3::from(dir));
+    let radius = if shell.projectile.caliber >= resolve::DISC_MIN_CALIBER {
+        shell.projectile.caliber * 0.5
+    } else {
+        0.0
+    };
+    // Which primitives each disc sample is still inside. Non-empty only between the crossings of one
+    // multi-plate step; the resolver hands it forward so the next corridor never has to infer it.
+    let mut interior: Vec<walk::SampleSeed> = Vec::new();
+
     while remaining > EPS {
         let origin = pos + dir * EPS;
-        let Some(step_hit) = cast_march_segment(
-            &world.spatial,
-            world.grid.as_deref(),
-            origin,
-            dir,
-            remaining,
-            &not_own,
-        ) else {
+        let Some(step_hit) =
+            cast_disc_segment(world, &frame, radius, origin, dir, remaining, &not_own)
+        else {
             // Open air — fly out the rest of the step. On the original (unbent) segment this is
             // exactly the shared `advance_shell` landing point; a `continue` past this point only
             // ever follows a bend, so `bent` is the exact discriminant.
@@ -2077,6 +2218,7 @@ fn march_shell_step(
         // shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica arm below
         // continues or breaks, so the physical armor resolution after it is authority-only.
         if !deposit {
+            let hit_normal = hit.normal;
             match resolve_replica_armor_contact(
                 shell, entry, hit.normal, sanctioned, now, shot_trace, commands,
             ) {
@@ -2089,7 +2231,16 @@ fn march_shell_step(
                         dir = new_dir;
                     }
                     speed = sanctioned_speed;
-                    pos = origin;
+                    // Lift the shell's BODY clear of the face it bounced off, exactly as the
+                    // authority's own ricochet does. At oblique incidence a disc's lateral offsets
+                    // lie mostly along the struck surface's normal, so resuming at the contact point
+                    // leaves half the ring behind the face and first contact fires again on the very
+                    // surface just left — which on a replica means holding for a keyframe that was
+                    // already consumed. The RECORDED bounce point is untouched; only where the march
+                    // resumes moves.
+                    pos = origin
+                        + Vec3::new(hit_normal.x, hit_normal.y, hit_normal.z).normalize_or_zero()
+                            * radius;
                     bent = true;
                     remaining -= travelled;
                     continue;
@@ -2107,37 +2258,71 @@ fn march_shell_step(
             }
         }
 
-        // Momentum: each branch below hands the struck body its share of the shell's momentum,
-        // `m·(v_in − v_out)` — a shell that stops dumps it all, a perforation less (it carries
-        // momentum out), a ricochet a partial normal-ward kick.
-        let (crossing, crossing_damage) = resolve_armor_crossing(
+        // The §13 union walk: collect an atomic corridor from here, integrate the field over
+        // EVERYTHING in it, and apply the plan it returns. `node_entity`/`factor` above are no longer
+        // the resolution's inputs — the corridor finds every volume for itself — but they still
+        // classify armour from terrain, which is why the read stays.
+        let _ = (node_entity, factor);
+        let resolved = resolve::resolve_crossing(
             shell,
-            entry,
-            &hit,
+            &resolve::ResolveContext {
+                world,
+                colliders,
+                armor: &armor,
+                deposit,
+                laws: walk::WalkLaws::default(),
+            },
+            origin,
             dir,
             speed,
-            node_entity,
-            factor,
+            hit.distance,
+            &interior,
             &mut terminal_emitted,
-            world,
             health,
             bodies,
-            &armor,
-            deposit,
+            &not_own,
             commands,
         );
-        damage_dealt += crossing_damage;
+        // FAIL CLOSED. A structured walk error means the corridor could not be resolved honestly —
+        // unpairable topology, an unprobeable collider, a crossing that would not close inside 50 m.
+        // The round stops where it was: no perforation, no spall, no transit damage. Free penetration
+        // is the one outcome worse than a stopped shell, because it is indistinguishable from armour
+        // that was never modelled.
+        let crossing = match resolved {
+            Ok(crossing) => crossing,
+            Err(error) => {
+                warn_once!(
+                    "ballistics: union walk failed, stopping the round at contact: {error:?}"
+                );
+                commands.trigger(Impact {
+                    position: entry,
+                    normal: hit.normal,
+                    caliber: shell.projectile.caliber,
+                    surface: ImpactSurface::Armor,
+                    penetrated: false,
+                    deflection: None,
+                    authority: None,
+                });
+                pos = entry;
+                stopped = true;
+                break;
+            }
+        };
+        damage_dealt += crossing.damage;
+        interior = crossing.seeds;
+        let crossing_resume = crossing.resume;
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
         bent = true;
-        match crossing {
+        match crossing.outcome {
             ArmorCrossing::Ricochet {
                 direction,
                 speed: bled,
             } => {
+                frame = frame.transport(Vec3::from(dir), Vec3::from(direction));
                 dir = direction;
                 speed = bled;
-                pos = entry;
+                pos = crossing_resume.unwrap_or(entry);
                 remaining -= travelled;
                 continue;
             }
@@ -2152,6 +2337,7 @@ fn march_shell_step(
                 speed: residual,
                 span,
             } => {
+                frame = frame.transport(Vec3::from(dir), Vec3::from(direction));
                 dir = direction;
                 speed = residual;
                 pos = exit;
@@ -2159,6 +2345,9 @@ fn march_shell_step(
             }
         }
     }
+    // Carry the (possibly re-rolled) basis back onto the shell so the next tick transports from
+    // where this one left off rather than re-anchoring.
+    shell.projectile.disc = frame;
 
     Some(MarchStep {
         position: pos,
@@ -2184,327 +2373,6 @@ enum ArmorCrossing {
         /// Line-of-sight metres spent inside the volume; the leftover travel budget pays for them.
         span: f32,
     },
-}
-
-/// Resolve one crossing of a ballistic volume — the penetration model itself (design doc §§2–6).
-///
-/// Ricochet (too oblique, unless overmatch suppresses it), or bite in: normalize toward the inward
-/// normal, spend the crossing's cost against the round's capability, and either embed or perforate.
-///
-/// AUTHORITY ONLY — every replica arm in [`resolve_replica_armor_contact`] ends the march before
-/// this is reached. Returns the outcome and the HP actually removed.
-fn resolve_armor_crossing(
-    shell: &mut MarchingShell,
-    // Where the round met the face, and the raw hit it came from (entity identity for the interior
-    // probes, and the outward normal).
-    entry: Vec3,
-    hit: &avian3d::prelude::RayHitData,
-    mut dir: Dir3,
-    mut speed: f32,
-    // The struck volume's node entity — where transit damage and spall address the component — and
-    // its authored reference-mm-per-metre.
-    node_entity: Entity,
-    factor: f32,
-    // Whether this shot's ONE `ShellTerminal` has already ridden the wire; latched here on the
-    // first perforation.
-    terminal_emitted: &mut bool,
-    world: &ProjectileMarchWorld,
-    health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
-    armor: &SpatialQueryFilter,
-    // Authority = not a replica: only then does a crossing actually mutate health.
-    deposit: bool,
-    commands: &mut Commands,
-) -> (ArmorCrossing, f32) {
-    let shot = shell.shot;
-    let mut damage_dealt = 0.0;
-    // Nudge past each boundary we resolve so we don't immediately re-hit it.
-    const EPS: f32 = 1.0e-3;
-    // How far ahead to search for a volume's far face — its full geometric thickness, even past the
-    // end of this step (thin plates resolve well within it).
-    const PROBE: f32 = 50.0;
-    // Steeper than this from the surface normal, an un-overmatched round ricochets (rad, ~70°).
-    const RICOCHET_ANGLE: f32 = 1.221;
-    // Speed retained through a ricochet.
-    const RICOCHET_BLEED: f32 = 0.6;
-    // Shock a glancing bounce jars into an *exposed component* (not armor): scaled by impact energy
-    // (capability) × squareness (cos incidence). A graze chips structural integrity without one-
-    // shotting; a faint graze barely registers; small arms barely scratch. Armor has no HP → shrugs.
-    const SHOCK_K: f32 = 0.045;
-    // Share of the impact angle the round straightens toward the normal on entry (normalization).
-    const NORMALIZATION: f32 = 0.2;
-    // Overmatch when calibre ≥ this × the plate's thickness: ricochet suppressed, slope cancelled.
-    const OVERMATCH_RATIO: f32 = 3.0;
-    // Main-penetrator transit damage = cost paid crossing the component × this (design §6).
-    const TRANSIT_K: f32 = 1.0;
-
-    // Momentum bookkeeping for this crossing: the incoming velocity (before any bend/bleed)
-    // and the body that owns the struck volume. Each resolution branch below hands the body
-    // its share of the shell's momentum, `m·(v_in − v_out)` — a shell that stops dumps it all,
-    // a perforation less (it carries momentum out), a ricochet a partial normal-ward kick.
-    let v_in = Vec3::from(dir) * speed;
-    let body = world.owners.get(node_entity).ok().map(|owner| owner.tank());
-    // The identity of the body every branch below arms, carried on the authority facts so a client
-    // can tell whose hull a spark it re-draws belongs to.
-    let victim = body.and_then(|body| world.combatants.get(body).ok().copied());
-
-    // Outward surface normal; angle of incidence is measured from it (0 = head-on).
-    let normal = Dir3::new(hit.normal).unwrap_or(-dir);
-    let incidence = Vec3::from(dir).angle_between(-Vec3::from(normal));
-
-    // Plate thickness *along its normal* (perpendicular, face to face) — the overmatch test:
-    // a round whose calibre dwarfs the plate cannot be deflected by it.
-    let thickness = world
-        .spatial
-        .cast_ray_predicate(
-            entry - Vec3::from(normal) * EPS,
-            -normal,
-            PROBE,
-            false,
-            armor,
-            &|e| e == hit.entity,
-        )
-        .map(|back| EPS + back.distance)
-        .unwrap_or(0.0);
-    let overmatched = thickness > 0.0 && shell.projectile.caliber >= OVERMATCH_RATIO * thickness;
-
-    // Ricochet: too oblique → deflect off the face (no entry, no spall) — unless overmatch
-    // suppresses it (design §4).
-    if !overmatched && incidence > RICOCHET_ANGLE {
-        // Shock: even a deflected hit jars an exposed component (barrel, optic) — scaled by
-        // impact energy (capability) and how square the graze was. Armor has no HP, so it
-        // shrugs the bounce off; a fragile module loses integrity without being one-shot.
-        if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-            let shock = SHOCK_K * capability(shell.projectile.mass, speed) * incidence.cos();
-            let before = hp.current;
-            hp.current = (before - shock).max(0.0);
-            damage_dealt += before - hp.current;
-        }
-        dir = reflect(dir, normal);
-        speed *= RICOCHET_BLEED;
-        if let Some(body) = body {
-            apply_hit_impulse(
-                bodies,
-                body,
-                shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
-                entry,
-                ShockCause::Ricochet,
-            );
-        }
-        // The bounce reads on the struck face: a hard bright spark fan, biased along the
-        // deflected (outgoing) direction — a ricochet throws its sparks the way it kicked off.
-        // It bit no steel, so `penetrated: false` (no flame lick — a bounce doesn't ignite).
-        commands.trigger(Impact {
-            position: entry,
-            normal: Vec3::from(normal),
-            caliber: shell.projectile.caliber,
-            surface: ImpactSurface::Armor,
-            penetrated: false,
-            deflection: Some(Vec3::from(dir)),
-            authority: None,
-        });
-        shell.marks.ricochets.push(entry);
-        shell.path.points.push(entry);
-        // AUTHORITY → CLIENTS: replicate this sanctioned bounce as the cause (ADR-0016) so
-        // every client re-seeds its cosmetic shell from truth rather than improvising. Only
-        // for a net-attributed shell (`Shot` present, stamped by the shared protocol stamp);
-        // SP/sandbox shells carry none and raise nothing. Muted after this shot's terminal
-        // (`!*terminal_emitted`) — an interior bounce past a perforation is invisible to the
-        // client shell, which ended at the terminal. `dir`/`speed` are already
-        // post-reflect/bleed (the outgoing state); `entry` is the bounce point.
-        // `net::shot_transport` observes this and stamps the bounce tick. The ordinal is this
-        // ricochet's 0-based index — the SAME count a client shell derives from its own
-        // `ricochets` — so multi-bounce shots re-seed in order. (Only reachable on the
-        // authority: the caller's `!deposit` branch already ended the march before here.)
-        if let Some(shot) = shot
-            && !*terminal_emitted
-        {
-            commands.trigger(ShellRicochet {
-                shot: shot.0,
-                origin: entry,
-                direction: Vec3::from(dir),
-                speed,
-                sequence: (shell.marks.ricochets.len() - 1) as u32,
-                victim,
-            });
-        }
-        return (
-            ArmorCrossing::Ricochet {
-                direction: dir,
-                speed,
-            },
-            damage_dealt,
-        );
-    }
-
-    // Normalize: a modest bend toward the inward normal as the round bites in (shortens the
-    // path it cuts and nudges the exit). Overmatch does NOT bend it further — the round drives
-    // through in roughly the same direction; overmatch instead cancels the *slope cost* below.
-    dir = bend_toward(dir, -normal, NORMALIZATION * incidence);
-    let span = world
-        .spatial
-        .cast_ray_predicate(entry + dir * EPS, dir, PROBE, false, armor, &|e| {
-            e == hit.entity
-        })
-        .map(|exit| EPS + exit.distance)
-        .unwrap_or(0.0);
-
-    // Cost = effective metres × the material's reference-mm-per-metre. An overmatched plate
-    // can't present its oblique line-of-sight to a round that dwarfs it, so it charges only
-    // the perpendicular thickness; otherwise the full slope span.
-    let cap = capability(shell.projectile.mass, speed);
-    let effective = if overmatched { thickness } else { span };
-    let cost = effective * factor;
-    if cap <= cost {
-        // Defeated: embed partway through (depth scaled by the capability it could pay).
-        let embed = entry + dir * span * (cap / cost);
-        shell.marks.events.push(PenetrationEvent {
-            entry,
-            exit: embed,
-            overmatched,
-        });
-        shell.path.points.push(embed);
-        // It buried itself here, spending all it had (`cap`) — deposit that as transit damage
-        // if the volume is a damageable component (design §6). No exit, so no spall.
-        if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-            let before = hp.current;
-            hp.current = (before - cap * TRANSIT_K).max(0.0);
-            damage_dealt += before - hp.current;
-        }
-        // The embed's visible face is the ENTRY surface — its normal is what sparks kick
-        // off of (the embed point itself is inside the plate). The round buried itself in the
-        // steel (`penetrated: true`): the hot-metal signature earns the brief flame lick, even
-        // though the plate ultimately defeated it — it bit in, it didn't bounce.
-        commands.trigger(Impact {
-            position: embed,
-            normal: Vec3::from(normal),
-            caliber: shell.projectile.caliber,
-            surface: ImpactSurface::Armor,
-            penetrated: true,
-            deflection: None,
-            authority: None,
-        });
-        // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire) — the same
-        // read the `Impact` above showed locally, so every client renders the identical honest
-        // embed (position/normal/flame lick). The `!*terminal_emitted` guard covers the
-        // perforate-then-embed-same-tick chain (the perforation already terminated the shot);
-        // no latch write is needed here — the embedded shell stops and despawns, so nothing
-        // after this can emit.
-        if let Some(shot) = shot
-            && !*terminal_emitted
-        {
-            commands.trigger(ShellTerminal {
-                shot: shot.0,
-                position: embed,
-                normal: Vec3::from(normal),
-                penetrated: true,
-                after_bounces: shell.marks.ricochets.len() as u32,
-                victim,
-            });
-        }
-        // Stopped: the body absorbs the full remaining momentum (v_out = 0).
-        if let Some(body) = body {
-            apply_hit_impulse(
-                bodies,
-                body,
-                shell.projectile.mass * v_in,
-                entry,
-                ShockCause::Embed,
-            );
-        }
-        return (ArmorCrossing::Embedded { at: embed }, damage_dealt);
-    }
-
-    // Perforate: spend the cost (residual speed) and continue along the bent direction.
-    // The struck FACE reads here — the entry point, its outward normal — where the round
-    // punched through. This is the one place "penetrated" is unambiguously true (the round
-    // breached the plate into the interior), so the armor read earns its flame lick. Without
-    // this trigger a clean perforation was visually silent on the struck face.
-    commands.trigger(Impact {
-        position: entry,
-        normal: Vec3::from(normal),
-        caliber: shell.projectile.caliber,
-        surface: ImpactSurface::Armor,
-        penetrated: true,
-        deflection: None,
-        authority: None,
-    });
-    // AUTHORITY → CLIENTS: the shot's TERMINAL (`ImpactConfirm` on the wire). A perforation
-    // ends the COSMETIC shell at this entry-face read even though the authoritative shell
-    // marches on into the interior — the documented choice on [`ShellTerminal`]: what an
-    // external viewer sees at the struck plate IS this read, and the client cannot march the
-    // interior. Emitted for the FIRST perforation/embed only; [`TerminalReport`] mutes both
-    // same-tick interior crossings and later fixed ticks while `Shot` remains available for
-    // damage attribution.
-    if let Some(shot) = shot
-        && !*terminal_emitted
-    {
-        *terminal_emitted = true;
-        shell.terminal_report.0 = true;
-        commands.trigger(ShellTerminal {
-            shot: shot.0,
-            position: entry,
-            normal: Vec3::from(normal),
-            penetrated: true,
-            after_bounces: shell.marks.ricochets.len() as u32,
-            victim,
-        });
-    }
-    speed = speed_for(shell.projectile.mass, cap - cost);
-    // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
-    if let Some(body) = body {
-        apply_hit_impulse(
-            bodies,
-            body,
-            shell.projectile.mass * (v_in - Vec3::from(dir) * speed),
-            entry,
-            ShockCause::Perforation,
-        );
-    }
-    let exit = entry + dir * span;
-    shell.marks.events.push(PenetrationEvent {
-        entry,
-        exit,
-        overmatched,
-    });
-    shell.path.points.push(exit);
-
-    // Transit damage: the main penetrator drove through this volume — if it's a damageable
-    // component, deposit the cost it paid crossing (design §6). Armor has no HP, so no-op.
-    if deposit && let Ok(mut hp) = health.get_mut(node_entity) {
-        let before = hp.current;
-        hp.current = (before - cost * TRANSIT_K).max(0.0);
-        damage_dealt += before - hp.current;
-    }
-
-    // Spall: the exit face throws a cone of fragments sized by the material chewed and by the
-    // shot's residual energy (design §5) — see [`throw_spall_burst`].
-    damage_dealt += throw_spall_burst(
-        shell.spall,
-        exit,
-        dir,
-        cost,
-        shell.projectile.caliber,
-        speed,
-        world,
-        health,
-        armor,
-        deposit,
-    );
-
-    (
-        ArmorCrossing::Perforated {
-            exit,
-            direction: dir,
-            speed,
-            span,
-        },
-        damage_dealt,
-    )
 }
 
 /// Resolve one armor contact a REPLICA's own march found, where ballistics is cosmetic and the
@@ -2836,6 +2704,14 @@ mod march_tests {
 
     use super::*;
 
+    /// The sampling basis a hand-built test shell is born with — anchored on ITS OWN fire direction,
+    /// exactly as `on_fire_shell` would. A frame anchored on some other direction is not merely
+    /// mis-rolled: it has a component ALONG this shell's travel, which puts ring samples in front of
+    /// and behind the disc.
+    fn test_disc(direction: Vec3) -> walk::DiscFrame {
+        walk::DiscFrame::anchored(direction).expect("a fixture fires along a real direction")
+    }
+
     /// One captured impact — the fields the armor read branches on.
     #[derive(Clone, Copy)]
     struct Captured {
@@ -2928,6 +2804,8 @@ mod march_tests {
                 caliber: 0.088,
                 mass: 10.2,
                 drag_k: drag_k(0.088, 10.2),
+                // Anchored on THIS fixture's fire direction, exactly as `on_fire_shell` would.
+                disc: test_disc(dir),
             },
             DamageReport::default(),
             TerminalReport::default(),
@@ -3232,6 +3110,7 @@ mod march_tests {
                         caliber: 0.0079,
                         mass: 0.0118,
                         drag_k: drag_k(0.0079, 0.0118),
+                        disc: test_disc(dir),
                     },
                     DamageReport::default(),
                     TerminalReport::default(),
@@ -3329,6 +3208,7 @@ mod march_tests {
                     caliber: 0.088,
                     mass: 10.2,
                     drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(Vec3::NEG_Z),
                 },
                 DamageReport::default(),
                 TerminalReport::default(),
@@ -3788,6 +3668,7 @@ mod march_tests {
                     caliber: 0.088,
                     mass: 10.2,
                     drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(dir),
                 },
                 DamageReport::default(),
                 TerminalReport::default(),
@@ -3823,6 +3704,7 @@ mod march_tests {
                     caliber: 0.088,
                     mass: 10.2,
                     drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(dir.normalize()),
                 },
                 DamageReport::default(),
                 TerminalReport::default(),
@@ -4068,6 +3950,7 @@ mod march_tests {
                     caliber: 0.088,
                     mass: 10.2,
                     drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(dir),
                 },
                 DamageReport::default(),
                 TerminalReport::default(),
@@ -4538,6 +4421,7 @@ mod march_tests {
                     caliber: 0.088,
                     mass: 10.2,
                     drag_k: drag_k(0.088, 10.2),
+                    disc: test_disc(dir),
                 },
                 DamageReport::default(),
                 TerminalReport::default(),

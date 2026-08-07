@@ -40,7 +40,7 @@ use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::prelude::*;
 
-use super::walk::{FaceHit, PrimitiveKey, WalkError};
+use super::walk::{FaceHit, PrimitiveKey, WalkError, WalkLaws};
 
 /// Faces one corridor may collect before the collector gives up.
 ///
@@ -54,6 +54,10 @@ const MAX_FACES: usize = 4096;
 /// the TOPOLOGY tolerance family (see [`super::walk::WalkLaws`]), deliberately far below the weld
 /// knob: it decides whether a face exists at all, not whether two faces are the same face.
 const PARALLEL_EPS: f32 = 1.0e-12;
+
+/// How far behind a corridor origin the convex narrow phase looks for the face the ray is sitting
+/// on. The march's own boundary nudge, so the two agree about what "just behind" means.
+const BOUNDARY_PROBE: f32 = 1.0e-3;
 
 /// What the collector needs from the world. Borrowed rather than owned so the march can hand it the
 /// queries it already holds.
@@ -70,6 +74,10 @@ pub(crate) struct Corridor<'a> {
     /// processes it. The two rules are complements, so an entry is counted exactly once however the
     /// f32 falls.
     pub seeded: &'a [PrimitiveKey],
+    /// Shared with the walk so the collector and the core agree about when two `t` name the same
+    /// face — the convex narrow phase has to make that judgement, and a second opinion about it is
+    /// how an entry gets counted twice or not at all.
+    pub laws: &'a WalkLaws,
 }
 
 /// Collect every face crossing along one corridor, appending to `out`.
@@ -215,25 +223,31 @@ fn collect_convex(
     let Ok(axis) = Dir3::new(corridor.axis) else {
         return;
     };
-    let forward = collider.cast_ray(
+    // Both ends are probed with `solid: true`, and that is the whole trick.
+    //
+    // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot distinguish
+    // "began inside" from "grazed an edge" (entry and exit coincide out at distance), and it answers
+    // for the wrong face whenever a cast origin lands exactly ON a surface, which the corridor's own
+    // endpoints do constantly because they ARE face positions a previous walk computed. `solid: true`
+    // answers one unambiguous question instead: zero if the origin is within, otherwise the distance
+    // to the nearest surface.
+    let entry = collider.cast_ray(
         position,
         rotation,
         corridor.origin,
         Vec3::from(axis),
         corridor.length,
-        false,
+        true,
     );
     let far = corridor.origin + corridor.axis * corridor.length;
-    let backward = collider
-        .cast_ray(
-            position,
-            rotation,
-            far,
-            -Vec3::from(axis),
-            corridor.length,
-            false,
-        )
-        .map(|(distance, normal)| (corridor.length - distance, normal));
+    let exit = collider.cast_ray(
+        position,
+        rotation,
+        far,
+        -Vec3::from(axis),
+        corridor.length,
+        true,
+    );
 
     let mut push = |t: f32, normal: Vec3, entry: bool, face: u32| {
         // Re-sign from the role, not from what the query returned.
@@ -253,19 +267,38 @@ fn collect_convex(
         }
     };
 
-    match (forward, backward) {
-        // Entry and exit are distinct: a genuine crossing.
-        (Some((enter, entry_normal)), Some((exit, exit_normal))) if enter < exit => {
-            push(enter, entry_normal, true, 0);
-            push(exit, exit_normal, false, 1);
+    match entry {
+        // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
+        // origin lands on a face constantly, and that face is the one the ray is sitting on. Anything
+        // deeper than this probe is not: that sample should have been seeded, and if it was not, the
+        // walk says so rather than this papering over it.
+        //
+        // The trimesh path needs none of this — its own kernel reports faces at negative `t`, and
+        // `admit` places them.
+        Some((distance, _)) if distance <= 0.0 => {
+            if !seeded
+                && let Some((behind, normal)) = collider.cast_ray(
+                    position,
+                    rotation,
+                    corridor.origin,
+                    -Vec3::from(axis),
+                    BOUNDARY_PROBE,
+                    false,
+                )
+            {
+                push(-behind, normal, true, 0);
+            }
         }
-        // The two casts landed on the same face: the ray began inside, so only the exit exists.
-        (Some(_), Some((exit, exit_normal))) => push(exit, exit_normal, false, 1),
-        // Only one end is in range — the corridor stops inside the solid, or starts inside it and
-        // never leaves. Either way the walk reports `IncompleteCorridor` and the driver extends.
-        (Some((enter, entry_normal)), None) => push(enter, entry_normal, true, 0),
-        (None, Some((exit, exit_normal))) => push(exit, exit_normal, false, 1),
-        (None, None) => {}
+        Some((distance, normal)) => push(distance, normal, true, 0),
+        None => {}
+    }
+
+    match exit {
+        // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
+        // defect class: the walk reports `IncompleteCorridor` and the driver extends.
+        Some((distance, _)) if distance <= 0.0 => {}
+        Some((distance, normal)) => push(corridor.length - distance, normal, false, 1),
+        None => {}
     }
 }
 
