@@ -286,6 +286,11 @@ pub enum WalkError {
         open: Vec<PrimitiveKey>,
         length: f32,
     },
+    /// The corridor handed to [`finish`] is not the one [`begin`] asked for. Accepting it silently
+    /// would resolve one contact's geometry against another contact's entrance decision — an
+    /// overmatch verdict, a normalization bend and a ricochet test all belonging to a surface the
+    /// round never met.
+    CorridorMismatch { reason: &'static str },
     /// The covered samples' entry normals cancelled, so no aggregate `n̄` exists.
     ///
     /// Defensive: the tangent gate ([`WalkLaws::tangent_cos`]) admits a face as an ENTRY only when
@@ -399,6 +404,19 @@ pub struct EntityPresence {
     pub spans: Vec<(f32, f32)>,
 }
 
+/// One primitive's presence intervals along a sample ray.
+///
+/// Kept alongside the per-ENTITY union because the staged handoff needs primitive identity: after
+/// normalization bends the axis and transports the ring, a transit sample can begin INSIDE material,
+/// and [`RayCorridor::initial_presence`] must be told which primitives — inference is forbidden
+/// (that is how a dropped entry face becomes free armour).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrimitivePresence {
+    pub key: PrimitiveKey,
+    /// Disjoint, ordered, half-open `[open, close)`.
+    pub spans: Vec<(f32, f32)>,
+}
+
 /// One sample ray's resolved walk.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RayWalk {
@@ -408,7 +426,32 @@ pub struct RayWalk {
     /// `∫ max(factor) dt`, accumulated in f64 over the canonical spans and cast ONCE.
     pub cost: f32,
     pub presence: Vec<EntityPresence>,
+    /// Per-primitive presence — the seed state the staged handoff exports.
+    pub primitives: Vec<PrimitivePresence>,
     pub events: Vec<BoundaryEvent>,
+}
+
+impl RayWalk {
+    /// Which primitives a corridor RESTARTED at progress `t` would have to declare as initial
+    /// presence.
+    ///
+    /// The interval is `(open, close]` — the entry face must be STRICTLY behind the restart. A face
+    /// sitting exactly on the handoff plane arrives in the new corridor's own hit list at `t = 0`
+    /// and is processed there, so seeding it as well would double-count the entry
+    /// ([`WalkError::UnexpectedEntry`]). An exit sitting exactly on the plane, conversely, must be
+    /// seeded or it has nothing to pair with.
+    pub fn inside_at(&self, t: f32) -> Vec<PrimitiveKey> {
+        self.primitives
+            .iter()
+            .filter(|presence| {
+                presence
+                    .spans
+                    .iter()
+                    .any(|(open, close)| *open < t && t <= *close)
+            })
+            .map(|presence| presence.key)
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -704,11 +747,24 @@ pub fn walk_ray(
     let events = boundary_events(corridor, &runs);
     let presence = entity_presence(&intervals, volumes)?;
 
+    let mut by_primitive: BTreeMap<PrimitiveKey, Vec<(f32, f32)>> = BTreeMap::new();
+    for (key, open, close) in &intervals {
+        by_primitive.entry(*key).or_default().push((*open, *close));
+    }
+    let primitives = by_primitive
+        .into_iter()
+        .map(|(key, mut spans)| {
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            PrimitivePresence { key, spans }
+        })
+        .collect();
+
     Ok(RayWalk {
         spans,
         runs,
         cost,
         presence,
+        primitives,
         events,
     })
 }
@@ -1110,8 +1166,21 @@ pub struct DiscWalk {
     pub origin: Vec3,
     pub frame: DiscFrame,
     pub radius: f32,
-    pub samples: usize,
+    /// Lateral offsets, index-aligned with `walks`. `offsets[0]` is `ZERO` — the AXIS sample.
+    pub offsets: Vec<Vec3>,
+    /// The per-sample walks, RETAINED. The staged handoff has to export which primitives each
+    /// sample is inside at the transit plane, and neither the events nor the per-entity presence
+    /// carry primitive identity — without this the caller would have to infer the seed state, which
+    /// is the one thing this module never does.
+    pub walks: Vec<RayWalk>,
     pub events: Vec<DiscEvent>,
+}
+
+impl DiscWalk {
+    /// k — the sample count the disc aggregates over.
+    pub fn samples(&self) -> usize {
+        self.walks.len()
+    }
 }
 
 /// Walk every sample and associate their runs into crossing events.
@@ -1125,6 +1194,15 @@ pub fn walk_disc(
         return Err(WalkError::BadCorridor {
             sample: 0,
             reason: "a disc corridor needs at least the axis sample",
+        });
+    }
+    // Sample 0 IS the axis (the convention [`disc_offsets`] builds to). The staged handoff anchors
+    // the transit ray on the axis rather than on a coverage centroid, so the axis must be
+    // identifiable rather than inferred.
+    if corridor.samples[0].offset != Vec3::ZERO {
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "sample 0 must be the disc axis (zero lateral offset)",
         });
     }
 
@@ -1237,7 +1315,8 @@ pub fn walk_disc(
         origin: corridor.origin,
         frame: corridor.frame,
         radius: corridor.radius,
-        samples: k,
+        offsets: corridor.samples.iter().map(|s| s.offset).collect(),
+        walks,
         events,
     })
 }
@@ -1509,31 +1588,72 @@ pub enum Begin {
     /// Too oblique, not overmatched: deflect off `n̄`, no entry, no spall (§4).
     Ricochet {
         entrance: EntranceRead,
-        direction: Vec3,
-        /// Speed retained. FULL bleed at η = 1, none at η → 0 — §13.5's "a graze IS a partial
-        /// ricochet", continuous, no cliff, no lottery.
+        /// Outgoing direction, blended from the incoming ray toward the full specular reflection by
+        /// η (§13.5, RULED 2026-08-07). η = 1 is the classic bounce, returned bit-for-bit; η → 0
+        /// fades to undisturbed flight. Continuity is the whole point — 1 mm of aim must never flip
+        /// the outcome between "flies past" and "full bounce".
         ///
-        /// FLAGGED: only the BLEED (and the impulse) scale with η in §13.5; the deflected DIRECTION
-        /// is the full specular reflection at any coverage, so an η ≈ 0.05 edge skim currently turns
-        /// the round as hard as a square bounce. An η-scaled deflection ANGLE is the obvious
-        /// missing piece — for Yan, not invented here.
+        /// The lateral TORQUE a corner clip really applies stays deferred (§13.5, re-affirmed
+        /// 2026-08-07): only the deflection MAGNITUDE ships. The mean lateral offset of the covered
+        /// samples is the ready-made kick direction whenever it is wanted.
+        direction: Vec3,
+        /// Speed retained. FULL bleed at η = 1, none at η → 0 — a graze IS a partial ricochet.
         speed_scale: f32,
     },
     /// It bit in. The caller must now collect the transit corridor along `request.axis`.
     Transit(TransitRequest),
 }
 
+/// One transit sample's starting state — where its ray resumes, and what it is already inside.
+///
+/// Each sample resumes from the point where its OWN entrance ray met the crossing surface, not from
+/// a flat disc re-projected around the bent axis. Two things fall out of that, and neither is
+/// available any other way:
+///
+/// - The seed is EXACT. The resume point lies on a ray this module already walked, so "which
+///   primitives is it inside" is a lookup ([`RayWalk::inside_at`]), not an inference — and
+///   inference is the one thing the walk never does, because "it must have started inside" is how a
+///   dropped entry face becomes free armour.
+/// - It is what physically happens. The rays bend where they strike; a sample that met the plate
+///   40 mm further along resumes 40 mm further along.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SampleSeed {
+    pub sample: usize,
+    /// Displacement of this sample's transit ray origin from [`TransitRequest::origin`]. Not purely
+    /// lateral — it carries the longitudinal spread of an oblique contact. `seeds[0].offset` is
+    /// `ZERO`: the axis sample defines the origin.
+    pub offset: Vec3,
+    /// Progress along that sample's ENTRANCE ray at which the seed was read.
+    pub t: f32,
+    pub inside: Vec<PrimitiveKey>,
+}
+
 /// The query the core needs answered to finish the crossing.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TransitRequest {
     pub entrance: EntranceRead,
     /// The NORMALIZED (bent) travel axis — the transit happens along this, not along the incoming
     /// direction the entrance was sampled on.
     pub axis: Vec3,
+    /// Where the DISC AXIS crosses the entrance surface.
+    ///
+    /// Deliberately NOT the covered-sample centroid. A centroid drags the shell's line of flight
+    /// sideways toward whatever part of the disc happened to touch geometry — a lateral kick, which
+    /// is exactly the asymmetry §13.5 rules out ("lateral asymmetry unmodeled", re-affirmed
+    /// 2026-08-07). The aggregate SURFACE is a mean (`entrance.position`, `n̄`); the shell's AXIS is
+    /// not. This also gives the axis-miss/ring-hit case a definition instead of a special case: the
+    /// axis ray still crosses the mean entrance plane.
     pub origin: Vec3,
     /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
     pub frame: DiscFrame,
     pub radius: f32,
+    /// k — the corridor supplied to [`finish`] must sample the disc the same way.
+    pub samples: usize,
+    /// The entities the entrance crossing engaged, sorted. [`finish`] checks the supplied corridor's
+    /// first crossing against these, so a corridor collected for some OTHER contact cannot be
+    /// resolved as if it were this one.
+    pub entrance_entities: Vec<Entity>,
+    pub seeds: Vec<SampleSeed>,
 }
 
 /// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
@@ -1569,23 +1689,80 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         return Begin::Miss;
     };
 
+    // η scales the deflection ANGLE as well as the bleed (§13.5, RULED 2026-08-07). A graze that
+    // turned the round as hard as a square bounce made 1 mm of aim the difference between "flies
+    // past" and "full bounce" — the cliff the disc primitive exists to remove.
+    let blend_by_coverage = |from: Dir3, toward: Dir3, coverage: f32| {
+        super::bend_toward(
+            from,
+            toward,
+            coverage * Vec3::from(from).angle_between(toward.into()),
+        )
+    };
+
     if !overmatched && incidence > laws.ricochet_angle {
+        let specular = super::reflect(axis, surface);
+        // At full coverage the blend IS the classic bounce, so it is returned VERBATIM: rotating a
+        // direction onto its own reflection by quaternion would perturb the low bits, and the
+        // pre-ruling full-bounce path must stay bit-identical.
+        let direction = if event.coverage >= 1.0 {
+            specular
+        } else {
+            blend_by_coverage(axis, specular, event.coverage)
+        };
         return Begin::Ricochet {
             entrance: read,
-            direction: Vec3::from(super::reflect(axis, surface)),
+            direction: Vec3::from(direction),
             speed_scale: 1.0 - event.coverage * (1.0 - laws.ricochet_bleed),
         };
     }
 
-    // Normalize: a modest bend toward the inward normal as it bites in. Overmatch does not bend it
-    // further — it cancels the SLOPE COST instead (charged in `finish`).
-    let bent = super::bend_toward(axis, -surface, laws.normalization * incidence);
+    // Normalize: a modest bend toward the inward normal as it bites in, scaled by η on the same
+    // ruling — a barely-engaged entry is barely bent. Overmatch does not bend it further; it cancels
+    // the SLOPE COST instead (charged in `finish`).
+    let bent = super::bend_toward(
+        axis,
+        -surface,
+        event.coverage * laws.normalization * incidence,
+    );
+
+    // The handoff plane is the mean entrance surface; the transit ray is the DISC AXIS crossing it.
+    // `axis · n̄ < -tangent_cos` always (every contributing entry face leans against the ray), so
+    // this cannot divide by zero.
+    let denominator = entrance.axis.dot(normal);
+    let plane = |from: Vec3| (event.entry_position - from).dot(normal) / denominator;
+    let axis_t = plane(entrance.origin);
+    let handoff = entrance.origin + entrance.axis * axis_t;
+    let seeds = entrance
+        .walks
+        .iter()
+        .enumerate()
+        .map(|(index, walk)| {
+            let offset = entrance.offsets[index];
+            let t = plane(entrance.origin + offset);
+            SampleSeed {
+                sample: index,
+                // Where this sample resumes, relative to the handoff. Carries the longitudinal
+                // spread of an oblique contact, so the seed below is a lookup on a ray already
+                // walked rather than a guess about a re-projected disc.
+                offset: offset + entrance.axis * (t - axis_t),
+                t,
+                inside: walk.inside_at(t),
+            }
+        })
+        .collect();
+    let mut entrance_entities: Vec<Entity> = event.shares.iter().map(|s| s.entity).collect();
+    entrance_entities.sort();
+
     Begin::Transit(TransitRequest {
         entrance: read,
         axis: Vec3::from(bent),
-        origin: event.entry_position,
+        origin: handoff,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
+        samples: entrance.samples(),
+        entrance_entities,
+        seeds,
     })
 }
 
@@ -1633,6 +1810,49 @@ pub struct ResolutionPlan {
     pub spall: Vec<DiscSpall>,
 }
 
+/// The corridor [`finish`] was handed must be the corridor [`begin`] asked for.
+///
+/// Between the two stages the caller runs a spatial query, and nothing in the type system stops it
+/// from collecting along the UNBENT axis, from the wrong origin, with a re-derived frame, or around
+/// a different contact entirely. Any of those silently resolves one surface's geometry against
+/// another surface's entrance verdict. Tolerances are loose enough for honest f32 round-tripping and
+/// far tighter than any of these mistakes.
+fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), WalkError> {
+    let mismatch = |reason| Err(WalkError::CorridorMismatch { reason });
+    if (transit.axis - request.axis).length() > 1.0e-4 {
+        return mismatch(
+            "the corridor was collected along a different axis than the bend asked for",
+        );
+    }
+    if (transit.origin - request.origin).length() > 1.0e-4 {
+        return mismatch("the corridor starts somewhere other than the entrance handoff point");
+    }
+    if (transit.frame.u - request.frame.u).length() > 1.0e-4
+        || (transit.frame.v - request.frame.v).length() > 1.0e-4
+    {
+        return mismatch("the ring frame was re-derived instead of transported");
+    }
+    if (transit.radius - request.radius).abs() > 1.0e-6 {
+        return mismatch("the corridor samples a different disc radius");
+    }
+    if transit.samples() != request.samples {
+        return mismatch("the corridor has a different sample count than the entrance disc");
+    }
+    if let Some(event) = transit.events.first()
+        && !event.shares.iter().any(|share| {
+            request
+                .entrance_entities
+                .binary_search(&share.entity)
+                .is_ok()
+        })
+    {
+        return mismatch(
+            "the corridor's first crossing shares no volume with the entrance crossing",
+        );
+    }
+    Ok(())
+}
+
 /// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits).
 pub fn finish(
     transit: &DiscWalk,
@@ -1640,6 +1860,7 @@ pub fn finish(
     shot: &Shot,
     _laws: &WalkLaws,
 ) -> Result<ResolutionPlan, WalkError> {
+    validate_transit(transit, request)?;
     let Some(event) = transit.events.first() else {
         return Err(WalkError::BadCorridor {
             sample: 0,
@@ -1697,13 +1918,13 @@ pub fn finish(
                 .iter()
                 .map(|(a, b)| (b.min(cut) as f64 - *a as f64).max(0.0))
                 .sum::<f64>()
-                / transit.samples as f64;
+                / transit.samples() as f64;
             let covered = share
                 .spans
                 .iter()
                 .filter(|(a, _)| *a < cut)
                 .count()
-                .min(transit.samples);
+                .min(transit.samples());
             let charged = chord * charge;
             EntityDeposit {
                 entity: share.entity,

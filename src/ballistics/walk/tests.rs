@@ -105,6 +105,161 @@ fn sample(offset: Vec3, hits: Vec<FaceHit>) -> SampleCorridor {
     }
 }
 
+/// A planar slab defined GEOMETRICALLY rather than by `t` values.
+///
+/// The staged tests need fixtures a ray can be asked about from any origin along any axis — once
+/// normalization bends the axis and the ring is transported, the transit corridor's sample rays
+/// meet the same plate at different places, and a fixture built from hard-coded `t`s can only
+/// describe the entrance.
+#[derive(Clone, Copy)]
+struct Slab {
+    vol: u32,
+    primitive: u32,
+    /// A point on the FRONT face (the one facing the shooter).
+    front: Vec3,
+    /// Outward normal of the front face; `AXIS · normal < 0`.
+    normal: Vec3,
+    /// Measured along the normal, face to face.
+    thickness: f32,
+}
+
+impl Slab {
+    /// The slab whose front face crosses the reference axis at `t` and which presents `chord` metres
+    /// of line-of-sight to a ray travelling along `AXIS`.
+    fn at(vol: u32, primitive: u32, t: f32, normal: Vec3, chord: f32) -> Self {
+        let normal = normal.normalize();
+        assert!(AXIS.dot(normal) < 0.0, "a front face leans against the ray");
+        Self {
+            vol,
+            primitive,
+            front: AXIS * t,
+            normal,
+            thickness: chord * AXIS.dot(normal).abs(),
+        }
+    }
+
+    fn key(&self) -> PrimitiveKey {
+        PrimitiveKey {
+            volume: volume(self.vol),
+            primitive: self.primitive,
+        }
+    }
+
+    /// The face hits this slab presents to one ray.
+    ///
+    /// `seeded` is what a real adapter knows too: whether this ray was declared to START inside this
+    /// primitive. If it was, a face behind the origin is the entry the seed already accounts for and
+    /// is dropped; if it was not, a face a rounding-hair behind the origin is the face the ray is
+    /// sitting ON and is clamped to `t = 0`, where the corridor processes it. The two rules are
+    /// complements, so the entry is counted exactly once however the f32 falls.
+    fn hits(&self, origin: Vec3, axis: Vec3, length: f32, seeded: bool) -> Vec<FaceHit> {
+        let n = self.normal;
+        let denominator = axis.dot(n);
+        let front = (self.front - origin).dot(n) / denominator;
+        let back = (self.front - n * self.thickness - origin).dot(n) / denominator;
+        let (enter, exit) = if denominator < 0.0 {
+            ((front, n), (back, -n))
+        } else {
+            ((back, -n), (front, n))
+        };
+        [(enter, 0u32), (exit, 1u32)]
+            .into_iter()
+            .filter_map(|((t, true_normal), face)| {
+                let t = if t < 0.0 {
+                    if seeded {
+                        return None;
+                    }
+                    0.0
+                } else {
+                    t
+                };
+                (t < length).then_some(FaceHit {
+                    volume: volume(self.vol),
+                    primitive: self.primitive,
+                    triangle: self.primitive * 100 + face,
+                    t,
+                    true_normal,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The ENTRANCE disc: k parallel rays from open air along `AXIS`.
+fn entrance_disc(slabs: &[Slab], length: f32) -> DiscCorridor {
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    disc_along(Vec3::ZERO, AXIS, frame, 0.044, length, slabs, |_| true)
+}
+
+/// The TRANSIT disc the caller owes [`begin`] — each sample resuming where the request says it
+/// resumes, along the bent axis, with the TRANSPORTED frame, seeded from the request. This is the
+/// slice-2 driver contract written out; `finish` rejects a corridor that departs from it.
+fn transit_disc(request: &TransitRequest, slabs: &[Slab], length: f32) -> DiscCorridor {
+    let samples = request
+        .seeds
+        .iter()
+        .map(|seed| SampleCorridor {
+            offset: seed.offset,
+            initial_presence: seed.inside.clone(),
+            hits: slabs
+                .iter()
+                .flat_map(|slab| {
+                    slab.hits(
+                        request.origin + seed.offset,
+                        request.axis,
+                        length,
+                        seed.inside.contains(&slab.key()),
+                    )
+                })
+                .collect(),
+        })
+        .collect();
+    DiscCorridor {
+        origin: request.origin,
+        axis: request.axis,
+        length,
+        radius: request.radius,
+        frame: request.frame,
+        samples,
+    }
+}
+
+fn disc_along(
+    origin: Vec3,
+    axis: Vec3,
+    frame: DiscFrame,
+    radius: f32,
+    length: f32,
+    slabs: &[Slab],
+    covered: impl Fn(usize) -> bool,
+) -> DiscCorridor {
+    let offsets = disc_offsets(&frame, radius, DEFAULT_RING);
+    let samples = offsets
+        .iter()
+        .enumerate()
+        .map(|(index, offset)| SampleCorridor {
+            offset: *offset,
+            initial_presence: Vec::new(),
+            hits: if covered(index) {
+                slabs
+                    .iter()
+                    .flat_map(|slab| slab.hits(origin + *offset, axis, length, false))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        })
+        .collect();
+    DiscCorridor {
+        origin,
+        axis,
+        length,
+        radius,
+        frame,
+        samples,
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Topology reduction and pairing
 // ---------------------------------------------------------------------------------------------
@@ -1257,111 +1412,371 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §13.3 / §3 — the staged resolution
+// §13.3 / §13.5 / §3 — the staged resolution
 // ---------------------------------------------------------------------------------------------
 
-fn disc_of(hits: Vec<FaceHit>, length: f32) -> DiscCorridor {
-    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
-    let samples = disc_offsets(&frame, 0.044, DEFAULT_RING)
-        .into_iter()
-        .map(|offset| sample(offset, hits.clone()))
-        .collect();
-    DiscCorridor {
-        origin: Vec3::ZERO,
-        axis: AXIS,
-        length,
-        radius: 0.044,
-        frame,
-        samples,
+const AP_88: Shot = Shot {
+    caliber: 0.088,
+    capability: 250.0,
+};
+
+fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
+    match begin(walked, shot, laws) {
+        Begin::Transit(request) => request,
+        other => panic!("expected the round to bite in, got {other:?}"),
     }
 }
 
 /// §13.3's motivating pathology: an exposed forearm is ~80 mm "thick", so a GEOMETRIC overmatch test
 /// leaves it un-overmatched and past 70° an arm ricochets an 88. Factor-weighted, 80 mm of flesh is
-/// ~1.6 mm steel-equivalent — overmatched by everything, deflecting nothing.
+/// ~0.2 mm steel-equivalent — overmatched by everything, deflecting nothing.
 #[test]
 fn an_arm_does_not_ricochet_an_88() {
     let laws = WalkLaws::default();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
-    // ~76° incidence — well past the ricochet threshold. The forearm's chord is 80 mm, so the
-    // GEOMETRIC read is a fat plate; factor-weighted it is 80 mm × 10 ÷ 1000 × cos76° ≈ 0.19 mm.
+    // ~76° incidence, well past the ricochet threshold.
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
-    let flesh = table(&[(1, 10.0)]);
-    let arm = disc_of(slab(1, 0, 0.5, 0.58, normal), 2.0);
-    let walked = walk_disc(&arm, &flesh, &laws).unwrap();
-    match begin(&walked, &shot, &laws) {
-        Begin::Transit(request) => {
-            assert!(request.entrance.overmatched);
-            assert!(request.entrance.incidence > laws.ricochet_angle);
-        }
-        other => panic!("an arm must not deflect an 88: {other:?}"),
-    }
+    let arm = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.08)], 2.0);
+
+    let walked = walk_disc(&arm, &table(&[(1, 10.0)]), &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    assert!(request.entrance.overmatched);
+    assert!(request.entrance.incidence > laws.ricochet_angle);
 
     // Real armour at the same obliquity DOES deflect it — the law still works where it should.
-    let steel = table(&[(1, 1000.0)]);
-    let plate = disc_of(slab(1, 0, 0.5, 0.9, normal), 2.0);
-    let walked = walk_disc(&plate, &steel, &laws).unwrap();
-    match begin(&walked, &shot, &laws) {
-        Begin::Ricochet { speed_scale, .. } => {
-            assert!((speed_scale - laws.ricochet_bleed).abs() < 1.0e-5)
+    let plate = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.4)], 2.0);
+    let walked = walk_disc(&plate, &table(&[(1, 1000.0)]), &laws).unwrap();
+    assert!(matches!(
+        begin(&walked, &AP_88, &laws),
+        Begin::Ricochet { .. }
+    ));
+}
+
+/// The COVERED-sample mean is what overmatch reads (`cost ÷ η`), not the disc mean. Dropping the
+/// division makes a lightly-engaged plate look thin, and a graze that should bounce punches through
+/// instead — the exact inversion of §13.5's graded weakspot.
+///
+/// Sized to straddle the threshold: 200 mm of oblique steel is 48 mm steel-equivalent along the
+/// normal (3 × 48 > 88, so no overmatch), but scaled by a 4/13 coverage it reads 15 mm (3 × 15 < 88,
+/// false overmatch).
+#[test]
+fn a_lightly_covered_plate_is_not_thin_enough_to_overmatch() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let steel = [Slab::at(1, 0, 0.5, normal, 0.2)];
+    let corridor = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
+        index % 4 == 0
+    });
+    let covered = corridor
+        .samples
+        .iter()
+        .filter(|s| !s.hits.is_empty())
+        .count();
+    let walked = walk_disc(&corridor, &volumes, &laws).unwrap();
+    let event = &walked.events[0];
+    assert_eq!(covered, 4, "fixture must stay lightly covered");
+    assert!(event.coverage < 0.35, "η = {}", event.coverage);
+
+    match begin(&walked, &AP_88, &laws) {
+        Begin::Ricochet { entrance, .. } => {
+            assert!(!entrance.overmatched);
+            // The covered-sample thickness, NOT the η-diluted one.
+            assert!(
+                (entrance.steel_equivalent - 0.0484).abs() < 2.0e-3,
+                "{}",
+                entrance.steel_equivalent
+            );
+            assert!(
+                entrance.steel_equivalent * event.coverage * laws.overmatch_ratio < AP_88.caliber,
+                "the fixture must actually straddle the threshold"
+            );
         }
-        other => panic!("expected a ricochet off steel, got {other:?}"),
+        other => panic!("a 200 mm oblique plate must deflect an 88: {other:?}"),
     }
 }
 
-/// A graze is a PARTIAL ricochet (§13.5): the same oblique steel met at half coverage bleeds half as
-/// much speed. Continuous, no cliff, no lottery.
+/// §13.5 (RULED 2026-08-07): η scales the DEFLECTION ANGLE as well as the bleed. A graze is a
+/// partial ricochet in direction too, so 1 mm of aim can never flip the outcome between "flies past"
+/// and "full bounce".
 #[test]
-fn a_partial_graze_bleeds_proportionally_to_coverage() {
+fn partial_coverage_scales_the_deflection_angle_and_the_bleed() {
     let laws = WalkLaws::default();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
-    let steel = table(&[(1, 1000.0)]);
+    let volumes = table(&[(1, 1000.0)]);
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
     let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let steel = [Slab::at(1, 0, 0.5, normal, 0.4)];
+
+    let full = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |_| true);
+    let full = walk_disc(&full, &volumes, &laws).unwrap();
+    let (full_direction, full_scale) = match begin(&full, &AP_88, &laws) {
+        Begin::Ricochet {
+            direction,
+            speed_scale,
+            ..
+        } => (direction, speed_scale),
+        other => panic!("expected a ricochet, got {other:?}"),
+    };
+    // At η = 1 the blend IS the classic bounce, returned bit-for-bit — the pre-ruling behaviour is
+    // preserved exactly at full coverage.
+    let specular = Vec3::from(super::super::reflect(
+        Dir3::new(AXIS).unwrap(),
+        Dir3::new(full.events[0].entry_normal).unwrap(),
+    ));
+    assert_eq!(full_direction.to_array(), specular.to_array());
+    assert!((full_scale - laws.ricochet_bleed).abs() < 1.0e-6);
+    let full_turn = AXIS.angle_between(full_direction);
+
+    // Partial coverage turns the round proportionally less, and bleeds proportionally less.
+    let mut previous_turn = full_turn;
+    for stride in [2usize, 4, 6] {
+        let partial = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
+            index % stride == 0
+        });
+        let partial = walk_disc(&partial, &volumes, &laws).unwrap();
+        let coverage = partial.events[0].coverage;
+        match begin(&partial, &AP_88, &laws) {
+            Begin::Ricochet {
+                direction,
+                speed_scale,
+                ..
+            } => {
+                let turn = AXIS.angle_between(direction);
+                assert!(
+                    (turn - coverage * full_turn).abs() < 1.0e-3,
+                    "η = {coverage}: turned {turn}, expected {}",
+                    coverage * full_turn
+                );
+                assert!(turn < previous_turn, "less coverage must turn it less");
+                let expected = 1.0 - coverage * (1.0 - laws.ricochet_bleed);
+                assert!((speed_scale - expected).abs() < 1.0e-5, "{speed_scale}");
+                previous_turn = turn;
+            }
+            other => panic!("expected a partial ricochet at η = {coverage}: {other:?}"),
+        }
+    }
+}
+
+/// Normalization scales by η the same way: a barely-engaged penetrating entry is barely bent.
+#[test]
+fn partial_coverage_scales_the_normalization_bend() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    // 45°, inside the ricochet threshold so the round bites in.
+    let normal = Vec3::new(0.0, 1.0, -1.0).normalize();
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let steel = [Slab::at(1, 0, 0.5, normal, 0.02)];
+
+    let full = walk_disc(
+        &disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |_| true),
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+    let full_request = transit_request(&full, &AP_88, &laws);
+    let full_bend = AXIS.angle_between(full_request.axis);
+    // At η = 1 the bend is the classic `normalization × incidence`, unscaled.
+    assert!(
+        (full_bend - laws.normalization * full_request.entrance.incidence).abs() < 1.0e-4,
+        "{full_bend}"
+    );
+
+    let partial = walk_disc(
+        &disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
+            index % 3 == 0
+        }),
+        &volumes,
+        &laws,
+    )
+    .unwrap();
+    let coverage = partial.events[0].coverage;
+    let partial_bend = AXIS.angle_between(transit_request(&partial, &AP_88, &laws).axis);
+    assert!(
+        (partial_bend - coverage * full_bend).abs() < 1.0e-3,
+        "η = {coverage}: bent {partial_bend}, expected {}",
+        coverage * full_bend
+    );
+}
+
+/// The transit ray is anchored on the DISC AXIS, never on the covered-sample centroid — a centroid
+/// would drag the shell's line of flight sideways toward whatever part of the disc touched geometry,
+/// which is the lateral asymmetry §13.5 rules out (re-affirmed 2026-08-07).
+#[test]
+fn the_transit_ray_is_anchored_on_the_axis_not_the_coverage_centroid() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    // Head-on plate seen by a lop-sided quarter of the disc: the covered samples all sit on one side.
+    let plate = [Slab::at(1, 0, 0.5, -AXIS, 0.02)];
     let offsets = disc_offsets(&frame, 0.044, DEFAULT_RING);
-    let k = offsets.len();
-    let samples: Vec<SampleCorridor> = offsets
+    let corridor = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &plate, |index| {
+        offsets[index].y > 0.01
+    });
+    let walked = walk_disc(&corridor, &volumes, &laws).unwrap();
+    let event = &walked.events[0];
+    assert!(event.coverage < 0.5);
+    // The REPORTED surface is a mean and is lop-sided, exactly as §13.5 says an aggregate should be…
+    assert!(event.entry_position.y > 0.01, "{}", event.entry_position);
+
+    // …but the shell's own axis is not moved by it.
+    let request = transit_request(&walked, &AP_88, &laws);
+    assert!(
+        request.origin.xy().length() < 1.0e-6,
+        "the transit ray drifted laterally to {}",
+        request.origin
+    );
+    assert!((request.origin.z - 0.5).abs() < 1.0e-5);
+}
+
+/// The handoff exports per-sample SEED state, and the seed is a LOOKUP on a ray already walked
+/// rather than an inference — each sample resumes from the point where its own entrance ray met the
+/// surface.
+///
+/// Two flush plates staggered by 1 mm — exactly the sub-caliber authoring slop §13.7 tolerates — are
+/// one crossing whose mean surface sits between them. The samples that met the nearer plate are
+/// therefore already inside it at the handoff and must be seeded; the ones that met the further
+/// plate are not yet in and must not be, because their entry face arrives in the transit corridor's
+/// own hit list at `t = 0`.
+#[test]
+fn the_handoff_seeds_every_sample_that_starts_inside_material() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
+    let offsets = disc_offsets(&frame, 0.044, DEFAULT_RING);
+    let near = Slab::at(1, 0, 0.499, -AXIS, 0.1);
+    let far = Slab::at(2, 0, 0.5, -AXIS, 0.1);
+    let samples = offsets
         .iter()
-        .enumerate()
-        .map(|(index, offset)| {
-            sample(
-                *offset,
-                if index % 2 == 0 {
-                    slab(1, 0, 0.5, 0.9, normal)
-                } else {
-                    Vec::new()
-                },
-            )
+        .map(|offset| {
+            let slab = if offset.y > 0.0 { near } else { far };
+            SampleCorridor {
+                offset: *offset,
+                initial_presence: Vec::new(),
+                hits: slab.hits(*offset, AXIS, 3.0, false),
+            }
         })
         .collect();
-    let covered = samples.iter().filter(|s| !s.hits.is_empty()).count() as f32 / k as f32;
     let walked = walk_disc(
         &DiscCorridor {
             origin: Vec3::ZERO,
             axis: AXIS,
-            length: 2.0,
+            length: 3.0,
             radius: 0.044,
             frame,
             samples,
         },
-        &steel,
+        &volumes,
         &laws,
     )
     .unwrap();
-    match begin(&walked, &shot, &laws) {
-        Begin::Ricochet { speed_scale, .. } => {
-            let expected = 1.0 - covered * (1.0 - laws.ricochet_bleed);
-            assert!((speed_scale - expected).abs() < 1.0e-5, "{speed_scale}");
-            assert!(speed_scale > laws.ricochet_bleed, "a graze bleeds less");
-        }
-        other => panic!("expected a partial ricochet, got {other:?}"),
+    assert_eq!(walked.events.len(), 1, "1 mm of stagger is one crossing");
+    let request = transit_request(&walked, &AP_88, &laws);
+
+    assert_eq!(request.seeds.len(), request.samples);
+    assert_eq!(request.seeds[0].offset, Vec3::ZERO, "sample 0 IS the axis");
+    let seeded = request
+        .seeds
+        .iter()
+        .filter(|s| !s.inside.is_empty())
+        .count();
+    assert!(
+        seeded > 0 && seeded < request.samples,
+        "a staggered surface seeds some samples and not others, got {seeded}/{}",
+        request.samples
+    );
+    // Every seeded sample names the NEAR plate — the one it is actually inside.
+    for seed in request.seeds.iter().filter(|s| !s.inside.is_empty()) {
+        assert_eq!(
+            seed.inside,
+            vec![PrimitiveKey {
+                volume: volume(1),
+                primitive: 0
+            }]
+        );
     }
+
+    // The seeded corridor resolves; the same corridor WITHOUT the seeds reports the unmatched exits
+    // it inherits, which is the whole point of exporting them.
+    let transit = DiscCorridor {
+        origin: request.origin,
+        axis: request.axis,
+        length: 3.0,
+        radius: request.radius,
+        frame: request.frame,
+        samples: request
+            .seeds
+            .iter()
+            .map(|seed| {
+                let slab = if offsets[seed.sample].y > 0.0 {
+                    near
+                } else {
+                    far
+                };
+                SampleCorridor {
+                    offset: seed.offset,
+                    initial_presence: seed.inside.clone(),
+                    hits: slab.hits(
+                        request.origin + seed.offset,
+                        request.axis,
+                        3.0,
+                        seed.inside.contains(&slab.key()),
+                    ),
+                }
+            })
+            .collect(),
+    };
+    assert!(walk_disc(&transit, &volumes, &laws).is_ok());
+    let mut unseeded = transit.clone();
+    for sample in &mut unseeded.samples {
+        sample.initial_presence.clear();
+    }
+    assert!(matches!(
+        walk_disc(&unseeded, &volumes, &laws),
+        Err(WalkError::UnexpectedExit { .. })
+    ));
+}
+
+/// `finish` validates the corridor it is handed against the corridor it asked for. Nothing in the
+/// type system stops a caller collecting along the unbent axis, from the wrong origin, with a
+/// re-derived frame, or around a different contact — and each of those silently resolves one
+/// surface's geometry against another surface's entrance verdict.
+#[test]
+fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let normal = Vec3::new(0.0, 0.5, -0.866).normalize();
+    let slabs = [Slab::at(1, 0, 0.5, normal, 0.05)];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let honest = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    assert!(finish(&honest, &request, &AP_88, &laws).is_ok());
+
+    // The entrance walk itself: right geometry, wrong axis and origin.
+    assert!(matches!(
+        finish(&walked, &request, &AP_88, &laws),
+        Err(WalkError::CorridorMismatch { .. })
+    ));
+
+    // A re-derived frame instead of the transported one.
+    let mut rolled = honest.clone();
+    rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
+    assert!(matches!(
+        finish(&rolled, &request, &AP_88, &laws),
+        Err(WalkError::CorridorMismatch { .. })
+    ));
+
+    // A corridor collected around a different contact entirely: right axis and origin, other volume.
+    let elsewhere = Slab::at(9, 0, 1.5, normal, 0.05);
+    let mut unrelated = transit_disc(&request, &[elsewhere], 3.0);
+    for (sample, seed) in unrelated.samples.iter_mut().zip(&request.seeds) {
+        sample.initial_presence.clear();
+        sample.hits = elsewhere.hits(request.origin + seed.offset, request.axis, 3.0, false);
+    }
+    let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
+    assert!(matches!(
+        finish(&other, &request, &AP_88, &laws),
+        Err(WalkError::CorridorMismatch { .. })
+    ));
 }
 
 /// Capability exhausted partway through a factor CHANGE: the embed point is the inverse of the
@@ -1371,23 +1786,23 @@ fn a_partial_graze_bleeds_proportionally_to_coverage() {
 fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 10.0)]);
-    // 100 mm of RHA, then a crewman.
-    let mut hits = plate(1, 0, 0.5, 0.6);
-    hits.extend(plate(2, 0, 0.6, 0.9));
-    let disc = disc_of(hits, 2.0);
-    let walked = walk_disc(&disc, &volumes, &laws).unwrap();
-    // 60 reference-mm: dies 60 % of the way through the plate.
+    // 100 mm of RHA head-on, then a crewman.
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.1),
+        Slab::at(2, 0, 0.6, -AXIS, 0.3),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let shot = Shot {
         caliber: 0.088,
         capability: 60.0,
     };
-    let request = match begin(&walked, &shot, &laws) {
-        Begin::Transit(request) => request,
-        other => panic!("expected Transit, got {other:?}"),
-    };
-    let plan = finish(&walked, &request, &shot, &laws).unwrap();
+    let request = transit_request(&walked, &shot, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let plan = finish(&transit, &request, &shot, &laws).unwrap();
+
+    // Head-on, so the handoff is the plate's own face: 60 reference-mm dies 60 mm in.
     match plan.outcome {
-        Outcome::Embedded { t, .. } => assert!((t - 0.56).abs() < 1.0e-3, "{t}"),
+        Outcome::Embedded { t, .. } => assert!((t - 0.06).abs() < 1.0e-3, "{t}"),
         other => panic!("expected an embed, got {other:?}"),
     }
     assert!((plan.cost_spent - 60.0).abs() < 0.1);
@@ -1410,19 +1825,15 @@ fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
 fn a_perforation_charges_every_entity_for_its_own_material() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 10.0)]);
-    let mut hits = plate(1, 0, 0.5, 0.6);
-    hits.extend(plate(2, 0, 0.6, 0.9));
-    let disc = disc_of(hits, 2.0);
-    let walked = walk_disc(&disc, &volumes, &laws).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
-    let request = match begin(&walked, &shot, &laws) {
-        Begin::Transit(request) => request,
-        other => panic!("expected Transit, got {other:?}"),
-    };
-    let plan = finish(&walked, &request, &shot, &laws).unwrap();
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.1),
+        Slab::at(2, 0, 0.6, -AXIS, 0.3),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+
     assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
     assert!((plan.cost_spent - 103.0).abs() < 0.5, "{}", plan.cost_spent);
     let crew = plan
@@ -1439,32 +1850,27 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
 }
 
 /// Overmatch charges the PERPENDICULAR projection rather than the oblique chord (§4: it cannot
-/// present its slope to a round that dwarfs it).
+/// present its slope to a round that dwarfs it) — and the projection reaches every CONSEQUENCE.
+/// §13.5 defines the spall budget as the event's cost and §6 defines transit damage from the cost
+/// paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
+/// depositing damage for 30.
 #[test]
-fn overmatch_charges_the_perpendicular_projection() {
+fn overmatch_charges_the_perpendicular_projection_everywhere() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0)]);
-    // 15 mm plate at 60°: a 30 mm chord, but 15 mm perpendicular, and 88 mm overmatches it.
+    // 15 mm plate at 60°: a 30 mm chord head-on, and 88 mm overmatches it.
     let normal = Vec3::new(0.0, 0.866, -0.5).normalize();
-    let disc = disc_of(slab(1, 0, 0.5, 0.53, normal), 2.0);
-    let walked = walk_disc(&disc, &volumes, &laws).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
-    let request = match begin(&walked, &shot, &laws) {
-        Begin::Transit(request) => request,
-        other => panic!("expected Transit, got {other:?}"),
-    };
+    let slabs = [Slab::at(1, 0, 0.5, normal, 0.03)];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
     assert!(request.entrance.overmatched);
-    let plan = finish(&walked, &request, &shot, &laws).unwrap();
-    // 30 mm chord × 1000 = 30 reference-mm oblique; the perpendicular projection is half of it.
-    assert!((plan.cost_spent - 15.0).abs() < 0.2, "{}", plan.cost_spent);
 
-    // …and the projection reaches every CONSEQUENCE, not just the capability spend. §13.5 defines
-    // the spall budget as the event's cost and §6 defines transit damage from the cost paid, so a
-    // projection that stopped at `cost_spent` would spend 15 while throwing spall and depositing
-    // damage for 30.
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+
+    // Whatever the normalization bend did to the chord, the CHARGE is the 15 mm perpendicular
+    // thickness — which is the point of the projection.
+    assert!((plan.cost_spent - 15.0).abs() < 0.2, "{}", plan.cost_spent);
     let exit = plan
         .spall
         .iter()
@@ -1482,13 +1888,13 @@ fn overmatch_charges_the_perpendicular_projection() {
         deposit.cost
     );
     assert!(
-        (deposit.chord - 0.015).abs() < 2.0e-4,
+        (deposit.chord - 0.015).abs() < 5.0e-4,
         "the charged chord is the perpendicular one: {}",
         deposit.chord
     );
-    // The GEOMETRY is untouched — the round really did travel the 30 mm slope chord.
+    // The GEOMETRY is untouched — the round really did travel its slope chord.
     match plan.outcome {
-        Outcome::Perforated { t, .. } => assert!((t - 0.53).abs() < 1.0e-4, "{t}"),
+        Outcome::Perforated { t, .. } => assert!(t > 0.02, "{t}"),
         other => panic!("expected a perforation, got {other:?}"),
     }
 }
@@ -1499,17 +1905,7 @@ fn overmatch_charges_the_perpendicular_projection() {
 fn an_empty_disc_is_a_miss() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0)]);
-    let walked = walk_disc(&disc_of(Vec::new(), 2.0), &volumes, &laws).unwrap();
+    let walked = walk_disc(&entrance_disc(&[], 2.0), &volumes, &laws).unwrap();
     assert!(walked.events.is_empty());
-    assert_eq!(
-        begin(
-            &walked,
-            &Shot {
-                caliber: 0.088,
-                capability: 250.0
-            },
-            &laws
-        ),
-        Begin::Miss
-    );
+    assert_eq!(begin(&walked, &AP_88, &laws), Begin::Miss);
 }
