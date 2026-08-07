@@ -5440,4 +5440,71 @@ mod march_tests {
             );
         }
     }
+
+    /// `MISS` MUST ADVANCE PAST THE GROUND IT JUST EXAMINED.
+    ///
+    /// First contact is a cast; the disc is the resolution. When they disagree — the cast touched
+    /// something, the walk found no material in it — the round flies on. What it must NOT do is
+    /// advance only to the contact, because the contact is exactly where the next cast will find the
+    /// same thing again: the round creeps forward one boundary nudge at a time, burning the tick's
+    /// budget in place, and ends a tick that should have carried it twelve metres a few millimetres
+    /// past a plate it never touched.
+    ///
+    /// Codex's mutant ledger had this one SURVIVING both its supposed catchers, so here is a fixture
+    /// that cannot miss it. A zero-factor volume is a `Miss` by construction rather than by
+    /// geometric knife-edge — the cast finds it, being real armour-layer geometry under a
+    /// `BallisticVolume`, and the union field never rises above zero, so there is nothing to resolve.
+    /// Nothing there means nothing there: no impact, and the tick lands exactly where free flight
+    /// would have put it.
+    #[test]
+    fn a_miss_flies_the_whole_corridor_it_examined() {
+        let start = Vec3::new(0.0, 2.0, 2.0);
+        let dt = 0.016_f32;
+        let (free_flight, _) = advance_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
+
+        let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
+        app.world_mut().spawn((
+            Transform::from_translation(Vec3::new(0.0, 2.0, 0.5)),
+            RigidBody::Static,
+            box_trimesh(Vec3::new(3.0, 3.0, 0.05)),
+            CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+            // Real geometry, no material. The cast still finds it; the field never rises.
+            BallisticVolume {
+                material_factor: 0.0,
+            },
+        ));
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let shell = spawn_headon_shell_at(&mut app, a_shot(), start);
+        app.update();
+
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "nothing was there, so nothing is reported: {:?}",
+            app.world()
+                .resource::<ImpactLog>()
+                .0
+                .iter()
+                .map(|i| i.position)
+                .collect::<Vec<_>>(),
+        );
+        let end = app
+            .world()
+            .get::<Transform>(shell)
+            .expect("the shell flies on")
+            .translation;
+        assert!(
+            end.distance(free_flight) < 1.0e-3,
+            "the tick lands where free flight would: expected {free_flight}, got {end}",
+        );
+        // Stated again as the thing that actually goes wrong, so the failure reads as the defect:
+        // creeping leaves the round at the plate instead of twelve metres past it.
+        assert!(
+            end.z < -10.0,
+            "the round did not creep at the surface it examined: z = {}",
+            end.z,
+        );
+    }
 }
