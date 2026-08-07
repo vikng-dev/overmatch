@@ -1460,6 +1460,37 @@ fn overmatch_charges_the_perpendicular_projection() {
     let plan = finish(&walked, &request, &shot, &laws).unwrap();
     // 30 mm chord × 1000 = 30 reference-mm oblique; the perpendicular projection is half of it.
     assert!((plan.cost_spent - 15.0).abs() < 0.2, "{}", plan.cost_spent);
+
+    // …and the projection reaches every CONSEQUENCE, not just the capability spend. §13.5 defines
+    // the spall budget as the event's cost and §6 defines transit damage from the cost paid, so a
+    // projection that stopped at `cost_spent` would spend 15 while throwing spall and depositing
+    // damage for 30.
+    let exit = plan
+        .spall
+        .iter()
+        .find(|mark| mark.to_factor == 0.0)
+        .expect("a perforation exits");
+    assert!(
+        (exit.budget - 15.0).abs() < 0.2,
+        "spall budget {}",
+        exit.budget
+    );
+    let deposit = &plan.deposits[0];
+    assert!(
+        (deposit.cost - 15.0).abs() < 0.2,
+        "deposit {}",
+        deposit.cost
+    );
+    assert!(
+        (deposit.chord - 0.015).abs() < 2.0e-4,
+        "the charged chord is the perpendicular one: {}",
+        deposit.chord
+    );
+    // The GEOMETRY is untouched — the round really did travel the 30 mm slope chord.
+    match plan.outcome {
+        Outcome::Perforated { t, .. } => assert!((t - 0.53).abs() < 1.0e-4, "{t}"),
+        other => panic!("expected a perforation, got {other:?}"),
+    }
 }
 
 /// An empty disc decides nothing — no fabricated entrance, no fabricated terminal (§13.6's "no

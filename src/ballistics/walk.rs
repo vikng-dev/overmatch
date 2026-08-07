@@ -1647,14 +1647,21 @@ pub fn finish(
         });
     };
 
-    // Overmatch cannot be made to present its oblique line of sight to a round that dwarfs it, so it
-    // charges the perpendicular projection of the crossing instead of the full slope chord (§4).
-    let projection = if request.entrance.overmatched {
+    // Overmatch cannot be made to present its oblique line of sight to a round that dwarfs it, so
+    // the CHARGED chord is the perpendicular projection, not the full slope chord (§4).
+    //
+    // It applies to every consequence, not just to the capability spend. §13.5 defines the spall
+    // budget AS the event's cost and §6 defines transit damage from the cost paid — so a projection
+    // that scaled only `cost_spent` would leave a 60° overmatched crossing spending 15 reference-mm
+    // while throwing spall and depositing damage for 30. One `charge` factor, applied to the prefix
+    // profile, the spall budgets and the deposits alike. The GEOMETRIC quantities (`t`, the embed
+    // position, the presence spans) are untouched: the round still travels the distance it travels.
+    let charge = if request.entrance.overmatched {
         transit.axis.dot(request.entrance.normal).abs() as f64
     } else {
         1.0
     };
-    let profile = event.profile.scaled(projection);
+    let profile = event.profile.scaled(charge);
     let total = profile.total();
 
     let embed_t = profile.invert(shot.capability as f64);
@@ -1697,11 +1704,12 @@ pub fn finish(
                 .filter(|(a, _)| *a < cut)
                 .count()
                 .min(transit.samples);
+            let charged = chord * charge;
             EntityDeposit {
                 entity: share.entity,
                 factor: share.factor,
-                chord: chord as f32,
-                cost: (chord * share.factor as f64) as f32,
+                chord: charged as f32,
+                cost: (charged * share.factor as f64) as f32,
                 coverage: if covered == 0 { 0.0 } else { share.coverage },
             }
         })
@@ -1709,12 +1717,16 @@ pub fn finish(
         .collect();
 
     // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward
-    // steps it actually reached.
+    // steps it actually reached, and every budget is charged on the same projection as the cost it
+    // is defined to equal.
     let spall = event
         .spall
         .iter()
-        .copied()
         .filter(|mark| mark.t <= cut)
+        .map(|mark| DiscSpall {
+            budget: (mark.budget as f64 * charge) as f32,
+            ..*mark
+        })
         .collect();
 
     Ok(ResolutionPlan {
