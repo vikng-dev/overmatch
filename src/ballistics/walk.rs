@@ -1235,6 +1235,8 @@ pub struct DiscEvent {
     /// §13.5's ratified rule hands the whole momentum exchange to. Taken from the sample that
     /// touched FIRST, ties broken by sample index.
     pub entrance_volume: Entity,
+    /// Every primitive this crossing touched, sorted — the identity half of the transit check.
+    pub primitives: Vec<PrimitiveKey>,
     /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
     pub cost: f32,
     pub profile: CostProfile,
@@ -1648,10 +1650,21 @@ fn build_event(
         .collect();
     spall.sort_by(|a, b| a.t.total_cmp(&b.t));
 
+    let mut primitives: Vec<PrimitiveKey> = by_sample
+        .iter()
+        .flat_map(|(sample, runs)| {
+            runs.iter()
+                .flat_map(move |run| walks[*sample].runs[*run].primitives.iter().copied())
+        })
+        .collect();
+    primitives.sort();
+    primitives.dedup();
+
     Ok(DiscEvent {
         start,
         end,
         entrance_volume: entrance_volume.unwrap_or(Entity::PLACEHOLDER),
+        primitives,
         entry_normal,
         entry_position,
         exit_normal,
@@ -1773,6 +1786,11 @@ pub struct TransitRequest {
     /// first crossing against these, so a corridor collected for some OTHER contact cannot be
     /// resolved as if it were this one.
     pub entrance_entities: Vec<Entity>,
+    /// The primitives the entrance crossing touched, sorted. Entity identity alone is too coarse for
+    /// the transit check: one volume can present several primitives metres apart, so "the corridor's
+    /// first crossing names a volume the entrance also named" is satisfied by a crossing of a
+    /// completely different part of the same hull.
+    pub entrance_primitives: Vec<PrimitiveKey>,
     pub seeds: Vec<SampleSeed>,
 }
 
@@ -1882,6 +1900,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         radius: entrance.radius,
         samples: entrance.samples(),
         entrance_entities,
+        entrance_primitives: event.primitives.clone(),
         seeds,
     })
 }
@@ -1960,20 +1979,52 @@ fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), 
     if transit.samples() != request.samples {
         return mismatch("the corridor has a different sample count than the entrance disc");
     }
-    if let Some(event) = transit.events.first()
-        && !event.shares.iter().any(|share| {
-            request
-                .entrance_entities
-                .binary_search(&share.entity)
-                .is_ok()
-        })
-    {
+
+    // PER-SAMPLE geometry, not just the disc's. The handoff exports where each ray resumes, and a
+    // caller that laid its ring out freshly — or nudged one origin — produces a corridor whose
+    // aggregate axis, origin, frame and radius all still match while the rays themselves sample
+    // somewhere else entirely. The seeds are only sound for the rays they were read on.
+    for (index, seed) in request.seeds.iter().enumerate() {
+        if (transit.offsets[index] - seed.offset).length() > SEED_OFFSET_TOLERANCE {
+            return mismatch("a sample ray resumes somewhere other than where the handoff put it");
+        }
+    }
+
+    let Some(event) = transit.events.first() else {
+        return Ok(());
+    };
+    // IDENTITY, on the two things that actually name a crossing: the geometry it is made of, and
+    // where it sits. Sharing an ENTITY is too coarse — one hull presents primitives metres apart —
+    // and a crossing that begins far from the handoff plane is not the one the entrance decided to
+    // enter, however familiar its volumes look.
+    let shares_primitive = event
+        .primitives
+        .iter()
+        .any(|key| request.entrance_primitives.binary_search(key).is_ok());
+    let same_surface = event.entry_normal.dot(request.entrance.normal) >= ENTRANCE_SURFACE_COS;
+    if !(shares_primitive || same_surface) {
         return mismatch(
-            "the corridor's first crossing shares no volume with the entrance crossing",
+            "the corridor's first crossing is neither made of the entrance's geometry nor on its surface",
         );
+    }
+    if event.start > HANDOFF_PROXIMITY {
+        return mismatch("the corridor's first crossing does not begin at the handoff plane");
     }
     Ok(())
 }
+
+/// How far a supplied sample origin may sit from the one the handoff exported. Generous enough for
+/// an honest f32 round-trip of a position through a corridor build, orders below any real re-aim.
+const SEED_OFFSET_TOLERANCE: f32 = 1.0e-4;
+
+/// How far into the transit corridor its first crossing may begin. The handoff plane IS the entrance
+/// surface, so the crossing the entrance decided to enter starts at zero; a millimetre covers the
+/// rounding of a face position that was computed, transported and re-collected.
+const HANDOFF_PROXIMITY: f32 = 1.0e-3;
+
+/// Cosine bound for "the transit's first crossing is on the surface the entrance read". Shares the
+/// magnitude of the event-plane rule for the same reason: two reads of one surface patch.
+const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
 /// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits).
 pub fn finish(

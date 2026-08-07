@@ -1875,6 +1875,61 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     ));
 }
 
+/// The disc's aggregate geometry matching is not enough: the SAMPLES must resume where the handoff
+/// put them. A corridor can carry the right axis, origin, frame, radius and sample count while one
+/// ray samples 10 mm away — and the seeds are only sound for the rays they were read on.
+#[test]
+fn finish_rejects_a_corridor_whose_samples_moved() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let normal = Vec3::new(0.0, 0.5, -0.866).normalize();
+    let slabs = [Slab::at(1, 0, 0.5, normal, 0.05)];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+
+    let mut moved = transit_disc(&request, &slabs, 3.0);
+    // One ray, 10 mm across. Everything the aggregate check looks at is untouched.
+    moved.samples[3].offset += Vec3::X * 0.01;
+    let moved = walk_disc(&moved, &volumes, &laws).unwrap();
+    assert_eq!(moved.axis, request.axis);
+    assert_eq!(moved.origin, request.origin);
+    assert_eq!(moved.samples(), request.samples);
+    assert!(matches!(
+        finish(&moved, &request, &AP_88, &laws),
+        Err(WalkError::CorridorMismatch { .. })
+    ));
+}
+
+/// First-crossing identity is checked on the geometry a crossing is MADE of and on where it sits —
+/// not on entity alone. One hull presents primitives metres apart, so "names a volume the entrance
+/// also named" is satisfied by a crossing of a completely different part of the same tank.
+#[test]
+fn finish_rejects_a_far_crossing_of_the_same_entity() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0)]);
+    let front = Slab::at(1, 0, 0.5, -AXIS, 0.05);
+    let walked = walk_disc(&entrance_disc(&[front], 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+
+    // Same VOLUME, a different primitive of it, two metres downrange.
+    let elsewhere = Slab::at(1, 7, 2.5, -AXIS, 0.05);
+    let mut corridor = transit_disc(&request, &[front], 3.0);
+    for (sample, seed) in corridor.samples.iter_mut().zip(&request.seeds) {
+        sample.initial_presence.clear();
+        sample.hits = elsewhere.hits(request.origin + seed.offset, request.axis, 3.0, false);
+    }
+    let far = walk_disc(&corridor, &volumes, &laws).unwrap();
+    assert_eq!(
+        far.events[0].shares[0].entity,
+        volume(1),
+        "the fixture must keep the entity identical — that is the point"
+    );
+    assert!(matches!(
+        finish(&far, &request, &AP_88, &laws),
+        Err(WalkError::CorridorMismatch { .. })
+    ));
+}
+
 /// Capability exhausted partway through a factor CHANGE: the embed point is the inverse of the
 /// prefix integral, not `span × cap/cost`, and per-entity damage is CLIPPED at that progress — a
 /// round that dies in the plate deposits nothing in the crewman behind it.
