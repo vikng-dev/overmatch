@@ -686,9 +686,14 @@ mod tests {
             .unwrap_or_else(|gap| panic!("the shipped glb must answer the marker read: {gap}"));
 
         assert!((m.pitch - 0.130_43).abs() < 1e-4, "pitch {}", m.pitch);
-        assert!((m.plane_x - 1.531_2).abs() < 1e-3, "plane_x {}", m.plane_x);
+        // 1.531_44, was 1.531_2: the rebuilt shoe (2026-08-08) carries its pin bore 1.243 mm
+        // further outboard. Pitch is unmoved to half a micron, so the loop length and the link
+        // window are untouched — this is a lateral datum only.
+        assert!((m.plane_x - 1.532_44).abs() < 1e-3, "plane_x {}", m.plane_x);
         // Width from `Link_Box`, NOT the RON's 0.79 — the authored number was 64 mm too wide.
-        assert!((m.width - 0.725_97).abs() < 1e-3, "width {}", m.width);
+        // 0.724_71, was 0.725_97: the same rebuild, 1.256 mm narrower. The near-mirror of the
+        // `plane_x` move — the bore went outboard, the outboard face stayed.
+        assert!((m.width - 0.724_71).abs() < 1e-3, "width {}", m.width);
         assert!(
             (m.width - 0.79).abs() > 0.05,
             "width must be the measured one, not the RON's"

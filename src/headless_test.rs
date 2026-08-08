@@ -1358,7 +1358,11 @@ fn slope_park_benchmarks_the_30_deg_holding_power_tiger() {
         "zero input at rest on the 30-degree ramp must latch the park brake"
     );
     // The BENCHMARK. See the doc above: this asserts what the holding power IS, not what it owes.
-    const MEASURED_DRIFT_M: f32 = 0.0928;
+    // 0.0035, was 0.0928: re-pinned 2026-08-08 against the rebuilt track shoe. The 26x drop in
+    // drift is NOT explained by the 1.256 mm the shoe narrowed, and is on the open queue rather
+    // than accounted for here (Yan's ruling, same day). The benchmark records what the holding
+    // power IS; it is pinned again so the NEXT move is caught, not because this one is understood.
+    const MEASURED_DRIFT_M: f32 = 0.0035;
     const BAND_M: f32 = 0.005;
     assert!(
         (drift - MEASURED_DRIFT_M).abs() < BAND_M,

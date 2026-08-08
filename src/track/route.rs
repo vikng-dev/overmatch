@@ -846,26 +846,29 @@ mod tests {
             belly_y.to_bits(),
         );
 
+        // Every hash below was re-pinned 2026-08-08 against the rebuilt track shoe. Both VERTEX
+        // COUNTS are unchanged (172 and 60): the route's structure is the same, and only the
+        // coordinates moved, which is what a new shoe of the same pitch should do.
         assert_eq!(loop_route.pts.len(), 172, "loop route vertex count moved");
         assert_eq!(
             route_bits_hash(&loop_route),
-            0x6f42_aac4_734d_8c32,
+            0xc87a_f178_5caf_49d0,
             "loop route bits moved (TrackGear::loop_pts would change)"
         );
         assert_eq!(
             loop_route.total().to_bits(),
-            0x414a_961a,
+            0x414a_9557,
             "loop length bits moved"
         );
         assert_eq!(taut_route.pts.len(), 60, "taut route vertex count moved");
         assert_eq!(
             route_bits_hash(&taut_route),
-            0x257e_7393_e8ea_b63e,
+            0x07a1_639a_ce0f_9b89,
             "taut route bits moved (hull_rest_y datum would change)"
         );
         assert_eq!(
             belly_y.to_bits(),
-            0x3dc6_3ea4,
+            0x3dc8_20bc,
             "hull_rest_y source bits moved"
         );
     }
