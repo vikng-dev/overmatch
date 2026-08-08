@@ -54,6 +54,15 @@ const MAX_CORRIDOR: f32 = 50.0;
 /// tolerance of everything it can meet, and §13.5 already says a fragment IS a shell with `r → 0`.
 /// Paying twelve extra casts to sample a 4 mm disc buys nothing, and the machine-gun is the round we
 /// fire by the beltful.
+///
+/// The 20 mm VALUE is arbitrary (Yan, 2026-08-07) — it sits above every round currently fired
+/// beltwise and below every cannon shell, and nothing was tuned finer than that. Revisit when
+/// higher-caliber automatic weapons or autocannons with a high fire rate arrive: they cross or
+/// crowd the threshold, and a sub-threshold round resolves as a zero-width line that can thread
+/// gaps narrower than the real projectile. Cost basis for the revisit (M4, 2026-08-07, branch
+/// `bench/disc-min-caliber`): 40 / 177 / 400 µs per impact at k = 1 / 5 / 13; free flight is
+/// k-independent. Precondition: the degenerate-bake volumes on the fuzzer residue list — a ring
+/// samples 13× more surface, so fail-closed impacts scale ~4% → 14% with k on today's asset.
 pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
 
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
