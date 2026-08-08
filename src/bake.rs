@@ -1036,7 +1036,12 @@ mod tests {
             census,
             BTreeMap::from([
                 ("Ammunition", 4),
-                ("Cast", 5),
+                // 4, was 5: `Turret_Cupola` is GONE — the commander's cupola was rebuilt
+                // 2026-08-08 as `Commander_Cupola` + `Commander_Hatch`, and both are RHA below.
+                // The substance moved with the modelling: the old single object was cast
+                // (`Panzerguß`) because it was one lump; the rebuilt cupola is a rolled-plate ring
+                // with a separate hatch, which is what the real Tiger's later cupola is.
+                ("Cast", 4),
                 ("EngineBlock", 2),
                 ("Flesh", 5),
                 ("GunSteel", 6),
@@ -1044,14 +1049,18 @@ mod tests {
                 // and `Idler_L/R`, one primitive each, `Mat_RunningGear_Paint` -> `MildSteel`.
                 // Machinery `Stahlguß`, not `Panzerguß`, so MildSteel and not Cast.
                 ("MildSteel", 26),
-                ("RHA", 17),
+                // 19, was 17: `Commander_Cupola` (832 tris) and `Commander_Hatch` (190), the two
+                // halves of the rebuilt cupola, both rolled plate. Net armour primitives +1, not
+                // +2, because `Turret_Cupola` left `Cast` in the same edit.
+                ("RHA", 19),
                 ("Rubber", 16),
             ]),
             "the Tiger's substance census moved — see the doc above before re-pinning"
         );
-        // 65, was 61: the same four nodes. Total primitives are UNCHANGED at 88 — these objects
-        // always had exactly one material slot, so this is a re-classification, not new geometry.
-        assert_eq!(geometry.ballistic_volumes.len(), 65);
+        // 66, was 65: one volume out (`Turret_Cupola`), two in (`Commander_Cupola`,
+        // `Commander_Hatch`). Total primitives 89, was 88, by the same arithmetic — this IS new
+        // geometry, unlike the 2026-08-07 running-gear change, which was a re-classification.
+        assert_eq!(geometry.ballistic_volumes.len(), 66);
     }
 
     /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
