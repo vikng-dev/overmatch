@@ -475,7 +475,8 @@ struct Projected {
     slack: f32,
 }
 
-/// The f32 projection's error, as a multiple of the vertex's own magnitude.
+/// The f32 projection's error, as a multiple of the vertex's own magnitude — over the certified
+/// coordinate domain, and nowhere else.
 ///
 /// # The derivation, in full
 ///
@@ -483,16 +484,42 @@ struct Projected {
 /// and `m = max|v_i|` the computed coordinate is `p = fl(v_kx + fl(s · v_kz))` over `v = fl(d)`.
 /// `kz` is the ray's DOMINANT axis, so `|S| ≤ 1` and `|s| ≤ 1 + u`, `u = 2⁻²⁴`. Then:
 ///
-/// - subtraction: `|v_i − d_i| ≤ u|d_i| ≤ u·m`, one term;
+/// - subtraction: `|v_i − d_i| ≤ u|d_i| ≤ u·m`, one term (a difference that lands in the subnormal
+///   range is exact, so this term needs no absolute companion);
 /// - the shear constant: `|s − S| ≤ u|S| ≤ u`, contributing `u|v_kz| ≤ u·m`;
-/// - the product's rounding: `≤ u|s·v_kz| ≤ u·m`, and the shear applied to the subtraction's own
-///   error a further `|S|·u·m ≤ u·m`;
-/// - the sum's rounding: `≤ u·|v_kx + fl(s·v_kz)| ≤ 2u·m(1 + u)`.
+/// - the product's rounding: `≤ u|s·v_kz| + η`, and the shear applied to the subtraction's own error
+///   a further `|S|·u·m ≤ u·m`;
+/// - the sum's rounding: `≤ u·|v_kx + fl(s·v_kz)| + η ≤ 2u·m(1 + u) + η`.
 ///
-/// Six `u·m` and a tail in `u²`. `PROJECTION_SLACK` is eight, which covers the tail and every
-/// rounding in the bound's own f32 evaluation. It is a bound on the rounding, NOT a tolerance: the
-/// exact answer for the stored vertices is always inside it, so a decision made outside it is the
-/// exact one.
+/// Six `u·m`, a tail in `u²`, and TWO absolute terms `η = 2⁻¹⁵⁰` — the half-ulp floor of gradual
+/// underflow, which is what the relative model cannot express. `PROJECTION_SLACK` is eight `u`,
+/// so it dominates iff `2u·m ≥ 2η`, that is iff
+///
+/// > **`m ≥ η/u = 2⁻¹²⁶ = f32::MIN_POSITIVE`.**
+///
+/// That is the domain condition, and it is a condition on the vertex's offset from the CORRIDOR
+/// ORIGIN, which no bake gate can bound from below — the origin is not a vertex and may sit
+/// arbitrarily close to one. What [`crate::bake::CERTIFIED_RANGE`] bounds instead is the CONSEQUENCE of
+/// failing it:
+///
+/// - `m < 2⁻¹²⁶` means the origin agrees with this vertex to within `MIN_POSITIVE` in every
+///   component, so at most one welded vertex position of a triangle can be in that state, and the
+///   origin itself is inside the certified box to within `2⁻¹²⁶`;
+/// - for that vertex the UNCLAIMED error is `6u·m + 2η < 2⁻¹⁴⁷`, against a claimed `8u·m ≥ 0`;
+/// - the other two points are certified, so `|q_i| = |v_kx + s·v_kz| ≤ 2·(2·2¹⁶)` and
+///   `|q₀| + |q₁| ≤ 2¹⁹`;
+/// - so the deficit propagated into [`edge_area`] is `< 2⁻¹⁴⁷ · 2¹⁹ = 2⁻¹²⁸`, and
+///   [`edge_area_slack`]'s `f32::MIN_POSITIVE = 2⁻¹²⁶` term covers it four times over — with room
+///   left for the ≤ 5η that band expression's own evaluation can lose to underflow.
+///
+/// So the band is sufficient EVERYWHERE on the certified domain, and outside it this kernel makes no
+/// claim at all: the codex triangle in
+/// [`a_subnormal_triangle_is_outside_the_certified_domain`] has a subnormal vertex and a coordinate
+/// of `10¹⁰`, is refused at the door by both bounds, and is declined here — correctly as far as this
+/// bound is concerned, because this bound never promised anything about it.
+///
+/// It is a bound on the rounding, NOT a tolerance: the exact answer for the stored vertices is
+/// always inside it, so a decision made outside it is the exact one.
 ///
 /// It is not small. `v` is the vertex MINUS the corridor origin — metres — while the lateral offset
 /// the projection has to resolve is centimetres, so at a 6 m standoff the bound is about a micron,
@@ -1326,6 +1353,66 @@ mod tests {
             return None;
         }
         Some(e2.dot(qvec) * inv)
+    }
+
+    /// THE BAND'S DOMAIN, STATED BY THE TRIANGLE THAT LIES OUTSIDE IT.
+    ///
+    /// [`PROJECTION_SLACK`] is a bound on the projection's rounding only where the relative-error
+    /// model it is derived from holds; on a vertex whose corridor-relative offset is subnormal it
+    /// underflows to zero and claims an exactness the arithmetic does not have. Codex built the
+    /// triangle that turns that into a declined crossing: one vertex at the very bottom of the
+    /// subnormal range, two at `10¹⁰`, so the near-zero vertex's unclaimed absolute error is
+    /// multiplied up into a wrong-signed edge area of `1.6079e-36` against a band of `1.3468e-38`.
+    /// No edge triggers the f64 reconsideration, and `cross_triangle` returns `None` where the
+    /// independent f64 reference finds a crossing.
+    ///
+    /// The answer is not a wider band — it is that this triangle is not geometry. Both ends of it
+    /// are outside [`crate::bake::CERTIFIED_RANGE`], so the bake refuses it before a collider is
+    /// ever built, and the kernel's bound is written as a claim about that domain. This test is what
+    /// makes the exclusion a fact rather than a footnote: the domain predicate REFUSES it, and the
+    /// kernel's answer here is recorded, not defended.
+    #[test]
+    fn a_subnormal_triangle_is_outside_the_certified_domain() {
+        let denormal = f32::from_bits(1);
+        let a = Vec3::new(-64.0 * denormal, -64.0 * denormal, denormal);
+        let b = Vec3::new(1.0e10, 10_017_928_192.0, 0.0);
+        let c = Vec3::new(-2.0e10, -1.0e10, 0.0);
+        let axis = Vec3::new(0.3, 0.4, 0.866_025_4);
+        let origin = Vec3::ZERO;
+
+        // Both ends of the certified range refuse it: the subnormal vertex and the 10¹⁰ one.
+        assert!(
+            !crate::bake::certified_coordinate(a.z),
+            "the subnormal vertex must be refused at the floor",
+        );
+        assert!(
+            !crate::bake::certified_coordinate(b.x),
+            "the 10¹⁰ vertex must be refused at the ceiling",
+        );
+        // And a coordinate a tank actually has is not refused with it.
+        assert!(
+            crate::bake::certified_coordinate(1.234) && crate::bake::certified_coordinate(0.0),
+            "the gate must pass the geometry it exists to protect",
+        );
+
+        // What the kernel does out there, recorded. The reference accepts; the kernel declines; the
+        // bound never spoke for this triangle either way.
+        let reference = moller_trumbore_f64(
+            origin.as_dvec3(),
+            axis.as_dvec3(),
+            a.as_dvec3(),
+            b.as_dvec3(),
+            c.as_dvec3(),
+        );
+        assert!(
+            reference.is_some(),
+            "the counterexample must still be a crossing in exact arithmetic",
+        );
+        let shear = RayShear::new(origin, axis);
+        assert!(
+            cross_triangle(&shear, axis, a, b, c).is_none(),
+            "the recorded out-of-domain behaviour changed — re-derive the bound before re-pinning",
+        );
     }
 
     /// A CLOSED SURFACE'S SILHOUETTE MUST NOT SWALLOW BOTH CROSSINGS.

@@ -198,6 +198,42 @@ fn classify(
     })
 }
 
+/// The dynamic range a ballistic vertex coordinate is CERTIFIED in, as `(low, high)` magnitudes in
+/// the bake's working frame (node-local metres).
+///
+/// `collect::PROJECTION_SLACK` is a bound on the f32 projection's rounding, and it is a bound only
+/// where the relative error model it is derived from holds. It is stated as a multiple of the
+/// vertex's own magnitude, so on a vertex whose corridor-relative offset is subnormal it underflows
+/// to zero and claims an exactness the arithmetic does not have — while a NEIGHBOURING vertex
+/// megametres away multiplies that unclaimed error up through the edge area. Codex built exactly
+/// that triangle and the kernel declined a crossing an exact reference accepts.
+///
+/// A tolerance cannot fix it, and neither can wider arithmetic in the hot path (§13 pays for the f64
+/// reconsideration only inside the band; widening the band is the cost, not the cure). Per ADR-0034
+/// the answer is generic and lives at the door: geometry outside the certified range does not enter
+/// the sim, and the kernel's proof is written as a claim ABOUT that range.
+///
+/// * `2^16 m` (65 536 m) is the CEILING, and it is the half the proof needs: it is what keeps the
+///   amplification of an unclaimed near-zero error by a neighbouring vertex inside
+///   `collect::edge_area_slack`'s `f32::MIN_POSITIVE` term, with a factor of four to spare. The
+///   derivation is written out at `collect::PROJECTION_SLACK`.
+/// * `2^-64 m` (54 zeptometres) is the FLOOR, and it is coordinate hygiene rather than a term in
+///   that derivation: it refuses geometry whose coordinates carry no relative accuracy at all — the
+///   class the counterexample was drawn from, where the f32 rigid transform onto the collider has
+///   already destroyed whatever the numbers meant. Exactly zero is legal and exact; it is the values
+///   that are merely NEAR zero that mean nothing.
+pub(crate) const CERTIFIED_RANGE: (f32, f32) = (
+    // 2^-64 and 2^16, written as bit patterns so the constant cannot drift by a decimal digit.
+    f32::from_bits(0x1F80_0000),
+    f32::from_bits(0x4780_0000),
+);
+
+/// Whether one coordinate is inside [`CERTIFIED_RANGE`].
+pub(crate) fn certified_coordinate(value: f32) -> bool {
+    let magnitude = value.abs();
+    magnitude == 0.0 || (magnitude >= CERTIFIED_RANGE.0 && magnitude <= CERTIFIED_RANGE.1)
+}
+
 /// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
 /// outward orientation per connected shell.
 ///
@@ -234,15 +270,20 @@ fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(
 
     // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
     // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
-    // a non-finite coordinate cannot be welded or integrated at all.
+    // a coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
+    // watertight kernel that has a bound to offer.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
     let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
     for position in &primitive.positions {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
-            if !value.is_finite() {
+            if !certified_coordinate(*value) {
                 return Err(defect(format!(
-                    "a vertex coordinate is not finite ({value})"
+                    "vertex coordinate {value} is outside the certified range — a ballistic \
+                     coordinate must be 0 or {low:e}..={high:e} m in magnitude, which is the domain \
+                     `collect`'s watertight projection carries a proven error bound over",
+                    low = CERTIFIED_RANGE.0,
+                    high = CERTIFIED_RANGE.1,
                 )));
             }
             *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
