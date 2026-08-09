@@ -12,6 +12,8 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
+mod embedding;
+
 use crate::spec::{TankSpec, TankSpecHandle};
 use crate::substances::SubstanceRegistry;
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
@@ -231,8 +233,8 @@ fn classify(
 /// where the relative error model it is derived from holds. It is stated as a multiple of the
 /// vertex's own magnitude, so on a vertex whose corridor-relative offset is subnormal it underflows
 /// to zero and claims an exactness the arithmetic does not have — while a NEIGHBOURING vertex
-/// megametres away multiplies that unclaimed error up through the edge area. Codex built exactly
-/// that triangle and the kernel declined a crossing an exact reference accepts.
+/// megametres away multiplies that unclaimed error up through the edge area, and the kernel then
+/// declines a crossing an exact reference accepts.
 ///
 /// A tolerance cannot fix it, and neither can wider arithmetic in the hot path (§13 pays for the f64
 /// reconsideration only inside the band; widening the band is the cost, not the cure). Per ADR-0034
@@ -293,7 +295,7 @@ pub(crate) fn certified_coordinate(value: f32) -> bool {
 /// distinct coordinates into one (a positive-thickness shell becomes zero-thickness) or carry a
 /// certified coordinate out of [`CERTIFIED_RANGE`]. Nothing here compensates for a scale; it names
 /// the node and refuses. Apply the scale in the .blend and re-export.
-fn manifold_gate(
+pub(crate) fn manifold_gate(
     node: &str,
     index: usize,
     primitive: &MeshGeometry,
@@ -322,6 +324,10 @@ fn manifold_gate(
     // watertight kernel that has a bound to offer.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
     let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
+    // The canonical position of each welded id, which is what the embedding certificate measures:
+    // one point per id, so two triangles naming a corner the same way are AT the same point by
+    // construction rather than by comparison.
+    let mut points: Vec<[f32; 3]> = Vec::new();
     for position in &primitive.positions {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
@@ -338,7 +344,11 @@ fn manifold_gate(
             *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
         }
         let next = canonical.len() as u32;
-        welded.push(*canonical.entry(key).or_insert(next));
+        let id = *canonical.entry(key).or_insert(next);
+        if id as usize == points.len() {
+            points.push(key.map(f32::from_bits));
+        }
+        welded.push(id);
     }
 
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(primitive.indices.len() / 3);
@@ -452,6 +462,13 @@ fn manifold_gate(
         let next = ids.len() as u32;
         shells.push(*ids.entry(root).or_insert(next));
     }
+
+    // EMBEDDING, over the surface. Closure and outward winding give a shell an inside; this is
+    // what says a ray that enters it leaves it. Unconditional — no flag and no allowlist, because
+    // a shell that passes through itself charges a fraction of the plate it crossed and the walk's
+    // one-dimensional evidence for that can cancel before it is read.
+    embedding::certify_embedding(&triangles, &shells, &points).map_err(defect)?;
+
     Ok(ShellCertificate {
         shells,
         corners: triangles,

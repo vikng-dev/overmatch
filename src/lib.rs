@@ -53,6 +53,10 @@ mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
 /// by both the offline and predicted-network client roots.
 mod drive_hud;
+/// Exact integer arithmetic over `f32`-sourced polynomials — the arithmetic the bake's embedding
+/// certificate and the corridor collector's parallel test are decided in, so neither has a
+/// tolerance.
+mod exact;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
