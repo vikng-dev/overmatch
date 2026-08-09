@@ -41,7 +41,8 @@ use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use super::walk::{FaceHit, PrimitiveKey, WalkError, WalkLaws};
+use super::BallisticShells;
+use super::walk::{FaceHit, ShellKey, WalkError, WalkLaws};
 
 /// Faces one corridor may collect before the collector gives up.
 ///
@@ -70,14 +71,14 @@ pub(crate) struct Corridor<'a> {
     /// Unit travel direction.
     pub axis: Vec3,
     pub length: f32,
-    /// Primitives this ray was declared to START inside.
+    /// Shells this ray was declared to START inside.
     ///
     /// Honors the core's `(open, close]` seed contract from the driving side: a face BEHIND the
     /// origin belongs to the seed and is dropped, and a face a rounding-hair behind it on a ray that
     /// was NOT seeded is the face the ray is sitting on and is clamped to `t = 0`, where the walk
     /// processes it. The two rules are complements, so an entry is counted exactly once however the
     /// f32 falls.
-    pub seeded: &'a [PrimitiveKey],
+    pub seeded: &'a [ShellKey],
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
     /// face — a second opinion about that is how an entry gets counted twice or not at all. The
     /// trimesh prune reads it through [`prune_margin`], to decide when a corridor origin is ON a
@@ -94,11 +95,11 @@ pub(crate) fn collect(
     corridor: &Corridor<'_>,
     // Candidate colliders, already filtered to armour the shell may hit (layer + self-exclusion).
     candidates: &[(Entity, Entity)],
-    colliders: &Query<(&Position, &Rotation, &Collider)>,
+    colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticShells>)>,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     for &(node, primitive) in candidates {
-        let Ok((position, rotation, collider)) = colliders.get(primitive) else {
+        let Ok((position, rotation, collider, shells)) = colliders.get(primitive) else {
             // A candidate the broad phase named but whose pose is not available cannot be probed,
             // and guessing that it is empty is exactly the silent-zero this module refuses.
             return Err(WalkError::CollectorFailed {
@@ -117,28 +118,54 @@ pub(crate) fn collect(
         // was computed from.
         let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
         let local_axis = inverse * corridor.axis;
-        let seeded = corridor.seeded.contains(&PrimitiveKey {
-            volume: node,
-            primitive,
-        });
+        let seeded = |shell: u32| {
+            corridor.seeded.contains(&ShellKey {
+                volume: node,
+                primitive,
+                shell,
+            })
+        };
 
         let before = out.len();
         match collider.shape_scaled().as_typed_shape() {
-            TypedShape::TriMesh(mesh) => collect_trimesh(
-                mesh,
-                local_origin,
-                local_axis,
-                corridor.length,
+            TypedShape::TriMesh(mesh) => {
+                // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
+                // shells closing at one `t` from one shell claimed twice, and it must not guess —
+                // so a trimesh whose shell table is missing or the wrong length is an unprobed
+                // candidate, which is the same silence as an absent one.
+                let shells = shells
+                    .map(|shells| &*shells.0)
+                    .filter(|shells| shells.len() == mesh.num_triangles())
+                    .ok_or(WalkError::CollectorFailed {
+                        volume: node,
+                        reason: "a trimesh candidate carries no per-triangle shell table",
+                    })?;
+                collect_trimesh(
+                    mesh,
+                    local_origin,
+                    local_axis,
+                    corridor.length,
+                    node,
+                    primitive,
+                    shells,
+                    &seeded,
+                    *rotation,
+                    prune_margin(local_origin, corridor.laws),
+                    corridor.laws,
+                    out,
+                )?
+            }
+            // The sandbox slabs. A convex solid is one closed surface by definition, so its shell
+            // id is `0` and there is nothing to look up.
+            _ => collect_convex(
+                collider,
+                position.0,
+                *rotation,
+                corridor,
                 node,
                 primitive,
-                seeded,
-                *rotation,
-                prune_margin(local_origin, corridor.laws),
-                corridor.laws,
+                seeded(0),
                 out,
-            )?,
-            _ => collect_convex(
-                collider, position.0, *rotation, corridor, node, primitive, seeded, out,
             )?,
         }
         if out.len() > MAX_FACES {
@@ -208,7 +235,8 @@ fn collect_trimesh(
     length: f32,
     node: Entity,
     primitive: Entity,
-    seeded: bool,
+    shells: &[u32],
+    seeded: &dyn Fn(u32) -> bool,
     rotation: Rotation,
     margin: f32,
     laws: &WalkLaws,
@@ -242,10 +270,12 @@ fn collect_trimesh(
         else {
             continue;
         };
-        if let Some(hit) = admit(t, length, seeded, laws) {
+        let shell = shells[index as usize];
+        if let Some(hit) = admit(t, length, seeded(shell), laws) {
             out.push(FaceHit {
                 volume: node,
                 primitive,
+                shell,
                 triangle: index,
                 t: hit,
                 // Back to world space. The winding normal is the mesh's own orientation — never
@@ -352,6 +382,7 @@ fn collect_convex(
             out.push(FaceHit {
                 volume: node,
                 primitive,
+                shell: 0,
                 triangle: face,
                 t,
                 true_normal: oriented,
@@ -883,6 +914,8 @@ mod tests {
         let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
             panic!("`Collider::trimesh` builds a trimesh");
         };
+        // Every fixture here is one closed box, which is one shell.
+        let shells = vec![0u32; mesh.num_triangles()];
         collect_trimesh(
             mesh,
             origin,
@@ -890,7 +923,8 @@ mod tests {
             length,
             node,
             node,
-            false,
+            &shells,
+            &|_| false,
             Rotation::default(),
             prune_margin(origin, &laws),
             &laws,
@@ -1160,7 +1194,7 @@ mod tests {
             &WalkLaws::default(),
         )?;
         Ok(walk
-            .primitives
+            .shells
             .first()
             .map_or(0, |presence| presence.spans.len()))
     }

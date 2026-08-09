@@ -222,7 +222,6 @@ fn classify(
 /// all pass, gave it an authored scale of `(2^19, 2^19, 2^-85)`, and the kernel declined a crossing
 /// the exact reference accepts.
 ///
-
 /// `collect::PROJECTION_SLACK` is a bound on the f32 projection's rounding, and it is a bound only
 /// where the relative error model it is derived from holds. It is stated as a multiple of the
 /// vertex's own magnitude, so on a vertex whose corridor-relative offset is subnormal it underflows

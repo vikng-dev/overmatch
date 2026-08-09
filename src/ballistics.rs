@@ -1,5 +1,6 @@
 //! Shared shell flight, collision queries, penetration, and impacts.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use avian3d::prelude::{Collider, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter};
@@ -646,6 +647,16 @@ pub struct BallisticVolume {
     )]
     pub substance: String,
 }
+
+/// Which closed shell each triangle of one collider belongs to — `bake::MeshGeometry::shells`,
+/// carried onto the collider entity so the corridor collector can name the surface a crossing came
+/// from (`walk::ShellKey`).
+///
+/// Index-aligned with the trimesh's own triangle order, which is the order the buffers were handed
+/// to `Collider::trimesh_with_config`: `MERGE_DUPLICATE_VERTICES` re-indexes vertices and never
+/// reorders or drops a face. `Arc` because every spawned tank shares one bake.
+#[derive(Component)]
+pub struct BallisticShells(pub Arc<[u32]>);
 
 /// Role tags layered on a ballistic volume for the sandbox's visibility passes: armor plates vs
 /// internal components (modules / crew / ammo). Attached at bind alongside `BallisticVolume`; the
@@ -1437,7 +1448,12 @@ fn integrate_projectiles(
     world: ProjectileMarchWorld,
     // Collider poses + shapes, for the §13 corridor collector: it walks each candidate's geometry
     // itself rather than asking Avian for a nearest hit (see `ballistics::collect`).
-    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static BallisticShells>,
+    )>,
     mut bodies: Query<(
         Forces,
         Option<&mut crate::track::sim::TrackGripWake>,
@@ -2037,7 +2053,12 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
 fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
-    colliders: &Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: &Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static BallisticShells>,
+    )>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<(
         Forces,
@@ -4881,12 +4902,14 @@ mod march_tests {
     // real trimesh colliders, through the live march — because §13.1 is a table of things the
     // resolver DID, and only the resolver can be asked whether it still does them.
 
-    /// A box as an outward-wound triangle mesh — the shape production armour actually is.
+    /// A box as an outward-wound triangle mesh, with the shell table the collector requires — the
+    /// shape production armour actually is, spawned the way the bind spawns it.
     ///
     /// Winding is the whole point: the collector reads a face's orientation from it (parry's normal
     /// is flipped to oppose the ray and cannot tell entry from exit), so a mesh wound inwards would
-    /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE.
-    fn box_trimesh(size: Vec3) -> Collider {
+    /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE. One closed
+    /// box is one shell, so every triangle carries shell `0`.
+    fn box_trimesh(size: Vec3) -> (Collider, BallisticShells) {
         let h = size * 0.5;
         let vertices: Vec<Vec3> = [
             (-1.0, -1.0, -1.0),
@@ -4915,7 +4938,8 @@ mod march_tests {
             [1, 2, 6],
             [1, 6, 5], // +X
         ];
-        Collider::trimesh(vertices, indices)
+        let shells = BallisticShells(vec![0u32; indices.len()].into());
+        (Collider::trimesh(vertices, indices), shells)
     }
 
     /// A world of outward-wound trimesh plates, all one substance.

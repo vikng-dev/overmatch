@@ -22,6 +22,23 @@
 //! - **disc sampling** (§13.5) — the shell meets the world as a caliber-wide body: k sample rays,
 //!   aggregated into `(η, n̄, cost)` per crossing event.
 //!
+//! # Pairing is a fact, not an inference
+//!
+//! Every crossing arrives naming the closed shell it came from ([`ShellKey`], from the manifold
+//! gate's own edge-connected components), and occupancy is tracked per shell. That is the whole of
+//! the topology law. Without it the interface is genuinely ambiguous — two shells of one primitive
+//! closing at one `t` and one shell's exit claimed by both triangles of its shared edge present the
+//! same `t`, the same winding sign and the same normal — and every rule that tried to decide between
+//! them from the numbers alone (signed nets, sign-change ordering, coincidence clusters spanning
+//! primitives) erased armour on some legal mesh.
+//!
+//! What survives of tolerance is one dedup: consecutive same-sign claims of ONE shell inside one
+//! coincidence window are one crossing. Two triangles sharing an edge belong to the same shell by
+//! construction, so that collapse is exact rather than a guess — nothing else can be hiding inside
+//! it. A sign change is never collapsed, so a shell thinner than the window is an ordinary tiny
+//! traversal: charged, with its own entrance and exit. There is no threshold below which a crossing
+//! stops being one.
+//!
 //! # Staged, because normalization bends the axis
 //!
 //! Entry faces are sampled along the INCOMING axis, but the transit happens along the bent one (the
@@ -42,8 +59,8 @@
 //!
 //! # Three tolerance domains, deliberately separate
 //!
-//! [`WalkLaws::topology_abs`]/[`WalkLaws::topology_rel`] group numerically coincident face hits into
-//! one boundary; [`WalkLaws::weld_perp`] is the §13.4 physical event-topology knob (~2 mm
+//! [`WalkLaws::topology_abs`]/[`WalkLaws::topology_rel`] dedup one shell's repeated claims of one
+//! crossing; [`WalkLaws::weld_perp`] is the §13.4 physical event-topology knob (~2 mm
 //! perpendicular); [`WalkLaws::event_plane_tolerance`] is the lateral surface-patch relation the
 //! disc uses to associate samples. They are three orders of magnitude apart and must never be
 //! collapsed into one "epsilon" — a march/query offset in particular must never reach this module,
@@ -59,14 +76,7 @@ mod tests;
 // Input vocabulary
 // ---------------------------------------------------------------------------------------------
 
-/// One closed island of one ballistic volume — the unit presence is tracked on.
-///
-/// Primitive identity is load-bearing and cannot be replaced by entity identity (§13.4's
-/// per-entity parity pairing is unsound the moment one mesh carries two overlapping islands: the
-/// hit order reads `enter A, enter B, exit A, exit B`, and adjacent pairing produces
-/// `[enter, enter]`, which is not material presence). Two coplanar triangles of ONE face must
-/// collapse to one crossing; two different shells sharing an entry plane must stay distinct,
-/// because their exits differ. Only primitive identity separates those cases.
+/// One ballistic mesh primitive — the grain presence is REPORTED at.
 ///
 /// The primitive is an `Entity` rather than an index because the bind already gives every glb mesh
 /// primitive its own collider entity (`tank::spawn::insert_ballistic_volumes`), so the identity the
@@ -80,6 +90,39 @@ pub struct PrimitiveKey {
     pub primitive: Entity,
 }
 
+/// One closed shell of one primitive — the grain presence and pairing are TRACKED at.
+///
+/// SURFACE IDENTITY, and the walk's whole basis for pairing. §13.7 authors a mixed-substance part
+/// as several closed islands in one primitive, so a primitive names a SET of surfaces — and at that
+/// grain "two shells close at one `t`" and "one shell's exit is claimed by both triangles of its
+/// shared edge" are the same numbers: same `t`, same winding sign, same normal. One means the depth
+/// drops by two, the other by one, and no rule over `t`, normals or triangle valence can tell them
+/// apart. Every such rule that shipped erased armour on some legal mesh.
+///
+/// The identity is not invented here. `bake::manifold_gate` builds the edge-connected components to
+/// prove closure and outward winding per island; the shell id is those components, published
+/// instead of discarded. Edge-connected, deliberately: two legal shells may touch at one welded
+/// VERTEX (§13.7's islands), and vertex components would merge them back into one ambiguous name.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct ShellKey {
+    /// The `BallisticVolume` node — where the factor, the HP and the damage address live.
+    pub volume: Entity,
+    /// The collider entity carrying this primitive's geometry.
+    pub primitive: Entity,
+    /// Dense index of the closed shell inside that primitive (`bake::MeshGeometry::shells`).
+    pub shell: u32,
+}
+
+impl ShellKey {
+    /// The primitive this shell belongs to.
+    pub fn primitive_key(&self) -> PrimitiveKey {
+        PrimitiveKey {
+            volume: self.volume,
+            primitive: self.primitive,
+        }
+    }
+}
+
 /// One triangle crossing along a sample ray, as the spatial adapter reports it.
 ///
 /// `true_normal` is the face's OUTWARD normal recovered from triangle winding — NOT parry's
@@ -91,9 +134,11 @@ pub struct PrimitiveKey {
 pub struct FaceHit {
     pub volume: Entity,
     pub primitive: Entity,
-    /// Diagnostic identity only. It never participates in coincidence clustering or in the
-    /// topological reduction (those are geometric, so a re-triangulated mesh cannot change the
-    /// answer); it exists so a [`WalkError`] can name the offending faces.
+    /// Which closed shell of that primitive this face belongs to — see [`ShellKey`].
+    pub shell: u32,
+    /// Diagnostic identity only. It never participates in the reduction below (which is geometric
+    /// and per shell, so a re-triangulated mesh cannot change the answer); it exists so a
+    /// [`WalkError`] can name the offending faces.
     pub triangle: u32,
     /// Distance along the sample ray from the corridor origin.
     pub t: f32,
@@ -101,10 +146,11 @@ pub struct FaceHit {
 }
 
 impl FaceHit {
-    fn key(&self) -> PrimitiveKey {
-        PrimitiveKey {
+    fn key(&self) -> ShellKey {
+        ShellKey {
             volume: self.volume,
             primitive: self.primitive,
+            shell: self.shell,
         }
     }
 }
@@ -180,12 +226,16 @@ pub struct RayCorridor {
     /// Unit travel direction.
     pub axis: Vec3,
     pub length: f32,
-    /// Primitives the corridor origin is ALREADY inside, declared by the caller.
+    /// Shells the corridor origin is ALREADY inside, declared by the caller.
     ///
     /// Never inferred. "The first hit is an exit, so we must have started inside" silently converts
     /// a dropped entry face into legitimate topology — which is how a hole in a mesh becomes free
     /// armour. An exit with neither declared presence nor a prior entry is an error.
-    pub initial_presence: Vec<PrimitiveKey>,
+    ///
+    /// Per SHELL, not per primitive, and that is load-bearing: a corridor restarting inside two
+    /// shells of one primitive that seeds one presence meets two exits and underflows. Identity has
+    /// to survive the restart or the restart re-introduces the ambiguity it was built to remove.
+    pub initial_presence: Vec<ShellKey>,
     pub hits: Vec<FaceHit>,
 }
 
@@ -197,24 +247,27 @@ pub struct RayCorridor {
 /// are live knobs"), gathered so no law reads a hidden constant.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkLaws {
-    /// TOPOLOGY domain — absolute floor (m) under which two face hits are the same boundary.
+    /// TOPOLOGY domain — absolute floor (m) under which two SAME-SIGN claims of ONE shell are the
+    /// same crossing.
+    ///
+    /// It is a dedup window and nothing else. It never relates two shells, so it cannot merge two
+    /// surfaces, and it never relates an entry to an exit, so it cannot erase a chord.
     pub topology_abs: f32,
     /// TOPOLOGY domain — relative term, so a corridor anchored far downrange (where f32 spacing is
     /// coarser) still groups the two triangles of one face diagonal.
     pub topology_rel: f32,
-    /// TOPOLOGY domain — how many coincidence windows ONE cluster may span in total.
+    /// TOPOLOGY domain — how many windows one shell's duplicate-claim FAN may span in total.
     ///
-    /// Coincidence chains from face to face, because the surfaces meeting at one geometric point are
-    /// each computed from their own triangle's plane and so spread over several ULP: MEASURED on the
-    /// bound Tiger, a four-face corner spread 4.8 µm against a 4.4 µm window (1.09 windows). A chain
-    /// with no ceiling is single-linkage and unbounded, and a cluster is a claim that its faces are
-    /// ONE boundary — so the chain is capped, and the cap is above the widest corner measured and
-    /// well below any authored feature.
+    /// The window chains from claim to claim, because the triangles incident on one welded edge or
+    /// vertex each compute `t` from their own plane and so spread over several ULP: MEASURED on the
+    /// bound Tiger, a four-face corner spread 4.8 µm against a 4.4 µm window (1.09 windows). Chaining
+    /// with no ceiling is single-linkage and unbounded, so the fan is capped above the widest corner
+    /// measured and well below any authored feature.
     ///
-    /// It is not a safety knob. What a cluster's width can cost is bounded by the reduction's
-    /// direction (entries open at the cluster's first face, exits close at its last), so widening
-    /// this over-charges and never erases.
-    pub topology_cluster_windows: f32,
+    /// What it bounds is how far a fan of same-sign claims of ONE shell may reach before the walk
+    /// reads them as two crossings of that shell. Reading two where there is one leaves the shell
+    /// open at the corridor's end ([`WalkError::IncompleteCorridor`]) — loud, never quiet.
+    pub topology_fan_windows: f32,
     /// A face is tangent — and toggles nothing — when `|axis · n|` is at most this. A tangent face
     /// bounds zero material, so refusing to toggle on it cannot lose armour.
     pub tangent_cos: f32,
@@ -303,7 +356,7 @@ impl Default for WalkLaws {
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
-            topology_cluster_windows: 2.0,
+            topology_fan_windows: 2.0,
             tangent_cos: 1.0e-4,
             weld_perp: 2.0e-3,
             // ~60°: parallel plates read -1; anything less opposed is not two sides of one gap.
@@ -339,19 +392,19 @@ pub enum WalkError {
     UnknownVolume { volume: Entity },
     /// The corridor itself is malformed (non-unit axis, non-finite length, a hit behind the origin).
     BadCorridor { sample: usize, reason: &'static str },
-    /// An exit face for a primitive the walk is not inside: a dropped entry, an inverted winding, or
+    /// An exit face for a shell the walk is not inside: a dropped entry, an inverted winding, or
     /// an undeclared start-inside. NOT repaired by inventing an interval from the corridor origin.
     UnexpectedExit {
         sample: usize,
-        key: PrimitiveKey,
+        key: ShellKey,
         t: f32,
         triangles: Vec<u32>,
     },
-    /// An entry face for a primitive the walk is already inside — a self-overlapping island, which
+    /// An entry face for a shell the walk is already inside — a self-overlapping island, which
     /// means the mesh is not the closed positively-oriented shell the bake gate promises.
     UnexpectedEntry {
         sample: usize,
-        key: PrimitiveKey,
+        key: ShellKey,
         t: f32,
         triangles: Vec<u32>,
     },
@@ -359,9 +412,16 @@ pub enum WalkError {
     /// crossing closes (§13.4's atomic resolution corridor); the core will not synthesize the exit.
     IncompleteCorridor {
         sample: usize,
-        open: Vec<PrimitiveKey>,
+        open: Vec<ShellKey>,
         length: f32,
     },
+    /// A stretch of positive union factor that no shell's presence interval covers.
+    ///
+    /// The field and the intervals are two readings of one walk, so they cannot disagree — and the
+    /// disagreement is not repairable, because a run with no geometry behind it has no entrance
+    /// surface, no owning body and no exit to spall from. Attributing it to a stand-in entity is
+    /// how a numerical artefact spends a round's capability and marks a penetration.
+    UnattributedRun { sample: usize, start: f32, end: f32 },
     /// The spatial collector could not probe a candidate it was handed. Never softened into "that
     /// volume contributed nothing" — an unprobed volume and an absent one are the same silence.
     CollectorFailed {
@@ -407,15 +467,6 @@ pub struct Span {
     pub start: f32,
     pub end: f32,
     pub factor: f32,
-    /// Whether this stretch's factor is a coincidence cluster's GRAZE BOUND — the conservative
-    /// charge for a net-zero cluster, whose faces bound material the reduction cannot resolve —
-    /// rather than material some primitive is reported present in.
-    ///
-    /// It is charged like any other span and it is charged wherever spans are read, which is the
-    /// whole point: declining it is a silent under-charge. What it may not do is reach the event
-    /// stream, so [`weld_runs`] folds its cost into the material segment beside it instead of
-    /// letting it become a factor step of its own.
-    pub graze: bool,
 }
 
 impl Span {
@@ -510,15 +561,15 @@ pub struct EntityPresence {
     pub spans: Vec<(f32, f32)>,
 }
 
-/// One primitive's presence intervals along a sample ray.
+/// One shell's presence intervals along a sample ray.
 ///
-/// Kept alongside the per-ENTITY union because the staged handoff needs primitive identity: after
+/// Kept alongside the per-ENTITY union because the staged handoff needs surface identity: after
 /// normalization bends the axis and transports the ring, a transit sample can begin INSIDE material,
-/// and [`RayCorridor::initial_presence`] must be told which primitives — inference is forbidden
-/// (that is how a dropped entry face becomes free armour).
+/// and [`RayCorridor::initial_presence`] must be told which shells — inference is forbidden (that is
+/// how a dropped entry face becomes free armour).
 #[derive(Clone, Debug, PartialEq)]
-pub struct PrimitivePresence {
-    pub key: PrimitiveKey,
+pub struct ShellPresence {
+    pub key: ShellKey,
     /// Disjoint, ordered, half-open `[open, close)`.
     pub spans: Vec<(f32, f32)>,
 }
@@ -532,13 +583,13 @@ pub struct RayWalk {
     /// `∫ max(factor) dt`, accumulated in f64 over the canonical spans and cast ONCE.
     pub cost: f32,
     pub presence: Vec<EntityPresence>,
-    /// Per-primitive presence — the seed state the staged handoff exports.
-    pub primitives: Vec<PrimitivePresence>,
+    /// Per-shell presence — the seed state the staged handoff exports.
+    pub shells: Vec<ShellPresence>,
     pub events: Vec<BoundaryEvent>,
 }
 
 impl RayWalk {
-    /// Which primitives a corridor RESTARTED at progress `t` would have to declare as initial
+    /// Which shells a corridor RESTARTED at progress `t` would have to declare as initial
     /// presence.
     ///
     /// The interval is `(open, close]` — the entry face must be STRICTLY behind the restart. A face
@@ -555,8 +606,8 @@ impl RayWalk {
     /// does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on a plate it
     /// should have crossed. [`coincident`] is the module's existing answer to "do these two `t` name
     /// one boundary", so it is the one used here.
-    pub fn inside_at(&self, t: f32, laws: &WalkLaws) -> Vec<PrimitiveKey> {
-        self.primitives
+    pub fn inside_at(&self, t: f32, laws: &WalkLaws) -> Vec<ShellKey> {
+        self.shells
             .iter()
             .filter(|presence| {
                 presence.spans.iter().any(|(open, close)| {
@@ -580,166 +631,145 @@ pub(crate) fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
     (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
 }
 
-/// Whether `t` is still inside the widest span ONE cluster may cover, measured from its anchor.
+/// Whether `t` is still inside the widest fan ONE shell's duplicate claims may cover, measured from
+/// the fan's first claim.
 ///
-/// Coincidence chains, so without a ceiling a cluster grows for as long as faces keep arriving
-/// within a window of each other, and a cluster is a claim that its faces name ONE boundary.
-fn within_cluster_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
+/// The window chains from claim to claim, so without a ceiling a fan grows for as long as same-sign
+/// claims keep arriving within a window of each other.
+fn within_fan_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
     (t - anchor).abs()
-        <= laws.topology_cluster_windows
+        <= laws.topology_fan_windows
             * (laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs()))
 }
 
-/// What one primitive's faces in one coincident cluster mean.
-///
-/// The payload is a SIGNED NET OCCUPANCY, not a flag. §13.7 legalizes several disconnected closed
-/// shells inside one primitive, so a cluster can hold `E X E` — shell A opened and closed, shell B
-/// opened — and a reduction to `(has_entry, has_exit)` cannot tell that from a point graze. It
-/// charges the cluster's own microns and leaves the field shut, declining every metre shell B
-/// bounds.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Toggle {
-    /// Net positive: the primitive OPENS, and the depth it opens by is the net.
-    Enter(u32),
-    /// Net negative: the primitive CLOSES by that depth.
-    Exit(u32),
-    /// Net zero with toggling faces bracketing a non-zero length: opened and closed inside this
-    /// cluster, whatever the shell count. It bounds material the walk cannot resolve — the cluster
-    /// is charged for it — but it crosses no boundary, so it names no presence and fires no event.
-    Graze,
-    /// Net zero at ONE bit-equal `t`, or nothing but tangents: a zero-measure touch. It bounds no
-    /// length, so there is nothing to charge and nothing to report.
-    Touch,
-}
-
-/// One primitive's faces inside one coincident cluster, as the reduction reads them.
-#[derive(Default)]
-struct ClusterFaces {
-    /// `entries − exits`, over the RUN-REDUCED sign sequence (see [`ClusterFaces::claim`]).
-    net: i32,
-    /// The sign standing at the end of the reduced sequence so far; `0` before the first.
-    last_sign: i32,
-    /// The bit-equal `t` group being accumulated, and which signs it holds. Faces at ONE `t` have no
-    /// order, so they are taken together (see [`ClusterFaces::flush`]).
-    group: Option<u32>,
-    group_entry: bool,
-    group_exit: bool,
-    /// Whether any face toggled at all, as opposed to being a tangent.
-    toggled: bool,
+/// One certified crossing of one shell: where the ray goes in or out, and which faces said so.
+struct Crossing {
+    key: ShellKey,
+    /// Where the field changes. An entry opens at the fan's FIRST face and an exit closes at its
+    /// LAST, so a fan spread over a few ULP charges its own width rather than declining it.
+    t: f32,
+    /// The last claim absorbed, which is what the next claim chains from.
+    last: f32,
+    /// `+1` inward, `−1` outward.
+    sign: i32,
+    /// Sum of the contributing faces' outward normals — the boundary aggregate, unnormalized so a
+    /// fan's several faces average rather than the last one winning.
+    normal: Vec3,
     triangles: Vec<u32>,
-    entry_sum: Vec3,
-    exit_sum: Vec3,
-    /// First and last `t` among the faces that TOGGLE. Tangent faces bound no material, so they are
-    /// not allowed to widen a graze into a charge.
-    span: Option<(f32, f32)>,
 }
 
-impl ClusterFaces {
-    /// Take one toggling face, in `t` order, and fold it into the net.
-    ///
-    /// RAW MULTIPLICITY IS NOT SURFACE MULTIPLICITY. `collect::cross_triangle` deliberately lets
-    /// BOTH triangles incident on a shared edge claim a ray that runs through it — a duplicate is
-    /// recoverable and a dropped crossing is not — and each computes `t` from its own plane, so the
-    /// duplicate lands a few ULP away rather than on the same bits. Counting it would read `+2` for
-    /// one entry and leave the primitive open for ever. (Measured on the shared-edge sweep:
-    /// 370 double claims in 66 049 rays, of which 17 are bit-equal.)
-    ///
-    /// So consecutive same-sign claims of one primitive inside one cluster reduce to ONE claim, and
-    /// only a SIGN CHANGE moves the net. `E E` is `+1`; `E X E` is `+1`; `E X E X` is `0`.
-    ///
-    /// The reduction is the safe direction in both signs. Under-counting entries drops the depth,
-    /// so the primitive closes early and the exits it did not consume meet depth zero —
-    /// [`WalkError::UnexpectedExit`]. Under-counting exits raises it, so the primitive is still open
-    /// at the corridor's end — [`WalkError::IncompleteCorridor`]. Both are loud; neither is a
-    /// stretch of armour charged at air.
-    fn claim(&mut self, sign: i32, t: f32) {
-        self.toggled = true;
-        if self.group != Some(t.to_bits()) {
-            self.flush();
-            self.group = Some(t.to_bits());
+/// Reduce ONE shell's face claims, in `t` order, to the crossings they name.
+///
+/// RAW MULTIPLICITY IS NOT SURFACE MULTIPLICITY, and shell identity is what makes the difference
+/// decidable. `collect::cross_triangle` deliberately lets BOTH triangles incident on a shared edge
+/// claim a ray running through it — a duplicate is recoverable and a dropped crossing is not — and
+/// each computes `t` from its own plane, so the duplicate lands a few ULP away rather than on the
+/// same bits. (MEASURED on the shared-edge sweep: 370 double claims in 66 049 rays, of which 17 are
+/// bit-equal.) Two triangles sharing an edge are the SAME SHELL by construction, so collapsing
+/// consecutive same-sign claims of one shell inside one window is exact: no other surface can be
+/// hiding inside that collapse, because no other surface is in this list.
+///
+/// A SIGN CHANGE IS NEVER COLLAPSED. Entry-then-exit of one shell is a traversal — a corner the ray
+/// brushes and a shell thinner than the window present the identical pair, and they are the
+/// identical thing: the ray passed through that much of that shell. It is charged, and it carries
+/// its own entrance and exit like any other chord. There is no threshold below which a crossing
+/// stops being one.
+///
+/// Under-counting is the only failure this reduction can produce, and both directions of it are
+/// loud: too few entries closes the shell early and the exits meet depth zero
+/// ([`WalkError::UnexpectedExit`]); too few exits leaves it open at the corridor's end
+/// ([`WalkError::IncompleteCorridor`]).
+fn reduce_shell(
+    key: ShellKey,
+    claims: &[&FaceHit],
+    axis: Vec3,
+    laws: &WalkLaws,
+    out: &mut Vec<Crossing>,
+) {
+    let mut fan: Option<Crossing> = None;
+    let mut anchor = 0.0f32;
+    let mut index = 0usize;
+    while index < claims.len() {
+        // CLAIMS AT ONE BIT-EQUAL `t` HAVE NO ORDER. The corridor's total order breaks their tie on
+        // triangle index, which is a fact about the mesh's index buffer and not about the geometry,
+        // and the fan below is order-SENSITIVE — so a group at one `t` is taken with the sign
+        // already standing FIRST. That is the only order-free reading, and it is the one that reads
+        // a repeated claim of the crossing in progress as the duplicate it is. It decides nothing
+        // about which SURFACE anything belongs to; there is only one surface in this list.
+        let bits = claims[index].t.to_bits();
+        let mut end = index + 1;
+        while end < claims.len() && claims[end].t.to_bits() == bits {
+            end += 1;
         }
-        if sign > 0 {
-            self.group_entry = true;
-        } else {
-            self.group_exit = true;
-        }
-        self.widen(t);
-    }
+        let group = &claims[index..end];
+        index = end;
 
-    /// Fold one bit-equal `t` group into the net.
-    ///
-    /// FACES AT ONE `t` HAVE NO ORDER. The corridor's total order breaks their tie on volume,
-    /// primitive and triangle index, which is a fact about the mesh's index buffer and not about the
-    /// geometry — and the run reduction above is order-SENSITIVE, so reading them in index order
-    /// makes armour depend on triangulation. (Measured on the shared-vertex fan: one origin in 4 225
-    /// whose corner brush reads `+1` in index order and `0` in the other.)
-    ///
-    /// So the group is emitted in the order that introduces the FEWEST sign changes: the sign
-    /// already standing first, then the other. With nothing standing, ENTRY first — the reading that
-    /// leaves the primitive open rather than shut, which is the direction that fails loud.
-    fn flush(&mut self) {
-        let first = if self.last_sign < 0 { -1 } else { 1 };
-        for sign in [first, -first] {
-            let present = if sign > 0 {
-                self.group_entry
-            } else {
-                self.group_exit
-            };
-            if present && sign != self.last_sign {
-                self.net += sign;
-                self.last_sign = sign;
+        let standing = if fan.as_ref().is_some_and(|fan| fan.sign < 0) {
+            -1
+        } else {
+            1
+        };
+        for wanted in [standing, -standing] {
+            for hit in group {
+                let d = axis.dot(hit.true_normal);
+                // A tangent face bounds zero material, so refusing to toggle on it cannot lose
+                // armour.
+                let sign = if d < -laws.tangent_cos {
+                    1
+                } else if d > laws.tangent_cos {
+                    -1
+                } else {
+                    continue;
+                };
+                if sign != wanted {
+                    continue;
+                }
+                match fan.as_mut() {
+                    Some(open)
+                        if open.sign == sign
+                            && coincident(open.last, hit.t, laws)
+                            && within_fan_span(anchor, hit.t, laws) =>
+                    {
+                        open.normal += hit.true_normal;
+                        open.triangles.push(hit.triangle);
+                        open.last = hit.t;
+                        if sign < 0 {
+                            open.t = hit.t;
+                        }
+                    }
+                    _ => {
+                        out.extend(fan.take());
+                        anchor = hit.t;
+                        fan = Some(Crossing {
+                            key,
+                            t: hit.t,
+                            last: hit.t,
+                            sign,
+                            normal: hit.true_normal,
+                            triangles: vec![hit.triangle],
+                        });
+                    }
+                }
             }
         }
-        self.group_entry = false;
-        self.group_exit = false;
     }
-
-    fn widen(&mut self, t: f32) {
-        self.span = Some(match self.span {
-            None => (t, t),
-            Some((first, last)) => (first.min(t), last.max(t)),
-        });
-    }
-
-    /// Whether this primitive's own toggling faces name ONE point exactly.
-    ///
-    /// Bit equality, not tolerance: tolerance is what the cluster already applied to decide these
-    /// faces are one boundary, and applying it twice is how a positive-volume shell becomes a point.
-    fn is_zero_measure(&self) -> bool {
-        self.span
-            .is_none_or(|(first, last)| first.to_bits() == last.to_bits())
-    }
-
-    /// The net occupancy this primitive contributes, as the field will apply it.
-    fn toggle(&mut self) -> Toggle {
-        self.flush();
-        match self.net {
-            net if net > 0 => Toggle::Enter(net as u32),
-            net if net < 0 => Toggle::Exit(net.unsigned_abs()),
-            _ if self.toggled && !self.is_zero_measure() => Toggle::Graze,
-            _ => Toggle::Touch,
-        }
-    }
+    out.extend(fan);
 }
 
-/// The live union field: which primitives are open, and therefore what `max(factor)` is.
+/// The live union field: which shells are open, and therefore what `max(factor)` is.
 ///
-/// Openness is a DEPTH, not a flag, because §13.7 legalizes several closed shells inside one
-/// primitive — the road wheels are the standing precedent, with bodies and axle authored as one
-/// MildSteel primitive. A ray through one of those meets `enter, enter, exit, exit`, and a boolean
-/// pairing reads the second entry as a topology error. The §13.6 fuzzer measured 0.47% of a million
-/// rays failing closed on exactly that shape: the sixteen wheels, `Hull_Rear` and `Turret_Cupola`.
+/// Openness is a DEPTH rather than a flag because the manifold gate asks a shell for closure and
+/// outward winding, not for simplicity: a self-intersecting closed shell has winding number two
+/// where it overlaps itself, and clamping that to one would close the shell at the first of its two
+/// exits and leave the second facing depth zero.
 ///
-/// Depth changes nothing about the field's meaning. Presence is `depth > 0`, so the interval a
-/// primitive contributes is the UNION of its shells, and §13.2 takes `max(factor)` over whatever is
-/// present — shell multiplicity inside one primitive charges exactly once, which is the same answer
-/// the per-ENTITY union already gives for two overlapping primitives of one volume. It is also why
-/// §13.6's idempotence still holds: a duplicated shell coincides face-for-face with the original, so
-/// the topology reduction collapses it to one toggle before the field ever sees it.
+/// Depth changes nothing about the field's meaning. Presence is `depth > 0`, so the interval a shell
+/// contributes is one interval however deep it goes, and §13.2 takes `max(factor)` over whatever is
+/// present — which is the same answer the per-ENTITY union already gives for two overlapping
+/// primitives of one volume.
 struct Field {
-    /// Per primitive: how many shells the ray is currently inside, and where the OUTERMOST one
-    /// opened — the start of the union interval this primitive will contribute.
-    open: BTreeMap<PrimitiveKey, (u32, f32)>,
+    /// Per shell: the winding depth the ray is currently at, and where the presence opened.
+    open: BTreeMap<ShellKey, (u32, f32)>,
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -794,176 +824,131 @@ pub fn walk_ray(
         a.t.total_cmp(&b.t)
             .then(a.volume.cmp(&b.volume))
             .then(a.primitive.cmp(&b.primitive))
+            .then(a.shell.cmp(&b.shell))
             .then(a.triangle.cmp(&b.triangle))
     });
+
+    // PAIRING IS PER SHELL, AND ONLY PER SHELL. Every claim is filed under the surface that made it,
+    // so the reduction below never has to decide whether two nearby faces are one surface or two —
+    // that is already known.
+    let mut by_shell: BTreeMap<ShellKey, Vec<&FaceHit>> = BTreeMap::new();
+    for hit in &order {
+        by_shell.entry(hit.key()).or_default().push(hit);
+    }
+    let mut crossings: Vec<Crossing> = Vec::new();
+    for (key, claims) in &by_shell {
+        reduce_shell(*key, claims, corridor.axis, laws, &mut crossings);
+    }
+    crossings.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.key.cmp(&b.key)));
 
     let mut field = Field {
         open: BTreeMap::new(),
         per_entity: BTreeMap::new(),
     };
     for key in &corridor.initial_presence {
-        // Declared presence opens at depth ONE, whatever nesting produced it upstream: the seed says
-        // the ray is inside this primitive, and the exits it will meet close that presence from the
-        // inside out.
+        // Declared presence opens at depth ONE: the seed says the ray is inside this shell, and the
+        // exit it will meet closes it.
         if field.open.insert(*key, (1, 0.0)).is_none() {
             *field.per_entity.entry(key.volume).or_insert(0) += 1;
         }
         volumes.factor(key.volume)?;
     }
 
-    // Per-primitive presence intervals, in close order.
-    let mut intervals: Vec<(PrimitiveKey, f32, f32)> = Vec::new();
-    // Field transitions: (t, factor_before, factor_after, entry_normal, exit_normal).
+    // Per-shell presence intervals, in close order.
+    let mut intervals: Vec<(ShellKey, f32, f32)> = Vec::new();
     struct Transition {
         t: f32,
         before: f32,
         after: f32,
         entry_normal: Option<Vec3>,
         exit_normal: Option<Vec3>,
-        /// Whether the level this transition rises TO is a graze bound (see [`Span::graze`]).
-        graze: bool,
     }
     let mut transitions: Vec<Transition> = Vec::new();
 
     let mut i = 0usize;
-    while i < order.len() {
-        let anchor = order[i].t;
-        // Coincidence CHAINS, under two ceilings.
-        //
-        // Chaining, because the faces meeting at ONE geometric point do not share a `t`: each is
-        // computed from its own triangle's plane, so a corner where four surfaces meet spreads its
-        // four `t` over several ULP. Anchoring the window on the first of them puts the last one
-        // outside it whenever that spread exceeds the window — the cluster splits mid-corner, one
-        // primitive's entry lands in the next cluster, and its exit is left facing a depth that has
-        // not opened yet.
-        //
-        // Chaining alone is single-linkage, which is transitive and therefore unbounded: one face
-        // every few microns merges boundaries arbitrarily far apart. Two ceilings bound it.
-        //
-        // TOTAL SPAN — a cluster claims its faces are one boundary, so it may not reach further than
-        // `topology_cluster_windows` windows from its anchor, whatever bridges the gap.
-        //
-        // ONE PRIMITIVE'S OWN FACES — a face may only join a cluster that already holds a face of
-        // the SAME primitive if the two are pairwise coincident. A primitive reads entry-AND-exit in
-        // one cluster only when its own two faces name one point, which is a graze; a bridging face
-        // belonging to anything else can no longer merge an entry with an exit that are a real
-        // traversal apart, and so can no longer reduce a plate to a no-op.
+    while i < crossings.len() {
+        // ONE BIT-EQUAL `t` IS ONE ATOMIC BATCH. Crossings that share a `t` exactly have no order —
+        // the total order above breaks their tie on entity and triangle index, which is a fact about
+        // the index buffer — so the field is read once, every delta is applied, and the field is read
+        // again. That is also what keeps seam invisibility bit-exact: at an exact abutment the
+        // outgoing plate's exit and the incoming plate's entry cancel inside one batch, so no
+        // transition is emitted and one span covers both plates (§13.6).
+        let t = crossings[i].t;
         let mut j = i + 1;
-        while j < order.len() && coincident(order[j - 1].t, order[j].t, laws) {
-            let t = order[j].t;
-            if !within_cluster_span(anchor, t, laws) {
-                break;
-            }
-            let own = order[i..j]
-                .iter()
-                .find(|hit| hit.key() == order[j].key())
-                .map(|hit| hit.t);
-            if own.is_some_and(|own| !coincident(own, t, laws)) {
-                break;
-            }
+        while j < crossings.len() && crossings[j].t.to_bits() == t.to_bits() {
             j += 1;
         }
-        let cluster = &order[i..j];
+        let batch = &crossings[i..j];
         i = j;
 
-        // Reduce the cluster to at most one toggle per primitive.
-        let mut per_primitive: BTreeMap<PrimitiveKey, ClusterFaces> = BTreeMap::new();
-        // `cluster` is in `t` order, so each primitive's own faces arrive in `t` order too — which
-        // is what the run reduction in [`ClusterFaces::claim`] reads.
-        for hit in cluster {
-            let d = corridor.axis.dot(hit.true_normal);
-            let slot = per_primitive.entry(hit.key()).or_default();
-            slot.triangles.push(hit.triangle);
-            if d < -laws.tangent_cos {
-                slot.entry_sum += hit.true_normal;
-                slot.claim(1, hit.t);
-            } else if d > laws.tangent_cos {
-                slot.exit_sum += hit.true_normal;
-                slot.claim(-1, hit.t);
-            }
+        // Per shell, the batch's net. Entries only means the ray crossed inward; exits only, outward;
+        // BOTH means the shell was touched and left at one point, which bounds no length — the exact
+        // edge tangent, where the two incident faces of one shell disagree about which way the ray
+        // was going and neither is wrong.
+        let mut net: BTreeMap<ShellKey, i32> = BTreeMap::new();
+        for crossing in batch {
+            *net.entry(crossing.key).or_insert(0) += crossing.sign;
         }
 
-        let mut toggles: Vec<(PrimitiveKey, Toggle, Vec<u32>, Vec3, Vec3)> = Vec::new();
-        for (key, mut faces) in per_primitive {
-            toggles.push((
-                key,
-                faces.toggle(),
-                faces.triangles,
-                faces.entry_sum,
-                faces.exit_sum,
-            ));
-        }
-
-        // The whole batch is applied atomically: read the field, apply every exit AND entry, read it
-        // again, emit at most one transition. Entity or triangle order cannot influence the result.
         let before = field.max_factor(volumes)?;
         let mut entry_normal = Vec3::ZERO;
         let mut exit_normal = Vec3::ZERO;
         let mut any_entry = false;
         let mut any_exit = false;
-        // A CLUSTER COLLAPSES IN THE CONSERVATIVE DIRECTION. Material appears at the FIRST face of
-        // the cluster and disappears at its LAST, so the factor charged anywhere inside a cluster is
-        // `max(before, after, graze)` and dominates the field's true value there. Collapsing both
-        // onto one end would charge `before` past an entry, or `after` before an exit, and either
-        // reading is a stretch of armour up to the cluster's own width that the walk declines to
-        // charge.
-        //
-        // DOMINANCE. A primitive present anywhere strictly inside the cluster has net occupancy
-        // positive before it, positive after it, or zero on both sides — and the third case is
-        // exactly `Toggle::Graze`, whose factor joins the maximum. There is no fourth case: a
-        // cluster holds only the faces at its own `t`. So the level charged across the cluster is an
-        // upper bound on `max(factor)` everywhere in it, and the only thing declined is a net-zero
-        // pair whose two `t` are bit-equal, which bounds no length to charge.
-        let opens_at = anchor;
-        let closes_at = cluster.last().map_or(anchor, |hit| hit.t);
-        // The highest factor GRAZING this cluster: present inside it, gone by its far side.
-        let mut graze = 0.0f32;
 
-        for (key, toggle, triangles, entry_sum, exit_sum) in toggles {
-            match toggle {
-                Toggle::Enter(delta) => {
+        for (key, delta) in net {
+            let faces = || -> Vec<u32> {
+                batch
+                    .iter()
+                    .filter(|crossing| crossing.key == key)
+                    .flat_map(|crossing| crossing.triangles.iter().copied())
+                    .collect()
+            };
+            let normal = |sign: i32| -> Vec3 {
+                batch
+                    .iter()
+                    .filter(|crossing| crossing.key == key && crossing.sign == sign)
+                    .fold(Vec3::ZERO, |sum, crossing| sum + crossing.normal)
+            };
+            match delta.cmp(&0) {
+                std::cmp::Ordering::Greater => {
                     volumes.factor(key.volume)?;
                     match field.open.get_mut(&key) {
-                        // Further shells of a primitive the ray is already inside (§13.7). Presence
-                        // does not change — it is already present — so no interval opens and the
-                        // entity count does not move; only the depth that must be unwound.
-                        Some((depth, _)) => *depth += delta,
+                        // Deeper into a shell the ray is already inside. Presence does not change —
+                        // it is already present — so no interval opens and this face is not a field
+                        // boundary, which is why its normal is not part of one either.
+                        Some((depth, _)) => *depth += delta as u32,
                         None => {
-                            field.open.insert(key, (delta, opens_at));
+                            field.open.insert(key, (delta as u32, t));
                             *field.per_entity.entry(key.volume).or_insert(0) += 1;
+                            entry_normal += normal(1);
+                            any_entry = true;
                         }
                     }
-                    entry_normal += entry_sum;
-                    any_entry = true;
                 }
-                Toggle::Exit(delta) => {
-                    // FAIL-LOUD SURVIVES. Balanced nesting is legal; an exit with no shell open is
-                    // still a dropped entry, an inverted winding or a hole in the mesh, and still an
-                    // error. What changed is only that "already inside" stopped being a contradiction.
+                std::cmp::Ordering::Less => {
+                    // FAIL-LOUD SURVIVES. An exit with no shell open is a dropped entry, an inverted
+                    // winding or a hole in the mesh, and a net that closes more winding than is open
+                    // is the same defect one level up.
+                    let closing = delta.unsigned_abs();
                     let Some((depth, open_at)) = field.open.get_mut(&key) else {
                         return Err(WalkError::UnexpectedExit {
                             sample,
                             key,
-                            t: closes_at,
-                            triangles,
+                            t,
+                            triangles: faces(),
                         });
                     };
-                    // A net that closes more shells than are open is the same defect one level up:
-                    // the depth would go negative, so it is refused where a negative depth would
-                    // otherwise be silently clamped.
-                    if *depth < delta {
+                    if *depth < closing {
                         return Err(WalkError::UnexpectedExit {
                             sample,
                             key,
-                            t: closes_at,
-                            triangles,
+                            t,
+                            triangles: faces(),
                         });
                     }
-                    *depth -= delta;
+                    *depth -= closing;
                     if *depth > 0 {
-                        // Out of an inner shell and still inside the primitive: presence is
-                        // unbroken, the union interval stays open, and this face is NOT a field
-                        // boundary — so it must not contribute to the boundary normal either.
                         continue;
                     }
                     let open_at = *open_at;
@@ -971,62 +956,22 @@ pub fn walk_ray(
                     if let Some(count) = field.per_entity.get_mut(&key.volume) {
                         *count -= 1;
                     }
-                    intervals.push((key, open_at, closes_at));
-                    exit_normal += exit_sum;
+                    intervals.push((key, open_at, t));
+                    exit_normal += normal(-1);
                     any_exit = true;
                 }
-                Toggle::Graze => {
-                    // A NET-ZERO CLUSTER CROSSES NO BOUNDARY, SO IT IS COST AND NOTHING ELSE.
-                    //
-                    // What the faces bound is real — the reduction cannot tell a plate thinner than
-                    // the window from a corner the ray only brushes — so the cluster's level carries
-                    // it and the round pays for it. What it must NOT carry is a boundary: §13.6
-                    // forbids fabricated events, and presence, an entrance normal and an exit's
-                    // spall budget are not bounded by the cluster's microns. Ricochet,
-                    // normalization, impact and attribution are discrete outcomes, and a tangent
-                    // whose two incident faces happened to round to different bits would decide
-                    // them.
-                    //
-                    // A primitive the ray is ALREADY inside charges nothing new either: its factor
-                    // is in both `before` and `after` across the whole cluster.
-                    if !field.open.contains_key(&key) {
-                        graze = graze.max(volumes.factor(key.volume)?);
-                    }
-                }
-                Toggle::Touch => {}
+                std::cmp::Ordering::Equal => {}
             }
         }
 
         let after = field.max_factor(volumes)?;
-        // The level held ACROSS the cluster, and the two steps that bracket it. With no graze this
-        // is `max(before, after)` reached in one step — bit-for-bit the reduction that shipped:
-        // a rise lands on the cluster's first face, a fall on its last, and an unchanged field
-        // emits nothing. A graze is the case that needs both steps at once.
-        let level = before.max(after).max(graze);
-        // Whether the level ABOVE the field either side of the cluster is the graze bound rather
-        // than material anything reported present. That stretch is charged and never welded away,
-        // but it names no boundary, so it must not reach the event stream as one.
-        let grazed = graze > before.max(after);
-        let entry_normal = any_entry.then_some(entry_normal);
-        let exit_normal = any_exit.then_some(exit_normal);
-        if level.to_bits() != before.to_bits() {
+        if before.to_bits() != after.to_bits() {
             transitions.push(Transition {
-                t: opens_at,
+                t,
                 before,
-                after: level,
-                entry_normal,
-                exit_normal,
-                graze: grazed,
-            });
-        }
-        if after.to_bits() != level.to_bits() {
-            transitions.push(Transition {
-                t: closes_at,
-                before: level,
                 after,
-                entry_normal,
-                exit_normal,
-                graze: false,
+                entry_normal: any_entry.then_some(entry_normal),
+                exit_normal: any_exit.then_some(exit_normal),
             });
         }
     }
@@ -1049,26 +994,22 @@ pub fn walk_ray(
     } else {
         transitions[0].before
     };
-    let mut graze = false;
     for transition in &transitions {
         if transition.t > cursor {
             spans.push(Span {
                 start: cursor,
                 end: transition.t,
                 factor,
-                graze,
             });
             cursor = transition.t;
         }
         factor = transition.after;
-        graze = transition.graze;
     }
     if corridor.length > cursor {
         spans.push(Span {
             start: cursor,
             end: corridor.length,
             factor,
-            graze,
         });
     }
 
@@ -1096,9 +1037,6 @@ pub fn walk_ray(
 
     // Boundary normals, looked up by the transition that opens/closes each run.
     let normal_at = |t: f32, entry: bool| -> Vec3 {
-        // Several transitions can share one `t`: a cluster that ends between two faces at the same
-        // distance leaves a step on each side of the split. The normal is taken from whichever of
-        // them carries the face this boundary is asking for.
         transitions
             .iter()
             .filter(|transition| transition.t == t)
@@ -1116,19 +1054,21 @@ pub fn walk_ray(
             .unwrap_or(if entry { -corridor.axis } else { corridor.axis })
     };
 
-    let runs = weld_runs(corridor, &spans, &raw_runs, &intervals, &normal_at, laws);
+    let runs = weld_runs(
+        sample, corridor, &spans, &raw_runs, &intervals, &normal_at, laws,
+    )?;
     let events = boundary_events(corridor, &runs);
     let presence = entity_presence(&intervals, volumes)?;
 
-    let mut by_primitive: BTreeMap<PrimitiveKey, Vec<(f32, f32)>> = BTreeMap::new();
+    let mut by_shell: BTreeMap<ShellKey, Vec<(f32, f32)>> = BTreeMap::new();
     for (key, open, close) in &intervals {
-        by_primitive.entry(*key).or_default().push((*open, *close));
+        by_shell.entry(*key).or_default().push((*open, *close));
     }
-    let primitives = by_primitive
+    let shells = by_shell
         .into_iter()
         .map(|(key, mut spans)| {
             spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            PrimitivePresence { key, spans }
+            ShellPresence { key, spans }
         })
         .collect();
 
@@ -1137,7 +1077,7 @@ pub fn walk_ray(
         runs,
         cost,
         presence,
-        primitives,
+        shells,
         events,
     })
 }
@@ -1158,54 +1098,26 @@ fn unit_or_zero(v: Vec3) -> Vec3 {
 
 /// ε-weld the raw runs (§13.4) and build each welded run's material segments.
 fn weld_runs(
+    sample: usize,
     corridor: &RayCorridor,
     spans: &[Span],
     raw_runs: &[(usize, usize)],
-    intervals: &[(PrimitiveKey, f32, f32)],
+    intervals: &[(ShellKey, f32, f32)],
     normal_at: &dyn Fn(f32, bool) -> Vec3,
     laws: &WalkLaws,
-) -> Vec<WeldedRun> {
+) -> Result<Vec<WeldedRun>, WalkError> {
     let mut welded: Vec<WeldedRun> = Vec::new();
     let mut group_start = 0usize;
     let mut gap_budget = 0.0f32;
 
-    let flush = |from: usize, to: usize| {
+    let flush = |from: usize, to: usize| -> Result<WeldedRun, WalkError> {
         let start = spans[raw_runs[from].0].start;
         let end = spans[raw_runs[to].1 - 1].end;
         let mut segments: Vec<MaterialSegment> = Vec::new();
         let mut cost_acc = 0.0f64;
-        // A GRAZE BOUND IS COST, NOT A STEP. A net-zero cluster's level sits above the material
-        // either side of it, so left as a segment of its own it would open and close a factor step
-        // inside the run — an upward step and a downward one with a spall budget — for a cluster
-        // that crossed no boundary. Its cost is folded into the material segment beside it instead:
-        // the run's total, the welded exit's budget and every span integral are unchanged, and the
-        // event stream never learns of it. A run that is NOTHING but graze keeps its own segments
-        // (it has no material to fold into) and is skipped whole by [`boundary_events`].
-        let material = raw_runs[from..=to]
-            .iter()
-            .flat_map(|run| &spans[run.0..run.1])
-            .any(|span| !span.graze);
-        let mut pending: Option<(f32, f32, f64)> = None;
         for run in &raw_runs[from..=to] {
             for span in &spans[run.0..run.1] {
                 cost_acc += span.cost();
-                if span.graze && material {
-                    match segments.last_mut() {
-                        Some(last) => {
-                            last.end = span.end;
-                            last.material += span.end - span.start;
-                            last.cost = (last.cost as f64 + span.cost()) as f32;
-                        }
-                        // The run OPENS on a graze bound: hold it until the first material segment
-                        // arrives and extend that one backwards over it.
-                        None => {
-                            let held = pending.get_or_insert((span.start, span.end, 0.0));
-                            held.1 = span.end;
-                            held.2 += span.cost();
-                        }
-                    }
-                    continue;
-                }
                 match segments.last_mut() {
                     // Coalesce across a welded void so an equal-factor sandwich reads as ONE
                     // stretch — that is what makes the welded exit's spall budget the SUMMED cost
@@ -1215,34 +1127,35 @@ fn weld_runs(
                         last.material += span.end - span.start;
                         last.cost = (last.cost as f64 + span.cost()) as f32;
                     }
-                    _ => {
-                        let held = segments.is_empty().then(|| pending.take()).flatten();
-                        segments.push(MaterialSegment {
-                            start: held.map_or(span.start, |held| held.0),
-                            end: span.end,
-                            factor: span.factor,
-                            material: span.end - span.start
-                                + held.map_or(0.0, |held| held.1 - held.0),
-                            cost: (span.cost() + held.map_or(0.0, |held| held.2)) as f32,
-                        })
-                    }
+                    _ => segments.push(MaterialSegment {
+                        start: span.start,
+                        end: span.end,
+                        factor: span.factor,
+                        material: span.end - span.start,
+                        cost: span.cost() as f32,
+                    }),
                 }
             }
         }
         let mut primitives: Vec<PrimitiveKey> = intervals
             .iter()
             .filter(|(_, open, close)| *close > start && *open < end)
-            .map(|(key, _, _)| *key)
+            .map(|(key, _, _)| key.primitive_key())
             .collect();
         primitives.sort();
         primitives.dedup();
+        // A run IS its geometry: positive union factor means some shell is open there, and an open
+        // shell has an interval covering it. The two readings cannot disagree, and a run with no
+        // geometry behind it is not attributable to anything, so it is refused rather than handed a
+        // stand-in entity to spend a round's capability on.
         let entry_volume = intervals
             .iter()
             .filter(|(_, open, _)| *open == start)
             .map(|(key, _, _)| key.volume)
             .min()
-            .unwrap_or_else(|| primitives.first().map_or(Entity::PLACEHOLDER, |k| k.volume));
-        WeldedRun {
+            .or_else(|| primitives.first().map(|key| key.volume))
+            .ok_or(WalkError::UnattributedRun { sample, start, end })?;
+        Ok(WeldedRun {
             start,
             end,
             cost: cost_acc as f32,
@@ -1252,12 +1165,12 @@ fn weld_runs(
             segments,
             joints: (to - from) as u32,
             primitives,
-        }
+        })
     };
 
     for index in 0..raw_runs.len() {
         if index + 1 == raw_runs.len() {
-            welded.push(flush(group_start, index));
+            welded.push(flush(group_start, index)?);
             break;
         }
         let this_end = spans[raw_runs[index].1 - 1].end;
@@ -1285,13 +1198,13 @@ fn weld_runs(
         if weld {
             gap_budget += gap_perp;
         } else {
-            welded.push(flush(group_start, index));
+            welded.push(flush(group_start, index)?);
             group_start = index + 1;
             gap_budget = 0.0;
         }
     }
 
-    welded
+    Ok(welded)
 }
 
 /// Turn each welded run's material segments into the ordered field transitions the consequence step
@@ -1307,14 +1220,6 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
         let at = |t: f32| corridor.origin + corridor.axis * t;
-        // A RUN WITH NO PRIMITIVE BEHIND IT IS A GRAZE BOUND, AND A GRAZE IS NOT AN EVENT (§13.6).
-        // Every stretch of real material carries the presence interval of whatever bounds it; a
-        // stretch that carries none is a net-zero cluster's conservative charge, and it names no
-        // volume, no entrance normal and no exit to spall from. Its cost stays in the spans, which
-        // is where the field integral reads it.
-        if run.primitives.is_empty() {
-            continue;
-        }
         let Some(first) = run.segments.first() else {
             continue;
         };
@@ -1363,7 +1268,7 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
 /// Union each entity's primitive intervals, then charge its own chord at its own factor (§13.2's
 /// damage law: no ownership, no priority, no argmax).
 fn entity_presence(
-    intervals: &[(PrimitiveKey, f32, f32)],
+    intervals: &[(ShellKey, f32, f32)],
     volumes: &VolumeTable,
 ) -> Result<Vec<EntityPresence>, WalkError> {
     let mut by_entity: BTreeMap<Entity, Vec<(f32, f32)>> = BTreeMap::new();
@@ -1492,7 +1397,7 @@ pub const DEFAULT_RING: usize = 12;
 #[derive(Clone, Debug, Default)]
 pub struct SampleCorridor {
     pub offset: Vec3,
-    pub initial_presence: Vec<PrimitiveKey>,
+    pub initial_presence: Vec<ShellKey>,
     pub hits: Vec<FaceHit>,
 }
 
@@ -2092,10 +1997,19 @@ fn build_event(
     primitives.sort();
     primitives.dedup();
 
+    let Some(entrance_volume) = entrance_volume else {
+        // Defensive: a cluster is built from at least one welded run, and every run names the
+        // volume whose shell opens it. A stand-in entity here would be an event with no owner,
+        // spending capability and marking a penetration against nothing.
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "a disc crossing cluster holds no run",
+        });
+    };
     Ok(DiscEvent {
         start,
         end,
-        entrance_volume: entrance_volume.unwrap_or(Entity::PLACEHOLDER),
+        entrance_volume,
         primitives,
         entry_normal,
         entry_position,
@@ -2190,7 +2104,7 @@ pub struct SampleSeed {
     pub offset: Vec3,
     /// Progress along that sample's ENTRANCE ray at which the seed was read.
     pub t: f32,
-    pub inside: Vec<PrimitiveKey>,
+    pub inside: Vec<ShellKey>,
 }
 
 /// The query the core needs answered to finish the crossing.

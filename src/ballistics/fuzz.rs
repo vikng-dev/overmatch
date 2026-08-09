@@ -305,12 +305,13 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         WalkError::IncompleteCorridor { open, .. } => open.first().map(|key| key.volume),
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
+        | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. } => None,
     }
 }
 
-/// The PRIMITIVE a [`WalkError`] blames, when the error is about one.
-fn blamed_primitive(error: &WalkError) -> Option<walk::PrimitiveKey> {
+/// The SHELL a [`WalkError`] blames, when the error is about one.
+fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
     match error {
         WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
             Some(*key)
@@ -741,7 +742,7 @@ impl Pass<'_, '_, '_> {
     /// Every crossing of the primitive a [`WalkError`] blamed, as `(t, axis · n)` — see
     /// [`WalkFailure::crossings`] for what the shape of that list diagnoses.
     fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f32, f32)> {
-        let Some(key) = blamed_primitive(error) else {
+        let Some(key) = blamed_shell(error) else {
             return Vec::new();
         };
         let Ok((corridor, _)) = self.probe_parts(ray) else {
@@ -972,7 +973,12 @@ fn run_fuzz(
     // `'static` spelled out because `ResolveContext` (the march's own borrow group) names the
     // query that way: `Query`'s data parameter is invariant, so an elided lifetime here will not
     // coerce into it.
-    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticShells>,
+    )>,
     aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
     names: Query<(Entity, &Name)>,
@@ -1234,7 +1240,12 @@ fn run_replay(
     tank: Res<ProbeTank>,
     spares: Res<Spares>,
     world: ProjectileMarchWorld,
-    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticShells>,
+    )>,
     aabbs: Query<&ColliderAabb>,
     names: Query<(Entity, &Name)>,
     roots: Query<&GlobalTransform>,
