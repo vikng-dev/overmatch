@@ -30,6 +30,11 @@ pub(crate) struct NodeGeometry {
     /// (`pos += rot * t; rot *= r`) so equal inputs give bit-equal outputs.
     pub root_position: Vec3,
     pub root_rotation: Quat,
+    /// Composed scale root→node, as the COMPONENTWISE product avian's `ColliderTransform`
+    /// propagation forms (`parent.scale * child.scale`, `collider_transform/plugin.rs:133`). It is
+    /// what turns a stored vertex into the coordinate the corridor kernel consumes, so it is what
+    /// [`CERTIFIED_RANGE`] is enforced against.
+    pub root_scale: Vec3,
     /// Raw mesh buffers, captured only where the sim consumes them ([`classify`]): collision
     /// proxies (convex hull source) and ballistic volumes, the road wheels included (trimesh source).
     /// Vertices are **node-local and unscaled** — exactly the bytes the glb holds, which is what the
@@ -53,6 +58,30 @@ pub(crate) struct MeshGeometry {
     /// and §13.7 authors a mixed-substance part as one object holding one closed shell per
     /// substance region (the Tiger road wheel: `MildSteel` bodies + `Rubber` rims in one object).
     pub substance: Option<PrimitiveSubstance>,
+    /// What [`manifold_gate`] proved about this primitive, and the identities it proved it with.
+    /// `None` for a non-substance primitive, which is not armour and is never walked.
+    pub certificate: Option<ShellCertificate>,
+}
+
+/// The manifold gate's findings, carried forward instead of discarded — the identities the §13.4
+/// walk pairs on.
+///
+/// Without them a coincidence of two shells of one primitive and a duplicate claim of one shell are
+/// the same three numbers at the collector's interface, and the walk has to guess which; with them,
+/// pairing is a fact.
+#[derive(Debug)]
+pub(crate) struct ShellCertificate {
+    /// Which closed shell each triangle belongs to, index-aligned with `indices.chunks_exact(3)` —
+    /// the gate's own edge-connected components, dense and in first-triangle order.
+    pub shells: Vec<u32>,
+    /// The WELDED vertex id of each triangle corner. Two triangles meeting at a welded edge or
+    /// vertex name it with the same two numbers however their own index buffers spell it, which is
+    /// what lets the collector canonicalize a whole fan onto one contact.
+    pub corners: Vec<[u32; 3]>,
+    /// The composed scale the certificate was formed at. Everything above was proven about
+    /// `position * scale`, so a collider that reaches the world at any other scale is uncertified —
+    /// see `ballistics::collect`.
+    pub scale: Vec3,
 }
 
 /// A ballistic primitive's substance, resolved against the registry at extraction so the walk never
@@ -198,6 +227,73 @@ fn classify(
     })
 }
 
+/// The dynamic range a ballistic vertex coordinate is CERTIFIED in, as `(low, high)` magnitudes in
+/// the frame the corridor kernel reads — the stored vertex AFTER the authored scale
+/// ([`NodeGeometry::root_scale`]), which is what avian hands parry.
+///
+/// THE WHOLE CERTIFICATE RUNS ON THE SCALED POSITIONS, not just the range half of it. The stored
+/// buffers are node-local and unscaled, and the collider is built as a child of its node, so avian
+/// composes every ancestor `Transform` scale onto the shape and parry multiplies it into the
+/// vertices before the kernel ever projects one. Certifying the raw bytes therefore certifies a mesh
+/// nobody consumes, in two different ways:
+///
+/// * range — codex took a tetrahedron whose raw coordinates all pass, gave it an authored scale of
+///   `(2^19, 2^19, 2^-85)`, and the kernel declined a crossing the exact reference accepts;
+/// * TOPOLOGY — a componentwise scale is injective over the reals and not over `f32`. Codex
+///   measured raw `0.6250001788139343` and `0.6250002384185791` both landing on
+///   `0.06250002235174179` under an authored `0.10000000149011612` **[MEASURED]**, so a raw
+///   positive-thickness shell becomes zero-thickness after scaling while every scaled coordinate
+///   stays comfortably in range.
+///
+/// So welding, degeneracy, closure, winding and signed volume are all judged on the scaled
+/// positions. The collapse above then arrives as what it is — two welded corners of one triangle,
+/// which is a degenerate face — and is refused by name.
+///
+/// `collect::PROJECTION_SLACK` is a bound on the f32 projection's rounding, and it is a bound only
+/// where the relative error model it is derived from holds. It is stated as a multiple of the
+/// vertex's own magnitude, so on a vertex whose corridor-relative offset is subnormal it underflows
+/// to zero and claims an exactness the arithmetic does not have — while a NEIGHBOURING vertex
+/// megametres away multiplies that unclaimed error up through the edge area. Codex built exactly
+/// that triangle and the kernel declined a crossing an exact reference accepts.
+///
+/// A tolerance cannot fix it, and neither can wider arithmetic in the hot path (§13 pays for the f64
+/// reconsideration only inside the band; widening the band is the cost, not the cure). Per ADR-0034
+/// the answer is generic and lives at the door: geometry outside the certified range does not enter
+/// the sim, and the kernel's proof is written as a claim ABOUT that range.
+///
+/// * `2^16 m` (65 536 m) is the CEILING, and it is the half the proof needs: it is what keeps the
+///   amplification of an unclaimed near-zero error by a neighbouring vertex inside
+///   `collect::edge_area_slack`'s `f32::MIN_POSITIVE` term, with a factor of four to spare. The
+///   derivation is written out at `collect::PROJECTION_SLACK`.
+/// * `2^-64 m` (54 zeptometres) is the FLOOR, and it is coordinate hygiene rather than a term in
+///   that derivation: it refuses geometry whose coordinates carry no relative accuracy at all — the
+///   class the counterexample was drawn from, where the f32 rigid transform onto the collider has
+///   already destroyed whatever the numbers meant. Exactly zero is legal and exact; it is the values
+///   that are merely NEAR zero that mean nothing.
+pub(crate) const CERTIFIED_RANGE: (f32, f32) = (
+    // 2^-64 and 2^16, written as bit patterns so the constant cannot drift by a decimal digit.
+    f32::from_bits(0x1F80_0000),
+    f32::from_bits(0x4780_0000),
+);
+
+/// Whether one coordinate is inside [`CERTIFIED_RANGE`].
+pub(crate) fn certified_coordinate(value: f32) -> bool {
+    let magnitude = value.abs();
+    magnitude == 0.0 || (magnitude >= CERTIFIED_RANGE.0 && magnitude <= CERTIFIED_RANGE.1)
+}
+
+/// Whether a composed scale can carry a certified mesh into a certified collider.
+///
+/// Finite and non-zero per axis, because the certification below is a claim about the SCALED
+/// coordinates and a zero axis makes that claim vacuously true while collapsing the shell — every
+/// vertex lands at `0.0`, which is certified, and the armour is a plane with no volume.
+fn certified_scale(scale: Vec3) -> bool {
+    scale
+        .to_array()
+        .iter()
+        .all(|axis| axis.is_finite() && *axis != 0.0)
+}
+
 /// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
 /// outward orientation per connected shell.
 ///
@@ -221,7 +317,17 @@ fn classify(
 ///
 /// Multiple closed shells in one primitive are legal and expected (§13.7: one shell per substance
 /// region, and a substance region may be several islands — the wheel's two steel bodies plus axle).
-fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(), String> {
+/// Which is why the roots are the RETURN VALUE and not a local: they are the surface identity the
+/// §13.4 walk pairs crossings on, dense and in first-triangle order, one per triangle.
+///
+/// `scale` is the composed authored scale ([`NodeGeometry::root_scale`]); the certified-domain check
+/// runs on the coordinates it produces, because those are the ones the kernel projects.
+fn manifold_gate(
+    node: &str,
+    index: usize,
+    primitive: &MeshGeometry,
+    scale: Vec3,
+) -> Result<ShellCertificate, String> {
     let defect = |what: String| format!("node `{node}` primitive {index}: {what}");
 
     if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
@@ -231,18 +337,45 @@ fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(
             primitive.indices.len()
         )));
     }
+    if !certified_scale(scale) {
+        return Err(defect(format!(
+            "composed authored scale {scale:?} has a zero or non-finite axis — the collider avian \
+             builds from it is not the shell that was authored"
+        )));
+    }
+
+    // THE POSITIONS AVIAN WILL CONSUME, formed once, and the only ones anything below reads. Parry
+    // scales a trimesh by multiplying each vertex componentwise, so this is that arithmetic to the
+    // bit.
+    let scaled: Vec<[f32; 3]> = primitive
+        .positions
+        .iter()
+        .map(|position| {
+            [
+                position[0] * scale.x,
+                position[1] * scale.y,
+                position[2] * scale.z,
+            ]
+        })
+        .collect();
 
     // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
     // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
-    // a non-finite coordinate cannot be welded or integrated at all.
+    // a coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
+    // watertight kernel that has a bound to offer.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
-    for position in &primitive.positions {
+    let mut welded: Vec<u32> = Vec::with_capacity(scaled.len());
+    for (position, raw) in scaled.iter().zip(&primitive.positions) {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
-            if !value.is_finite() {
+            if !certified_coordinate(*value) {
                 return Err(defect(format!(
-                    "a vertex coordinate is not finite ({value})"
+                    "vertex coordinate {raw:?} scales to {value}, outside the certified range — a \
+                     ballistic coordinate must reach the corridor kernel as 0 or {low:e}..={high:e} \
+                     m in magnitude, which is the domain `collect`'s watertight projection carries a \
+                     proven error bound over",
+                    low = CERTIFIED_RANGE.0,
+                    high = CERTIFIED_RANGE.1,
                 )));
             }
             *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
@@ -324,14 +457,14 @@ fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(
         }
     }
 
-    // Signed volume per shell, from the ORIGINAL positions (welding only merged coincident points,
-    // so the coordinates are unchanged). f64 because the divergence-theorem sum of a thin plate far
-    // from the origin cancels hard.
+    // Signed volume per shell, on the SCALED positions — a negative scale axis mirrors the shell and
+    // inverts its winding, which is exactly what this check exists to catch. f64 because the
+    // divergence-theorem sum of a thin plate far from the origin cancels hard.
     let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
     for triangle in 0..triangles.len() {
         let shell = find(&mut parent, triangle);
         let corner = |slot: usize| -> [f64; 3] {
-            let position = primitive.positions[primitive.indices[triangle * 3 + slot] as usize];
+            let position = scaled[primitive.indices[triangle * 3 + slot] as usize];
             [position[0] as f64, position[1] as f64, position[2] as f64]
         };
         let (a, b, c) = (corner(0), corner(1), corner(2));
@@ -352,7 +485,22 @@ fn manifold_gate(node: &str, index: usize, primitive: &MeshGeometry) -> Result<(
             )));
         }
     }
-    Ok(())
+
+    // Publish the roots as DENSE ids in first-triangle order. The root is a union-find artefact —
+    // it moves when path compression moves — and the id is the walk's surface name, so it is
+    // derived from the triangle order the mesh actually ships with and nothing else.
+    let mut ids: HashMap<usize, u32> = HashMap::new();
+    let mut shells: Vec<u32> = Vec::with_capacity(triangles.len());
+    for triangle in 0..triangles.len() {
+        let root = find(&mut parent, triangle);
+        let next = ids.len() as u32;
+        shells.push(*ids.entry(root).or_insert(next));
+    }
+    Ok(ShellCertificate {
+        shells,
+        corners: triangles,
+        scale,
+    })
 }
 
 pub(crate) fn plugin(app: &mut App) {
@@ -452,6 +600,7 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
         transform: Transform::IDENTITY,
         root_position: Vec3::ZERO,
         root_rotation: Quat::IDENTITY,
+        root_scale: Vec3::ONE,
         primitives: Vec::new(),
     }];
     let mut by_name: HashMap<String, usize> = HashMap::new();
@@ -484,6 +633,8 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
         let root_position =
             nodes[parent].root_position + nodes[parent].root_rotation * transform.translation;
         let root_rotation = nodes[parent].root_rotation * transform.rotation;
+        // Avian's own composition, verbatim (`collider_transform/plugin.rs:133`).
+        let root_scale = nodes[parent].root_scale * transform.scale;
 
         let mut primitives = Vec::new();
         if let Some(mesh) = node.mesh() {
@@ -536,13 +687,15 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
                     .read_indices()
                     .map(|i| i.into_u32().collect())
                     .unwrap_or_default();
-                let geometry = MeshGeometry {
+                let mut geometry = MeshGeometry {
                     positions,
                     indices,
                     substance,
+                    certificate: None,
                 };
                 if geometry.substance.is_some() {
-                    manifold_gate(&name, index, &geometry)?;
+                    geometry.certificate =
+                        Some(manifold_gate(&name, index, &geometry, root_scale)?);
                 }
                 primitives.push(geometry);
             }
@@ -560,6 +713,7 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
             transform,
             root_position,
             root_rotation,
+            root_scale,
             primitives,
         });
         for child in node.children() {
@@ -1061,6 +1215,92 @@ mod tests {
         // `Commander_Hatch`). Total primitives 89, was 88, by the same arithmetic — this IS new
         // geometry, unlike the 2026-08-07 running-gear change, which was a re-classification.
         assert_eq!(geometry.ballistic_volumes.len(), 66);
+
+        // Closed shells, the grain the walk pairs on. Pinned alongside the primitives because a
+        // remodel that splits or merges an island changes what the walk can tell apart, and
+        // nothing else in the pipeline would notice.
+        let shells: usize = geometry
+            .nodes
+            .iter()
+            .flat_map(|node| &node.primitives)
+            .map(|primitive| {
+                primitive.certificate.as_ref().map_or(0, |certificate| {
+                    certificate
+                        .shells
+                        .iter()
+                        .copied()
+                        .max()
+                        .map_or(0, |max| max as usize + 1)
+                })
+            })
+            .sum();
+        // 131 shells over 89 primitives: multi-shell primitives are the ordinary case here, not a
+        // wheel-only curiosity.
+        assert_eq!(shells, 131, "the Tiger's shell census moved");
+    }
+
+    /// The gate at scale 1 — the case every synthetic fixture below is about.
+    fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, String> {
+        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
+    }
+
+    /// SAME-PRIMITIVE FACE-TO-FACE CONTACT IS REFUSED, AND THAT IS THE CONTRACT (§13.7).
+    ///
+    /// Two closed shells of one primitive that share a welded edge present four triangles on it, so
+    /// the directed-edge census rejects them before union-find can even be asked whether they are
+    /// one shell or two. That refusal is deliberate and it is the answer: a geometric guess at where
+    /// one shell ends and the next begins is exactly the ambiguity surface identity exists to
+    /// remove, and the walk's pairing, restart seeding and contact ownership all depend on the
+    /// distinction. Plates authored face to face stay separate PRIMITIVES; only vertex contact and
+    /// interior intersection are legal inside one.
+    #[test]
+    fn same_primitive_face_to_face_contact_is_refused() {
+        // Two unit cubes sharing the whole `x = 1` face, in one primitive.
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for offset in [0.0f32, 1.0] {
+            let base = positions.len() as u32;
+            for (x, y, z) in [
+                (0.0f32, 0.0f32, 0.0f32),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+                (1.0, 0.0, 1.0),
+                (1.0, 1.0, 1.0),
+                (0.0, 1.0, 1.0),
+            ] {
+                positions.push([x + offset, y, z]);
+            }
+            for face in [
+                [0u32, 3, 2],
+                [0, 2, 1],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [3, 7, 6],
+                [3, 6, 2],
+                [0, 4, 7],
+                [0, 7, 3],
+                [1, 2, 6],
+                [1, 6, 5],
+            ] {
+                indices.extend(face.map(|corner| base + corner));
+            }
+        }
+        let abutting = MeshGeometry {
+            positions,
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+            certificate: None,
+        };
+        let err = gate("Abutting", &abutting)
+            .expect_err("face-to-face contact inside one primitive must be refused");
+        assert!(err.contains("directed edge"), "{err}");
     }
 
     /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
@@ -1081,16 +1321,17 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
+            certificate: None,
         };
         let closed = vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
-        manifold_gate("Good", 0, &tetra(closed.clone())).expect("a closed tetrahedron passes");
+        let shells = gate("Good", &tetra(closed.clone())).expect("a closed tetrahedron passes");
+        assert_eq!(shells, vec![0; 4], "one tetrahedron is one shell");
 
         // One face removed: an open shell. This is the defect that makes armour worth ZERO — the
         // walk never finds the exit face and the volume is never charged.
         let mut open = closed.clone();
         open.truncate(9);
-        let err =
-            manifold_gate("Open", 0, &tetra(open)).expect_err("an open shell must be refused");
+        let err = gate("Open", &tetra(open)).expect_err("an open shell must be refused");
         assert!(err.contains("Open") && err.contains("not closed"), "{err}");
 
         // Every face flipped: closed, but wound inward — the walk would read entries as exits.
@@ -1098,15 +1339,14 @@ mod tests {
             .chunks_exact(3)
             .flat_map(|t| [t[0], t[2], t[1]])
             .collect();
-        let err = manifold_gate("Inverted", 0, &tetra(inverted))
-            .expect_err("an inside-out shell must be refused");
+        let err =
+            gate("Inverted", &tetra(inverted)).expect_err("an inside-out shell must be refused");
         assert!(err.contains("Inverted") && err.contains("volume"), "{err}");
 
         // A duplicated face: closed by undirected count, but one directed edge is traversed twice.
         let mut doubled = closed.clone();
         doubled.extend_from_slice(&[0, 2, 1]);
-        let err = manifold_gate("Doubled", 0, &tetra(doubled))
-            .expect_err("a duplicated face must be refused");
+        let err = gate("Doubled", &tetra(doubled)).expect_err("a duplicated face must be refused");
         assert!(
             err.contains("Doubled") && err.contains("directed edge"),
             "{err}"
@@ -1115,8 +1355,8 @@ mod tests {
         // A degenerate (zero-area) triangle has no orientation to check.
         let mut degenerate = closed.clone();
         degenerate.extend_from_slice(&[0, 1, 1]);
-        let err = manifold_gate("Degenerate", 0, &tetra(degenerate))
-            .expect_err("a zero-area face must be refused");
+        let err =
+            gate("Degenerate", &tetra(degenerate)).expect_err("a zero-area face must be refused");
         assert!(
             err.contains("Degenerate") && err.contains("degenerate"),
             "{err}"
@@ -1153,8 +1393,104 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
+            certificate: None,
         };
-        manifold_gate("Split", 0, &split).expect("welding by position closes the split shell");
+        gate("Split", &split).expect("welding by position closes the split shell");
+    }
+
+    /// TWO SHELLS IN ONE PRIMITIVE ARE TWO KEYS, AND ONE SHARED VERTEX DOES NOT MERGE THEM.
+    ///
+    /// This is what the §13.4 walk pairs on. Edge-connected components are the right grain and
+    /// vertex-connected ones are not: two legal shells may legally touch at a point (§13.7's
+    /// islands), and merging them there would put one key on two surfaces — exactly the ambiguity
+    /// the identity exists to remove.
+    #[test]
+    fn two_shells_in_one_primitive_are_two_keys() {
+        // Two tetrahedra sharing the single vertex at the origin, one either side of it.
+        let mut positions = vec![[0.0f32, 0.0, 0.0]];
+        let mut indices = Vec::new();
+        for sign in [1.0f32, -1.0] {
+            let base = positions.len() as u32;
+            positions.extend([[sign, 0.0, 0.0], [0.0, sign, 0.0], [0.0, 0.0, sign]]);
+            // `0` is the shared apex; the outward winding flips with the octant.
+            let faces: [[u32; 3]; 4] = if sign > 0.0 {
+                [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+            } else {
+                [[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]]
+            };
+            for face in faces {
+                indices.extend(face.map(|corner| if corner == 0 { 0 } else { base + corner - 1 }));
+            }
+        }
+        let pair = MeshGeometry {
+            positions,
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+            certificate: None,
+        };
+        let shells = gate("Pair", &pair).expect("two closed outward tetrahedra pass");
+        assert_eq!(
+            shells,
+            vec![0, 0, 0, 0, 1, 1, 1, 1],
+            "one key per edge-connected shell, dense and in triangle order",
+        );
+    }
+
+    /// THE DOMAIN IS ENFORCED WHERE THE KERNEL READS, NOT WHERE THE BYTES ARE STORED.
+    ///
+    /// Codex's counterexample: a closed tetrahedron whose raw coordinates all satisfy
+    /// [`CERTIFIED_RANGE`], authored at a scale of `(2^19, 2^19, 2^-85)`. Avian builds that scaled
+    /// trimesh happily; `collect::cross_triangle` then declines a crossing the independent f64
+    /// reference accepts, because the projection's error bound never spoke for those coordinates.
+    /// The scale is what the gate must read.
+    #[test]
+    fn the_certified_domain_is_enforced_after_the_authored_scale() {
+        let tetra = MeshGeometry {
+            positions: vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+            certificate: None,
+        };
+        // Every raw coordinate is certified …
+        assert!(
+            tetra
+                .positions
+                .iter()
+                .flatten()
+                .all(|value| certified_coordinate(*value)),
+            "the counterexample's own bytes must pass, or it proves nothing",
+        );
+        gate("Unscaled", &tetra).expect("at scale 1 it is ordinary geometry");
+
+        // … and the scaled ones are not, at both ends of the range.
+        let out_of_domain = Vec3::new(
+            f32::from_bits(0x5F80_0000),
+            f32::from_bits(0x5F80_0000),
+            f32::from_bits(0x1500_0000),
+        );
+        let err = manifold_gate("Scaled", 0, &tetra, out_of_domain)
+            .expect_err("the scaled coordinates leave the certified domain");
+        assert!(
+            err.contains("scales to") && err.contains("certified range"),
+            "{err}"
+        );
+
+        // A zero axis is the other way to leave it: every scaled coordinate is `0.0`, which is
+        // certified, and the shell has no volume left.
+        let err = manifold_gate("Flattened", 0, &tetra, Vec3::new(1.0, 1.0, 0.0))
+            .expect_err("a collapsed axis is not a shell");
+        assert!(err.contains("zero or non-finite axis"), "{err}");
     }
 
     /// Every node that SPINS must carry its axle in its own origin.

@@ -17,7 +17,9 @@ use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole,
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
-use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
+use crate::ballistics::{
+    ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
+};
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
@@ -681,6 +683,20 @@ fn insert_ballistic_volumes(
                     !triangles.is_empty(),
                     "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
                 );
+                // The bake's manifold certificate, index-aligned with those triangles. Armour
+                // without it is armour the walk cannot pair, so it is refused here rather than
+                // collected ambiguously later.
+                let certificate = primitive
+                    .certificate
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("ballistic volume `{name}` was never certified"));
+                assert_eq!(
+                    certificate.shells.len(),
+                    triangles.len(),
+                    "ballistic volume `{name}` has {} triangles and {} certified faces",
+                    triangles.len(),
+                    certificate.shells.len(),
+                );
                 let mut collider = commands.spawn((
                     ChildOf(entity),
                     // ADR-0015 shields this authored local pose from position sync.
@@ -690,6 +706,11 @@ fn insert_ballistic_volumes(
                         triangles,
                         TrimeshFlags::MERGE_DUPLICATE_VERTICES,
                     ),
+                    BallisticSurfaces {
+                        shells: certificate.shells.as_slice().into(),
+                        corners: certificate.corners.as_slice().into(),
+                        scale: certificate.scale,
+                    },
                     CollisionLayers::new([Layer::Armor], LayerMask::NONE),
                 ));
                 if split {

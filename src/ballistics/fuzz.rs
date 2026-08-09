@@ -273,8 +273,8 @@ pub struct Violation {
     pub detail: String,
 }
 
-/// A [`WalkError`] the fuzzer met. Should be empty on a gated asset — the per-primitive manifold
-/// gate (`bake`) is what makes that claim, and this is what tests it against real shot lines.
+/// A [`WalkError`] the fuzzer met. Empty on a gated asset — the per-primitive manifold gate
+/// (`bake`) is what makes that claim, and this is what tests it against real shot lines.
 #[derive(Clone, Debug)]
 pub struct WalkFailure {
     pub ray: u64,
@@ -289,7 +289,7 @@ pub struct WalkFailure {
     /// unrepresentable by the walk's per-primitive parity pairing); two entries a micron apart are a
     /// tolerance problem instead. The distinction is the whole diagnosis, so the fuzzer collects it
     /// rather than leaving it to a debugger.
-    pub crossings: Vec<(f32, f32)>,
+    pub crossings: Vec<(f64, f32)>,
 }
 
 /// The volume a [`WalkError`] blames, when it blames one.
@@ -299,22 +299,23 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::UnknownVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
         | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(key.volume)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(key.volume),
         WalkError::IncompleteCorridor { open, .. } => open.first().map(|key| key.volume),
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
+        | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. } => None,
     }
 }
 
-/// The PRIMITIVE a [`WalkError`] blames, when the error is about one.
-fn blamed_primitive(error: &WalkError) -> Option<walk::PrimitiveKey> {
+/// The SHELL a [`WalkError`] blames, when the error is about one.
+fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
     match error {
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(*key)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(*key),
         WalkError::IncompleteCorridor { open, .. } => open.first().copied(),
         _ => None,
     }
@@ -352,67 +353,15 @@ pub struct Report {
     pub radius: f32,
 }
 
-/// Volumes carrying a MESH DEFECT this fuzzer has measured and an asset-side investigation owns.
-///
-/// NOT a walk-semantics excuse. Every entry below is a baked corridor that contradicts itself —
-/// an exit before its own entry, two exits at one `t`, an entry with no exit anywhere in a 14 m
-/// corridor. No pairing rule can resolve a contradiction; the walk is right to refuse, and the fix
-/// is in the mesh, not here. Each is listed with the exact signature it was measured by, so a row
-/// that stops matching its signature is a row that has to be re-earned rather than inherited.
-///
-/// This list REPLACED a much broader one. Until 2026-08-07 it was `KNOWN_MULTI_SHELL_VOLUMES` and
-/// excused three prefixes — `Hull_Rear`, `Turret_Cupola`, `Wheel_` — covering 4591 of 4592 failures
-/// at a million rays, on the theory that the walk's boolean per-primitive pairing could not
-/// represent §13.7's legal several-shells-per-object authoring. It could not, and now it does:
-/// presence is a depth. That excuse is spent, and keeping its name would have been a lie about what
-/// the remaining rays are.
-///
-/// MEASURED 2026-08-07, seed 7, 1 000 000 rays, on the fixed walk: 5 failures TOTAL, one ray each,
-/// listed below. The gate refuses any walk error blamed on ANYTHING ELSE, so a new defect still
-/// fails loudly — and with the list this short, so does a defect that spreads.
-pub const DEGENERATE_BAKE_RESIDUE: &[&str] = &[
-    // ray 505821 — `UnexpectedExit` at t 8.9248, with the crossing dump reading
-    // `8.9248out 8.9250in 8.9507in 9.0489out`: the exit face sits 0.2 MM IN FRONT of the entry face
-    // it belongs to. An inverted or duplicated triangle on the rear plate's inner skin.
-    "Hull_Rear",
-    // ray 233264 — `IncompleteCorridor` with one primitive left open: entry at t 7.0039 and no exit
-    // in the whole 14.05 m corridor. A hole in the shell, so the ray never comes out of the solid.
-    "Hull_Side_Lower_L",
-    // ray 960102 — `IncompleteCorridor`, the same shape: entry at t 8.5621, no exit.
-    "Idler_L",
-    // ray 416399 — `UnexpectedExit` at t 5.9726 with the dump reading `5.9726out` and NOTHING before
-    // it: an exit face reached without ever entering, i.e. an outward-facing triangle on the inside.
-    "Wheel_L_3",
-    // ray 539618 — `IncompleteCorridor` off `7.0035in 7.0709in 7.1294out 7.1318in 7.1408out
-    // 7.1408out`: TWO EXITS AT THE SAME `t`, so one of the three shells this ray opened is closed
-    // twice and another is never closed at all. Coincident duplicate faces.
-    "Wheel_R_0",
-];
-
-/// Whether a walk error on this volume is one of the measured bake defects rather than a new one.
-///
-/// Prefix-matched, because the bake suffixes a split volume (`Wheel_R_0 (shard)`); the prefixes are
-/// whole volume names, so this names five volumes and not a family.
-pub fn is_degenerate_bake_residue(volume: &str) -> bool {
-    DEGENERATE_BAKE_RESIDUE
-        .iter()
-        .any(|known| volume.starts_with(known))
-}
-
 impl Report {
-    /// Walk errors this run cannot explain — anything not blamed on
-    /// [`DEGENERATE_BAKE_RESIDUE`]. THE gate quantity: a rate is not a contract, but "no
-    /// unexplained failure" is.
-    pub fn unexplained_walk_errors(&self) -> Vec<&WalkFailure> {
-        self.walk_errors
-            .iter()
-            .filter(|failure| !is_degenerate_bake_residue(&failure.volume))
-            .collect()
-    }
-
-    /// Nothing the gate refuses: no violated invariant, no unexplained walk error.
+    /// Nothing the gate refuses: no violated invariant, and no walk error at all.
+    ///
+    /// HARD ZERO, and it has no allow-list to soften it. A `WalkError` is a round that stops dead in
+    /// mid-armour, so one of them is a gameplay defect and a hundred are the same defect spreading —
+    /// there is no rate at which the answer is "expected". A run that meets one names the ray, and
+    /// `replay_ray` re-fires it.
     pub fn is_clean(&self) -> bool {
-        self.violations.is_empty() && self.unexplained_walk_errors().is_empty()
+        self.violations.is_empty() && self.walk_errors.is_empty()
     }
 }
 
@@ -705,7 +654,7 @@ struct Pass<'a, 'w, 's> {
 ///
 /// f64 accumulation, matching [`walk::RayWalk`]'s own cost, so a prefix taken at the corridor end
 /// equals the walk's reported total rather than drifting from it.
-fn prefix_cost(spans: &[Span], t: f32) -> f64 {
+fn prefix_cost(spans: &[Span], t: f64) -> f64 {
     spans
         .iter()
         .map(|span| {
@@ -713,7 +662,7 @@ fn prefix_cost(spans: &[Span], t: f32) -> f64 {
             if end <= span.start {
                 0.0
             } else {
-                (end as f64 - span.start as f64) * span.factor as f64
+                (end - span.start) * span.factor as f64
             }
         })
         .sum()
@@ -792,14 +741,14 @@ impl Pass<'_, '_, '_> {
 
     /// Every crossing of the primitive a [`WalkError`] blamed, as `(t, axis · n)` — see
     /// [`WalkFailure::crossings`] for what the shape of that list diagnoses.
-    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f32, f32)> {
-        let Some(key) = blamed_primitive(error) else {
+    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f64, f32)> {
+        let Some(key) = blamed_shell(error) else {
             return Vec::new();
         };
         let Ok((corridor, _)) = self.probe_parts(ray) else {
             return Vec::new();
         };
-        let mut out: Vec<(f32, f32)> = corridor
+        let mut out: Vec<(f64, f32)> = corridor
             .hits
             .iter()
             .filter(|hit| hit.volume == key.volume && hit.primitive == key.primitive)
@@ -1024,7 +973,12 @@ fn run_fuzz(
     // `'static` spelled out because `ResolveContext` (the march's own borrow group) names the
     // query that way: `Query`'s data parameter is invariant, so an elided lifetime here will not
     // coerce into it.
-    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticSurfaces>,
+    )>,
     aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
     names: Query<(Entity, &Name)>,
@@ -1263,6 +1217,124 @@ pub fn fuzz(config: &FuzzConfig) -> Result<Report, String> {
     Ok(app.world().resource::<FuzzOutput>().0.clone())
 }
 
+/// One ray's corridor, dumped.
+///
+/// The report names a failing ray by `(seed, index)` and calls that a complete reproduction recipe.
+/// This is what consumes it: the ray generator is re-run for that index alone and every crossing
+/// along the corridor is printed in order, with the volume that owns it, the triangle that produced
+/// it and the sign that makes it an entry or an exit. Which is what a `WalkError` has to be read
+/// against — the error names one primitive, and the defect is almost always in what its neighbours
+/// did or did not report.
+#[derive(Resource, Clone)]
+struct ReplayJob {
+    config: FuzzConfig,
+    ray: u64,
+}
+
+#[derive(Resource, Default)]
+struct ReplayOutput(String);
+
+fn run_replay(
+    job: Res<ReplayJob>,
+    mut output: ResMut<ReplayOutput>,
+    tank: Res<ProbeTank>,
+    spares: Res<Spares>,
+    world: ProjectileMarchWorld,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticSurfaces>,
+    )>,
+    aabbs: Query<&ColliderAabb>,
+    names: Query<(Entity, &Name)>,
+    roots: Query<&GlobalTransform>,
+    mut commands: Commands,
+) {
+    use std::fmt::Write as _;
+    let root = roots
+        .get(tank.0)
+        .expect("the probe tank has a global transform");
+    let to_local = root.affine().inverse();
+    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+    let context = ResolveContext {
+        world: &world,
+        colliders: &colliders,
+        armor: &armor,
+        deposit: false,
+        laws: walk::WalkLaws::default(),
+    };
+    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
+        panic!("the probe tank presented no ballistic collider to fuzz");
+    };
+    let pass = Pass {
+        context,
+        spares: *spares,
+        targets: BTreeMap::new(),
+        names: names
+            .iter()
+            .map(|name| (name.0, name.1.as_str().to_owned()))
+            .collect(),
+        to_local,
+        local_min,
+        local_max,
+    };
+
+    let ray = ray_for(job.ray, &job.config, center, radius);
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "seed {} ray {}: origin {:?} direction {:?} length {}",
+        job.config.seed, job.ray, ray.origin, ray.direction, ray.length
+    );
+    match pass.probe_parts(&ray) {
+        Ok((corridor, _)) => {
+            let mut hits = corridor.hits;
+            hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+            for hit in &hits {
+                let along = ray.direction.dot(hit.true_normal);
+                let _ = writeln!(
+                    text,
+                    "  t={:.7} {:>3} {:<28} volume={:?} primitive={:?} triangle={} axis·n={:+.6}",
+                    hit.t,
+                    if along < 0.0 { "IN" } else { "OUT" },
+                    pass.volume_name(hit.volume),
+                    hit.volume,
+                    hit.primitive,
+                    hit.triangle,
+                    along,
+                );
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(text, "  the corridor would not collect: {error:?}");
+        }
+    }
+    let _ = writeln!(
+        text,
+        "walk: {}",
+        match pass.probe(&ray, 0.0) {
+            Ok(_) => "resolved".to_owned(),
+            Err(error) => format!("{error:?}"),
+        }
+    );
+    output.0 = text;
+    commands.remove_resource::<ReplayJob>();
+}
+
+/// Re-fire one ray of a run and dump its corridor — see [`ReplayJob`].
+pub fn replay_ray(config: &FuzzConfig, ray: u64) -> Result<String, String> {
+    let mut app = probe_world()?;
+    app.init_resource::<ReplayOutput>()
+        .insert_resource(ReplayJob {
+            config: config.clone(),
+            ray,
+        })
+        .add_systems(Update, run_replay.run_if(resource_exists::<ReplayJob>));
+    app.update();
+    Ok(app.world().resource::<ReplayOutput>().0.clone())
+}
+
 /// `cargo run --bin ballistic_fuzzer [-- --rays N --seed S --out PATH]` — the bake-scale sweep.
 ///
 /// Exit code 1 means the gate FAILED: a violated invariant, a walk error, or an unblessed corridor
@@ -1274,6 +1346,7 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
         ..default()
     };
     let mut out = std::path::PathBuf::from("target/ballistic-fuzzer-report.md");
+    let mut replay: Vec<u64> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -1281,8 +1354,15 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
             "--rays" => config.rays = value()?.parse()?,
             "--seed" => config.seed = value()?.parse()?,
             "--out" => out = value()?.into(),
+            "--replay" => replay.push(value()?.parse()?),
             other => return Err(format!("unknown flag {other}").into()),
         }
+    }
+    if !replay.is_empty() {
+        for ray in replay {
+            println!("{}", replay_ray(&config, ray)?);
+        }
+        return Ok(());
     }
 
     let report = fuzz(&config)?;
@@ -1344,12 +1424,7 @@ pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
         report.rays
     );
     for (volume, count) in &report.walk_error_volumes {
-        let known = if is_degenerate_bake_residue(volume) {
-            "degenerate bake residue"
-        } else {
-            "**UNEXPLAINED**"
-        };
-        let _ = writeln!(out, "- `{volume}` — {count} ({known})");
+        let _ = writeln!(out, "- `{volume}` — {count}");
     }
     for failure in report.walk_errors.iter().take(10) {
         let _ = writeln!(

@@ -38,9 +38,11 @@
 
 use avian3d::parry::shape::TypedShape;
 use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
+use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use super::walk::{FaceHit, PrimitiveKey, WalkError, WalkLaws};
+use super::BallisticSurfaces;
+use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
 
 /// Faces one corridor may collect before the collector gives up.
 ///
@@ -69,14 +71,14 @@ pub(crate) struct Corridor<'a> {
     /// Unit travel direction.
     pub axis: Vec3,
     pub length: f32,
-    /// Primitives this ray was declared to START inside.
+    /// Shells this ray was declared to START inside.
     ///
     /// Honors the core's `(open, close]` seed contract from the driving side: a face BEHIND the
     /// origin belongs to the seed and is dropped, and a face a rounding-hair behind it on a ray that
     /// was NOT seeded is the face the ray is sitting on and is clamped to `t = 0`, where the walk
     /// processes it. The two rules are complements, so an entry is counted exactly once however the
     /// f32 falls.
-    pub seeded: &'a [PrimitiveKey],
+    pub seeded: &'a [ShellKey],
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
     /// face — a second opinion about that is how an entry gets counted twice or not at all. The
     /// trimesh prune reads it through [`prune_margin`], to decide when a corridor origin is ON a
@@ -93,11 +95,11 @@ pub(crate) fn collect(
     corridor: &Corridor<'_>,
     // Candidate colliders, already filtered to armour the shell may hit (layer + self-exclusion).
     candidates: &[(Entity, Entity)],
-    colliders: &Query<(&Position, &Rotation, &Collider)>,
+    colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     for &(node, primitive) in candidates {
-        let Ok((position, rotation, collider)) = colliders.get(primitive) else {
+        let Ok((position, rotation, collider, surfaces)) = colliders.get(primitive) else {
             // A candidate the broad phase named but whose pose is not available cannot be probed,
             // and guessing that it is empty is exactly the silent-zero this module refuses.
             return Err(WalkError::CollectorFailed {
@@ -116,28 +118,70 @@ pub(crate) fn collect(
         // was computed from.
         let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
         let local_axis = inverse * corridor.axis;
-        let seeded = corridor.seeded.contains(&PrimitiveKey {
-            volume: node,
-            primitive,
-        });
+        let seeded = |shell: u32| {
+            corridor.seeded.contains(&ShellKey {
+                volume: node,
+                primitive,
+                shell,
+            })
+        };
 
         let before = out.len();
         match collider.shape_scaled().as_typed_shape() {
-            TypedShape::TriMesh(mesh) => collect_trimesh(
-                mesh,
-                local_origin,
-                local_axis,
-                corridor.length,
+            TypedShape::TriMesh(mesh) => {
+                // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
+                // shells closing at one `t` from one shell claimed twice, and it must not guess —
+                // so a trimesh whose certificate is missing or the wrong length is an unprobed
+                // candidate, which is the same silence as an absent one.
+                let surfaces = surfaces
+                    .filter(|surfaces| {
+                        surfaces.shells.len() == mesh.num_triangles()
+                            && surfaces.corners.len() == mesh.num_triangles()
+                    })
+                    .ok_or(WalkError::CollectorFailed {
+                        volume: node,
+                        reason: "a trimesh candidate carries no per-triangle manifold certificate",
+                    })?;
+                // THE CERTIFICATE IS ABOUT ONE SCALE. Everything the bake proved — closure, winding,
+                // positive volume, the welded ids the contacts below are named with — it proved
+                // about `position * scale`, and avian re-derives the scaled shape from whatever the
+                // hierarchy says at the time. A collider that reaches the world at any other scale
+                // has an uncertified topology, so it is refused rather than walked. Bit-exact, not
+                // near: there is no scale that is almost the one that was proven.
+                if collider.scale().to_array().map(f32::to_bits)
+                    != surfaces.scale.to_array().map(f32::to_bits)
+                {
+                    return Err(WalkError::CollectorFailed {
+                        volume: node,
+                        reason: "a collider reached the world at a scale the bake never certified",
+                    });
+                }
+                collect_trimesh(
+                    mesh,
+                    local_origin,
+                    local_axis,
+                    corridor.length,
+                    node,
+                    primitive,
+                    surfaces,
+                    &seeded,
+                    *rotation,
+                    prune_margin(local_origin, corridor.laws),
+                    corridor.laws,
+                    out,
+                )?
+            }
+            // The sandbox slabs. A convex solid is one closed surface by definition, so its shell
+            // id is `0` and there is nothing to look up.
+            _ => collect_convex(
+                collider,
+                position.0,
+                *rotation,
+                corridor,
                 node,
                 primitive,
-                seeded,
-                *rotation,
-                prune_margin(local_origin, corridor.laws),
-                corridor.laws,
+                seeded(0),
                 out,
-            )?,
-            _ => collect_convex(
-                collider, position.0, *rotation, corridor, node, primitive, seeded, out,
             )?,
         }
         if out.len() > MAX_FACES {
@@ -207,7 +251,8 @@ fn collect_trimesh(
     length: f32,
     node: Entity,
     primitive: Entity,
-    seeded: bool,
+    surfaces: &BallisticSurfaces,
+    seeded: &dyn Fn(u32) -> bool,
     rotation: Rotation,
     margin: f32,
     laws: &WalkLaws,
@@ -226,6 +271,7 @@ fn collect_trimesh(
     let far = origin + axis * length;
     let lo = origin.min(far) - Vec3::splat(margin);
     let hi = origin.max(far) + Vec3::splat(margin);
+    let shear = RayShear::new(origin, axis);
     for index in mesh.bvh().leaves(|node| {
         let aabb = node.aabb();
         aabb.maxs.x >= lo.x
@@ -236,19 +282,33 @@ fn collect_trimesh(
             && aabb.mins.z <= hi.z
     }) {
         let triangle = mesh.triangle(index);
-        let Some((t, normal)) = cross_triangle(origin, axis, triangle.a, triangle.b, triangle.c)
-        else {
+        let corners = [triangle.a, triangle.b, triangle.c];
+        let Some(claim) = cross_triangle(&shear, axis, triangle.a, triangle.b, triangle.c) else {
             continue;
         };
-        if let Some(hit) = admit(t, length, seeded, laws) {
+        let shell = surfaces.shells[index as usize];
+        // The welded feature the claim is about, and the `t` that feature has. Both are computed
+        // from the feature itself, so every triangle of a fan reports the same contact and the same
+        // bits — the fan is canonical before the walk ever sees it.
+        let (contact, t) = contact_of(
+            &shear,
+            axis,
+            index,
+            &corners,
+            &surfaces.corners[index as usize],
+            &claim,
+        );
+        if let Some(hit) = admit(t, length, seeded(shell), laws) {
             out.push(FaceHit {
                 volume: node,
                 primitive,
+                shell,
+                contact,
                 triangle: index,
                 t: hit,
                 // Back to world space. The winding normal is the mesh's own orientation — never
                 // parry's, which is flipped to oppose the ray and so cannot tell entry from exit.
-                true_normal: rotation * normal,
+                true_normal: rotation * claim.normal,
             });
         }
         if out.len() > MAX_FACES {
@@ -339,7 +399,7 @@ fn collect_convex(
         true,
     );
 
-    let mut push = |t: f32, normal: Vec3, entry: bool, face: u32| {
+    let mut push = |t: f64, normal: Vec3, entry: bool, face: u32| {
         // Re-sign from the role, not from what the query returned.
         let oriented = if (normal.dot(corridor.axis) < 0.0) == entry {
             normal
@@ -350,6 +410,8 @@ fn collect_convex(
             out.push(FaceHit {
                 volume: node,
                 primitive,
+                shell: 0,
+                contact: Contact::Face(face),
                 triangle: face,
                 t,
                 true_normal: oriented,
@@ -393,7 +455,7 @@ fn collect_convex(
                 }
             }
         }
-        Some((distance, normal)) => push(distance, normal, true, 0),
+        Some((distance, normal)) => push(distance as f64, normal, true, 0),
         None => {}
     }
 
@@ -401,7 +463,9 @@ fn collect_convex(
         // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
         // defect class: the walk reports `IncompleteCorridor` and the driver extends.
         Some((distance, _)) if distance <= 0.0 => {}
-        Some((distance, normal)) => push(corridor.length - distance, normal, false, 1),
+        Some((distance, normal)) => {
+            push(corridor.length as f64 - distance as f64, normal, false, 1)
+        }
         None => {}
     }
     Ok(())
@@ -432,8 +496,8 @@ fn collect_convex(
 /// module's own answer to whether two `t` name one boundary. Anything farther behind is already
 /// traversed and is dropped. The seeded-drop / unseeded-clamp dichotomy is untouched; only the
 /// unbounded reach dies.
-fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
-    if !t.is_finite() || t >= length {
+fn admit(t: f64, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f64> {
+    if !t.is_finite() || t >= length as f64 {
         return None;
     }
     if t < 0.0 {
@@ -445,7 +509,239 @@ fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
     Some(t)
 }
 
-/// Ray-vs-triangle, returning the crossing distance and the triangle's WINDING normal.
+/// The ray reduced to the frame the containment test runs in: origin at zero, travel along `+z`
+/// after a permutation and a shear (Woop/Benthin/Wald, *Watertight Ray/Triangle Intersection*, 2013).
+///
+/// It is a function of the RAY ALONE. Every triangle of a corridor is sheared by the same constants,
+/// which is what makes the edge tests below comparable between triangles at all.
+struct RayShear {
+    origin: Vec3,
+    /// The permute-and-shear map, as its two surviving ROWS — the `z` row is discarded, since the
+    /// containment test is purely lateral. Held as vectors rather than as axis indices and scalars so
+    /// projection is two dot products and no dynamic component indexing.
+    row_x: Vec3,
+    row_y: Vec3,
+    /// The same map in f64, for the band where the f32 projection's own rounding decides the
+    /// containment answer. Derived from the same f32 `origin` and `axis`, so it describes the SAME
+    /// ray — it removes the arithmetic's rounding, never re-poses the query.
+    origin_exact: DVec3,
+    row_x_exact: DVec3,
+    row_y_exact: DVec3,
+}
+
+/// One vertex in the sheared frame, with a bound on how far the f32 arithmetic could have moved it.
+#[derive(Clone, Copy)]
+struct Projected {
+    p: (f32, f32),
+    /// Bound on `|computed − exact|` for EITHER coordinate (see [`PROJECTION_SLACK`]).
+    slack: f32,
+}
+
+/// The f32 projection's error, as a multiple of the vertex's own magnitude — over the certified
+/// coordinate domain, and nowhere else.
+///
+/// # The derivation, in full
+///
+/// A row holds `1` at `kx` and `s = fl(−axis[kx] / axis[kz])` at `kz`, so with `d = V − o` exactly
+/// and `m = max|v_i|` the computed coordinate is `p = fl(v_kx + fl(s · v_kz))` over `v = fl(d)`.
+/// `kz` is the ray's DOMINANT axis, so `|S| ≤ 1` and `|s| ≤ 1 + u`, `u = 2⁻²⁴`. Then:
+///
+/// - subtraction: `|v_i − d_i| ≤ u|d_i| ≤ u·m`, one term (a difference that lands in the subnormal
+///   range is exact, so this term needs no absolute companion);
+/// - the shear constant: `|s − S| ≤ u|S| ≤ u`, contributing `u|v_kz| ≤ u·m`;
+/// - the product's rounding: `≤ u|s·v_kz| + η`, and the shear applied to the subtraction's own error
+///   a further `|S|·u·m ≤ u·m`;
+/// - the sum's rounding: `≤ u·|v_kx + fl(s·v_kz)| + η ≤ 2u·m(1 + u) + η`.
+///
+/// Six `u·m`, a tail in `u²`, and TWO absolute terms `η = 2⁻¹⁵⁰` — the half-ulp floor of gradual
+/// underflow, which is what the relative model cannot express. `PROJECTION_SLACK` is eight `u`,
+/// so it dominates iff `2u·m ≥ 2η`, that is iff
+///
+/// > **`m ≥ η/u = 2⁻¹²⁶ = f32::MIN_POSITIVE`.**
+///
+/// That is the domain condition, and it is a condition on the vertex's offset from the CORRIDOR
+/// ORIGIN, which no bake gate can bound from below — the origin is not a vertex and may sit
+/// arbitrarily close to one. What [`crate::bake::CERTIFIED_RANGE`] bounds instead is the CONSEQUENCE of
+/// failing it:
+///
+/// - `m < 2⁻¹²⁶` means the origin agrees with this vertex to within `MIN_POSITIVE` in every
+///   component, so at most one welded vertex position of a triangle can be in that state, and the
+///   origin itself is inside the certified box to within `2⁻¹²⁶`;
+/// - for that vertex the UNCLAIMED error is `6u·m + 2η < 2⁻¹⁴⁷`, against a claimed `8u·m ≥ 0`;
+/// - the other two points are certified, so `|q_i| = |v_kx + s·v_kz| ≤ 2·(2·2¹⁶)` and
+///   `|q₀| + |q₁| ≤ 2¹⁹`;
+/// - so the deficit propagated into [`edge_area`] is `< 2⁻¹⁴⁷ · 2¹⁹ = 2⁻¹²⁸`, and
+///   [`edge_area_slack`]'s `f32::MIN_POSITIVE = 2⁻¹²⁶` term covers it four times over — with room
+///   left for the ≤ 5η that band expression's own evaluation can lose to underflow.
+///
+/// So the band is sufficient EVERYWHERE on the certified domain, and outside it this kernel makes no
+/// claim at all: the codex triangle in
+/// [`a_subnormal_triangle_is_outside_the_certified_domain`] has a subnormal vertex and a coordinate
+/// of `10¹⁰`, is refused at the door by both bounds, and is declined here — correctly as far as this
+/// bound is concerned, because this bound never promised anything about it.
+///
+/// It is a bound on the rounding, NOT a tolerance: the exact answer for the stored vertices is
+/// always inside it, so a decision made outside it is the exact one.
+///
+/// It is not small. `v` is the vertex MINUS the corridor origin — metres — while the lateral offset
+/// the projection has to resolve is centimetres, so at a 6 m standoff the bound is about a micron,
+/// and a micron at a silhouette is a whole chord ([`a_ray_inside_the_silhouette_keeps_its_chord`]).
+const PROJECTION_SLACK: f32 = 4.0 * f32::EPSILON;
+
+impl RayShear {
+    fn new(origin: Vec3, axis: Vec3) -> Self {
+        // `kz` is the ray's dominant axis, so the shear never divides by a small component.
+        let abs = axis.abs();
+        let kz = if abs.x > abs.y && abs.x > abs.z {
+            0
+        } else if abs.y > abs.z {
+            1
+        } else {
+            2
+        };
+        // Swapped when the ray runs backwards along `kz`, which keeps the sheared frame
+        // right-handed and so keeps the edge-area signs meaningful.
+        let mut kx = (kz + 1) % 3;
+        let mut ky = (kx + 1) % 3;
+        if axis[kz] < 0.0 {
+            std::mem::swap(&mut kx, &mut ky);
+        }
+        let mut row_x = Vec3::ZERO;
+        let mut row_y = Vec3::ZERO;
+        row_x[kx] = 1.0;
+        row_x[kz] = -axis[kx] / axis[kz];
+        row_y[ky] = 1.0;
+        row_y[kz] = -axis[ky] / axis[kz];
+        let (mut row_x_exact, mut row_y_exact) = (DVec3::ZERO, DVec3::ZERO);
+        row_x_exact[kx] = 1.0;
+        row_x_exact[kz] = -(axis[kx] as f64) / axis[kz] as f64;
+        row_y_exact[ky] = 1.0;
+        row_y_exact[kz] = -(axis[ky] as f64) / axis[kz] as f64;
+        Self {
+            origin,
+            row_x,
+            row_y,
+            origin_exact: origin.as_dvec3(),
+            row_x_exact,
+            row_y_exact,
+        }
+    }
+
+    /// One vertex in the sheared frame, as the 2D point the edge tests take cross products of.
+    ///
+    /// The translation happens FIRST. Folding it into a precomputed bias would leave the corridor
+    /// origin's magnitude in the products, and a corridor is metres from geometry that is centimetres
+    /// across.
+    #[inline]
+    fn project(&self, vertex: Vec3) -> Projected {
+        let v = vertex - self.origin;
+        Projected {
+            p: (self.row_x.dot(v), self.row_y.dot(v)),
+            slack: PROJECTION_SLACK * v.abs().max_element(),
+        }
+    }
+
+    /// The same projection with the rounding taken out.
+    ///
+    /// PER-VERTEX DETERMINISTIC, like the f32 form: a pure function of the stored vertex and the
+    /// shear. Two triangles naming one vertex therefore hand the edge test the same two f64 numbers,
+    /// which is the whole basis of the sign relation between them — the wider precision inherits the
+    /// watertightness argument rather than replacing it.
+    #[inline]
+    fn project_exact(&self, vertex: Vec3) -> (f64, f64) {
+        let v = vertex.as_dvec3() - self.origin_exact;
+        (self.row_x_exact.dot(v), self.row_y_exact.dot(v))
+    }
+}
+
+/// The signed area of the sheared edge `(p, q)` against the ray.
+///
+/// WATERTIGHTNESS LIVES HERE. Two triangles sharing an edge present it as `(p, q)` and `(q, p)`, and
+/// this expression is EXACTLY antisymmetric under that swap in IEEE arithmetic: multiplication
+/// commutes bit-for-bit, and `fl(x − y) == −fl(y − x)`. So the two triangles never agree that the ray
+/// is outside — a ray on a shared edge is claimed by exactly one of them, or (at an exact zero) by
+/// both. A per-triangle barycentric test computes the same edge from two different anchors and has no
+/// such relation: at a micron from the edge both round to "outside", the crossing is dropped, and the
+/// walk sees an exit with no entry.
+#[inline]
+fn edge_area(p: (f32, f32), q: (f32, f32)) -> f32 {
+    q.0 * p.1 - q.1 * p.0
+}
+
+/// The same area with the products carried in f64 — reached when, and only when, the f32 form
+/// cancels to exactly zero.
+///
+/// EXACT ZERO IS THE WHOLE OF THE UNRECOVERABLE SET *GIVEN THE PROJECTED POINTS*, which is what
+/// fixes this trigger's width. Round-to-nearest is monotone, so `q₀·p₁ ≥ q₁·p₀` implies
+/// `fl(q₀·p₁) ≥ fl(q₁·p₀)`, and the subtraction that follows preserves sign: a nonzero f32 area
+/// carries the EXACT sign for those points however violently the two products cancel, and only a
+/// cancellation to zero carries none. A trigger widened to "within a relative-error guard of zero"
+/// therefore re-decides cases whose sign was already right, and can recover no crossing at all
+/// (`the_sign_of_a_sheared_edge_area_is_the_exact_one_or_zero`).
+///
+/// The points themselves are the OTHER half, and this arithmetic cannot reach it: it inherits
+/// whatever [`RayShear::project`] rounded. That half is [`edge_area_slack`]'s.
+///
+/// Antisymmetric on the same grounds as the f32 form, so widening one triangle's edge widens its
+/// neighbour's identically.
+#[inline]
+fn edge_area_exact(p: (f32, f32), q: (f32, f32)) -> f64 {
+    q.0 as f64 * p.1 as f64 - q.1 as f64 * p.0 as f64
+}
+
+/// The same area over points that are already f64 — the exact-projection path.
+#[inline]
+fn edge_area_f64(p: (f64, f64), q: (f64, f64)) -> f64 {
+    q.0 * p.1 - q.1 * p.0
+}
+
+/// How far [`edge_area`] can sit from the area the EXACT projection of the same stored vertices
+/// would give.
+///
+/// With `|Δp| ≤ eₚ` and `|Δq| ≤ e_q` per coordinate ([`PROJECTION_SLACK`]), the propagated error on
+/// `q₀·p₁ − q₁·p₀` is at most `e_q(|p₀| + |p₁| + 2eₚ) + eₚ(|q₀| + |q₁|)`, and the two products and
+/// the subtraction add at most `2.1u(|q₀p₁| + |q₁p₀|)` on top — carried here as `4ε = 8u`, which
+/// also absorbs the rounding of this expression's own arithmetic. `f32::MIN_POSITIVE` covers
+/// gradual underflow, where the relative bounds stop holding.
+///
+/// It is a SUFFICIENT band, and that is the entire claim: if the f32 areas do not all share a sign
+/// while the exact ones do, then some f32 area is on the wrong side of zero and therefore no
+/// further from zero than its own error — inside this band. So a rejection outside the band is the
+/// exact answer for the stored geometry, and a rejection inside it is re-taken in f64. Nothing else
+/// about the band's width is load-bearing: too wide only costs the f64 path.
+#[inline]
+fn edge_area_slack(p: Projected, q: Projected) -> f32 {
+    let (px, py) = (p.p.0.abs(), p.p.1.abs());
+    let (qx, qy) = (q.p.0.abs(), q.p.1.abs());
+    q.slack * (px + py + 2.0 * p.slack)
+        + p.slack * (qx + qy)
+        + 4.0 * f32::EPSILON * (qx * py + qy * px)
+        + f32::MIN_POSITIVE
+}
+
+/// Whether the ray passes on the same side of all three edges — the containment half of the test,
+/// over whichever precision produced the areas.
+#[inline]
+fn same_side<T: PartialOrd + Default>(u: T, v: T, w: T) -> bool {
+    let zero = T::default();
+    !((u < zero || v < zero || w < zero) && (u > zero || v > zero || w > zero))
+}
+
+/// What one triangle claims about a ray: where it crosses, which way the face is wound, and which
+/// of its three sheared edges the ray cancelled EXACTLY against.
+struct TriangleClaim {
+    /// The plane intersection — the interior contact's `t`, and the fallback for a feature whose
+    /// own arithmetic cannot resolve it. Carried in f64 because it is the parameter the walk ORDERS
+    /// and MEASURES on; see [`contact_of`].
+    t: f64,
+    normal: Vec3,
+    /// Bit `k` set means the edge OPPOSITE corner `k` produced an exactly-zero area, so the ray
+    /// lies on it. Zero bits is an interior claim; one is an edge; two is the vertex they share.
+    zeros: u8,
+}
+
+/// Ray-vs-triangle, returning the crossing distance, the triangle's WINDING normal, and the exact
+/// feature the ray landed on.
 ///
 /// Ours rather than parry's for two reasons: parry's kernel answers "nearest hit, normal flipped to
 /// oppose the ray", which discards exactly the orientation §13.4's pairing runs on; and keeping the
@@ -454,24 +750,169 @@ fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
 ///
 /// Double-sided by construction: the sign of `det` is not tested, so a face is reported whichever
 /// way the ray meets it. That is the point — an exit face is a crossing too.
-fn cross_triangle(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, Vec3)> {
+///
+/// CONTAINMENT and DISTANCE come from different arithmetic on purpose. Containment is the watertight
+/// edge test, whose only contract is the sign relation between neighbouring triangles; `t` is the
+/// plane intersection, taken in f64 over the stored vertices because it is the quantity the walk
+/// orders crossings by and measures chords with — two contacts a fraction of an f32 ULP apart are
+/// still two contacts with a positive chord between them, and f32 arithmetic cannot say which comes
+/// first, let alone how far apart they are.
+///
+/// # One decision, so a contact means one thing
+///
+/// The f32 edge areas decide, EXCEPT inside their own rounding band, where the exact projection
+/// decides instead and REPLACES them. Outside the band the f32 sign is provably the exact one
+/// ([`edge_area_slack`]), so the composite predicate IS the exact-projection predicate — evaluated
+/// cheaply where cheap suffices.
+///
+/// That is what makes a contact well defined. Two arithmetics would tile the projected plane two
+/// different ways, and a pair of neighbouring triangles could each claim a ray under its own tiling
+/// with nothing cancelling: two claims of one shell naming two different contacts, which the walk
+/// can only refuse. One tiling has the antisymmetry property, so neighbours overlap only where an
+/// area is exactly zero — and an exact zero is a contact, by name.
+#[inline]
+fn cross_triangle(
+    shear: &RayShear,
+    axis: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Option<TriangleClaim> {
+    let (pa, pb, pc) = (shear.project(a), shear.project(b), shear.project(c));
+    let (u, v, w) = (
+        edge_area(pb.p, pc.p),
+        edge_area(pc.p, pa.p),
+        edge_area(pa.p, pb.p),
+    );
+    // The band contains exact zero (`edge_area_slack` carries `f32::MIN_POSITIVE`), so a cancelled
+    // area always escalates and a contact is always classified by the exact projection.
+    let banded = u.abs() <= edge_area_slack(pb, pc)
+        || v.abs() <= edge_area_slack(pc, pa)
+        || w.abs() <= edge_area_slack(pa, pb);
+    let zeros = if banded {
+        let (pa, pb, pc) = (
+            shear.project_exact(a),
+            shear.project_exact(b),
+            shear.project_exact(c),
+        );
+        let (u, v, w) = (
+            edge_area_f64(pb, pc),
+            edge_area_f64(pc, pa),
+            edge_area_f64(pa, pb),
+        );
+        // Three collinear sheared points: the ray lies in the triangle's plane and crosses nothing.
+        if !(same_side(u, v, w) && u + v + w != 0.0) {
+            return None;
+        }
+        u8::from(u == 0.0) | (u8::from(v == 0.0) << 1) | (u8::from(w == 0.0) << 2)
+    } else {
+        if !same_side(u, v, w) {
+            return None;
+        }
+        0
+    };
+
     let e1 = b - a;
     let e2 = c - a;
-    let normal = e1.cross(e2);
-    let det = -axis.dot(normal);
-    if det.abs() < PARALLEL_EPS {
+    let coarse = e1.cross(e2);
+    let (a64, b64, c64) = (a.as_dvec3(), b.as_dvec3(), c.as_dvec3());
+    let exact = (b64 - a64).cross(c64 - a64);
+    let det = -axis.as_dvec3().dot(exact);
+    if det.abs() < PARALLEL_EPS as f64 {
         return None;
     }
-    let ao = origin - a;
-    let dao = ao.cross(axis);
-    let u = e2.dot(dao) / det;
-    let v = -e1.dot(dao) / det;
-    if u < 0.0 || v < 0.0 || u + v > 1.0 {
-        return None;
+    let t = (shear.origin_exact - a64).dot(exact) / det;
+    // A NEEDLE'S PLANE IS NOT ITS OWN f32 CROSS PRODUCT. Two edges within `PROJECTION_SLACK` of
+    // parallel cancel that product down to its last bits, and what survives is noise with a
+    // direction: the face would then be reported with an orientation its own vertices do not support
+    // — an entry that reads as an exit. `PARALLEL_EPS` does not catch it, because the noise has
+    // magnitude. The three stored points still DETERMINE a plane; only the f32 arithmetic cannot find
+    // it, so the degenerate case takes its ORIENTATION from the wider products and nothing else does.
+    let normal = if coarse.length_squared()
+        <= PROJECTION_SLACK * PROJECTION_SLACK * e1.length_squared() * e2.length_squared()
+    {
+        exact.normalize_or_zero().as_vec3()
+    } else {
+        coarse.normalize_or_zero()
+    };
+    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim { t, normal, zeros })
+}
+
+/// The welded feature a claim is about, and the `t` that feature has along the ray.
+///
+/// CANONICAL, which is the whole job: every triangle incident on a welded edge or vertex must report
+/// the same contact and the same bits, or the walk cannot tell one crossing claimed twice from two
+/// crossings. Identity comes from the bake's welded ids; the parameter comes from the feature's own
+/// geometry, taken in an order fixed by those ids, so two triangles that spell an edge in opposite
+/// directions still compute one number.
+///
+/// EXACT-ORDERABLE, and that is the second half of the job. The parameter is carried in f64, over
+/// the same escalated projection the contact classification already ran: two distinct contacts of one
+/// shell can sit a fraction of an f32 ULP apart, and at that width f32 neither orders them (the walk
+/// then meets an exit before its entry) nor measures the material between them (the chord collapses
+/// to zero and a real thickness is crossed free). The public f32 the report prints is this number
+/// rounded; the walk pairs and charges on the f64.
+fn contact_of(
+    shear: &RayShear,
+    axis: Vec3,
+    triangle: u32,
+    positions: &[Vec3; 3],
+    welded: &[u32; 3],
+    claim: &TriangleClaim,
+) -> (Contact, f64) {
+    let axis = axis.as_dvec3();
+    let parameter = |point: DVec3| (point - shear.origin_exact).dot(axis);
+    match claim.zeros.count_ones() {
+        // The interior: this triangle alone claims it, and its own plane gives the distance.
+        0 => (Contact::Face(triangle), claim.t),
+        // One cancelled edge: the ray runs through it. Both incident triangles land here.
+        1 => {
+            // Bit `k` names the edge opposite corner `k`, i.e. the one joining the other two.
+            let (i, j) = match claim.zeros {
+                0b001 => (1, 2),
+                0b010 => (2, 0),
+                _ => (0, 1),
+            };
+            // Ascending welded id, so the two triangles interpolate the same direction.
+            let (i, j) = if welded[i] <= welded[j] {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let (p, q) = (
+                shear.project_exact(positions[i]),
+                shear.project_exact(positions[j]),
+            );
+            // The ray sits at the projected origin, so the parameter along the edge is where the
+            // segment crosses it. The wider component divides, so a near-axis-aligned edge does not
+            // divide by its own rounding.
+            let (from, span) = if (q.0 - p.0).abs() >= (q.1 - p.1).abs() {
+                (p.0, q.0 - p.0)
+            } else {
+                (p.1, q.1 - p.1)
+            };
+            let (from_i, to_j) = (positions[i].as_dvec3(), positions[j].as_dvec3());
+            let point = if span == 0.0 {
+                from_i
+            } else {
+                from_i + (to_j - from_i) * (-from / span)
+            };
+            (Contact::Edge(welded[i], welded[j]), parameter(point))
+        }
+        // Two cancelled edges: the ray runs through the vertex they share, and the whole welded fan
+        // around it reports this one contact.
+        _ => {
+            let corner = match claim.zeros {
+                0b011 => 2,
+                0b101 => 1,
+                _ => 0,
+            };
+            (
+                Contact::Vertex(welded[corner]),
+                parameter(positions[corner].as_dvec3()),
+            )
+        }
     }
-    let t = ao.dot(normal) / det;
-    let normal = normal.normalize_or_zero();
-    (normal != Vec3::ZERO).then_some((t, normal))
 }
 
 /// The corridor's swept bounding box, for the broad phase.
@@ -483,12 +924,14 @@ pub(crate) fn swept_aabb(origin: Vec3, axis: Vec3, length: f32, radius: f32) -> 
 
 #[cfg(test)]
 mod tests {
+    use bevy::math::DVec3;
+
     use super::*;
 
-    fn tri(o: Vec3, d: Vec3) -> Option<(f32, Vec3)> {
+    fn tri(o: Vec3, d: Vec3) -> Option<TriangleClaim> {
         // A unit triangle in the z = 1 plane, wound so its normal points +Z.
         cross_triangle(
-            o,
+            &RayShear::new(o, d),
             d,
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(1.0, 0.0, 1.0),
@@ -498,7 +941,8 @@ mod tests {
 
     #[test]
     fn a_head_on_crossing_reports_its_distance_and_winding_normal() {
-        let (t, normal) = tri(Vec3::new(0.1, 0.1, 0.0), Vec3::Z).expect("the ray crosses it");
+        let claim = tri(Vec3::new(0.1, 0.1, 0.0), Vec3::Z).expect("the ray crosses it");
+        let (t, normal) = (claim.t, claim.normal);
         assert!((t - 1.0).abs() < 1.0e-6, "{t}");
         // The WINDING normal, not one flipped to oppose the ray: this face is wound away from the
         // shooter, so it reads as an EXIT — which is exactly the fact parry's convention destroys.
@@ -510,7 +954,8 @@ mod tests {
     /// backfaces would lose every exit — half of every interval.
     #[test]
     fn a_crossing_from_behind_reports_the_same_winding_normal() {
-        let (t, normal) = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::NEG_Z).expect("the ray crosses it");
+        let claim = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::NEG_Z).expect("the ray crosses it");
+        let (t, normal) = (claim.t, claim.normal);
         assert!((t - 1.0).abs() < 1.0e-6, "{t}");
         assert!((normal - Vec3::Z).length() < 1.0e-6, "{normal}");
     }
@@ -532,7 +977,9 @@ mod tests {
     /// corridor admits.
     #[test]
     fn a_crossing_behind_the_origin_keeps_its_negative_distance() {
-        let (t, _) = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::Z).expect("the plane is behind it");
+        let t = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::Z)
+            .expect("the plane is behind it")
+            .t;
         assert!(t < 0.0, "{t}");
     }
 
@@ -583,6 +1030,16 @@ mod tests {
         let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
             panic!("`Collider::trimesh` builds a trimesh");
         };
+        // Every fixture here is one closed box, which is one shell.
+        let surfaces = BallisticSurfaces {
+            shells: vec![0u32; mesh.num_triangles()].into(),
+            corners: (0..mesh.num_triangles())
+                .map(|index| mesh.indices()[index])
+                .collect::<Vec<_>>()
+                .as_slice()
+                .into(),
+            scale: Vec3::ONE,
+        };
         collect_trimesh(
             mesh,
             origin,
@@ -590,7 +1047,8 @@ mod tests {
             length,
             node,
             node,
-            false,
+            &surfaces,
+            &|_| false,
             Rotation::default(),
             prune_margin(origin, &laws),
             &laws,
@@ -679,7 +1137,7 @@ mod tests {
         assert_eq!(admit(-1.0e-7, 1.0, true, &laws), None);
         // Behind the origin, NOT seeded: the ray is sitting on the face.
         assert_eq!(admit(-1.0e-7, 1.0, false, &laws), Some(0.0));
-        assert_eq!(admit(f32::NAN, 1.0, false, &laws), None);
+        assert_eq!(admit(f64::NAN, 1.0, false, &laws), None);
         // BEHIND THE ORIGIN AND MEANING IT: already traversed, and not this corridor's to report.
         // A sloped plate's exit triangles have extent along the ray, so a transit corridor that
         // restarts at that exit finds them here — and dragging them to `t = 0` is an exit with
@@ -691,5 +1149,681 @@ mod tests {
                 "{behind} m behind the origin is traversed, not underfoot",
             );
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Edge-crossing watertightness
+    // -----------------------------------------------------------------------------------------
+
+    /// The measured conditioning of the live defect: a corridor origin metres away from geometry
+    /// tens of centimetres across, on a ray aligned with no axis, meeting a face aligned with no
+    /// axis. Round coordinates and axis-aligned faces round symmetrically and hide it.
+    const SWEEP_SIZE: Vec3 = Vec3::new(0.4127, 0.4127, 0.1013);
+    const SWEEP_DIR: Vec3 = Vec3::new(0.4871, -0.5133, -1.0);
+    const SWEEP_STANDOFF: f32 = 6.0837;
+    /// Half-width of the sweep, in ULP of the ray origin. The band is a few ULP wide and sits
+    /// wherever the rounding puts it, so the grid brackets it rather than naming it.
+    const SWEEP_REACH: i32 = 128;
+
+    /// The retired per-triangle containment test, kept as the REFERENCE the sweep measures itself
+    /// against.
+    ///
+    /// It anchors all three edges on the triangle's own first vertex, so two triangles sharing an
+    /// edge compute that edge from different quantities: the exact-arithmetic identity between them
+    /// survives, the floating-point one does not, and within a few ULP of the edge both round the
+    /// ray to "outside". The sweep asserts that this predicate DOES lose crossings on the fixture,
+    /// so a green run cannot mean the fixture stopped exercising the band.
+    fn barycentric_contains(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+        let e1 = b - a;
+        let e2 = c - a;
+        let det = -axis.dot(e1.cross(e2));
+        if det.abs() < PARALLEL_EPS {
+            return false;
+        }
+        let dao = (origin - a).cross(axis);
+        let u = e2.dot(dao) / det;
+        let v = -e1.dot(dao) / det;
+        !(u < 0.0 || v < 0.0 || u + v > 1.0)
+    }
+
+    /// The eight corners of the sweep box, rotated off every axis.
+    fn sweep_vertices() -> Vec<Vec3> {
+        let h = SWEEP_SIZE * 0.5;
+        let rotation = Quat::from_euler(EulerRot::YXZ, 0.7137, 0.3119, 0.1171);
+        [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| rotation * Vec3::new(x * h.x, y * h.y, z * h.z))
+        .collect()
+    }
+
+    /// The box's faces except the top, which each fixture triangulates for itself.
+    fn sweep_sides() -> Vec<[u32; 3]> {
+        vec![
+            [0, 3, 2],
+            [0, 2, 1],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ]
+    }
+
+    /// Ray origins on a grid of single-ULP steps around the one aimed straight at `target`.
+    ///
+    /// Stepping the ORIGIN's bits, not the target: the origin is metres from the geometry, so its
+    /// own ULP is the finest perturbation the corridor can express, and a smaller step applied to
+    /// the target vanishes in the subtraction that forms it.
+    fn sweep_origins(target: Vec3, axis: Vec3, reach: i32) -> impl Iterator<Item = Vec3> {
+        let base = target - axis * SWEEP_STANDOFF;
+        (-reach..=reach).flat_map(move |i| {
+            (-reach..=reach).map(move |j| {
+                Vec3::new(
+                    f32::from_bits((base.x.to_bits() as i32 + i) as u32),
+                    f32::from_bits((base.y.to_bits() as i32 + j) as u32),
+                    base.z,
+                )
+            })
+        })
+    }
+
+    /// A RAY THROUGH A SHARED EDGE MUST NOT FALL BETWEEN THE TWO TRIANGLES.
+    ///
+    /// The two halves of the top face are anchored on DIFFERENT vertices — the shape the live
+    /// failure has (`[51, 58, 59]` beside `[58, 60, 59]`), and the shape a mesh is under no
+    /// obligation to avoid. A ray within a few ULP of their shared edge is then rejected by both
+    /// independent barycentric tests: the entry vanishes, the walk meets an exit for a primitive it
+    /// is not inside, and the driver fails the round closed in mid-armour.
+    #[test]
+    fn a_ray_on_a_shared_edge_is_claimed_by_one_of_the_two_triangles() {
+        let vertices = sweep_vertices();
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
+        let mut lost = 0;
+        let mut retired_lost = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
+            let shear = RayShear::new(origin, axis);
+            let near = cross_triangle(&shear, axis, vertices[4], vertices[5], vertices[6]);
+            let far = cross_triangle(&shear, axis, vertices[6], vertices[7], vertices[4]);
+            if near.is_none() && far.is_none() {
+                lost += 1;
+            }
+            if !barycentric_contains(origin, axis, vertices[4], vertices[5], vertices[6])
+                && !barycentric_contains(origin, axis, vertices[6], vertices[7], vertices[4])
+            {
+                retired_lost += 1;
+            }
+            total += 1;
+        }
+        assert_eq!(
+            lost, 0,
+            "{lost} of {total} rays fell between the two triangles"
+        );
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing on this fixture, so the sweep is not crossing the edge \
+             it was built to cross",
+        );
+    }
+
+    /// AND THE WALK RESOLVES IT — the consequence, end to end on a closed primitive.
+    #[test]
+    fn a_shared_edge_crossing_resolves_into_one_interval() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
+            let spans = sweep_walks(&collider, origin, axis)
+                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
+            assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
+        }
+    }
+
+    /// Walk one sweep ray and report how many presence intervals the crossing resolved into.
+    ///
+    /// `walk_ray` rather than a hit count, because that IS the contract: a ray exactly on a shared
+    /// edge is legitimately claimed by BOTH incident triangles, and they name that edge, so the walk
+    /// reads one crossing. What must never happen is a crossing going missing.
+    fn sweep_walks(collider: &Collider, origin: Vec3, axis: Vec3) -> Result<usize, WalkError> {
+        let length = SWEEP_STANDOFF * 2.0;
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let hits = trimesh_hits(collider, origin, axis, length);
+        let walk = super::super::walk::walk_ray(
+            0,
+            &super::super::walk::RayCorridor {
+                anchor: Vec3::ZERO,
+                origin,
+                axis,
+                length,
+                initial_presence: Vec::new(),
+                hits,
+            },
+            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &WalkLaws::default(),
+        )?;
+        Ok(walk
+            .shells
+            .first()
+            .map_or(0, |presence| presence.spans.len()))
+    }
+
+    /// A T-JUNCTION IS A CRACK OF ITS OWN VERTEX'S WIDTH, AND NO KERNEL CAN CLOSE IT.
+    ///
+    /// The same box, but one half of the top face re-triangulated around a vertex `M` placed on the
+    /// diagonal without splitting the triangle on the far side of it. There is no shared edge for
+    /// the sign relation to hold across, and `M` lies on the segment only to f32 rounding, so the
+    /// surface really is open — over a sliver as wide as that rounding and no wider.
+    ///
+    /// The bound is the claim. A T-junction that lost more than its own vertex rounding would be a
+    /// hole in the asset, which is a modelling fix and not a walk one.
+    #[test]
+    fn a_t_junction_cracks_only_within_its_own_rounding() {
+        let mut vertices = sweep_vertices();
+        let (v4, v6) = (vertices[4], vertices[6]);
+        // Deliberately not a midpoint or a power-of-two fraction, either of which can land exactly
+        // on the segment and hide the crack.
+        vertices.push(v4 + (v6 - v4) * 0.3719);
+        let mut indices = sweep_sides();
+        // The far half keeps the whole diagonal as one edge; the near half is split around `M`.
+        indices.extend([[6, 7, 4], [4, 5, 8], [8, 5, 6]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[8];
+        let mut cracked = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
+            match sweep_walks(&collider, origin, axis) {
+                Ok(spans) => assert_eq!(spans, 1, "origin {origin:?} crossed the box once"),
+                Err(_) => cracked += 1,
+            }
+            total += 1;
+        }
+        // The grid is `2·SWEEP_REACH + 1` ULP across in each direction and centred on the junction
+        // vertex itself — the worst place on the whole seam to aim.
+        assert!(
+            cracked * 100 <= total,
+            "{cracked} of {total} rays fell through the T-junction: that is a hole, not a rounding \
+             sliver",
+        );
+    }
+
+    /// `x` moved by `steps` f32 ULP.
+    fn ulp_step(x: f32, steps: i32) -> f32 {
+        f32::from_bits((x.to_bits() as i32 + steps) as u32)
+    }
+
+    /// A NONZERO f32 EDGE AREA IS NEVER ON THE WRONG SIDE, AND AN EXACT ZERO IS NEVER MISSED.
+    ///
+    /// [`edge_area`] is `fl(fl(q₀·p₁) − fl(q₁·p₀))`. Round-to-nearest is MONOTONE, so
+    /// `q₀·p₁ ≥ q₁·p₀` implies `fl(q₀·p₁) ≥ fl(q₁·p₀)`, and the final subtraction is sign-preserving:
+    /// the computed area therefore carries the exact sign or it carries none — it can never carry
+    /// the opposite one, however violently the two products cancel.
+    ///
+    /// That is what pins the width of the f64 fallback's trigger. Exact zero is the whole of the
+    /// unrecoverable set; a trigger widened to "near zero" re-decides only cases whose f32 sign was
+    /// already right, so it cannot recover a crossing that was lost. MEASURED over 1 543 115
+    /// genuinely interior grazing rays (f64 Möller–Trumbore reference): the shipped predicate and an
+    /// exact-arithmetic evaluation of the same sheared points agree on every one of them, and a
+    /// relative-error-widened trigger changes 0 decisions.
+    #[test]
+    fn the_sign_of_a_sheared_edge_area_is_the_exact_one_or_zero() {
+        let mut cancelled = 0u32;
+        let mut checked = 0u32;
+        for (x, y) in [
+            (0.6127f32, 0.7903f32),
+            (1.4813, 0.5171),
+            (0.25, 2.0),
+            (3.7137, -1.1071),
+            (0.5, 0.70710677),
+        ] {
+            let p = (x, y);
+            // `q` sweeps a neighbourhood of `−p`, where the two products cancel to the last bits.
+            for i in -48..=48i32 {
+                for j in -48..=48i32 {
+                    let q = (ulp_step(-x, i), ulp_step(-y, j));
+                    let f32_area = edge_area(p, q);
+                    let exact = edge_area_exact(p, q);
+                    checked += 1;
+                    if f32_area == 0.0 {
+                        cancelled += 1;
+                        continue;
+                    }
+                    assert_eq!(
+                        f32_area > 0.0,
+                        exact > 0.0,
+                        "p {p:?} q {q:?}: f32 {f32_area:e} against {exact:e}",
+                    );
+                    assert!(
+                        exact != 0.0,
+                        "p {p:?} q {q:?}: an exact zero read as nonzero"
+                    );
+                }
+            }
+        }
+        assert!(
+            cancelled > 0,
+            "{checked} pairs and not one cancellation: the sweep is not crossing the band",
+        );
+    }
+
+    /// A SLIVER FACE IN A CLOSED SURFACE LOSES NO CROSSING.
+    ///
+    /// One triangle of the top face is fanned around a point 0.1 µm off its own long diagonal, so
+    /// the fan contains a triangle whose sheared projection is a sliver 0.4 m long: every interior
+    /// point of it is within a few ULP of two of its own edges, and its edge areas are the
+    /// difference of two products that agree to their last bits.
+    ///
+    /// A sliver's containment answer is not a claim about 3D barycentrics — the shear projects both
+    /// halves of every shared edge from the SAME vertices, so the projected triangles tile the plane
+    /// exactly, and a ray the sliver declines is claimed by whichever neighbour owns that side of the
+    /// edge. The retired per-triangle test had no such relation, which is why it drops rays here.
+    #[test]
+    fn a_sliver_face_in_a_closed_surface_loses_no_crossing() {
+        let mut vertices = sweep_vertices();
+        let (v4, v5, v6) = (vertices[4], vertices[5], vertices[6]);
+        // Strictly inside the triangle `[4, 5, 6]`, and 0.1 µm off the diagonal `4–6`.
+        let foot = v4 + (v6 - v4) * 0.4137;
+        let inner = foot + (v5 - foot).normalize() * 1.0e-7;
+        vertices.push(inner);
+        let mut indices = sweep_sides();
+        // The far half keeps the diagonal whole; the near half is fanned around the interior point,
+        // so the surface stays closed and `[6, 4, 8]` is the sliver.
+        indices.extend([[6, 7, 4], [4, 5, 8], [5, 6, 8], [6, 4, 8]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let (a, b, c) = (vertices[6], vertices[4], vertices[8]);
+        let target = a * 0.170 + b * 0.238 + c * 0.592;
+        let mut retired_lost = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
+            let spans = sweep_walks(&collider, origin, axis)
+                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
+            assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
+            let shear = RayShear::new(origin, axis);
+            let fan = [[a, b, c], [b, v5, c], [v5, a, c]];
+            let shipped = fan
+                .iter()
+                .filter(|t| cross_triangle(&shear, axis, t[0], t[1], t[2]).is_some())
+                .count();
+            let retired = fan
+                .iter()
+                .filter(|t| barycentric_contains(origin, axis, t[0], t[1], t[2]))
+                .count();
+            if shipped > 0 && retired == 0 {
+                retired_lost += 1;
+            }
+            total += 1;
+        }
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing over {total} rays, so the sweep is not crossing the              sliver",
+        );
+    }
+
+    /// One triangle crossing in f64, from the f32 vertices — the reference the shipped kernel is
+    /// measured against.
+    ///
+    /// Möller–Trumbore rather than a second shear, so the reference shares no arithmetic with the
+    /// thing it is judging: a bug in the shear cannot hide inside its own oracle. Double-sided, like
+    /// the kernel.
+    ///
+    /// The mesh's f32 vertices are the geometry. The reference is what an infinitely precise ray
+    /// through THOSE points would answer, evaluated in f64 — sixteen orders below the micron the
+    /// disagreements live at, so it stands in for exact arithmetic here.
+    fn moller_trumbore_f64(
+        origin: DVec3,
+        axis: DVec3,
+        a: DVec3,
+        b: DVec3,
+        c: DVec3,
+    ) -> Option<f64> {
+        let (e1, e2) = (b - a, c - a);
+        let pvec = axis.cross(e2);
+        let det = e1.dot(pvec);
+        if det.abs() < 1.0e-18 {
+            return None;
+        }
+        let inv = 1.0 / det;
+        let tvec = origin - a;
+        let u = tvec.dot(pvec) * inv;
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let qvec = tvec.cross(e1);
+        let v = axis.dot(qvec) * inv;
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        Some(e2.dot(qvec) * inv)
+    }
+
+    /// THE BAND'S DOMAIN, STATED BY THE TRIANGLE THAT LIES OUTSIDE IT.
+    ///
+    /// [`PROJECTION_SLACK`] is a bound on the projection's rounding only where the relative-error
+    /// model it is derived from holds; on a vertex whose corridor-relative offset is subnormal it
+    /// underflows to zero and claims an exactness the arithmetic does not have. Codex built the
+    /// triangle that turns that into a declined crossing: one vertex at the very bottom of the
+    /// subnormal range, two at `10¹⁰`, so the near-zero vertex's unclaimed absolute error is
+    /// multiplied up into a wrong-signed edge area of `1.6079e-36` against a band of `1.3468e-38`.
+    /// No edge triggers the f64 reconsideration, and `cross_triangle` returns `None` where the
+    /// independent f64 reference finds a crossing.
+    ///
+    /// The answer is not a wider band — it is that this triangle is not geometry. Both ends of it
+    /// are outside [`crate::bake::CERTIFIED_RANGE`], so the bake refuses it before a collider is
+    /// ever built, and the kernel's bound is written as a claim about that domain. This test is what
+    /// makes the exclusion a fact rather than a footnote: the domain predicate REFUSES it, and the
+    /// kernel's answer here is recorded, not defended.
+    #[test]
+    fn a_subnormal_triangle_is_outside_the_certified_domain() {
+        let denormal = f32::from_bits(1);
+        let a = Vec3::new(-64.0 * denormal, -64.0 * denormal, denormal);
+        let b = Vec3::new(1.0e10, 10_017_928_192.0, 0.0);
+        let c = Vec3::new(-2.0e10, -1.0e10, 0.0);
+        let axis = Vec3::new(0.3, 0.4, 0.866_025_4);
+        let origin = Vec3::ZERO;
+
+        // Both ends of the certified range refuse it: the subnormal vertex and the 10¹⁰ one.
+        assert!(
+            !crate::bake::certified_coordinate(a.z),
+            "the subnormal vertex must be refused at the floor",
+        );
+        assert!(
+            !crate::bake::certified_coordinate(b.x),
+            "the 10¹⁰ vertex must be refused at the ceiling",
+        );
+        // And a coordinate a tank actually has is not refused with it.
+        assert!(
+            crate::bake::certified_coordinate(1.234) && crate::bake::certified_coordinate(0.0),
+            "the gate must pass the geometry it exists to protect",
+        );
+
+        // What the kernel does out there, recorded. The reference accepts; the kernel declines; the
+        // bound never spoke for this triangle either way.
+        let reference = moller_trumbore_f64(
+            origin.as_dvec3(),
+            axis.as_dvec3(),
+            a.as_dvec3(),
+            b.as_dvec3(),
+            c.as_dvec3(),
+        );
+        assert!(
+            reference.is_some(),
+            "the counterexample must still be a crossing in exact arithmetic",
+        );
+        let shear = RayShear::new(origin, axis);
+        assert!(
+            cross_triangle(&shear, axis, a, b, c).is_none(),
+            "the recorded out-of-domain behaviour changed — re-derive the bound before re-pinning",
+        );
+    }
+
+    /// A CLOSED SURFACE'S SILHOUETTE MUST NOT SWALLOW BOTH CROSSINGS.
+    ///
+    /// The shear's edge test is watertight BETWEEN triangles: neighbours share an edge's two
+    /// endpoints, so the same rounded 2D points serve both and the sign relation is exact. What that
+    /// argument never covered is the projection itself. Translation, shear multiply and sum all run
+    /// in f32, and at a corridor's scale the subtraction `vertex − origin` is metres wide while the
+    /// lateral offset it must resolve is centimetres — so each projected vertex lands up to about a
+    /// micron off the point the exact map would put it at, and the whole projected silhouette
+    /// breathes by that much.
+    ///
+    /// A ray a fraction of a micron inside that silhouette then falls OUTSIDE the rounded one, every
+    /// incident triangle declines it, and the walk sees no crossing at all: not a fail-closed error,
+    /// a silent zero.
+    ///
+    /// A 513 × 513 ULP grid centred on the box's own corner — the worst place on a closed surface to
+    /// aim, where four faces and three silhouette edges meet. 78 871 of those rays have a positive
+    /// exact chord, and against the f64 reference the census over 3 158 028 triangle tests reads:
+    ///
+    /// | | chords erased | chords halved | crossings declined | claims the reference denies |
+    /// |---|---|---|---|---|
+    /// | f32 projection alone | 271 | 0 | 965 | 463 |
+    /// | with the f64 band | 0 | 0 | 0 | 463 |
+    ///
+    /// The widest erased chord was 0.763528 µm, at origin `(-2.5700798, 2.315606, 5.0677752)`. The
+    /// last column does not move because the band never re-decides an acceptance.
+    #[test]
+    fn a_ray_inside_the_silhouette_keeps_its_chord() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let axis = SWEEP_DIR.normalize();
+        let (axis64, tris) = (
+            axis.as_dvec3(),
+            indices
+                .iter()
+                .map(|t| {
+                    [
+                        vertices[t[0] as usize].as_dvec3(),
+                        vertices[t[1] as usize].as_dvec3(),
+                        vertices[t[2] as usize].as_dvec3(),
+                    ]
+                })
+                .collect::<Vec<_>>(),
+        );
+
+        let (mut chorded, mut lost, mut halved) = (0u32, 0u32, 0u32);
+        // Per-TRIANGLE disagreements with the reference, in both directions. `over` is deliberate —
+        // the band may only add acceptances, so an f32 claim the reference denies is kept and
+        // counted rather than flipped. `under` is the defect class itself.
+        let (mut over, mut under) = (0u32, 0u32);
+        let mut widest = 0.0f64;
+        for origin in sweep_origins(vertices[4], axis, 256) {
+            let shear = RayShear::new(origin, axis);
+            let mut exact: Vec<f64> = Vec::new();
+            let mut shipped = 0u32;
+            for (t, exact_tri) in indices.iter().zip(&tris) {
+                let reference = moller_trumbore_f64(
+                    origin.as_dvec3(),
+                    axis64,
+                    exact_tri[0],
+                    exact_tri[1],
+                    exact_tri[2],
+                );
+                let claimed = cross_triangle(
+                    &shear,
+                    axis,
+                    vertices[t[0] as usize],
+                    vertices[t[1] as usize],
+                    vertices[t[2] as usize],
+                )
+                .is_some();
+                match (claimed, reference) {
+                    (true, Some(distance)) => {
+                        shipped += 1;
+                        exact.push(distance);
+                    }
+                    (true, None) => {
+                        shipped += 1;
+                        over += 1;
+                    }
+                    (false, Some(distance)) => {
+                        under += 1;
+                        exact.push(distance);
+                    }
+                    (false, None) => {}
+                }
+            }
+            exact.sort_by(f64::total_cmp);
+            let chord = match (exact.first(), exact.last()) {
+                (Some(first), Some(last)) => last - first,
+                _ => 0.0,
+            };
+
+            if chord > 0.0 {
+                chorded += 1;
+                match shipped {
+                    0 => {
+                        lost += 1;
+                        widest = widest.max(chord);
+                    }
+                    1 => halved += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(
+            chorded > 70_000,
+            "{chorded} rays with a chord: the grid has stopped straddling the corner",
+        );
+        assert_eq!(
+            lost, 0,
+            "{lost} of {chorded} chords erased entirely, the widest {widest:e} m",
+        );
+        assert_eq!(halved, 0, "{halved} of {chorded} chords lost one crossing");
+        assert_eq!(
+            under, 0,
+            "{under} triangle crossings the reference finds and the kernel declines",
+        );
+        // The other direction is the rounded tiling's own over-claim, MEASURED at 463 of 3 158 028
+        // triangle tests and identical before and after the band — the f32 decision is never
+        // flipped, only supplemented. A ray charged to a face a hair outside it is the direction
+        // §13 allows; the bound is here so the count cannot grow unnoticed.
+        assert!(
+            over * 100 <= chorded,
+            "{over} kept f32 claims the reference denies, against {chorded} chords",
+        );
+    }
+
+    /// THE REPORTED PARAMETER IS THE EXACT ONE, WHICH IS WHAT MAKES ORDER A FACT.
+    ///
+    /// Two certified contacts of one shell can sit a fraction of an f32 ULP apart — a shard brushed
+    /// near its silhouette is the ordinary way to get there. The pairing law reads them as an entry
+    /// then an exit, so their ORDER decides between an ordinary tiny traversal and a structured
+    /// alternation error, and the order is only a fact if the parameter is.
+    ///
+    /// The retired f32 plane intersection is not. It computes `(origin − a)·n / (−axis·n)` at f32
+    /// width over a metres-wide subtraction, and per triangle that costs ULP-scale accuracy — enough
+    /// to swap a sub-ULP pair, which is exactly the `UnexpectedExit` the bound Tiger produced at
+    /// seed 11 ray 645520. The f64 form agrees with an independent f64 reference far below any
+    /// separation two distinct contacts can have.
+    #[test]
+    fn the_reported_parameter_is_the_exact_plane_intersection() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let axis = SWEEP_DIR.normalize();
+        let axis64 = axis.as_dvec3();
+
+        let (mut wide, mut retired) = (0.0f64, 0.0f64);
+        for origin in sweep_origins(vertices[4], axis, 64) {
+            let shear = RayShear::new(origin, axis);
+            for triangle in &indices {
+                let (a, b, c) = (
+                    vertices[triangle[0] as usize],
+                    vertices[triangle[1] as usize],
+                    vertices[triangle[2] as usize],
+                );
+                let Some(reference) = moller_trumbore_f64(
+                    origin.as_dvec3(),
+                    axis64,
+                    a.as_dvec3(),
+                    b.as_dvec3(),
+                    c.as_dvec3(),
+                ) else {
+                    continue;
+                };
+                let Some(claim) = cross_triangle(&shear, axis, a, b, c) else {
+                    continue;
+                };
+                wide = wide.max((claim.t - reference).abs());
+                // The retired form, kept here as the CONTRAST rather than as a fallback.
+                let normal = (b - a).cross(c - a);
+                let f32_t = (shear.origin - a).dot(normal) / -axis.dot(normal);
+                retired = retired.max((f32_t as f64 - reference).abs());
+            }
+        }
+
+        // One f32 ULP at this standoff — the separation two contacts of one shell may have and still
+        // be ordinary material.
+        let ulp = (f32::from_bits(SWEEP_STANDOFF.to_bits() + 1) - SWEEP_STANDOFF) as f64;
+        assert!(
+            wide < ulp * 1.0e-6,
+            "the reported parameter drifts {wide:e} m from the exact one, against a {ulp:e} m ULP",
+        );
+        assert!(
+            retired > ulp * 0.1,
+            "the retired f32 form drifted only {retired:e} m — the sweep no longer conditions it",
+        );
+    }
+
+    /// A RAY THROUGH A SHARED VERTEX IS CLAIMED BY THE FAN AROUND IT.
+    ///
+    /// The shared-EDGE relation is exact antisymmetry between two triangles. A vertex has no such
+    /// pairing: it is the meeting point of a whole fan, and its watertightness rests on the shear
+    /// projecting that one vertex to one 2D point for every triangle that names it. This aims at a
+    /// box corner where four faces meet, rotated off every axis, and steps the origin one ULP at a
+    /// time across it.
+    ///
+    /// The claim is the walk's, not a hit count's: a ray on the corner is claimed by the whole fan,
+    /// and every face of it names that welded vertex, so the walk reads one contact. What must never
+    /// happen is a crossing going missing, which the corridor reports as a `WalkError`.
+    #[test]
+    fn a_ray_through_a_shared_vertex_is_claimed_by_the_fan() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        // Vertex 4 is named by four of the box's faces.
+        let fan: Vec<[u32; 3]> = {
+            let mut all = sweep_sides();
+            all.extend([[4, 5, 6], [6, 7, 4]]);
+            all.into_iter().filter(|t| t.contains(&4)).collect()
+        };
+        assert_eq!(fan.len(), 4, "the corner is a fan of four");
+        let (mut crossed, mut missed, mut retired_lost) = (0, 0, 0);
+        for origin in sweep_origins(vertices[4], axis, 32) {
+            match sweep_walks(&collider, origin, axis) {
+                Ok(0) => missed += 1,
+                // A ray that clips the corner has a chord that shrinks continuously toward zero, and
+                // every one of them is an ordinary crossing: the parameter is exact, so a chord far
+                // thinner than one f32 ULP is still ordered, still charged, and still one crossing.
+                Ok(1) => crossed += 1,
+                Ok(other) => panic!("origin {origin:?} crossed the box {other} times"),
+                Err(error) => panic!("origin {origin:?}: {error:?}"),
+            }
+            let shear = RayShear::new(origin, axis);
+            let claim = |t: &[u32; 3], retired: bool| {
+                let (a, b, c) = (
+                    vertices[t[0] as usize],
+                    vertices[t[1] as usize],
+                    vertices[t[2] as usize],
+                );
+                if retired {
+                    barycentric_contains(origin, axis, a, b, c)
+                } else {
+                    cross_triangle(&shear, axis, a, b, c).is_some()
+                }
+            };
+            if fan.iter().any(|t| claim(t, false)) && !fan.iter().any(|t| claim(t, true)) {
+                retired_lost += 1;
+            }
+        }
+        assert!(
+            crossed > 0 && missed > 0,
+            "the grid must bracket the corner: {crossed} crossed, {missed} missed",
+        );
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing at the corner, so the sweep is not crossing the fan",
+        );
     }
 }

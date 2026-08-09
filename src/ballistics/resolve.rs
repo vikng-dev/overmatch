@@ -30,13 +30,13 @@ use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
 use super::walk::{
-    self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, PrimitiveKey, SampleCorridor,
-    SampleSeed, Shot, VolumeTable, WalkError, WalkLaws,
+    self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, SampleCorridor, SampleSeed, ShellKey,
+    Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, ComponentHealth, HullShockLedger, Impact, ImpactSurface, MarchingShell,
-    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, ShockCause,
-    apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
+    ArmorCrossing, BallisticSurfaces, ComponentHealth, HullShockLedger, Impact, ImpactSurface,
+    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
+    ShockCause, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
 /// How far past first contact the first corridor reaches. Most crossings close well inside it; the
@@ -112,7 +112,16 @@ pub(crate) struct Crossing {
 /// than nine, exactly as [`ProjectileMarchWorld`] groups the queries.
 pub(crate) struct ResolveContext<'a, 'w, 's> {
     pub world: &'a ProjectileMarchWorld<'w, 's>,
-    pub colliders: &'a Query<'w, 's, (&'static Position, &'static Rotation, &'static Collider)>,
+    pub colliders: &'a Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static Collider,
+            Option<&'static BallisticSurfaces>,
+        ),
+    >,
     pub armor: &'a SpatialQueryFilter,
     /// Authority = not a replica: only then does a crossing mutate health.
     pub deposit: bool,
@@ -283,10 +292,9 @@ fn closing_walk(
         let volumes = volume_table(context, &corridor)?;
         match walk::walk_disc(&corridor, &volumes, &context.laws) {
             Ok(walked) => {
-                let settled = walked
-                    .events
-                    .first()
-                    .is_none_or(|event| event.end + context.laws.weld_max_lookahead <= length);
+                let settled = walked.events.first().is_none_or(|event| {
+                    event.end + context.laws.weld_max_lookahead as f64 <= length as f64
+                });
                 if settled || length >= MAX_CORRIDOR {
                     return Ok(walked);
                 }
@@ -367,7 +375,7 @@ pub(super) fn build_corridor(
 
     let mut samples = Vec::with_capacity(offsets.len());
     for (index, offset) in offsets.into_iter().enumerate() {
-        let seeded: &[PrimitiveKey] = seeds.get(index).map_or(&[], |seed| &seed.inside);
+        let seeded: &[ShellKey] = seeds.get(index).map_or(&[], |seed| &seed.inside);
         let mut hits = Vec::new();
         collect::collect(
             &Corridor {
@@ -663,7 +671,7 @@ fn perforate_or_embed(
             // Read at the point the NEXT corridor will actually start from — the march nudges every
             // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
             // plate the round has already cleared.
-            let seeds = transit.resume_at(t + super::MARCH_EPS, &context.laws);
+            let seeds = transit.resume_at((t + super::MARCH_EPS) as f64, &context.laws);
             (
                 ArmorCrossing::Perforated {
                     exit: world(transit.origin + transit.axis * t),

@@ -41,11 +41,11 @@ fn the_union_field_contract_holds_at_ci_scale() {
          larger than the run"
     );
     assert!(
-        report.unexplained_walk_errors().is_empty(),
-        "a corridor through the bound tank failed to walk on a volume that is NOT one of the \
-         measured bake defects (see `DEGENERATE_BAKE_RESIDUE`). Every one of these is a round that \
-         stops dead in mid-armour:\n{:#?}",
-        report.unexplained_walk_errors(),
+        report.walk_errors.is_empty(),
+        "a corridor through the bound tank failed to walk. Every one of these is a round that stops \
+         dead in mid-armour — re-fire the named ray with `--replay` at this seed, it depends on \
+         nothing else:\n{:#?}",
+        report.walk_errors,
     );
 
     let bless = BlessList::shipped();
