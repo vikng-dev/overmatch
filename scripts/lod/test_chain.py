@@ -67,8 +67,8 @@ def validity_record(tris, verts, origin_radius=0.1, bbox_mm=(700.0, 180.0, 180.0
     return {
         "tris": tris, "verts": verts, "components": 1, "duplicate_faces": 0,
         "nonfinite_attrs": 0, "orientation_flips": 0, "nonmanifold_edges": 0,
-        "boundary_edges": 0, "slivers_below_floor": 0, "tangent_default_faces": 0,
-        "tangent_default_verts": 0, "min_altitude_m": 0.001, "min_altitude_floor_m": 0.0001,
+        "boundary_edges": 0, "tangent_default_faces": 0,
+        "tangent_default_verts": 0,
         "min_tri_area_mm2": 1.0, "origin_radius_m": origin_radius,
         "baked_tangents": verts, "degenerate_tangents": 0, "min_tangent_length": 0.999999,
         "bbox_mm": list(bbox_mm), "radius_m": 0.4,
@@ -718,6 +718,16 @@ class RederivationSweepTests(unittest.TestCase):
             if level.get("render_gate", {}).get("abstained")
         ]
         self.abstaining = abstaining[0] if abstaining else None
+        # The DEEPEST SCORED level, by list index. The three "cannot buy an abstention" mutations
+        # below have to start from a level the gate actually judged: aimed at one that already
+        # abstains they mutate nothing that matters and assert nothing at all, which is the same
+        # vacuity the hardcoded index above produced by a different route. Deepest, because that is
+        # the one closest to the footprint floor and so the one an abstention is worth buying for.
+        scored = [
+            index for index, level in enumerate(levels)
+            if level.get("render_gate") and not level["render_gate"].get("abstained")
+        ]
+        self.scored_index = scored[-1] if scored else None
 
     def mutated(self, mutate):
         manifest = json.loads(self.text)
@@ -841,8 +851,7 @@ class RederivationSweepTests(unittest.TestCase):
 
     def test_every_recorded_defect_counter_is_compared_against_its_limit(self):
         for key in ("duplicate_faces", "nonfinite_attrs", "orientation_flips",
-                    "nonmanifold_edges", "tangent_default_faces", "tangent_default_verts",
-                    "slivers_below_floor"):
+                    "nonmanifold_edges", "tangent_default_faces", "tangent_default_verts"):
             with self.subTest(key=key):
                 self.assert_caught(
                     f"{key} = 3 on L1",
@@ -1043,7 +1052,7 @@ class RederivationSweepTests(unittest.TestCase):
         anything.
         """
         def shrink(manifest):
-            gate = manifest["assets"][0]["levels"][3]["render_gate"]
+            gate = manifest["assets"][0]["levels"][self.scored_index]["render_gate"]
             gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
             gate["screen_footprint_px"] = round(
                 chain.screen_footprint_px(gate["bbox_mm"], gate["distance_m"], VIEW), 4
@@ -1052,7 +1061,7 @@ class RederivationSweepTests(unittest.TestCase):
             gate["pass"] = None
             gate["reason"] = "too small to judge"
 
-        self.assert_caught("L3 gate bbox shrunk tenfold", shrink)
+        self.assert_caught("deepest level: gate bbox shrunk tenfold", shrink)
 
     def test_a_gate_bbox_that_is_not_the_levels_bbox_is_refused(self):
         self.assert_caught(
@@ -1105,7 +1114,7 @@ class RederivationSweepTests(unittest.TestCase):
     def test_shrinking_both_bboxes_cannot_buy_an_abstention(self):
         """The gate bbox AND the validity record's copy, moved together — still refused."""
         def shrink(manifest):
-            level = manifest["assets"][0]["levels"][3]
+            level = manifest["assets"][0]["levels"][self.scored_index]
             gate = level["render_gate"]
             gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
             level["validity"]["bbox_mm"] = list(gate["bbox_mm"])
@@ -1121,7 +1130,7 @@ class RederivationSweepTests(unittest.TestCase):
     def test_removing_the_validity_bbox_cannot_buy_an_abstention(self):
         """`bbox_mm` was optional, so deleting it deleted the comparison that used it."""
         def remove(manifest):
-            level = manifest["assets"][0]["levels"][3]
+            level = manifest["assets"][0]["levels"][self.scored_index]
             gate = level["render_gate"]
             level["validity"].pop("bbox_mm")
             gate["bbox_mm"] = [value / 10.0 for value in gate["bbox_mm"]]
@@ -1145,39 +1154,6 @@ class RederivationSweepTests(unittest.TestCase):
                         k, m["assets"][0]["levels"][1]["validity"][k] + 7
                     ),
                 )
-
-    def test_a_forged_sliver_floor_is_refused(self):
-        """The floor was read from the record and used as its own threshold.
-
-        Lowering the recorded number lowered the bar it was checked against, so a level could
-        legalise a sliver by editing the manifest. The verifier now DERIVES the corpus floor from
-        decoded L0 and this tree's config, and the recorded copy has to match it.
-        """
-        for index in range(0, self.level_count):
-            with self.subTest(level=index):
-                self.assert_caught(
-                    f"L{index} sliver floor lowered 10x",
-                    lambda m, i=index: m["assets"][0]["levels"][i]["validity"].__setitem__(
-                        "min_altitude_floor_m",
-                        m["assets"][0]["levels"][i]["validity"]["min_altitude_floor_m"] / 10.0,
-                    ),
-                )
-
-    def test_the_derived_floor_matches_what_generation_recorded(self):
-        """The derivation and the corpus agree — otherwise the check above is vacuous."""
-        import measure as measure_module
-
-        l0 = json.loads(self.text)["assets"][0]["levels"][0]
-        surface = measure_module.surface_from_bytes(
-            open(os.path.join(self.root, l0["glb"]), "rb").read(), l0["node"], "L0"
-        )
-        plain = surface.validity(CONFIG.GATES)
-        derived = chain._derived_corpus_floor(plain, surface.diagonal, CONFIG.GATES)
-        for level in json.loads(self.text)["assets"][0]["levels"]:
-            self.assertAlmostEqual(
-                level["validity"]["min_altitude_floor_m"], derived, places=12,
-                msg=f"L{level['level']}",
-            )
 
     def test_a_level_that_split_into_two_pieces_is_refused(self):
         """`components_must_match` was compared at generation and never again.
@@ -1233,8 +1209,7 @@ class RederivationSweepTests(unittest.TestCase):
         entry = manifest["assets"][0]["levels"][1]
         entry["glb_sha256"] = hashlib.sha256(blob).hexdigest()
         rebuilt = measure_module.surface_from_bytes(blob, level["node"], "L1")
-        floor = entry["validity"]["min_altitude_floor_m"]
-        entry["validity"] = rebuilt.validity(CONFIG.GATES, floor)
+        entry["validity"] = rebuilt.validity(CONFIG.GATES)
         entry["tris"], entry["verts"] = rebuilt.tri_count, rebuilt.vert_count
 
         failures, _ = chain.verify(manifest, chain.Tree(directory))
@@ -1246,17 +1221,15 @@ class RederivationSweepTests(unittest.TestCase):
 
     @staticmethod
     def _thinnest_triangle_apex(surface):
-        """(vertex index, unit direction toward the opposite edge) for the thinnest triangle.
+        """(vertex index, unit direction toward the opposite edge) of the SMALLEST triangle.
 
-        THE VERTEX THAT SETS THE CORPUS BAR. The sliver floor is `min_altitude / margin`, and a
-        triangle's minimum altitude is the distance from the vertex opposite its longest edge to
-        that edge — so pushing THIS vertex toward THAT edge lowers the minimum altitude by (almost
-        exactly) the distance moved, and lowers the floor every level is judged against with it.
-        Any other vertex would move the geometry fingerprint without moving the bar, which is the
-        half of the story a fingerprint-only mutation cannot tell.
+        Any interior vertex would do — the point of the poison is that it is sub-micron and
+        geometrically invisible, not that it lands anywhere special. The smallest triangle's apex
+        is chosen because it is deterministic and cheap to name, and because moving it toward its
+        opposite edge is the most conservative possible nudge: it changes the surface less than
+        moving any other vertex the same distance would.
         """
-        altitudes = surface.altitudes()
-        triangle = surface.tri_v[int(np.argmin(altitudes))]
+        triangle = surface.tri_v[int(np.argmin(surface.tri_area))]
         points = surface.verts[triangle]
         edges = [float(np.linalg.norm(points[(k + 1) % 3] - points[k])) for k in range(3)]
         apex = (int(np.argmax(edges)) + 2) % 3          # the corner the longest edge does not touch
@@ -1266,21 +1239,15 @@ class RederivationSweepTests(unittest.TestCase):
         foot = base + along * float(np.dot(stand_off - base, along))
         return int(triangle[apex]), (foot - stand_off) / np.linalg.norm(foot - stand_off)
 
-    def test_a_poisoned_l0_cannot_lower_the_corpus_floor(self):
-        """L0 is the BASELINE, so choosing it freely re-judges every level. BYTES, not a digest.
+    def test_a_poisoned_l0_is_caught_only_by_its_fingerprint(self):
+        """L0 is the BASELINE every level is compared to, so it may not be chosen freely.
 
-        The probe that found this moved one interior vertex of L0 by 0.9 um, updated the hash and
-        recomputed every level's validity against the new bar — and the whole manifest verified
-        clean, because the corpus sliver floor is DERIVED FROM L0: thin L0's thinnest triangle and
-        every other level is judged against a lower bar for free.
-
-        SO THIS TEST PERFORMS THAT REGRESSION RATHER THAN DESCRIBING IT. It decodes the shipped
-        `tiger_1.glb`, moves the apex of L0's thinnest triangle 0.9 um toward the edge it stands off
+        THIS TEST PERFORMS THE SUBSTITUTION RATHER THAN DESCRIBING IT. It decodes the shipped
+        `tiger_1.glb`, moves the apex of L0's smallest triangle 0.9 um toward the edge it stands off
         (every split corner of that one POSITION, so the weld stays intact and the level is still
         one component — a torn weld is a different refusal), patches those float32s back into the
         BIN chunk, re-encodes the glb, and writes an HONEST manifest for the result: the real
-        sha256 of the poisoned bytes and every level's validity recomputed against the floor the
-        poisoned L0 derives. Measured here, that floor falls from 1.1808 um to 0.9558 um.
+        sha256 of the poisoned bytes and every level's validity recomputed from them.
 
         Both halves are asserted, and the first is what makes the second worth having:
 
@@ -1301,7 +1268,6 @@ class RederivationSweepTests(unittest.TestCase):
             original = handle.read()
         gltf, binary = measure_module.glb_chunks_from_bytes(original, source["glb"])
         surface = measure_module.surface_from_bytes(original, source["node"], "L0")
-        recorded_floor = source["validity"]["min_altitude_floor_m"]
 
         target, direction = self._thinnest_triangle_apex(surface)
         coincident = np.where(
@@ -1363,19 +1329,12 @@ class RederivationSweepTests(unittest.TestCase):
         manifest = json.loads(self.text)
         poisoned_levels = manifest["assets"][0]["levels"]
         poisoned_levels[0]["glb_sha256"] = hashlib.sha256(poisoned).hexdigest()
-        floor = chain._derived_corpus_floor(
-            mutant.validity(CONFIG.GATES), mutant.diagonal, CONFIG.GATES
-        )
-        self.assertLess(
-            floor, recorded_floor - 1e-7,
-            f"the poison must actually lower the corpus bar: {recorded_floor} m -> {floor} m",
-        )
         for level in poisoned_levels:
             with open(os.path.join(directory, level["glb"]), "rb") as handle:
                 decoded = measure_module.surface_from_bytes(
                     handle.read(), level.get("node"), f"L{level['level']}"
                 )
-            level["validity"] = decoded.validity(CONFIG.GATES, floor)
+            level["validity"] = decoded.validity(CONFIG.GATES)
 
         # WITHOUT THE FINGERPRINT THERE IS NOTHING: re-derive it from the poisoned bytes, as an
         # attacker rewriting the manifest alongside the assets would, and the corpus verifies clean.

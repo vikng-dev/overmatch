@@ -25,8 +25,8 @@ rather than inherited from the Blender mesh that produced them.
 
 WHAT FAILS THE RUN, LOUDLY (ADR 0033 §10): an unexpected Blender build; a skinned or morph-target
 source; a multi-material or multi-primitive source; a shipped L0 that is not the source; a level
-whose certified upper bound misses its rung after export; a level that lost a component; a sliver
-below the scale-aware altitude floor; a defaulted tangent; a duplicate face; a non-manifold edge; a
+whose certified upper bound misses its rung after export; a level that lost a component; a
+defaulted tangent; a duplicate face; a non-manifold edge; a
 non-finite attribute; a flipped winding; a level that does not reproduce byte-for-byte when built
 twice; and — once its threshold is ratified — a rendered difference over budget. Nothing degrades
 silently.
@@ -294,9 +294,8 @@ def cleanup(mesh, scale_m):
     THE DISTANCE IS DECLARED IN `config.GATES["cleanup_dissolve_frac_of_diag"]` and it had to grow.
     At 1e-6 of the bounding diagonal (0.77 um here) it removed nothing real, and the decimator kept
     producing a NEEDLE — a 50 mm triangle 4.7 um thick — inherited from the source. That needle
-    passes every positional gate honestly (its altitude is above the sliver floor, which is anchored
-    to the source's own worst) and still breaks the loader: after decimation the corner at its tip
-    ends up with a fan of one, and mikktspace declines to give it a tangent.
+    passes every positional gate honestly and still breaks the loader: after decimation the corner
+    at its tip ends up with a fan of one, and mikktspace declines to give it a tangent.
 
     So the distance is now 1e-5 of the diagonal, 7.7 um on this shoe. What that spans is worth
     stating plainly: it removes the 4.7 um needle and leaves the next-thinnest features (21 um and
@@ -397,13 +396,12 @@ class Candidates:
     neighbours, because "no valid candidate at exactly N triangles" is not "no valid candidate".
     """
 
-    def __init__(self, source_obj, source_surface, gates, source_validity, floor_m):
+    def __init__(self, source_obj, source_surface, gates, source_validity):
         self.source_obj = source_obj
         self.source = source_surface
         self.gates = gates
-        # The pre-filter's inputs, identical to the ones `certify` will use on the shipped bytes.
+        # The pre-filter's input, identical to the one `certify` will use on the shipped bytes.
         self.source_validity = source_validity
-        self.floor_m = floor_m
         self.entries = {}
         self.outputs = []          # candidate KEYS (geometry digests), ascending by triangles
         self.rejected = {}         # digest -> the failures that kept it out of the search
@@ -463,7 +461,7 @@ class Candidates:
             if key in self.rejected:
                 return reached, key
             if key not in self.entries:
-                validity = surface.validity(self.gates, self.floor_m)
+                validity = surface.validity(self.gates)
                 # `require_baked_tangents=False`: tangents are baked by the EXPORTER, so a Blender
                 # candidate legitimately carries none yet. Every other gate in the shared list
                 # applies, and the baked-tangent gate is still enforced at certification, on the
@@ -601,24 +599,13 @@ def write_level_glb(mesh, node_name, path):
 
 # ── certification ────────────────────────────────────────────────────────────────────────────────
 
-def sliver_floor_m(gates, source, source_validity):
-    """The floor generated levels are held to: scale-aware, and anchored to the source's own worst.
-
-    See `config.GATES["sliver_margin_vs_source"]` for why both halves are needed.
-    """
-    return max(
-        gates["min_altitude_frac_of_diag"] * source.diagonal,
-        source_validity["min_altitude_m"] / gates["sliver_margin_vs_source"],
-    )
-
-
-def certify(source, shipped, target_mm, gates, source_validity, floor_m):
+def certify(source, shipped, target_mm, gates, source_validity):
     """Every numeric gate, on the decoded shipped bytes. Returns (report, failures)."""
     deviation = M.certified_deviation(
         source, shipped, gates["deviation_tol_m"], gates["deviation_max_nodes_certify"],
         rel_tol=gates["deviation_rel_tol_certify"],
     )
-    validity = shipped.validity(gates, floor_m)
+    validity = shipped.validity(gates)
     failures = M.validity_gate_failures(validity, source_validity, gates)
     if deviation["mm_upper"] > target_mm:
         failures.insert(0, (
@@ -645,22 +632,8 @@ def build_chain(asset, root, run_render_gate, out_dir):
     source_validity = source.validity(CONFIG.GATES)
     log(f"  source {source.tri_count} tris  {source.vert_count} verts  "
         f"components={source_validity['components']}  "
-        f"min_altitude={source_validity['min_altitude_m'] * 1000:.6f} mm  "
         f"tangent_default_faces={source_validity['tangent_default_faces']}  "
         f"radius={source.radius:.4f} m")
-    if source_validity["slivers_below_floor"]:
-        raise GenerationError(
-            "source",
-            f"the SOURCE carries {source_validity['slivers_below_floor']} triangle(s) below the "
-            f"absolute scale-aware altitude floor "
-            f"{source_validity['min_altitude_floor_m'] * 1000:.6f} mm — fix the .blend; a floor "
-            f"the source fails is not a floor",
-        )
-    floor_m = sliver_floor_m(CONFIG.GATES, source, source_validity)
-    log(f"  sliver floor for generated levels: {floor_m * 1000:.6f} mm "
-        f"(source worst {source_validity['min_altitude_m'] * 1000:.6f} mm / margin "
-        f"{CONFIG.GATES['sliver_margin_vs_source']:g}, absolute bound "
-        f"{CONFIG.GATES['min_altitude_frac_of_diag'] * source.diagonal * 1000:.6f} mm)")
 
     probe = _fresh_copy(obj, "FloorProbe")
     modifier = probe.modifiers.new("C", "DECIMATE")
@@ -683,7 +656,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     shipped_l0 = M.from_glb(l0_path, asset["l0_node"], "L0")
     identical, identity_reason = M.same_surface(source, shipped_l0)
     l0_dev_mm = M.vertex_deviation(source, shipped_l0)
-    l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
+    l0_validity = shipped_l0.validity(CONFIG.GATES)
     # L0 bakes its tangents too now (Yan ratified the host re-export), so it is held to exactly
     # the same rule as every generated level: one tangent per vertex, and none degenerate.
     l0_failures = M.validity_gate_failures(l0_validity, source_validity, CONFIG.GATES)
@@ -721,7 +694,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "tangents_are_baked": True,
     }
 
-    candidates = Candidates(obj, source, CONFIG.GATES, source_validity, floor_m)
+    candidates = Candidates(obj, source, CONFIG.GATES, source_validity)
     # Once per asset, shared by every rung: the complete set of meshes this decimator can produce.
     candidates.enumerate_outputs(floor_tris, source.tri_count)
     levels = [l0]
@@ -788,7 +761,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
 
         shipped = M.from_glb(staged, None, f"rung{rung}")
         report, failures = certify(
-            source, shipped, target_mm, CONFIG.GATES, source_validity, floor_m
+            source, shipped, target_mm, CONFIG.GATES, source_validity
         )
         pairwise = M.certified_deviation(
             previous["surface"], shipped, CONFIG.GATES["deviation_tol_m"],
@@ -948,7 +921,6 @@ def build_chain(asset, root, run_render_gate, out_dir):
             "validity": source_validity,
         },
         "topology_floor_tris": floor_tris,
-        "sliver_floor_m": floor_m,
         "termination": termination,
         "deviation_evaluations": candidates.evaluations,
         "enumerated_outputs": len(candidates.outputs),

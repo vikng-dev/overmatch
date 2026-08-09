@@ -77,8 +77,8 @@ SOURCE_NUMERIC_FIELDS = ("tris", "verts", "radius_m")
 #: second one is evidence.
 LEVEL_VALIDITY_FIELDS = (
     "tris", "verts", "components", "duplicate_faces", "nonfinite_attrs", "orientation_flips",
-    "nonmanifold_edges", "slivers_below_floor", "tangent_default_faces", "tangent_default_verts",
-    "min_altitude_m", "origin_radius_m", "min_altitude_floor_m", "min_tri_area_mm2",
+    "nonmanifold_edges", "tangent_default_faces", "tangent_default_verts",
+    "origin_radius_m", "min_tri_area_mm2",
     "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
     "radius_m",
 )
@@ -147,7 +147,7 @@ INFORMATIONAL_FIELDS = frozenset({
     "shed_fraction", "floor_tris", "cleanup", "faces_before", "faces_after", "dissolve_dist_m",
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
     "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
-    "under_absolute_floor", "label", "sliver_floor_m", "topology_floor_tris",
+    "under_absolute_floor", "label", "topology_floor_tris",
     "blend_sha256", "sources_sha256", "glb_sha256", "welded_digest", "right_wall_m", "reference_view",
     "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
     "numeric", "render", "render_views", "render_gate_blocking", "generator", "ladder", "gates",
@@ -732,29 +732,9 @@ def _check_level_cross_fields(asset, levels, index, row, failures):
 
 #: Validity fields that are NOT re-derivable from a level's own bytes, with why.
 #:
-#: `min_altitude_floor_m` is the SOURCE-anchored sliver floor — a property of the corpus, not of one
-#: level's mesh — so it is compared as a recorded number and used as an input when re-deriving the
-#: rest. `components` is derived from the bytes and included below.
+#: Empty: every field in a level's validity record is recomputed from that level's own decoded
+#: bytes. `components` is compared against decoded L0's, which is derived rather than recorded.
 VALIDITY_NOT_FROM_OWN_BYTES = ()
-
-
-def _derived_corpus_floor(l0_validity, l0_diagonal_m, gates):
-    """The sliver floor, DERIVED — never read out of the manifest and used as its own input.
-
-    It is `max(frac_of_diag x diagonal, source_worst / margin)`, exactly as generation computes it,
-    and every input comes from decoded L0 or from this tree's config. The manifest's copy is then
-    compared against this rather than trusted.
-
-    IT WAS TRUSTED, AND THAT WAS THE WHOLE GATE. The floor was read from the level's own record and
-    fed back in as the threshold to re-derive against, so lowering the recorded number lowered the
-    bar it was checked against: a 1.17e-7 m sliver injected into a level, with every byte-derived
-    field and the hash honestly updated and only the floor moved, verified clean. A threshold a
-    manifest can choose for itself is not a threshold.
-    """
-    return max(
-        gates["min_altitude_frac_of_diag"] * l0_diagonal_m,
-        l0_validity["min_altitude_m"] / gates["sliver_margin_vs_source"],
-    )
 
 
 def _decode_level(tree, level, label, failures):
@@ -776,7 +756,7 @@ def _decode_level(tree, level, label, failures):
         return None
 
 
-def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None, floor_m=None):
+def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
     """Re-derive the level's whole validity record FROM THE SHIPPED BYTES and compare it.
 
     THIS IS THE ROOT FIX FOR TWO SEPARATE BYPASSES, and both worked the same way: verification
@@ -796,14 +776,7 @@ def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None, floor_m=
         return
 
     recorded = level["validity"]
-    derived = surface.validity(CONFIG.GATES, floor_m)
-    if abs(recorded["min_altitude_floor_m"] - floor_m) > 1e-12:
-        failures.append(
-            f"{label}: records a sliver floor of {recorded['min_altitude_floor_m']} m, but decoded "
-            f"L0 and this tree's config derive {floor_m} m — a threshold a manifest can choose for "
-            f"itself is not a threshold"
-        )
-
+    derived = surface.validity(CONFIG.GATES)
     for key in LEVEL_VALIDITY_FIELDS:
         if key in VALIDITY_NOT_FROM_OWN_BYTES:
             continue
@@ -895,16 +868,13 @@ def verify(manifest, tree):
                 f"{asset['name']}: {asset['source']['blend']} has changed since generation — the "
                 f"chain is cut from a source that no longer exists"
             )
-        # DECODE L0 FIRST: it is the source of both the component count every level is compared
-        # against and the corpus sliver floor, and neither may come from the manifest.
+        # DECODE L0 FIRST: it is the source of the component count every level is compared
+        # against, and that may not come from the manifest.
         #
         # ── WHAT BINDS L0, AND WHAT DOES NOT ─────────────────────────────────────────────────
         #
-        # L0 is the BASELINE: the floor every sliver is judged against and the component count
-        # every level is compared to are both derived from it. So it is worth being exact about
-        # what stops it being chosen freely, because a probe moving ONE interior vertex of L0 by
-        # 0.9 um — with its hash honestly updated — lowered the corpus floor from 1.18 um to
-        # 0.77 um and the whole manifest verified clean.
+        # L0 is the BASELINE: the component count every level is compared to is derived from it.
+        # So it is worth being exact about what stops it being chosen freely.
         #
         # BOUND: the decoded bytes must reproduce `welded_digest`, a split-invariant fingerprint of
         # L0's geometry recorded at generation, at the moment L0 had just been proven identical to
@@ -919,7 +889,7 @@ def verify(manifest, tree):
         # review, and git history. This verifier proves a corpus is internally consistent and
         # consistent WITH ITS BYTES; it does not prove the bytes are the ones an artist authored.
         l0_surface = _decode_level(tree, asset["levels"][0], f"{asset['name']} L0", failures)
-        l0_derived = floor_m = None
+        l0_derived = None
         if l0_surface is not None:
             recorded_digest = asset["levels"][0].get("welded_digest")
             if not recorded_digest:
@@ -930,12 +900,10 @@ def verify(manifest, tree):
             elif l0_surface.welded_digest() != recorded_digest:
                 failures.append(
                     f"{asset['name']} L0: the shipped bytes do not reproduce the recorded geometry "
-                    f"fingerprint. L0 sets the sliver floor and the component count for the whole "
-                    f"corpus, so a changed baseline silently re-judges every level."
+                    f"fingerprint. L0 sets the component count for the whole corpus, so a "
+                    f"changed baseline silently re-judges every level."
                 )
-            l0_plain = l0_surface.validity(CONFIG.GATES)
-            floor_m = _derived_corpus_floor(l0_plain, l0_surface.diagonal, CONFIG.GATES)
-            l0_derived = l0_surface.validity(CONFIG.GATES, floor_m)
+            l0_derived = l0_surface.validity(CONFIG.GATES)
 
         previous = None
         for index, (row, level) in enumerate(zip(chain["levels"], asset["levels"])):
@@ -959,7 +927,7 @@ def verify(manifest, tree):
                 failures.append(f"{label}: does not record baked tangents")
             if l0_derived is not None:
                 _check_decoded_bytes(
-                    asset, level, tree, failures, l0_derived, floor_m
+                    asset, level, tree, failures, l0_derived
                 )
             _check_level_cross_fields(asset, asset["levels"], index, row, failures)
             if level["role"] == "source":

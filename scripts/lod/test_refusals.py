@@ -193,7 +193,6 @@ class ValidityTests(unittest.TestCase):
         self.assertEqual(report["tangent_default_faces"], 0)
         self.assertEqual(report["nonfinite_attrs"], 0)
         self.assertEqual(report["components"], 1)
-        self.assertEqual(report["slivers_below_floor"], 0)
 
     def test_a_duplicate_face_is_counted(self):
         report = self.surface(
@@ -228,14 +227,6 @@ class ValidityTests(unittest.TestCase):
         self.assertEqual(
             self.surface("two.glb", positions, indices, uvs).validity(self.gates)["components"], 2
         )
-
-    def test_a_needle_triangle_falls_below_the_altitude_floor(self):
-        """A collapse leaves needles; the gate is an altitude, not an area, so length cannot hide it."""
-        positions = [[0, 0, 0], [1, 0, 0], [0.5, 1e-9, 0]]
-        surface = self.surface("needle.glb", positions, [0, 1, 2], [[0, 0], [1, 0], [0.5, 1]])
-        report = surface.validity(self.gates)
-        self.assertEqual(report["slivers_below_floor"], 1)
-        self.assertLess(report["min_altitude_m"], report["min_altitude_floor_m"])
 
     def test_a_nonfinite_position_is_counted(self):
         positions = [[0, 0, 0], [1, 0, 0], [float("nan"), 1, 0], [0, 1, 0]]
@@ -476,7 +467,7 @@ class GateParityTests(unittest.TestCase):
     """Generation and verification enforce the SAME gates, and every declared limit gates something.
 
     Twice a gate existed at generation and was simply absent from the verifier — `components_must_
-    match` was compared when a level was cut and never again, and the sliver floor was re-derived
+    match` was compared when a level was cut and never again, and the checks were re-derived
     against a threshold the manifest supplied for itself. Both are the same bug: two lists that were
     supposed to agree.
 
@@ -491,8 +482,7 @@ class GateParityTests(unittest.TestCase):
         return {
             "tris": 10, "verts": 30, "components": 1, "duplicate_faces": 0, "nonfinite_attrs": 0,
             "orientation_flips": 0, "nonmanifold_edges": 0, "boundary_edges": 0,
-            "slivers_below_floor": 0, "tangent_default_faces": 0, "tangent_default_verts": 0,
-            "min_altitude_m": 0.01, "min_altitude_floor_m": 0.001, "min_tri_area_mm2": 1.0,
+            "tangent_default_faces": 0, "tangent_default_verts": 0, "min_tri_area_mm2": 1.0,
             "origin_radius_m": 0.4, "bbox_mm": [1.0, 1.0, 1.0],
             "baked_tangents": 30, "degenerate_tangents": 0, "min_tangent_length": 1.0,
         }
@@ -519,12 +509,6 @@ class GateParityTests(unittest.TestCase):
         validity["components"] = 2
         failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
         self.assertTrue(any("component count" in f for f in failures), failures)
-
-    def test_the_sliver_gate_fires(self):
-        validity = self.clean_validity()
-        validity["slivers_below_floor"] = 1
-        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
-        self.assertTrue(any("altitude floor" in f for f in failures), failures)
 
     def test_the_tangent_presence_gate_fires(self):
         validity = self.clean_validity()

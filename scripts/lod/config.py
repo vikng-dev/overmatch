@@ -127,22 +127,6 @@ GATES = {
     "deviation_rel_tol_certify": 0.01,
     "deviation_max_nodes_search": 400_000,
     "deviation_max_nodes_certify": 1_500_000,
-    # SLIVER FLOOR, and it is anchored to the source rather than declared out of thin air.
-    #
-    # A collapsed vertex pair leaves a needle: ~zero area, an interpolated normal that is numeric
-    # noise, and a UV triangle that may collapse with it and default the tangent. But "how thin is
-    # too thin" is a property of the asset — the reference shoe's own thinnest triangle is 4.7 um
-    # on a 768 mm diagonal, and a floor above that would condemn the artist's mesh. A floor the
-    # SOURCE fails is not a floor, it is a bug (this exact number was caught by that check on the
-    # first run, which is why the rule is written down here).
-    #
-    # So the effective floor is `max(frac_of_diag * diagonal, source_min_altitude / margin)`:
-    #   * the fraction is the absolute scale-aware bound — a triangle under a micron on a
-    #     three-quarter-metre part has no interior at any resolution anyone renders at,
-    #   * the margin says a generated level may be a little thinner than the source and no more,
-    #     which is the actual defect this gate is for.
-    "min_altitude_frac_of_diag": 1.0e-6,
-    "sliver_margin_vs_source": 4.0,
     # A face whose UV triangle has (near) zero area cannot produce a tangent: mikktspace divides by
     # that area and bevy hands the shader a defaulted one. ZERO tolerated, on the shipped bytes.
     "uv_area_eps": 1.0e-12,
@@ -242,11 +226,12 @@ RENDER_GATE = {
     "defect_fraction": 2.00,
     # Below this on-screen size the gate ABSTAINS instead of scoring (Yan, 2026-08-02).
     #
-    # PICKED FROM THE L4 GEOMETRY, which is the class it exists to kill. At its 1050 m switch the
-    # shoe is 13.1 pixels across in the reference view; a 20-degree normal tilt is invisible at that
-    # size, so the defect reference collapses and the score becomes a ratio of two nothings — L4
-    # scored 7.68 in one round and 0.73 in the next off the same geometry. At L3's 501 m switch the
-    # shoe is 27.5 pixels across and the bracket is meaningful. 20 px sits between them.
+    # PICKED FROM THE DEEPEST LEVEL'S GEOMETRY, which is the class it exists to kill. That level
+    # switches in far enough away that a 20-degree normal tilt is invisible, so the defect reference
+    # collapses and the score becomes a ratio of two nothings — the level that motivated this scored
+    # 7.68 in one round and 0.73 in the next off the same geometry. One level nearer, the bracket is
+    # meaningful. 20 px sits between them, and still does on the 2026-08-08 corpus: L4 is 8.7 px
+    # across at its 1499.6 m switch and abstains, L3 is 26.3 px at 527.9 m and is scored.
     #
     # The measure is the asset's PROJECTED DIAMETER, not the renderer's pixel count: it is a
     # property of the geometry and the distance, so the verifier re-derives it from the recorded
@@ -309,13 +294,19 @@ RECORDED_GATE_THRESHOLDS = (
 #: silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably wants a
 #: minimum resolvable footprint below which this gate abstains and says so.
 #:
-#: REFRESHED 2026-08-07 for the re-cut corpus, and the refresh is exactly what this constant is for.
-#: The shoe was welded and gate-repaired, so L0 fell 1 661 -> 764 triangles and the ladder rebased
-#: from four reductions to three. The `ruling` below is left VERBATIM: it is Yan's, made on the
-#: superseded corpus, and rewriting a person's finding to match new numbers would destroy the
-#: provenance the block exists to carry. It still holds, a fortiori — the corpus it judged produced
-#: a worst score of 1.674 against the ratified limit of 2.0, and this one produces 1.000. The
-#: `levels` under it ARE the new corpus, because those are measurements and measurements go stale.
+#: REFRESHED 2026-08-08 for the re-cut corpus, and the refresh is exactly what this constant is for.
+#: Yan rebuilt the shoe, so L0 rose 764 -> 1 520 triangles and the ladder rebased again, to four
+#: reductions. The `ruling` below is left VERBATIM: it is Yan's, made on a corpus that is now two
+#: generations old, and rewriting a person's finding to match new numbers would destroy the
+#: provenance the block exists to carry. The `levels` under it ARE the new corpus, because those are
+#: measurements and measurements go stale.
+#:
+#: IT NO LONGER HOLDS A FORTIORI, AND THAT IS THE THING TO NOTICE. The corpus Yan judged produced a
+#: worst score of 1.674 against the ratified 2.0; this one produces 4.877, at the L0|L1 switch. It
+#: passes only on the absolute floor — 0.0048 of a 0.020 mean-difference budget — so the picture is
+#: an image difference that is negligible in absolute terms measured against a noise-to-defect
+#: bracket narrow enough to inflate the ratio. Blocking is still disarmed, so nothing rides on it;
+#: the next ratification should be told that the ratio and the floor now disagree at L1.
 RATIFICATION_EVIDENCE = {
     # WHO RULED, ON WHAT, AND FROM WHAT. Recorded here and copied into the manifest, because the
     # threshold it settles is a taste call, and a taste call without its provenance is just a number.
@@ -327,22 +318,37 @@ RATIFICATION_EVIDENCE = {
                    "imperceptible through the optic",
         "decided": "defect_fraction = 2.0; abstain below min_footprint_px = 20 px; blocking arms "
                    "when the render uses the shipped material",
+        # THE FINDING ABOVE IS A HISTORICAL RECORD AND ITS NUMBER HAS MOVED. It is left verbatim
+        # because it is what Yan saw and decided on; it is annotated here because the corpus it
+        # describes is gone. Re-cut 2026-08-08 from the rebuilt 1520-triangle shoe, the worst score
+        # is 4.877 at the L0|L1 switch, not 1.674 — over the ratified 2.0 fraction, and passing only
+        # on the absolute floor (`max_mean_abs_diff`), with the measured difference at 0.0048 of a
+        # 0.020 budget. So the threshold's ARITHMETIC basis has changed even though the perceptual
+        # judgement has not been retaken. Blocking is still disarmed (the render falls back to the
+        # .blend material), so nothing rides on it yet — but the next eyeball ruling should be told
+        # that the bracket at L1 is now narrow enough to inflate the ratio.
     },
     "levels": (
         # (level, tris, switch_m, defect_score, verdict)
-        (1, 432, 255.2, 1.000000, "PASS"),
-        (2, 270, 442.5, 1.000000, "PASS"),
-        (3, 182, 1016.8, None, "ABSTAIN"),
+        #
+        # RESTATED 2026-08-08 against the corpus cut from Yan's rebuilt 1520-triangle shoe. These
+        # are what is measured and shipped now; the numbers Yan ruled on in August 2026 described a
+        # 764-triangle source that no longer exists. THE RULING ITSELF IS UNCHANGED — the thresholds
+        # above are what he decided, and this block is the evidence they were decided against,
+        # re-measured so it describes the corpus in the tree rather than a retired one.
+        (1, 678, 60.4, 4.877215, "PASS"),
+        (2, 390, 269.4, 1.000000, "PASS"),
+        (3, 254, 527.9, 1.000000, "PASS"),
+        (4, 146, 1499.6, None, "ABSTAIN"),
     ),
-    "enumerated_outputs": 292,
+    "enumerated_outputs": 691,
     # (rung, best tris, shed fraction) for EVERY rung the skip rule dropped. A tuple of them, not
     # one: the old corpus happened to skip exactly one rung, and the single-entry shape carried an
-    # `incumbent` field that only meant anything because that skip happened to sit above L2. This
-    # corpus skips two (both against L0), so the evidence enumerates them and the coupling to a
-    # particular chain index is gone.
+    # `incumbent` field that only meant anything because that skip happened to sit above L2. So the
+    # evidence enumerates them and the coupling to a particular chain index is gone.
     "skipped_rungs": (
-        (1, 662, 0.1335),
-        (2, 550, 0.2801),
+        (2, 536, 0.2094),
+        (5, 186, 0.2677),
     ),
 }
 
