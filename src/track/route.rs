@@ -846,24 +846,26 @@ mod tests {
             belly_y.to_bits(),
         );
 
-        // Every hash below was re-pinned 2026-08-08 against the rebuilt track shoe. Both VERTEX
-        // COUNTS are unchanged (172 and 60): the route's structure is the same, and only the
-        // coordinates moved, which is what a new shoe of the same pitch should do.
+        // Re-pinned 2026-08-09 against the re-exported running gear: the inner row of road-wheel
+        // stations carries a new origin, and the idler's tread radius moved 1.9 mm, so every
+        // circle the wrap is built on moved with them. Both VERTEX COUNTS are unchanged (172 and
+        // 60) and `belly_y` is bit-identical: the route's structure, and the hull datum it feeds,
+        // are the same — only the coordinates moved.
         assert_eq!(loop_route.pts.len(), 172, "loop route vertex count moved");
         assert_eq!(
             route_bits_hash(&loop_route),
-            0xc87a_f178_5caf_49d0,
+            0x732d_b46f_bbb9_0f5c,
             "loop route bits moved (TrackGear::loop_pts would change)"
         );
         assert_eq!(
             loop_route.total().to_bits(),
-            0x414a_9557,
+            0x414a_8fc1,
             "loop length bits moved"
         );
         assert_eq!(taut_route.pts.len(), 60, "taut route vertex count moved");
         assert_eq!(
             route_bits_hash(&taut_route),
-            0x07a1_639a_ce0f_9b89,
+            0xe75b_8f2d_8919_5e0e,
             "taut route bits moved (hull_rest_y datum would change)"
         );
         assert_eq!(

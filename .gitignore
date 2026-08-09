@@ -3,8 +3,14 @@
 .DS_Store
 **/.DS_Store
 /handoff.md
+# The CANONICAL tank blend is tracked (LFS, `.gitattributes`): it is the source every committed
+# derivative — the glb, the LOD chain, the manifest — is cut from, so the two travel together and
+# CI can re-cut them. Everything else blend-shaped is local authoring scratch: Blender's own `.blend1`
+# rolling backup and the hand-made `.bak` snapshots an authoring session leaves beside it.
 *.blend
+!assets/tiger_1/tiger_1.blend
 *.blend1
+*.bak
 
 # Scratch output of `scripts/encode-tank-ktx2.sh` when it is run by hand with default arguments.
 # The BAKED glb is the tracked one (`assets/tiger_1/tiger_1.glb`); there is exactly one tank glb

@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "7ad6bbd1444fdadafba3ec8a35ff7a1162bae82f07b9a6b05925e7be6c1366cc",
+    "sources_sha256": "5a2831beaafce1f163fe2340a65c847d8764011580999a7bf9028021ce578c83",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -95,9 +95,9 @@
       "name": "tiger_1_link",
       "source": {
         "blend": "assets/tiger_1/tiger_1.blend",
-        "blend_sha256": "3afa9cbc76430a0b9316c3563fe5ab4662656dff643d8989331fc752a086241f",
+        "blend_sha256": "7e54c2f713605a992d9ce7c3d735f8197e99fc81ceb04dd1693f736377292ade",
         "object": "Link",
-        "evaluated_digest": "8019d349d30ba0e7bccc3bc3f6b5129c5bd9654f7aca6c9983643f3cf6b27533",
+        "evaluated_digest": "07b5686ef77712df3dcf0d8dc401a4dd06c4dfc379ce455927fe281e97f0401b",
         "tris": 1520,
         "verts": 744,
         "radius_m": 0.384491,
@@ -157,7 +157,7 @@
           "rung": 0,
           "role": "source",
           "tris": 1520,
-          "verts": 1744,
+          "verts": 2273,
           "glb": "assets/tiger_1/tiger_1.glb",
           "node": "Link",
           "e_target_mm": 0.0,
@@ -167,10 +167,10 @@
           "switch_m": 0.0,
           "validity": {
             "tris": 1520,
-            "verts": 1744,
-            "baked_tangents": 1744,
+            "verts": 2273,
+            "baked_tangents": 2273,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.99995303,
+            "min_tangent_length": 0.99995161,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -188,7 +188,7 @@
             "radius_m": 0.384491,
             "origin_radius_m": 0.380365
           },
-          "glb_sha256": "cd956f0636e3e091c2ef3ed198742c810b4932933b6aef4cf59f42467597c324",
+          "glb_sha256": "5d32d654abb8f1d74242962e2ff6553143c9f82f4153c5fb5cd583d3b72fd436",
           "blender_source_verts": 744,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
@@ -204,7 +204,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung1.glb",
           "node": "Link_LOD1",
           "tris": 678,
-          "verts": 922,
+          "verts": 1724,
           "shed_fraction_vs_parent": 0.553947,
           "parent_level": "L0",
           "dev_source_mm": 3.305472,
@@ -219,10 +219,10 @@
           "switch_from_pairwise_m": 60.4024,
           "validity": {
             "tris": 678,
-            "verts": 922,
-            "baked_tangents": 922,
+            "verts": 1724,
+            "baked_tangents": 1724,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999935962,
+            "min_tangent_length": 0.999938686,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -249,9 +249,9 @@
           "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
-            "p99_deg": 31.049,
-            "p95_deg": 16.917,
-            "backface_corr_frac": 0.00235,
+            "p99_deg": 33.791,
+            "p95_deg": 18.302,
+            "backface_corr_frac": 0.00345,
             "samples": 20000
           },
           "render_gate": {
@@ -272,30 +272,30 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 259086,
+                  "footprint_px": 259072,
                   "silhouette_band_px": 190,
                   "silhouette_band_frac": 0.000733,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.005392,
+                  "max_abs_diff": 0.007353,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
-                  "footprint_px": 259083,
-                  "silhouette_band_px": 193,
-                  "silhouette_band_frac": 0.000744,
-                  "mean_abs_diff": 0.00093,
+                  "footprint_px": 259071,
+                  "silhouette_band_px": 191,
+                  "silhouette_band_frac": 0.000737,
+                  "mean_abs_diff": 0.000932,
                   "p99_abs_diff": 0.004412,
-                  "max_abs_diff": 0.047794,
+                  "max_abs_diff": 0.048039,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 259086,
+                  "footprint_px": 259072,
                   "silhouette_band_px": 190,
                   "silhouette_band_frac": 0.000733,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.006618,
+                  "max_abs_diff": 0.016912,
                   "frac_over": 0.0
                 },
                 "defect_score": 1.0,
@@ -307,28 +307,28 @@
                   "footprint_px": 157100,
                   "silhouette_band_px": 734,
                   "silhouette_band_frac": 0.00465,
-                  "mean_abs_diff": 9e-06,
+                  "mean_abs_diff": 2.1e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.059069,
-                  "frac_over": 0.0
+                  "max_abs_diff": 0.105392,
+                  "frac_over": 1.3e-05
                 },
                 "noise_floor": {
                   "footprint_px": 157106,
                   "silhouette_band_px": 731,
                   "silhouette_band_frac": 0.004631,
-                  "mean_abs_diff": 0.000922,
+                  "mean_abs_diff": 0.000926,
                   "p99_abs_diff": 0.003922,
-                  "max_abs_diff": 0.038725,
+                  "max_abs_diff": 0.053186,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
                   "footprint_px": 157113,
                   "silhouette_band_px": 721,
                   "silhouette_band_frac": 0.004568,
-                  "mean_abs_diff": 0.000831,
+                  "mean_abs_diff": 0.000832,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.481373,
-                  "frac_over": 0.00224
+                  "max_abs_diff": 0.4875,
+                  "frac_over": 0.002266
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -336,39 +336,39 @@
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 124683,
-                  "silhouette_band_px": 1070,
-                  "silhouette_band_frac": 0.008509,
-                  "mean_abs_diff": 0.002041,
-                  "p99_abs_diff": 0.01348,
-                  "max_abs_diff": 0.740932,
-                  "frac_over": 0.004251
+                  "footprint_px": 124682,
+                  "silhouette_band_px": 1071,
+                  "silhouette_band_frac": 0.008517,
+                  "mean_abs_diff": 0.000377,
+                  "p99_abs_diff": 0.004412,
+                  "max_abs_diff": 0.334559,
+                  "frac_over": 0.000906
                 },
                 "noise_floor": {
-                  "footprint_px": 124703,
-                  "silhouette_band_px": 1049,
-                  "silhouette_band_frac": 0.008342,
-                  "mean_abs_diff": 0.00092,
-                  "p99_abs_diff": 0.007598,
-                  "max_abs_diff": 0.056127,
+                  "footprint_px": 124705,
+                  "silhouette_band_px": 1046,
+                  "silhouette_band_frac": 0.008318,
+                  "mean_abs_diff": 0.000933,
+                  "p99_abs_diff": 0.007353,
+                  "max_abs_diff": 0.054167,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 124715,
-                  "silhouette_band_px": 1035,
-                  "silhouette_band_frac": 0.008231,
-                  "mean_abs_diff": 0.00611,
-                  "p99_abs_diff": 0.38652,
-                  "max_abs_diff": 0.578186,
-                  "frac_over": 0.013038
+                  "footprint_px": 124714,
+                  "silhouette_band_px": 1036,
+                  "silhouette_band_frac": 0.008239,
+                  "mean_abs_diff": 0.006153,
+                  "p99_abs_diff": 0.391636,
+                  "max_abs_diff": 0.578677,
+                  "frac_over": 0.012918
                 },
-                "defect_score": 0.215992,
+                "defect_score": 0.0,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.002041,
-            "worst_frac_over": 0.004251,
+            "worst_mean_abs_diff": 0.000377,
+            "worst_frac_over": 0.000906,
             "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
@@ -381,8 +381,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "0e1ffb4a0372c0610792ab1653fb1aa387fdfef9a07a86162e7edf0ca7ffb70b",
-          "glb_bytes": 49492
+          "glb_sha256": "6fd2e4c0265df5ff8a37d1e7ba3230dfb48623c67f384e0d76a8ce2cd702a8d3",
+          "glb_bytes": 87992
         },
         {
           "level": 2,
@@ -392,7 +392,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung3.glb",
           "node": "Link_LOD3",
           "tris": 390,
-          "verts": 602,
+          "verts": 1110,
           "shed_fraction_vs_parent": 0.424779,
           "parent_level": "L1",
           "dev_source_mm": 14.815255,
@@ -407,10 +407,10 @@
           "switch_from_pairwise_m": 269.376,
           "validity": {
             "tris": 390,
-            "verts": 602,
-            "baked_tangents": 602,
+            "verts": 1110,
+            "baked_tangents": 1110,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999935899,
+            "min_tangent_length": 0.999940699,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -437,9 +437,9 @@
           "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
-            "p99_deg": 89.301,
-            "p95_deg": 77.27,
-            "backface_corr_frac": 0.0331,
+            "p99_deg": 88.707,
+            "p95_deg": 76.176,
+            "backface_corr_frac": 0.0371,
             "samples": 20000
           },
           "render_gate": {
@@ -460,30 +460,30 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 80374,
-                  "silhouette_band_px": 2314,
-                  "silhouette_band_frac": 0.027985,
+                  "footprint_px": 80407,
+                  "silhouette_band_px": 2308,
+                  "silhouette_band_frac": 0.027903,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.001961,
+                  "max_abs_diff": 0.011029,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
-                  "footprint_px": 80358,
-                  "silhouette_band_px": 2337,
-                  "silhouette_band_frac": 0.02826,
+                  "footprint_px": 80392,
+                  "silhouette_band_px": 2326,
+                  "silhouette_band_frac": 0.02812,
                   "mean_abs_diff": 0.000904,
                   "p99_abs_diff": 0.003676,
-                  "max_abs_diff": 0.060784,
+                  "max_abs_diff": 0.054657,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 80374,
-                  "silhouette_band_px": 2314,
-                  "silhouette_band_frac": 0.027985,
+                  "footprint_px": 80407,
+                  "silhouette_band_px": 2308,
+                  "silhouette_band_frac": 0.027903,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.00098,
+                  "max_abs_diff": 0.001471,
                   "frac_over": 0.0
                 },
                 "defect_score": 1.0,
@@ -492,31 +492,31 @@
               },
               "grazing": {
                 "signal": {
-                  "footprint_px": 59049,
-                  "silhouette_band_px": 2062,
-                  "silhouette_band_frac": 0.033742,
-                  "mean_abs_diff": 1.2e-05,
+                  "footprint_px": 59057,
+                  "silhouette_band_px": 2086,
+                  "silhouette_band_frac": 0.034117,
+                  "mean_abs_diff": 3e-06,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.084804,
+                  "max_abs_diff": 0.016912,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
-                  "footprint_px": 59030,
-                  "silhouette_band_px": 2085,
-                  "silhouette_band_frac": 0.034116,
-                  "mean_abs_diff": 0.000976,
+                  "footprint_px": 59037,
+                  "silhouette_band_px": 2112,
+                  "silhouette_band_frac": 0.034539,
+                  "mean_abs_diff": 0.000974,
                   "p99_abs_diff": 0.004167,
-                  "max_abs_diff": 0.038971,
+                  "max_abs_diff": 0.042402,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 59051,
-                  "silhouette_band_px": 2060,
-                  "silhouette_band_frac": 0.033709,
-                  "mean_abs_diff": 9.7e-05,
+                  "footprint_px": 59059,
+                  "silhouette_band_px": 2084,
+                  "silhouette_band_frac": 0.034084,
+                  "mean_abs_diff": 0.000101,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.417157,
-                  "frac_over": 0.000288
+                  "max_abs_diff": 0.416912,
+                  "frac_over": 0.000305
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -524,39 +524,39 @@
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 62228,
-                  "silhouette_band_px": 2236,
-                  "silhouette_band_frac": 0.034686,
-                  "mean_abs_diff": 0.000218,
+                  "footprint_px": 62239,
+                  "silhouette_band_px": 2247,
+                  "silhouette_band_frac": 0.034845,
+                  "mean_abs_diff": 6.6e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.66299,
-                  "frac_over": 0.000546
+                  "max_abs_diff": 0.272304,
+                  "frac_over": 0.000209
                 },
                 "noise_floor": {
-                  "footprint_px": 62217,
-                  "silhouette_band_px": 2252,
-                  "silhouette_band_frac": 0.034932,
+                  "footprint_px": 62231,
+                  "silhouette_band_px": 2260,
+                  "silhouette_band_frac": 0.035044,
                   "mean_abs_diff": 0.001008,
                   "p99_abs_diff": 0.004412,
-                  "max_abs_diff": 0.043873,
+                  "max_abs_diff": 0.040931,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 62232,
-                  "silhouette_band_px": 2232,
-                  "silhouette_band_frac": 0.034624,
-                  "mean_abs_diff": 0.000361,
+                  "footprint_px": 62244,
+                  "silhouette_band_px": 2242,
+                  "silhouette_band_frac": 0.034767,
+                  "mean_abs_diff": 0.000467,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.558088,
-                  "frac_over": 0.000996
+                  "max_abs_diff": 0.564951,
+                  "frac_over": 0.001076
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.000218,
-            "worst_frac_over": 0.000546,
+            "worst_mean_abs_diff": 6.6e-05,
+            "worst_frac_over": 0.000209,
             "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
@@ -569,8 +569,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "522c8dd60f8c90e7005f6443d28eb223bab5399612a9219cdbcbee0857b04757",
-          "glb_bytes": 32400
+          "glb_sha256": "4a655450ae90820178aa91d045384993037b82df80df3fa09ebce25e2e6564a0",
+          "glb_bytes": 56792
         },
         {
           "level": 3,
@@ -580,7 +580,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung4.glb",
           "node": "Link_LOD4",
           "tris": 254,
-          "verts": 476,
+          "verts": 762,
           "shed_fraction_vs_parent": 0.348718,
           "parent_level": "L2",
           "dev_source_mm": 29.053509,
@@ -595,10 +595,10 @@
           "switch_from_pairwise_m": 527.94,
           "validity": {
             "tris": 254,
-            "verts": 476,
-            "baked_tangents": 476,
+            "verts": 762,
+            "baked_tangents": 762,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999930499,
+            "min_tangent_length": 0.999943723,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -625,9 +625,9 @@
           "tangents_are_baked": true,
           "normal_diagnostic_deg": {
             "max_deg": 90.0,
-            "p99_deg": 89.394,
-            "p95_deg": 87.085,
-            "backface_corr_frac": 0.0853,
+            "p99_deg": 89.393,
+            "p95_deg": 87.288,
+            "backface_corr_frac": 0.08465,
             "samples": 20000
           },
           "render_gate": {
@@ -648,30 +648,30 @@
             "views": {
               "three_quarter": {
                 "signal": {
-                  "footprint_px": 20595,
-                  "silhouette_band_px": 1158,
-                  "silhouette_band_frac": 0.053234,
+                  "footprint_px": 20610,
+                  "silhouette_band_px": 1155,
+                  "silhouette_band_frac": 0.053067,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
                   "max_abs_diff": 0.002941,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
-                  "footprint_px": 20587,
-                  "silhouette_band_px": 1173,
-                  "silhouette_band_frac": 0.053906,
-                  "mean_abs_diff": 0.00093,
-                  "p99_abs_diff": 0.003922,
+                  "footprint_px": 20600,
+                  "silhouette_band_px": 1172,
+                  "silhouette_band_frac": 0.053831,
+                  "mean_abs_diff": 0.000935,
+                  "p99_abs_diff": 0.003679,
                   "max_abs_diff": 0.036029,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 20595,
-                  "silhouette_band_px": 1158,
-                  "silhouette_band_frac": 0.053234,
+                  "footprint_px": 20610,
+                  "silhouette_band_px": 1155,
+                  "silhouette_band_frac": 0.053067,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.001225,
+                  "max_abs_diff": 0.000245,
                   "frac_over": 0.0
                 },
                 "defect_score": 1.0,
@@ -680,31 +680,31 @@
               },
               "grazing": {
                 "signal": {
-                  "footprint_px": 15114,
-                  "silhouette_band_px": 1034,
-                  "silhouette_band_frac": 0.064033,
-                  "mean_abs_diff": 3e-06,
+                  "footprint_px": 15125,
+                  "silhouette_band_px": 1039,
+                  "silhouette_band_frac": 0.064279,
+                  "mean_abs_diff": 5e-06,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.022304,
+                  "max_abs_diff": 0.046078,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
-                  "footprint_px": 15106,
-                  "silhouette_band_px": 1046,
-                  "silhouette_band_frac": 0.06476,
-                  "mean_abs_diff": 0.000997,
-                  "p99_abs_diff": 0.004167,
-                  "max_abs_diff": 0.029657,
+                  "footprint_px": 15117,
+                  "silhouette_band_px": 1049,
+                  "silhouette_band_frac": 0.064889,
+                  "mean_abs_diff": 0.001008,
+                  "p99_abs_diff": 0.004373,
+                  "max_abs_diff": 0.042157,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 15117,
-                  "silhouette_band_px": 1031,
-                  "silhouette_band_frac": 0.063847,
-                  "mean_abs_diff": 2.5e-05,
+                  "footprint_px": 15128,
+                  "silhouette_band_px": 1036,
+                  "silhouette_band_frac": 0.064093,
+                  "mean_abs_diff": 7.4e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.106863,
-                  "frac_over": 6.6e-05
+                  "max_abs_diff": 0.393137,
+                  "frac_over": 0.000264
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -712,39 +712,39 @@
               },
               "edge_on": {
                 "signal": {
-                  "footprint_px": 15932,
-                  "silhouette_band_px": 1092,
-                  "silhouette_band_frac": 0.064145,
-                  "mean_abs_diff": 8.5e-05,
+                  "footprint_px": 15934,
+                  "silhouette_band_px": 1095,
+                  "silhouette_band_frac": 0.064302,
+                  "mean_abs_diff": 4.8e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.167647,
-                  "frac_over": 0.000314
+                  "max_abs_diff": 0.121569,
+                  "frac_over": 6.3e-05
                 },
                 "noise_floor": {
-                  "footprint_px": 15932,
-                  "silhouette_band_px": 1094,
-                  "silhouette_band_frac": 0.064255,
+                  "footprint_px": 15934,
+                  "silhouette_band_px": 1097,
+                  "silhouette_band_frac": 0.064412,
                   "mean_abs_diff": 0.001057,
                   "p99_abs_diff": 0.004412,
-                  "max_abs_diff": 0.028922,
+                  "max_abs_diff": 0.032108,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
-                  "footprint_px": 15939,
-                  "silhouette_band_px": 1085,
-                  "silhouette_band_frac": 0.063734,
-                  "mean_abs_diff": 0.00013,
+                  "footprint_px": 15941,
+                  "silhouette_band_px": 1088,
+                  "silhouette_band_frac": 0.063891,
+                  "mean_abs_diff": 0.000289,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.344608,
-                  "frac_over": 0.000502
+                  "max_abs_diff": 0.530392,
+                  "frac_over": 0.000753
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 8.5e-05,
-            "worst_frac_over": 0.000314,
+            "worst_mean_abs_diff": 4.8e-05,
+            "worst_frac_over": 6.3e-05,
             "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
@@ -757,8 +757,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "bdae5261a42371aaa93e17879224280e201112f72d84ff447420ec6e52f13a67",
-          "glb_bytes": 25536
+          "glb_sha256": "367550fa9286d6c1b048a56a51bace03ca3d75f7ad65d6c0533c912d4193bb82",
+          "glb_bytes": 39264
         },
         {
           "level": 4,
@@ -768,7 +768,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung6.glb",
           "node": "Link_LOD6",
           "tris": 146,
-          "verts": 298,
+          "verts": 438,
           "shed_fraction_vs_parent": 0.425197,
           "parent_level": "L3",
           "dev_source_mm": 76.972574,
@@ -783,10 +783,10 @@
           "switch_from_pairwise_m": 1499.578,
           "validity": {
             "tris": 146,
-            "verts": 298,
-            "baked_tangents": 298,
+            "verts": 438,
+            "baked_tangents": 438,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999927902,
+            "min_tangent_length": 0.99994172,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -812,10 +812,10 @@
           "reproducible": true,
           "tangents_are_baked": true,
           "normal_diagnostic_deg": {
-            "max_deg": 89.988,
-            "p99_deg": 89.672,
-            "p95_deg": 85.044,
-            "backface_corr_frac": 0.2999,
+            "max_deg": 89.954,
+            "p99_deg": 89.495,
+            "p95_deg": 85.159,
+            "backface_corr_frac": 0.30015,
             "samples": 20000
           },
           "render_gate": {
@@ -833,8 +833,8 @@
             "pass": null,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "f5c73e6698c5163a303499667cdf7cd10c557bb5fb343e6321ff1f936faea5e5",
-          "glb_bytes": 16340
+          "glb_sha256": "3641082343964c19a81f534179252aa40b41bec640759b0e43ba25477aea4dc0",
+          "glb_bytes": 23060
         }
       ],
       "material": "Mat_Track_Link",

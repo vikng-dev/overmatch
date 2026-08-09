@@ -467,11 +467,11 @@ def repo_root(start=None):
 
 
 def resolve_source(root, relpath):
-    """Where the (UNTRACKED) source .blend actually is, given a work tree that may not hold it.
+    """Where the source .blend actually is, given a work tree that may not hold its bytes.
 
-    The .blend is deliberately not in git — it is 145 MB of authoring state with its own backups —
-    so a `git worktree` checkout has every tracked asset and no source at all. Generation run from
-    one would otherwise fail with "the .blend does not exist", which is true and useless.
+    The .blend is tracked through LFS, so an ordinary checkout has it; a tree whose LFS objects
+    were never fetched has a pointer file instead, and generation run from one would otherwise fail
+    with "the .blend does not exist", which is true and useless.
 
     The order is: this work tree, then the MAIN work tree (read out of the `gitdir:` pointer a
     linked worktree's `.git` file carries), then `$OVERMATCH_ASSET_ROOT`. Read-only in every case,
