@@ -445,3 +445,8 @@ ships. (Grip and support have since settled further: per-element strain grip
 - Thrown track as replicated damage state with alternate route topology (far future).
 - Streaming/destructible terrain under the oracle (`covered`, chunk revisioning) — named in §5,
   deliberately unscheduled.
+- **The park-hold cliff.** MEASURED: sweeping road-wheel tread radius over 500 µm moves parked
+  drift by only ~0.005 m, then it falls off a cliff inside a 10 µm window (hold at 0.386470 m,
+  no hold at 0.386460 m). The shipped radius, 0.386441 m, sits ~30 µm **past** the cliff. The
+  discontinuity is a contact-regime flip, not a tuning curve; which regimes it flips between,
+  and whether the envelope law should be continuous across it, is open.

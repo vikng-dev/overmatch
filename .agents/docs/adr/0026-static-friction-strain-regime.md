@@ -70,3 +70,13 @@ stays retired.
 - The determinism/parity discipline held throughout: `grip=off` (stiffness 0) is
   bit-identical to the pre-grip baseline — the entire regime, belt-hold included, is one
   multiplicative gate away from the shipped phase-B law.
+
+## Appendix: the eigen-audit (MEASURED)
+
+Stability sweep of the coupled support/grip system at the shipped configuration:
+
+- `ζ_elem = 0.5` is a **ceiling**, not a setpoint — safe everywhere swept, worst Jury margin 2.34×.
+- Damping splits roughly **70/30 support-vs-grip**; the support side is the dominant term.
+- The support damper sustains a **32 Hz roll limit cycle**, a Nyquist artifact of the 64 Hz tick,
+  saturating at ±0.187 rad/s (~1.5 mrad of tilt). Its lever is `SUPPORT_DAMPING_PER_M`, not the
+  grip ζ — a support-law item, bounded and benign at this amplitude.
