@@ -2989,6 +2989,159 @@ fn a_spread_exit_closes_at_the_far_face() {
     );
 }
 
+/// A CLUSTER THAT LEAVES A PRIMITIVE OPEN MUST LEAVE IT OPEN.
+///
+/// §13.7 legalizes several disconnected closed shells inside one primitive, so a cluster may hold
+/// shell A's entry, shell A's exit and shell B's entry — `E X E`. Reduced to the pair
+/// `(has_entry, has_exit)` that is indistinguishable from a point graze: the walk charges the
+/// cluster's own 0.00047683716 reference-metres, reports air from there to the corridor's end, and
+/// returns `Ok` having declined ~499.9995 of the 500 reference-metres shell B bounds.
+///
+/// The signed net occupancy is what separates them. `+1 − 1 + 1 = +1`: the primitive is OPEN after
+/// the cluster, so the corridor ends inside it, and a corridor that ends inside material is
+/// [`WalkError::IncompleteCorridor`] — the fail-closed answer, not a silent one.
+#[test]
+fn a_re_entrant_shell_in_one_cluster_stays_open() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    // Shell A is two ULP thick; shell B opens two ULP past its exit and closes past the corridor.
+    let (a_enter, a_exit, b_enter) = (1.0f32, ulps(1.0, 2), ulps(1.0, 4));
+    assert!(
+        coincident(a_enter, a_exit, &laws) && coincident(a_exit, b_enter, &laws),
+        "the three faces must chain into ONE cluster, or there is no reduction to defeat",
+    );
+    let mut hits = plate(1, 1, a_enter, a_exit);
+    hits.extend(plate(1, 1, b_enter, 2.0));
+
+    let error = walk_ray(0, &corridor(1.5, hits), &volumes, &laws)
+        .expect_err("the corridor ends inside shell B");
+    let WalkError::IncompleteCorridor { open, .. } = error else {
+        panic!("a primitive left open must fail closed, not resolve: {error:?}");
+    };
+    assert_eq!(
+        open,
+        vec![PrimitiveKey {
+            volume: volume(1),
+            primitive: prim(1),
+        }],
+        "and the open primitive is named",
+    );
+}
+
+/// THE SAME CLUSTER, CLOSED — `E X E X` inside one cluster is net zero and no more.
+///
+/// Two complete grazes of one primitive: whatever the reduction charges for the cluster's own
+/// width, the field is shut again on its far side, and a corridor that continues past it is not
+/// left holding an open shell.
+#[test]
+fn two_complete_grazes_in_one_cluster_are_net_zero() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let mut hits = plate(1, 1, 1.0, ulps(1.0, 2));
+    hits.extend(plate(1, 1, ulps(1.0, 4), ulps(1.0, 6)));
+    let walked =
+        walk_ray(0, &corridor(1.5, hits), &volumes, &laws).expect("net zero closes the field");
+
+    assert!(
+        walked.spans.last().is_some_and(|span| span.factor == 0.0),
+        "the field is shut past the cluster: {:#?}",
+        walked.spans,
+    );
+    // Never LESS than the material the two shells bound, and never more than the cluster's width.
+    let bound = 1000.0 * (ulps(1.0, 6) - 1.0);
+    assert!(
+        (1000.0 * (ulps(1.0, 2) - 1.0)..=bound).contains(&walked.cost),
+        "cost {} is not the cluster's own width",
+        walked.cost,
+    );
+}
+
+/// TWO TRIANGLES CLAIMING ONE CROSSING ARE ONE CROSSING.
+///
+/// `collect::cross_triangle` deliberately lets BOTH triangles incident on a shared edge claim a ray
+/// that runs through it — a duplicate is recoverable, a dropped crossing is not — and the two
+/// compute `t` from their own planes, so the duplicate arrives a few ULP off, not bit-equal. Raw
+/// multiplicity is therefore not surface multiplicity, and a net that counted it would read `+2`
+/// for one entry and leave the primitive open for ever.
+///
+/// The reduction is over the SIGN SEQUENCE in `t` order: consecutive same-sign claims of one
+/// primitive inside one cluster are one claim. `E E` is `+1`; the `E X E` above is still `+1`.
+#[test]
+fn duplicate_claims_of_one_crossing_are_one_entry() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let mut hits = plate(1, 1, 1.0, 1.5);
+    // The second incident triangle of the entry face, two ULP downrange.
+    hits.push(FaceHit {
+        volume: volume(1),
+        primitive: prim(1),
+        triangle: 77,
+        t: ulps(1.0, 2),
+        true_normal: -AXIS,
+    });
+    let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws)
+        .expect("a duplicated entry claim is one entry");
+
+    assert_eq!(walked.runs.len(), 1, "one crossing: {:#?}", walked.runs);
+    assert_eq!(walked.presence[0].spans, vec![(1.0, 1.5)]);
+}
+
+/// FACES AT ONE `t` HAVE NO ORDER, SO THEY MAY NOT DECIDE THE NET.
+///
+/// The corner of a box, as the shared-vertex fan really reports it (`collect`'s sweep, one origin in
+/// 4 225): the near half of the top face claims an entry, and one ULP downrange the far half claims
+/// the SAME entry while a side face claims the exit — two faces at one bit-equal `t`. The corridor's
+/// total order breaks that tie on triangle index, so reading the pair in index order makes the net
+/// `+1` for one triangulation and `0` for the other: the same corner is a brush or a round stopped
+/// dead depending on how the exporter numbered two triangles.
+#[test]
+fn a_tie_at_one_t_reads_the_same_in_either_triangle_order() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let (near, far) = (1.0f32, ulps(1.0, 2));
+    let corner = |exit_first: bool| {
+        let (a, b) = if exit_first { (7u32, 9u32) } else { (9, 7) };
+        vec![
+            FaceHit {
+                volume: volume(1),
+                primitive: prim(1),
+                triangle: 5,
+                t: near,
+                true_normal: -AXIS,
+            },
+            FaceHit {
+                volume: volume(1),
+                primitive: prim(1),
+                triangle: a,
+                t: far,
+                true_normal: AXIS,
+            },
+            FaceHit {
+                volume: volume(1),
+                primitive: prim(1),
+                triangle: b,
+                t: far,
+                true_normal: -AXIS,
+            },
+        ]
+    };
+    let exit_first = walk_ray(0, &corridor(2.0, corner(true)), &volumes, &laws)
+        .expect("the corner resolves in either order");
+    let entry_first = walk_ray(0, &corridor(2.0, corner(false)), &volumes, &laws)
+        .expect("the corner resolves in either order");
+
+    assert_eq!(exit_first.spans, entry_first.spans, "the field is the same");
+    assert_eq!(exit_first.cost.to_bits(), entry_first.cost.to_bits());
+    assert!(
+        exit_first
+            .spans
+            .last()
+            .is_some_and(|span| span.factor == 0.0),
+        "a corner brush closes the field: {:#?}",
+        exit_first.spans,
+    );
+}
+
 /// CLUSTERING NEVER CHARGES LESS THAN THE EXACT UNION FIELD.
 ///
 /// Four hundred randomised fields of six overlapping plates, drawn onto a lattice of hot spots a

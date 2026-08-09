@@ -582,25 +582,41 @@ fn within_cluster_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
 }
 
 /// What one primitive's faces in one coincident cluster mean.
+///
+/// The payload is a SIGNED NET OCCUPANCY, not a flag. §13.7 legalizes several disconnected closed
+/// shells inside one primitive, so a cluster can hold `E X E` — shell A opened and closed, shell B
+/// opened — and a reduction to `(has_entry, has_exit)` cannot tell that from a point graze. It
+/// charges the cluster's own microns and leaves the field shut, declining every metre shell B
+/// bounds.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Toggle {
-    Enter,
-    Exit,
-    /// Entry AND exit faces of ONE primitive inside one cluster, at `t` values that are not
-    /// bit-equal: a shell thinner than the window, not a point contact. It bounds real material —
-    /// `(last − first) · factor` of it — and that material is charged across the cluster.
+    /// Net positive: the primitive OPENS, and the depth it opens by is the net.
+    Enter(u32),
+    /// Net negative: the primitive CLOSES by that depth.
+    Exit(u32),
+    /// Net zero with toggling faces bracketing a non-zero length: opened and closed inside this
+    /// cluster, whatever the shell count. It bounds material the walk cannot resolve — the cluster
+    /// is charged for it — but it crosses no boundary, so it names no presence and fires no event.
     Graze,
-    /// Mixed entry and exit faces at ONE bit-equal `t`, or nothing but tangents: a zero-measure
-    /// touch. It must not toggle presence — fabricating a zero-length interval here is how an edge
-    /// graze grows a spurious entrance/exit event pair out of no material at all.
+    /// Net zero at ONE bit-equal `t`, or nothing but tangents: a zero-measure touch. It bounds no
+    /// length, so there is nothing to charge and nothing to report.
     Touch,
 }
 
 /// One primitive's faces inside one coincident cluster, as the reduction reads them.
 #[derive(Default)]
 struct ClusterFaces {
-    has_entry: bool,
-    has_exit: bool,
+    /// `entries − exits`, over the RUN-REDUCED sign sequence (see [`ClusterFaces::claim`]).
+    net: i32,
+    /// The sign standing at the end of the reduced sequence so far; `0` before the first.
+    last_sign: i32,
+    /// The bit-equal `t` group being accumulated, and which signs it holds. Faces at ONE `t` have no
+    /// order, so they are taken together (see [`ClusterFaces::flush`]).
+    group: Option<u32>,
+    group_entry: bool,
+    group_exit: bool,
+    /// Whether any face toggled at all, as opposed to being a tangent.
+    toggled: bool,
     triangles: Vec<u32>,
     entry_sum: Vec3,
     exit_sum: Vec3,
@@ -610,6 +626,65 @@ struct ClusterFaces {
 }
 
 impl ClusterFaces {
+    /// Take one toggling face, in `t` order, and fold it into the net.
+    ///
+    /// RAW MULTIPLICITY IS NOT SURFACE MULTIPLICITY. `collect::cross_triangle` deliberately lets
+    /// BOTH triangles incident on a shared edge claim a ray that runs through it — a duplicate is
+    /// recoverable and a dropped crossing is not — and each computes `t` from its own plane, so the
+    /// duplicate lands a few ULP away rather than on the same bits. Counting it would read `+2` for
+    /// one entry and leave the primitive open for ever. (Measured on the shared-edge sweep:
+    /// 370 double claims in 66 049 rays, of which 17 are bit-equal.)
+    ///
+    /// So consecutive same-sign claims of one primitive inside one cluster reduce to ONE claim, and
+    /// only a SIGN CHANGE moves the net. `E E` is `+1`; `E X E` is `+1`; `E X E X` is `0`.
+    ///
+    /// The reduction is the safe direction in both signs. Under-counting entries drops the depth,
+    /// so the primitive closes early and the exits it did not consume meet depth zero —
+    /// [`WalkError::UnexpectedExit`]. Under-counting exits raises it, so the primitive is still open
+    /// at the corridor's end — [`WalkError::IncompleteCorridor`]. Both are loud; neither is a
+    /// stretch of armour charged at air.
+    fn claim(&mut self, sign: i32, t: f32) {
+        self.toggled = true;
+        if self.group != Some(t.to_bits()) {
+            self.flush();
+            self.group = Some(t.to_bits());
+        }
+        if sign > 0 {
+            self.group_entry = true;
+        } else {
+            self.group_exit = true;
+        }
+        self.widen(t);
+    }
+
+    /// Fold one bit-equal `t` group into the net.
+    ///
+    /// FACES AT ONE `t` HAVE NO ORDER. The corridor's total order breaks their tie on volume,
+    /// primitive and triangle index, which is a fact about the mesh's index buffer and not about the
+    /// geometry — and the run reduction above is order-SENSITIVE, so reading them in index order
+    /// makes armour depend on triangulation. (Measured on the shared-vertex fan: one origin in 4 225
+    /// whose corner brush reads `+1` in index order and `0` in the other.)
+    ///
+    /// So the group is emitted in the order that introduces the FEWEST sign changes: the sign
+    /// already standing first, then the other. With nothing standing, ENTRY first — the reading that
+    /// leaves the primitive open rather than shut, which is the direction that fails loud.
+    fn flush(&mut self) {
+        let first = if self.last_sign < 0 { -1 } else { 1 };
+        for sign in [first, -first] {
+            let present = if sign > 0 {
+                self.group_entry
+            } else {
+                self.group_exit
+            };
+            if present && sign != self.last_sign {
+                self.net += sign;
+                self.last_sign = sign;
+            }
+        }
+        self.group_entry = false;
+        self.group_exit = false;
+    }
+
     fn widen(&mut self, t: f32) {
         self.span = Some(match self.span {
             None => (t, t),
@@ -624,6 +699,17 @@ impl ClusterFaces {
     fn is_zero_measure(&self) -> bool {
         self.span
             .is_none_or(|(first, last)| first.to_bits() == last.to_bits())
+    }
+
+    /// The net occupancy this primitive contributes, as the field will apply it.
+    fn toggle(&mut self) -> Toggle {
+        self.flush();
+        match self.net {
+            net if net > 0 => Toggle::Enter(net as u32),
+            net if net < 0 => Toggle::Exit(net.unsigned_abs()),
+            _ if self.toggled && !self.is_zero_measure() => Toggle::Graze,
+            _ => Toggle::Touch,
+        }
     }
 }
 
@@ -771,37 +857,26 @@ pub fn walk_ray(
 
         // Reduce the cluster to at most one toggle per primitive.
         let mut per_primitive: BTreeMap<PrimitiveKey, ClusterFaces> = BTreeMap::new();
+        // `cluster` is in `t` order, so each primitive's own faces arrive in `t` order too — which
+        // is what the run reduction in [`ClusterFaces::claim`] reads.
         for hit in cluster {
             let d = corridor.axis.dot(hit.true_normal);
             let slot = per_primitive.entry(hit.key()).or_default();
             slot.triangles.push(hit.triangle);
             if d < -laws.tangent_cos {
-                slot.has_entry = true;
                 slot.entry_sum += hit.true_normal;
-                slot.widen(hit.t);
+                slot.claim(1, hit.t);
             } else if d > laws.tangent_cos {
-                slot.has_exit = true;
                 slot.exit_sum += hit.true_normal;
-                slot.widen(hit.t);
+                slot.claim(-1, hit.t);
             }
         }
 
         let mut toggles: Vec<(PrimitiveKey, Toggle, Vec<u32>, Vec3, Vec3)> = Vec::new();
-        for (key, faces) in per_primitive {
-            let toggle = match (faces.has_entry, faces.has_exit) {
-                (true, false) => Toggle::Enter,
-                (false, true) => Toggle::Exit,
-                // A THIN SHELL IS NOT A POINT GRAZE. One primitive reading entry-AND-exit inside one
-                // cluster is either a corner the ray only brushes, or a plate thinner than the
-                // window — and the two are indistinguishable from the tolerance that grouped them.
-                // Only the `t` values themselves separate them, so only bit equality may reduce the
-                // pair to nothing.
-                (true, true) if !faces.is_zero_measure() => Toggle::Graze,
-                _ => Toggle::Touch,
-            };
+        for (key, mut faces) in per_primitive {
             toggles.push((
                 key,
-                toggle,
+                faces.toggle(),
                 faces.triangles,
                 faces.entry_sum,
                 faces.exit_sum,
@@ -822,12 +897,12 @@ pub fn walk_ray(
         // reading is a stretch of armour up to the cluster's own width that the walk declines to
         // charge.
         //
-        // DOMINANCE. A primitive present anywhere strictly inside the cluster either was open
-        // before it, is open after it, or opened AND closed inside it — and the third case is
+        // DOMINANCE. A primitive present anywhere strictly inside the cluster has net occupancy
+        // positive before it, positive after it, or zero on both sides — and the third case is
         // exactly `Toggle::Graze`, whose factor joins the maximum. There is no fourth case: a
         // cluster holds only the faces at its own `t`. So the level charged across the cluster is an
-        // upper bound on `max(factor)` everywhere in it, and the only thing declined is a pair whose
-        // two `t` are bit-equal, which bounds no length to charge.
+        // upper bound on `max(factor)` everywhere in it, and the only thing declined is a net-zero
+        // pair whose two `t` are bit-equal, which bounds no length to charge.
         let opens_at = anchor;
         let closes_at = cluster.last().map_or(anchor, |hit| hit.t);
         // The highest factor GRAZING this cluster: present inside it, gone by its far side.
@@ -835,22 +910,22 @@ pub fn walk_ray(
 
         for (key, toggle, triangles, entry_sum, exit_sum) in toggles {
             match toggle {
-                Toggle::Enter => {
+                Toggle::Enter(delta) => {
                     volumes.factor(key.volume)?;
                     match field.open.get_mut(&key) {
-                        // A further shell of a primitive the ray is already inside (§13.7). Presence
+                        // Further shells of a primitive the ray is already inside (§13.7). Presence
                         // does not change — it is already present — so no interval opens and the
                         // entity count does not move; only the depth that must be unwound.
-                        Some((depth, _)) => *depth += 1,
+                        Some((depth, _)) => *depth += delta,
                         None => {
-                            field.open.insert(key, (1, opens_at));
+                            field.open.insert(key, (delta, opens_at));
                             *field.per_entity.entry(key.volume).or_insert(0) += 1;
                         }
                     }
                     entry_normal += entry_sum;
                     any_entry = true;
                 }
-                Toggle::Exit => {
+                Toggle::Exit(delta) => {
                     // FAIL-LOUD SURVIVES. Balanced nesting is legal; an exit with no shell open is
                     // still a dropped entry, an inverted winding or a hole in the mesh, and still an
                     // error. What changed is only that "already inside" stopped being a contradiction.
@@ -862,7 +937,18 @@ pub fn walk_ray(
                             triangles,
                         });
                     };
-                    *depth -= 1;
+                    // A net that closes more shells than are open is the same defect one level up:
+                    // the depth would go negative, so it is refused where a negative depth would
+                    // otherwise be silently clamped.
+                    if *depth < delta {
+                        return Err(WalkError::UnexpectedExit {
+                            sample,
+                            key,
+                            t: closes_at,
+                            triangles,
+                        });
+                    }
+                    *depth -= delta;
                     if *depth > 0 {
                         // Out of an inner shell and still inside the primitive: presence is
                         // unbroken, the union interval stays open, and this face is NOT a field
