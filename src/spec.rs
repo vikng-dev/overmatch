@@ -616,7 +616,81 @@ pub struct TankSpec {
     pub capabilities: HashMap<Capability, Requirement>,
 }
 
+/// What the sim does with a node the spec names — the role half of a typed node reference.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum NodeRole {
+    /// An actuator mount.
+    Servo,
+    /// A component facet: hit points, crew, ammunition, a function.
+    Volume,
+    /// A collision proxy — a convex-hull source, never armour.
+    Collider,
+    /// A roadwheel station, which carries its own wheel mesh.
+    Roadwheel,
+    /// A weapon's bore or its recoiling barrel.
+    Weapon,
+    /// A crew viewpoint anchor.
+    View,
+}
+
+impl NodeRole {
+    /// Whether `crate::tank::rig_world_pose` composes through a node in this role. That composition
+    /// is rigid — position and rotation only — so such a node and every ancestor of it must be
+    /// authored at unit scale or the sim and the view disagree about where the part is.
+    pub(crate) fn rigid_pose(self) -> bool {
+        match self {
+            Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
+            Self::Volume | Self::Collider => false,
+        }
+    }
+}
+
 impl TankSpec {
+    /// Every model node this sheet names, with the role it names it in — the canonical reference
+    /// list, so no consumer (the bake gate, the source lint, a future editor) maintains a second
+    /// vocabulary of RON field names. Sorted by role then name: the maps are unordered, and a
+    /// report that reorders between runs is one nobody can diff.
+    pub fn node_references(&self) -> Vec<(NodeRole, &str)> {
+        let mut references: Vec<(NodeRole, &str)> = Vec::new();
+        references.extend(
+            self.servos
+                .keys()
+                .map(|node| (NodeRole::Servo, node.as_str())),
+        );
+        references.extend(
+            self.volumes
+                .keys()
+                .map(|node| (NodeRole::Volume, node.as_str())),
+        );
+        references.extend(
+            self.colliders
+                .iter()
+                .map(|node| (NodeRole::Collider, node.as_str())),
+        );
+        references.extend(
+            self.roadwheels
+                .iter()
+                .map(|wheel| (NodeRole::Roadwheel, wheel.node.as_str())),
+        );
+        for weapon in self.weapons.values() {
+            references.push((NodeRole::Weapon, weapon.muzzle.as_str()));
+            references.extend(
+                weapon
+                    .barrel
+                    .as_deref()
+                    .map(|node| (NodeRole::Weapon, node)),
+            );
+        }
+        references.extend(
+            self.views
+                .values()
+                .map(|view| (NodeRole::View, view.node.as_str())),
+        );
+        references.sort_unstable();
+        references.dedup();
+        references
+    }
+
     /// Fail-fast semantic validation past what serde's shape check catches (ADR-0011: a competitive
     /// sim never runs on silently-bricked stats). serde proves the *fields* exist and typecheck; this
     /// proves the *values* yield a weapon that can actually fire and cycle. Each rejection names the

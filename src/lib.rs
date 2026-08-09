@@ -25,6 +25,12 @@ mod assets;
 /// construction source; the shadow harness keeps proving it
 /// equivalent to the instantiated scene on every view bind.
 mod bake;
+/// The consumer contract, and the one report shape it answers in. `bin/asset_verify` is a thin
+/// adapter over [`verify_asset`]; the runtime bake calls the same implementation at startup, so a
+/// law cannot hold at one door and not the other.
+pub use bake::{
+    Check, Finding, Severity, Stage, Subject, SubjectKind, has_error, render, verify_asset,
+};
 mod ballistics;
 /// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate
 /// itself also rides `cargo test` at CI scale — see `ballistics::fuzz`.
