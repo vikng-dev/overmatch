@@ -1244,6 +1244,65 @@ mod tests {
         manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
     }
 
+    /// SAME-PRIMITIVE FACE-TO-FACE CONTACT IS REFUSED, AND THAT IS THE CONTRACT (§13.7).
+    ///
+    /// Two closed shells of one primitive that share a welded edge present four triangles on it, so
+    /// the directed-edge census rejects them before union-find can even be asked whether they are
+    /// one shell or two. That refusal is deliberate and it is the answer: a geometric guess at where
+    /// one shell ends and the next begins is exactly the ambiguity surface identity exists to
+    /// remove, and the walk's pairing, restart seeding and contact ownership all depend on the
+    /// distinction. Plates authored face to face stay separate PRIMITIVES; only vertex contact and
+    /// interior intersection are legal inside one.
+    #[test]
+    fn same_primitive_face_to_face_contact_is_refused() {
+        // Two unit cubes sharing the whole `x = 1` face, in one primitive.
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for offset in [0.0f32, 1.0] {
+            let base = positions.len() as u32;
+            for (x, y, z) in [
+                (0.0f32, 0.0f32, 0.0f32),
+                (1.0, 0.0, 0.0),
+                (1.0, 1.0, 0.0),
+                (0.0, 1.0, 0.0),
+                (0.0, 0.0, 1.0),
+                (1.0, 0.0, 1.0),
+                (1.0, 1.0, 1.0),
+                (0.0, 1.0, 1.0),
+            ] {
+                positions.push([x + offset, y, z]);
+            }
+            for face in [
+                [0u32, 3, 2],
+                [0, 2, 1],
+                [4, 5, 6],
+                [4, 6, 7],
+                [0, 1, 5],
+                [0, 5, 4],
+                [3, 7, 6],
+                [3, 6, 2],
+                [0, 4, 7],
+                [0, 7, 3],
+                [1, 2, 6],
+                [1, 6, 5],
+            ] {
+                indices.extend(face.map(|corner| base + corner));
+            }
+        }
+        let abutting = MeshGeometry {
+            positions,
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: "RHA".into(),
+                factor: 1000.0,
+            }),
+            certificate: None,
+        };
+        let err = gate("Abutting", &abutting)
+            .expect_err("face-to-face contact inside one primitive must be refused");
+        assert!(err.contains("directed edge"), "{err}");
+    }
+
     /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
     /// synthetic primitives, because the shipped asset must (and does) pass — the gate's value is
     /// entirely in what it rejects.

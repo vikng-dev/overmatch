@@ -103,6 +103,14 @@ pub struct PrimitiveKey {
 /// prove closure and outward winding per island; the shell id is those components, published
 /// instead of discarded. Edge-connected, deliberately: two legal shells may touch at one welded
 /// VERTEX (§13.7's islands), and vertex components would merge them back into one ambiguous name.
+///
+/// EPHEMERAL, AND DELIBERATELY NOT A WIRE IDENTITY. Two of its three fields are Bevy entities,
+/// allocated per world, and the third is dense in the bake's own triangle order — so an exporter
+/// that reorders faces renumbers it. It carries no `Serialize`, no `Reflect` and no derive that
+/// could put it on a wire, and nothing in `net` names it: the walk runs on the authority and
+/// publishes outcomes, never topology. A future consumer that needs shell identity across a save,
+/// a replay or the wire must state it as (volume slot, primitive slot, shell index) plus the bake's
+/// own hash, and refuse a mismatched bake — never these bits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct ShellKey {
     /// The `BallisticVolume` node — where the factor, the HP and the damage address live.
@@ -730,11 +738,15 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
 
 /// The live union field: which shells are open, and therefore what `max(factor)` is.
 ///
-/// Openness is a BOOLEAN, not a depth, and that is a theorem rather than a simplification: the bake
-/// certifies every shell closed, outward-wound and non-self-intersecting, so a ray crosses it
-/// transversely at finitely many certified contacts and its crossings alternate in from out. A
-/// second entry with no exit between is therefore not a deeper winding — it is a violated
-/// certificate, and it is named as one.
+/// Openness is a BOOLEAN, not a depth. A closed, outward-wound, EMBEDDED shell crossed transversely
+/// at certified contacts has crossings that alternate in from out; a shell that passes through
+/// itself does not, and reading the difference as depth is how a real branch gets erased. So the
+/// alternation is required rather than assumed, and the first crossing that disproves it is named
+/// ([`WalkError::UnexpectedEntry`]) instead of counted.
+///
+/// OPEN TAB: the bake proves closure and outward winding per shell, not embedding. Until it does,
+/// this is where a non-embedded shell is caught — fail-closed, at the first crossing that proves
+/// it, rather than at build time.
 struct Field {
     /// Per open shell: where its presence opened.
     open: BTreeMap<ShellKey, f32>,
