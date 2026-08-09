@@ -800,4 +800,216 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Edge-crossing watertightness
+    // -----------------------------------------------------------------------------------------
+
+    /// The measured conditioning of the live defect: a corridor origin metres away from geometry
+    /// tens of centimetres across, on a ray aligned with no axis, meeting a face aligned with no
+    /// axis. Round coordinates and axis-aligned faces round symmetrically and hide it.
+    const SWEEP_SIZE: Vec3 = Vec3::new(0.4127, 0.4127, 0.1013);
+    const SWEEP_DIR: Vec3 = Vec3::new(0.4871, -0.5133, -1.0);
+    const SWEEP_STANDOFF: f32 = 6.0837;
+    /// Half-width of the sweep, in ULP of the ray origin. The band is a few ULP wide and sits
+    /// wherever the rounding puts it, so the grid brackets it rather than naming it.
+    const SWEEP_REACH: i32 = 128;
+
+    /// The retired per-triangle containment test, kept as the REFERENCE the sweep measures itself
+    /// against.
+    ///
+    /// It anchors all three edges on the triangle's own first vertex, so two triangles sharing an
+    /// edge compute that edge from different quantities: the exact-arithmetic identity between them
+    /// survives, the floating-point one does not, and within a few ULP of the edge both round the
+    /// ray to "outside". The sweep asserts that this predicate DOES lose crossings on the fixture,
+    /// so a green run cannot mean the fixture stopped exercising the band.
+    fn barycentric_contains(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+        let e1 = b - a;
+        let e2 = c - a;
+        let det = -axis.dot(e1.cross(e2));
+        if det.abs() < PARALLEL_EPS {
+            return false;
+        }
+        let dao = (origin - a).cross(axis);
+        let u = e2.dot(dao) / det;
+        let v = -e1.dot(dao) / det;
+        !(u < 0.0 || v < 0.0 || u + v > 1.0)
+    }
+
+    /// The eight corners of the sweep box, rotated off every axis.
+    fn sweep_vertices() -> Vec<Vec3> {
+        let h = SWEEP_SIZE * 0.5;
+        let rotation = Quat::from_euler(EulerRot::YXZ, 0.7137, 0.3119, 0.1171);
+        [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| rotation * Vec3::new(x * h.x, y * h.y, z * h.z))
+        .collect()
+    }
+
+    /// The box's faces except the top, which each fixture triangulates for itself.
+    fn sweep_sides() -> Vec<[u32; 3]> {
+        vec![
+            [0, 3, 2],
+            [0, 2, 1],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ]
+    }
+
+    /// Ray origins on a grid of single-ULP steps around the one aimed straight at `target`.
+    ///
+    /// Stepping the ORIGIN's bits, not the target: the origin is metres from the geometry, so its
+    /// own ULP is the finest perturbation the corridor can express, and a smaller step applied to
+    /// the target vanishes in the subtraction that forms it.
+    fn sweep_origins(target: Vec3, axis: Vec3) -> impl Iterator<Item = Vec3> {
+        let base = target - axis * SWEEP_STANDOFF;
+        (-SWEEP_REACH..=SWEEP_REACH).flat_map(move |i| {
+            (-SWEEP_REACH..=SWEEP_REACH).map(move |j| {
+                Vec3::new(
+                    f32::from_bits((base.x.to_bits() as i32 + i) as u32),
+                    f32::from_bits((base.y.to_bits() as i32 + j) as u32),
+                    base.z,
+                )
+            })
+        })
+    }
+
+    /// A RAY THROUGH A SHARED EDGE MUST NOT FALL BETWEEN THE TWO TRIANGLES.
+    ///
+    /// The two halves of the top face are anchored on DIFFERENT vertices — the shape the live
+    /// failure has (`[51, 58, 59]` beside `[58, 60, 59]`), and the shape a mesh is under no
+    /// obligation to avoid. A ray within a few ULP of their shared edge is then rejected by both
+    /// independent barycentric tests: the entry vanishes, the walk meets an exit for a primitive it
+    /// is not inside, and the driver fails the round closed in mid-armour.
+    #[test]
+    fn a_ray_on_a_shared_edge_is_claimed_by_one_of_the_two_triangles() {
+        let vertices = sweep_vertices();
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
+        let mut lost = 0;
+        let mut retired_lost = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis) {
+            let shear = RayShear::new(origin, axis);
+            let near = cross_triangle(&shear, axis, vertices[4], vertices[5], vertices[6]);
+            let far = cross_triangle(&shear, axis, vertices[6], vertices[7], vertices[4]);
+            if near.is_none() && far.is_none() {
+                lost += 1;
+            }
+            if !barycentric_contains(origin, axis, vertices[4], vertices[5], vertices[6])
+                && !barycentric_contains(origin, axis, vertices[6], vertices[7], vertices[4])
+            {
+                retired_lost += 1;
+            }
+            total += 1;
+        }
+        assert_eq!(
+            lost, 0,
+            "{lost} of {total} rays fell between the two triangles"
+        );
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing on this fixture, so the sweep is not crossing the edge \
+             it was built to cross",
+        );
+    }
+
+    /// AND THE WALK RESOLVES IT — the consequence, end to end on a closed primitive.
+    #[test]
+    fn a_shared_edge_crossing_resolves_into_one_interval() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
+        for origin in sweep_origins(target, axis) {
+            let spans = sweep_walks(&collider, origin, axis)
+                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
+            assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
+        }
+    }
+
+    /// Walk one sweep ray and report how many presence intervals the crossing resolved into.
+    ///
+    /// `walk_ray` rather than a hit count, because that IS the contract: a ray exactly on a shared
+    /// edge may legitimately be claimed by BOTH incident triangles, and the walk's coincidence
+    /// clustering reduces that to one toggle. What must never happen is a toggle going missing.
+    fn sweep_walks(collider: &Collider, origin: Vec3, axis: Vec3) -> Result<usize, WalkError> {
+        let length = SWEEP_STANDOFF * 2.0;
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let hits = trimesh_hits(collider, origin, axis, length);
+        let walk = super::super::walk::walk_ray(
+            0,
+            &super::super::walk::RayCorridor {
+                anchor: Vec3::ZERO,
+                origin,
+                axis,
+                length,
+                initial_presence: Vec::new(),
+                hits,
+            },
+            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &WalkLaws::default(),
+        )?;
+        Ok(walk
+            .primitives
+            .first()
+            .map_or(0, |presence| presence.spans.len()))
+    }
+
+    /// A T-JUNCTION IS A CRACK OF ITS OWN VERTEX'S WIDTH, AND NO KERNEL CAN CLOSE IT.
+    ///
+    /// The same box, but one half of the top face re-triangulated around a vertex `M` placed on the
+    /// diagonal without splitting the triangle on the far side of it. There is no shared edge for
+    /// the sign relation to hold across, and `M` lies on the segment only to f32 rounding, so the
+    /// surface really is open — over a sliver as wide as that rounding and no wider.
+    ///
+    /// The bound is the claim. A T-junction that lost more than its own vertex rounding would be a
+    /// hole in the asset, which is a modelling fix and not a walk one.
+    #[test]
+    fn a_t_junction_cracks_only_within_its_own_rounding() {
+        let mut vertices = sweep_vertices();
+        let (v4, v6) = (vertices[4], vertices[6]);
+        // Deliberately not a midpoint or a power-of-two fraction, either of which can land exactly
+        // on the segment and hide the crack.
+        vertices.push(v4 + (v6 - v4) * 0.3719);
+        let mut indices = sweep_sides();
+        // The far half keeps the whole diagonal as one edge; the near half is split around `M`.
+        indices.extend([[6, 7, 4], [4, 5, 8], [8, 5, 6]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let target = vertices[8];
+        let mut cracked = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis) {
+            match sweep_walks(&collider, origin, axis) {
+                Ok(spans) => assert_eq!(spans, 1, "origin {origin:?} crossed the box once"),
+                Err(_) => cracked += 1,
+            }
+            total += 1;
+        }
+        // The grid is `2·SWEEP_REACH + 1` ULP across in each direction and centred on the junction
+        // vertex itself — the worst place on the whole seam to aim.
+        assert!(
+            cracked * 100 <= total,
+            "{cracked} of {total} rays fell through the T-junction: that is a hole, not a rounding \
+             sliver",
+        );
+    }
 }
