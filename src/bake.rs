@@ -1644,11 +1644,11 @@ mod tests {
             Vec3::new(1.0, 1.0, 0.0),
             Vec3::new(1.0, 1.0, f32::from_bits(1.0f32.to_bits() + 1)),
         ] {
-            let Err(findings) = manifold_gate("Turret_Bottom", 0, &tetra, scale) else {
+            let Err(findings) = manifold_gate("Scaled_Plate", 0, &tetra, scale) else {
                 panic!("a ballistic node at {scale:?} must be refused");
             };
             assert_eq!(refusals(&findings), ["L2.UNIT_SCALE"]);
-            assert_eq!(findings[0].subject.name, "Turret_Bottom");
+            assert_eq!(findings[0].subject.name, "Scaled_Plate");
         }
     }
 
