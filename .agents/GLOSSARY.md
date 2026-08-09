@@ -84,9 +84,6 @@ _Avoid_: "the rig" for the sim body (the rig is the *contract*; the sim body is 
 The instantiated glb scene, attached onto the sim body as pure presentation whenever it loads. It only renders — no sim state reads or lives on it. A view node mirrors a sim part by name (`ViewOf` / `ViewNode`); render smoothing writes view nodes, and the sim transforms stay pure per-tick truth (ADR-0014).
 _Avoid_: calling the view "the model" (that is the source `.glb`/`.blend`)
 
-**Bind window** (retired):
-The old hazard interval between a replicated tank root arriving and its sim body finishing an async scene-driven bind — the source of a run of netcode bugs. Closed by ADR-0014: the sim body is now complete at spawn, so a late scene is only a cosmetic view pop-in. The term should now describe *only* the view attach, or be deleted.
-
 ## Geometry LOD
 
 (Model: geometry mipmapping — a mip chain for meshes. Decisions in the LOD ADR.)
@@ -200,10 +197,6 @@ Turning through differential belt motion while the contact elements shear latera
 **Neutral steer**:
 Counter-rotating the belts at near-zero mean speed so their equal-and-opposite traction produces yaw with little translation.
 _Avoid_: pivot turn, neutral turn
-
-**Grip ellipse**:
-The shared longitudinal/lateral traction budget of one belt contact, capped by normal load and the terrain's lateral-grip ratio. Per-element strain and sliding both spend this same budget.
-_Avoid_: friction circle (the lateral budget is deliberately lower)
 
 **Declared transmission**:
 The vehicle-authored engine envelope, gear ladders, steering radii, capacities, brakes, shift behavior, and architecture. Speeds and radii are source data; reductions, curvatures, and other coupled quantities derive in one validated constructor.
@@ -347,3 +340,30 @@ _Avoid_: efficiency (reserve that for a single requirement member's coefficient)
 **Cookoff**:
 Detonation of an ammunition volume when its HP is depleted — instantly kills all crew. The one terminal, non-repairable event.
 _Avoid_: ammo rack explosion, detonation (reserve detonation for HE)
+
+**Union field**:
+The material-factor field along a shot's path: at every point, the **max** `material_factor` over the volumes covering it. Cost is its integral, so shared space is charged exactly once, authoring order cannot matter, and adding a volume never lowers protection. Damage stays per-presence — every HP-bearing volume deposits over its own chords, at its own factor, with no ownership.
+_Avoid_: CSG merge, boolean union of the meshes (the union is evaluated lazily on the ray; no merged mesh exists)
+
+**Walk**:
+How one sample ray is resolved: collect *all* crossings, pair them per volume into enter/exit runs, ε-weld near-touching runs, then integrate cost along the field and fire the boundary laws at each factor step. Replaces the serial one-plate-at-a-time march, in which overlapping and exactly-abutting plates were both crossed free.
+_Avoid_: march (that is the shell's flight through the world; the walk is what happens inside one crossing)
+
+**Shell** (as a sampled disc):
+The projectile as a caliber-wide body rather than a line: k sample rays (the axis plus a ring at `caliber/2`) each walked, then aggregated. Every scalar the point model consumed becomes an area aggregate — the mean entry normal `n̄`, and the covered fraction **η**, which scales cost, ricochet bleed and deflection angle alike. A fragment is this same primitive at r→0, k=1.
+
+**η** (engagement fraction):
+The fraction of a shell's disc covered by material at a crossing. η = 1 is a fully-buried hit, η = 0 flies free, and everything between is continuous — which is what makes a graze a partial ricochet, an MG port a graded weakspot, and a weakspot caliber-gated without any authored weakspot data.
+
+**ε-weld**:
+Runs separated by less than the weld tolerance — DERIVED ≈2 mm, measured **perpendicular** to the faces — merge into one run. It merges event *topology*, not material: one entry face, one exit face, one overmatch test, while the gap itself is never charged and material steps inside the welded run still spall by the field law. Bounds the omitted void per run at ε, so a picket fence cannot chain into one plate.
+_Avoid_: tolerance, snapping (this deletes phantom faces; it never creates steel)
+
+**Corridor**:
+A path through a tank that reaches crew or ammunition without crossing enough material to stop the admitting caliber. Deliberate ones — turret ring, MG port, vision slits — are blessed; accidental super-caliber ones are authoring defects.
+
+**Bless list**:
+The ray fuzzer's record of deliberate openings, each with its admitting caliber and per-caliber η ("this seam admits ≥8 mm; at 88 mm η = 0.93"). Weakspots are decided here, not discovered by players as bugs; anything the fuzzer reports that is not on the list is a hole to fix.
+
+**Fail-closed**:
+The armor read's response to a question it cannot answer honestly — an unpairable topology, an unprobeable collider, a replica with no authoritative verdict. The round stops where it was: no perforation, no spall, no transit damage, no fabricated event. Free penetration is the one outcome worse than a stopped shell, because it is indistinguishable from armor that was never modeled.
