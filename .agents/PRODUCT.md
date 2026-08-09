@@ -6,9 +6,9 @@ The single top-level authority on what this game is, where it stands, and what i
 
 Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, sound, sky — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
 
-In flight: the ballistics union field (spec finalized, not built); the Tiger asset restructure (substance library assigned, glb re-export pending); geometry LOD v2, terrain LOD and display settings (landed); level design (external lane, below).
+In flight: the rebuilt Tiger asset + 5-level LOD ladder + watertight ray kernel (one PR, in adversarial review); pipeline generalization per ADR-0034; level design (external lane, below). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings.
 
-Next: build the union-field walk and its ray-fuzzer gate; re-export the Tiger glb; open the building-destruction implementation research.
+Next: land the asset PR; coincident-shell refinement (unconditional fuzzer zero); Houdini map-pipeline direction session; building-destruction implementation research.
 
 ## Values
 
