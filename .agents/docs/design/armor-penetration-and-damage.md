@@ -655,7 +655,10 @@ today independent of unions.
    - **A fan that disagrees about direction is a tangent** — the ray met the surface and left on the
      side it came from. No interval, no cost, no event. A fan that agrees is transverse and is one
      oriented crossing. Two contacts are two crossings however close they land.
-   - **No threshold decides what counts as a hit.** A shell thinner than any window is two different
+   - **No threshold decides what counts as a hit.** Parallel is an exactly zero determinant and
+     nothing else — a crossing whose determinant cancels to a fraction of an ULP is still a
+     crossing, taken in exact integer arithmetic when the float filter's own error bound reaches
+     zero. A shell thinner than any window is two different
      contacts and stays an ordinary crossing, charged, with its own entrance and exit. The contact
      parameter is carried at `f64`, from the collector's exact projection through to the cost
      integral, so two contacts keep their exact ORDER and a chargeable metric CHORD even where their
@@ -664,16 +667,12 @@ today independent of unions.
      no order between them and no thickness to charge.
    - **Occupancy is a boolean and alternation is required.** A certified shell is entered from
      outside and left from inside; a second entry is a violated certificate, not a deeper winding,
-     and it is named. (Embedding — no self-intersection within one shell — is not yet proven at
-     bake; until it is, this is where a non-embedded shell is caught.)
+     and it is named. Embedding — no self-intersection within one shell — is proven at the bake
+     (§13.6), so this is a backstop against a live collider drifting from the buffer that was
+     certified, not the only guard.
    - Identity survives the RESTART: a corridor resuming inside material declares which *shells* it
      is inside, never which primitives. It is a runtime identity only — entity-keyed and dense in
      the bake's triangle order — and never crosses a save, replay or wire seam.
-
-   This replaces per-entity parity pairing, which is unsound the moment one mesh carries two
-   islands, and the family of laws that tried to reduce a *cluster* of nearby crossings to a net
-   occupancy: at that interface two shells closing at one `t` and one shell claimed twice are the
-   same numbers, so every such rule erased armour on some legal mesh.
 3. **ε-weld:** runs separated by less than the weld tolerance merge into one run. Semantics
    sharpened 2026-08-04:
    - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
@@ -807,15 +806,27 @@ Enforced mechanically, not by eyeball:
   test per connected shell, on every substance primitive (classifier precedent 2026-08-07 — the gate
   keys off the material, not a name). Welding, degeneracy, closure, winding and signed volume are all
   judged on the authored buffer, and its edge-connected components ARE the surface identity §13.4
-  pairs on, published rather than discarded. **Embedding is not yet proven** — a shell that passes
-  through itself is caught at runtime by §13.4's alternation, not at build time. OPEN TAB.
-- **Unit scale is the authoring contract for ballistic geometry.** A componentwise scale is injective
-  over the reals and not over `f32` — two authored coordinates can land on one, turning a
-  positive-thickness shell into a zero-thickness one that the gate has already passed — so the model
-  carries the scale in its vertices, never on its nodes. The bake **refuses** a substance primitive
-  whose composed node scale is not bit-exactly 1, naming the node; the fix is to apply the scale in
-  the .blend and re-export, never to compensate in code. The collector re-checks the live collider
-  scale before it walks one, which is what catches a spawn-time or runtime mutation.
+  pairs on, published rather than discarded.
+- **Embedding, per shell, unconditionally.** Closure says a shell has an inside; embedding says the
+  ray that enters it leaves it. For every same-shell triangle pair whose closed AABBs overlap, the
+  exact intersection `I` must lie inside the feature `F` the two DECLARE they share — their common
+  welded ids: none, one vertex, one edge, and three is one face exported twice. No adjacent pair is
+  exempt; the exemption IS the declared feature. Every sign is exact — a float filter decides only
+  where its own proven roundoff excludes zero, and coplanarity, collinearity and tangency are
+  exact-zero. There is no flag and no allowlist: a shell that passes through itself charges a
+  fraction of the plate it crossed, and §13.4's alternation cannot be relied on to notice, because
+  a fan whose claims disagree about direction is a tangent that carries no evidence.
+- **Unit scale is the authoring contract for ballistic geometry, at every seam it can be broken
+  at.** A componentwise scale is injective over the reals and not over `f32` — two authored
+  coordinates can land on one, turning a positive-thickness shell into a zero-thickness one that the
+  gate has already passed — so the model carries the scale in its vertices, never on its nodes.
+  Three refusals, all bit-exact against 1 and none of them a compensation: the bake refuses a
+  substance primitive whose composed node scale is not 1, naming the node (fix it in the .blend and
+  re-export); the spawn refuses a tank root spawned at any other scale, because a scaled root moves
+  and shrinks every collider's world AABB and the swept query can then miss the armour entirely,
+  leaving nothing downstream to refuse; and the collector refuses a live collider that reaches the
+  world at any other scale, which is what catches a runtime mutation of a hierarchy that spawned
+  clean.
 
 ### 13.7 Authoring contract (amends the §12 mesh bullet; revised 2026-08-04)
 

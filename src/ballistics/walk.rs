@@ -25,19 +25,19 @@
 //! # Pairing is a fact, not an inference
 //!
 //! Every crossing arrives naming the closed shell it came from ([`ShellKey`], from the manifold
-//! gate's own edge-connected components), and occupancy is tracked per shell. That is the whole of
-//! the topology law. Without it the interface is genuinely ambiguous — two shells of one primitive
+//! gate's own edge-connected components) AND the welded feature the ray met — a triangle interior,
+//! a welded edge, or a welded vertex. Occupancy is tracked per shell, and that is the whole of the
+//! topology law. Without it the interface is genuinely ambiguous: two shells of one primitive
 //! closing at one `t` and one shell's exit claimed by both triangles of its shared edge present the
-//! same `t`, the same winding sign and the same normal — and every rule that tried to decide between
-//! them from the numbers alone (signed nets, sign-change ordering, coincidence clusters spanning
-//! primitives) erased armour on some legal mesh.
+//! same `t`, the same winding sign and the same normal.
 //!
-//! What survives of tolerance is one dedup: consecutive same-sign claims of ONE shell inside one
-//! coincidence window are one crossing. Two triangles sharing an edge belong to the same shell by
-//! construction, so that collapse is exact rather than a guess — nothing else can be hiding inside
-//! it. A sign change is never collapsed, so a shell thinner than the window is an ordinary tiny
-//! traversal: charged, with its own entrance and exit. There is no threshold below which a crossing
-//! stops being one.
+//! IDENTITY IS THE ONLY DEDUP. Claims are one crossing when they name one contact of one shell,
+//! never because their `t` are close: there is no coincidence window here, no proximity test and no
+//! signed net. Two contacts are two crossings however close they land, so a shell thinner than any
+//! window is an ordinary traversal — charged, with its own entrance and exit. The parameter is
+//! carried at `f64` from the collector's exact projection through to the cost integral, so two
+//! contacts keep their order and their chargeable chord even where their public `f32` values
+//! coincide.
 //!
 //! # Staged, because normalization bends the axis
 //!
@@ -59,8 +59,9 @@
 //!
 //! # Three tolerance domains, deliberately separate
 //!
-//! [`WalkLaws::topology_abs`]/[`WalkLaws::topology_rel`] dedup one shell's repeated claims of one
-//! crossing; [`WalkLaws::weld_perp`] is the §13.4 physical event-topology knob (~2 mm
+//! [`WalkLaws::topology_abs`]/[`WalkLaws::topology_rel`] relate a corridor RESTART to the face it
+//! hands off on, and have no part in pairing; [`WalkLaws::weld_perp`] is the §13.4 physical
+//! event-topology knob (~2 mm
 //! perpendicular); [`WalkLaws::event_plane_tolerance`] is the lateral surface-patch relation the
 //! disc uses to associate samples. They are three orders of magnitude apart and must never be
 //! collapsed into one "epsilon" — a march/query offset in particular must never reach this module,
@@ -258,7 +259,7 @@ pub struct RayCorridor {
     /// f32 near the edge of a 2.5 km map resolves to 0.24 mm, so a world position and anything
     /// derived from it are quantised at that step INDEPENDENTLY: two exact-equal quantities computed
     /// by different routes come back up to a quarter millimetre apart. That is what put a transit
-    /// handoff 0.38 mm off the very face it was computed from (MEASURED by codex 2026-08-07 at
+    /// handoff 0.38 mm off the very face it was computed from (MEASURED at
     /// `(2499.9, 924.963, 1524.939)`, 38° incidence) and let a real entry face be pruned in-envelope.
     /// Anchoring kills it at the source: the world-scale subtraction happens ONCE, on the anchor, and
     /// every relationship the walk cares about is then arithmetic on small numbers.
@@ -339,7 +340,7 @@ pub struct WalkLaws {
     /// Ceiling on `sec(incidence)` — dimensionless, and the only knob left in the association
     /// geometry.
     ///
-    /// DIMENSIONS, EXPLICITLY, because getting this wrong is exactly what round 4 caught. The
+    /// DIMENSIONS, EXPLICITLY, because a cap read in the wrong unit mispredicts the geometry. The
     /// predicted separation of two samples is `−(d·n̄)/(axis·n̄)`, whose worst case over a disc is
     /// `|d| = 2r` with `d` up the plane's steepest line: `2·r·sin(i)·sec(i) = 2·r·tan(i)`. Capping
     /// the SECANT at `C` therefore caps the reach at `2·r·C·sin(i) ≤ 2·r·C` — that is `C` DIAMETERS,
@@ -348,8 +349,8 @@ pub struct WalkLaws {
     ///
     /// GENEROUS, deliberately. Its only job is numerical: the division blows up as the ray goes
     /// parallel to the surface. Below it the relation is EXACT, and a cap that engages anywhere a
-    /// valid crossing can happen does not bound the geometry, it mispredicts it — which is precisely
-    /// the defect round 4 caught. A hundred engages past 89.43°, an order beyond any incidence at
+    /// valid crossing can happen does not bound the geometry, it mispredicts it. A hundred engages
+    /// past 89.43°, an order beyond any incidence at
     /// which a round both declines to ricochet and still presents a resolvable chord. The reach it
     /// implies is never the operative bound — the residual is.
     pub event_secant_cap: f32,
@@ -754,9 +755,11 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
 /// alternation is required rather than assumed, and the first crossing that disproves it is named
 /// ([`WalkError::UnexpectedEntry`]) instead of counted.
 ///
-/// OPEN TAB: the bake proves closure and outward winding per shell, not embedding. Until it does,
-/// this is where a non-embedded shell is caught — fail-closed, at the first crossing that proves
-/// it, rather than at build time.
+/// The bake certifies embedding over the surface (`bake::embedding`), so alternation is a
+/// redundant runtime backstop rather than the only guard: a shell that could disprove it never
+/// reaches the world. It is kept fail-closed because a live collider is not the buffer the bake
+/// judged — a pose, a scale or a collider swap can still put a ray somewhere the certificate does
+/// not cover.
 struct Field {
     /// Per open shell: where its presence opened.
     open: BTreeMap<ShellKey, f64>,
@@ -1709,10 +1712,10 @@ pub fn walk_disc(
 /// Bounding the SEPARATION by that worst case (which is what shipped) is not the same statement, and
 /// the difference is not academic. The worst case is reached only by diametrically opposite samples;
 /// every other pair on the same plane is closer, so a bound sized for the extreme admits pairs that
-/// are nowhere near one surface, while a bound sized for the typical pair rejects the extreme. Codex
-/// measured the second half of that: an 88 at 80° whose axis and intermediates passed through an
-/// opening, leaving only the two opposite rim samples on one plane, split into two events — a valid
-/// contact refused because it sat exactly at the extreme the bound was cut to.
+/// are nowhere near one surface, while a bound sized for the typical pair rejects the extreme. The
+/// second half of that is MEASURED: an 88 at 80° whose axis and intermediates pass through an
+/// opening leaves only the two opposite rim samples on one plane, and the pair splits into two
+/// events — a valid contact refused because it sat exactly at the extreme the bound was cut to.
 ///
 /// The RESIDUAL has no such tension. It is zero for one surface at every incidence, every calibre,
 /// and every pair, however far apart along the ray they land; and for two genuinely separate
