@@ -517,9 +517,19 @@ fn edge_area(p: (f32, f32), q: (f32, f32)) -> f32 {
     q.0 * p.1 - q.1 * p.0
 }
 
-/// The same area with the products carried in f64 — reached only when the f32 form cancels to
-/// exactly zero, where the sign the edge test needs has been rounded away. Antisymmetric on the same
-/// grounds, so widening one triangle's edge widens its neighbour's identically.
+/// The same area with the products carried in f64 — reached when, and only when, the f32 form
+/// cancels to exactly zero.
+///
+/// EXACT ZERO IS THE WHOLE OF THE UNRECOVERABLE SET, which is what fixes the trigger's width.
+/// Round-to-nearest is monotone, so `q₀·p₁ ≥ q₁·p₀` implies `fl(q₀·p₁) ≥ fl(q₁·p₀)`, and the
+/// subtraction that follows preserves sign: a nonzero f32 area carries the EXACT sign however
+/// violently the two products cancel, and only a cancellation to zero carries none. A trigger
+/// widened to "within a relative-error guard of zero" therefore re-decides cases whose sign was
+/// already right, and can recover no crossing at all
+/// (`the_sign_of_a_sheared_edge_area_is_the_exact_one_or_zero`).
+///
+/// Antisymmetric on the same grounds as the f32 form, so widening one triangle's edge widens its
+/// neighbour's identically.
 #[inline]
 fn edge_area_exact(p: (f32, f32), q: (f32, f32)) -> f64 {
     q.0 as f64 * p.1 as f64 - q.1 as f64 * p.0 as f64
@@ -876,10 +886,10 @@ mod tests {
     /// Stepping the ORIGIN's bits, not the target: the origin is metres from the geometry, so its
     /// own ULP is the finest perturbation the corridor can express, and a smaller step applied to
     /// the target vanishes in the subtraction that forms it.
-    fn sweep_origins(target: Vec3, axis: Vec3) -> impl Iterator<Item = Vec3> {
+    fn sweep_origins(target: Vec3, axis: Vec3, reach: i32) -> impl Iterator<Item = Vec3> {
         let base = target - axis * SWEEP_STANDOFF;
-        (-SWEEP_REACH..=SWEEP_REACH).flat_map(move |i| {
-            (-SWEEP_REACH..=SWEEP_REACH).map(move |j| {
+        (-reach..=reach).flat_map(move |i| {
+            (-reach..=reach).map(move |j| {
                 Vec3::new(
                     f32::from_bits((base.x.to_bits() as i32 + i) as u32),
                     f32::from_bits((base.y.to_bits() as i32 + j) as u32),
@@ -904,7 +914,7 @@ mod tests {
         let mut lost = 0;
         let mut retired_lost = 0;
         let mut total = 0;
-        for origin in sweep_origins(target, axis) {
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
             let shear = RayShear::new(origin, axis);
             let near = cross_triangle(&shear, axis, vertices[4], vertices[5], vertices[6]);
             let far = cross_triangle(&shear, axis, vertices[6], vertices[7], vertices[4]);
@@ -938,7 +948,7 @@ mod tests {
         let collider = Collider::trimesh(vertices.clone(), indices);
         let axis = SWEEP_DIR.normalize();
         let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
-        for origin in sweep_origins(target, axis) {
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
             let spans = sweep_walks(&collider, origin, axis)
                 .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
             assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
@@ -997,7 +1007,7 @@ mod tests {
         let target = vertices[8];
         let mut cracked = 0;
         let mut total = 0;
-        for origin in sweep_origins(target, axis) {
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
             match sweep_walks(&collider, origin, axis) {
                 Ok(spans) => assert_eq!(spans, 1, "origin {origin:?} crossed the box once"),
                 Err(_) => cracked += 1,
@@ -1010,6 +1020,180 @@ mod tests {
             cracked * 100 <= total,
             "{cracked} of {total} rays fell through the T-junction: that is a hole, not a rounding \
              sliver",
+        );
+    }
+
+    /// `x` moved by `steps` f32 ULP.
+    fn ulp_step(x: f32, steps: i32) -> f32 {
+        f32::from_bits((x.to_bits() as i32 + steps) as u32)
+    }
+
+    /// A NONZERO f32 EDGE AREA IS NEVER ON THE WRONG SIDE, AND AN EXACT ZERO IS NEVER MISSED.
+    ///
+    /// [`edge_area`] is `fl(fl(q₀·p₁) − fl(q₁·p₀))`. Round-to-nearest is MONOTONE, so
+    /// `q₀·p₁ ≥ q₁·p₀` implies `fl(q₀·p₁) ≥ fl(q₁·p₀)`, and the final subtraction is sign-preserving:
+    /// the computed area therefore carries the exact sign or it carries none — it can never carry
+    /// the opposite one, however violently the two products cancel.
+    ///
+    /// That is what pins the width of the f64 fallback's trigger. Exact zero is the whole of the
+    /// unrecoverable set; a trigger widened to "near zero" re-decides only cases whose f32 sign was
+    /// already right, so it cannot recover a crossing that was lost. MEASURED over 1 543 115
+    /// genuinely interior grazing rays (f64 Möller–Trumbore reference): the shipped predicate and an
+    /// exact-arithmetic evaluation of the same sheared points agree on every one of them, and a
+    /// relative-error-widened trigger changes 0 decisions.
+    #[test]
+    fn the_sign_of_a_sheared_edge_area_is_the_exact_one_or_zero() {
+        let mut cancelled = 0u32;
+        let mut checked = 0u32;
+        for (x, y) in [
+            (0.6127f32, 0.7903f32),
+            (1.4813, 0.5171),
+            (0.25, 2.0),
+            (3.7137, -1.1071),
+            (0.5, 0.70710677),
+        ] {
+            let p = (x, y);
+            // `q` sweeps a neighbourhood of `−p`, where the two products cancel to the last bits.
+            for i in -48..=48i32 {
+                for j in -48..=48i32 {
+                    let q = (ulp_step(-x, i), ulp_step(-y, j));
+                    let f32_area = edge_area(p, q);
+                    let exact = edge_area_exact(p, q);
+                    checked += 1;
+                    if f32_area == 0.0 {
+                        cancelled += 1;
+                        continue;
+                    }
+                    assert_eq!(
+                        f32_area > 0.0,
+                        exact > 0.0,
+                        "p {p:?} q {q:?}: f32 {f32_area:e} against {exact:e}",
+                    );
+                    assert!(
+                        exact != 0.0,
+                        "p {p:?} q {q:?}: an exact zero read as nonzero"
+                    );
+                }
+            }
+        }
+        assert!(
+            cancelled > 0,
+            "{checked} pairs and not one cancellation: the sweep is not crossing the band",
+        );
+    }
+
+    /// A SLIVER FACE IN A CLOSED SURFACE LOSES NO CROSSING.
+    ///
+    /// One triangle of the top face is fanned around a point 0.1 µm off its own long diagonal, so
+    /// the fan contains a triangle whose sheared projection is a sliver 0.4 m long: every interior
+    /// point of it is within a few ULP of two of its own edges, and its edge areas are the
+    /// difference of two products that agree to their last bits.
+    ///
+    /// A sliver's containment answer is not a claim about 3D barycentrics — the shear projects both
+    /// halves of every shared edge from the SAME vertices, so the projected triangles tile the plane
+    /// exactly, and a ray the sliver declines is claimed by whichever neighbour owns that side of the
+    /// edge. The retired per-triangle test had no such relation, which is why it drops rays here.
+    #[test]
+    fn a_sliver_face_in_a_closed_surface_loses_no_crossing() {
+        let mut vertices = sweep_vertices();
+        let (v4, v5, v6) = (vertices[4], vertices[5], vertices[6]);
+        // Strictly inside the triangle `[4, 5, 6]`, and 0.1 µm off the diagonal `4–6`.
+        let foot = v4 + (v6 - v4) * 0.4137;
+        let inner = foot + (v5 - foot).normalize() * 1.0e-7;
+        vertices.push(inner);
+        let mut indices = sweep_sides();
+        // The far half keeps the diagonal whole; the near half is fanned around the interior point,
+        // so the surface stays closed and `[6, 4, 8]` is the sliver.
+        indices.extend([[6, 7, 4], [4, 5, 8], [5, 6, 8], [6, 4, 8]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        let (a, b, c) = (vertices[6], vertices[4], vertices[8]);
+        let target = a * 0.170 + b * 0.238 + c * 0.592;
+        let mut retired_lost = 0;
+        let mut total = 0;
+        for origin in sweep_origins(target, axis, SWEEP_REACH) {
+            let spans = sweep_walks(&collider, origin, axis)
+                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
+            assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
+            let shear = RayShear::new(origin, axis);
+            let fan = [[a, b, c], [b, v5, c], [v5, a, c]];
+            let shipped = fan
+                .iter()
+                .filter(|t| cross_triangle(&shear, axis, t[0], t[1], t[2]).is_some())
+                .count();
+            let retired = fan
+                .iter()
+                .filter(|t| barycentric_contains(origin, axis, t[0], t[1], t[2]))
+                .count();
+            if shipped > 0 && retired == 0 {
+                retired_lost += 1;
+            }
+            total += 1;
+        }
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing over {total} rays, so the sweep is not crossing the              sliver",
+        );
+    }
+
+    /// A RAY THROUGH A SHARED VERTEX IS CLAIMED BY THE FAN AROUND IT.
+    ///
+    /// The shared-EDGE relation is exact antisymmetry between two triangles. A vertex has no such
+    /// pairing: it is the meeting point of a whole fan, and its watertightness rests on the shear
+    /// projecting that one vertex to one 2D point for every triangle that names it. This aims at a
+    /// box corner where four faces meet, rotated off every axis, and steps the origin one ULP at a
+    /// time across it.
+    ///
+    /// The claim is the walk's, not a hit count's: a ray on the corner may be claimed by several
+    /// faces at once and the coincidence clustering reduces that to one toggle. What must never
+    /// happen is a toggle going missing, which the corridor reports as a `WalkError`.
+    #[test]
+    fn a_ray_through_a_shared_vertex_is_claimed_by_the_fan() {
+        let vertices = sweep_vertices();
+        let mut indices = sweep_sides();
+        indices.extend([[4, 5, 6], [6, 7, 4]]);
+        let collider = Collider::trimesh(vertices.clone(), indices);
+        let axis = SWEEP_DIR.normalize();
+        // Vertex 4 is named by four of the box's faces.
+        let fan: Vec<[u32; 3]> = {
+            let mut all = sweep_sides();
+            all.extend([[4, 5, 6], [6, 7, 4]]);
+            all.into_iter().filter(|t| t.contains(&4)).collect()
+        };
+        assert_eq!(fan.len(), 4, "the corner is a fan of four");
+        let (mut crossed, mut missed, mut retired_lost) = (0, 0, 0);
+        for origin in sweep_origins(vertices[4], axis, 32) {
+            let spans = sweep_walks(&collider, origin, axis)
+                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
+            match spans {
+                0 => missed += 1,
+                1 => crossed += 1,
+                other => panic!("origin {origin:?} crossed the box {other} times"),
+            }
+            let shear = RayShear::new(origin, axis);
+            let claim = |t: &[u32; 3], retired: bool| {
+                let (a, b, c) = (
+                    vertices[t[0] as usize],
+                    vertices[t[1] as usize],
+                    vertices[t[2] as usize],
+                );
+                if retired {
+                    barycentric_contains(origin, axis, a, b, c)
+                } else {
+                    cross_triangle(&shear, axis, a, b, c).is_some()
+                }
+            };
+            if fan.iter().any(|t| claim(t, false)) && !fan.iter().any(|t| claim(t, true)) {
+                retired_lost += 1;
+            }
+        }
+        assert!(
+            crossed > 0 && missed > 0,
+            "the grid must bracket the corner: {crossed} crossed, {missed} missed",
+        );
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing at the corner, so the sweep is not crossing the fan",
         );
     }
 }
