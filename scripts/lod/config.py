@@ -301,12 +301,13 @@ RECORDED_GATE_THRESHOLDS = (
 #: provenance the block exists to carry. The `levels` under it ARE the new corpus, because those are
 #: measurements and measurements go stale.
 #:
-#: IT NO LONGER HOLDS A FORTIORI, AND THAT IS THE THING TO NOTICE. The corpus Yan judged produced a
-#: worst score of 1.674 against the ratified 2.0; this one produces 4.877, at the L0|L1 switch. It
-#: passes only on the absolute floor — 0.0048 of a 0.020 mean-difference budget — so the picture is
-#: an image difference that is negligible in absolute terms measured against a noise-to-defect
-#: bracket narrow enough to inflate the ratio. Blocking is still disarmed, so nothing rides on it;
-#: the next ratification should be told that the ratio and the floor now disagree at L1.
+#: REFRESHED AGAIN 2026-08-09, after the shipped L0's shading was corrected at source. `Link` used
+#: to carry its `Smooth by Angle` as a modifier, and `export_scene.gltf` does not apply modifiers,
+#: so the tank glb shipped the mesh's unevaluated all-smooth normals while the chain was cut from
+#: the evaluated ones. The .blend now holds that smoothing as `sharp_edge` data, so both sides read
+#: the same surface. Every scored level measures 1.000 against the ratified 2.0; the corpus cut
+#: before the correction scored 4.877 at the L0|L1 switch, where the gate was comparing L1 against
+#: an L0 that rendered differently from the surface L1 was reduced from.
 RATIFICATION_EVIDENCE = {
     # WHO RULED, ON WHAT, AND FROM WHAT. Recorded here and copied into the manifest, because the
     # threshold it settles is a taste call, and a taste call without its provenance is just a number.
@@ -320,23 +321,23 @@ RATIFICATION_EVIDENCE = {
                    "when the render uses the shipped material",
         # THE FINDING ABOVE IS A HISTORICAL RECORD AND ITS NUMBER HAS MOVED. It is left verbatim
         # because it is what Yan saw and decided on; it is annotated here because the corpus it
-        # describes is gone. Re-cut 2026-08-08 from the rebuilt 1520-triangle shoe, the worst score
-        # is 4.877 at the L0|L1 switch, not 1.674 — over the ratified 2.0 fraction, and passing only
-        # on the absolute floor (`max_mean_abs_diff`), with the measured difference at 0.0048 of a
-        # 0.020 budget. So the threshold's ARITHMETIC basis has changed even though the perceptual
-        # judgement has not been retaken. Blocking is still disarmed (the render falls back to the
-        # .blend material), so nothing rides on it yet — but the next eyeball ruling should be told
-        # that the bracket at L1 is now narrow enough to inflate the ratio.
+        # describes is gone. Re-cut 2026-08-09 from the rebuilt 1520-triangle shoe with the shipped
+        # L0's shading corrected, the worst score is 1.000, not 1.674 — under the ratified 2.0 at
+        # every scored level, and no level reaching the absolute floors. The perceptual judgement
+        # has not been retaken; the thresholds it set hold a fortiori on this corpus. Blocking is
+        # still disarmed (the render falls back to the .blend material), so nothing rides on it yet.
     },
     "levels": (
         # (level, tris, switch_m, defect_score, verdict)
         #
-        # RESTATED 2026-08-08 against the corpus cut from Yan's rebuilt 1520-triangle shoe. These
-        # are what is measured and shipped now; the numbers Yan ruled on in August 2026 described a
-        # 764-triangle source that no longer exists. THE RULING ITSELF IS UNCHANGED — the thresholds
-        # above are what he decided, and this block is the evidence they were decided against,
-        # re-measured so it describes the corpus in the tree rather than a retired one.
-        (1, 678, 60.4, 4.877215, "PASS"),
+        # RESTATED 2026-08-09 against the corpus cut from Yan's rebuilt 1520-triangle shoe with its
+        # shading corrected at source. These are what is measured and shipped now; the numbers Yan
+        # ruled on in August 2026 described a 764-triangle source that no longer exists. THE RULING
+        # ITSELF IS UNCHANGED — the thresholds above are what he decided, and this block is the
+        # evidence they were decided against, re-measured so it describes the corpus in the tree
+        # rather than a retired one. Only L1's score moved in this refresh; the triangle counts and
+        # switch distances are the 2026-08-08 ladder unchanged.
+        (1, 678, 60.4, 1.000000, "PASS"),
         (2, 390, 269.4, 1.000000, "PASS"),
         (3, 254, 527.9, 1.000000, "PASS"),
         (4, 146, 1499.6, None, "ABSTAIN"),

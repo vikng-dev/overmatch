@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "9e3bfe5cdec514e4baf6a64ebb1d5bbd43c081068557f25a01bbc918bb08a1a4",
+    "sources_sha256": "7ad6bbd1444fdadafba3ec8a35ff7a1162bae82f07b9a6b05925e7be6c1366cc",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -95,9 +95,9 @@
       "name": "tiger_1_link",
       "source": {
         "blend": "assets/tiger_1/tiger_1.blend",
-        "blend_sha256": "988cc1cf2f752573a3b89c2bd3eea9e1add84ef78153a00c22bc6b3f1df6abb3",
+        "blend_sha256": "3afa9cbc76430a0b9316c3563fe5ab4662656dff643d8989331fc752a086241f",
         "object": "Link",
-        "evaluated_digest": "cd5c61969906cc30144ad5f88172c5fc53aed3799fa1e63a79f46a6b24f74154",
+        "evaluated_digest": "8019d349d30ba0e7bccc3bc3f6b5129c5bd9654f7aca6c9983643f3cf6b27533",
         "tris": 1520,
         "verts": 744,
         "radius_m": 0.384491,
@@ -157,7 +157,7 @@
           "rung": 0,
           "role": "source",
           "tris": 1520,
-          "verts": 1746,
+          "verts": 1744,
           "glb": "assets/tiger_1/tiger_1.glb",
           "node": "Link",
           "e_target_mm": 0.0,
@@ -167,10 +167,10 @@
           "switch_m": 0.0,
           "validity": {
             "tris": 1520,
-            "verts": 1746,
-            "baked_tangents": 1746,
+            "verts": 1744,
+            "baked_tangents": 1744,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999925699,
+            "min_tangent_length": 0.99995303,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -188,7 +188,7 @@
             "radius_m": 0.384491,
             "origin_radius_m": 0.380365
           },
-          "glb_sha256": "a781dca72e11c4dce080e908995876092df74c417c7f26f70905609dc74a994b",
+          "glb_sha256": "cd956f0636e3e091c2ef3ed198742c810b4932933b6aef4cf59f42467597c324",
           "blender_source_verts": 744,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
@@ -204,7 +204,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung1.glb",
           "node": "Link_LOD1",
           "tris": 678,
-          "verts": 1022,
+          "verts": 922,
           "shed_fraction_vs_parent": 0.553947,
           "parent_level": "L0",
           "dev_source_mm": 3.305472,
@@ -219,10 +219,10 @@
           "switch_from_pairwise_m": 60.4024,
           "validity": {
             "tris": 678,
-            "verts": 1022,
-            "baked_tangents": 1022,
+            "verts": 922,
+            "baked_tangents": 922,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999938686,
+            "min_tangent_length": 0.999935962,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -275,9 +275,9 @@
                   "footprint_px": 259086,
                   "silhouette_band_px": 190,
                   "silhouette_band_frac": 0.000733,
-                  "mean_abs_diff": 1e-06,
+                  "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.012745,
+                  "max_abs_diff": 0.005392,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
@@ -295,7 +295,7 @@
                   "silhouette_band_frac": 0.000733,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.012745,
+                  "max_abs_diff": 0.006618,
                   "frac_over": 0.0
                 },
                 "defect_score": 1.0,
@@ -307,17 +307,17 @@
                   "footprint_px": 157100,
                   "silhouette_band_px": 734,
                   "silhouette_band_frac": 0.00465,
-                  "mean_abs_diff": 0.000218,
+                  "mean_abs_diff": 9e-06,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.283088,
-                  "frac_over": 0.000885
+                  "max_abs_diff": 0.059069,
+                  "frac_over": 0.0
                 },
                 "noise_floor": {
                   "footprint_px": 157106,
                   "silhouette_band_px": 731,
                   "silhouette_band_frac": 0.004631,
-                  "mean_abs_diff": 0.00092,
-                  "p99_abs_diff": 0.003676,
+                  "mean_abs_diff": 0.000922,
+                  "p99_abs_diff": 0.003922,
                   "max_abs_diff": 0.038725,
                   "frac_over": 0.0
                 },
@@ -325,10 +325,10 @@
                   "footprint_px": 157113,
                   "silhouette_band_px": 721,
                   "silhouette_band_frac": 0.004568,
-                  "mean_abs_diff": 5.7e-05,
+                  "mean_abs_diff": 0.000831,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.371324,
-                  "frac_over": 8.3e-05
+                  "max_abs_diff": 0.481373,
+                  "frac_over": 0.00224
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -339,37 +339,37 @@
                   "footprint_px": 124683,
                   "silhouette_band_px": 1070,
                   "silhouette_band_frac": 0.008509,
-                  "mean_abs_diff": 0.004774,
-                  "p99_abs_diff": 0.16573,
-                  "max_abs_diff": 0.729902,
-                  "frac_over": 0.01256
+                  "mean_abs_diff": 0.002041,
+                  "p99_abs_diff": 0.01348,
+                  "max_abs_diff": 0.740932,
+                  "frac_over": 0.004251
                 },
                 "noise_floor": {
                   "footprint_px": 124703,
                   "silhouette_band_px": 1049,
                   "silhouette_band_frac": 0.008342,
-                  "mean_abs_diff": 0.000921,
-                  "p99_abs_diff": 0.008088,
-                  "max_abs_diff": 0.066176,
+                  "mean_abs_diff": 0.00092,
+                  "p99_abs_diff": 0.007598,
+                  "max_abs_diff": 0.056127,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
                   "footprint_px": 124715,
                   "silhouette_band_px": 1035,
                   "silhouette_band_frac": 0.008231,
-                  "mean_abs_diff": 0.001711,
-                  "p99_abs_diff": 0.055882,
-                  "max_abs_diff": 0.526716,
-                  "frac_over": 0.005525
+                  "mean_abs_diff": 0.00611,
+                  "p99_abs_diff": 0.38652,
+                  "max_abs_diff": 0.578186,
+                  "frac_over": 0.013038
                 },
-                "defect_score": 4.877215,
+                "defect_score": 0.215992,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 0.004774,
-            "worst_frac_over": 0.01256,
-            "worst_defect_score": 4.877215,
+            "worst_mean_abs_diff": 0.002041,
+            "worst_frac_over": 0.004251,
+            "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
               "defect_normal_deg": 20.0,
@@ -381,8 +381,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "e10d23532b88affbc2445a26fe8a51707f2568f0e1d5de38da8983b94e574b70",
-          "glb_bytes": 54296
+          "glb_sha256": "0e1ffb4a0372c0610792ab1653fb1aa387fdfef9a07a86162e7edf0ca7ffb70b",
+          "glb_bytes": 49492
         },
         {
           "level": 2,
@@ -392,7 +392,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung3.glb",
           "node": "Link_LOD3",
           "tris": 390,
-          "verts": 628,
+          "verts": 602,
           "shed_fraction_vs_parent": 0.424779,
           "parent_level": "L1",
           "dev_source_mm": 14.815255,
@@ -407,10 +407,10 @@
           "switch_from_pairwise_m": 269.376,
           "validity": {
             "tris": 390,
-            "verts": 628,
-            "baked_tangents": 628,
+            "verts": 602,
+            "baked_tangents": 602,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.99993601,
+            "min_tangent_length": 0.999935899,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -495,9 +495,9 @@
                   "footprint_px": 59049,
                   "silhouette_band_px": 2062,
                   "silhouette_band_frac": 0.033742,
-                  "mean_abs_diff": 3e-06,
+                  "mean_abs_diff": 1.2e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.02451,
+                  "max_abs_diff": 0.084804,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
@@ -513,10 +513,10 @@
                   "footprint_px": 59051,
                   "silhouette_band_px": 2060,
                   "silhouette_band_frac": 0.033709,
-                  "mean_abs_diff": 0.000103,
+                  "mean_abs_diff": 9.7e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.416912,
-                  "frac_over": 0.000322
+                  "max_abs_diff": 0.417157,
+                  "frac_over": 0.000288
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -527,10 +527,10 @@
                   "footprint_px": 62228,
                   "silhouette_band_px": 2236,
                   "silhouette_band_frac": 0.034686,
-                  "mean_abs_diff": 6.9e-05,
+                  "mean_abs_diff": 0.000218,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.283333,
-                  "frac_over": 0.000177
+                  "max_abs_diff": 0.66299,
+                  "frac_over": 0.000546
                 },
                 "noise_floor": {
                   "footprint_px": 62217,
@@ -545,18 +545,18 @@
                   "footprint_px": 62232,
                   "silhouette_band_px": 2232,
                   "silhouette_band_frac": 0.034624,
-                  "mean_abs_diff": 0.000458,
+                  "mean_abs_diff": 0.000361,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.564706,
-                  "frac_over": 0.001077
+                  "max_abs_diff": 0.558088,
+                  "frac_over": 0.000996
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 6.9e-05,
-            "worst_frac_over": 0.000177,
+            "worst_mean_abs_diff": 0.000218,
+            "worst_frac_over": 0.000546,
             "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
@@ -569,8 +569,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "f21d0b534171989f18f0b8eb06d093d5bc4622f25bf7a94d7782c023b98f3064",
-          "glb_bytes": 33648
+          "glb_sha256": "522c8dd60f8c90e7005f6443d28eb223bab5399612a9219cdbcbee0857b04757",
+          "glb_bytes": 32400
         },
         {
           "level": 3,
@@ -580,7 +580,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung4.glb",
           "node": "Link_LOD4",
           "tris": 254,
-          "verts": 544,
+          "verts": 476,
           "shed_fraction_vs_parent": 0.348718,
           "parent_level": "L2",
           "dev_source_mm": 29.053509,
@@ -595,10 +595,10 @@
           "switch_from_pairwise_m": 527.94,
           "validity": {
             "tris": 254,
-            "verts": 544,
-            "baked_tangents": 544,
+            "verts": 476,
+            "baked_tangents": 476,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999943723,
+            "min_tangent_length": 0.999930499,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -671,7 +671,7 @@
                   "silhouette_band_frac": 0.053234,
                   "mean_abs_diff": 0.0,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.0,
+                  "max_abs_diff": 0.001225,
                   "frac_over": 0.0
                 },
                 "defect_score": 1.0,
@@ -683,16 +683,16 @@
                   "footprint_px": 15114,
                   "silhouette_band_px": 1034,
                   "silhouette_band_frac": 0.064033,
-                  "mean_abs_diff": 6e-06,
+                  "mean_abs_diff": 3e-06,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.034069,
+                  "max_abs_diff": 0.022304,
                   "frac_over": 0.0
                 },
                 "noise_floor": {
                   "footprint_px": 15106,
                   "silhouette_band_px": 1046,
                   "silhouette_band_frac": 0.06476,
-                  "mean_abs_diff": 0.000999,
+                  "mean_abs_diff": 0.000997,
                   "p99_abs_diff": 0.004167,
                   "max_abs_diff": 0.029657,
                   "frac_over": 0.0
@@ -701,10 +701,10 @@
                   "footprint_px": 15117,
                   "silhouette_band_px": 1031,
                   "silhouette_band_frac": 0.063847,
-                  "mean_abs_diff": 8.2e-05,
+                  "mean_abs_diff": 2.5e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.40049,
-                  "frac_over": 0.000265
+                  "max_abs_diff": 0.106863,
+                  "frac_over": 6.6e-05
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
@@ -715,36 +715,36 @@
                   "footprint_px": 15932,
                   "silhouette_band_px": 1092,
                   "silhouette_band_frac": 0.064145,
-                  "mean_abs_diff": 4.8e-05,
+                  "mean_abs_diff": 8.5e-05,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.133088,
-                  "frac_over": 0.000126
+                  "max_abs_diff": 0.167647,
+                  "frac_over": 0.000314
                 },
                 "noise_floor": {
                   "footprint_px": 15932,
                   "silhouette_band_px": 1094,
                   "silhouette_band_frac": 0.064255,
-                  "mean_abs_diff": 0.001058,
+                  "mean_abs_diff": 0.001057,
                   "p99_abs_diff": 0.004412,
-                  "max_abs_diff": 0.030637,
+                  "max_abs_diff": 0.028922,
                   "frac_over": 0.0
                 },
                 "defect_floor": {
                   "footprint_px": 15939,
                   "silhouette_band_px": 1085,
                   "silhouette_band_frac": 0.063734,
-                  "mean_abs_diff": 0.000292,
+                  "mean_abs_diff": 0.00013,
                   "p99_abs_diff": 0.0,
-                  "max_abs_diff": 0.529902,
-                  "frac_over": 0.000753
+                  "max_abs_diff": 0.344608,
+                  "frac_over": 0.000502
                 },
                 "defect_score": 1.0,
                 "under_absolute_floor": true,
                 "pass": true
               }
             },
-            "worst_mean_abs_diff": 4.8e-05,
-            "worst_frac_over": 0.000126,
+            "worst_mean_abs_diff": 8.5e-05,
+            "worst_frac_over": 0.000314,
             "worst_defect_score": 1.0,
             "thresholds": {
               "defect_fraction": 2.0,
@@ -757,8 +757,8 @@
             "pass": true,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "acfd2a63a699bf8a214b9e8f6aa4e1cc76fb1e25a9d2d9b2514fc11a37851afc",
-          "glb_bytes": 28800
+          "glb_sha256": "bdae5261a42371aaa93e17879224280e201112f72d84ff447420ec6e52f13a67",
+          "glb_bytes": 25536
         },
         {
           "level": 4,
@@ -768,7 +768,7 @@
           "glb": "assets/tiger_1/tiger_1_link.rung6.glb",
           "node": "Link_LOD6",
           "tris": 146,
-          "verts": 378,
+          "verts": 298,
           "shed_fraction_vs_parent": 0.425197,
           "parent_level": "L3",
           "dev_source_mm": 76.972574,
@@ -783,10 +783,10 @@
           "switch_from_pairwise_m": 1499.578,
           "validity": {
             "tris": 146,
-            "verts": 378,
-            "baked_tangents": 378,
+            "verts": 298,
+            "baked_tangents": 298,
             "degenerate_tangents": 0,
-            "min_tangent_length": 0.999935375,
+            "min_tangent_length": 0.999927902,
             "components": 1,
             "duplicate_faces": 0,
             "nonfinite_attrs": 0,
@@ -833,8 +833,8 @@
             "pass": null,
             "material_source": "FELL BACK to the .blend material 'Mat_Track_Link' \u2014 imported material 'Mat_Track_Link.001' has 3 texture(s) with no pixel data (albedo, roughness, normal) \u2014 Blender cannot read the KHR_texture_basisu KTX2 images the bake writes"
           },
-          "glb_sha256": "eaebfb359d1e01f48b3a84b6e975670460dcabd479b390a274cadc9518733171",
-          "glb_bytes": 20180
+          "glb_sha256": "f5c73e6698c5163a303499667cdf7cd10c557bb5fb343e6321ff1f936faea5e5",
+          "glb_bytes": 16340
         }
       ],
       "material": "Mat_Track_Link",
