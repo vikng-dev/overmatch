@@ -586,10 +586,45 @@ fn within_cluster_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
 enum Toggle {
     Enter,
     Exit,
-    /// Mixed entry and exit faces at one `t`, or nothing but tangents: a zero-measure touch. It must
-    /// not toggle presence — fabricating a zero-length interval here is how an edge graze grows a
-    /// spurious entrance/exit event pair out of no material at all.
+    /// Entry AND exit faces of ONE primitive inside one cluster, at `t` values that are not
+    /// bit-equal: a shell thinner than the window, not a point contact. It bounds real material —
+    /// `(last − first) · factor` of it — and that material is charged across the cluster.
+    Graze,
+    /// Mixed entry and exit faces at ONE bit-equal `t`, or nothing but tangents: a zero-measure
+    /// touch. It must not toggle presence — fabricating a zero-length interval here is how an edge
+    /// graze grows a spurious entrance/exit event pair out of no material at all.
     Touch,
+}
+
+/// One primitive's faces inside one coincident cluster, as the reduction reads them.
+#[derive(Default)]
+struct ClusterFaces {
+    has_entry: bool,
+    has_exit: bool,
+    triangles: Vec<u32>,
+    entry_sum: Vec3,
+    exit_sum: Vec3,
+    /// First and last `t` among the faces that TOGGLE. Tangent faces bound no material, so they are
+    /// not allowed to widen a graze into a charge.
+    span: Option<(f32, f32)>,
+}
+
+impl ClusterFaces {
+    fn widen(&mut self, t: f32) {
+        self.span = Some(match self.span {
+            None => (t, t),
+            Some((first, last)) => (first.min(t), last.max(t)),
+        });
+    }
+
+    /// Whether this primitive's own toggling faces name ONE point exactly.
+    ///
+    /// Bit equality, not tolerance: tolerance is what the cluster already applied to decide these
+    /// faces are one boundary, and applying it twice is how a positive-volume shell becomes a point.
+    fn is_zero_measure(&self) -> bool {
+        self.span
+            .is_none_or(|(first, last)| first.to_bits() == last.to_bits())
+    }
 }
 
 /// The live union field: which primitives are open, and therefore what `max(factor)` is.
@@ -735,40 +770,42 @@ pub fn walk_ray(
         i = j;
 
         // Reduce the cluster to at most one toggle per primitive.
-        let mut per_primitive: BTreeMap<PrimitiveKey, (bool, bool, Vec<u32>, Vec3, Vec3)> =
-            BTreeMap::new();
+        let mut per_primitive: BTreeMap<PrimitiveKey, ClusterFaces> = BTreeMap::new();
         for hit in cluster {
             let d = corridor.axis.dot(hit.true_normal);
-            let slot = per_primitive.entry(hit.key()).or_insert((
-                false,
-                false,
-                Vec::new(),
-                Vec3::ZERO,
-                Vec3::ZERO,
-            ));
-            slot.2.push(hit.triangle);
+            let slot = per_primitive.entry(hit.key()).or_default();
+            slot.triangles.push(hit.triangle);
             if d < -laws.tangent_cos {
-                slot.0 = true;
-                slot.3 += hit.true_normal;
+                slot.has_entry = true;
+                slot.entry_sum += hit.true_normal;
+                slot.widen(hit.t);
             } else if d > laws.tangent_cos {
-                slot.1 = true;
-                slot.4 += hit.true_normal;
+                slot.has_exit = true;
+                slot.exit_sum += hit.true_normal;
+                slot.widen(hit.t);
             }
         }
 
-        let mut toggles: Vec<(PrimitiveKey, Toggle, Vec<u32>, Vec3)> = Vec::new();
-        for (key, (has_entry, has_exit, triangles, entry_sum, exit_sum)) in per_primitive {
-            let toggle = match (has_entry, has_exit) {
+        let mut toggles: Vec<(PrimitiveKey, Toggle, Vec<u32>, Vec3, Vec3)> = Vec::new();
+        for (key, faces) in per_primitive {
+            let toggle = match (faces.has_entry, faces.has_exit) {
                 (true, false) => Toggle::Enter,
                 (false, true) => Toggle::Exit,
+                // A THIN SHELL IS NOT A POINT GRAZE. One primitive reading entry-AND-exit inside one
+                // cluster is either a corner the ray only brushes, or a plate thinner than the
+                // window — and the two are indistinguishable from the tolerance that grouped them.
+                // Only the `t` values themselves separate them, so only bit equality may reduce the
+                // pair to nothing.
+                (true, true) if !faces.is_zero_measure() => Toggle::Graze,
                 _ => Toggle::Touch,
             };
-            let normal = match toggle {
-                Toggle::Enter => entry_sum,
-                Toggle::Exit => exit_sum,
-                Toggle::Touch => Vec3::ZERO,
-            };
-            toggles.push((key, toggle, triangles, normal));
+            toggles.push((
+                key,
+                toggle,
+                faces.triangles,
+                faces.entry_sum,
+                faces.exit_sum,
+            ));
         }
 
         // The whole batch is applied atomically: read the field, apply every exit AND entry, read it
@@ -780,17 +817,23 @@ pub fn walk_ray(
         let mut any_exit = false;
         // A CLUSTER COLLAPSES IN THE CONSERVATIVE DIRECTION. Material appears at the FIRST face of
         // the cluster and disappears at its LAST, so the factor charged anywhere inside a cluster is
-        // `max(before, after)` and dominates the field's true value there. Collapsing both onto one
-        // end would charge `before` past an entry, or `after` before an exit, and either reading is
-        // a stretch of armour up to the cluster's own width that the walk declines to charge.
+        // `max(before, after, graze)` and dominates the field's true value there. Collapsing both
+        // onto one end would charge `before` past an entry, or `after` before an exit, and either
+        // reading is a stretch of armour up to the cluster's own width that the walk declines to
+        // charge.
         //
-        // The one thing a cluster still declines to charge is a primitive whose OWN entry and exit
-        // are pairwise coincident — a graze, at most one window wide, which is what `Toggle::Touch`
-        // is for.
+        // DOMINANCE. A primitive present anywhere strictly inside the cluster either was open
+        // before it, is open after it, or opened AND closed inside it — and the third case is
+        // exactly `Toggle::Graze`, whose factor joins the maximum. There is no fourth case: a
+        // cluster holds only the faces at its own `t`. So the level charged across the cluster is an
+        // upper bound on `max(factor)` everywhere in it, and the only thing declined is a pair whose
+        // two `t` are bit-equal, which bounds no length to charge.
         let opens_at = anchor;
         let closes_at = cluster.last().map_or(anchor, |hit| hit.t);
+        // The highest factor GRAZING this cluster: present inside it, gone by its far side.
+        let mut graze = 0.0f32;
 
-        for (key, toggle, triangles, normal) in toggles {
+        for (key, toggle, triangles, entry_sum, exit_sum) in toggles {
             match toggle {
                 Toggle::Enter => {
                     volumes.factor(key.volume)?;
@@ -804,7 +847,7 @@ pub fn walk_ray(
                             *field.per_entity.entry(key.volume).or_insert(0) += 1;
                         }
                     }
-                    entry_normal += normal;
+                    entry_normal += entry_sum;
                     any_entry = true;
                 }
                 Toggle::Exit => {
@@ -832,23 +875,55 @@ pub fn walk_ray(
                         *count -= 1;
                     }
                     intervals.push((key, open_at, closes_at));
-                    exit_normal += normal;
+                    exit_normal += exit_sum;
                     any_exit = true;
+                }
+                Toggle::Graze => {
+                    // A further shell of a primitive the ray is ALREADY inside (§13.7) charges
+                    // nothing new: its presence is open across the whole cluster and its factor is
+                    // already in both `before` and `after`.
+                    if !field.open.contains_key(&key) {
+                        // The shell's own faces bound the charge, and its presence is REPORTED: a
+                        // charged stretch with no primitive behind it would reach the run with no
+                        // entry volume to name. The interval is the cluster's, not the pair's,
+                        // because that is the stretch the field level below is applied over — wider
+                        // than the pair by at most the cluster's own width, and never narrower.
+                        graze = graze.max(volumes.factor(key.volume)?);
+                        intervals.push((key, opens_at, closes_at));
+                        entry_normal += entry_sum;
+                        exit_normal += exit_sum;
+                        any_entry = true;
+                        any_exit = true;
+                    }
                 }
                 Toggle::Touch => {}
             }
         }
 
         let after = field.max_factor(volumes)?;
-        if after.to_bits() != before.to_bits() {
+        // The level held ACROSS the cluster, and the two steps that bracket it. With no graze this
+        // is `max(before, after)` reached in one step — bit-for-bit the reduction that shipped:
+        // a rise lands on the cluster's first face, a fall on its last, and an unchanged field
+        // emits nothing. A graze is the case that needs both steps at once.
+        let level = before.max(after).max(graze);
+        let entry_normal = any_entry.then_some(entry_normal);
+        let exit_normal = any_exit.then_some(exit_normal);
+        if level.to_bits() != before.to_bits() {
             transitions.push(Transition {
-                // A rise is caused by the cluster's entries and lands on its first face; a fall is
-                // caused by its exits and lands on its last.
-                t: if after > before { opens_at } else { closes_at },
+                t: opens_at,
                 before,
+                after: level,
+                entry_normal,
+                exit_normal,
+            });
+        }
+        if after.to_bits() != level.to_bits() {
+            transitions.push(Transition {
+                t: closes_at,
+                before: level,
                 after,
-                entry_normal: any_entry.then_some(entry_normal),
-                exit_normal: any_exit.then_some(exit_normal),
+                entry_normal,
+                exit_normal,
             });
         }
     }

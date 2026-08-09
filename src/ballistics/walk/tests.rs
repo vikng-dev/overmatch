@@ -2682,6 +2682,63 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
     assert_eq!(once.primitives, twice.primitives);
 }
 
+/// A SHELL THINNER THAN THE WINDOW IS CHARGED, NOT ERASED.
+///
+/// The manifold gate asks a ballistic volume for closure and positive signed volume. It does NOT
+/// ask for a minimum thickness, so a closed, outward-wound `1 m × 1 m × 0.953674 µm` plate is legal
+/// geometry — and a head-on ray meets its two faces eight f32 ULP apart, inside the 1.4 µm topology
+/// window at that distance.
+///
+/// Reduced by tolerance alone, that pair is one boundary and the primitive reads entry-AND-exit: a
+/// touch, toggling nothing. The walk then returns success having charged nothing — no cost, no run,
+/// no presence, no event — for 0.0009536743 reference-metres of steel it certainly crossed. That is
+/// the same free-penetration class as the bridged plate, reached from inside one primitive instead
+/// of through a third party.
+///
+/// Only bit equality may collapse the pair, because only bit equality is a statement about the
+/// geometry rather than about the tolerance that grouped it.
+#[test]
+fn a_shell_thinner_than_the_window_is_charged_not_erased() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let (enter, exit) = (1.0f32, ulps(1.0, 8));
+    assert!(
+        coincident(enter, exit, &laws),
+        "the shell must be INSIDE one window, or there is no trap to spring",
+    );
+
+    let walked = walk_ray(0, &corridor(2.0, plate(1, 1, enter, exit)), &volumes, &laws)
+        .expect("a thin shell resolves");
+
+    let truth = 1000.0 * (exit - enter) as f64;
+    assert!(
+        walked.cost as f64 >= truth * (1.0 - 1.0e-6),
+        "charged {} against an exact {truth}",
+        walked.cost,
+    );
+    assert_eq!(
+        walked.runs.len(),
+        1,
+        "the shell is one crossing: {walked:#?}"
+    );
+    assert_eq!(
+        walked.runs[0].entry_volume,
+        volume(1),
+        "a charged run names the volume that charged it",
+    );
+    assert_eq!(
+        walked.presence.iter().map(|p| p.entity).collect::<Vec<_>>(),
+        vec![volume(1)],
+        "the shell is present: {walked:#?}",
+    );
+    assert!(
+        walked.presence[0].chord >= exit - enter,
+        "chord {} lost material",
+        walked.presence[0].chord,
+    );
+    assert!(!walked.events.is_empty(), "a crossing is an event");
+}
+
 /// A CORNER IS ONE CLUSTER, HOWEVER MANY FACES MEET AT IT.
 ///
 /// The faces meeting at one geometric point do not share a `t`: each comes from its own triangle's
@@ -2692,10 +2749,15 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
 ///
 /// Anchored on the first face, the window ends mid-corner: the fourth face starts a new cluster,
 /// one shard's exit is reduced alone, and it faces a depth that has not opened. Chained, the corner
-/// is one batch, both shards read entry-AND-exit, and a zero-measure graze toggles nothing — which
-/// is what `Toggle::Touch` is for.
+/// is one batch and both shards read entry-AND-exit.
+///
+/// What the corner is NOT is free. The brushed shard's two faces are 4 µm apart, not bit-equal, so
+/// the reduction cannot tell a corner from a 4 µm plate and charges it as one (`Toggle::Graze`) —
+/// microns of steel it may not have crossed, which is the direction the doctrine allows. The claim
+/// the test still holds is the one clustering exists for: ONE contact, whatever the corner's face
+/// count, and no error.
 #[test]
-fn a_corner_graze_spread_wider_than_the_window_is_still_one_touch() {
+fn a_corner_graze_spread_wider_than_the_window_is_one_contact() {
     let volumes = table(&[(1, 1000.0), (2, 800.0)]);
     let (near, far) = (Vec3::new(0.1, 0.0, -1.0), Vec3::new(-0.1, 0.0, -1.0));
     let mut hits = Vec::new();
@@ -2709,22 +2771,41 @@ fn a_corner_graze_spread_wider_than_the_window_is_still_one_touch() {
 
     let walked = walk_ray(0, &corridor(14.0, hits), &volumes, &WalkLaws::default())
         .expect("a corner graze resolves");
-    let touched: Vec<Entity> = walked
-        .presence
-        .iter()
-        .filter(|presence| presence.chord > 0.0)
-        .map(|presence| presence.entity)
-        .collect();
-    assert_eq!(
-        touched,
-        vec![volume(1)],
-        "the grazed shard bounds no material and must deposit none"
-    );
     assert_eq!(
         walked.runs.len(),
         1,
         "one crossing, not one per corner face: {:#?}",
         walked.runs
+    );
+
+    // The shard the ray really crosses is charged in full …
+    let crossed = walked
+        .presence
+        .iter()
+        .find(|presence| presence.entity == volume(1))
+        .expect("the crossed shard is present");
+    assert!(
+        crossed.chord >= 8.754_433 - 8.371_457,
+        "chord {} lost the plate itself",
+        crossed.chord,
+    );
+    // … and the brushed one for the corner's own width, at most, and never for less than the 4 µm
+    // its own two faces bracket.
+    let brushed = walked
+        .presence
+        .iter()
+        .find(|presence| presence.entity == volume(2))
+        .expect("the brushed shard is charged, not erased");
+    let corner = 8.564_676 - 8.5646715;
+    assert!(
+        (8.564_676 - 8.564_672..=corner).contains(&brushed.chord),
+        "chord {} is not the corner's own width",
+        brushed.chord,
+    );
+    assert!(
+        walked.cost <= 1000.0 * (8.754_433 - 8.371_457) + 800.0 * corner,
+        "cost {} charged more than the crossing plus the whole corner",
+        walked.cost,
     );
 }
 
@@ -2910,10 +2991,15 @@ fn a_spread_exit_closes_at_the_far_face() {
 
 /// CLUSTERING NEVER CHARGES LESS THAN THE EXACT UNION FIELD.
 ///
-/// Two hundred randomised fields of six overlapping plates, drawn onto a lattice of hot spots a few
-/// ULP wide so their boundaries pile up inside the topology window and the reduction has plenty to
-/// collapse. Every plate is centimetres thick — four orders above the window — so none of them is a
-/// graze and nothing here may be dropped.
+/// Four hundred randomised fields of six overlapping plates, drawn onto a lattice of hot spots a
+/// few ULP wide so their boundaries pile up inside the topology window and the reduction has plenty
+/// to collapse.
+///
+/// TWO FAMILIES, because the reduction has two ways to lose material. The first two hundred cases
+/// are centimetres thick — four orders above the window — so no plate is a graze and the risk is a
+/// cluster swallowing a boundary. The second two hundred are one to eight ULP thick, entirely
+/// INSIDE the window, so every plate is a pairwise-coincident pair and the whole charge rests on
+/// the graze rule.
 ///
 /// The reference is `∫ max(factor) dt` over the intervals as authored. The walk's own cost must
 /// DOMINATE it: a cluster may charge the wider of the factors either side of it across its own
@@ -2935,13 +3021,26 @@ fn clustering_never_charges_less_than_the_exact_union_field() {
         (state >> 33) as u32
     };
 
-    for case in 0..200 {
+    for case in 0..400 {
+        // The second family: every plate thinner than the window it lives in.
+        let sub_window = case >= 200;
         let mut hits = Vec::new();
         let mut authored: Vec<(f32, f32, f32)> = Vec::new();
         for p in 0..6u32 {
             let vol = 1 + p % 4;
             let enter = ulps(1.0 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12);
-            let exit = ulps(1.05 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12);
+            let exit = if sub_window {
+                ulps(enter, 1 + (rng() % 8) as i32)
+            } else {
+                ulps(1.05 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12)
+            };
+            if sub_window {
+                assert!(
+                    coincident(enter, exit, &WalkLaws::default()),
+                    "case {case}: the family is only a test of the graze rule if the pair is one \
+                     window wide",
+                );
+            }
             hits.extend(plate(vol, p, enter, exit));
             authored.push((enter, exit, factors[(vol - 1) as usize]));
         }
