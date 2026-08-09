@@ -10,9 +10,7 @@ artifact-format decisions and §8 step 4 (`tools/tankc`, the baked artifact + ha
 server shedding the glb) plus §9's phase-2 honesty test.
 
 Related: [`0012-spec-driven-rig-binder`](../adr/0012-spec-driven-rig-binder.md),
-[`0013-composable-rig-control`](../adr/0013-composable-rig-control.md),
-[`rig-ron-sot-and-composability.md`](rig-ron-sot-and-composability.md) (superseded, kept for the
-seam reasoning — this sketch is the anticipated "revisit" that doc reserved the right to).
+[`0013-composable-rig-control`](../adr/0013-composable-rig-control.md).
 
 ## 1. Problem: the tank is born twice
 

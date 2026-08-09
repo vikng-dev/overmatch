@@ -18,6 +18,14 @@ Design decisions chosen *provisionally*, to be settled by how the slice feels in
 each with its default, preserved alternatives, and revert cost. See
 `.agents/scratch/playtest-forks/README.md`. (Distinct from ADRs, which are settled.)
 
+## Hard rules
+
+- **Never** `git checkout`, `git restore`, `git stash` or `git clean` — another agent may be working in the same tree.
+- **Never** bare `cargo fmt`; format per file with `rustfmt --edition 2024 <file>`. `cargo fmt --all --check` as a *check* is fine.
+- One cargo command at a time (`pgrep -f "cargo|rustc"` first). Commits to the working branch are authorized; pushing, merging to main, tagging and releasing are not, without explicit approval.
+- Never file, open or comment on anything in an external repository. `.agents/docs/upstream/` holds local drafts only — Yan sends them, if ever.
+- Codex is the verification and review lane; Claude agents implement.
+
 ## Working discipline
 
 - **Tanks are data; every system, law, gate and test is generic.** Nothing is tested,

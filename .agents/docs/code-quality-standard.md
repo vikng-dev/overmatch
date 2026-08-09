@@ -24,7 +24,7 @@ violated guardrail costs a deploy cycle or a silent desync.
 | `.agents/skills/writing-great-skills/SKILL.md` | information hierarchy; progressive disclosure; no-op pruning |
 | `tests/fn_length.rs` | the 300-line **function** ceiling, and the reasoning for function-not-file |
 | `tests/doc_citations.rs` | the doc-rot gate — comments may not cite dead paths or line numbers |
-| `.agents/docs/adr/` (32 ADRs) | settled decisions. Do not re-litigate; see §C.7 |
+| `.agents/docs/adr/` | settled decisions. Do not re-litigate; see §C.7 |
 | `.agents/GLOSSARY.md` | domain names. Use these, never invented synonyms |
 
 Use the codebase-design vocabulary **exactly**. Do not drift into "component", "service", "API",
@@ -277,7 +277,7 @@ paragraph, you are doing the wrong thing.
 
 ### B3. The wire surface is fingerprinted
 
-`src/net/protocol.rs` holds `PROTOCOL_REV` (currently **22**), `WIRE_SURFACE`, a pinned
+`src/net/protocol.rs` holds `PROTOCOL_REV`, `WIRE_SURFACE`, a pinned
 `WIRE_SURFACE_HASH` (`0xf321_3c48_61b3_bfea`), and `PROTOCOL_FINGERPRINT` derived from them.
 ADR-0018 owns this.
 
@@ -352,7 +352,7 @@ Two narrow rules survive:
 
 ### B8. Settled decisions
 
-31 ADRs. If a simplification contradicts one, it is not a simplification — it is a proposal to
+If a simplification contradicts an ADR, it is not a simplification — it is a proposal to
 revisit an ADR, which per `improve-codebase-architecture` is raised explicitly and not performed.
 Check the index before touching `src/net/`, `src/track/`, `src/ballistics.rs` or the render-layer
 policy; those are the most heavily adjudicated areas.
@@ -388,7 +388,9 @@ naming explicitly. Swapping in an upstream widget, scheduler, or state machine c
 semantics, focus, timing or feel even when the types line up. **That is a dedicated task with an
 owner decision, not a simplification.** Surface it as a scoped proposal — what exists hand-rolled,
 what upstream replaces it, what measurably changes for the player, migration order, risk — and let
-the owner schedule it. Do not perform it inside this stream.
+the owner schedule it. Do not perform it inside this stream. One such proposal is open and
+unscheduled: `design/bevy-ui-widgets-migration-proposal.md` (the settings page's hand-rolled
+interaction semantics vs Bevy's headless widgets). Do not apply it, and do not re-file it.
 
 ### C2b. New patterns are welcome — silent ones are not
 

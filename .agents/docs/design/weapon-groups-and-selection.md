@@ -137,7 +137,7 @@ mode, independent-turret laying, salvo modes) — noted, not built.
 | **T-35** — 37s in own turrets; main turret 75 + ball-mount MG | Many small independent groups, each with its **own station/crew**; ball mount = a group-of-one with its own traverse + elevation |
 | **Ontos** — 6 rifles one axis, each a bolted ranging MG, fire 1/cycle/all | **Rich fire selection** + trivial laying; the **spotter** — an MG matched to the gun so tracer = range-by-observation (an alt to the dial) |
 
-"Any tank from primitives" is a **north star, not a milestone** (per `rig-ron-sot-and-composability.md`):
+"Any tank from primitives" is a **north star, not a milestone**:
 good primitive boundaries only appear under the tension of a real second tank. Don't abstract around
 the Tiger — add one deliberately-weird tank and let it reveal the seams.
 

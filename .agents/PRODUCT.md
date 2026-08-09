@@ -1,6 +1,20 @@
 # Overmatch product target
 
-This is the current product truth. Accepted implementation decisions live in [`docs/adr/`](docs/adr/); feel decisions that remain open by design live in [`scratch/playtest-forks/`](scratch/playtest-forks/); research and implementation logs are evidence rather than authority.
+The single top-level authority on what this game is, where it stands, and what it will not do. Accepted implementation decisions live in [`docs/adr/`](docs/adr/); feel decisions that remain open by design live in [`scratch/playtest-forks/`](scratch/playtest-forks/); research and implementation logs are evidence rather than authority. History is git.
+
+## Now
+
+Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, sound, sky — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
+
+In flight: the ballistics union field (spec finalized, not built); the Tiger asset restructure (substance library assigned, glb re-export pending); geometry LOD v2, terrain LOD and display settings (landed); level design (external lane, below).
+
+Next: build the union-field walk and its ray-fuzzer gate; re-export the Tiger glb; open the building-destruction implementation research.
+
+## Values
+
+- **Vehicle inclusion.** A vehicle ships only if a full-size metal prototype moved under its own power with its intended weapon physically mounted.
+- **Realism vs fun.** Replicate real conditions as closely as we can, but never at the cost of frustrating the player in a way that adds nothing to play.
+- **No pay-to-win.** Payment buys cosmetics and progression speed, never gameplay advantage. A free player can always reach the same battle effectiveness as a paying one.
 
 ## Core product
 
@@ -33,9 +47,9 @@ The client predicts causes; the server confirms consequences.
 - **DERIVED product target:** a map covers roughly 1–4 km².
 - One authoritative world owns a complete Battle; distributed gameplay authority and world sharding are not target architecture.
 - There is no abstract spotting mechanic. If physical geometry, foliage, weather, and rendering allow a player to see a tank, distance alone does not hide it.
-- Terrain topology remains simulation-static: players do not dig trenches or deform traversable ground.
-- Track marks, impact scars, scorch, dust, and shallow visual craters are **Surface evidence** with no gameplay effect.
-- Fallen trees are the first intended **Battlefield destruction**. Wall and building destruction are later research and may change collision, cover, line of sight, and traversal authoritatively.
+- Terrain topology is simulation-static **today**: track marks, impact scars, scorch, dust, and shallow craters are **Surface evidence** with no gameplay effect. Whether ground deformation stays cosmetic scarring or becomes authoritative heightmap change is an open fork, settled by dedicated research at the world-detail milestone — not by whichever is easier when a crater is first drawn.
+- **Battlefield destruction is a core feature, not late polish.** Buildings must be destructible before early access; it changes collision, cover, line of sight, and traversal authoritatively, and implementation research is still pending. Fallen trees remain the first piece built.
+- **Level design is an external parallel lane:** a colleague authors maps through a Houdini export pipeline. We owe that lane its interface direction — what the pipeline must emit, and what the runtime guarantees about it.
 
 Replication frequency, rendering LOD, occlusion, and interest management are optimizations. They must not silently become spotting or concealment rules.
 
@@ -55,7 +69,6 @@ Determinism is proven by canonical state digests: fresh runs agree, rollback rep
 - Player-created gameplay mods and custom content.
 - The exact combat damage-feedback presentation and disclosure level.
 - Detailed X-ray armor inspection.
-- Wall and building destruction implementation.
 - Garage economy details such as persistent damage, repair cost, and ammunition economy.
 
 Deferred capabilities must not acquire speculative frameworks. Preserve the shared game rules and real seams they would use; add their implementations when the product reaches them.

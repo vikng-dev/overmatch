@@ -1,41 +1,22 @@
-# Domain Docs
+# Domain docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+How the engineering skills consume this repo's domain documentation.
 
-## Before exploring, read these
+## Read before exploring
 
-- **`.agents/PRODUCT.md`** for the current product target and explicit deferrals.
-- **`.agents/GLOSSARY.md`** for canonical vocabulary.
-- **`.agents/docs/adr/`** for accepted decisions that touch the area you're about to work in.
-- **`.agents/scratch/playtest-forks/`** when the work touches a deliberately provisional feel decision.
+- **`.agents/PRODUCT.md`** — the product authority: values, current milestone, and explicit deferrals.
+- **`.agents/GLOSSARY.md`** — canonical vocabulary.
+- **`.agents/docs/adr/`** — accepted decisions touching the area you are about to work in.
+- **`.agents/scratch/playtest-forks/`** — when the work touches a deliberately provisional feel decision.
 
-Historical research and implementation logs are evidence, not current truth. Follow their successor links and verify their claims against the code and accepted ADRs before relying on them.
-
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
-
-## File structure
-
-Single-context repo (this repo):
-
-```
-/
-├── .agents/
-│   ├── PRODUCT.md
-│   ├── GLOSSARY.md
-│   └── docs/adr/
-│       ├── 0001-some-decision.md
-│       └── 0002-another-decision.md
-└── src/
-```
+Everything else under `.agents/docs/` is evidence, not authority: verify its claims against the code and the ADRs before relying on them. If a file listed above does not exist, proceed silently — `/domain-modeling` creates them lazily, when a term or a decision actually resolves.
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `.agents/GLOSSARY.md`. Don't drift to synonyms the glossary explicitly avoids.
-
-If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+When your output names a domain concept — an issue title, a refactor proposal, a hypothesis, a test name — use the glossary's term, not a synonym it explicitly avoids. A concept missing from the glossary is a signal: either you are inventing language the project does not use, or there is a real gap worth noting for `/domain-modeling`.
 
 ## Flag ADR conflicts
 
-If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
+If your output contradicts an ADR, surface it rather than silently overriding:
 
 > _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_

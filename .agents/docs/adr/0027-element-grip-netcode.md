@@ -7,7 +7,7 @@ the initialization snapshot; after that, prediction rewinds local history and au
 arrives through sparse exact checkpoints. The field is never reconstructed from an asset, attached
 late to an already-replicated authority entity, or replicated every tick.
 
-This settles the hybrid from `element-netcode-design.md`: a cheap authoritative effect anchor finds
+This settles the hybrid the element-netcode design proposed: a cheap authoritative effect anchor finds
 meaningful divergence, while exact checkpoints provide the missing state required for correction.
 The `TrackGrip` component is the per-side summed telemetry over that field (hashed into `hblt`); it
 is not network authority and stays off the wire.

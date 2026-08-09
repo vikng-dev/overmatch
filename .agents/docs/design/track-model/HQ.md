@@ -936,9 +936,8 @@ both.
     slap-down: honest clack or too harsh?
 - 2026-07-02 — **MODEL 3 RESTART (user decision).** The increment-1 attempt (steps 16/16b) is
   **deleted** — never committed, removed from the tree — to be rebuilt from scratch in a fresh
-  session. Everything worth keeping is distilled into
-  **`.agents/docs/design/track-model/model3-handoff.md`** (settled design, implementation learnings
-  from the attempt, the two open issues — flat-ground gizmo jitter [element undiagnosed] and the
+  session. Everything worth keeping was distilled into a fresh-start handoff (settled design,
+  implementation learnings from the attempt, the two open issues — flat-ground gizmo jitter [element undiagnosed] and the
   washboard slap-down feel — Avian API notes, workflow contract, registration checklist). Kept in
   the tree from the attempt: model2's pub(super) state visibilities and the `LinkLoads` clear on
   `M`/`R` (real hygiene fix). Registry back to models 1–2, model 2 default; fmt/clippy green.
@@ -1524,7 +1523,7 @@ both.
      circles break external_tangent); tier cost model per TANK (the v1 "2 ms budget" failed its
      own arithmetic: 4 sim + 26 route ≈ 4.5 ms/frame solver-only), TrackRenderer instance-buffer
      seam (~5k links at 30 tanks), BeltState = root-born replicated+predicted (NOT
-     local_rollback — v1 conflated the contracts). Tiger agenda: `tiger-authoring-agenda.md`
+     local_rollback — v1 conflated the contracts). Tiger agenda written
      (tiger_1.glb surveyed: 8 wheels/side + sprocket/idler visual pivots present; static
      Track_Strip/Treads meshes to hide). Yan defers the Tiger session until authoring starts
      (he provides a proper link model).
@@ -1600,8 +1599,8 @@ both.
      feel-winning friction. Zero tears in reversal-slam + full-throttle washboard. Measurement
      note: the 64 Hz pattern metric aliases above pitch/(2·dt) = 5.5 m/s — low-speed run is
      the alias-free proof.
-  - NEXT: **Tiger authoring session with Yan** (link mesh, rig nodes, bake bounds —
-    `tiger-authoring-agenda.md` v3). Visual sign check (witness link + sprocket tooth lock)
+  - NEXT: **Tiger authoring session with Yan** (link mesh, rig nodes, bake bounds; agenda v3).
+    Visual sign check (witness link + sprocket tooth lock)
     in Yan's next feel pass — wheel↔chain sync now expected to hold. Phase B unchanged, gated.
 
 - 2026-07-17 — **Step 27 landed: PHASE B SHIPPED** (commit 9758d97, main; 223 tests green,
@@ -1613,7 +1612,7 @@ both.
   (Yan): the v1 plan's hold/bristle transplant + old-feel powertrain numbers were REMOVED —
   pure sandbox law, sandbox-scaled Tiger numbers (stiff governor 60k, support 1.46M/m,
   inertia 16k), slope-parking creep (~16 cm/s @ 20°, bounded) ACCEPTED as a known gap;
-  future hill-hold = per-element bristle of THIS model (`phase-b-migration.md` §3a).
+  future hill-hold = per-element bristle of THIS model (phase-B cutover plan §3a).
   ADR-0025 written (supersedes 0005, retires 0006); architecture.md v4 (§0a phase-B
   reality); trace schema v2 + divergence/jitter analyzers retargeted; legacy-residue sweep
   purged stale suspension/anchor/DriveState wording repo-wide.
@@ -1632,7 +1631,7 @@ both.
   turn-in lag at steer=0.1 (yaw-sign 91% over the full window, 100% settled), slalom net
   heading 21.7° (washboard asymmetry + rest-start, not a sign bias). Course-exit trimming:
   turn runs drive off the finite lane (support-collapse detection ends the window).
-  `feel-pass-checklist.md` written for Yan's first drive. Remaining commit-E tail: slope
+  A feel-pass checklist was written for Yan's first drive. Remaining commit-E tail: slope
   presets (`pose=slope_*`), rollback steer-edge tests, remote circling-bot capture.
 
 - 2026-07-17 — **Step 29: STATIC FRICTION SHIPPED — the strain regime (ADR-0026)**. Yan's
@@ -1707,8 +1706,8 @@ both.
   run-nondeterministic (view-layer) — strip it for byte-diffs. (b) Eigen-audit (see memory +
   scratchpad eigen_audit/): ζ_elem=0.5 safe everywhere, worst margin 2.34×, ζ is a CEILING;
   bonus: support-damper 32 Hz roll Nyquist micro limit cycle decoded (support-law item, lever =
-  SUPPORT_DAMPING_PER_M). (c) Promotion references persisted: element-netcode-design.md +
-  element-promotion-checklist.md (verified: GamePlugin offline composition exists unmounted;
+  SUPPORT_DAMPING_PER_M). (c) Promotion references persisted as the element netcode design and
+  promotion checklist (verified: GamePlugin offline composition exists unmounted;
   REV-14 checklist incl. the CatchUpGated JIP correction). NEXT: cleanup slot A
   (improve-codebase-architecture scan), then Phase 2 offline gate.
 
@@ -1725,7 +1724,7 @@ both.
   regression test — verified to FAIL on the broken variant; phase_decompose contract
   guard). Gate ladder: post-A field-wise 5/5, post-B/C/D bit-identical 5/5 each, analyzer
   8/8, 255 tests. Codex review also confirmed the REV-14 resize blocker (addendum in
-  element-promotion-checklist.md). Carried into Phase 2: candidate 1 (collapse the 3-way
+  the promotion checklist). Carried into Phase 2: candidate 1 (collapse the 3-way
   law switch) as the promotion's architecture frame; deferred at Yan's discretion:
   param-struct grouping, view.rs fan-outs, wrap-vs-chain sandbox verdict.
 

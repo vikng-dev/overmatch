@@ -5,8 +5,7 @@ record: the shear-modulus provenance, the elasto-plastic drift fix, the damping 
 budget-on-elastic-load rationale below are the law's foundations and stand. Two things the brief
 proposed were superseded on the way to the shipped law: the **single per-side aggregate resultant**
 representation (`TrackGrip { sides: [[f32;2];2] }`, 16 bytes on the wire) gave way to the exact
-**per-element strain field** (`TrackGripElements`; netcode is [[0027-element-grip-netcode]] and
-`element-netcode-design.md`), and the **anisotropic ellipse** (a 0.55 lateral share) gave way to
+**per-element strain field** (`TrackGripElements`; netcode is [[0027-element-grip-netcode]]), and the **anisotropic ellipse** (a 0.55 lateral share) gave way to
 the **isotropic circle** (full μN in every direction; the `lateral_ratio` knob is deleted). ADR-0026 also records
 the three places implementation falsified the draft (stiffness provenance, elastic vs damped
 budget, the kinetic term removed from the grip regime).
@@ -60,7 +59,7 @@ lab, 20° pad, zero command, 64 Hz):
   force-affecting state; needs material-identity advection bookkeeping. Weighed here as the
   costly alternative to the aggregate — but this IS what shipped: the per-element field became
   the grip law, reconciled by wrench anchor + exact checkpoints rather than per-tick wire state
-  ([[0027-element-grip-netcode]], `element-netcode-design.md`).
+  ([[0027-element-grip-netcode]]).
 - **`local_rollback` for grip state**: disqualified — parked means zero slip distance, so a
   stale local grip state NEVER heals (Dahl mismatch decays only with accumulated slip), and
   grip has no separate authoritative correction path. The one case being fixed is the one

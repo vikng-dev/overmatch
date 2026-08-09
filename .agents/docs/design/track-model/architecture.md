@@ -7,8 +7,7 @@ chain tier, its `V` toggle and its feel switches are DELETED (see §1a). v4 (ste
 supersedes ADR-0005, retires ADR-0006). v3 (step 26) shipped
 phase A (`src/track/view.rs`) with the tier-line discussion + codex view-plugin review. v2
 reconciled v1 against the codex adversarial review (`scratchpad/codex_arch25_review.md`, 10
-findings, all dispositioned below). Companion to HQ.md (the step log) and
-`phase-b-migration.md` (the cutover plan, v2). Foundation
+findings, all dispositioned below). Companion to HQ.md (the step log). Foundation
 document for "many tanks, one model"; every structural decision is judged against Yan's three
 constraints:
 
@@ -49,8 +48,8 @@ What is true now:
   `HeightGrid` alongside the authored blocks (§5).
 - The view consumes `TrackDrive` phase/speed directly — the pose-delta no-slip derivation is
   deleted; remote tracks scroll at exact authority phase.
-- The raycast hold/bristle transplant was REVERTED at cutover (owner call — pure sandbox law;
-  `phase-b-migration.md` §3a). Hill-hold later shipped as physics inside the slip law: the
+- The raycast hold/bristle transplant was REVERTED at cutover (owner call — pure sandbox law).
+  Hill-hold later shipped as physics inside the slip law: the
   per-element elastic–plastic strain grip ([[0026-static-friction-strain-regime]], settled
   per-element in [[0027-element-grip-netcode]]) — a parked tank holds on grade.
 - Sandbox `belt` (renamed from `model4` 2026-07-26) is a thin adapter over `track::forces` — the entanglement noted in §0
@@ -446,3 +445,8 @@ ships. (Grip and support have since settled further: per-element strain grip
 - Thrown track as replicated damage state with alternate route topology (far future).
 - Streaming/destructible terrain under the oracle (`covered`, chunk revisioning) — named in §5,
   deliberately unscheduled.
+- **The park-hold cliff.** MEASURED: sweeping road-wheel tread radius over 500 µm moves parked
+  drift by only ~0.005 m, then it falls off a cliff inside a 10 µm window (hold at 0.386470 m,
+  no hold at 0.386460 m). The shipped radius, 0.386441 m, sits ~30 µm **past** the cliff. The
+  discontinuity is a contact-regime flip, not a tuning curve; which regimes it flips between,
+  and whether the envelope law should be continuous across it, is open.
