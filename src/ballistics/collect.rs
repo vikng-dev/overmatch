@@ -43,6 +43,7 @@ use bevy::prelude::*;
 
 use super::BallisticSurfaces;
 use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
+use crate::exact::Int;
 
 /// Faces one corridor may collect before the collector gives up.
 ///
@@ -52,10 +53,24 @@ use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
 /// (a degenerate mesh, a corridor extended past all reason) into a loud stop.
 const MAX_FACES: usize = 4096;
 
-/// Below this, the ray is parallel to the triangle's plane and there is no crossing to report. In
-/// the TOPOLOGY tolerance family (see [`super::walk::WalkLaws`]), deliberately far below the weld
-/// knob: it decides whether a face exists at all, not whether two faces are the same face.
-const PARALLEL_EPS: f32 = 1.0e-12;
+/// Bound on the f64 evaluation of the crossing determinant `−axis · ((b − a) × (c − a))`, as a
+/// multiple of its permanent `Σ (|e1ᵤ·e2ᵥ| + |e1ᵥ·e2ᵤ|)·|axisₖ|`.
+///
+/// The three differences, six products and five sums together lose at most `8.3 · 2^-53`
+/// permanents; this is `16 · 2^-53`. `f64::MIN_POSITIVE` covers gradual underflow, where the
+/// relative model stops holding.
+///
+/// A bound on the rounding, NOT a tolerance. PARALLEL IS EXACT ZERO AND NOTHING ELSE: a
+/// determinant below any threshold is still a transverse crossing, and a certified shell one ULP
+/// thick presents exactly that — declining it walks a ray through a closed plate free of charge.
+/// So outside this band the f64 sign is the exact sign and the f64 quotient is the parameter;
+/// inside it, both are retaken in [`crate::exact`].
+const DETERMINANT_SLACK: f64 = 8.0 * f64::EPSILON;
+
+/// The universal `f32` shift: every finite `f32` is an integer multiple of `2^-149`, so the
+/// crossing's numerator and denominator — both cubic in ray and vertex coordinates — are exact
+/// integers, at one and the same power of two.
+const RAY_SHIFT: i32 = 149;
 
 /// How far behind a corridor origin the convex narrow phase looks for the face the ray is sitting
 /// on. The march's own boundary nudge, so the two agree about what "just behind" means.
@@ -219,9 +234,9 @@ pub(crate) fn collect(
 ///
 /// Before anchoring it had to scale on the WORLD position instead, and that is what made this a
 /// squeeze rather than a tolerance: `topology_rel · 2500 m` reaches [`super::MARCH_EPS`] exactly, so
-/// the floor the geometry demanded and the ceiling safety demanded crossed INSIDE the map. Codex
-/// measured a live handoff 0.3848 mm off its own plane at 2.5 km, past the 0.25 mm ceiling. The
-/// anchor removed the conflict; the ceiling stays as defence in depth.
+/// the floor the geometry demanded and the ceiling safety demanded crossed INSIDE the map — a live
+/// handoff at 2.5 km lands 0.3848 mm off its own plane, past the 0.25 mm ceiling. The anchor
+/// removes the conflict; the ceiling stays as defence in depth.
 ///
 /// The CEILING is not decoration. The march resumes one `MARCH_EPS` past every face it leaves, so a
 /// margin that reached a whole nudge would re-collect the EXIT face of the plate just perforated —
@@ -574,10 +589,10 @@ struct Projected {
 ///   left for the ≤ 5η that band expression's own evaluation can lose to underflow.
 ///
 /// So the band is sufficient EVERYWHERE on the certified domain, and outside it this kernel makes no
-/// claim at all: the codex triangle in
-/// [`a_subnormal_triangle_is_outside_the_certified_domain`] has a subnormal vertex and a coordinate
-/// of `10¹⁰`, is refused at the door by both bounds, and is declined here — correctly as far as this
-/// bound is concerned, because this bound never promised anything about it.
+/// claim at all: the triangle in [`a_subnormal_triangle_is_outside_the_certified_domain`] has a
+/// subnormal vertex and a coordinate of `10¹⁰`, is refused at the door by both bounds, and is
+/// declined here — correctly as far as this bound is concerned, because this bound never promised
+/// anything about it.
 ///
 /// It is a bound on the rounding, NOT a tolerance: the exact answer for the stored vertices is
 /// always inside it, so a decision made outside it is the exact one.
@@ -815,18 +830,34 @@ fn cross_triangle(
     let e2 = c - a;
     let coarse = e1.cross(e2);
     let (a64, b64, c64) = (a.as_dvec3(), b.as_dvec3(), c.as_dvec3());
-    let exact = (b64 - a64).cross(c64 - a64);
-    let det = -axis.as_dvec3().dot(exact);
-    if det.abs() < PARALLEL_EPS as f64 {
-        return None;
-    }
-    let t = (shear.origin_exact - a64).dot(exact) / det;
+    let (d1, d2) = (b64 - a64, c64 - a64);
+    let exact = d1.cross(d2);
+    let direction = axis.as_dvec3();
+    let det = -direction.dot(exact);
+    let permanent: f64 = (0..3)
+        .map(|k| {
+            let (u, v) = ((k + 1) % 3, (k + 2) % 3);
+            (d1[u].abs() * d2[v].abs() + d1[v].abs() * d2[u].abs()) * direction[k].abs()
+        })
+        .sum();
+    let t = if det.abs() > DETERMINANT_SLACK * permanent + f64::MIN_POSITIVE {
+        (shear.origin_exact - a64).dot(exact) / det
+    } else {
+        // Inside the band the float determinant cannot say whether the ray is parallel, so the
+        // exact one does — and the same escalation hands back a parameter the cancelled quotient
+        // could not.
+        let (numerator, denominator) = exact_crossing(shear.origin, axis, a, b, c);
+        if denominator.is_zero() {
+            return None;
+        }
+        numerator.to_f64() / denominator.to_f64()
+    };
     // A NEEDLE'S PLANE IS NOT ITS OWN f32 CROSS PRODUCT. Two edges within `PROJECTION_SLACK` of
     // parallel cancel that product down to its last bits, and what survives is noise with a
     // direction: the face would then be reported with an orientation its own vertices do not support
-    // — an entry that reads as an exit. `PARALLEL_EPS` does not catch it, because the noise has
-    // magnitude. The three stored points still DETERMINE a plane; only the f32 arithmetic cannot find
-    // it, so the degenerate case takes its ORIENTATION from the wider products and nothing else does.
+    // — an entry that reads as an exit. The three stored points still DETERMINE a plane; only the
+    // f32 arithmetic cannot find it, so the degenerate case takes its ORIENTATION from the wider
+    // products and nothing else does.
     let normal = if coarse.length_squared()
         <= PROJECTION_SLACK * PROJECTION_SLACK * e1.length_squared() * e2.length_squared()
     {
@@ -835,6 +866,29 @@ fn cross_triangle(
         coarse.normalize_or_zero()
     };
     (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim { t, normal, zeros })
+}
+
+/// The crossing's plane parameter as an exact ratio: `((origin − a) · N, −axis · N)` with
+/// `N = (b − a) × (c − a)`.
+///
+/// Both are cubic in the stored `f32`, so both carry the same power of two and it cancels in the
+/// quotient. A zero denominator is the ONLY parallel ray there is; every other value, however far
+/// it cancelled in f64, names a transverse crossing that must be collected and charged.
+fn exact_crossing(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> (Int, Int) {
+    let point = |v: Vec3| [v.x, v.y, v.z].map(|value| Int::from_f32_scaled(value, RAY_SHIFT));
+    let difference = |p: [Int; 3], q: [Int; 3]| [p[0].sub(q[0]), p[1].sub(q[1]), p[2].sub(q[2])];
+    let dot = |p: [Int; 3], q: [Int; 3]| p[0].mul(q[0]).add(p[1].mul(q[1])).add(p[2].mul(q[2]));
+    let (a, b, c) = (point(a), point(b), point(c));
+    let (e1, e2) = (difference(b, a), difference(c, a));
+    let normal = [
+        e1[1].mul(e2[2]).sub(e1[2].mul(e2[1])),
+        e1[2].mul(e2[0]).sub(e1[0].mul(e2[2])),
+        e1[0].mul(e2[1]).sub(e1[1].mul(e2[0])),
+    ];
+    (
+        dot(difference(point(origin), a), normal),
+        dot(point(axis), normal).negated(),
+    )
 }
 
 /// The welded feature a claim is about, and the `t` that feature has along the ray.
@@ -1175,7 +1229,7 @@ mod tests {
         let e1 = b - a;
         let e2 = c - a;
         let det = -axis.dot(e1.cross(e2));
-        if det.abs() < PARALLEL_EPS {
+        if det == 0.0 {
             return false;
         }
         let dao = (origin - a).cross(axis);
@@ -1515,9 +1569,9 @@ mod tests {
     ///
     /// [`PROJECTION_SLACK`] is a bound on the projection's rounding only where the relative-error
     /// model it is derived from holds; on a vertex whose corridor-relative offset is subnormal it
-    /// underflows to zero and claims an exactness the arithmetic does not have. Codex built the
-    /// triangle that turns that into a declined crossing: one vertex at the very bottom of the
-    /// subnormal range, two at `10¹⁰`, so the near-zero vertex's unclaimed absolute error is
+    /// underflows to zero and claims an exactness the arithmetic does not have. The triangle that
+    /// turns that into a declined crossing has one vertex at the very bottom of the subnormal
+    /// range and two at `10¹⁰`, so the near-zero vertex's unclaimed absolute error is
     /// multiplied up into a wrong-signed edge area of `1.6079e-36` against a band of `1.3468e-38`.
     /// No edge triggers the f64 reconsideration, and `cross_triangle` returns `None` where the
     /// independent f64 reference finds a crossing.
@@ -1823,5 +1877,116 @@ mod tests {
             retired_lost > 0,
             "the retired test lost nothing at the corner, so the sweep is not crossing the fan",
         );
+    }
+
+    /// A CERTIFIED SHELL IS CROSSED AND CHARGED, HOWEVER THIN ITS SILHOUETTE.
+    ///
+    /// The end cap of a needle four ULP square presents a crossing determinant of about
+    /// `2.3e-13`. Nothing in the bake bounds a triangle's area from below, and nothing needs to:
+    /// this shell is closed, outward-wound, positive-volume, unit-scale and inside the certified
+    /// coordinate range, so `bake::manifold_gate` certifies it and the corridor must therefore
+    /// collect it. A determinant threshold collects NEITHER cap, and the walk then returns a ray
+    /// that crossed a metre of steel with no presence, no chord and no cost.
+    #[test]
+    fn a_needle_thin_certified_shell_is_still_crossed_and_charged() {
+        let ulp = |steps: u32| f32::from_bits(1.0f32.to_bits() + steps);
+        let (low, high) = (1.0f32, ulp(4));
+        let corners: Vec<Vec3> = [
+            (0, 0, 0.0f32),
+            (1, 0, 0.0),
+            (1, 1, 0.0),
+            (0, 1, 0.0),
+            (0, 0, 1.0),
+            (1, 0, 1.0),
+            (1, 1, 1.0),
+            (0, 1, 1.0),
+        ]
+        .into_iter()
+        .map(|(x, y, z)| {
+            Vec3::new(
+                if x == 0 { low } else { high },
+                if y == 0 { low } else { high },
+                z,
+            )
+        })
+        .collect();
+        let faces: Vec<[u32; 3]> = vec![
+            [0, 3, 2],
+            [0, 2, 1],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [3, 7, 6],
+            [3, 6, 2],
+            [0, 4, 7],
+            [0, 7, 3],
+            [1, 2, 6],
+            [1, 6, 5],
+        ];
+
+        // The gate is what makes this geometry ordinary rather than exotic, so it is the premise.
+        crate::bake::manifold_gate(
+            "Needle",
+            0,
+            &crate::bake::MeshGeometry {
+                positions: corners.iter().map(|v| v.to_array()).collect(),
+                indices: faces.iter().flatten().copied().collect(),
+                substance: Some(crate::bake::PrimitiveSubstance {
+                    name: "RHA".into(),
+                    factor: 1000.0,
+                }),
+                certificate: None,
+            },
+            Vec3::ONE,
+        )
+        .expect("a needle is closed, outward-wound and certified like any other shell");
+
+        // Strictly inside one cap triangle in both lateral axes, which four ULP of width is just
+        // wide enough to allow.
+        let origin = Vec3::new(ulp(2), ulp(1), -0.5);
+        let collider = Collider::trimesh(corners, faces);
+        let hits = trimesh_hits(&collider, origin, Vec3::Z, 2.0);
+        assert_eq!(hits.len(), 2, "both caps are crossings: {hits:?}");
+
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let walk = super::super::walk::walk_ray(
+            0,
+            &super::super::walk::RayCorridor {
+                anchor: Vec3::ZERO,
+                origin,
+                axis: Vec3::Z,
+                length: 2.0,
+                initial_presence: Vec::new(),
+                hits,
+            },
+            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &WalkLaws::default(),
+        )
+        .expect("a closed needle resolves");
+        let spans = &walk.shells.first().expect("one shell was crossed").spans;
+        assert_eq!(spans.len(), 1, "{spans:?}");
+        assert!((spans[0].1 - spans[0].0 - 1.0).abs() < 1.0e-6, "{spans:?}");
+        assert!((walk.cost - 1.0).abs() < 1.0e-5, "cost {}", walk.cost);
+    }
+
+    /// PARALLEL IS THE EXACT ZERO DENOMINATOR AND NOTHING ELSE.
+    ///
+    /// The ray in the plane cancels exactly; the ray meeting a needle's cap does not, however far
+    /// below any threshold the float determinant falls.
+    #[test]
+    fn the_parallel_test_is_an_exact_zero() {
+        let ulp = |steps: u32| f32::from_bits(1.0f32.to_bits() + steps);
+        let (a, b, c) = (
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(ulp(4), ulp(4), 0.0),
+            Vec3::new(ulp(4), 1.0, 0.0),
+        );
+        let (_, in_plane) = exact_crossing(Vec3::new(0.0, 0.0, 0.0), Vec3::X, a, b, c);
+        assert!(in_plane.is_zero(), "a ray inside the plane crosses nothing");
+        let (numerator, across) = exact_crossing(Vec3::new(ulp(2), ulp(1), -0.5), Vec3::Z, a, b, c);
+        assert!(!across.is_zero(), "a needle's cap is still a crossing");
+        let t = numerator.to_f64() / across.to_f64();
+        assert!((t - 0.5).abs() < 1.0e-9, "{t}");
     }
 }
