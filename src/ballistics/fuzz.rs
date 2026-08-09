@@ -273,8 +273,8 @@ pub struct Violation {
     pub detail: String,
 }
 
-/// A [`WalkError`] the fuzzer met. Should be empty on a gated asset — the per-primitive manifold
-/// gate (`bake`) is what makes that claim, and this is what tests it against real shot lines.
+/// A [`WalkError`] the fuzzer met. Empty on a gated asset — the per-primitive manifold gate
+/// (`bake`) is what makes that claim, and this is what tests it against real shot lines.
 #[derive(Clone, Debug)]
 pub struct WalkFailure {
     pub ray: u64,
@@ -352,67 +352,15 @@ pub struct Report {
     pub radius: f32,
 }
 
-/// Volumes carrying a MESH DEFECT this fuzzer has measured and an asset-side investigation owns.
-///
-/// NOT a walk-semantics excuse. Every entry below is a baked corridor that contradicts itself —
-/// an exit before its own entry, two exits at one `t`, an entry with no exit anywhere in a 14 m
-/// corridor. No pairing rule can resolve a contradiction; the walk is right to refuse, and the fix
-/// is in the mesh, not here. Each is listed with the exact signature it was measured by, so a row
-/// that stops matching its signature is a row that has to be re-earned rather than inherited.
-///
-/// This list REPLACED a much broader one. Until 2026-08-07 it was `KNOWN_MULTI_SHELL_VOLUMES` and
-/// excused three prefixes — `Hull_Rear`, `Turret_Cupola`, `Wheel_` — covering 4591 of 4592 failures
-/// at a million rays, on the theory that the walk's boolean per-primitive pairing could not
-/// represent §13.7's legal several-shells-per-object authoring. It could not, and now it does:
-/// presence is a depth. That excuse is spent, and keeping its name would have been a lie about what
-/// the remaining rays are.
-///
-/// MEASURED 2026-08-07, seed 7, 1 000 000 rays, on the fixed walk: 5 failures TOTAL, one ray each,
-/// listed below. The gate refuses any walk error blamed on ANYTHING ELSE, so a new defect still
-/// fails loudly — and with the list this short, so does a defect that spreads.
-pub const DEGENERATE_BAKE_RESIDUE: &[&str] = &[
-    // ray 505821 — `UnexpectedExit` at t 8.9248, with the crossing dump reading
-    // `8.9248out 8.9250in 8.9507in 9.0489out`: the exit face sits 0.2 MM IN FRONT of the entry face
-    // it belongs to. An inverted or duplicated triangle on the rear plate's inner skin.
-    "Hull_Rear",
-    // ray 233264 — `IncompleteCorridor` with one primitive left open: entry at t 7.0039 and no exit
-    // in the whole 14.05 m corridor. A hole in the shell, so the ray never comes out of the solid.
-    "Hull_Side_Lower_L",
-    // ray 960102 — `IncompleteCorridor`, the same shape: entry at t 8.5621, no exit.
-    "Idler_L",
-    // ray 416399 — `UnexpectedExit` at t 5.9726 with the dump reading `5.9726out` and NOTHING before
-    // it: an exit face reached without ever entering, i.e. an outward-facing triangle on the inside.
-    "Wheel_L_3",
-    // ray 539618 — `IncompleteCorridor` off `7.0035in 7.0709in 7.1294out 7.1318in 7.1408out
-    // 7.1408out`: TWO EXITS AT THE SAME `t`, so one of the three shells this ray opened is closed
-    // twice and another is never closed at all. Coincident duplicate faces.
-    "Wheel_R_0",
-];
-
-/// Whether a walk error on this volume is one of the measured bake defects rather than a new one.
-///
-/// Prefix-matched, because the bake suffixes a split volume (`Wheel_R_0 (shard)`); the prefixes are
-/// whole volume names, so this names five volumes and not a family.
-pub fn is_degenerate_bake_residue(volume: &str) -> bool {
-    DEGENERATE_BAKE_RESIDUE
-        .iter()
-        .any(|known| volume.starts_with(known))
-}
-
 impl Report {
-    /// Walk errors this run cannot explain — anything not blamed on
-    /// [`DEGENERATE_BAKE_RESIDUE`]. THE gate quantity: a rate is not a contract, but "no
-    /// unexplained failure" is.
-    pub fn unexplained_walk_errors(&self) -> Vec<&WalkFailure> {
-        self.walk_errors
-            .iter()
-            .filter(|failure| !is_degenerate_bake_residue(&failure.volume))
-            .collect()
-    }
-
-    /// Nothing the gate refuses: no violated invariant, no unexplained walk error.
+    /// Nothing the gate refuses: no violated invariant, and no walk error at all.
+    ///
+    /// HARD ZERO, and it has no allow-list to soften it. A `WalkError` is a round that stops dead in
+    /// mid-armour, so one of them is a gameplay defect and a hundred are the same defect spreading —
+    /// there is no rate at which the answer is "expected". A run that meets one names the ray, and
+    /// `replay_ray` re-fires it.
     pub fn is_clean(&self) -> bool {
-        self.violations.is_empty() && self.unexplained_walk_errors().is_empty()
+        self.violations.is_empty() && self.walk_errors.is_empty()
     }
 }
 
@@ -1465,12 +1413,7 @@ pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
         report.rays
     );
     for (volume, count) in &report.walk_error_volumes {
-        let known = if is_degenerate_bake_residue(volume) {
-            "degenerate bake residue"
-        } else {
-            "**UNEXPLAINED**"
-        };
-        let _ = writeln!(out, "- `{volume}` — {count} ({known})");
+        let _ = writeln!(out, "- `{volume}` — {count}");
     }
     for failure in report.walk_errors.iter().take(10) {
         let _ = writeln!(
