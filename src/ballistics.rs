@@ -661,11 +661,6 @@ pub struct BallisticSurfaces {
     pub shells: Arc<[u32]>,
     /// Welded vertex ids per triangle corner.
     pub corners: Arc<[[u32; 3]]>,
-    /// The composed scale the bake proved all of it at. The collector refuses a collider whose live
-    /// scale differs by a bit: everything the certificate says is a statement about
-    /// `position * scale`, and avian recomputes the scaled shape from whatever the hierarchy says
-    /// at the time — including a scale nobody baked.
-    pub scale: Vec3,
 }
 
 /// Role tags layered on a ballistic volume for the sandbox's visibility passes: armor plates vs
@@ -4953,7 +4948,6 @@ mod march_tests {
         let surfaces = BallisticSurfaces {
             shells: vec![0u32; indices.len()].into(),
             corners: indices.as_slice().into(),
-            scale: Vec3::ONE,
         };
         (Collider::trimesh(vertices, indices), surfaces)
     }

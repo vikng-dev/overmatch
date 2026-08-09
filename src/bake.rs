@@ -31,17 +31,17 @@ pub(crate) struct NodeGeometry {
     pub root_position: Vec3,
     pub root_rotation: Quat,
     /// Composed scale root→node, as the COMPONENTWISE product avian's `ColliderTransform`
-    /// propagation forms (`parent.scale * child.scale`, `collider_transform/plugin.rs:133`). It is
-    /// what turns a stored vertex into the coordinate the corridor kernel consumes, so it is what
-    /// [`CERTIFIED_RANGE`] is enforced against.
+    /// propagation forms (`parent.scale * child.scale`, `collider_transform/plugin.rs:133`). On a
+    /// node holding a substance primitive it must be bit-exactly `1`; [`manifold_gate`] refuses
+    /// anything else.
     pub root_scale: Vec3,
     /// Raw mesh buffers, captured only where the sim consumes them ([`classify`]): collision
     /// proxies (convex hull source) and ballistic volumes, the road wheels included (trimesh source).
-    /// Vertices are **node-local and unscaled** — exactly the bytes the glb holds, which is what the
-    /// shadow compare needs to diff against the loaded `Mesh` assets. Consumers that build colliders
-    /// hang them under the node entity and let avian compose [`transform`](Self::transform)'s scale
-    /// down the hierarchy (`ColliderTransform`), so a node authored at scale ≠ 1 (the wheels, the
-    /// coax MG volumes) is sized correctly without the extractor pre-baking anything.
+    /// Vertices are **node-local** — exactly the bytes the glb holds, which is what the shadow
+    /// compare needs to diff against the loaded `Mesh` assets. Consumers that build colliders hang
+    /// them under the node entity and let avian compose [`transform`](Self::transform)'s scale down
+    /// the hierarchy (`ColliderTransform`), so a collision proxy may be authored at any scale; a
+    /// ballistic node may not.
     pub primitives: Vec<MeshGeometry>,
 }
 
@@ -78,10 +78,6 @@ pub(crate) struct ShellCertificate {
     /// vertex name it with the same two numbers however their own index buffers spell it, which is
     /// what lets the collector canonicalize a whole fan onto one contact.
     pub corners: Vec<[u32; 3]>,
-    /// The composed scale the certificate was formed at. Everything above was proven about
-    /// `position * scale`, so a collider that reaches the world at any other scale is uncertified —
-    /// see `ballistics::collect`.
-    pub scale: Vec3,
 }
 
 /// A ballistic primitive's substance, resolved against the registry at extraction so the walk never
@@ -228,26 +224,8 @@ fn classify(
 }
 
 /// The dynamic range a ballistic vertex coordinate is CERTIFIED in, as `(low, high)` magnitudes in
-/// the frame the corridor kernel reads — the stored vertex AFTER the authored scale
-/// ([`NodeGeometry::root_scale`]), which is what avian hands parry.
-///
-/// THE WHOLE CERTIFICATE RUNS ON THE SCALED POSITIONS, not just the range half of it. The stored
-/// buffers are node-local and unscaled, and the collider is built as a child of its node, so avian
-/// composes every ancestor `Transform` scale onto the shape and parry multiplies it into the
-/// vertices before the kernel ever projects one. Certifying the raw bytes therefore certifies a mesh
-/// nobody consumes, in two different ways:
-///
-/// * range — codex took a tetrahedron whose raw coordinates all pass, gave it an authored scale of
-///   `(2^19, 2^19, 2^-85)`, and the kernel declined a crossing the exact reference accepts;
-/// * TOPOLOGY — a componentwise scale is injective over the reals and not over `f32`. Codex
-///   measured raw `0.6250001788139343` and `0.6250002384185791` both landing on
-///   `0.06250002235174179` under an authored `0.10000000149011612` **[MEASURED]**, so a raw
-///   positive-thickness shell becomes zero-thickness after scaling while every scaled coordinate
-///   stays comfortably in range.
-///
-/// So welding, degeneracy, closure, winding and signed volume are all judged on the scaled
-/// positions. The collapse above then arrives as what it is — two welded corners of one triangle,
-/// which is a degenerate face — and is refused by name.
+/// the frame the corridor kernel reads. That frame is the stored buffer itself: a ballistic node is
+/// unit-scale ([`manifold_gate`]), so what parry multiplies into the vertices is `1`.
 ///
 /// `collect::PROJECTION_SLACK` is a bound on the f32 projection's rounding, and it is a bound only
 /// where the relative error model it is derived from holds. It is stated as a multiple of the
@@ -282,18 +260,6 @@ pub(crate) fn certified_coordinate(value: f32) -> bool {
     magnitude == 0.0 || (magnitude >= CERTIFIED_RANGE.0 && magnitude <= CERTIFIED_RANGE.1)
 }
 
-/// Whether a composed scale can carry a certified mesh into a certified collider.
-///
-/// Finite and non-zero per axis, because the certification below is a claim about the SCALED
-/// coordinates and a zero axis makes that claim vacuously true while collapsing the shell — every
-/// vertex lands at `0.0`, which is certified, and the armour is a plane with no volume.
-fn certified_scale(scale: Vec3) -> bool {
-    scale
-        .to_array()
-        .iter()
-        .all(|axis| axis.is_finite() && *axis != 0.0)
-}
-
 /// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
 /// outward orientation per connected shell.
 ///
@@ -320,8 +286,13 @@ fn certified_scale(scale: Vec3) -> bool {
 /// Which is why the roots are the RETURN VALUE and not a local: they are the surface identity the
 /// §13.4 walk pairs crossings on, dense and in first-triangle order, one per triangle.
 ///
-/// `scale` is the composed authored scale ([`NodeGeometry::root_scale`]); the certified-domain check
-/// runs on the coordinates it produces, because those are the ones the kernel projects.
+/// UNIT SCALE IS THE CONTRACT, and `scale` — the composed authored scale
+/// ([`NodeGeometry::root_scale`]) — is where it is enforced. A ballistic node reaches the world at
+/// scale `1` or it does not reach it at all: everything below is judged on the stored buffer, and a
+/// componentwise scale is injective over the reals but not over `f32`, so scaling can weld two
+/// distinct coordinates into one (a positive-thickness shell becomes zero-thickness) or carry a
+/// certified coordinate out of [`CERTIFIED_RANGE`]. Nothing here compensates for a scale; it names
+/// the node and refuses. Apply the scale in the .blend and re-export.
 fn manifold_gate(
     node: &str,
     index: usize,
@@ -337,42 +308,28 @@ fn manifold_gate(
             primitive.indices.len()
         )));
     }
-    if !certified_scale(scale) {
+    // Bit-exact, not near: there is no scale that is almost 1.
+    if scale.to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
         return Err(defect(format!(
-            "composed authored scale {scale:?} has a zero or non-finite axis — the collider avian \
-             builds from it is not the shell that was authored"
+            "composed authored scale is {scale:?}, not 1 — a ballistic node must be authored at \
+             unit scale (apply the object scale in the .blend and re-export)"
         )));
     }
-
-    // THE POSITIONS AVIAN WILL CONSUME, formed once, and the only ones anything below reads. Parry
-    // scales a trimesh by multiplying each vertex componentwise, so this is that arithmetic to the
-    // bit.
-    let scaled: Vec<[f32; 3]> = primitive
-        .positions
-        .iter()
-        .map(|position| {
-            [
-                position[0] * scale.x,
-                position[1] * scale.y,
-                position[2] * scale.z,
-            ]
-        })
-        .collect();
 
     // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
     // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
     // a coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
     // watertight kernel that has a bound to offer.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut welded: Vec<u32> = Vec::with_capacity(scaled.len());
-    for (position, raw) in scaled.iter().zip(&primitive.positions) {
+    let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
+    for position in &primitive.positions {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
             if !certified_coordinate(*value) {
                 return Err(defect(format!(
-                    "vertex coordinate {raw:?} scales to {value}, outside the certified range — a \
-                     ballistic coordinate must reach the corridor kernel as 0 or {low:e}..={high:e} \
-                     m in magnitude, which is the domain `collect`'s watertight projection carries a \
+                    "vertex coordinate {position:?} is outside the certified range — a ballistic \
+                     coordinate must reach the corridor kernel as 0 or {low:e}..={high:e} m in \
+                     magnitude, which is the domain `collect`'s watertight projection carries a \
                      proven error bound over",
                     low = CERTIFIED_RANGE.0,
                     high = CERTIFIED_RANGE.1,
@@ -457,14 +414,13 @@ fn manifold_gate(
         }
     }
 
-    // Signed volume per shell, on the SCALED positions — a negative scale axis mirrors the shell and
-    // inverts its winding, which is exactly what this check exists to catch. f64 because the
-    // divergence-theorem sum of a thin plate far from the origin cancels hard.
+    // Signed volume per shell. f64 because the divergence-theorem sum of a thin plate far from the
+    // origin cancels hard.
     let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
     for triangle in 0..triangles.len() {
         let shell = find(&mut parent, triangle);
         let corner = |slot: usize| -> [f64; 3] {
-            let position = scaled[primitive.indices[triangle * 3 + slot] as usize];
+            let position = primitive.positions[primitive.indices[triangle * 3 + slot] as usize];
             [position[0] as f64, position[1] as f64, position[2] as f64]
         };
         let (a, b, c) = (corner(0), corner(1), corner(2));
@@ -499,7 +455,6 @@ fn manifold_gate(
     Ok(ShellCertificate {
         shells,
         corners: triangles,
-        scale,
     })
 }
 
@@ -1439,15 +1394,13 @@ mod tests {
         );
     }
 
-    /// THE DOMAIN IS ENFORCED WHERE THE KERNEL READS, NOT WHERE THE BYTES ARE STORED.
+    /// A BALLISTIC NODE IS UNIT-SCALE OR IT IS REFUSED, BY NAME.
     ///
-    /// Codex's counterexample: a closed tetrahedron whose raw coordinates all satisfy
-    /// [`CERTIFIED_RANGE`], authored at a scale of `(2^19, 2^19, 2^-85)`. Avian builds that scaled
-    /// trimesh happily; `collect::cross_triangle` then declines a crossing the independent f64
-    /// reference accepts, because the projection's error bound never spoke for those coordinates.
-    /// The scale is what the gate must read.
+    /// The same geometry passes at `1` and fails at every other scale, including one a millionth of
+    /// an ULP away — nothing here compensates, rescales, or tolerates. The message names the node,
+    /// because the fix is in the .blend and the artist has to be told which object.
     #[test]
-    fn the_certified_domain_is_enforced_after_the_authored_scale() {
+    fn a_ballistic_node_that_is_not_unit_scale_is_refused_by_name() {
         let tetra = MeshGeometry {
             positions: vec![
                 [0.0, 0.0, 0.0],
@@ -1462,35 +1415,25 @@ mod tests {
             }),
             certificate: None,
         };
-        // Every raw coordinate is certified …
-        assert!(
-            tetra
-                .positions
-                .iter()
-                .flatten()
-                .all(|value| certified_coordinate(*value)),
-            "the counterexample's own bytes must pass, or it proves nothing",
-        );
         gate("Unscaled", &tetra).expect("at scale 1 it is ordinary geometry");
 
-        // … and the scaled ones are not, at both ends of the range.
-        let out_of_domain = Vec3::new(
-            f32::from_bits(0x5F80_0000),
-            f32::from_bits(0x5F80_0000),
-            f32::from_bits(0x1500_0000),
-        );
-        let err = manifold_gate("Scaled", 0, &tetra, out_of_domain)
-            .expect_err("the scaled coordinates leave the certified domain");
-        assert!(
-            err.contains("scales to") && err.contains("certified range"),
-            "{err}"
-        );
-
-        // A zero axis is the other way to leave it: every scaled coordinate is `0.0`, which is
-        // certified, and the shell has no volume left.
-        let err = manifold_gate("Flattened", 0, &tetra, Vec3::new(1.0, 1.0, 0.0))
-            .expect_err("a collapsed axis is not a shell");
-        assert!(err.contains("zero or non-finite axis"), "{err}");
+        // A uniform shrink, a single stretched axis, a mirror, a collapse, and one ULP: all the
+        // same verdict, because the contract is bit-exact equality with 1 and nothing weaker.
+        for scale in [
+            Vec3::splat(0.9312),
+            Vec3::new(1.0, 2.0, 1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, f32::from_bits(1.0f32.to_bits() + 1)),
+        ] {
+            let Err(err) = manifold_gate("Turret_Bottom", 0, &tetra, scale) else {
+                panic!("a ballistic node at {scale:?} must be refused");
+            };
+            assert!(
+                err.contains("Turret_Bottom") && err.contains("unit scale"),
+                "{err}"
+            );
+        }
     }
 
     /// Every node that SPINS must carry its axle in its own origin.

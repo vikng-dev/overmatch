@@ -807,15 +807,17 @@ Enforced mechanically, not by eyeball:
   the game). The bless-list is where weakspots are decided, not discovered by players as bugs.
 - **Per-primitive manifold gate:** weld-by-position, then closed-manifold + positive-orientation
   test per connected shell, on every substance primitive (classifier precedent 2026-08-07 — the gate
-  keys off the material, not a name). It runs on the positions the corridor kernel will actually
-  consume — the authored buffers *after* the composed node scale, which is what avian hands parry —
-  because a componentwise scale is injective over the reals and not over `f32`: two raw coordinates
-  can land on one, turning a positive-thickness shell into a zero-thickness one that any raw check
-  passes. Welding, degeneracy, closure, winding and signed volume are all judged there, and a
-  collider that reaches the world at any other scale is refused before collection.
-  Its edge-connected components ARE the surface identity §13.4 pairs on, published rather than
-  discarded. **Embedding is not yet proven** — a shell that passes through itself is caught at
-  runtime by §13.4's alternation, not at build time. OPEN TAB.
+  keys off the material, not a name). Welding, degeneracy, closure, winding and signed volume are all
+  judged on the authored buffer, and its edge-connected components ARE the surface identity §13.4
+  pairs on, published rather than discarded. **Embedding is not yet proven** — a shell that passes
+  through itself is caught at runtime by §13.4's alternation, not at build time. OPEN TAB.
+- **Unit scale is the authoring contract for ballistic geometry.** A componentwise scale is injective
+  over the reals and not over `f32` — two authored coordinates can land on one, turning a
+  positive-thickness shell into a zero-thickness one that the gate has already passed — so the model
+  carries the scale in its vertices, never on its nodes. The bake **refuses** a substance primitive
+  whose composed node scale is not bit-exactly 1, naming the node; the fix is to apply the scale in
+  the .blend and re-export, never to compensate in code. The collector re-checks the live collider
+  scale before it walks one, which is what catches a spawn-time or runtime mutation.
 
 ### 13.7 Authoring contract (amends the §12 mesh bullet; revised 2026-08-04)
 

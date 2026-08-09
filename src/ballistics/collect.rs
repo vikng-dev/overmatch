@@ -142,18 +142,17 @@ pub(crate) fn collect(
                         volume: node,
                         reason: "a trimesh candidate carries no per-triangle manifold certificate",
                     })?;
-                // THE CERTIFICATE IS ABOUT ONE SCALE. Everything the bake proved — closure, winding,
-                // positive volume, the welded ids the contacts below are named with — it proved
-                // about `position * scale`, and avian re-derives the scaled shape from whatever the
-                // hierarchy says at the time. A collider that reaches the world at any other scale
-                // has an uncertified topology, so it is refused rather than walked. Bit-exact, not
-                // near: there is no scale that is almost the one that was proven.
-                if collider.scale().to_array().map(f32::to_bits)
-                    != surfaces.scale.to_array().map(f32::to_bits)
-                {
+                // THE CERTIFICATE IS ABOUT THE UNSCALED BUFFER. Everything `bake::manifold_gate`
+                // proved — closure, winding, positive volume, the welded ids the contacts below are
+                // named with — it proved on the authored positions, which is why it refuses a
+                // ballistic node that is not unit-scale. Avian re-derives the scaled shape from
+                // whatever the hierarchy says at the time, so the live scale is checked HERE too:
+                // this is what catches a spawn-time or runtime mutation the bake never saw.
+                // Bit-exact, not near: there is no scale that is almost 1.
+                if collider.scale().to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
                     return Err(WalkError::CollectorFailed {
                         volume: node,
-                        reason: "a collider reached the world at a scale the bake never certified",
+                        reason: "a collider reached the world at a scale other than 1",
                     });
                 }
                 collect_trimesh(
@@ -1038,7 +1037,6 @@ mod tests {
                 .collect::<Vec<_>>()
                 .as_slice()
                 .into(),
-            scale: Vec3::ONE,
         };
         collect_trimesh(
             mesh,

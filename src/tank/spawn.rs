@@ -579,9 +579,11 @@ fn insert_weapons(
 /// collision response (`filters = NONE`) so it never perturbs the body — watertight solids may be
 /// concave, fine for the march's raycast (ADR-0008).
 ///
-/// The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of its
-/// volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales onto
-/// the shape, so a volume authored at scale != 1 is sized right without pre-baking anything here.
+/// The extracted buffers are node-LOCAL, and each collider is spawned as a child of its volume's
+/// node entity with an IDENTITY local transform: avian's `ColliderTransform` composes the ancestor
+/// `Transform` scales onto the shape, and a ballistic volume's chain is unit-scale by contract
+/// (`bake::manifold_gate`), so the shape parry gets is the buffer the gate certified. `collect`
+/// re-checks the live scale before it walks one.
 ///
 /// # Where the factor lands, and why it is not always the node
 ///
@@ -709,7 +711,6 @@ fn insert_ballistic_volumes(
                     BallisticSurfaces {
                         shells: certificate.shells.as_slice().into(),
                         corners: certificate.corners.as_slice().into(),
-                        scale: certificate.scale,
                     },
                     CollisionLayers::new([Layer::Armor], LayerMask::NONE),
                 ));
