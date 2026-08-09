@@ -894,4 +894,20 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             muzzle,
         },
     );
+
+    // UNIT SCALE AT THE ROOT, BIT-EXACTLY (§13.6). `bake::manifold_gate` refuses an authored scale
+    // other than 1 and `ballistics::collect` refuses a collider that reaches the world at one, but
+    // the collector only judges a CANDIDATE: a scaled root moves and shrinks every collider's
+    // world AABB, so the swept query can miss the armour entirely and leave nothing to refuse. The
+    // root bundle is arbitrary caller data, so this is where that seam closes — before the first
+    // corridor, by name, on the whole hierarchy at once.
+    commands.queue(move |world: &mut World| {
+        let scale = world.get::<Transform>(root).map_or(Vec3::ONE, |t| t.scale);
+        assert_eq!(
+            scale.to_array().map(f32::to_bits),
+            [1.0f32.to_bits(); 3],
+            "tank root {root} was spawned at scale {scale:?}, not 1 — armour is certified in the \
+             buffer it was authored in and reaches the world through an unscaled hierarchy"
+        );
+    });
 }
