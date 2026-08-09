@@ -299,9 +299,9 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::UnknownVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
         | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(key.volume)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(key.volume),
         WalkError::IncompleteCorridor { open, .. } => open.first().map(|key| key.volume),
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
@@ -313,9 +313,9 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
 /// The SHELL a [`WalkError`] blames, when the error is about one.
 fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
     match error {
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(*key)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(*key),
         WalkError::IncompleteCorridor { open, .. } => open.first().copied(),
         _ => None,
     }
@@ -977,7 +977,7 @@ fn run_fuzz(
         &'static Position,
         &'static Rotation,
         &'static Collider,
-        Option<&'static super::BallisticShells>,
+        Option<&'static super::BallisticSurfaces>,
     )>,
     aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
@@ -1244,7 +1244,7 @@ fn run_replay(
         &'static Position,
         &'static Rotation,
         &'static Collider,
-        Option<&'static super::BallisticShells>,
+        Option<&'static super::BallisticSurfaces>,
     )>,
     aabbs: Query<&ColliderAabb>,
     names: Query<(Entity, &Name)>,

@@ -58,14 +58,30 @@ pub(crate) struct MeshGeometry {
     /// and §13.7 authors a mixed-substance part as one object holding one closed shell per
     /// substance region (the Tiger road wheel: `MildSteel` bodies + `Rubber` rims in one object).
     pub substance: Option<PrimitiveSubstance>,
+    /// What [`manifold_gate`] proved about this primitive, and the identities it proved it with.
+    /// `None` for a non-substance primitive, which is not armour and is never walked.
+    pub certificate: Option<ShellCertificate>,
+}
+
+/// The manifold gate's findings, carried forward instead of discarded — the identities the §13.4
+/// walk pairs on.
+///
+/// Without them a coincidence of two shells of one primitive and a duplicate claim of one shell are
+/// the same three numbers at the collector's interface, and the walk has to guess which; with them,
+/// pairing is a fact.
+#[derive(Debug)]
+pub(crate) struct ShellCertificate {
     /// Which closed shell each triangle belongs to, index-aligned with `indices.chunks_exact(3)` —
-    /// [`manifold_gate`]'s own edge-connected components, dense and in first-triangle order. Empty
-    /// for a non-substance primitive, which has no shells because it is not armour.
-    ///
-    /// This is the SURFACE IDENTITY the §13.4 walk pairs on. Without it a coincidence of two shells
-    /// of one primitive and a duplicate claim of one shell are the same three numbers, and the walk
-    /// has to guess which; with it, pairing is a fact.
+    /// the gate's own edge-connected components, dense and in first-triangle order.
     pub shells: Vec<u32>,
+    /// The WELDED vertex id of each triangle corner. Two triangles meeting at a welded edge or
+    /// vertex name it with the same two numbers however their own index buffers spell it, which is
+    /// what lets the collector canonicalize a whole fan onto one contact.
+    pub corners: Vec<[u32; 3]>,
+    /// The composed scale the certificate was formed at. Everything above was proven about
+    /// `position * scale`, so a collider that reaches the world at any other scale is uncertified —
+    /// see `ballistics::collect`.
+    pub scale: Vec3,
 }
 
 /// A ballistic primitive's substance, resolved against the registry at extraction so the walk never
@@ -215,12 +231,23 @@ fn classify(
 /// the frame the corridor kernel reads — the stored vertex AFTER the authored scale
 /// ([`NodeGeometry::root_scale`]), which is what avian hands parry.
 ///
-/// THE SCALE IS THE ENFORCEMENT POINT, not a detail of it. The stored buffers are node-local and
-/// unscaled, and the collider is built as a child of its node, so avian composes every ancestor
-/// `Transform` scale onto the shape before the kernel ever projects a vertex. Checking the raw
-/// bytes therefore certifies a mesh nobody consumes: codex took a tetrahedron whose raw coordinates
-/// all pass, gave it an authored scale of `(2^19, 2^19, 2^-85)`, and the kernel declined a crossing
-/// the exact reference accepts.
+/// THE WHOLE CERTIFICATE RUNS ON THE SCALED POSITIONS, not just the range half of it. The stored
+/// buffers are node-local and unscaled, and the collider is built as a child of its node, so avian
+/// composes every ancestor `Transform` scale onto the shape and parry multiplies it into the
+/// vertices before the kernel ever projects one. Certifying the raw bytes therefore certifies a mesh
+/// nobody consumes, in two different ways:
+///
+/// * range — codex took a tetrahedron whose raw coordinates all pass, gave it an authored scale of
+///   `(2^19, 2^19, 2^-85)`, and the kernel declined a crossing the exact reference accepts;
+/// * TOPOLOGY — a componentwise scale is injective over the reals and not over `f32`. Codex
+///   measured raw `0.6250001788139343` and `0.6250002384185791` both landing on
+///   `0.06250002235174179` under an authored `0.10000000149011612` **[MEASURED]**, so a raw
+///   positive-thickness shell becomes zero-thickness after scaling while every scaled coordinate
+///   stays comfortably in range.
+///
+/// So welding, degeneracy, closure, winding and signed volume are all judged on the scaled
+/// positions. The collapse above then arrives as what it is — two welded corners of one triangle,
+/// which is a degenerate face — and is refused by name.
 ///
 /// `collect::PROJECTION_SLACK` is a bound on the f32 projection's rounding, and it is a bound only
 /// where the relative error model it is derived from holds. It is stated as a multiple of the
@@ -300,7 +327,7 @@ fn manifold_gate(
     index: usize,
     primitive: &MeshGeometry,
     scale: Vec3,
-) -> Result<Vec<u32>, String> {
+) -> Result<ShellCertificate, String> {
     let defect = |what: String| format!("node `{node}` primitive {index}: {what}");
 
     if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
@@ -317,25 +344,36 @@ fn manifold_gate(
         )));
     }
 
+    // THE POSITIONS AVIAN WILL CONSUME, formed once, and the only ones anything below reads. Parry
+    // scales a trimesh by multiplying each vertex componentwise, so this is that arithmetic to the
+    // bit.
+    let scaled: Vec<[f32; 3]> = primitive
+        .positions
+        .iter()
+        .map(|position| {
+            [
+                position[0] * scale.x,
+                position[1] * scale.y,
+                position[2] * scale.z,
+            ]
+        })
+        .collect();
+
     // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
     // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
     // a coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
     // watertight kernel that has a bound to offer.
-    //
-    // Welding on the RAW position and certifying the SCALED one is one statement, not two: a
-    // componentwise scale with no zero axis is injective, so the two frames weld the same points.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
-    for position in &primitive.positions {
+    let mut welded: Vec<u32> = Vec::with_capacity(scaled.len());
+    for (position, raw) in scaled.iter().zip(&primitive.positions) {
         let mut key = [0u32; 3];
-        for (axis, (slot, value)) in key.iter_mut().zip(position).enumerate() {
-            let consumed = *value * scale[axis];
-            if !certified_coordinate(consumed) {
+        for (slot, value) in key.iter_mut().zip(position) {
+            if !certified_coordinate(*value) {
                 return Err(defect(format!(
-                    "vertex coordinate {value} scales to {consumed}, outside the certified range — \
-                     a ballistic coordinate must reach the corridor kernel as 0 or \
-                     {low:e}..={high:e} m in magnitude, which is the domain `collect`'s watertight \
-                     projection carries a proven error bound over",
+                    "vertex coordinate {raw:?} scales to {value}, outside the certified range — a \
+                     ballistic coordinate must reach the corridor kernel as 0 or {low:e}..={high:e} \
+                     m in magnitude, which is the domain `collect`'s watertight projection carries a \
+                     proven error bound over",
                     low = CERTIFIED_RANGE.0,
                     high = CERTIFIED_RANGE.1,
                 )));
@@ -419,14 +457,14 @@ fn manifold_gate(
         }
     }
 
-    // Signed volume per shell, from the ORIGINAL positions (welding only merged coincident points,
-    // so the coordinates are unchanged). f64 because the divergence-theorem sum of a thin plate far
-    // from the origin cancels hard.
+    // Signed volume per shell, on the SCALED positions — a negative scale axis mirrors the shell and
+    // inverts its winding, which is exactly what this check exists to catch. f64 because the
+    // divergence-theorem sum of a thin plate far from the origin cancels hard.
     let mut volumes: BTreeMap<usize, f64> = BTreeMap::new();
     for triangle in 0..triangles.len() {
         let shell = find(&mut parent, triangle);
         let corner = |slot: usize| -> [f64; 3] {
-            let position = primitive.positions[primitive.indices[triangle * 3 + slot] as usize];
+            let position = scaled[primitive.indices[triangle * 3 + slot] as usize];
             [position[0] as f64, position[1] as f64, position[2] as f64]
         };
         let (a, b, c) = (corner(0), corner(1), corner(2));
@@ -458,7 +496,11 @@ fn manifold_gate(
         let next = ids.len() as u32;
         shells.push(*ids.entry(root).or_insert(next));
     }
-    Ok(shells)
+    Ok(ShellCertificate {
+        shells,
+        corners: triangles,
+        scale,
+    })
 }
 
 pub(crate) fn plugin(app: &mut App) {
@@ -649,10 +691,11 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
                     positions,
                     indices,
                     substance,
-                    shells: Vec::new(),
+                    certificate: None,
                 };
                 if geometry.substance.is_some() {
-                    geometry.shells = manifold_gate(&name, index, &geometry, root_scale)?;
+                    geometry.certificate =
+                        Some(manifold_gate(&name, index, &geometry, root_scale)?);
                 }
                 primitives.push(geometry);
             }
@@ -1181,12 +1224,14 @@ mod tests {
             .iter()
             .flat_map(|node| &node.primitives)
             .map(|primitive| {
-                primitive
-                    .shells
-                    .iter()
-                    .copied()
-                    .max()
-                    .map_or(0, |max| max as usize + 1)
+                primitive.certificate.as_ref().map_or(0, |certificate| {
+                    certificate
+                        .shells
+                        .iter()
+                        .copied()
+                        .max()
+                        .map_or(0, |max| max as usize + 1)
+                })
             })
             .sum();
         // 131 shells over 89 primitives: multi-shell primitives are the ordinary case here, not a
@@ -1196,7 +1241,7 @@ mod tests {
 
     /// The gate at scale 1 — the case every synthetic fixture below is about.
     fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, String> {
-        manifold_gate(node, 0, primitive, Vec3::ONE)
+        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
     }
 
     /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
@@ -1217,7 +1262,7 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
-            shells: Vec::new(),
+            certificate: None,
         };
         let closed = vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
         let shells = gate("Good", &tetra(closed.clone())).expect("a closed tetrahedron passes");
@@ -1289,7 +1334,7 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
-            shells: Vec::new(),
+            certificate: None,
         };
         gate("Split", &split).expect("welding by position closes the split shell");
     }
@@ -1325,7 +1370,7 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
-            shells: Vec::new(),
+            certificate: None,
         };
         let shells = gate("Pair", &pair).expect("two closed outward tetrahedra pass");
         assert_eq!(
@@ -1356,7 +1401,7 @@ mod tests {
                 name: "RHA".into(),
                 factor: 1000.0,
             }),
-            shells: Vec::new(),
+            certificate: None,
         };
         // Every raw coordinate is certified …
         assert!(

@@ -64,6 +64,7 @@ fn oblique_plate(
             volume: volume(vol),
             primitive: prim(primitive),
             shell,
+            contact: Contact::Face(primitive * 100 + shell * 10),
             triangle: primitive * 100 + shell * 10,
             t: enter,
             true_normal: entry_normal.normalize(),
@@ -72,6 +73,7 @@ fn oblique_plate(
             volume: volume(vol),
             primitive: prim(primitive),
             shell,
+            contact: Contact::Face(primitive * 100 + shell * 10 + 1),
             triangle: primitive * 100 + shell * 10 + 1,
             t: exit,
             true_normal: exit_normal.normalize(),
@@ -195,6 +197,7 @@ impl Slab {
                     volume: volume(self.vol),
                     primitive: prim(self.primitive),
                     shell: 0,
+                    contact: Contact::Face(self.primitive * 100 + face),
                     triangle: self.primitive * 100 + face,
                     t,
                     true_normal,
@@ -295,6 +298,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Edge(3, 7),
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
@@ -303,6 +307,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Edge(3, 7),
             triangle: 1,
             t: 1.0,
             true_normal: -AXIS,
@@ -311,6 +316,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(2),
             triangle: 2,
             t: 1.125,
             true_normal: AXIS,
@@ -339,6 +345,7 @@ fn a_shared_vertex_cluster_is_one_crossing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Vertex(4),
             triangle: index as u32,
             t: 1.0,
             true_normal: normal.normalize(),
@@ -348,6 +355,7 @@ fn a_shared_vertex_cluster_is_one_crossing() {
         volume: volume(1),
         primitive: prim(0),
         shell: 0,
+        contact: Contact::Face(9),
         triangle: 9,
         t: 1.5,
         true_normal: AXIS,
@@ -368,6 +376,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Edge(2, 5),
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
@@ -376,6 +385,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Edge(2, 5),
             triangle: 1,
             t: 1.0,
             true_normal: AXIS,
@@ -413,6 +423,7 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(0),
             triangle: 0,
             t: 0.25,
             true_normal: AXIS,
@@ -436,6 +447,7 @@ fn starting_inside_without_declared_presence_is_a_structured_error() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(7),
             triangle: 7,
             t: 0.25,
             true_normal: AXIS,
@@ -563,6 +575,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(0),
             triangle: 0,
             t: 0.25,
             true_normal: -AXIS,
@@ -571,6 +584,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(1),
             triangle: 1,
             t: 0.5,
             true_normal: -AXIS,
@@ -579,6 +593,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(2),
             triangle: 2,
             t: 1.0,
             true_normal: AXIS,
@@ -586,7 +601,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
     ];
     assert!(matches!(
         walk_ray(1, &corridor(4.0, hits), &volumes, &WalkLaws::default()),
-        Err(WalkError::IncompleteCorridor { sample: 1, .. })
+        Err(WalkError::UnexpectedEntry { sample: 1, .. })
     ));
 }
 
@@ -602,6 +617,7 @@ fn an_exit_below_depth_zero_is_still_a_structured_error() {
         volume: volume(1),
         primitive: prim(0),
         shell: 0,
+        contact: Contact::Face(9),
         triangle: 9,
         t: 0.75,
         true_normal: AXIS,
@@ -712,6 +728,7 @@ fn a_corridor_starting_inside_a_volume_grants_no_free_crossing() {
             volume: volume(1),
             primitive: prim(0),
             shell: 0,
+            contact: Contact::Face(0),
             triangle: 0,
             t: 0.125,
             true_normal: AXIS,
@@ -2653,8 +2670,8 @@ fn a_ring_only_contact_on_one_plane_is_one_event() {
 fn a_shell_nested_inside_another_in_one_primitive_is_one_presence() {
     let volumes = table(&[(1, 1000.0)]);
     // Outer shell [0.20, 0.60); inner shell 3 mm inside it, entirely contained.
-    let mut hits = plate(1, 0, 0.20, 0.60);
-    hits.extend(plate(1, 0, 0.203, 0.597));
+    let mut hits = shell_plate(1, 0, 0, 0.20, 0.60);
+    hits.extend(shell_plate(1, 0, 1, 0.203, 0.597));
     let walked = walk(&corridor(4.0, hits), &volumes);
 
     assert_eq!(
@@ -2683,8 +2700,8 @@ fn a_shell_nested_inside_another_in_one_primitive_is_one_presence() {
 #[test]
 fn overlapping_shells_in_one_primitive_are_one_presence() {
     let volumes = table(&[(1, 1000.0)]);
-    let mut hits = plate(1, 0, 0.20, 0.40);
-    hits.extend(plate(1, 0, 0.292, 0.50));
+    let mut hits = shell_plate(1, 0, 0, 0.20, 0.40);
+    hits.extend(shell_plate(1, 0, 1, 0.292, 0.50));
     let walked = walk(&corridor(4.0, hits), &volumes);
 
     assert_eq!(walked.runs.len(), 1);
@@ -2706,8 +2723,8 @@ fn overlapping_shells_in_one_primitive_are_one_presence() {
 fn disjoint_shells_in_one_primitive_are_still_two_crossings() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
-    let mut hits = plate(1, 0, 0.20, 0.30);
-    hits.extend(plate(1, 0, 0.392, 0.50));
+    let mut hits = shell_plate(1, 0, 0, 0.20, 0.30);
+    hits.extend(shell_plate(1, 0, 1, 0.392, 0.50));
     assert!(
         0.092 > laws.weld_max_lookahead,
         "the gap is past the lookahead, so no weld can even be looked for",
@@ -2734,8 +2751,8 @@ fn disjoint_shells_in_one_primitive_are_still_two_crossings() {
 fn a_duplicated_shell_in_one_primitive_changes_nothing() {
     let volumes = table(&[(1, 1000.0)]);
     let once = walk(&corridor(4.0, plate(1, 0, 0.25, 0.75)), &volumes);
-    let mut doubled = plate(1, 0, 0.25, 0.75);
-    doubled.extend(plate(1, 0, 0.25, 0.75));
+    let mut doubled = shell_plate(1, 0, 0, 0.25, 0.75);
+    doubled.extend(shell_plate(1, 0, 1, 0.25, 0.75));
     let twice = walk(&corridor(4.0, doubled), &volumes);
 
     assert_eq!(
@@ -2745,7 +2762,10 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
     );
     assert_eq!(once.spans, twice.spans);
     assert_eq!(once.presence, twice.presence);
-    assert_eq!(once.shells, twice.shells);
+    assert_eq!(once.events, twice.events);
+    // The second shell IS reported — it is real geometry, and the seed contract needs its identity.
+    // What it does not do is charge, deposit or fire anything twice.
+    assert_eq!(twice.shells.len(), 2);
 }
 
 /// A SHELL THINNER THAN THE WINDOW IS AN ORDINARY CROSSING.
@@ -2794,23 +2814,6 @@ fn a_shell_thinner_than_the_window_is_an_ordinary_crossing() {
         vec![(BoundaryKind::Entrance, enter), (BoundaryKind::Exit, exit),],
         "and it has a real entrance and a real exit: {:#?}",
         walked.events,
-    );
-}
-
-/// AN EXACT TANGENT BOUNDS NOTHING, HOWEVER MANY FACES MEET AT IT.
-///
-/// The other side of the same law. A ray through a shell's edge is claimed by both incident faces,
-/// one reading entry and one exit, at ONE bit-equal `t` — so the shell is entered and left at one
-/// point and the chord is zero. Zero chord, zero cost, no run, no event. It needs no rule of its
-/// own: the arithmetic says it.
-#[test]
-fn an_exact_tangent_of_one_shell_bounds_nothing() {
-    let volumes = table(&[(1, 1000.0)]);
-    let walked = walk(&corridor(2.0, plate(1, 1, 1.0, 1.0)), &volumes);
-    assert_eq!(walked.cost, 0.0);
-    assert!(
-        walked.runs.is_empty() && walked.events.is_empty(),
-        "{walked:#?}"
     );
 }
 
@@ -2917,6 +2920,7 @@ fn a_bridging_face_cannot_erase_the_plate_it_sits_inside() {
         volume: volume(2),
         primitive: prim(2),
         shell: 0,
+        contact: Contact::Face(7),
         triangle: 7,
         t: mid,
         true_normal: Vec3::X,
@@ -3008,6 +3012,7 @@ fn a_chain_of_bridging_faces_cannot_span_more_than_the_ceiling() {
             volume: volume(3),
             primitive: prim(3),
             shell: 0,
+            contact: Contact::Face(step as u32),
             triangle: step as u32,
             t,
             true_normal: Vec3::X,
@@ -3031,28 +3036,30 @@ fn a_chain_of_bridging_faces_cannot_span_more_than_the_ceiling() {
     );
 }
 
-/// AN EXIT CLOSES AT THE CLUSTER'S LAST FACE, NOT AT ITS FIRST.
+/// A FAN OF CLAIMS ON ONE FEATURE IS ONE CROSSING, AT THE FEATURE'S OWN `t`.
 ///
-/// The direction is the whole reason a cluster cannot erase cost: whatever a cluster's width, the
-/// material inside it is charged at the larger of the factors either side. Collapsing an exit onto
-/// the cluster's anchor instead would decline to charge everything between the two.
+/// The exit face's two triangles both claim a ray running through their shared edge, and the
+/// collector names that edge and gives both claims the edge's own distance — so the walk sees one
+/// contact at one `t` and has nothing to reconcile. There is no window here, and no rule about
+/// which of two nearby `t` wins: the fan was canonical before it arrived.
 #[test]
-fn a_spread_exit_closes_at_the_far_face() {
+fn a_fan_of_claims_on_one_feature_is_one_crossing() {
     let volumes = table(&[(1, 1000.0)]);
-    let far = ulps(1.0, 3);
     let mut hits = plate(1, 1, 0.5, 1.0);
-    // The same face's second triangle, three ULP downrange — one boundary, two crossings.
+    // The exit face's second incident triangle, naming the same welded edge.
+    hits[1].contact = Contact::Edge(11, 12);
     hits.push(FaceHit {
         volume: volume(1),
         primitive: prim(1),
         shell: 0,
+        contact: Contact::Edge(11, 12),
         triangle: 77,
-        t: far,
+        t: 1.0,
         true_normal: AXIS,
     });
     let walked = walk(&corridor(2.0, hits), &volumes);
 
-    assert_eq!(walked.presence[0].spans, vec![(0.5, far)]);
+    assert_eq!(walked.presence[0].spans, vec![(0.5, 1.0)]);
     assert_eq!(
         walked.runs.len(),
         1,
@@ -3158,50 +3165,63 @@ fn two_shells_crossed_inside_one_window_are_two_crossings() {
     );
 }
 
-/// TWO TRIANGLES CLAIMING ONE CROSSING ARE ONE CROSSING.
+/// TWO TRIANGLES CLAIMING ONE CROSSING ARE ONE CROSSING — AND TWO CONTACTS ARE TWO.
 ///
 /// `collect::cross_triangle` deliberately lets BOTH triangles incident on a shared edge claim a ray
-/// that runs through it — a duplicate is recoverable, a dropped crossing is not — and the two
-/// compute `t` from their own planes, so the duplicate arrives a few ULP off, not bit-equal. Raw
-/// multiplicity is therefore not surface multiplicity, and a net that counted it would read `+2`
-/// for one entry and leave the primitive open for ever.
-///
-/// The reduction is over the SIGN SEQUENCE in `t` order: consecutive same-sign claims of one
-/// primitive inside one cluster are one claim. `E E` is `+1`; the `E X E` above is still `+1`.
+/// that runs through it — a duplicate is recoverable, a dropped crossing is not. They name the same
+/// welded edge, so they are one entry. Raw multiplicity is not surface multiplicity, and the
+/// contact is what says so — not how close their `t` happen to be.
 #[test]
-fn duplicate_claims_of_one_crossing_are_one_entry() {
+fn duplicate_claims_of_one_contact_are_one_entry() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
     let mut hits = plate(1, 1, 1.0, 1.5);
-    // The second incident triangle of the entry face, two ULP downrange.
+    hits[0].contact = Contact::Edge(4, 9);
+    // The entry face's second incident triangle: the same edge, so the same crossing.
     hits.push(FaceHit {
         volume: volume(1),
         primitive: prim(1),
         shell: 0,
+        contact: Contact::Edge(4, 9),
         triangle: 77,
-        t: ulps(1.0, 2),
+        t: 1.0,
         true_normal: -AXIS,
     });
     let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws)
         .expect("a duplicated entry claim is one entry");
 
     assert_eq!(walked.runs.len(), 1, "one crossing: {:#?}", walked.runs);
-    assert_eq!(walked.presence[0].spans, vec![(1.0, 1.5)]);
+    assert_eq!(walked.shells[0].spans, vec![(1.0, 1.5)]);
+
+    // A THIRD claim two ULP downrange naming a DIFFERENT feature is a different crossing, and a
+    // second entry of a certified shell is a broken certificate — named, never counted as depth.
+    let mut hits = plate(1, 1, 1.0, 1.5);
+    hits.push(FaceHit {
+        volume: volume(1),
+        primitive: prim(1),
+        shell: 0,
+        contact: Contact::Face(77),
+        triangle: 77,
+        t: ulps(1.0, 2),
+        true_normal: -AXIS,
+    });
+    assert!(matches!(
+        walk_ray(0, &corridor(2.0, hits), &volumes, &laws),
+        Err(WalkError::UnexpectedEntry { .. })
+    ));
 }
 
-/// FACES AT ONE `t` HAVE NO ORDER, SO THEY MAY NOT DECIDE THE NET.
+/// A CORNER BRUSH IS A TANGENT, AND A TANGENT BOUNDS NOTHING — IN EITHER TRIANGLE ORDER.
 ///
-/// The corner of a box, as the shared-vertex fan really reports it (`collect`'s sweep, one origin in
-/// 4 225): the near half of the top face claims an entry, and one ULP downrange the far half claims
-/// the SAME entry while a side face claims the exit — two faces at one bit-equal `t`. The corridor's
-/// total order breaks that tie on triangle index, so reading the pair in index order makes the net
-/// `+1` for one triangulation and `0` for the other: the same corner is a brush or a round stopped
-/// dead depending on how the exporter numbered two triangles.
+/// The corner of a box, as the shared-vertex fan really reports it: several faces of one shell name
+/// the same welded vertex, and they disagree about which way the ray is going, because the ray
+/// meets that vertex and leaves on the side it came from. Disagreement IS the tangent — no interval,
+/// no cost, no event — and it is a property of the fan, not of the order the exporter numbered its
+/// triangles in.
 #[test]
-fn a_tie_at_one_t_reads_the_same_in_either_triangle_order() {
+fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
-    let (near, far) = (1.0f32, ulps(1.0, 2));
     let corner = |exit_first: bool| {
         let (a, b) = if exit_first { (7u32, 9u32) } else { (9, 7) };
         vec![
@@ -3209,24 +3229,18 @@ fn a_tie_at_one_t_reads_the_same_in_either_triangle_order() {
                 volume: volume(1),
                 primitive: prim(1),
                 shell: 0,
-                triangle: 5,
-                t: near,
-                true_normal: -AXIS,
-            },
-            FaceHit {
-                volume: volume(1),
-                primitive: prim(1),
-                shell: 0,
+                contact: Contact::Vertex(3),
                 triangle: a,
-                t: far,
+                t: 1.0,
                 true_normal: AXIS,
             },
             FaceHit {
                 volume: volume(1),
                 primitive: prim(1),
                 shell: 0,
+                contact: Contact::Vertex(3),
                 triangle: b,
-                t: far,
+                t: 1.0,
                 true_normal: -AXIS,
             },
         ]
@@ -3236,16 +3250,12 @@ fn a_tie_at_one_t_reads_the_same_in_either_triangle_order() {
     let entry_first = walk_ray(0, &corridor(2.0, corner(false)), &volumes, &laws)
         .expect("the corner resolves in either order");
 
-    assert_eq!(exit_first.spans, entry_first.spans, "the field is the same");
-    assert_eq!(exit_first.cost.to_bits(), entry_first.cost.to_bits());
+    assert_eq!(exit_first, entry_first, "the walk is the same");
     assert!(
-        exit_first
-            .spans
-            .last()
-            .is_some_and(|span| span.factor == 0.0),
-        "a corner brush closes the field: {:#?}",
-        exit_first.spans,
+        exit_first.runs.is_empty() && exit_first.events.is_empty(),
+        "a brushed corner bounds nothing: {exit_first:#?}",
     );
+    assert_eq!(exit_first.cost, 0.0);
 }
 
 /// CLUSTERING NEVER CHARGES LESS THAN THE EXACT UNION FIELD.

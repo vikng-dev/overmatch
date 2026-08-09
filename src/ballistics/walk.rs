@@ -123,6 +123,28 @@ impl ShellKey {
     }
 }
 
+/// The welded feature of a shell the ray actually met — the identity that decides which claims are
+/// the same crossing.
+///
+/// EXACT, and free. The sheared edge test is antisymmetric between the two triangles incident on an
+/// edge, so a claim's barycentric areas cancel to EXACTLY zero on that edge for both of them, and on
+/// two edges at a shared vertex for the whole fan around it. That zero pattern is the contact, and
+/// it is the same pattern in every triangle that names the feature, whatever the mesh's own index
+/// buffer calls it (the ids are the bake's WELDED vertices). A ray that is merely NEAR a feature
+/// cancels nothing and is claimed by exactly one triangle's interior.
+///
+/// So dedup is by identity, not by proximity: two claims are one crossing when they name one
+/// contact of one shell, and never because their `t` happen to be close.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum Contact {
+    /// The interior of one triangle, named by its index. Claimed by that triangle alone.
+    Face(u32),
+    /// A welded edge, named by its two welded vertex ids in ascending order.
+    Edge(u32, u32),
+    /// A welded vertex — the whole fan around it names this.
+    Vertex(u32),
+}
+
 /// One triangle crossing along a sample ray, as the spatial adapter reports it.
 ///
 /// `true_normal` is the face's OUTWARD normal recovered from triangle winding — NOT parry's
@@ -136,11 +158,16 @@ pub struct FaceHit {
     pub primitive: Entity,
     /// Which closed shell of that primitive this face belongs to — see [`ShellKey`].
     pub shell: u32,
-    /// Diagnostic identity only. It never participates in the reduction below (which is geometric
-    /// and per shell, so a re-triangulated mesh cannot change the answer); it exists so a
-    /// [`WalkError`] can name the offending faces.
+    /// The welded feature this claim is ABOUT. Claims sharing one contact of one shell are one
+    /// crossing; claims of different contacts never are.
+    pub contact: Contact,
+    /// Diagnostic identity only. It never participates in the reduction below (which is topological,
+    /// so a re-triangulated mesh cannot change the answer); it exists so a [`WalkError`] can name
+    /// the offending faces.
     pub triangle: u32,
-    /// Distance along the sample ray from the corridor origin.
+    /// Distance along the sample ray from the corridor origin. CANONICAL PER CONTACT: every claim
+    /// of one welded feature reports the same bits, because the collector computes it from the
+    /// feature rather than from each triangle's own plane.
     pub t: f32,
     pub true_normal: Vec3,
 }
@@ -247,30 +274,16 @@ pub struct RayCorridor {
 /// are live knobs"), gathered so no law reads a hidden constant.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkLaws {
-    /// TOPOLOGY domain — absolute floor (m) under which two SAME-SIGN claims of ONE shell are the
-    /// same crossing.
+    /// SEED domain — absolute floor (m) under which two `t` name the same handoff plane.
     ///
-    /// It is a dedup window and nothing else. It never relates two shells, so it cannot merge two
-    /// surfaces, and it never relates an entry to an exit, so it cannot erase a chord.
+    /// It relates a RESTART to a face, and nothing else: the corridor's restart `t` is computed from
+    /// the aggregate entrance plane while each face came from its own ray, so the two agree only to
+    /// rounding. It decides which side of the handoff owns a face ([`RayWalk::inside_at`],
+    /// `collect::admit`). It has no part in pairing, which is topological.
     pub topology_abs: f32,
-    /// TOPOLOGY domain — relative term, so a corridor anchored far downrange (where f32 spacing is
-    /// coarser) still groups the two triangles of one face diagonal.
+    /// SEED domain — relative term, so a corridor anchored far downrange (where f32 spacing is
+    /// coarser) still recognises its own handoff plane.
     pub topology_rel: f32,
-    /// TOPOLOGY domain — how many windows one shell's duplicate-claim FAN may span in total.
-    ///
-    /// The window chains from claim to claim, because the triangles incident on one welded edge or
-    /// vertex each compute `t` from their own plane and so spread over several ULP: MEASURED on the
-    /// bound Tiger, a four-face corner spread 4.8 µm against a 4.4 µm window (1.09 windows). Chaining
-    /// with no ceiling is single-linkage and unbounded, so the fan is capped above the widest corner
-    /// measured and well below any authored feature.
-    ///
-    /// What it bounds is how far a fan of same-sign claims of ONE shell may reach before the walk
-    /// reads them as two crossings of that shell. Reading two where there is one leaves the shell
-    /// open at the corridor's end ([`WalkError::IncompleteCorridor`]) — loud, never quiet.
-    pub topology_fan_windows: f32,
-    /// A face is tangent — and toggles nothing — when `|axis · n|` is at most this. A tangent face
-    /// bounds zero material, so refusing to toggle on it cannot lose armour.
-    pub tangent_cos: f32,
     /// WELD domain (§13.4) — maximum PERPENDICULAR gap that merges event topology (~2 mm: far above
     /// export jitter, two orders below real spaced armour).
     pub weld_perp: f32,
@@ -322,9 +335,8 @@ pub struct WalkLaws {
     /// parallel to the surface. Below it the relation is EXACT, and a cap that engages anywhere a
     /// valid crossing can happen does not bound the geometry, it mispredicts it — which is precisely
     /// the defect round 4 caught. A hundred engages past 89.43°, an order beyond any incidence at
-    /// which a round both declines to ricochet and still presents a resolvable chord; and the module
-    /// already refuses to toggle on faces within `tangent_cos` of edge-on, whose secant would be
-    /// 10 000. The reach it implies is never the operative bound — the residual is.
+    /// which a round both declines to ricochet and still presents a resolvable chord. The reach it
+    /// implies is never the operative bound — the residual is.
     pub event_secant_cap: f32,
     /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
     pub ricochet_angle: f32,
@@ -356,8 +368,6 @@ impl Default for WalkLaws {
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
-            topology_fan_windows: 2.0,
-            tangent_cos: 1.0e-4,
             weld_perp: 2.0e-3,
             // ~60°: parallel plates read -1; anything less opposed is not two sides of one gap.
             weld_face_cos: 0.5,
@@ -415,6 +425,17 @@ pub enum WalkError {
         open: Vec<ShellKey>,
         length: f32,
     },
+    /// Two distinct certified contacts of ONE shell whose `t` collide on the same f32 bits.
+    ///
+    /// The material between them is real and its thickness is not representable in this corridor,
+    /// so there is no honest number to charge. Reading the pair as a zero-length touch would be a
+    /// silent free crossing of however much steel the two features actually bound, which is the
+    /// defect class §13.1 exists to kill — so it is named instead.
+    UnrepresentableChord {
+        sample: usize,
+        key: ShellKey,
+        t: f32,
+    },
     /// A stretch of positive union factor that no shell's presence interval covers.
     ///
     /// The field and the intervals are two readings of one walk, so they cannot disagree — and the
@@ -443,11 +464,9 @@ pub enum WalkError {
     CorridorMismatch { reason: &'static str },
     /// The covered samples' entry normals cancelled, so no aggregate `n̄` exists.
     ///
-    /// Defensive: the tangent gate ([`WalkLaws::tangent_cos`]) admits a face as an ENTRY only when
-    /// `axis · n < -tangent_cos`, so every contributing normal leans against the axis and their sum
-    /// cannot vanish — `n̄` is well-defined by construction, which is precisely §13.5's repair of
-    /// the point model's degenerate normal. The arm exists so that a future zeroed tangent gate
-    /// fails loud instead of normalizing a zero vector.
+    /// Defensive: a face is an ENTRY only when `axis · n < 0`, so every contributing normal leans
+    /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
+    /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
 }
 
@@ -631,25 +650,11 @@ pub(crate) fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
     (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
 }
 
-/// Whether `t` is still inside the widest fan ONE shell's duplicate claims may cover, measured from
-/// the fan's first claim.
-///
-/// The window chains from claim to claim, so without a ceiling a fan grows for as long as same-sign
-/// claims keep arriving within a window of each other.
-fn within_fan_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
-    (t - anchor).abs()
-        <= laws.topology_fan_windows
-            * (laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs()))
-}
-
 /// One certified crossing of one shell: where the ray goes in or out, and which faces said so.
 struct Crossing {
     key: ShellKey,
-    /// Where the field changes. An entry opens at the fan's FIRST face and an exit closes at its
-    /// LAST, so a fan spread over a few ULP charges its own width rather than declining it.
+    contact: Contact,
     t: f32,
-    /// The last claim absorbed, which is what the next claim chains from.
-    last: f32,
     /// `+1` inward, `−1` outward.
     sign: i32,
     /// Sum of the contributing faces' outward normals — the boundary aggregate, unnormalized so a
@@ -658,118 +663,81 @@ struct Crossing {
     triangles: Vec<u32>,
 }
 
-/// Reduce ONE shell's face claims, in `t` order, to the crossings they name.
+/// Canonicalize the raw face claims into the crossings they name.
 ///
-/// RAW MULTIPLICITY IS NOT SURFACE MULTIPLICITY, and shell identity is what makes the difference
-/// decidable. `collect::cross_triangle` deliberately lets BOTH triangles incident on a shared edge
-/// claim a ray running through it — a duplicate is recoverable and a dropped crossing is not — and
-/// each computes `t` from its own plane, so the duplicate lands a few ULP away rather than on the
-/// same bits. (MEASURED on the shared-edge sweep: 370 double claims in 66 049 rays, of which 17 are
-/// bit-equal.) Two triangles sharing an edge are the SAME SHELL by construction, so collapsing
-/// consecutive same-sign claims of one shell inside one window is exact: no other surface can be
-/// hiding inside that collapse, because no other surface is in this list.
+/// ONE CONTACT OF ONE SHELL IS ONE CROSSING, and nothing else is. `collect::cross_triangle`
+/// deliberately lets every triangle incident on a welded feature claim a ray running through it — a
+/// duplicate is recoverable and a dropped crossing is not — and it names the feature exactly, so the
+/// fan arrives already identified. There is no window here and no proximity test: two claims are one
+/// crossing when they name one contact, and two contacts are two crossings however close their `t`.
 ///
-/// A SIGN CHANGE IS NEVER COLLAPSED. Entry-then-exit of one shell is a traversal — a corner the ray
-/// brushes and a shell thinner than the window present the identical pair, and they are the
-/// identical thing: the ray passed through that much of that shell. It is charged, and it carries
-/// its own entrance and exit like any other chord. There is no threshold below which a crossing
-/// stops being one.
-///
-/// Under-counting is the only failure this reduction can produce, and both directions of it are
-/// loud: too few entries closes the shell early and the exits meet depth zero
-/// ([`WalkError::UnexpectedExit`]); too few exits leaves it open at the corridor's end
-/// ([`WalkError::IncompleteCorridor`]).
-fn reduce_shell(
-    key: ShellKey,
-    claims: &[&FaceHit],
-    axis: Vec3,
-    laws: &WalkLaws,
-    out: &mut Vec<Crossing>,
-) {
-    let mut fan: Option<Crossing> = None;
-    let mut anchor = 0.0f32;
-    let mut index = 0usize;
-    while index < claims.len() {
-        // CLAIMS AT ONE BIT-EQUAL `t` HAVE NO ORDER. The corridor's total order breaks their tie on
-        // triangle index, which is a fact about the mesh's index buffer and not about the geometry,
-        // and the fan below is order-SENSITIVE — so a group at one `t` is taken with the sign
-        // already standing FIRST. That is the only order-free reading, and it is the one that reads
-        // a repeated claim of the crossing in progress as the duplicate it is. It decides nothing
-        // about which SURFACE anything belongs to; there is only one surface in this list.
-        let bits = claims[index].t.to_bits();
-        let mut end = index + 1;
-        while end < claims.len() && claims[end].t.to_bits() == bits {
-            end += 1;
-        }
-        let group = &claims[index..end];
-        index = end;
-
-        let standing = if fan.as_ref().is_some_and(|fan| fan.sign < 0) {
+/// A FAN THAT DISAGREES ABOUT DIRECTION IS A TANGENT. The ray meets the feature and leaves on the
+/// same side, so it bounds no material and crosses no surface: no interval, no cost, no event. A fan
+/// that agrees is transverse and emits exactly one oriented crossing. That is the whole rule, and it
+/// needs neither a normal tolerance nor a minimum thickness — a shell thinner than any window is two
+/// DIFFERENT contacts and stays two crossings.
+fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
+    struct Fan {
+        t: f32,
+        sign: i32,
+        normal: Vec3,
+        triangles: Vec<u32>,
+        mixed: bool,
+    }
+    let mut fans: BTreeMap<(ShellKey, Contact), Fan> = BTreeMap::new();
+    for hit in order {
+        // EXACT ZERO IS THE ONLY TANGENT, and the collector has already refused it: a face whose
+        // plane contains the ray projects to a degenerate outline and claims nothing. So the sign of
+        // `axis · n` is the direction, with no angular threshold deciding what counts as a face.
+        let d = axis.dot(hit.true_normal);
+        let sign = if d < 0.0 {
+            1
+        } else if d > 0.0 {
             -1
         } else {
-            1
+            continue;
         };
-        for wanted in [standing, -standing] {
-            for hit in group {
-                let d = axis.dot(hit.true_normal);
-                // A tangent face bounds zero material, so refusing to toggle on it cannot lose
-                // armour.
-                let sign = if d < -laws.tangent_cos {
-                    1
-                } else if d > laws.tangent_cos {
-                    -1
-                } else {
-                    continue;
-                };
-                if sign != wanted {
-                    continue;
-                }
-                match fan.as_mut() {
-                    Some(open)
-                        if open.sign == sign
-                            && coincident(open.last, hit.t, laws)
-                            && within_fan_span(anchor, hit.t, laws) =>
-                    {
-                        open.normal += hit.true_normal;
-                        open.triangles.push(hit.triangle);
-                        open.last = hit.t;
-                        if sign < 0 {
-                            open.t = hit.t;
-                        }
-                    }
-                    _ => {
-                        out.extend(fan.take());
-                        anchor = hit.t;
-                        fan = Some(Crossing {
-                            key,
-                            t: hit.t,
-                            last: hit.t,
-                            sign,
-                            normal: hit.true_normal,
-                            triangles: vec![hit.triangle],
-                        });
-                    }
-                }
+        match fans.entry((hit.key(), hit.contact)) {
+            std::collections::btree_map::Entry::Occupied(mut slot) => {
+                let fan = slot.get_mut();
+                fan.mixed |= fan.sign != sign;
+                fan.normal += hit.true_normal;
+                fan.triangles.push(hit.triangle);
+            }
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(Fan {
+                    t: hit.t,
+                    sign,
+                    normal: hit.true_normal,
+                    triangles: vec![hit.triangle],
+                    mixed: false,
+                });
             }
         }
     }
-    out.extend(fan);
+    fans.into_iter()
+        .filter(|(_, fan)| !fan.mixed)
+        .map(|((key, contact), fan)| Crossing {
+            key,
+            contact,
+            t: fan.t,
+            sign: fan.sign,
+            normal: fan.normal,
+            triangles: fan.triangles,
+        })
+        .collect()
 }
 
 /// The live union field: which shells are open, and therefore what `max(factor)` is.
 ///
-/// Openness is a DEPTH rather than a flag because the manifold gate asks a shell for closure and
-/// outward winding, not for simplicity: a self-intersecting closed shell has winding number two
-/// where it overlaps itself, and clamping that to one would close the shell at the first of its two
-/// exits and leave the second facing depth zero.
-///
-/// Depth changes nothing about the field's meaning. Presence is `depth > 0`, so the interval a shell
-/// contributes is one interval however deep it goes, and §13.2 takes `max(factor)` over whatever is
-/// present — which is the same answer the per-ENTITY union already gives for two overlapping
-/// primitives of one volume.
+/// Openness is a BOOLEAN, not a depth, and that is a theorem rather than a simplification: the bake
+/// certifies every shell closed, outward-wound and non-self-intersecting, so a ray crosses it
+/// transversely at finitely many certified contacts and its crossings alternate in from out. A
+/// second entry with no exit between is therefore not a deeper winding — it is a violated
+/// certificate, and it is named as one.
 struct Field {
-    /// Per shell: the winding depth the ray is currently at, and where the presence opened.
-    open: BTreeMap<ShellKey, (u32, f32)>,
+    /// Per open shell: where its presence opened.
+    open: BTreeMap<ShellKey, f32>,
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -828,27 +796,38 @@ pub fn walk_ray(
             .then(a.triangle.cmp(&b.triangle))
     });
 
-    // PAIRING IS PER SHELL, AND ONLY PER SHELL. Every claim is filed under the surface that made it,
-    // so the reduction below never has to decide whether two nearby faces are one surface or two —
-    // that is already known.
-    let mut by_shell: BTreeMap<ShellKey, Vec<&FaceHit>> = BTreeMap::new();
-    for hit in &order {
-        by_shell.entry(hit.key()).or_default().push(hit);
+    // PAIRING IS PER SHELL, AND ONLY PER SHELL. Every claim already names the surface and the
+    // welded feature it is about, so the reduction below never has to decide whether two nearby
+    // faces are one surface or two — that is a fact by the time it arrives.
+    let mut crossings = canonical_crossings(&order, corridor.axis);
+    crossings.sort_by(|a, b| {
+        a.t.total_cmp(&b.t)
+            .then(a.key.cmp(&b.key))
+            .then(a.contact.cmp(&b.contact))
+    });
+
+    // A CHORD THAT CANNOT BE REPRESENTED IS NOT A CHORD OF ZERO. Two distinct certified contacts of
+    // one shell whose `t` land on the same f32 bits bound material whose thickness this corridor
+    // cannot express, so the walk refuses instead of charging nothing for it.
+    let mut previous: BTreeMap<ShellKey, f32> = BTreeMap::new();
+    for crossing in &crossings {
+        if let Some(last) = previous.insert(crossing.key, crossing.t)
+            && last.to_bits() == crossing.t.to_bits()
+        {
+            return Err(WalkError::UnrepresentableChord {
+                sample,
+                key: crossing.key,
+                t: crossing.t,
+            });
+        }
     }
-    let mut crossings: Vec<Crossing> = Vec::new();
-    for (key, claims) in &by_shell {
-        reduce_shell(*key, claims, corridor.axis, laws, &mut crossings);
-    }
-    crossings.sort_by(|a, b| a.t.total_cmp(&b.t).then(a.key.cmp(&b.key)));
 
     let mut field = Field {
         open: BTreeMap::new(),
         per_entity: BTreeMap::new(),
     };
     for key in &corridor.initial_presence {
-        // Declared presence opens at depth ONE: the seed says the ray is inside this shell, and the
-        // exit it will meet closes it.
-        if field.open.insert(*key, (1, 0.0)).is_none() {
+        if field.open.insert(*key, 0.0).is_none() {
             *field.per_entity.entry(key.volume).or_insert(0) += 1;
         }
         volumes.factor(key.volume)?;
@@ -867,12 +846,12 @@ pub fn walk_ray(
 
     let mut i = 0usize;
     while i < crossings.len() {
-        // ONE BIT-EQUAL `t` IS ONE ATOMIC BATCH. Crossings that share a `t` exactly have no order —
-        // the total order above breaks their tie on entity and triangle index, which is a fact about
-        // the index buffer — so the field is read once, every delta is applied, and the field is read
-        // again. That is also what keeps seam invisibility bit-exact: at an exact abutment the
-        // outgoing plate's exit and the incoming plate's entry cancel inside one batch, so no
-        // transition is emitted and one span covers both plates (§13.6).
+        // ONE BIT-EQUAL `t` IS ONE ATOMIC BATCH. Crossings that share a `t` exactly have no order,
+        // so the field is read once, every crossing is applied, and the field is read again. That is
+        // what keeps seam invisibility bit-exact at an exact abutment: the outgoing plate's exit and
+        // the incoming plate's entry cancel inside one batch, no transition is emitted, and one span
+        // covers both plates (§13.6). Within one shell a batch holds at most one crossing — two
+        // would be the unrepresentable chord refused above.
         let t = crossings[i].t;
         let mut j = i + 1;
         while j < crossings.len() && crossings[j].t.to_bits() == t.to_bits() {
@@ -881,86 +860,48 @@ pub fn walk_ray(
         let batch = &crossings[i..j];
         i = j;
 
-        // Per shell, the batch's net. Entries only means the ray crossed inward; exits only, outward;
-        // BOTH means the shell was touched and left at one point, which bounds no length — the exact
-        // edge tangent, where the two incident faces of one shell disagree about which way the ray
-        // was going and neither is wrong.
-        let mut net: BTreeMap<ShellKey, i32> = BTreeMap::new();
-        for crossing in batch {
-            *net.entry(crossing.key).or_insert(0) += crossing.sign;
-        }
-
         let before = field.max_factor(volumes)?;
         let mut entry_normal = Vec3::ZERO;
         let mut exit_normal = Vec3::ZERO;
         let mut any_entry = false;
         let mut any_exit = false;
 
-        for (key, delta) in net {
-            let faces = || -> Vec<u32> {
-                batch
-                    .iter()
-                    .filter(|crossing| crossing.key == key)
-                    .flat_map(|crossing| crossing.triangles.iter().copied())
-                    .collect()
-            };
-            let normal = |sign: i32| -> Vec3 {
-                batch
-                    .iter()
-                    .filter(|crossing| crossing.key == key && crossing.sign == sign)
-                    .fold(Vec3::ZERO, |sum, crossing| sum + crossing.normal)
-            };
-            match delta.cmp(&0) {
-                std::cmp::Ordering::Greater => {
-                    volumes.factor(key.volume)?;
-                    match field.open.get_mut(&key) {
-                        // Deeper into a shell the ray is already inside. Presence does not change —
-                        // it is already present — so no interval opens and this face is not a field
-                        // boundary, which is why its normal is not part of one either.
-                        Some((depth, _)) => *depth += delta as u32,
-                        None => {
-                            field.open.insert(key, (delta as u32, t));
-                            *field.per_entity.entry(key.volume).or_insert(0) += 1;
-                            entry_normal += normal(1);
-                            any_entry = true;
-                        }
-                    }
+        for crossing in batch {
+            let key = crossing.key;
+            if crossing.sign > 0 {
+                volumes.factor(key.volume)?;
+                // A CERTIFIED SHELL ALTERNATES. Entering one the ray is already inside is a broken
+                // certificate — a self-intersecting shell, or a crossing the collector invented —
+                // and it is refused rather than counted as depth.
+                if field.open.contains_key(&key) {
+                    return Err(WalkError::UnexpectedEntry {
+                        sample,
+                        key,
+                        t,
+                        triangles: crossing.triangles.clone(),
+                    });
                 }
-                std::cmp::Ordering::Less => {
-                    // FAIL-LOUD SURVIVES. An exit with no shell open is a dropped entry, an inverted
-                    // winding or a hole in the mesh, and a net that closes more winding than is open
-                    // is the same defect one level up.
-                    let closing = delta.unsigned_abs();
-                    let Some((depth, open_at)) = field.open.get_mut(&key) else {
-                        return Err(WalkError::UnexpectedExit {
-                            sample,
-                            key,
-                            t,
-                            triangles: faces(),
-                        });
-                    };
-                    if *depth < closing {
-                        return Err(WalkError::UnexpectedExit {
-                            sample,
-                            key,
-                            t,
-                            triangles: faces(),
-                        });
-                    }
-                    *depth -= closing;
-                    if *depth > 0 {
-                        continue;
-                    }
-                    let open_at = *open_at;
-                    field.open.remove(&key);
-                    if let Some(count) = field.per_entity.get_mut(&key.volume) {
-                        *count -= 1;
-                    }
-                    intervals.push((key, open_at, t));
-                    exit_normal += normal(-1);
-                    any_exit = true;
+                field.open.insert(key, t);
+                *field.per_entity.entry(key.volume).or_insert(0) += 1;
+                entry_normal += crossing.normal;
+                any_entry = true;
+            } else {
+                // An exit with no shell open is a dropped entry, an inverted winding or a hole in
+                // the mesh — never repaired by inventing an interval from the corridor origin.
+                let Some(open_at) = field.open.remove(&key) else {
+                    return Err(WalkError::UnexpectedExit {
+                        sample,
+                        key,
+                        t,
+                        triangles: crossing.triangles.clone(),
+                    });
+                };
+                if let Some(count) = field.per_entity.get_mut(&key.volume) {
+                    *count -= 1;
                 }
-                std::cmp::Ordering::Equal => {}
+                intervals.push((key, open_at, t));
+                exit_normal += crossing.normal;
+                any_exit = true;
             }
         }
 
@@ -2216,8 +2157,8 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     );
 
     // The handoff plane is the mean entrance surface; the transit ray is the DISC AXIS crossing it.
-    // `axis · n̄ < -tangent_cos` always (every contributing entry face leans against the ray), so
-    // this cannot divide by zero.
+    // `axis · n̄ < 0` always (every contributing entry face leans against the ray), so this cannot
+    // divide by zero.
     let denominator = entrance.axis.dot(normal);
     let plane = |from: Vec3| (event.entry_position - from).dot(normal) / denominator;
     let axis_t = plane(entrance.origin);

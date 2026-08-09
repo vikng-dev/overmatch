@@ -648,15 +648,25 @@ pub struct BallisticVolume {
     pub substance: String,
 }
 
-/// Which closed shell each triangle of one collider belongs to — `bake::MeshGeometry::shells`,
-/// carried onto the collider entity so the corridor collector can name the surface a crossing came
-/// from (`walk::ShellKey`).
+/// The bake's manifold certificate, carried onto the collider entity so the corridor collector can
+/// name the surface and the welded feature a crossing came from (`walk::ShellKey`,
+/// `walk::Contact`).
 ///
-/// Index-aligned with the trimesh's own triangle order, which is the order the buffers were handed
-/// to `Collider::trimesh_with_config`: `MERGE_DUPLICATE_VERTICES` re-indexes vertices and never
-/// reorders or drops a face. `Arc` because every spawned tank shares one bake.
+/// Both tables are index-aligned with the trimesh's own triangle order, which is the order the
+/// buffers were handed to `Collider::trimesh_with_config`: `MERGE_DUPLICATE_VERTICES` re-indexes
+/// vertices and never reorders or drops a face. `Arc` because every spawned tank shares one bake.
 #[derive(Component)]
-pub struct BallisticShells(pub Arc<[u32]>);
+pub struct BallisticSurfaces {
+    /// Closed shell per triangle.
+    pub shells: Arc<[u32]>,
+    /// Welded vertex ids per triangle corner.
+    pub corners: Arc<[[u32; 3]]>,
+    /// The composed scale the bake proved all of it at. The collector refuses a collider whose live
+    /// scale differs by a bit: everything the certificate says is a statement about
+    /// `position * scale`, and avian recomputes the scaled shape from whatever the hierarchy says
+    /// at the time — including a scale nobody baked.
+    pub scale: Vec3,
+}
 
 /// Role tags layered on a ballistic volume for the sandbox's visibility passes: armor plates vs
 /// internal components (modules / crew / ammo). Attached at bind alongside `BallisticVolume`; the
@@ -1452,7 +1462,7 @@ fn integrate_projectiles(
         &'static Position,
         &'static Rotation,
         &'static Collider,
-        Option<&'static BallisticShells>,
+        Option<&'static BallisticSurfaces>,
     )>,
     mut bodies: Query<(
         Forces,
@@ -2057,7 +2067,7 @@ fn march_shell_step(
         &'static Position,
         &'static Rotation,
         &'static Collider,
-        Option<&'static BallisticShells>,
+        Option<&'static BallisticSurfaces>,
     )>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<(
@@ -4909,7 +4919,7 @@ mod march_tests {
     /// is flipped to oppose the ray and cannot tell entry from exit), so a mesh wound inwards would
     /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE. One closed
     /// box is one shell, so every triangle carries shell `0`.
-    fn box_trimesh(size: Vec3) -> (Collider, BallisticShells) {
+    fn box_trimesh(size: Vec3) -> (Collider, BallisticSurfaces) {
         let h = size * 0.5;
         let vertices: Vec<Vec3> = [
             (-1.0, -1.0, -1.0),
@@ -4938,8 +4948,14 @@ mod march_tests {
             [1, 2, 6],
             [1, 6, 5], // +X
         ];
-        let shells = BallisticShells(vec![0u32; indices.len()].into());
-        (Collider::trimesh(vertices, indices), shells)
+        // One closed box is one shell; the welded ids are the box's own corner indices, which are
+        // already welded (each corner appears once in `vertices`).
+        let surfaces = BallisticSurfaces {
+            shells: vec![0u32; indices.len()].into(),
+            corners: indices.as_slice().into(),
+            scale: Vec3::ONE,
+        };
+        (Collider::trimesh(vertices, indices), surfaces)
     }
 
     /// A world of outward-wound trimesh plates, all one substance.

@@ -34,7 +34,7 @@ use super::walk::{
     Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, BallisticShells, ComponentHealth, HullShockLedger, Impact, ImpactSurface,
+    ArmorCrossing, BallisticSurfaces, ComponentHealth, HullShockLedger, Impact, ImpactSurface,
     MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
     ShockCause, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
 };
@@ -119,7 +119,7 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
             &'static Position,
             &'static Rotation,
             &'static Collider,
-            Option<&'static BallisticShells>,
+            Option<&'static BallisticSurfaces>,
         ),
     >,
     pub armor: &'a SpatialQueryFilter,

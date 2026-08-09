@@ -41,8 +41,8 @@ use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::math::DVec3;
 use bevy::prelude::*;
 
-use super::BallisticShells;
-use super::walk::{FaceHit, ShellKey, WalkError, WalkLaws};
+use super::BallisticSurfaces;
+use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
 
 /// Faces one corridor may collect before the collector gives up.
 ///
@@ -95,11 +95,11 @@ pub(crate) fn collect(
     corridor: &Corridor<'_>,
     // Candidate colliders, already filtered to armour the shell may hit (layer + self-exclusion).
     candidates: &[(Entity, Entity)],
-    colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticShells>)>,
+    colliders: &Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     for &(node, primitive) in candidates {
-        let Ok((position, rotation, collider, shells)) = colliders.get(primitive) else {
+        let Ok((position, rotation, collider, surfaces)) = colliders.get(primitive) else {
             // A candidate the broad phase named but whose pose is not available cannot be probed,
             // and guessing that it is empty is exactly the silent-zero this module refuses.
             return Err(WalkError::CollectorFailed {
@@ -131,15 +131,31 @@ pub(crate) fn collect(
             TypedShape::TriMesh(mesh) => {
                 // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
                 // shells closing at one `t` from one shell claimed twice, and it must not guess —
-                // so a trimesh whose shell table is missing or the wrong length is an unprobed
+                // so a trimesh whose certificate is missing or the wrong length is an unprobed
                 // candidate, which is the same silence as an absent one.
-                let shells = shells
-                    .map(|shells| &*shells.0)
-                    .filter(|shells| shells.len() == mesh.num_triangles())
+                let surfaces = surfaces
+                    .filter(|surfaces| {
+                        surfaces.shells.len() == mesh.num_triangles()
+                            && surfaces.corners.len() == mesh.num_triangles()
+                    })
                     .ok_or(WalkError::CollectorFailed {
                         volume: node,
-                        reason: "a trimesh candidate carries no per-triangle shell table",
+                        reason: "a trimesh candidate carries no per-triangle manifold certificate",
                     })?;
+                // THE CERTIFICATE IS ABOUT ONE SCALE. Everything the bake proved — closure, winding,
+                // positive volume, the welded ids the contacts below are named with — it proved
+                // about `position * scale`, and avian re-derives the scaled shape from whatever the
+                // hierarchy says at the time. A collider that reaches the world at any other scale
+                // has an uncertified topology, so it is refused rather than walked. Bit-exact, not
+                // near: there is no scale that is almost the one that was proven.
+                if collider.scale().to_array().map(f32::to_bits)
+                    != surfaces.scale.to_array().map(f32::to_bits)
+                {
+                    return Err(WalkError::CollectorFailed {
+                        volume: node,
+                        reason: "a collider reached the world at a scale the bake never certified",
+                    });
+                }
                 collect_trimesh(
                     mesh,
                     local_origin,
@@ -147,7 +163,7 @@ pub(crate) fn collect(
                     corridor.length,
                     node,
                     primitive,
-                    shells,
+                    surfaces,
                     &seeded,
                     *rotation,
                     prune_margin(local_origin, corridor.laws),
@@ -235,7 +251,7 @@ fn collect_trimesh(
     length: f32,
     node: Entity,
     primitive: Entity,
-    shells: &[u32],
+    surfaces: &BallisticSurfaces,
     seeded: &dyn Fn(u32) -> bool,
     rotation: Rotation,
     margin: f32,
@@ -266,21 +282,33 @@ fn collect_trimesh(
             && aabb.mins.z <= hi.z
     }) {
         let triangle = mesh.triangle(index);
-        let Some((t, normal)) = cross_triangle(&shear, axis, triangle.a, triangle.b, triangle.c)
-        else {
+        let corners = [triangle.a, triangle.b, triangle.c];
+        let Some(claim) = cross_triangle(&shear, axis, triangle.a, triangle.b, triangle.c) else {
             continue;
         };
-        let shell = shells[index as usize];
+        let shell = surfaces.shells[index as usize];
+        // The welded feature the claim is about, and the `t` that feature has. Both are computed
+        // from the feature itself, so every triangle of a fan reports the same contact and the same
+        // bits — the fan is canonical before the walk ever sees it.
+        let (contact, t) = contact_of(
+            &shear,
+            axis,
+            index,
+            &corners,
+            &surfaces.corners[index as usize],
+            &claim,
+        );
         if let Some(hit) = admit(t, length, seeded(shell), laws) {
             out.push(FaceHit {
                 volume: node,
                 primitive,
                 shell,
+                contact,
                 triangle: index,
                 t: hit,
                 // Back to world space. The winding normal is the mesh's own orientation — never
                 // parry's, which is flipped to oppose the ray and so cannot tell entry from exit.
-                true_normal: rotation * normal,
+                true_normal: rotation * claim.normal,
             });
         }
         if out.len() > MAX_FACES {
@@ -383,6 +411,7 @@ fn collect_convex(
                 volume: node,
                 primitive,
                 shell: 0,
+                contact: Contact::Face(face),
                 triangle: face,
                 t,
                 true_normal: oriented,
@@ -696,7 +725,20 @@ fn same_side<T: PartialOrd + Default>(u: T, v: T, w: T) -> bool {
     !((u < zero || v < zero || w < zero) && (u > zero || v > zero || w > zero))
 }
 
-/// Ray-vs-triangle, returning the crossing distance and the triangle's WINDING normal.
+/// What one triangle claims about a ray: where it crosses, which way the face is wound, and which
+/// of its three sheared edges the ray cancelled EXACTLY against.
+struct TriangleClaim {
+    /// The plane intersection — the interior contact's `t`, and the fallback for a feature whose
+    /// own arithmetic cannot resolve it.
+    t: f32,
+    normal: Vec3,
+    /// Bit `k` set means the edge OPPOSITE corner `k` produced an exactly-zero area, so the ray
+    /// lies on it. Zero bits is an interior claim; one is an edge; two is the vertex they share.
+    zeros: u8,
+}
+
+/// Ray-vs-triangle, returning the crossing distance, the triangle's WINDING normal, and the exact
+/// feature the ray landed on.
 ///
 /// Ours rather than parry's for two reasons: parry's kernel answers "nearest hit, normal flipped to
 /// oppose the ray", which discards exactly the orientation §13.4's pairing runs on; and keeping the
@@ -710,60 +752,60 @@ fn same_side<T: PartialOrd + Default>(u: T, v: T, w: T) -> bool {
 /// edge test, whose only contract is the sign relation between neighbouring triangles; `t` stays the
 /// plane intersection it has always been, so a crossing this kernel and a barycentric one both admit
 /// lands on the same bits.
+///
+/// # One decision, so a contact means one thing
+///
+/// The f32 edge areas decide, EXCEPT inside their own rounding band, where the exact projection
+/// decides instead and REPLACES them. Outside the band the f32 sign is provably the exact one
+/// ([`edge_area_slack`]), so the composite predicate IS the exact-projection predicate — evaluated
+/// cheaply where cheap suffices.
+///
+/// That is what makes a contact well defined. Two arithmetics would tile the projected plane two
+/// different ways, and a pair of neighbouring triangles could each claim a ray under its own tiling
+/// with nothing cancelling: two claims of one shell naming two different contacts, which the walk
+/// can only refuse. One tiling has the antisymmetry property, so neighbours overlap only where an
+/// area is exactly zero — and an exact zero is a contact, by name.
 #[inline]
-fn cross_triangle(shear: &RayShear, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, Vec3)> {
+fn cross_triangle(
+    shear: &RayShear,
+    axis: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+) -> Option<TriangleClaim> {
     let (pa, pb, pc) = (shear.project(a), shear.project(b), shear.project(c));
     let (u, v, w) = (
         edge_area(pb.p, pc.p),
         edge_area(pc.p, pa.p),
         edge_area(pa.p, pb.p),
     );
-    // Inside means the ray passes on the same side of all three edges. Zero is inside on BOTH
-    // triangles incident on that edge, which is a duplicate crossing at one `t` — one toggle after
-    // the walk's coincidence clustering, and never a lost one. A cancelled f32 area has no side to
-    // be on, so it is the one case that pays for the wider products.
-    let inside = if u == 0.0 || v == 0.0 || w == 0.0 {
+    // The band contains exact zero (`edge_area_slack` carries `f32::MIN_POSITIVE`), so a cancelled
+    // area always escalates and a contact is always classified by the exact projection.
+    let banded = u.abs() <= edge_area_slack(pb, pc)
+        || v.abs() <= edge_area_slack(pc, pa)
+        || w.abs() <= edge_area_slack(pa, pb);
+    let zeros = if banded {
+        let (pa, pb, pc) = (
+            shear.project_exact(a),
+            shear.project_exact(b),
+            shear.project_exact(c),
+        );
         let (u, v, w) = (
-            edge_area_exact(pb.p, pc.p),
-            edge_area_exact(pc.p, pa.p),
-            edge_area_exact(pa.p, pb.p),
+            edge_area_f64(pb, pc),
+            edge_area_f64(pc, pa),
+            edge_area_f64(pa, pb),
         );
         // Three collinear sheared points: the ray lies in the triangle's plane and crosses nothing.
-        same_side(u, v, w) && u + v + w != 0.0
+        if !(same_side(u, v, w) && u + v + w != 0.0) {
+            return None;
+        }
+        u8::from(u == 0.0) | (u8::from(v == 0.0) << 1) | (u8::from(w == 0.0) << 2)
     } else {
-        same_side(u, v, w)
+        if !same_side(u, v, w) {
+            return None;
+        }
+        0
     };
-    // THE PROJECTION IS THE OTHER HALF. Everything above is exact GIVEN the projected points, and
-    // the points are rounded: at a closed surface's silhouette the whole outline breathes by
-    // `PROJECTION_SLACK`, so a ray a fraction of a micron inside it can be declined by every
-    // incident triangle at once — both crossings gone, and a walk that reports no armour rather
-    // than an error.
-    //
-    // So a rejection is only final outside the band. Inside it the decision is re-taken over the
-    // exact projection, which is the true containment for the stored vertices. ONE DIRECTION ONLY:
-    // the wider precision may add an acceptance and may never take one away, so no crossing this
-    // kernel already reports can move or vanish, and `t` and the normal below are untouched by any
-    // of it.
-    let inside = inside
-        || ((u.abs() <= edge_area_slack(pb, pc)
-            || v.abs() <= edge_area_slack(pc, pa)
-            || w.abs() <= edge_area_slack(pa, pb))
-            && {
-                let (pa, pb, pc) = (
-                    shear.project_exact(a),
-                    shear.project_exact(b),
-                    shear.project_exact(c),
-                );
-                let (u, v, w) = (
-                    edge_area_f64(pb, pc),
-                    edge_area_f64(pc, pa),
-                    edge_area_f64(pa, pb),
-                );
-                same_side(u, v, w) && u + v + w != 0.0
-            });
-    if !inside {
-        return None;
-    }
 
     let e1 = b - a;
     let e2 = c - a;
@@ -800,7 +842,76 @@ fn cross_triangle(shear: &RayShear, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Op
             normal.normalize_or_zero(),
         )
     };
-    (normal != Vec3::ZERO && t.is_finite()).then_some((t, normal))
+    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim { t, normal, zeros })
+}
+
+/// The welded feature a claim is about, and the `t` that feature has along the ray.
+///
+/// CANONICAL, which is the whole job: every triangle incident on a welded edge or vertex must report
+/// the same contact and the same bits, or the walk cannot tell one crossing claimed twice from two
+/// crossings. Identity comes from the bake's welded ids; the parameter comes from the feature's own
+/// geometry, taken in an order fixed by those ids, so two triangles that spell an edge in opposite
+/// directions still compute one number.
+fn contact_of(
+    shear: &RayShear,
+    axis: Vec3,
+    triangle: u32,
+    positions: &[Vec3; 3],
+    welded: &[u32; 3],
+    claim: &TriangleClaim,
+) -> (Contact, f32) {
+    let parameter = |point: Vec3| (point - shear.origin).dot(axis);
+    match claim.zeros.count_ones() {
+        // The interior: this triangle alone claims it, and its own plane gives the distance.
+        0 => (Contact::Face(triangle), claim.t),
+        // One cancelled edge: the ray runs through it. Both incident triangles land here.
+        1 => {
+            // Bit `k` names the edge opposite corner `k`, i.e. the one joining the other two.
+            let (i, j) = match claim.zeros {
+                0b001 => (1, 2),
+                0b010 => (2, 0),
+                _ => (0, 1),
+            };
+            // Ascending welded id, so the two triangles interpolate the same direction.
+            let (i, j) = if welded[i] <= welded[j] {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let (p, q) = (
+                shear.project_exact(positions[i]),
+                shear.project_exact(positions[j]),
+            );
+            // The ray sits at the projected origin, so the parameter along the edge is where the
+            // segment crosses it. The wider component divides, so a near-axis-aligned edge does not
+            // divide by its own rounding.
+            let (from, span) = if (q.0 - p.0).abs() >= (q.1 - p.1).abs() {
+                (p.0, q.0 - p.0)
+            } else {
+                (p.1, q.1 - p.1)
+            };
+            let point = if span == 0.0 {
+                positions[i]
+            } else {
+                let lambda = (-from / span) as f32;
+                positions[i] + (positions[j] - positions[i]) * lambda
+            };
+            (Contact::Edge(welded[i], welded[j]), parameter(point))
+        }
+        // Two cancelled edges: the ray runs through the vertex they share, and the whole welded fan
+        // around it reports this one contact.
+        _ => {
+            let corner = match claim.zeros {
+                0b011 => 2,
+                0b101 => 1,
+                _ => 0,
+            };
+            (
+                Contact::Vertex(welded[corner]),
+                parameter(positions[corner]),
+            )
+        }
+    }
 }
 
 /// The corridor's swept bounding box, for the broad phase.
@@ -816,7 +927,7 @@ mod tests {
 
     use super::*;
 
-    fn tri(o: Vec3, d: Vec3) -> Option<(f32, Vec3)> {
+    fn tri(o: Vec3, d: Vec3) -> Option<TriangleClaim> {
         // A unit triangle in the z = 1 plane, wound so its normal points +Z.
         cross_triangle(
             &RayShear::new(o, d),
@@ -829,7 +940,8 @@ mod tests {
 
     #[test]
     fn a_head_on_crossing_reports_its_distance_and_winding_normal() {
-        let (t, normal) = tri(Vec3::new(0.1, 0.1, 0.0), Vec3::Z).expect("the ray crosses it");
+        let claim = tri(Vec3::new(0.1, 0.1, 0.0), Vec3::Z).expect("the ray crosses it");
+        let (t, normal) = (claim.t, claim.normal);
         assert!((t - 1.0).abs() < 1.0e-6, "{t}");
         // The WINDING normal, not one flipped to oppose the ray: this face is wound away from the
         // shooter, so it reads as an EXIT — which is exactly the fact parry's convention destroys.
@@ -841,7 +953,8 @@ mod tests {
     /// backfaces would lose every exit — half of every interval.
     #[test]
     fn a_crossing_from_behind_reports_the_same_winding_normal() {
-        let (t, normal) = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::NEG_Z).expect("the ray crosses it");
+        let claim = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::NEG_Z).expect("the ray crosses it");
+        let (t, normal) = (claim.t, claim.normal);
         assert!((t - 1.0).abs() < 1.0e-6, "{t}");
         assert!((normal - Vec3::Z).length() < 1.0e-6, "{normal}");
     }
@@ -863,7 +976,9 @@ mod tests {
     /// corridor admits.
     #[test]
     fn a_crossing_behind_the_origin_keeps_its_negative_distance() {
-        let (t, _) = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::Z).expect("the plane is behind it");
+        let t = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::Z)
+            .expect("the plane is behind it")
+            .t;
         assert!(t < 0.0, "{t}");
     }
 
@@ -915,7 +1030,15 @@ mod tests {
             panic!("`Collider::trimesh` builds a trimesh");
         };
         // Every fixture here is one closed box, which is one shell.
-        let shells = vec![0u32; mesh.num_triangles()];
+        let surfaces = BallisticSurfaces {
+            shells: vec![0u32; mesh.num_triangles()].into(),
+            corners: (0..mesh.num_triangles())
+                .map(|index| mesh.indices()[index])
+                .collect::<Vec<_>>()
+                .as_slice()
+                .into(),
+            scale: Vec3::ONE,
+        };
         collect_trimesh(
             mesh,
             origin,
@@ -923,7 +1046,7 @@ mod tests {
             length,
             node,
             node,
-            &shells,
+            &surfaces,
             &|_| false,
             Rotation::default(),
             prune_margin(origin, &laws),
@@ -1603,14 +1726,20 @@ mod tests {
             all.into_iter().filter(|t| t.contains(&4)).collect()
         };
         assert_eq!(fan.len(), 4, "the corner is a fan of four");
-        let (mut crossed, mut missed, mut retired_lost) = (0, 0, 0);
+        let (mut crossed, mut missed, mut retired_lost, mut unrepresentable, mut total) =
+            (0, 0, 0, 0, 0);
         for origin in sweep_origins(vertices[4], axis, 32) {
-            let spans = sweep_walks(&collider, origin, axis)
-                .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
-            match spans {
-                0 => missed += 1,
-                1 => crossed += 1,
-                other => panic!("origin {origin:?} crossed the box {other} times"),
+            total += 1;
+            match sweep_walks(&collider, origin, axis) {
+                Ok(0) => missed += 1,
+                Ok(1) => crossed += 1,
+                Ok(other) => panic!("origin {origin:?} crossed the box {other} times"),
+                // A ray that clips the corner has a chord that shrinks continuously to zero, so
+                // some of these rays bound less material than one ULP of `t` can express. That is
+                // refused BY NAME rather than charged as nothing: the corridor cannot represent the
+                // chord, and a silent zero is the one answer §13.1 forbids.
+                Err(WalkError::UnrepresentableChord { .. }) => unrepresentable += 1,
+                Err(error) => panic!("origin {origin:?}: {error:?}"),
             }
             let shear = RayShear::new(origin, axis);
             let claim = |t: &[u32; 3], retired: bool| {
@@ -1636,6 +1765,13 @@ mod tests {
         assert!(
             retired_lost > 0,
             "the retired test lost nothing at the corner, so the sweep is not crossing the fan",
+        );
+        // The refusal band is the corner's own sub-ULP sliver, not a hole in the surface: it is a
+        // narrow fringe of a grid aimed at the very worst point on the box.
+        assert!(
+            unrepresentable * 20 <= total,
+            "{unrepresentable} of {total} corner rays were refused as unrepresentable — that is a \
+             band, not a fringe",
         );
     }
 }
