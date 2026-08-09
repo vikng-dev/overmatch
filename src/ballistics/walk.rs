@@ -176,7 +176,14 @@ pub struct FaceHit {
     /// Distance along the sample ray from the corridor origin. CANONICAL PER CONTACT: every claim
     /// of one welded feature reports the same bits, because the collector computes it from the
     /// feature rather than from each triangle's own plane.
-    pub t: f32,
+    ///
+    /// f64, and that is a law rather than a precision preference. It is the quantity crossings are
+    /// ORDERED by and chords are MEASURED with, and both fail at f32 width: two distinct contacts of
+    /// one shell can land a fraction of an f32 ULP apart, where f32 puts an exit before its own entry
+    /// and collapses a real thickness to a zero chord that is then crossed free. Everything the walk
+    /// publishes as a POSITION is still f32 — a metre-scale coordinate needs no more — but the
+    /// parameter itself stays wide from the collector's exact projection through to the cost integral.
+    pub t: f64,
     pub true_normal: Vec3,
 }
 
@@ -415,7 +422,7 @@ pub enum WalkError {
     UnexpectedExit {
         sample: usize,
         key: ShellKey,
-        t: f32,
+        t: f64,
         triangles: Vec<u32>,
     },
     /// An entry face for a shell the walk is already inside — a self-overlapping island, which
@@ -423,7 +430,7 @@ pub enum WalkError {
     UnexpectedEntry {
         sample: usize,
         key: ShellKey,
-        t: f32,
+        t: f64,
         triangles: Vec<u32>,
     },
     /// The corridor ran out with material still open. The caller must extend the corridor until the
@@ -433,16 +440,18 @@ pub enum WalkError {
         open: Vec<ShellKey>,
         length: f32,
     },
-    /// Two distinct certified contacts of ONE shell whose `t` collide on the same f32 bits.
+    /// Two distinct certified contacts of ONE shell whose EXACT ray parameters are bit-equal.
     ///
-    /// The material between them is real and its thickness is not representable in this corridor,
-    /// so there is no honest number to charge. Reading the pair as a zero-length touch would be a
-    /// silent free crossing of however much steel the two features actually bound, which is the
-    /// defect class §13.1 exists to kill — so it is named instead.
+    /// Not the sub-f32 chord — that one is ordinary material, ordered and charged on the f64
+    /// parameter like any other traversal. This is the residue: two features of one shell the ray
+    /// meets at one indistinguishable parameter, which is tangent grade and measure zero. There is no
+    /// order between them and no thickness to charge, and reading the pair as a zero-length touch
+    /// would be a silent free crossing of whatever they actually bound — the defect class §13.1
+    /// exists to kill. So it is named instead.
     UnrepresentableChord {
         sample: usize,
         key: ShellKey,
-        t: f32,
+        t: f64,
     },
     /// A stretch of positive union factor that no shell's presence interval covers.
     ///
@@ -450,7 +459,7 @@ pub enum WalkError {
     /// disagreement is not repairable, because a run with no geometry behind it has no entrance
     /// surface, no owning body and no exit to spall from. Attributing it to a stand-in entity is
     /// how a numerical artefact spends a round's capability and marks a penetration.
-    UnattributedRun { sample: usize, start: f32, end: f32 },
+    UnattributedRun { sample: usize, start: f64, end: f64 },
     /// The spatial collector could not probe a candidate it was handed. Never softened into "that
     /// volume contributed nothing" — an unprobed volume and an absent one are the same silence.
     CollectorFailed {
@@ -491,14 +500,14 @@ pub enum WalkError {
 /// steel would change the cost bits purely by subdividing the interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     pub factor: f32,
 }
 
 impl Span {
     fn len(&self) -> f64 {
-        self.end as f64 - self.start as f64
+        self.end - self.start
     }
 
     fn cost(&self) -> f64 {
@@ -512,18 +521,18 @@ impl Span {
 /// metres actually charged. Welding deletes faces, never creates steel (§13.4).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialSegment {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     pub factor: f32,
-    pub material: f32,
+    pub material: f64,
     pub cost: f32,
 }
 
 /// A contiguous crossing after ε-welding: one entrance, one exit, and the material steps between.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeldedRun {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     pub cost: f32,
     /// Outward normal of the outermost entry face — the surface the entrance laws read.
     pub entry_normal: Vec3,
@@ -560,7 +569,7 @@ pub enum BoundaryKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoundaryEvent {
     pub kind: BoundaryKind,
-    pub t: f32,
+    pub t: f64,
     pub position: Vec3,
     pub normal: Vec3,
     pub factor_before: f32,
@@ -585,7 +594,7 @@ pub struct EntityPresence {
     pub factor: f32,
     pub chord: f32,
     pub cost: f32,
-    pub spans: Vec<(f32, f32)>,
+    pub spans: Vec<(f64, f64)>,
 }
 
 /// One shell's presence intervals along a sample ray.
@@ -598,7 +607,7 @@ pub struct EntityPresence {
 pub struct ShellPresence {
     pub key: ShellKey,
     /// Disjoint, ordered, half-open `[open, close)`.
-    pub spans: Vec<(f32, f32)>,
+    pub spans: Vec<(f64, f64)>,
 }
 
 /// One sample ray's resolved walk.
@@ -633,7 +642,7 @@ impl RayWalk {
     /// does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on a plate it
     /// should have crossed. [`coincident`] is the module's existing answer to "do these two `t` name
     /// one boundary", so it is the one used here.
-    pub fn inside_at(&self, t: f32, laws: &WalkLaws) -> Vec<ShellKey> {
+    pub fn inside_at(&self, t: f64, laws: &WalkLaws) -> Vec<ShellKey> {
         self.shells
             .iter()
             .filter(|presence| {
@@ -654,15 +663,16 @@ impl RayWalk {
 
 /// Whether two `t` values name the same topological boundary. Scale-aware, because f32 spacing
 /// coarsens with distance and a face diagonal at 400 m must still reduce to one crossing.
-pub(crate) fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
-    (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
+pub(crate) fn coincident(anchor: f64, t: f64, laws: &WalkLaws) -> bool {
+    (t - anchor).abs()
+        <= laws.topology_abs as f64 + laws.topology_rel as f64 * anchor.abs().max(t.abs())
 }
 
 /// One certified crossing of one shell: where the ray goes in or out, and which faces said so.
 struct Crossing {
     key: ShellKey,
     contact: Contact,
-    t: f32,
+    t: f64,
     /// `+1` inward, `−1` outward.
     sign: i32,
     /// Sum of the contributing faces' outward normals — the boundary aggregate, unnormalized so a
@@ -686,7 +696,7 @@ struct Crossing {
 /// DIFFERENT contacts and stays two crossings.
 fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
     struct Fan {
-        t: f32,
+        t: f64,
         sign: i32,
         normal: Vec3,
         triangles: Vec<u32>,
@@ -749,7 +759,7 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
 /// it, rather than at build time.
 struct Field {
     /// Per open shell: where its presence opened.
-    open: BTreeMap<ShellKey, f32>,
+    open: BTreeMap<ShellKey, f64>,
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -792,7 +802,7 @@ pub fn walk_ray(
     let mut order: Vec<&FaceHit> = corridor
         .hits
         .iter()
-        .filter(|hit| hit.t < corridor.length)
+        .filter(|hit| hit.t < corridor.length as f64)
         .collect();
     if order.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0) {
         return Err(WalkError::BadCorridor {
@@ -811,28 +821,19 @@ pub fn walk_ray(
     // PAIRING IS PER SHELL, AND ONLY PER SHELL. Every claim already names the surface and the
     // welded feature it is about, so the reduction below never has to decide whether two nearby
     // faces are one surface or two — that is a fact by the time it arrives.
+    //
+    // ORDER COMES FROM THE EXACT PARAMETER. Each contact's `t` is the collector's f64 projection, so
+    // two contacts a fraction of an f32 ULP apart still sort the way the ray actually meets them.
+    // Ordering the same pair on their rounded f32 values reverses them about half the time, and a
+    // reversed pair is an exit before its own entry: a structured error over geometry that is
+    // perfectly ordinary. An exit that STILL precedes its entry after this sort is a genuine
+    // alternation violation, and stays one.
     let mut crossings = canonical_crossings(&order, corridor.axis);
     crossings.sort_by(|a, b| {
         a.t.total_cmp(&b.t)
             .then(a.key.cmp(&b.key))
             .then(a.contact.cmp(&b.contact))
     });
-
-    // A CHORD THAT CANNOT BE REPRESENTED IS NOT A CHORD OF ZERO. Two distinct certified contacts of
-    // one shell whose `t` land on the same f32 bits bound material whose thickness this corridor
-    // cannot express, so the walk refuses instead of charging nothing for it.
-    let mut previous: BTreeMap<ShellKey, f32> = BTreeMap::new();
-    for crossing in &crossings {
-        if let Some(last) = previous.insert(crossing.key, crossing.t)
-            && last.to_bits() == crossing.t.to_bits()
-        {
-            return Err(WalkError::UnrepresentableChord {
-                sample,
-                key: crossing.key,
-                t: crossing.t,
-            });
-        }
-    }
 
     let mut field = Field {
         open: BTreeMap::new(),
@@ -846,9 +847,9 @@ pub fn walk_ray(
     }
 
     // Per-shell presence intervals, in close order.
-    let mut intervals: Vec<(ShellKey, f32, f32)> = Vec::new();
+    let mut intervals: Vec<(ShellKey, f64, f64)> = Vec::new();
     struct Transition {
-        t: f32,
+        t: f64,
         before: f32,
         after: f32,
         entry_normal: Option<Vec3>,
@@ -858,12 +859,11 @@ pub fn walk_ray(
 
     let mut i = 0usize;
     while i < crossings.len() {
-        // ONE BIT-EQUAL `t` IS ONE ATOMIC BATCH. Crossings that share a `t` exactly have no order,
-        // so the field is read once, every crossing is applied, and the field is read again. That is
-        // what keeps seam invisibility bit-exact at an exact abutment: the outgoing plate's exit and
-        // the incoming plate's entry cancel inside one batch, no transition is emitted, and one span
-        // covers both plates (§13.6). Within one shell a batch holds at most one crossing — two
-        // would be the unrepresentable chord refused above.
+        // ONE BIT-EQUAL EXACT `t` IS ONE ATOMIC BATCH. Crossings that share the exact parameter have
+        // no order, so the field is read once, every crossing is applied, and the field is read
+        // again. That is what keeps seam invisibility bit-exact at an exact abutment: the outgoing
+        // plate's exit and the incoming plate's entry cancel inside one batch, no transition is
+        // emitted, and one span covers both plates (§13.6).
         let t = crossings[i].t;
         let mut j = i + 1;
         while j < crossings.len() && crossings[j].t.to_bits() == t.to_bits() {
@@ -871,6 +871,21 @@ pub fn walk_ray(
         }
         let batch = &crossings[i..j];
         i = j;
+
+        // ONE SHELL MAY NOT APPEAR TWICE IN ONE BATCH. A batch is deliberately unordered, so two
+        // contacts of one shell inside it have no order and no thickness between them — tangent
+        // grade, and measure zero now that ordinary sub-f32 chords are carried exactly. Applying
+        // both would charge whatever they bound as nothing.
+        let mut seen: BTreeSet<ShellKey> = BTreeSet::new();
+        for crossing in batch {
+            if !seen.insert(crossing.key) {
+                return Err(WalkError::UnrepresentableChord {
+                    sample,
+                    key: crossing.key,
+                    t,
+                });
+            }
+        }
 
         let before = field.max_factor(volumes)?;
         let mut entry_normal = Vec3::ZERO;
@@ -940,7 +955,7 @@ pub fn walk_ray(
     // Canonical spans. Cut ONLY at factor changes, so equal-factor abutment and one thick plate
     // produce the identical span list and therefore the identical cost bits.
     let mut spans: Vec<Span> = Vec::new();
-    let mut cursor = 0.0f32;
+    let mut cursor = 0.0f64;
     let mut factor = if transitions.is_empty() {
         // No steps at all: either empty air, or the corridor lies wholly inside declared presence.
         field_start_factor(corridor, volumes)?
@@ -958,10 +973,10 @@ pub fn walk_ray(
         }
         factor = transition.after;
     }
-    if corridor.length > cursor {
+    if corridor.length as f64 > cursor {
         spans.push(Span {
             start: cursor,
-            end: corridor.length,
+            end: corridor.length as f64,
             factor,
         });
     }
@@ -989,7 +1004,7 @@ pub fn walk_ray(
     }
 
     // Boundary normals, looked up by the transition that opens/closes each run.
-    let normal_at = |t: f32, entry: bool| -> Vec3 {
+    let normal_at = |t: f64, entry: bool| -> Vec3 {
         transitions
             .iter()
             .filter(|transition| transition.t == t)
@@ -1013,7 +1028,7 @@ pub fn walk_ray(
     let events = boundary_events(corridor, &runs);
     let presence = entity_presence(&intervals, volumes)?;
 
-    let mut by_shell: BTreeMap<ShellKey, Vec<(f32, f32)>> = BTreeMap::new();
+    let mut by_shell: BTreeMap<ShellKey, Vec<(f64, f64)>> = BTreeMap::new();
     for (key, open, close) in &intervals {
         by_shell.entry(*key).or_default().push((*open, *close));
     }
@@ -1055,13 +1070,13 @@ fn weld_runs(
     corridor: &RayCorridor,
     spans: &[Span],
     raw_runs: &[(usize, usize)],
-    intervals: &[(ShellKey, f32, f32)],
-    normal_at: &dyn Fn(f32, bool) -> Vec3,
+    intervals: &[(ShellKey, f64, f64)],
+    normal_at: &dyn Fn(f64, bool) -> Vec3,
     laws: &WalkLaws,
 ) -> Result<Vec<WeldedRun>, WalkError> {
     let mut welded: Vec<WeldedRun> = Vec::new();
     let mut group_start = 0usize;
-    let mut gap_budget = 0.0f32;
+    let mut gap_budget = 0.0f64;
 
     let flush = |from: usize, to: usize| -> Result<WeldedRun, WalkError> {
         let start = spans[raw_runs[from].0].start;
@@ -1141,12 +1156,12 @@ fn weld_runs(
             .dot(n_exit)
             .abs()
             .max(corridor.axis.dot(n_entry).abs());
-        let gap_perp = gap_along * projection;
+        let gap_perp = gap_along * projection as f64;
         let opposing = n_exit.dot(n_entry) <= -laws.weld_face_cos;
         let weld = opposing
-            && gap_along <= laws.weld_max_lookahead
-            && gap_perp <= laws.weld_perp
-            && gap_budget + gap_perp <= laws.weld_run_gap_budget;
+            && gap_along <= laws.weld_max_lookahead as f64
+            && gap_perp <= laws.weld_perp as f64
+            && gap_budget + gap_perp <= laws.weld_run_gap_budget as f64;
 
         if weld {
             gap_budget += gap_perp;
@@ -1172,7 +1187,7 @@ fn weld_runs(
 fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEvent> {
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
-        let at = |t: f32| corridor.origin + corridor.axis * t;
+        let at = |t: f64| corridor.origin + corridor.axis * t as f32;
         let Some(first) = run.segments.first() else {
             continue;
         };
@@ -1221,10 +1236,10 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
 /// Union each entity's primitive intervals, then charge its own chord at its own factor (§13.2's
 /// damage law: no ownership, no priority, no argmax).
 fn entity_presence(
-    intervals: &[(ShellKey, f32, f32)],
+    intervals: &[(ShellKey, f64, f64)],
     volumes: &VolumeTable,
 ) -> Result<Vec<EntityPresence>, WalkError> {
-    let mut by_entity: BTreeMap<Entity, Vec<(f32, f32)>> = BTreeMap::new();
+    let mut by_entity: BTreeMap<Entity, Vec<(f64, f64)>> = BTreeMap::new();
     for (key, open, close) in intervals {
         by_entity
             .entry(key.volume)
@@ -1234,7 +1249,7 @@ fn entity_presence(
     let mut out = Vec::new();
     for (entity, mut spans) in by_entity {
         spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        let mut merged: Vec<(f32, f32)> = Vec::new();
+        let mut merged: Vec<(f64, f64)> = Vec::new();
         for span in spans {
             match merged.last_mut() {
                 Some(last) if span.0 <= last.1 => last.1 = last.1.max(span.1),
@@ -1242,7 +1257,7 @@ fn entity_presence(
             }
         }
         let factor = volumes.factor(entity)?;
-        let chord: f64 = merged.iter().map(|(a, b)| *b as f64 - *a as f64).sum();
+        let chord: f64 = merged.iter().map(|(a, b)| *b - *a).sum();
         out.push(EntityPresence {
             entity,
             factor,
@@ -1372,7 +1387,7 @@ pub struct DiscCorridor {
 /// A downward field step aggregated over the disc — one spall source.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DiscSpall {
-    pub t: f32,
+    pub t: f64,
     pub position: Vec3,
     pub normal: Vec3,
     pub from_factor: f32,
@@ -1392,7 +1407,7 @@ pub struct DiscSpall {
 /// rather than scaled proportionally.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CostProfile {
-    pub ts: Vec<f32>,
+    pub ts: Vec<f64>,
     pub cumulative: Vec<f64>,
 }
 
@@ -1403,7 +1418,7 @@ impl CostProfile {
 
     /// The progress `t` at which the accumulated cost first reaches `budget`, or `None` when the
     /// whole profile costs less than that (i.e. the round perforates).
-    pub fn invert(&self, budget: f64) -> Option<f32> {
+    pub fn invert(&self, budget: f64) -> Option<f64> {
         if budget >= self.total() {
             return None;
         }
@@ -1414,9 +1429,8 @@ impl CostProfile {
                     return Some(self.ts[index - 1]);
                 }
                 let share = (budget - self.cumulative[index - 1]) / slice;
-                let a = self.ts[index - 1] as f64;
-                let b = self.ts[index] as f64;
-                return Some((a + (b - a) * share) as f32);
+                let (a, b) = (self.ts[index - 1], self.ts[index]);
+                return Some(a + (b - a) * share);
             }
         }
         self.ts.last().copied()
@@ -1445,15 +1459,15 @@ pub struct EntityShare {
     /// Fraction of the disc that met this entity at all.
     pub coverage: f32,
     /// Per-sample presence spans, kept only to clip at an embed. Private detail of the plan.
-    spans: Vec<(f32, f32)>,
+    spans: Vec<(f64, f64)>,
 }
 
 /// One crossing of the world by the disc: the cluster of sample runs that belong to the same
 /// physical surface (§13.5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscEvent {
-    pub start: f32,
-    pub end: f32,
+    pub start: f64,
+    pub end: f64,
     /// Area-mean entry normal over covered samples. Normals integrate (§13.5) — this is what
     /// repairs the point model's degenerate normal at an edge or on curved cast.
     pub entry_normal: Vec3,
@@ -1509,7 +1523,7 @@ impl DiscWalk {
     /// its own interior state: a shell that perforates an outer plate while a ring sample is already
     /// inside the crewman behind it resumes KNOWING that, because the ray it would have to guess
     /// about is one this walk already covered.
-    pub fn resume_at(&self, t: f32, laws: &WalkLaws) -> Vec<SampleSeed> {
+    pub fn resume_at(&self, t: f64, laws: &WalkLaws) -> Vec<SampleSeed> {
         self.walks
             .iter()
             .enumerate()
@@ -1599,7 +1613,7 @@ pub fn walk_disc(
             let overlap = run_a.start < run_b.end && run_b.start < run_a.end;
             let gap_along = (run_b.start - run_a.end)
                 .max(run_a.start - run_b.end)
-                .max(0.0);
+                .max(0.0) as f32;
             let facing = unit_or_zero(run_a.entry_normal + run_b.entry_normal);
             // Not "are these close enough along the ray" — one plane can put two samples half a
             // metre apart and mean it — but "are they where ONE surface would have put them".
@@ -1641,10 +1655,12 @@ pub fn walk_disc(
             let coplanar = {
                 let na = run_a.entry_normal;
                 let nb = run_b.entry_normal;
-                let pa =
-                    corridor.origin + corridor.samples[sa].offset + corridor.axis * run_a.start;
-                let pb =
-                    corridor.origin + corridor.samples[sb].offset + corridor.axis * run_b.start;
+                let pa = corridor.origin
+                    + corridor.samples[sa].offset
+                    + corridor.axis * run_a.start as f32;
+                let pb = corridor.origin
+                    + corridor.samples[sb].offset
+                    + corridor.axis * run_b.start as f32;
                 na.dot(nb) >= laws.event_plane_cos
                     && facing != Vec3::ZERO
                     && (pa - pb).dot(facing).abs() <= laws.event_plane_tolerance
@@ -1722,7 +1738,7 @@ fn separation_residual(
     };
     let sign = if denominator < 0.0 { -1.0 } else { 1.0 };
     let predicted = -lateral.dot(facing) * secant * sign;
-    (run_b.start - run_a.start) - predicted
+    ((run_b.start - run_a.start) - predicted as f64) as f32
 }
 
 fn build_event(
@@ -1743,8 +1759,8 @@ fn build_event(
         runs.sort_unstable();
     }
 
-    let mut start = f32::INFINITY;
-    let mut end = f32::NEG_INFINITY;
+    let mut start = f64::INFINITY;
+    let mut end = f64::NEG_INFINITY;
     let mut entrance_volume = None;
     let mut entry_sum = Vec3::ZERO;
     let mut entry_position = Vec3::ZERO;
@@ -1761,8 +1777,8 @@ fn build_event(
         entry_sum += first.entry_normal;
         exit_sum += last.exit_normal;
         let base = corridor.origin + corridor.samples[sample].offset;
-        entry_position += base + corridor.axis * first.start;
-        exit_position += base + corridor.axis * last.end;
+        entry_position += base + corridor.axis * first.start as f32;
+        exit_position += base + corridor.axis * last.end as f32;
     }
     let covered = by_sample.len();
     let coverage = (covered as f64 / kf) as f32;
@@ -1790,7 +1806,7 @@ fn build_event(
     // Disc-mean cumulative cost. Breakpoints are the union of every contributing sample's canonical
     // span boundaries; between two of them every sample's factor is constant, so the mean slope is
     // exact and the profile is piecewise linear.
-    let mut breaks: Vec<f32> = vec![start, end];
+    let mut breaks: Vec<f64> = vec![start, end];
     for (&sample, runs) in &by_sample {
         for &run in runs {
             let extent = &walks[sample].runs[run];
@@ -1802,7 +1818,7 @@ fn build_event(
             }
         }
     }
-    breaks.sort_by(f32::total_cmp);
+    breaks.sort_by(f64::total_cmp);
     breaks.dedup();
     breaks.retain(|t| *t >= start && *t <= end);
 
@@ -1810,7 +1826,7 @@ fn build_event(
     cumulative.push(0.0);
     for window in breaks.windows(2) {
         let (a, b) = (window[0], window[1]);
-        let mid = 0.5 * (a as f64 + b as f64);
+        let mid = 0.5 * (a + b);
         let mut slope = 0.0f64;
         for (&sample, runs) in &by_sample {
             // The CANONICAL spans carry the field, welded voids included at factor 0 — reading the
@@ -1818,7 +1834,7 @@ fn build_event(
             // faces, never material (§13.4).
             let inside = runs.iter().any(|&run| {
                 let extent = &walks[sample].runs[run];
-                (extent.start as f64) <= mid && mid < (extent.end as f64)
+                extent.start <= mid && mid < extent.end
             });
             if !inside {
                 continue;
@@ -1826,13 +1842,13 @@ fn build_event(
             if let Some(span) = walks[sample]
                 .spans
                 .iter()
-                .find(|span| (span.start as f64) <= mid && mid < (span.end as f64))
+                .find(|span| span.start <= mid && mid < span.end)
             {
                 slope += span.factor as f64;
             }
         }
         let last = *cumulative.last().unwrap();
-        cumulative.push(last + (b as f64 - a as f64) * slope / kf);
+        cumulative.push(last + (b - a) * slope / kf);
     }
     let profile = CostProfile {
         ts: breaks,
@@ -1841,7 +1857,7 @@ fn build_event(
     let cost = profile.total() as f32;
 
     // Per-entity shares, unioned per sample then averaged over the disc.
-    let mut shares: BTreeMap<Entity, (f32, Vec<(f32, f32)>, BTreeSet<usize>)> = BTreeMap::new();
+    let mut shares: BTreeMap<Entity, (f32, Vec<(f64, f64)>, BTreeSet<usize>)> = BTreeMap::new();
     for (&sample, runs) in &by_sample {
         let (lo, hi) = (
             walks[sample].runs[runs[0]].start,
@@ -1865,11 +1881,7 @@ fn build_event(
     let shares = shares
         .into_iter()
         .map(|(entity, (factor, spans, samples))| {
-            let chord: f64 = spans
-                .iter()
-                .map(|(a, b)| *b as f64 - *a as f64)
-                .sum::<f64>()
-                / kf;
+            let chord: f64 = spans.iter().map(|(a, b)| *b - *a).sum::<f64>() / kf;
             EntityShare {
                 entity,
                 factor,
@@ -1884,7 +1896,7 @@ fn build_event(
     // Spall: cluster each sample's downward steps by their factor pair and their ordinal among
     // same-pair steps in that sample. Longitudinal position cannot be the key — on an oblique slab
     // the ring's exits are spread by `r·tan(incidence)` yet they are all one exit face.
-    let mut spall_groups: BTreeMap<(u32, u32, usize), (Vec<f32>, Vec3, Vec3, f64, usize)> =
+    let mut spall_groups: BTreeMap<(u32, u32, usize), (Vec<f64>, Vec3, Vec3, f64, usize)> =
         BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in &by_sample {
@@ -1924,7 +1936,7 @@ fn build_event(
         .map(|((from, to, _), (ts, position, normal, budget, count))| {
             let n = count as f32;
             DiscSpall {
-                t: ts.iter().map(|t| *t as f64).sum::<f64>() as f32 / n,
+                t: ts.iter().sum::<f64>() / count as f64,
                 position: position / n,
                 normal: if count == 1 {
                     normal
@@ -2056,7 +2068,7 @@ pub struct SampleSeed {
     /// `ZERO`: the axis sample defines the origin.
     pub offset: Vec3,
     /// Progress along that sample's ENTRANCE ray at which the seed was read.
-    pub t: f32,
+    pub t: f64,
     pub inside: Vec<ShellKey>,
 }
 
@@ -2172,9 +2184,9 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     // `axis · n̄ < 0` always (every contributing entry face leans against the ray), so this cannot
     // divide by zero.
     let denominator = entrance.axis.dot(normal);
-    let plane = |from: Vec3| (event.entry_position - from).dot(normal) / denominator;
+    let plane = |from: Vec3| ((event.entry_position - from).dot(normal) / denominator) as f64;
     let axis_t = plane(entrance.origin);
-    let handoff = entrance.origin + entrance.axis * axis_t;
+    let handoff = entrance.origin + entrance.axis * axis_t as f32;
     let seeds = entrance
         .walks
         .iter()
@@ -2187,7 +2199,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
                 // Where this sample resumes, relative to the handoff. Carries the longitudinal
                 // spread of an oblique contact, so the seed below is a lookup on a ray already
                 // walked rather than a guess about a re-projected disc.
-                offset: offset + entrance.axis * (t - axis_t),
+                offset: offset + entrance.axis * (t - axis_t) as f32,
                 t,
                 inside: walk.inside_at(t, laws),
             }
@@ -2315,7 +2327,7 @@ fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), 
             "the corridor's first crossing is neither made of the entrance's geometry nor on its surface",
         );
     }
-    if event.start > HANDOFF_PROXIMITY {
+    if event.start > HANDOFF_PROXIMITY as f64 {
         return mismatch("the corridor's first crossing does not begin at the handoff plane");
     }
     Ok(())
@@ -2369,9 +2381,9 @@ pub fn finish(
     let embed_t = profile.invert(shot.capability as f64);
     let (outcome, cost_spent, cut) = match embed_t {
         Some(t) => {
-            let at = transit.origin + transit.axis * t;
+            let at = transit.origin + transit.axis * t as f32;
             (
-                Outcome::Embedded { at, t },
+                Outcome::Embedded { at, t: t as f32 },
                 shot.capability.min(total as f32),
                 t,
             )
@@ -2381,7 +2393,7 @@ pub fn finish(
                 exit: event.exit_position,
                 exit_normal: event.exit_normal,
                 direction: transit.axis,
-                t: event.end,
+                t: event.end as f32,
             },
             total as f32,
             event.end,
@@ -2397,7 +2409,7 @@ pub fn finish(
             let chord: f64 = share
                 .spans
                 .iter()
-                .map(|(a, b)| (b.min(cut) as f64 - *a as f64).max(0.0))
+                .map(|(a, b)| (b.min(cut) - *a).max(0.0))
                 .sum::<f64>()
                 / transit.samples() as f64;
             let covered = share

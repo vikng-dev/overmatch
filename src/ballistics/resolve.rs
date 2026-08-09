@@ -292,10 +292,9 @@ fn closing_walk(
         let volumes = volume_table(context, &corridor)?;
         match walk::walk_disc(&corridor, &volumes, &context.laws) {
             Ok(walked) => {
-                let settled = walked
-                    .events
-                    .first()
-                    .is_none_or(|event| event.end + context.laws.weld_max_lookahead <= length);
+                let settled = walked.events.first().is_none_or(|event| {
+                    event.end + context.laws.weld_max_lookahead as f64 <= length as f64
+                });
                 if settled || length >= MAX_CORRIDOR {
                     return Ok(walked);
                 }
@@ -672,7 +671,7 @@ fn perforate_or_embed(
             // Read at the point the NEXT corridor will actually start from — the march nudges every
             // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
             // plate the round has already cleared.
-            let seeds = transit.resume_at(t + super::MARCH_EPS, &context.laws);
+            let seeds = transit.resume_at((t + super::MARCH_EPS) as f64, &context.laws);
             (
                 ArmorCrossing::Perforated {
                     exit: world(transit.origin + transit.axis * t),

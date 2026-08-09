@@ -657,9 +657,12 @@ today independent of unions.
      side it came from. No interval, no cost, no event. A fan that agrees is transverse and is one
      oriented crossing. Two contacts are two crossings however close they land.
    - **No threshold decides what counts as a hit.** A shell thinner than any window is two different
-     contacts and stays an ordinary crossing, charged, with its own entrance and exit. Two contacts
-     of one shell whose `t` collide on the same `f32` bits bound material this corridor cannot
-     express, and are refused by name rather than charged as zero.
+     contacts and stays an ordinary crossing, charged, with its own entrance and exit. The contact
+     parameter is carried at `f64`, from the collector's exact projection through to the cost
+     integral, so two contacts keep their exact ORDER and a chargeable metric CHORD even where their
+     public `f32` values coincide — a sub-ULP chord is charged like any other traversal. Only two
+     contacts bit-equal in the *exact* parameter are refused by name: tangent grade, measure zero,
+     no order between them and no thickness to charge.
    - **Occupancy is a boolean and alternation is required.** A certified shell is entered from
      outside and left from inside; a second entry is a violated certificate, not a deeper winding,
      and it is named. (Embedding — no self-intersection within one shell — is not yet proven at

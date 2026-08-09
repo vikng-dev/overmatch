@@ -29,18 +29,18 @@ fn prim(index: u32) -> Entity {
 }
 
 /// A plate crossing: `[enter, exit)` on one primitive's shell 0, faces square to the ray.
-fn plate(vol: u32, primitive: u32, enter: f32, exit: f32) -> Vec<FaceHit> {
+fn plate(vol: u32, primitive: u32, enter: f64, exit: f64) -> Vec<FaceHit> {
     shell_plate(vol, primitive, 0, enter, exit)
 }
 
 /// The same, on a NAMED shell of that primitive — §13.7's several closed islands in one object.
-fn shell_plate(vol: u32, primitive: u32, shell: u32, enter: f32, exit: f32) -> Vec<FaceHit> {
+fn shell_plate(vol: u32, primitive: u32, shell: u32, enter: f64, exit: f64) -> Vec<FaceHit> {
     oblique_plate(vol, primitive, shell, enter, exit, -AXIS, AXIS)
 }
 
 /// A slab whose faces are tilted `front` — the OUTWARD normal of the face the ray meets first, so
 /// `axis · front < 0`. The back face is `-front`, the flat-plate case.
-fn slab(vol: u32, primitive: u32, enter: f32, exit: f32, front: Vec3) -> Vec<FaceHit> {
+fn slab(vol: u32, primitive: u32, enter: f64, exit: f64, front: Vec3) -> Vec<FaceHit> {
     let front = front.normalize();
     assert!(
         AXIS.dot(front) < 0.0,
@@ -54,8 +54,8 @@ fn oblique_plate(
     vol: u32,
     primitive: u32,
     shell: u32,
-    enter: f32,
-    exit: f32,
+    enter: f64,
+    exit: f64,
     entry_normal: Vec3,
     exit_normal: Vec3,
 ) -> Vec<FaceHit> {
@@ -199,7 +199,7 @@ impl Slab {
                     shell: 0,
                     contact: Contact::Face(self.primitive * 100 + face),
                     triangle: self.primitive * 100 + face,
-                    t,
+                    t: t as f64,
                     true_normal,
                 })
             })
@@ -838,8 +838,8 @@ fn one_ulp_seam_offsets_stay_one_boundary() {
         seam,
         f32::from_bits(seam.to_bits() + 1),
     ] {
-        let mut hits = plate(1, 0, 0.0625, jitter);
-        hits.extend(plate(2, 0, seam, 0.1875));
+        let mut hits = plate(1, 0, 0.0625, jitter as f64);
+        hits.extend(plate(2, 0, seam as f64, 0.1875));
         let result = walk(&corridor(1.0, hits), &volumes);
         assert_eq!(result.runs.len(), 1, "jitter {jitter:?} split the crossing");
         assert_eq!(
@@ -871,7 +871,7 @@ fn large_world_coordinates_keep_the_millimetre_distinction() {
     // 3 mm void must not, identically at the map edge and at the origin.
     let welding = |origin: Vec3, gap: f32| {
         let mut hits = plate(1, 0, 0.25, 0.35);
-        hits.extend(plate(2, 0, 0.35 + gap, 0.45));
+        hits.extend(plate(2, 0, (0.35 + gap) as f64, 0.45));
         walk(
             &RayCorridor {
                 anchor: Vec3::ZERO,
@@ -1148,16 +1148,25 @@ fn a_thin_oblique_slab_is_one_event_not_several() {
         .map(|offset| {
             // One plane: each sample enters where its own ray meets it.
             let shift = -offset.dot(normal) / AXIS.dot(normal);
-            sample(offset, slab(1, 0, 0.5 + shift, 0.5 + shift + chord, normal))
+            sample(
+                offset,
+                slab(
+                    1,
+                    0,
+                    (0.5 + shift) as f64,
+                    (0.5 + shift + chord) as f64,
+                    normal,
+                ),
+            )
         })
         .collect();
-    let starts: Vec<f32> = samples.iter().map(|s| s.hits[0].t).collect();
+    let starts: Vec<f64> = samples.iter().map(|s| s.hits[0].t).collect();
     let (lo, hi) = (
-        starts.iter().copied().fold(f32::INFINITY, f32::min),
-        starts.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        starts.iter().copied().fold(f64::INFINITY, f64::min),
+        starts.iter().copied().fold(f64::NEG_INFINITY, f64::max),
     );
     assert!(
-        hi - lo > chord,
+        hi - lo > chord as f64,
         "fixture must actually spread the samples past one chord ({lo}..{hi})"
     );
 
@@ -1332,11 +1341,11 @@ fn the_coplanar_branch_is_bounded_by_where_one_surface_would_put_things() {
                 samples: vec![
                     sample(
                         Vec3::ZERO,
-                        oblique_plate(1, 0, 0, near, near_end, normal, -normal),
+                        oblique_plate(1, 0, 0, near as f64, near_end as f64, normal, -normal),
                     ),
                     sample(
                         offset,
-                        oblique_plate(2, 0, 0, far, far + 0.05, normal, -normal),
+                        oblique_plate(2, 0, 0, far as f64, (far + 0.05) as f64, normal, -normal),
                     ),
                 ],
             },
@@ -2353,7 +2362,7 @@ fn a_long_grazing_gap_is_rejected_by_the_lookahead_ceiling() {
     let into = Vec3::new(0.0, -0.9998, -0.02);
     let pair = |gap: f32| {
         let mut hits = oblique_plate(1, 0, 0, 0.2, 0.3, into, out);
-        hits.extend(oblique_plate(2, 0, 0, 0.3 + gap, 0.5, into, out));
+        hits.extend(oblique_plate(2, 0, 0, (0.3 + gap) as f64, 0.5, into, out));
         walk(&corridor(2.0, hits), &volumes)
     };
     // 60 mm along the ray: 1.2 mm perpendicular, so every other guard would let it through.
@@ -2406,7 +2415,7 @@ fn the_fragment_degeneracy_survives_a_normal_that_normalization_would_move() {
 #[test]
 fn three_abutting_plates_are_byte_identical_to_one_slab_in_every_order() {
     let volumes = table(&[(7, 997.0), (5, 997.0), (3, 997.0), (11, 311.0)]);
-    let (a, b, c, d) = (0.137_f32, 0.291_f32, 0.447_8_f32, 0.601_3_f32);
+    let (a, b, c, d) = (0.137_f64, 0.291_f64, 0.447_8_f64, 0.601_3_f64);
 
     let one = walk(&corridor(2.0, plate(7, 0, a, d)), &volumes);
 
@@ -2784,7 +2793,7 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
 fn a_shell_thinner_than_the_window_is_an_ordinary_crossing() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
-    let (enter, exit) = (1.0f32, ulps(1.0, 8));
+    let (enter, exit) = (1.0f64, ulps(1.0, 8));
     assert!(
         coincident(enter, exit, &laws),
         "the shell must be INSIDE one window, or the fixture proves nothing",
@@ -2793,7 +2802,7 @@ fn a_shell_thinner_than_the_window_is_an_ordinary_crossing() {
     let walked = walk_ray(0, &corridor(2.0, plate(1, 1, enter, exit)), &volumes, &laws)
         .expect("a thin shell resolves");
 
-    let truth = 1000.0 * (exit - enter) as f64;
+    let truth = 1000.0 * (exit - enter);
     assert!(
         walked.cost as f64 >= truth * (1.0 - 1.0e-6),
         "charged {} against an exact {truth}",
@@ -2804,7 +2813,7 @@ fn a_shell_thinner_than_the_window_is_an_ordinary_crossing() {
         1,
         "the shell is present: {walked:#?}"
     );
-    assert_eq!(walked.presence[0].chord, exit - enter);
+    assert_eq!(walked.presence[0].chord, (exit - enter) as f32);
     assert_eq!(
         walked
             .events
@@ -2867,7 +2876,7 @@ fn two_shells_at_one_corner_keep_their_own_chords() {
         .iter()
         .find(|presence| presence.entity == volume(2))
         .expect("the brushed shard is present too");
-    assert_eq!(brushed.chord, 8.564_676 - 8.5646715);
+    assert_eq!(brushed.chord, (8.564_676_f64 - 8.5646715_f64) as f32);
     let plate = 1000.0 * (8.754_433 - 8.371_457);
     assert!(
         walked.cost > plate,
@@ -2885,10 +2894,11 @@ fn two_shells_at_one_corner_keep_their_own_chords() {
 // Surface identity: what one shell's claims may and may not collapse into
 // ---------------------------------------------------------------------------------------------
 
-/// `t` moved by `steps` f32 ULP — the finest perturbation a corridor can express at that distance,
-/// and the scale the topology window is written against.
-fn ulps(t: f32, steps: i32) -> f32 {
-    f32::from_bits((t.to_bits() as i32 + steps) as u32)
+/// `t` moved by `steps` f32 ULP — the finest perturbation an f32 POSITION can express at that
+/// distance, and the scale the topology window is written against. The walk's own parameter is
+/// wider, so this is a fixture scale rather than a resolution limit.
+fn ulps(t: f32, steps: i32) -> f64 {
+    f32::from_bits((t.to_bits() as i32 + steps) as u32) as f64
 }
 
 /// NOTHING BRIDGES, BECAUSE NOTHING GROUPS.
@@ -2905,7 +2915,7 @@ fn ulps(t: f32, steps: i32) -> f32 {
 fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
     let volumes = table(&[(1, 1000.0), (2, 800.0), (3, 600.0)]);
     let laws = WalkLaws::default();
-    let (enter, exit) = (1.0f32, ulps(1.0, 8));
+    let (enter, exit) = (1.0f64, ulps(1.0, 8));
     assert!(
         coincident(enter, exit, &laws),
         "the plate must be thinner than the retired window, or it proves nothing",
@@ -2922,7 +2932,7 @@ fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
             shell: 0,
             contact: Contact::Face(step),
             triangle: step,
-            t: ulps(exit, (step as i32) * 8),
+            t: ulps(exit as f32, (step as i32) * 8),
             true_normal: Vec3::X,
         });
     }
@@ -2935,11 +2945,11 @@ fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
         .expect("the thin plate is present");
     assert_eq!(
         plate.chord,
-        exit - enter,
+        (exit - enter) as f32,
         "the whole 20 ULP is its own chord"
     );
     assert!(
-        walked.cost > 800.0 * (1.5 - enter),
+        walked.cost as f64 > 800.0 * (1.5 - enter),
         "cost {} charged the plate at the soft factor or not at all",
         walked.cost,
     );
@@ -2990,7 +3000,7 @@ fn a_fan_of_claims_on_one_feature_is_one_crossing() {
 fn overlapping_shells_inside_one_window_keep_the_survivor_open() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
-    let (a_enter, b_enter, a_exit) = (1.0f32, ulps(1.0, 2), ulps(1.0, 4));
+    let (a_enter, b_enter, a_exit) = (1.0f64, ulps(1.0, 2), ulps(1.0, 4));
     assert!(
         coincident(a_enter, a_exit, &laws),
         "the three faces must sit in ONE window, or there is no reduction to defeat",
@@ -3068,7 +3078,7 @@ fn two_shells_crossed_inside_one_window_are_two_crossings() {
     );
     let chords = (ulps(1.0, 2) - 1.0) + (ulps(1.0, 6) - ulps(1.0, 4));
     assert!(
-        (walked.cost - 1000.0 * chords).abs() <= 1.0e-3,
+        (walked.cost as f64 - 1000.0 * chords).abs() <= 1.0e-3,
         "cost {} is not the two shells' own chords",
         walked.cost,
     );
@@ -3167,14 +3177,55 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
     assert_eq!(exit_first.cost, 0.0);
 }
 
-/// A CHORD THE CORRIDOR CANNOT EXPRESS IS REFUSED BY NAME, NOT CHARGED AS ZERO.
+/// A CHORD THINNER THAN ONE f32 ULP IS ORDINARY MATERIAL, CHARGED.
 ///
-/// Two distinct certified contacts of one shell whose `t` land on the same f32 bits bound real
-/// material — the corner clip whose chord shrinks continuously below one ULP is the ordinary way to
-/// get there. Reading the pair as a zero-length touch would be a silent free crossing of whatever
-/// they actually bound, so the walk says so instead.
+/// The corner clip whose chord shrinks continuously toward zero is the ordinary way to get two
+/// contacts of one shell whose public `f32` values are the same bits. They are still two contacts,
+/// the material between them is still real, and the exact parameter still separates them — so the
+/// pair is an ordinary tiny traversal with its own entrance, its own exit and `chord × factor` of
+/// cost. MEASURED on the bound Tiger (seed 42, ray 93162, `Commander_Cupola`): a 0.32 nm chord whose
+/// two ends both print as 8.8448.
 #[test]
-fn a_chord_that_collides_on_one_f32_t_is_a_named_refusal() {
+fn a_chord_below_one_f32_ulp_is_charged_like_any_other() {
+    let volumes = table(&[(1, 1000.0)]);
+    let enter = 8.844_806_671_142_578_f64;
+    let exit = enter + 3.2e-10;
+    assert_eq!(
+        (enter as f32).to_bits(),
+        (exit as f32).to_bits(),
+        "the fixture only proves something if the two ends collide in f32",
+    );
+
+    let walked = walk_ray(
+        0,
+        &corridor(14.0, plate(1, 1, enter, exit)),
+        &volumes,
+        &WalkLaws::default(),
+    )
+    .expect("a sub-ULP chord is material, not a refusal");
+
+    assert_eq!(
+        walked
+            .events
+            .iter()
+            .map(|event| (event.kind, event.t))
+            .collect::<Vec<_>>(),
+        vec![(BoundaryKind::Entrance, enter), (BoundaryKind::Exit, exit)],
+        "an entrance and an exit at the canonical parameters: {:#?}",
+        walked.events,
+    );
+    assert_eq!(walked.presence[0].chord, (exit - enter) as f32);
+    assert_eq!(walked.cost, (1000.0 * (exit - enter)) as f32);
+}
+
+/// TWO CONTACTS AT ONE EXACT PARAMETER ARE REFUSED BY NAME.
+///
+/// The residue the charge arm leaves behind, and the only one: two features of one shell the ray
+/// meets at a bit-equal EXACT parameter. There is no order between them and no thickness to charge,
+/// and reading the pair as a zero-length touch would be a silent free crossing of whatever they
+/// bound. Tangent grade, measure zero, and named rather than swallowed.
+#[test]
+fn two_contacts_at_one_exact_parameter_are_a_named_refusal() {
     let volumes = table(&[(1, 1000.0)]);
     let error = walk_ray(
         0,
@@ -3188,6 +3239,27 @@ fn a_chord_that_collides_on_one_f32_t_is_a_named_refusal() {
     };
     assert_eq!(key.shell, 0);
     assert_eq!(t, 1.0);
+}
+
+/// PAIRING ORDER IS THE PARAMETER'S, NOT THE HIT LIST'S.
+///
+/// A sub-ULP pair is exactly where an arrival-order tie-break would decide the answer: rounded to
+/// f32 the two ends are one value, so any rule reading `t` at that width sees a tie and takes
+/// whichever claim the collector happened to push first. The exact parameter has no tie, so the
+/// shell is entered and then left however the list arrives.
+#[test]
+fn a_sub_ulp_pair_orders_on_the_parameter_not_the_hit_list() {
+    let volumes = table(&[(1, 1000.0)]);
+    let enter = 6.871_579_170_227_051_f64;
+    let exit = enter + 2.0e-9;
+    let mut reversed = plate(1, 1, enter, exit);
+    reversed.reverse();
+
+    let walked = walk_ray(0, &corridor(14.0, reversed), &volumes, &WalkLaws::default())
+        .expect("the pair is an entry then an exit, whatever order it arrives in");
+
+    assert_eq!(walked.shells[0].spans, vec![(enter, exit)]);
+    assert_eq!(walked.cost, (1000.0 * (exit - enter)) as f32);
 }
 
 /// A BOUNDARY BURIED UNDER EQUAL-OR-HIGHER FACTOR FIRES NOTHING (§13.4).
@@ -3303,12 +3375,12 @@ fn surface_identity_never_charges_less_than_the_exact_union_field() {
         // The second family: every plate thinner than the window it lives in.
         let sub_window = case >= 200;
         let mut hits = Vec::new();
-        let mut authored: Vec<(f32, f32, f32)> = Vec::new();
+        let mut authored: Vec<(f64, f64, f32)> = Vec::new();
         for p in 0..6u32 {
             let vol = 1 + p % 4;
             let enter = ulps(1.0 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12);
             let exit = if sub_window {
-                ulps(enter, 1 + (rng() % 8) as i32)
+                ulps(enter as f32, 1 + (rng() % 8) as i32)
             } else {
                 ulps(1.05 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12)
             };
@@ -3324,16 +3396,16 @@ fn surface_identity_never_charges_less_than_the_exact_union_field() {
         let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &WalkLaws::default())
             .unwrap_or_else(|error| panic!("case {case}: {error:?}"));
 
-        let mut edges: Vec<f32> = authored.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
-        edges.sort_by(f32::total_cmp);
+        let mut edges: Vec<f64> = authored.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+        edges.sort_by(f64::total_cmp);
         edges.dedup();
         let mut truth = 0.0f64;
         for pair in edges.windows(2) {
-            let (lo, hi) = (pair[0] as f64, pair[1] as f64);
+            let (lo, hi) = (pair[0], pair[1]);
             let mid = 0.5 * (lo + hi);
             let factor = authored
                 .iter()
-                .filter(|(a, b, _)| (*a as f64) <= mid && mid < (*b as f64))
+                .filter(|(a, b, _)| *a <= mid && mid < *b)
                 .fold(0.0f32, |max, (_, _, factor)| max.max(*factor));
             truth += factor as f64 * (hi - lo);
         }

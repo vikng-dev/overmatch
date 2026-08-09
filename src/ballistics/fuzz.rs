@@ -289,7 +289,7 @@ pub struct WalkFailure {
     /// unrepresentable by the walk's per-primitive parity pairing); two entries a micron apart are a
     /// tolerance problem instead. The distinction is the whole diagnosis, so the fuzzer collects it
     /// rather than leaving it to a debugger.
-    pub crossings: Vec<(f32, f32)>,
+    pub crossings: Vec<(f64, f32)>,
 }
 
 /// The volume a [`WalkError`] blames, when it blames one.
@@ -654,7 +654,7 @@ struct Pass<'a, 'w, 's> {
 ///
 /// f64 accumulation, matching [`walk::RayWalk`]'s own cost, so a prefix taken at the corridor end
 /// equals the walk's reported total rather than drifting from it.
-fn prefix_cost(spans: &[Span], t: f32) -> f64 {
+fn prefix_cost(spans: &[Span], t: f64) -> f64 {
     spans
         .iter()
         .map(|span| {
@@ -662,7 +662,7 @@ fn prefix_cost(spans: &[Span], t: f32) -> f64 {
             if end <= span.start {
                 0.0
             } else {
-                (end as f64 - span.start as f64) * span.factor as f64
+                (end - span.start) * span.factor as f64
             }
         })
         .sum()
@@ -741,14 +741,14 @@ impl Pass<'_, '_, '_> {
 
     /// Every crossing of the primitive a [`WalkError`] blamed, as `(t, axis · n)` — see
     /// [`WalkFailure::crossings`] for what the shape of that list diagnoses.
-    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f32, f32)> {
+    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f64, f32)> {
         let Some(key) = blamed_shell(error) else {
             return Vec::new();
         };
         let Ok((corridor, _)) = self.probe_parts(ray) else {
             return Vec::new();
         };
-        let mut out: Vec<(f32, f32)> = corridor
+        let mut out: Vec<(f64, f32)> = corridor
             .hits
             .iter()
             .filter(|hit| hit.volume == key.volume && hit.primitive == key.primitive)
