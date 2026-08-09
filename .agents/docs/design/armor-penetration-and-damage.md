@@ -537,8 +537,7 @@ it. Do not write engine code from memory.
   **Amended 2026-08-03/04 (§13.7):** manifold-per-volume is the only geometric gate.
   **Face-to-face contact** is the preferred joint style (x-ray legibility, physical honesty);
   overlap is tolerated (the union walk charges shared space once) and mutual exact-fit is NOT
-  required — sub-caliber slop in either direction is harmless (§13.5). Deliberate openings stay
-  honest (caliber-gated weakspots, fuzzer-blessed); accidental super-caliber corridors are
+  required — sub-caliber slop in either direction is harmless (§13.5). Super-caliber corridors are
   fuzzer-hunted.
 - **No numbers in the model.** `material_factor`, `hp`, and future facets live in RON keyed by node
   name (ADR-0010). Model = named manifold solids; code (RON) = all semantics.
@@ -800,11 +799,10 @@ Revisit only if seam-threading shots ever matter.
 Enforced mechanically, not by eyeball:
 
 - **Ray fuzzer** (bake/CI gate): 10⁵–10⁶ random rays at the bound tank, asserting the invariants,
-  and reporting every corridor/opening that reaches crew/ammo with its **admitting caliber and
-  per-caliber η** ("this seam admits ≥8mm; at 88mm η = 0.93"). Each finding is either a real hole
-  (**fix**) or a deliberate opening (**bless** — turret ring, MG port, vision slits: historical
-  weakspots consciously kept as gameplay, with exact knowledge of how they'll play at every gun in
-  the game). The bless-list is where weakspots are decided, not discovered by players as bugs.
+  and reporting every corridor that reaches crew/ammo with its **admitting caliber and per-caliber
+  η** ("this seam admits ≥8mm; at 88mm η = 0.93"). **Any such corridor fails the gate by name.**
+  There is no exemption channel: a route into the crew compartment that no gun has to pay for is a
+  defect in the model, and it is fixed in the model.
 - **Per-primitive manifold gate:** weld-by-position, then closed-manifold + positive-orientation
   test per connected shell, on every substance primitive (classifier precedent 2026-08-07 — the gate
   keys off the material, not a name). Welding, degeneracy, closure, winding and signed volume are all
@@ -833,7 +831,8 @@ Enforced mechanically, not by eyeball:
   ε-weld (longitudinal) or self-heal at η ≈ 1 (lateral cracks). Don't sweat sub-caliber precision.
 - Components may clip into walls; the damage law makes the slop harmless.
 - **Real openings are modeled honestly, not plugged** — the turret ring, MG ports, vision slits
-  become caliber-gated, η-graded weakspots by the disc law, and are *blessed* in the fuzzer.
+  become caliber-gated, η-graded weakspots by the disc law. On the Tiger they are modelled as solid
+  cast steel, so the disc law has no geometry to grade and the fuzzer finds no corridor at all.
 - The remaining geometry sin is the **super-caliber accidental corridor** — hunted by the fuzzer,
   not the eyeball.
 - **Plates that touch face to face are separate PRIMITIVES.** Two closed shells of one primitive

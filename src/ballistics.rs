@@ -46,8 +46,8 @@ mod collect;
 
 /// The §13.6 ray fuzzer: random rays at the BOUND tank, the union-field invariants machine-checked,
 /// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
-/// η. Its findings are adjudicated against `assets/tiger_1/tiger_1.bless.ron` — the list where
-/// deliberate weakspots are decided rather than discovered by players as bugs.
+/// η. A corridor fails the gate by name, unconditionally: an effectively unarmoured route into the
+/// tank is a defect in the model.
 #[cfg(any(feature = "dev_tools", test))]
 pub mod fuzz;
 

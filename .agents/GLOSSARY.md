@@ -360,10 +360,7 @@ Runs separated by less than the weld tolerance — DERIVED ≈2 mm, measured **p
 _Avoid_: tolerance, snapping (this deletes phantom faces; it never creates steel)
 
 **Corridor**:
-A path through a tank that reaches crew or ammunition without crossing enough material to stop the admitting caliber. Deliberate ones — turret ring, MG port, vision slits — are blessed; accidental super-caliber ones are authoring defects.
-
-**Bless list**:
-The ray fuzzer's record of deliberate openings, each with its admitting caliber and per-caliber η ("this seam admits ≥8 mm; at 88 mm η = 0.93"). Weakspots are decided here, not discovered by players as bugs; anything the fuzzer reports that is not on the list is a hole to fix.
+A path through a tank that reaches crew or ammunition without crossing enough material to stop the admitting caliber. Always an authoring defect: the ray fuzzer reports one with its admitting caliber and per-caliber η ("this seam admits ≥8 mm; at 88 mm η = 0.93") and fails the gate by name.
 
 **Fail-closed**:
 The armor read's response to a question it cannot answer honestly — an unpairable topology, an unprobeable collider, a replica with no authoritative verdict. The round stops where it was: no perforation, no spall, no transit damage, no fabricated event. Free penetration is the one outcome worse than a stopped shell, because it is indistinguishable from armor that was never modeled.
