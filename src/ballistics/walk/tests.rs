@@ -2681,3 +2681,49 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
     assert_eq!(once.presence, twice.presence);
     assert_eq!(once.primitives, twice.primitives);
 }
+
+/// A CORNER IS ONE CLUSTER, HOWEVER MANY FACES MEET AT IT.
+///
+/// The faces meeting at one geometric point do not share a `t`: each comes from its own triangle's
+/// plane, so the four surfaces around a corner between two abutting shells arrive spread over
+/// several ULP. MEASURED on the bound Tiger (seed 7, ray 3412876, two shards of `Wheel_R_0`): four
+/// faces at 8.5646715 / 8.5646725 / 8.5646753 / 8.5646763, a spread of 4.8 µm against a 4.4 µm
+/// window at that distance.
+///
+/// Anchored on the first face, the window ends mid-corner: the fourth face starts a new cluster,
+/// one shard's exit is reduced alone, and it faces a depth that has not opened. Chained, the corner
+/// is one batch, both shards read entry-AND-exit, and a zero-measure graze toggles nothing — which
+/// is what `Toggle::Touch` is for.
+#[test]
+fn a_corner_graze_spread_wider_than_the_window_is_still_one_touch() {
+    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
+    let (near, far) = (Vec3::new(0.1, 0.0, -1.0), Vec3::new(-0.1, 0.0, -1.0));
+    let mut hits = Vec::new();
+    // The shard the ray genuinely crosses, from well before the corner to well after it.
+    hits.extend(oblique_plate(1, 1, 8.371_457, 8.754_433, near, -near));
+    // Its own second shell, opening and closing INSIDE the corner.
+    hits.extend(oblique_plate(1, 1, 8.5646715, 8.564_675, near, -far));
+    // The abutting shard, which the ray only touches: it leaves at one corner face and re-enters at
+    // the next, and is never inside between them.
+    hits.extend(oblique_plate(2, 2, 8.564_676, 8.564_672, far, -near));
+
+    let walked = walk_ray(0, &corridor(14.0, hits), &volumes, &WalkLaws::default())
+        .expect("a corner graze resolves");
+    let touched: Vec<Entity> = walked
+        .presence
+        .iter()
+        .filter(|presence| presence.chord > 0.0)
+        .map(|presence| presence.entity)
+        .collect();
+    assert_eq!(
+        touched,
+        vec![volume(1)],
+        "the grazed shard bounds no material and must deposit none"
+    );
+    assert_eq!(
+        walked.runs.len(),
+        1,
+        "one crossing, not one per corner face: {:#?}",
+        walked.runs
+    );
+}

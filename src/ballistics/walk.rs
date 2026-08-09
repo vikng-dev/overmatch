@@ -672,8 +672,20 @@ pub fn walk_ray(
     let mut i = 0usize;
     while i < order.len() {
         let anchor = order[i].t;
-        let mut j = i;
-        while j < order.len() && coincident(anchor, order[j].t, laws) {
+        // Coincidence chains, and is not measured from the cluster's first face.
+        //
+        // The faces meeting at ONE geometric point do not share a `t`: each is computed from its own
+        // triangle's plane, so a corner where four surfaces meet spreads its four `t` over several
+        // ULP. Anchoring the window on the first of them puts the last one outside it whenever that
+        // spread exceeds the window — the cluster splits mid-corner, one primitive's entry lands in
+        // the next cluster, and its exit is left facing a depth that has not opened yet.
+        //
+        // The cluster's WIDTH is therefore bounded by how many faces meet at the point rather than by
+        // the window alone, which is the geometry's bound and not an adversary's: a chain needs a
+        // face every few microns to grow, and `topology_abs` is already stated as being below any
+        // authored feature.
+        let mut j = i + 1;
+        while j < order.len() && coincident(order[j - 1].t, order[j].t, laws) {
             j += 1;
         }
         let cluster = &order[i..j];
