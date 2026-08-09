@@ -63,8 +63,8 @@ stays retired.
   (SUPERSEDED at PROTOCOL_REV 15 by [[0027-element-grip-netcode]]: `TrackGrip` left the wire with
   the element-netcode
   batch — in element mode it is derived telemetry, and rolling back on it without an
-  exact field checkpoint is the correction-free rollback loop element-netcode-design.md
-  forbids. The component and offline aggregate path remain; per-element state now
+  exact field checkpoint is the correction-free rollback loop the element-netcode
+  design forbids. The component and offline aggregate path remain; per-element state now
   reconciles via the wrench anchor + exact checkpoints. Aggregate-law retirement is the
   pending Phase-4 decision.)
 - The determinism/parity discipline held throughout: `grip=off` (stiffness 0) is
