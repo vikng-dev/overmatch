@@ -226,6 +226,7 @@ fn collect_trimesh(
     let far = origin + axis * length;
     let lo = origin.min(far) - Vec3::splat(margin);
     let hi = origin.max(far) + Vec3::splat(margin);
+    let shear = RayShear::new(origin, axis);
     for index in mesh.bvh().leaves(|node| {
         let aabb = node.aabb();
         aabb.maxs.x >= lo.x
@@ -236,7 +237,7 @@ fn collect_trimesh(
             && aabb.mins.z <= hi.z
     }) {
         let triangle = mesh.triangle(index);
-        let Some((t, normal)) = cross_triangle(origin, axis, triangle.a, triangle.b, triangle.c)
+        let Some((t, normal)) = cross_triangle(&shear, axis, triangle.a, triangle.b, triangle.c)
         else {
             continue;
         };
@@ -445,6 +446,93 @@ fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
     Some(t)
 }
 
+/// The ray reduced to the frame the containment test runs in: origin at zero, travel along `+z`
+/// after a permutation and a shear (Woop/Benthin/Wald, *Watertight Ray/Triangle Intersection*, 2013).
+///
+/// It is a function of the RAY ALONE. Every triangle of a corridor is sheared by the same constants,
+/// which is what makes the edge tests below comparable between triangles at all.
+struct RayShear {
+    origin: Vec3,
+    /// The permute-and-shear map, as its two surviving ROWS — the `z` row is discarded, since the
+    /// containment test is purely lateral. Held as vectors rather than as axis indices and scalars so
+    /// projection is two dot products and no dynamic component indexing.
+    row_x: Vec3,
+    row_y: Vec3,
+}
+
+impl RayShear {
+    fn new(origin: Vec3, axis: Vec3) -> Self {
+        // `kz` is the ray's dominant axis, so the shear never divides by a small component.
+        let abs = axis.abs();
+        let kz = if abs.x > abs.y && abs.x > abs.z {
+            0
+        } else if abs.y > abs.z {
+            1
+        } else {
+            2
+        };
+        // Swapped when the ray runs backwards along `kz`, which keeps the sheared frame
+        // right-handed and so keeps the edge-area signs meaningful.
+        let mut kx = (kz + 1) % 3;
+        let mut ky = (kx + 1) % 3;
+        if axis[kz] < 0.0 {
+            std::mem::swap(&mut kx, &mut ky);
+        }
+        let mut row_x = Vec3::ZERO;
+        let mut row_y = Vec3::ZERO;
+        row_x[kx] = 1.0;
+        row_x[kz] = -axis[kx] / axis[kz];
+        row_y[ky] = 1.0;
+        row_y[kz] = -axis[ky] / axis[kz];
+        Self {
+            origin,
+            row_x,
+            row_y,
+        }
+    }
+
+    /// One vertex in the sheared frame, as the 2D point the edge tests take cross products of.
+    ///
+    /// The translation happens FIRST. Folding it into a precomputed bias would leave the corridor
+    /// origin's magnitude in the products, and a corridor is metres from geometry that is centimetres
+    /// across.
+    #[inline]
+    fn project(&self, vertex: Vec3) -> (f32, f32) {
+        let v = vertex - self.origin;
+        (self.row_x.dot(v), self.row_y.dot(v))
+    }
+}
+
+/// The signed area of the sheared edge `(p, q)` against the ray.
+///
+/// WATERTIGHTNESS LIVES HERE. Two triangles sharing an edge present it as `(p, q)` and `(q, p)`, and
+/// this expression is EXACTLY antisymmetric under that swap in IEEE arithmetic: multiplication
+/// commutes bit-for-bit, and `fl(x − y) == −fl(y − x)`. So the two triangles never agree that the ray
+/// is outside — a ray on a shared edge is claimed by exactly one of them, or (at an exact zero) by
+/// both. A per-triangle barycentric test computes the same edge from two different anchors and has no
+/// such relation: at a micron from the edge both round to "outside", the crossing is dropped, and the
+/// walk sees an exit with no entry.
+#[inline]
+fn edge_area(p: (f32, f32), q: (f32, f32)) -> f32 {
+    q.0 * p.1 - q.1 * p.0
+}
+
+/// The same area with the products carried in f64 — reached only when the f32 form cancels to
+/// exactly zero, where the sign the edge test needs has been rounded away. Antisymmetric on the same
+/// grounds, so widening one triangle's edge widens its neighbour's identically.
+#[inline]
+fn edge_area_exact(p: (f32, f32), q: (f32, f32)) -> f64 {
+    q.0 as f64 * p.1 as f64 - q.1 as f64 * p.0 as f64
+}
+
+/// Whether the ray passes on the same side of all three edges — the containment half of the test,
+/// over whichever precision produced the areas.
+#[inline]
+fn same_side<T: PartialOrd + Default>(u: T, v: T, w: T) -> bool {
+    let zero = T::default();
+    !((u < zero || v < zero || w < zero) && (u > zero || v > zero || w > zero))
+}
+
 /// Ray-vs-triangle, returning the crossing distance and the triangle's WINDING normal.
 ///
 /// Ours rather than parry's for two reasons: parry's kernel answers "nearest hit, normal flipped to
@@ -454,7 +542,34 @@ fn admit(t: f32, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f32> {
 ///
 /// Double-sided by construction: the sign of `det` is not tested, so a face is reported whichever
 /// way the ray meets it. That is the point — an exit face is a crossing too.
-fn cross_triangle(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, Vec3)> {
+///
+/// CONTAINMENT and DISTANCE come from different arithmetic on purpose. Containment is the watertight
+/// edge test, whose only contract is the sign relation between neighbouring triangles; `t` stays the
+/// plane intersection it has always been, so a crossing this kernel and a barycentric one both admit
+/// lands on the same bits.
+#[inline]
+fn cross_triangle(shear: &RayShear, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<(f32, Vec3)> {
+    let (pa, pb, pc) = (shear.project(a), shear.project(b), shear.project(c));
+    let (u, v, w) = (edge_area(pb, pc), edge_area(pc, pa), edge_area(pa, pb));
+    // Inside means the ray passes on the same side of all three edges. Zero is inside on BOTH
+    // triangles incident on that edge, which is a duplicate crossing at one `t` — one toggle after
+    // the walk's coincidence clustering, and never a lost one. A cancelled f32 area has no side to
+    // be on, so it is the one case that pays for the wider products.
+    let inside = if u == 0.0 || v == 0.0 || w == 0.0 {
+        let (u, v, w) = (
+            edge_area_exact(pb, pc),
+            edge_area_exact(pc, pa),
+            edge_area_exact(pa, pb),
+        );
+        // Three collinear sheared points: the ray lies in the triangle's plane and crosses nothing.
+        same_side(u, v, w) && u + v + w != 0.0
+    } else {
+        same_side(u, v, w)
+    };
+    if !inside {
+        return None;
+    }
+
     let e1 = b - a;
     let e2 = c - a;
     let normal = e1.cross(e2);
@@ -462,14 +577,7 @@ fn cross_triangle(origin: Vec3, axis: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option
     if det.abs() < PARALLEL_EPS {
         return None;
     }
-    let ao = origin - a;
-    let dao = ao.cross(axis);
-    let u = e2.dot(dao) / det;
-    let v = -e1.dot(dao) / det;
-    if u < 0.0 || v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    let t = ao.dot(normal) / det;
+    let t = (shear.origin - a).dot(normal) / det;
     let normal = normal.normalize_or_zero();
     (normal != Vec3::ZERO).then_some((t, normal))
 }
@@ -488,7 +596,7 @@ mod tests {
     fn tri(o: Vec3, d: Vec3) -> Option<(f32, Vec3)> {
         // A unit triangle in the z = 1 plane, wound so its normal points +Z.
         cross_triangle(
-            o,
+            &RayShear::new(o, d),
             d,
             Vec3::new(0.0, 0.0, 1.0),
             Vec3::new(1.0, 0.0, 1.0),
