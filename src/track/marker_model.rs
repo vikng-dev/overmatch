@@ -677,73 +677,26 @@ mod tests {
         assert!((b + Vec3::new(0.3, 0.0, 0.0) - a).length() > straight * 2.0);
     }
 
-    /// The end-to-end read against the SHIPPED glb: the numbers this whole module exists to
-    /// produce, pinned so the next re-export that moves one of them fails here rather than in a
-    /// playtest. Values are the 2026-07-23 audit of `tiger_1.glb`.
-    #[test]
-    fn tiger_glb_drives_the_model() {
-        let m = DerivedModel::from_markers(57_000.0, Path::new(TIGER_GLB))
-            .unwrap_or_else(|gap| panic!("the shipped glb must answer the marker read: {gap}"));
-
-        assert!((m.pitch - 0.130_43).abs() < 1e-4, "pitch {}", m.pitch);
-        // 1.531_44, was 1.531_2: the rebuilt shoe (2026-08-08) carries its pin bore 1.243 mm
-        // further outboard. Pitch is unmoved to half a micron, so the loop length and the link
-        // window are untouched — this is a lateral datum only.
-        assert!((m.plane_x - 1.532_44).abs() < 1e-3, "plane_x {}", m.plane_x);
-        // Width from `Link_Box`, NOT the RON's 0.79 — the authored number was 64 mm too wide.
-        // 0.724_71, was 0.725_97: the same rebuild, 1.256 mm narrower. The near-mirror of the
-        // `plane_x` move — the bore went outboard, the outboard face stayed.
-        assert!((m.width - 0.724_71).abs() < 1e-3, "width {}", m.width);
-        assert!(
-            (m.width - 0.79).abs() > 0.05,
-            "width must be the measured one, not the RON's"
-        );
-        // The shoe is authored OUTBOARD of the pin plane: not symmetric about it.
-        assert!(
-            m.link_center_x - m.plane_x > 0.010,
-            "expected the ~16.8 mm outboard offset, got {}",
-            m.link_center_x - m.plane_x
-        );
-        assert!((m.lateral_max - m.lateral_min - m.width).abs() < 1e-5);
-        assert!(((m.lateral_min + m.lateral_max) * 0.5 - m.link_center_x).abs() < 1e-5);
-        // Radial faces off the box, `−y` outer: thinner outer, thicker inner.
-        assert!(
-            (m.pin_to_outer - 0.024_73).abs() < 5e-4,
-            "{}",
-            m.pin_to_outer
-        );
-        assert!(
-            (m.pin_to_inner - 0.025_56).abs() < 5e-4,
-            "{}",
-            m.pin_to_inner
-        );
-        // The tread: the wheel node's 4.34 local scale and 180° Y rotation are composed away, and
-        // the two-disc station reads its true rim about the authored axle.
-        assert!(
-            (m.wheel_tread - 0.386_97).abs() < 2e-3,
-            "tread {}",
-            m.wheel_tread
-        );
-        // Idler rim, measured from the AUTHORED origin — and now the two agree. This assertion used
-        // to band 0.34583 because the authored origin sat 3.9 mm off the rim's true axis, so
-        // origin-derived and circle-fitted radii DISAGREED by exactly that offset. The origin was
-        // corrected in the model (it now lands within 0.6 um of the rim's least-squares centre), so
-        // the honest number is the rim itself, 0.3419.
-        //
-        // The band stays tighter than the other pins for the original reason: a quiet return to a
-        // vertex-DERIVED centre would put the centre ~7 mm off (the idler's vertex median is that
-        // far from its axle), inflating this reading well past ±3 mm. So this still catches the
-        // regression the authored-origin switch exists to prevent.
-        assert!(
-            (m.idler_radius - 0.341_9).abs() < 3e-3,
-            "idler rim {} — is this measured from the node origin?",
-            m.idler_radius
-        );
-        assert!(
-            m.sprocket_center.x < 0.0 && m.idler_center.x > 0.0,
-            "front/rear"
-        );
-    }
+    // RETIRED 2026-08-08: `tiger_glb_drives_the_model`, the end-to-end read that pinned this
+    // module's outputs — pitch, plane_x, width, pin_to_outer, pin_to_inner, wheel_tread,
+    // idler_radius — to the literal values of the 2026-07-23 audit of `tiger_1.glb`.
+    //
+    // WHY IT IS GONE, and why deleting it is not a loss of coverage. It asserted the dimensions of
+    // ONE INSTANCE. Every number in it was a fact about the Tiger's mesh rather than about this
+    // module's behaviour, so the rebuilt track shoe moved five of them at once — plane_x +1.243 mm,
+    // width -1.256 mm, and the pin_to_outer/pin_to_inner pair collapsing from an 0.812 mm asymmetry
+    // to symmetric — and the test could only be re-pinned, never satisfied. A test that a correct
+    // asset change is guaranteed to break is measuring the asset, not the code. ADR-0034 (`tanks
+    // are data, no per-tank overrides`) rules that class out: a second tank would have needed a
+    // second copy of this test, which is the definition of a per-tank override living in the suite.
+    //
+    // WHAT STILL COVERS THIS MODULE, all of it below and none of it Tiger-shaped: the read either
+    // measures the glb or aborts (`refuse`), a road-wheel station's node origin IS its axle, the
+    // axle-origin tolerance trips on a side-plane offset, and pitch ignores the pins' abstract
+    // lateral placement. Those are properties of the derivation, and they hold for any tank.
+    //
+    // The route-hash and slope-park pins are the same class and are deliberately NOT touched here;
+    // they go with the generalization slice.
 
     /// The claim the authored-origin datum rests on, checked against the shipped asset rather than
     /// assumed: a road-wheel station's node origin IS its axle. In the side plane it agrees with the
