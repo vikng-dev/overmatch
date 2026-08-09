@@ -1297,8 +1297,8 @@ mod tests {
     /// Walk one sweep ray and report how many presence intervals the crossing resolved into.
     ///
     /// `walk_ray` rather than a hit count, because that IS the contract: a ray exactly on a shared
-    /// edge may legitimately be claimed by BOTH incident triangles, and the walk's coincidence
-    /// clustering reduces that to one toggle. What must never happen is a toggle going missing.
+    /// edge is legitimately claimed by BOTH incident triangles, and they name that edge, so the walk
+    /// reads one crossing. What must never happen is a crossing going missing.
     fn sweep_walks(collider: &Collider, origin: Vec3, axis: Vec3) -> Result<usize, WalkError> {
         let length = SWEEP_STANDOFF * 2.0;
         let node = Entity::from_raw_u32(1).expect("a test entity index");
@@ -1709,9 +1709,9 @@ mod tests {
     /// box corner where four faces meet, rotated off every axis, and steps the origin one ULP at a
     /// time across it.
     ///
-    /// The claim is the walk's, not a hit count's: a ray on the corner may be claimed by several
-    /// faces at once and the coincidence clustering reduces that to one toggle. What must never
-    /// happen is a toggle going missing, which the corridor reports as a `WalkError`.
+    /// The claim is the walk's, not a hit count's: a ray on the corner is claimed by the whole fan,
+    /// and every face of it names that welded vertex, so the walk reads one contact. What must never
+    /// happen is a crossing going missing, which the corridor reports as a `WalkError`.
     #[test]
     fn a_ray_through_a_shared_vertex_is_claimed_by_the_fan() {
         let vertices = sweep_vertices();

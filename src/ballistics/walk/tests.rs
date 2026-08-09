@@ -330,7 +330,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
 /// Several faces incident on one shared VERTEX arrive at one `t` with differing normals. Still one
 /// crossing — multiplicity of faces is not multiplicity of material.
 #[test]
-fn a_shared_vertex_cluster_is_one_crossing() {
+fn a_shared_vertex_fan_is_one_crossing() {
     let volumes = table(&[(1, 1000.0)]);
     let mut hits = Vec::new();
     for (index, normal) in [
@@ -2891,148 +2891,57 @@ fn ulps(t: f32, steps: i32) -> f32 {
     f32::from_bits((t.to_bits() as i32 + steps) as u32)
 }
 
-/// A FACE BETWEEN A PLATE'S TWO FACES MUST NOT ERASE THE PLATE.
+/// NOTHING BRIDGES, BECAUSE NOTHING GROUPS.
 ///
-/// The plate is 20 ULP thick at `t = 1 m` — 2.4 µm against a 1.4 µm window, so its entry and its
-/// exit are NOT one boundary and the crossing is real. A single tangent face at the midpoint is
-/// within the window of each of them, and nothing else.
+/// The whole bridging class — a stray face inside a plate's own thickness merging that plate's entry
+/// with its exit, and a chain of such faces reaching across an air gap — existed because crossings
+/// were grouped by PROXIMITY. They are grouped by identity now: a face of another volume shares
+/// neither shell nor contact with the plate's faces, so there is nothing for it to join.
 ///
-/// If coincidence is transitive, that one face merges the entry with the exit, the plate reduces to
-/// a zero-measure touch, and the walk returns success having charged nothing: no cost, no run, no
-/// presence, no event. That is the free-penetration class the whole module exists to refuse.
+/// The plate here is 8 ULP thick at `t = 1 m` — inside the window that used to do the grouping —
+/// with a foreign face at its midpoint and forty more chained across the gap beyond it.
+/// Both plates keep their own boundaries and the air between them survives as air.
 #[test]
-fn a_bridging_face_cannot_erase_the_plate_it_sits_inside() {
-    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
-    let laws = WalkLaws::default();
-    let (enter, exit) = (1.0f32, ulps(1.0, 20));
-    let mid = ulps(1.0, 10);
-    assert!(
-        !coincident(enter, exit, &laws),
-        "the plate must be thicker than one window, or there is nothing to preserve",
-    );
-    assert!(
-        coincident(enter, mid, &laws) && coincident(mid, exit, &laws),
-        "the bridging face must be within the window of BOTH plate faces",
-    );
-
-    let mut hits = plate(1, 1, enter, exit);
-    hits.push(FaceHit {
-        volume: volume(2),
-        primitive: prim(2),
-        shell: 0,
-        contact: Contact::Face(7),
-        triangle: 7,
-        t: mid,
-        true_normal: Vec3::X,
-    });
-    let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws).expect("the plate resolves");
-
-    assert_eq!(
-        walked.runs.len(),
-        1,
-        "the plate is one crossing: {walked:#?}"
-    );
-    assert_eq!(
-        walked.presence.iter().map(|p| p.entity).collect::<Vec<_>>(),
-        vec![volume(1)],
-        "the plate is present",
-    );
-    assert_eq!(
-        walked.presence[0].chord,
-        exit - enter,
-        "the whole 20 ULP is charged",
-    );
-    assert!(
-        walked.cost >= 1000.0 * (exit - enter),
-        "cost {} lost material",
-        walked.cost,
-    );
-}
-
-/// THE SAME, WITH EVERY FACE PAIRED — nothing here is a graze, a tangent or a stray triangle.
-///
-/// A high-factor plate 20 ULP thick, and a low-factor solid whose ENTRY happens to land between its
-/// two faces. Transitive coincidence merges the plate's entry and exit through that entry face; the
-/// plate then toggles nothing and vanishes from the walk entirely, while the soft volume around it
-/// is charged in full. The round reads 800 where it should read 1000.
-#[test]
-fn a_bridging_entry_cannot_erase_a_high_factor_plate() {
-    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
-    let laws = WalkLaws::default();
-    let (enter, exit) = (1.0f32, ulps(1.0, 20));
-    let mut hits = plate(1, 1, enter, exit);
-    hits.extend(plate(2, 2, ulps(1.0, 10), 1.5));
-    let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both solids resolve");
-
-    let mut present: Vec<Entity> = walked.presence.iter().map(|p| p.entity).collect();
-    present.sort();
-    let mut expected = vec![volume(1), volume(2)];
-    expected.sort();
-    assert_eq!(
-        present, expected,
-        "the plate is a primitive of its own and must be reported: {walked:#?}",
-    );
-    let plate = walked
-        .presence
-        .iter()
-        .find(|presence| presence.entity == volume(1))
-        .expect("the plate is present");
-    assert_eq!(plate.chord, exit - enter, "the plate's own chord");
-    // 800 over the soft volume, and the plate's 20 ULP charged at 1000 rather than at 800.
-    assert!(
-        walked.cost > 800.0 * (1.5 - enter),
-        "cost {} charged the plate at the soft factor or not at all",
-        walked.cost,
-    );
-}
-
-/// A CHAIN OF BRIDGING FACES CANNOT REACH ACROSS AN AIR GAP.
-///
-/// Coincidence chains, so a face every window links the next: forty tangent faces a fraction of a
-/// window apart cover twenty-seven windows of ray. Unbounded, that chain is one cluster, and the
-/// plate that ends where it starts and the plate that begins where it ends are one boundary — the
-/// air between them, and both plates' own faces, reduced to a single event.
-///
-/// `topology_cluster_windows` is the ceiling that stops it. The two plates keep their own boundaries
-/// and the gap survives as air.
-#[test]
-fn a_chain_of_bridging_faces_cannot_span_more_than_the_ceiling() {
+fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
     let volumes = table(&[(1, 1000.0), (2, 800.0), (3, 600.0)]);
     let laws = WalkLaws::default();
-    let (exit, entry) = (1.0f32, ulps(1.0, 320));
-    let mut hits = plate(1, 1, 0.5, exit);
-    hits.extend(plate(2, 2, entry, 1.5));
+    let (enter, exit) = (1.0f32, ulps(1.0, 8));
+    assert!(
+        coincident(enter, exit, &laws),
+        "the plate must be thinner than the retired window, or it proves nothing",
+    );
+
+    let mut hits = plate(1, 1, enter, exit);
+    // A high-factor plate's entry landing between the thin plate's two faces …
+    hits.extend(plate(2, 2, ulps(1.0, 4), 1.5));
+    // … and a chain of tangent faces reaching from the thin plate across the air beyond it.
     for step in 0..40 {
-        let t = ulps(exit, step * 8);
-        assert!(
-            coincident(ulps(exit, step * 8 - 8), t, &laws),
-            "each link must be within a window of the last, or the chain is not a chain",
-        );
         hits.push(FaceHit {
             volume: volume(3),
             primitive: prim(3),
             shell: 0,
-            contact: Contact::Face(step as u32),
-            triangle: step as u32,
-            t,
+            contact: Contact::Face(step),
+            triangle: step,
+            t: ulps(exit, (step as i32) * 8),
             true_normal: Vec3::X,
         });
     }
-    let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both plates resolve");
+    let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both solids resolve");
 
-    let air = walked
-        .spans
+    let plate = walked
+        .presence
         .iter()
-        .find(|span| span.factor == 0.0 && span.start > 0.5 && span.end < 1.5)
-        .unwrap_or_else(|| panic!("the gap between the plates was swallowed: {walked:#?}"));
-    assert!(
-        air.end - air.start > 0.5 * (entry - exit),
-        "most of the gap must survive: {air:?}",
-    );
+        .find(|presence| presence.entity == volume(1))
+        .expect("the thin plate is present");
     assert_eq!(
-        walked.presence.len(),
-        2,
-        "two plates, whatever bridges them: {walked:#?}",
+        plate.chord,
+        exit - enter,
+        "the whole 20 ULP is its own chord"
+    );
+    assert!(
+        walked.cost > 800.0 * (1.5 - enter),
+        "cost {} charged the plate at the soft factor or not at all",
+        walked.cost,
     );
 }
 
@@ -3258,23 +3167,123 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
     assert_eq!(exit_first.cost, 0.0);
 }
 
-/// CLUSTERING NEVER CHARGES LESS THAN THE EXACT UNION FIELD.
+/// A CHORD THE CORRIDOR CANNOT EXPRESS IS REFUSED BY NAME, NOT CHARGED AS ZERO.
+///
+/// Two distinct certified contacts of one shell whose `t` land on the same f32 bits bound real
+/// material — the corner clip whose chord shrinks continuously below one ULP is the ordinary way to
+/// get there. Reading the pair as a zero-length touch would be a silent free crossing of whatever
+/// they actually bound, so the walk says so instead.
+#[test]
+fn a_chord_that_collides_on_one_f32_t_is_a_named_refusal() {
+    let volumes = table(&[(1, 1000.0)]);
+    let error = walk_ray(
+        0,
+        &corridor(2.0, plate(1, 1, 1.0, 1.0)),
+        &volumes,
+        &WalkLaws::default(),
+    )
+    .expect_err("an unrepresentable chord is not a zero one");
+    let WalkError::UnrepresentableChord { key, t, .. } = error else {
+        panic!("expected a named refusal, got {error:?}");
+    };
+    assert_eq!(key.shell, 0);
+    assert_eq!(t, 1.0);
+}
+
+/// A BOUNDARY BURIED UNDER EQUAL-OR-HIGHER FACTOR FIRES NOTHING (§13.4).
+///
+/// A thin shell has ordinary entrance and exit crossings — and they are silent wherever the union
+/// hides them. Inside a same-factor overlap there is no field step, so there is no ricochet, no
+/// spall, no impact and no normal to attribute; the events belong to the face that actually moves
+/// the field.
+#[test]
+fn a_boundary_buried_under_equal_factor_fires_nothing() {
+    let volumes = table(&[(1, 1000.0), (2, 1000.0), (3, 10.0)]);
+    let mut hits = plate(1, 0, 0.25, 0.75);
+    // A second shell wholly inside the first, at the same factor, and a soft one inside both.
+    hits.extend(plate(2, 1, 0.30, 0.70));
+    hits.extend(plate(3, 2, 0.40, 0.60));
+    let walked = walk(&corridor(2.0, hits), &volumes);
+
+    assert_eq!(
+        walked
+            .events
+            .iter()
+            .map(|event| (event.kind, event.t))
+            .collect::<Vec<_>>(),
+        vec![(BoundaryKind::Entrance, 0.25), (BoundaryKind::Exit, 0.75),],
+        "only the exposed union boundary is an event: {:#?}",
+        walked.events,
+    );
+    assert_eq!(
+        walked.cost, 500.0,
+        "and the buried volumes charge nothing extra"
+    );
+}
+
+/// A SEED CARRIES EVERY SHELL, NOT EVERY PRIMITIVE.
+///
+/// A corridor restarting inside two shells of one primitive that declared one presence meets two
+/// exits and underflows. The seed is per shell, so the restart is a lookup on rays already walked.
+#[test]
+fn a_restart_seeds_each_shell_of_one_primitive_separately() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let mut hits = shell_plate(1, 0, 0, 0.25, 1.25);
+    hits.extend(shell_plate(1, 0, 1, 0.30, 1.10));
+    let walked = walk(&corridor(2.0, hits), &volumes);
+
+    let inside = walked.inside_at(0.5, &laws);
+    assert_eq!(
+        inside,
+        vec![
+            ShellKey {
+                volume: volume(1),
+                primitive: prim(0),
+                shell: 0,
+            },
+            ShellKey {
+                volume: volume(1),
+                primitive: prim(0),
+                shell: 1,
+            },
+        ],
+        "both shells are named: {inside:?}",
+    );
+
+    // And a corridor seeded with them closes; seeded with only one, the other's exit is loud.
+    let exits = || {
+        vec![
+            shell_plate(1, 0, 0, -1.0, 0.75).remove(1),
+            shell_plate(1, 0, 1, -1.0, 0.60).remove(1),
+        ]
+    };
+    let mut resumed = corridor(2.0, exits());
+    resumed.initial_presence = inside.clone();
+    walk_ray(0, &resumed, &volumes, &laws).expect("both seeded shells close");
+
+    let mut half = corridor(2.0, exits());
+    half.initial_presence = vec![inside[0]];
+    assert!(matches!(
+        walk_ray(0, &half, &volumes, &laws),
+        Err(WalkError::UnexpectedExit { .. })
+    ));
+}
+
+/// SURFACE IDENTITY NEVER CHARGES LESS THAN THE EXACT UNION FIELD.
 ///
 /// Four hundred randomised fields of six overlapping plates, drawn onto a lattice of hot spots a
-/// few ULP wide so their boundaries pile up inside the topology window and the reduction has plenty
-/// to collapse.
+/// few ULP wide so their boundaries pile up inside the finest distinction the corridor can express.
 ///
-/// TWO FAMILIES, because the reduction has two ways to lose material. The first two hundred cases
-/// are centimetres thick — four orders above the window — so no plate is a graze and the risk is a
-/// cluster swallowing a boundary. The second two hundred are one to eight ULP thick, entirely
-/// INSIDE the window, so every plate is a pairwise-coincident pair and the whole charge rests on
-/// the graze rule.
+/// TWO FAMILIES. The first two hundred cases are centimetres thick — four orders above the lattice
+/// — so the risk is a boundary going missing between neighbours. The second two hundred are one to
+/// eight ULP thick, so every plate is a chord at the very limit of representability and the whole
+/// charge rests on those chords surviving as chords.
 ///
-/// The reference is `∫ max(factor) dt` over the intervals as authored. The walk's own cost must
-/// DOMINATE it: a cluster may charge the wider of the factors either side of it across its own
-/// width, and may never charge the narrower.
+/// The reference is `∫ max(factor) dt` over the intervals as authored, and the walk's own cost must
+/// match it: with pairing per surface there is no reduction left to over- or under-charge with.
 #[test]
-fn clustering_never_charges_less_than_the_exact_union_field() {
+fn surface_identity_never_charges_less_than_the_exact_union_field() {
     let factors = [1000.0f32, 800.0, 600.0, 1200.0];
     let volumes = table(&[
         (1, factors[0]),
@@ -3305,9 +3314,8 @@ fn clustering_never_charges_less_than_the_exact_union_field() {
             };
             if sub_window {
                 assert!(
-                    coincident(enter, exit, &WalkLaws::default()),
-                    "case {case}: the family is only a test of the graze rule if the pair is one \
-                     window wide",
+                    exit > enter,
+                    "case {case}: a sub-ULP family case must still bound a positive chord",
                 );
             }
             hits.extend(plate(vol, p, enter, exit));
@@ -3335,8 +3343,7 @@ fn clustering_never_charges_less_than_the_exact_union_field() {
             "case {case}: charged {} against an authored {truth}",
             walked.cost,
         );
-        // And the other side of it: what a cluster's width can over-charge is the cluster's width,
-        // which is microns.
+        // And the other side of it: nothing over-charges either.
         assert!(
             walked.cost as f64 <= truth + 0.1,
             "case {case}: charged {} against an authored {truth}",
