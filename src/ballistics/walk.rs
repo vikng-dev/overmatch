@@ -407,6 +407,15 @@ pub struct Span {
     pub start: f32,
     pub end: f32,
     pub factor: f32,
+    /// Whether this stretch's factor is a coincidence cluster's GRAZE BOUND — the conservative
+    /// charge for a net-zero cluster, whose faces bound material the reduction cannot resolve —
+    /// rather than material some primitive is reported present in.
+    ///
+    /// It is charged like any other span and it is charged wherever spans are read, which is the
+    /// whole point: declining it is a silent under-charge. What it may not do is reach the event
+    /// stream, so [`weld_runs`] folds its cost into the material segment beside it instead of
+    /// letting it become a factor step of its own.
+    pub graze: bool,
 }
 
 impl Span {
@@ -811,6 +820,8 @@ pub fn walk_ray(
         after: f32,
         entry_normal: Option<Vec3>,
         exit_normal: Option<Vec3>,
+        /// Whether the level this transition rises TO is a graze bound (see [`Span::graze`]).
+        graze: bool,
     }
     let mut transitions: Vec<Transition> = Vec::new();
 
@@ -965,21 +976,21 @@ pub fn walk_ray(
                     any_exit = true;
                 }
                 Toggle::Graze => {
-                    // A further shell of a primitive the ray is ALREADY inside (§13.7) charges
-                    // nothing new: its presence is open across the whole cluster and its factor is
-                    // already in both `before` and `after`.
+                    // A NET-ZERO CLUSTER CROSSES NO BOUNDARY, SO IT IS COST AND NOTHING ELSE.
+                    //
+                    // What the faces bound is real — the reduction cannot tell a plate thinner than
+                    // the window from a corner the ray only brushes — so the cluster's level carries
+                    // it and the round pays for it. What it must NOT carry is a boundary: §13.6
+                    // forbids fabricated events, and presence, an entrance normal and an exit's
+                    // spall budget are not bounded by the cluster's microns. Ricochet,
+                    // normalization, impact and attribution are discrete outcomes, and a tangent
+                    // whose two incident faces happened to round to different bits would decide
+                    // them.
+                    //
+                    // A primitive the ray is ALREADY inside charges nothing new either: its factor
+                    // is in both `before` and `after` across the whole cluster.
                     if !field.open.contains_key(&key) {
-                        // The shell's own faces bound the charge, and its presence is REPORTED: a
-                        // charged stretch with no primitive behind it would reach the run with no
-                        // entry volume to name. The interval is the cluster's, not the pair's,
-                        // because that is the stretch the field level below is applied over — wider
-                        // than the pair by at most the cluster's own width, and never narrower.
                         graze = graze.max(volumes.factor(key.volume)?);
-                        intervals.push((key, opens_at, closes_at));
-                        entry_normal += entry_sum;
-                        exit_normal += exit_sum;
-                        any_entry = true;
-                        any_exit = true;
                     }
                 }
                 Toggle::Touch => {}
@@ -992,6 +1003,10 @@ pub fn walk_ray(
         // a rise lands on the cluster's first face, a fall on its last, and an unchanged field
         // emits nothing. A graze is the case that needs both steps at once.
         let level = before.max(after).max(graze);
+        // Whether the level ABOVE the field either side of the cluster is the graze bound rather
+        // than material anything reported present. That stretch is charged and never welded away,
+        // but it names no boundary, so it must not reach the event stream as one.
+        let grazed = graze > before.max(after);
         let entry_normal = any_entry.then_some(entry_normal);
         let exit_normal = any_exit.then_some(exit_normal);
         if level.to_bits() != before.to_bits() {
@@ -1001,6 +1016,7 @@ pub fn walk_ray(
                 after: level,
                 entry_normal,
                 exit_normal,
+                graze: grazed,
             });
         }
         if after.to_bits() != level.to_bits() {
@@ -1010,6 +1026,7 @@ pub fn walk_ray(
                 after,
                 entry_normal,
                 exit_normal,
+                graze: false,
             });
         }
     }
@@ -1032,22 +1049,26 @@ pub fn walk_ray(
     } else {
         transitions[0].before
     };
+    let mut graze = false;
     for transition in &transitions {
         if transition.t > cursor {
             spans.push(Span {
                 start: cursor,
                 end: transition.t,
                 factor,
+                graze,
             });
             cursor = transition.t;
         }
         factor = transition.after;
+        graze = transition.graze;
     }
     if corridor.length > cursor {
         spans.push(Span {
             start: cursor,
             end: corridor.length,
             factor,
+            graze,
         });
     }
 
@@ -1153,9 +1174,38 @@ fn weld_runs(
         let end = spans[raw_runs[to].1 - 1].end;
         let mut segments: Vec<MaterialSegment> = Vec::new();
         let mut cost_acc = 0.0f64;
+        // A GRAZE BOUND IS COST, NOT A STEP. A net-zero cluster's level sits above the material
+        // either side of it, so left as a segment of its own it would open and close a factor step
+        // inside the run — an upward step and a downward one with a spall budget — for a cluster
+        // that crossed no boundary. Its cost is folded into the material segment beside it instead:
+        // the run's total, the welded exit's budget and every span integral are unchanged, and the
+        // event stream never learns of it. A run that is NOTHING but graze keeps its own segments
+        // (it has no material to fold into) and is skipped whole by [`boundary_events`].
+        let material = raw_runs[from..=to]
+            .iter()
+            .flat_map(|run| &spans[run.0..run.1])
+            .any(|span| !span.graze);
+        let mut pending: Option<(f32, f32, f64)> = None;
         for run in &raw_runs[from..=to] {
             for span in &spans[run.0..run.1] {
                 cost_acc += span.cost();
+                if span.graze && material {
+                    match segments.last_mut() {
+                        Some(last) => {
+                            last.end = span.end;
+                            last.material += span.end - span.start;
+                            last.cost = (last.cost as f64 + span.cost()) as f32;
+                        }
+                        // The run OPENS on a graze bound: hold it until the first material segment
+                        // arrives and extend that one backwards over it.
+                        None => {
+                            let held = pending.get_or_insert((span.start, span.end, 0.0));
+                            held.1 = span.end;
+                            held.2 += span.cost();
+                        }
+                    }
+                    continue;
+                }
                 match segments.last_mut() {
                     // Coalesce across a welded void so an equal-factor sandwich reads as ONE
                     // stretch — that is what makes the welded exit's spall budget the SUMMED cost
@@ -1165,13 +1215,17 @@ fn weld_runs(
                         last.material += span.end - span.start;
                         last.cost = (last.cost as f64 + span.cost()) as f32;
                     }
-                    _ => segments.push(MaterialSegment {
-                        start: span.start,
-                        end: span.end,
-                        factor: span.factor,
-                        material: span.end - span.start,
-                        cost: span.cost() as f32,
-                    }),
+                    _ => {
+                        let held = segments.is_empty().then(|| pending.take()).flatten();
+                        segments.push(MaterialSegment {
+                            start: held.map_or(span.start, |held| held.0),
+                            end: span.end,
+                            factor: span.factor,
+                            material: span.end - span.start
+                                + held.map_or(0.0, |held| held.1 - held.0),
+                            cost: (span.cost() + held.map_or(0.0, |held| held.2)) as f32,
+                        })
+                    }
                 }
             }
         }
@@ -1253,6 +1307,14 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
         let at = |t: f32| corridor.origin + corridor.axis * t;
+        // A RUN WITH NO PRIMITIVE BEHIND IT IS A GRAZE BOUND, AND A GRAZE IS NOT AN EVENT (§13.6).
+        // Every stretch of real material carries the presence interval of whatever bounds it; a
+        // stretch that carries none is a net-zero cluster's conservative charge, and it names no
+        // volume, no entrance normal and no exit to spall from. Its cost stays in the spans, which
+        // is where the field integral reads it.
+        if run.primitives.is_empty() {
+            continue;
+        }
         let Some(first) = run.segments.first() else {
             continue;
         };

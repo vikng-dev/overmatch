@@ -2682,7 +2682,7 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
     assert_eq!(once.primitives, twice.primitives);
 }
 
-/// A SHELL THINNER THAN THE WINDOW IS CHARGED, NOT ERASED.
+/// A SHELL THINNER THAN THE WINDOW IS CHARGED — AND CHARGED IS ALL IT IS.
 ///
 /// The manifold gate asks a ballistic volume for closure and positive signed volume. It does NOT
 /// ask for a minimum thickness, so a closed, outward-wound `1 m × 1 m × 0.953674 µm` plate is legal
@@ -2690,15 +2690,16 @@ fn a_duplicated_shell_in_one_primitive_changes_nothing() {
 /// window at that distance.
 ///
 /// Reduced by tolerance alone, that pair is one boundary and the primitive reads entry-AND-exit: a
-/// touch, toggling nothing. The walk then returns success having charged nothing — no cost, no run,
-/// no presence, no event — for 0.0009536743 reference-metres of steel it certainly crossed. That is
-/// the same free-penetration class as the bridged plate, reached from inside one primitive instead
-/// of through a third party.
+/// touch, toggling nothing. The walk then returns success having charged nothing — no cost — for
+/// 0.0009536743 reference-metres of steel it certainly crossed. That is the same free-penetration
+/// class as the bridged plate, reached from inside one primitive instead of through a third party.
 ///
-/// Only bit equality may collapse the pair, because only bit equality is a statement about the
-/// geometry rather than about the tolerance that grouped it.
+/// So the cluster's level carries it and the cost is real. But its net occupancy is ZERO, and the
+/// reduction cannot tell this shell from the tangent that produces the identical face pair — so it
+/// crosses no boundary: no presence to attribute, no entrance for ricochet or normalization to read,
+/// no exit and no spall budget (§13.6, no fabricated events).
 #[test]
-fn a_shell_thinner_than_the_window_is_charged_not_erased() {
+fn a_shell_thinner_than_the_window_is_charged_and_no_more() {
     let volumes = table(&[(1, 1000.0)]);
     let laws = WalkLaws::default();
     let (enter, exit) = (1.0f32, ulps(1.0, 8));
@@ -2716,27 +2717,27 @@ fn a_shell_thinner_than_the_window_is_charged_not_erased() {
         "charged {} against an exact {truth}",
         walked.cost,
     );
-    assert_eq!(
-        walked.runs.len(),
-        1,
-        "the shell is one crossing: {walked:#?}"
-    );
-    assert_eq!(
-        walked.runs[0].entry_volume,
-        volume(1),
-        "a charged run names the volume that charged it",
-    );
-    assert_eq!(
-        walked.presence.iter().map(|p| p.entity).collect::<Vec<_>>(),
-        vec![volume(1)],
-        "the shell is present: {walked:#?}",
+    // And the charge is in the CANONICAL SPANS, which is where every field integral reads it —
+    // the disc's cost profile included.
+    let charged: f64 = walked
+        .spans
+        .iter()
+        .filter(|span| span.graze)
+        .map(|span| (span.end - span.start) as f64 * span.factor as f64)
+        .sum();
+    assert!(
+        charged >= truth * (1.0 - 1.0e-6),
+        "the graze bound is not in the spans: {:#?}",
+        walked.spans,
     );
     assert!(
-        walked.presence[0].chord >= exit - enter,
-        "chord {} lost material",
-        walked.presence[0].chord,
+        walked.presence.is_empty() && walked.primitives.is_empty(),
+        "a net-zero cluster attributes no presence: {walked:#?}",
     );
-    assert!(!walked.events.is_empty(), "a crossing is an event");
+    assert!(
+        walked.events.is_empty(),
+        "and fires no entrance, no exit and no spall: {walked:#?}",
+    );
 }
 
 /// A CORNER IS ONE CLUSTER, HOWEVER MANY FACES MEET AT IT.
@@ -2751,14 +2752,17 @@ fn a_shell_thinner_than_the_window_is_charged_not_erased() {
 /// one shard's exit is reduced alone, and it faces a depth that has not opened. Chained, the corner
 /// is one batch and both shards read entry-AND-exit.
 ///
-/// What the corner is NOT is free. The brushed shard's two faces are 4 µm apart, not bit-equal, so
-/// the reduction cannot tell a corner from a 4 µm plate and charges it as one (`Toggle::Graze`) —
-/// microns of steel it may not have crossed, which is the direction the doctrine allows. The claim
-/// the test still holds is the one clustering exists for: ONE contact, whatever the corner's face
-/// count, and no error.
+/// What the corner is NOT is free, and what it is NOT either is a boundary. The brushed shard's two
+/// faces are 4 µm apart, not bit-equal, so the reduction cannot tell a corner from a 4 µm plate: its
+/// factor joins the cluster's level and the round pays for the corner's own width. Its net occupancy
+/// is zero, so it reports no presence, no entrance and no exit — a shard the ray merely touched may
+/// not be struck, ricocheted off, or spalled out of (§13.6).
+///
+/// The brushed shard is authored HARDER than the one the ray crosses, so the charge is visible in
+/// the cost rather than hidden under the crossing's own factor.
 #[test]
 fn a_corner_graze_spread_wider_than_the_window_is_one_contact() {
-    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
+    let volumes = table(&[(1, 1000.0), (2, 1200.0)]);
     let (near, far) = (Vec3::new(0.1, 0.0, -1.0), Vec3::new(-0.1, 0.0, -1.0));
     let mut hits = Vec::new();
     // The shard the ray genuinely crosses, from well before the corner to well after it.
@@ -2789,23 +2793,38 @@ fn a_corner_graze_spread_wider_than_the_window_is_one_contact() {
         "chord {} lost the plate itself",
         crossed.chord,
     );
-    // … and the brushed one for the corner's own width, at most, and never for less than the 4 µm
-    // its own two faces bracket.
-    let brushed = walked
-        .presence
-        .iter()
-        .find(|presence| presence.entity == volume(2))
-        .expect("the brushed shard is charged, not erased");
+    // … and the brushed one is CHARGED but never REPORTED.
+    let plate = 1000.0 * (8.754_433 - 8.371_457);
     let corner = 8.564_676 - 8.5646715;
     assert!(
-        (8.564_676 - 8.564_672..=corner).contains(&brushed.chord),
-        "chord {} is not the corner's own width",
-        brushed.chord,
+        walked.cost > plate,
+        "cost {walked_cost} declined the corner the brushed shard bounds",
+        walked_cost = walked.cost,
     );
     assert!(
-        walked.cost <= 1000.0 * (8.754_433 - 8.371_457) + 800.0 * corner,
+        walked.cost <= plate + 1200.0 * corner,
         "cost {} charged more than the crossing plus the whole corner",
         walked.cost,
+    );
+    assert!(
+        walked
+            .presence
+            .iter()
+            .all(|presence| presence.entity != volume(2)),
+        "the brushed shard is not present: {walked:#?}",
+    );
+    assert_eq!(
+        walked
+            .events
+            .iter()
+            .map(|event| (event.kind, event.t))
+            .collect::<Vec<_>>(),
+        vec![
+            (BoundaryKind::Entrance, 8.371_457),
+            (BoundaryKind::Exit, 8.754_433),
+        ],
+        "the corner fires no event of its own: {:#?}",
+        walked.events,
     );
 }
 
