@@ -8,6 +8,9 @@
 #   cargo build --locked --release --bin overmatch
 #   scripts/perf/run-frame-sweep.sh /tmp/frame-sweep-$(date +%Y%m%d)
 #
+# Overnight runs: `caffeinate -u` does NOT reset the screensaver timer, and backlight 0 means
+# the window is occluded — either way frames are fiction. Keep the display on and lit.
+#
 # PLACEMENT — where the probe tanks stand relative to the camera, and therefore which side of the
 # shoe LOD's 500 m swap they render on (src/track/link_view.rs). Two sweeps, same runner:
 #   near (default):  scripts/perf/run-frame-sweep.sh $OUT-near

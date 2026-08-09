@@ -12,3 +12,7 @@ shipped game build is permitted; redistribution of the asset as an asset is not.
 the project owner 2026-07-27 (see assets/tiger_1/cc.txt for the original acceptance). Promoted
 from tiger_1.blend into this shared library 2026-08-07 and renamed "Rubber"
 (BaseColor/Roughness/Normal/Displacement at 2048x2048, packed).
+
+Dormant BlenderKit surface (unexported, fake-user datablocks in tiger_1.blend — each needs a
+license line HERE if it is ever exported): "Matte Tire Rubber", "Black Rubber Hex Pattern",
+"Latex Rubber Balloon".
