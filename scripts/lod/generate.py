@@ -378,14 +378,35 @@ class Candidates:
     Pareto minimum, with no monotonicity assumed anywhere: everything smaller has been measured and
     rejected. Rejections are nearly free — a single sampled point above the target ends the proof —
     which is what makes an exhaustive scan affordable.
+
+    VALIDITY FIRST, THEN DEVIATION. A candidate is admitted to the search only if it already passes
+    the structural gates; an invalid one is discarded the moment it is built and never costs a
+    deviation measurement. This is a PRUNE, not a new gate: the checks are
+    `measure.validity_gate_failures` — the same list, the same thresholds, the same shared function
+    the final certification calls — and every level that ships is still certified on its DECODED
+    SHIPPED BYTES afterwards, in the order ADR 0033 ratifies. Nothing here can admit something
+    certification would refuse; it can only stop the search from proposing it.
+
+    WHY IT MATTERS, MEASURED. The rung is a triangle BUDGET question, and the decimator's output at
+    a given count is not guaranteed clean: cutting the rebuilt 1520-triangle shoe, the first count
+    that met the 15.560 mm target (390) carried one triangle 0.079 mm tall against a 0.147 mm floor.
+    Searching deviation-first found it, certified it, and failed the whole chain — with no way to
+    reach the valid candidate a few counts away, because the search had already committed. Filtering
+    first, the scan simply steps past that count and settles on a neighbouring one that is both
+    valid and inside the target. An invalid candidate ends nothing: the walk continues to its
+    neighbours, because "no valid candidate at exactly N triangles" is not "no valid candidate".
     """
 
-    def __init__(self, source_obj, source_surface, gates):
+    def __init__(self, source_obj, source_surface, gates, source_validity, floor_m):
         self.source_obj = source_obj
         self.source = source_surface
         self.gates = gates
+        # The pre-filter's inputs, identical to the ones `certify` will use on the shipped bytes.
+        self.source_validity = source_validity
+        self.floor_m = floor_m
         self.entries = {}
         self.outputs = []          # candidate KEYS (geometry digests), ascending by triangles
+        self.rejected = {}         # digest -> the failures that kept it out of the search
         self.evaluations = 0
         self.decimations = 0
 
@@ -434,7 +455,26 @@ class Candidates:
             # same count, and keying by the count discarded one of them arbitrarily — possibly the
             # only one that met a rung. The digest is the identity; the count is an attribute.
             key = surface.digest()
+            # THE PRUNE. Structural validity is decided here, before the candidate can cost a
+            # deviation measurement — and a rejection is remembered by digest, because the same
+            # mesh is reachable from several budgets and re-measuring it would pay for the check
+            # once per budget. Returning normally (rather than raising or returning None) is what
+            # keeps the staircase walking: this budget yields nothing, its neighbours may.
+            if key in self.rejected:
+                return reached, key
             if key not in self.entries:
+                validity = surface.validity(self.gates, self.floor_m)
+                # `require_baked_tangents=False`: tangents are baked by the EXPORTER, so a Blender
+                # candidate legitimately carries none yet. Every other gate in the shared list
+                # applies, and the baked-tangent gate is still enforced at certification, on the
+                # bytes where it is a real question.
+                failures = M.validity_gate_failures(
+                    validity, self.source_validity, self.gates, require_baked_tangents=False
+                )
+                if failures:
+                    self.rejected[key] = failures
+                    log(f"    reject {surface.tri_count:>5} tris  {failures[0]}")
+                    return reached, key
                 # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
                 # means re-running the decimator, and its input is a BUDGET; feeding back the
                 # post-cleanup triangle count would ask for a different mesh than the one certified.
@@ -466,7 +506,8 @@ class Candidates:
             raise GenerationError("enumeration", str(exc)) from exc
         log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
             f"{ceiling_tris}] from {self.decimations} decimations "
-            f"({limits['max_enumeration_spot_checks']} spot checks passed, "
+            f"({len(self.rejected)} discarded as structurally invalid before any deviation "
+            f"measurement, {limits['max_enumeration_spot_checks']} spot checks passed, "
             f"{time.time() - started:.0f}s)")
         return self.outputs
 
@@ -680,7 +721,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "tangents_are_baked": True,
     }
 
-    candidates = Candidates(obj, source, CONFIG.GATES)
+    candidates = Candidates(obj, source, CONFIG.GATES, source_validity, floor_m)
     # Once per asset, shared by every rung: the complete set of meshes this decimator can produce.
     candidates.enumerate_outputs(floor_tris, source.tri_count)
     levels = [l0]
