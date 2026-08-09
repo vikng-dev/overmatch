@@ -202,6 +202,19 @@ pub struct WalkLaws {
     /// TOPOLOGY domain — relative term, so a corridor anchored far downrange (where f32 spacing is
     /// coarser) still groups the two triangles of one face diagonal.
     pub topology_rel: f32,
+    /// TOPOLOGY domain — how many coincidence windows ONE cluster may span in total.
+    ///
+    /// Coincidence chains from face to face, because the surfaces meeting at one geometric point are
+    /// each computed from their own triangle's plane and so spread over several ULP: MEASURED on the
+    /// bound Tiger, a four-face corner spread 4.8 µm against a 4.4 µm window (1.09 windows). A chain
+    /// with no ceiling is single-linkage and unbounded, and a cluster is a claim that its faces are
+    /// ONE boundary — so the chain is capped, and the cap is above the widest corner measured and
+    /// well below any authored feature.
+    ///
+    /// It is not a safety knob. What a cluster's width can cost is bounded by the reduction's
+    /// direction (entries open at the cluster's first face, exits close at its last), so widening
+    /// this over-charges and never erases.
+    pub topology_cluster_windows: f32,
     /// A face is tangent — and toggles nothing — when `|axis · n|` is at most this. A tangent face
     /// bounds zero material, so refusing to toggle on it cannot lose armour.
     pub tangent_cos: f32,
@@ -290,6 +303,7 @@ impl Default for WalkLaws {
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
+            topology_cluster_windows: 2.0,
             tangent_cos: 1.0e-4,
             weld_perp: 2.0e-3,
             // ~60°: parallel plates read -1; anything less opposed is not two sides of one gap.
@@ -557,6 +571,16 @@ pub(crate) fn coincident(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
     (t - anchor).abs() <= laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs())
 }
 
+/// Whether `t` is still inside the widest span ONE cluster may cover, measured from its anchor.
+///
+/// Coincidence chains, so without a ceiling a cluster grows for as long as faces keep arriving
+/// within a window of each other, and a cluster is a claim that its faces name ONE boundary.
+fn within_cluster_span(anchor: f32, t: f32, laws: &WalkLaws) -> bool {
+    (t - anchor).abs()
+        <= laws.topology_cluster_windows
+            * (laws.topology_abs + laws.topology_rel * anchor.abs().max(t.abs()))
+}
+
 /// What one primitive's faces in one coincident cluster mean.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Toggle {
@@ -672,20 +696,39 @@ pub fn walk_ray(
     let mut i = 0usize;
     while i < order.len() {
         let anchor = order[i].t;
-        // Coincidence chains, and is not measured from the cluster's first face.
+        // Coincidence CHAINS, under two ceilings.
         //
-        // The faces meeting at ONE geometric point do not share a `t`: each is computed from its own
-        // triangle's plane, so a corner where four surfaces meet spreads its four `t` over several
-        // ULP. Anchoring the window on the first of them puts the last one outside it whenever that
-        // spread exceeds the window — the cluster splits mid-corner, one primitive's entry lands in
-        // the next cluster, and its exit is left facing a depth that has not opened yet.
+        // Chaining, because the faces meeting at ONE geometric point do not share a `t`: each is
+        // computed from its own triangle's plane, so a corner where four surfaces meet spreads its
+        // four `t` over several ULP. Anchoring the window on the first of them puts the last one
+        // outside it whenever that spread exceeds the window — the cluster splits mid-corner, one
+        // primitive's entry lands in the next cluster, and its exit is left facing a depth that has
+        // not opened yet.
         //
-        // The cluster's WIDTH is therefore bounded by how many faces meet at the point rather than by
-        // the window alone, which is the geometry's bound and not an adversary's: a chain needs a
-        // face every few microns to grow, and `topology_abs` is already stated as being below any
-        // authored feature.
+        // Chaining alone is single-linkage, which is transitive and therefore unbounded: one face
+        // every few microns merges boundaries arbitrarily far apart. Two ceilings bound it.
+        //
+        // TOTAL SPAN — a cluster claims its faces are one boundary, so it may not reach further than
+        // `topology_cluster_windows` windows from its anchor, whatever bridges the gap.
+        //
+        // ONE PRIMITIVE'S OWN FACES — a face may only join a cluster that already holds a face of
+        // the SAME primitive if the two are pairwise coincident. A primitive reads entry-AND-exit in
+        // one cluster only when its own two faces name one point, which is a graze; a bridging face
+        // belonging to anything else can no longer merge an entry with an exit that are a real
+        // traversal apart, and so can no longer reduce a plate to a no-op.
         let mut j = i + 1;
         while j < order.len() && coincident(order[j - 1].t, order[j].t, laws) {
+            let t = order[j].t;
+            if !within_cluster_span(anchor, t, laws) {
+                break;
+            }
+            let own = order[i..j]
+                .iter()
+                .find(|hit| hit.key() == order[j].key())
+                .map(|hit| hit.t);
+            if own.is_some_and(|own| !coincident(own, t, laws)) {
+                break;
+            }
             j += 1;
         }
         let cluster = &order[i..j];
@@ -735,9 +778,17 @@ pub fn walk_ray(
         let mut exit_normal = Vec3::ZERO;
         let mut any_entry = false;
         let mut any_exit = false;
-        // The cluster's own position: the FIRST face reached, exactly representable and independent
-        // of how many triangles happen to sit on it.
-        let t = anchor;
+        // A CLUSTER COLLAPSES IN THE CONSERVATIVE DIRECTION. Material appears at the FIRST face of
+        // the cluster and disappears at its LAST, so the factor charged anywhere inside a cluster is
+        // `max(before, after)` and dominates the field's true value there. Collapsing both onto one
+        // end would charge `before` past an entry, or `after` before an exit, and either reading is
+        // a stretch of armour up to the cluster's own width that the walk declines to charge.
+        //
+        // The one thing a cluster still declines to charge is a primitive whose OWN entry and exit
+        // are pairwise coincident — a graze, at most one window wide, which is what `Toggle::Touch`
+        // is for.
+        let opens_at = anchor;
+        let closes_at = cluster.last().map_or(anchor, |hit| hit.t);
 
         for (key, toggle, triangles, normal) in toggles {
             match toggle {
@@ -749,7 +800,7 @@ pub fn walk_ray(
                         // entity count does not move; only the depth that must be unwound.
                         Some((depth, _)) => *depth += 1,
                         None => {
-                            field.open.insert(key, (1, t));
+                            field.open.insert(key, (1, opens_at));
                             *field.per_entity.entry(key.volume).or_insert(0) += 1;
                         }
                     }
@@ -764,7 +815,7 @@ pub fn walk_ray(
                         return Err(WalkError::UnexpectedExit {
                             sample,
                             key,
-                            t,
+                            t: closes_at,
                             triangles,
                         });
                     };
@@ -780,7 +831,7 @@ pub fn walk_ray(
                     if let Some(count) = field.per_entity.get_mut(&key.volume) {
                         *count -= 1;
                     }
-                    intervals.push((key, open_at, t));
+                    intervals.push((key, open_at, closes_at));
                     exit_normal += normal;
                     any_exit = true;
                 }
@@ -791,7 +842,9 @@ pub fn walk_ray(
         let after = field.max_factor(volumes)?;
         if after.to_bits() != before.to_bits() {
             transitions.push(Transition {
-                t,
+                // A rise is caused by the cluster's entries and lands on its first face; a fall is
+                // caused by its exits and lands on its last.
+                t: if after > before { opens_at } else { closes_at },
                 before,
                 after,
                 entry_normal: any_entry.then_some(entry_normal),
@@ -861,10 +914,13 @@ pub fn walk_ray(
 
     // Boundary normals, looked up by the transition that opens/closes each run.
     let normal_at = |t: f32, entry: bool| -> Vec3 {
+        // Several transitions can share one `t`: a cluster that ends between two faces at the same
+        // distance leaves a step on each side of the split. The normal is taken from whichever of
+        // them carries the face this boundary is asking for.
         transitions
             .iter()
-            .find(|transition| transition.t == t)
-            .and_then(|transition| {
+            .filter(|transition| transition.t == t)
+            .find_map(|transition| {
                 if entry {
                     transition.entry_normal
                 } else {

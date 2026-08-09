@@ -2727,3 +2727,252 @@ fn a_corner_graze_spread_wider_than_the_window_is_still_one_touch() {
         walked.runs
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Coincidence clustering: what a cluster may and may not swallow
+// ---------------------------------------------------------------------------------------------
+
+/// `t` moved by `steps` f32 ULP — the finest perturbation a corridor can express at that distance,
+/// and the scale the topology window is written against.
+fn ulps(t: f32, steps: i32) -> f32 {
+    f32::from_bits((t.to_bits() as i32 + steps) as u32)
+}
+
+/// A FACE BETWEEN A PLATE'S TWO FACES MUST NOT ERASE THE PLATE.
+///
+/// The plate is 20 ULP thick at `t = 1 m` — 2.4 µm against a 1.4 µm window, so its entry and its
+/// exit are NOT one boundary and the crossing is real. A single tangent face at the midpoint is
+/// within the window of each of them, and nothing else.
+///
+/// If coincidence is transitive, that one face merges the entry with the exit, the plate reduces to
+/// a zero-measure touch, and the walk returns success having charged nothing: no cost, no run, no
+/// presence, no event. That is the free-penetration class the whole module exists to refuse.
+#[test]
+fn a_bridging_face_cannot_erase_the_plate_it_sits_inside() {
+    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
+    let laws = WalkLaws::default();
+    let (enter, exit) = (1.0f32, ulps(1.0, 20));
+    let mid = ulps(1.0, 10);
+    assert!(
+        !coincident(enter, exit, &laws),
+        "the plate must be thicker than one window, or there is nothing to preserve",
+    );
+    assert!(
+        coincident(enter, mid, &laws) && coincident(mid, exit, &laws),
+        "the bridging face must be within the window of BOTH plate faces",
+    );
+
+    let mut hits = plate(1, 1, enter, exit);
+    hits.push(FaceHit {
+        volume: volume(2),
+        primitive: prim(2),
+        triangle: 7,
+        t: mid,
+        true_normal: Vec3::X,
+    });
+    let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws).expect("the plate resolves");
+
+    assert_eq!(
+        walked.runs.len(),
+        1,
+        "the plate is one crossing: {walked:#?}"
+    );
+    assert_eq!(
+        walked.presence.iter().map(|p| p.entity).collect::<Vec<_>>(),
+        vec![volume(1)],
+        "the plate is present",
+    );
+    assert_eq!(
+        walked.presence[0].chord,
+        exit - enter,
+        "the whole 20 ULP is charged",
+    );
+    assert!(
+        walked.cost >= 1000.0 * (exit - enter),
+        "cost {} lost material",
+        walked.cost,
+    );
+}
+
+/// THE SAME, WITH EVERY FACE PAIRED — nothing here is a graze, a tangent or a stray triangle.
+///
+/// A high-factor plate 20 ULP thick, and a low-factor solid whose ENTRY happens to land between its
+/// two faces. Transitive coincidence merges the plate's entry and exit through that entry face; the
+/// plate then toggles nothing and vanishes from the walk entirely, while the soft volume around it
+/// is charged in full. The round reads 800 where it should read 1000.
+#[test]
+fn a_bridging_entry_cannot_erase_a_high_factor_plate() {
+    let volumes = table(&[(1, 1000.0), (2, 800.0)]);
+    let laws = WalkLaws::default();
+    let (enter, exit) = (1.0f32, ulps(1.0, 20));
+    let mut hits = plate(1, 1, enter, exit);
+    hits.extend(plate(2, 2, ulps(1.0, 10), 1.5));
+    let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both solids resolve");
+
+    let mut present: Vec<Entity> = walked.presence.iter().map(|p| p.entity).collect();
+    present.sort();
+    let mut expected = vec![volume(1), volume(2)];
+    expected.sort();
+    assert_eq!(
+        present, expected,
+        "the plate is a primitive of its own and must be reported: {walked:#?}",
+    );
+    let plate = walked
+        .presence
+        .iter()
+        .find(|presence| presence.entity == volume(1))
+        .expect("the plate is present");
+    assert_eq!(plate.chord, exit - enter, "the plate's own chord");
+    // 800 over the soft volume, and the plate's 20 ULP charged at 1000 rather than at 800.
+    assert!(
+        walked.cost > 800.0 * (1.5 - enter),
+        "cost {} charged the plate at the soft factor or not at all",
+        walked.cost,
+    );
+}
+
+/// A CHAIN OF BRIDGING FACES CANNOT REACH ACROSS AN AIR GAP.
+///
+/// Coincidence chains, so a face every window links the next: forty tangent faces a fraction of a
+/// window apart cover twenty-seven windows of ray. Unbounded, that chain is one cluster, and the
+/// plate that ends where it starts and the plate that begins where it ends are one boundary — the
+/// air between them, and both plates' own faces, reduced to a single event.
+///
+/// `topology_cluster_windows` is the ceiling that stops it. The two plates keep their own boundaries
+/// and the gap survives as air.
+#[test]
+fn a_chain_of_bridging_faces_cannot_span_more_than_the_ceiling() {
+    let volumes = table(&[(1, 1000.0), (2, 800.0), (3, 600.0)]);
+    let laws = WalkLaws::default();
+    let (exit, entry) = (1.0f32, ulps(1.0, 320));
+    let mut hits = plate(1, 1, 0.5, exit);
+    hits.extend(plate(2, 2, entry, 1.5));
+    for step in 0..40 {
+        let t = ulps(exit, step * 8);
+        assert!(
+            coincident(ulps(exit, step * 8 - 8), t, &laws),
+            "each link must be within a window of the last, or the chain is not a chain",
+        );
+        hits.push(FaceHit {
+            volume: volume(3),
+            primitive: prim(3),
+            triangle: step as u32,
+            t,
+            true_normal: Vec3::X,
+        });
+    }
+    let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both plates resolve");
+
+    let air = walked
+        .spans
+        .iter()
+        .find(|span| span.factor == 0.0 && span.start > 0.5 && span.end < 1.5)
+        .unwrap_or_else(|| panic!("the gap between the plates was swallowed: {walked:#?}"));
+    assert!(
+        air.end - air.start > 0.5 * (entry - exit),
+        "most of the gap must survive: {air:?}",
+    );
+    assert_eq!(
+        walked.presence.len(),
+        2,
+        "two plates, whatever bridges them: {walked:#?}",
+    );
+}
+
+/// AN EXIT CLOSES AT THE CLUSTER'S LAST FACE, NOT AT ITS FIRST.
+///
+/// The direction is the whole reason a cluster cannot erase cost: whatever a cluster's width, the
+/// material inside it is charged at the larger of the factors either side. Collapsing an exit onto
+/// the cluster's anchor instead would decline to charge everything between the two.
+#[test]
+fn a_spread_exit_closes_at_the_far_face() {
+    let volumes = table(&[(1, 1000.0)]);
+    let far = ulps(1.0, 3);
+    let mut hits = plate(1, 1, 0.5, 1.0);
+    // The same face's second triangle, three ULP downrange — one boundary, two crossings.
+    hits.push(FaceHit {
+        volume: volume(1),
+        primitive: prim(1),
+        triangle: 77,
+        t: far,
+        true_normal: AXIS,
+    });
+    let walked = walk(&corridor(2.0, hits), &volumes);
+
+    assert_eq!(walked.presence[0].spans, vec![(0.5, far)]);
+    assert_eq!(
+        walked.runs.len(),
+        1,
+        "one boundary, one run: {:#?}",
+        walked.runs
+    );
+}
+
+/// CLUSTERING NEVER CHARGES LESS THAN THE EXACT UNION FIELD.
+///
+/// Two hundred randomised fields of six overlapping plates, drawn onto a lattice of hot spots a few
+/// ULP wide so their boundaries pile up inside the topology window and the reduction has plenty to
+/// collapse. Every plate is centimetres thick — four orders above the window — so none of them is a
+/// graze and nothing here may be dropped.
+///
+/// The reference is `∫ max(factor) dt` over the intervals as authored. The walk's own cost must
+/// DOMINATE it: a cluster may charge the wider of the factors either side of it across its own
+/// width, and may never charge the narrower.
+#[test]
+fn clustering_never_charges_less_than_the_exact_union_field() {
+    let factors = [1000.0f32, 800.0, 600.0, 1200.0];
+    let volumes = table(&[
+        (1, factors[0]),
+        (2, factors[1]),
+        (3, factors[2]),
+        (4, factors[3]),
+    ]);
+    let mut state = 0x2026_0809_u64;
+    let mut rng = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) as u32
+    };
+
+    for case in 0..200 {
+        let mut hits = Vec::new();
+        let mut authored: Vec<(f32, f32, f32)> = Vec::new();
+        for p in 0..6u32 {
+            let vol = 1 + p % 4;
+            let enter = ulps(1.0 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12);
+            let exit = ulps(1.05 + (rng() % 5) as f32 * 2.0e-5, (rng() % 24) as i32 - 12);
+            hits.extend(plate(vol, p, enter, exit));
+            authored.push((enter, exit, factors[(vol - 1) as usize]));
+        }
+        let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &WalkLaws::default())
+            .unwrap_or_else(|error| panic!("case {case}: {error:?}"));
+
+        let mut edges: Vec<f32> = authored.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+        edges.sort_by(f32::total_cmp);
+        edges.dedup();
+        let mut truth = 0.0f64;
+        for pair in edges.windows(2) {
+            let (lo, hi) = (pair[0] as f64, pair[1] as f64);
+            let mid = 0.5 * (lo + hi);
+            let factor = authored
+                .iter()
+                .filter(|(a, b, _)| (*a as f64) <= mid && mid < (*b as f64))
+                .fold(0.0f32, |max, (_, _, factor)| max.max(*factor));
+            truth += factor as f64 * (hi - lo);
+        }
+
+        assert!(
+            walked.cost as f64 >= truth * (1.0 - 1.0e-6),
+            "case {case}: charged {} against an authored {truth}",
+            walked.cost,
+        );
+        // And the other side of it: what a cluster's width can over-charge is the cluster's width,
+        // which is microns.
+        assert!(
+            walked.cost as f64 <= truth + 0.1,
+            "case {case}: charged {} against an authored {truth}",
+            walked.cost,
+        );
+    }
+}
