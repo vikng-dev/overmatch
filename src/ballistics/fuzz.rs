@@ -1263,6 +1263,119 @@ pub fn fuzz(config: &FuzzConfig) -> Result<Report, String> {
     Ok(app.world().resource::<FuzzOutput>().0.clone())
 }
 
+/// One ray's corridor, dumped.
+///
+/// The report names a failing ray by `(seed, index)` and calls that a complete reproduction recipe.
+/// This is what consumes it: the ray generator is re-run for that index alone and every crossing
+/// along the corridor is printed in order, with the volume that owns it, the triangle that produced
+/// it and the sign that makes it an entry or an exit. Which is what a `WalkError` has to be read
+/// against — the error names one primitive, and the defect is almost always in what its neighbours
+/// did or did not report.
+#[derive(Resource, Clone)]
+struct ReplayJob {
+    config: FuzzConfig,
+    ray: u64,
+}
+
+#[derive(Resource, Default)]
+struct ReplayOutput(String);
+
+fn run_replay(
+    job: Res<ReplayJob>,
+    mut output: ResMut<ReplayOutput>,
+    tank: Res<ProbeTank>,
+    spares: Res<Spares>,
+    world: ProjectileMarchWorld,
+    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    aabbs: Query<&ColliderAabb>,
+    names: Query<(Entity, &Name)>,
+    roots: Query<&GlobalTransform>,
+    mut commands: Commands,
+) {
+    use std::fmt::Write as _;
+    let root = roots
+        .get(tank.0)
+        .expect("the probe tank has a global transform");
+    let to_local = root.affine().inverse();
+    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+    let context = ResolveContext {
+        world: &world,
+        colliders: &colliders,
+        armor: &armor,
+        deposit: false,
+        laws: walk::WalkLaws::default(),
+    };
+    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
+        panic!("the probe tank presented no ballistic collider to fuzz");
+    };
+    let pass = Pass {
+        context,
+        spares: *spares,
+        targets: BTreeMap::new(),
+        names: names
+            .iter()
+            .map(|name| (name.0, name.1.as_str().to_owned()))
+            .collect(),
+        to_local,
+        local_min,
+        local_max,
+    };
+
+    let ray = ray_for(job.ray, &job.config, center, radius);
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "seed {} ray {}: origin {:?} direction {:?} length {}",
+        job.config.seed, job.ray, ray.origin, ray.direction, ray.length
+    );
+    match pass.probe_parts(&ray) {
+        Ok((corridor, _)) => {
+            let mut hits = corridor.hits;
+            hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+            for hit in &hits {
+                let along = ray.direction.dot(hit.true_normal);
+                let _ = writeln!(
+                    text,
+                    "  t={:.7} {:>3} {:<28} volume={:?} primitive={:?} triangle={} axis·n={:+.6}",
+                    hit.t,
+                    if along < 0.0 { "IN" } else { "OUT" },
+                    pass.volume_name(hit.volume),
+                    hit.volume,
+                    hit.primitive,
+                    hit.triangle,
+                    along,
+                );
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(text, "  the corridor would not collect: {error:?}");
+        }
+    }
+    let _ = writeln!(
+        text,
+        "walk: {}",
+        match pass.probe(&ray, 0.0) {
+            Ok(_) => "resolved".to_owned(),
+            Err(error) => format!("{error:?}"),
+        }
+    );
+    output.0 = text;
+    commands.remove_resource::<ReplayJob>();
+}
+
+/// Re-fire one ray of a run and dump its corridor — see [`ReplayJob`].
+pub fn replay_ray(config: &FuzzConfig, ray: u64) -> Result<String, String> {
+    let mut app = probe_world()?;
+    app.init_resource::<ReplayOutput>()
+        .insert_resource(ReplayJob {
+            config: config.clone(),
+            ray,
+        })
+        .add_systems(Update, run_replay.run_if(resource_exists::<ReplayJob>));
+    app.update();
+    Ok(app.world().resource::<ReplayOutput>().0.clone())
+}
+
 /// `cargo run --bin ballistic_fuzzer [-- --rays N --seed S --out PATH]` — the bake-scale sweep.
 ///
 /// Exit code 1 means the gate FAILED: a violated invariant, a walk error, or an unblessed corridor
@@ -1274,6 +1387,7 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
         ..default()
     };
     let mut out = std::path::PathBuf::from("target/ballistic-fuzzer-report.md");
+    let mut replay: Vec<u64> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -1281,8 +1395,15 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
             "--rays" => config.rays = value()?.parse()?,
             "--seed" => config.seed = value()?.parse()?,
             "--out" => out = value()?.into(),
+            "--replay" => replay.push(value()?.parse()?),
             other => return Err(format!("unknown flag {other}").into()),
         }
+    }
+    if !replay.is_empty() {
+        for ray in replay {
+            println!("{}", replay_ray(&config, ray)?);
+        }
+        return Ok(());
     }
 
     let report = fuzz(&config)?;
