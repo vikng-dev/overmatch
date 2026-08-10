@@ -42,6 +42,61 @@ pub(super) fn solid(material: &str, origin: [f32; 3]) -> Primitive {
     }
 }
 
+/// The unit box's outward-wound index buffer, over [`BOX_CORNERS`].
+const BOX: [u32; 36] = [
+    0, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2,
+    6, 1, 6, 5,
+];
+
+const BOX_CORNERS: [[f32; 3]; 8] = [
+    [0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0],
+    [0.0, 1.0, 0.0],
+    [0.0, 0.0, 1.0],
+    [1.0, 0.0, 1.0],
+    [1.0, 1.0, 1.0],
+    [0.0, 1.0, 1.0],
+];
+
+/// The unit box at `origin`, with the corner at index 6 wherever the caller puts it.
+fn box_at(material: &str, origin: [f32; 3], sixth: [f32; 3]) -> Primitive {
+    Primitive {
+        material: material.to_owned(),
+        positions: BOX_CORNERS
+            .iter()
+            .enumerate()
+            .map(|(corner, position)| {
+                let position = if corner == 6 { sixth } else { *position };
+                [
+                    origin[0] + position[0],
+                    origin[1] + position[1],
+                    origin[2] + position[2],
+                ]
+            })
+            .collect(),
+        indices: BOX.to_vec(),
+    }
+}
+
+/// The unit box at `origin`: a second passing solid, and the control [`pierced`] is one corner away
+/// from.
+pub(super) fn boxed(material: &str, origin: [f32; 3]) -> Primitive {
+    box_at(material, origin, BOX_CORNERS[6])
+}
+
+/// A closed, outward-wound, positive-volume solid that PASSES THROUGH ITSELF: [`boxed`] with the
+/// corner at `(1,1,1)` dragged out through the opposite `x = 0` wall to `(-0.5, 0.5, 0.5)`.
+///
+/// Every earlier gate still holds — no corner is repeated and no face is flat, each directed welded
+/// edge occurs once with its reverse once, and the one shell encloses `+1/6 m³` — so the embedding
+/// certificate is the only law left to refuse it. The three faces the moved corner belongs to now
+/// cross the `x = 0` wall: four of the six offending pairs share no welded corner at all, and two
+/// share one and meet far past it.
+pub(super) fn pierced(material: &str, origin: [f32; 3]) -> Primitive {
+    box_at(material, origin, [-0.5, 0.5, 0.5])
+}
+
 impl Node {
     pub(super) fn new(name: &str) -> Self {
         Self {

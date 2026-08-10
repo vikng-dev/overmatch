@@ -1341,7 +1341,7 @@ fn transform_bits_eq(a: &Transform, b: &Transform) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fixture::{CLOSED, Node, Primitive, solid};
+    use fixture::{CLOSED, Node, Primitive, pierced, solid};
 
     /// A registry substance, and a material name that is not one. Which two does not matter — what
     /// matters is that membership is decided by the registry and by nothing else.
@@ -1865,6 +1865,25 @@ mod tests {
                 .expect_err("an uncertified coordinate is refused");
             assert_eq!(refusals(&findings), ["L2.CERTIFIED_RANGE"]);
         }
+        // And through the door, so the law's refusal is one the report carries rather than one only
+        // a caller of the gate can see.
+        let (mut nodes, spec) = sound_vehicle();
+        let mut positions = solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions;
+        positions[3] = [0.0, 0.0, f32::from_bits(high.to_bits() + 1)];
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions,
+            indices: CLOSED.to_vec(),
+        });
+        let findings = verify("uncertified", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.CERTIFIED_RANGE"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+
         // Exact zero is legal and exact; the floor refuses what is merely NEAR zero.
         for inside in [0.0f32, -0.0, low, high] {
             let mut positions = tetrahedron(CLOSED.to_vec()).positions;
@@ -1893,6 +1912,24 @@ mod tests {
         let findings =
             gate("Repeated", &tetrahedron(repeated)).expect_err("a repeated corner is refused");
         assert_eq!(refusals(&findings)[0], "L2.EXACT_DEGENERACY");
+
+        // And through the door.
+        let (mut nodes, spec) = sound_vehicle();
+        let mut repeated = CLOSED.to_vec();
+        repeated.extend_from_slice(&[0, 1, 1]);
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions: solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions,
+            indices: repeated,
+        });
+        let findings = verify("repeated-corner", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.EXACT_DEGENERACY"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
 
         // One ulp off the line is a triangle, and the weld must not call it degenerate.
         let sliver = vec![
@@ -1951,10 +1988,27 @@ mod tests {
             .chunks_exact(3)
             .flat_map(|face| [face[0], face[2], face[1]])
             .collect();
-        let findings =
-            gate("Inverted", &tetrahedron(inverted)).expect_err("an inside-out shell is refused");
+        let findings = gate("Inverted", &tetrahedron(inverted.clone()))
+            .expect_err("an inside-out shell is refused");
         assert_eq!(refusals(&findings), ["L2.POSITIVE_SHELL_VOLUME"]);
         assert_eq!(findings[0].subject.name, "Inverted");
+
+        // Both laws through the door, so each one's refusal is a row of the one report.
+        for (id, indices) in [
+            ("L2.MANIFOLD_WINDING", closed[..9].to_vec()),
+            ("L2.POSITIVE_SHELL_VOLUME", inverted),
+        ] {
+            let (mut nodes, spec) = sound_vehicle();
+            nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+                material: SUBSTANCE.into(),
+                positions: solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions,
+                indices,
+            });
+            let findings = verify("hollow", &nodes, &spec);
+            assert_eq!(refusals(&findings), [id], "{}", render(&findings));
+            assert_eq!(findings[0].subject.name, "Plate");
+            assert!(has_error(&findings));
+        }
     }
 
     /// SAME-PRIMITIVE FACE-TO-FACE CONTACT IS REFUSED, AND THAT IS THE CONTRACT (§13.7).
@@ -2016,6 +2070,52 @@ mod tests {
             "{}",
             render(&findings)
         );
+    }
+
+    /// L2.SHELL_EMBEDDING — A SHELL THAT PASSES THROUGH ITSELF IS REFUSED, THROUGH THE WHOLE
+    /// CONTRACT.
+    ///
+    /// `fixture::pierced` is built to reach this law and no earlier one: it is closed, consistently
+    /// wound and encloses a positive volume, so the census and the volume gate both pass it and the
+    /// embedding certificate is the only thing between it and the walk. That is what the pair-level
+    /// witnesses in `embedding::tests` cannot say — they are handed a triangle list, not an asset —
+    /// and it is the whole reason this case is driven from the glb.
+    #[test]
+    fn a_shell_that_passes_through_itself_is_refused() {
+        // The gate's own three products first: the defect is not a census or a volume defect.
+        let solid = pierced(SUBSTANCE, [0.0, 0.0, 0.0]);
+        let geometry = ballistic(solid.positions.clone(), solid.indices.clone());
+        let findings = gate("Pierced", &geometry).expect_err("a pierced shell is refused");
+        assert_eq!(refusals(&findings), ["L2.SHELL_EMBEDDING"]);
+        assert!(
+            findings[0].evidence.contains("triangles 2 and 8")
+                && findings[0].evidence.contains("welded vertex 4"),
+            "{}",
+            render(&findings)
+        );
+
+        // And through the door: one glb, one spec sheet, one report.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(solid);
+        let findings = verify("pierced-shell", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.SHELL_EMBEDDING"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Plate");
+        assert_eq!(findings[0].check.severity, Severity::Error);
+        assert!(has_error(&findings), "the door exits non-zero on it");
+
+        // The same box with its corner where a box has one certifies: nothing about the mutation
+        // beyond the pierced corner is what refuses it.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate")
+            .child_of("Hull")
+            .holding(fixture::boxed(SUBSTANCE, [0.0, 0.0, 0.0]));
+        let findings = verify("intact-box", &nodes, &spec);
+        assert!(findings.is_empty(), "{}", render(&findings));
     }
 
     /// Weld-by-position is what makes the gate measure the SURFACE instead of the export's vertex
