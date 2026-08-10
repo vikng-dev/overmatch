@@ -244,8 +244,9 @@ jobs:
           cmake -S "${RUNNER_TEMP}/basis_universal" -B "${RUNNER_TEMP}/basis_universal/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build "${RUNNER_TEMP}/basis_universal/build"
+          # This tag's CMake links executables into the source tree's bin/, not the build tree.
           mkdir -p ~/.cache/overmatch/basisu
-          cp "${RUNNER_TEMP}/basis_universal/build/basisu" ~/.cache/overmatch/basisu/basisu
+          cp "${RUNNER_TEMP}/basis_universal/bin/basisu" ~/.cache/overmatch/basisu/basisu
 
       # The same predicate the door's preflight runs, in the same report shape, before anything long
       # starts. An install that produced another build fails here rather than inside the first asset.
