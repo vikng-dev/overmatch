@@ -32,7 +32,8 @@ by construction.
 
 Assets are **discovered**, never listed: an asset is a sibling trio `<id>.blend`, `<id>.tank.ron`,
 `<id>.glb` in one directory. Adding a second vehicle needs no hook edit. Discovery and hydration
-live in `scripts/hooks/pushed_assets.sh`, sourced by the hook.
+live in `scripts/hooks/pushed_assets.sh`, sourced by the hook and driven over synthetic revisions by
+`sh scripts/hooks/test_pushed_assets.sh` — by hand, and by the CI slice when there is one.
 
 It reads the **pushed revisions**, not the work tree: the trio's bytes come out of the pushed commit
 (its git-lfs pointers resolved against this clone's object store), because the work tree is a
