@@ -74,6 +74,17 @@ struct Face {
 /// `triangles` are welded corners in mesh order, `shells` the dense shell id of each, and
 /// `vertices` the canonical position of each welded id — the manifold gate's own three products,
 /// so this measures exactly the surface the gate proved closed.
+/// Whether a welded triangle encloses exactly zero area — the exact spelling of "has no plane".
+///
+/// `L2.EXACT_DEGENERACY` owns this, one law over both its spellings: repeated welded ids, and three
+/// DISTINCT ids on one line. [`certify_embedding`] is stated over triangles that have a plane, and
+/// its caller has already refused the ones that do not.
+pub(super) fn encloses_zero_area(position: &[[f32; 3]; 3]) -> bool {
+    plane_normal(&position.map(exact_point))
+        .iter()
+        .all(Int::is_zero)
+}
+
 pub(super) fn certify_embedding(
     triangles: &[[u32; 3]],
     shells: &[u32],
@@ -82,17 +93,6 @@ pub(super) fn certify_embedding(
     let mut by_shell: BTreeMap<u32, Vec<Face>> = BTreeMap::new();
     for (index, (corners, &shell)) in triangles.iter().zip(shells).enumerate() {
         let position = corners.map(|corner| vertices[corner as usize]);
-        // A triangle whose three distinct welded corners are collinear has no plane, so no
-        // predicate below has anything to decide against.
-        if plane_normal(&position.map(exact_point))
-            .iter()
-            .all(Int::is_zero)
-        {
-            return Err(format!(
-                "triangle {index} encloses zero exact area — its three welded corners are \
-                 collinear, so it has no plane and no side"
-            ));
-        }
         let mut low = position[0];
         let mut high = position[0];
         for corner in &position[1..] {
@@ -506,13 +506,23 @@ mod tests {
         assert!(err.contains("positive area"), "{err}");
     }
 
-    /// A triangle whose three DISTINCT welded corners are collinear has no plane, so nothing below
-    /// can decide a side against it.
+    /// The precondition this gate is stated over: a triangle with a plane. Three DISTINCT welded
+    /// corners on one line have none, and `L2.EXACT_DEGENERACY` refuses them before any pair is
+    /// tested — `super::tests::a_zero_area_face_is_refused` drives that end to end.
     #[test]
-    fn a_collinear_triangle_is_refused_before_any_pair_is_tested() {
-        let err = certify(&[[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]])
-            .expect_err("three points on a line are not a triangle");
-        assert!(err.contains("collinear"), "{err}");
+    fn a_collinear_triangle_encloses_exactly_zero_area() {
+        assert!(encloses_zero_area(&[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0]
+        ]));
+        assert!(!encloses_zero_area(&UNIT));
+        // One ulp of the coordinate off the line still has a plane, and this predicate is exact.
+        assert!(!encloses_zero_area(&[
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, f32::from_bits(2.0f32.to_bits() + 1) - 2.0, 0.0]
+        ]));
     }
 
     /// SHELLS ARE INDEPENDENT: two surfaces of one primitive may pass through each other, and this

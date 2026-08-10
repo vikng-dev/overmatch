@@ -95,6 +95,10 @@ name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
 
 [[bin]]
+name = "asset_verify"
+path = "src/bin/asset_verify.rs"
+
+[[bin]]
 name = "bitprobe"
 path = "src/bin/bitprobe.rs"
 required-features = ["bitprobe"]

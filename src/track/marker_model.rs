@@ -319,9 +319,10 @@ struct MeshMeasure {
     /// It is a stated fact, not an estimate, and that is the whole reason to prefer it: a rotation
     /// centre is something the rig DECLARES (Blender spins the wheel about this point), whereas any
     /// vertex statistic only ever approximates it and does so worst exactly where the mesh is least
-    /// regular. The `Sprocket_*` / `Idler_*` nodes carry a real axle origin
-    /// (`bake::tests::rotating_nodes_carry_their_own_axle_origin` pins that), so no vertex-statistic
-    /// estimator is needed. Only the lateral `x` is not on the axle mid-plane (the origin sits on the outer disc
+    /// regular. Every rotating node carries a real axle origin — the declared roadwheel stations
+    /// are pinned by `bake::tests::every_shipped_asset_passes_the_consumer_contract`, and the
+    /// `Sprocket_*` / `Idler_*` hubs are authored the same way — so no vertex-statistic estimator
+    /// is needed. Only the lateral `x` is not on the axle mid-plane (the origin sits on the outer disc
     /// row) — irrelevant, because every circle in this module is a side-plane `(z, y)` construction.
     origin: Vec3,
     /// Axis-aligned bounds of the mesh's vertices.

@@ -1,12 +1,15 @@
 """repair_source.py — fix the two defects in `assets/tiger_1/tiger_1.blend` AT THE SOURCE.
 
-    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py
-    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py -- --dry-run
+DONE, AND KEPT AS THE RECORD OF IT. This ran once, against one blend, and the repair it describes
+is in the committed source. It is not part of the standing door — nothing invokes it, and the door
+never edits a model — so it lives here in scratch rather than beside the source pass.
 
-THIS IS THE ONLY SCRIPT IN THE REPO THAT SAVES THE .BLEND. `export_tiger.py` never does — it
-swaps `Link`'s object data for the length of the export and puts it back — and that guarantee is
-load-bearing, because the artist's file is untracked and 145 MB. This one saves, once, explicitly,
-after every check below has passed.
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/scratch/repair_source.py
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/scratch/repair_source.py -- --dry-run
+
+THIS SCRIPT SAVES THE .BLEND, once, explicitly, after every check below has passed. The door never
+edits a model: `scripts/tank/asset_door.py` opens the stored file read-only and exports what it
+holds, so the only writer of the source is a human, or a repair like this one that says so.
 
 WHY IT EXISTS
 -------------
@@ -26,10 +29,10 @@ Two properties the shipped `tiger_1.glb` has, and the `.blend` did not:
     ADR 0033's branch; renders kept at `.agents/scratch/asset-diet-renders/`): 115 red pixels in
     128 M over 32 camera positions at 2 000 px, all coincident faces rather than holes.
 
-Both were previously REPLAYED onto every raw export by a surgery stage in `export_tiger.py`,
-using that pass's glb-surgery scripts. That stage is gone. A pipeline stage
-that repairs its input on every run is a workaround for a bad source; the source is now correct,
-and the export is a plain export again.
+Both were previously REPLAYED onto every raw export by a surgery stage in the retired Tiger-named
+export door, using that pass's glb-surgery scripts. That stage is gone, and so is the door. A
+pipeline stage that repairs its input on every run is a workaround for a bad source; the source is
+now correct, and the export is a plain export again.
 
 WHAT "IDENTICAL" MEANS HERE — DATA, NOT NAMES
 ---------------------------------------------
@@ -55,8 +58,8 @@ and does not save. Nothing here is a one-shot that corrupts the file if it runs 
 
 REFUSES LOUDLY. Any mismatch raises `Refused`, which derives from `SystemExit` because that is
 the only exception class `blender -b -P` reports through its exit code (an unhandled `Exception`
-prints a traceback and still exits 0 — measured, see `export_tiger.ExportError`). Nothing is
-written on any refusal path: every check runs before the first mutation.
+prints a traceback and still exits 0 — measured, 5.1.2). Nothing is written on any refusal path:
+every check runs before the first mutation.
 """
 
 import hashlib

@@ -3,21 +3,28 @@
 .DS_Store
 **/.DS_Store
 /handoff.md
-# The CANONICAL tank blend is tracked (LFS, `.gitattributes`): it is the source every committed
-# derivative — the glb, the LOD chain, the manifest — is cut from, so the two travel together and
-# CI can re-cut them. The shared material library is tracked for the same reason: every tank blend
-# links its substances from it, so a clone without it loads placeholders and the door refuses.
-# Everything else blend-shaped is local authoring scratch: Blender's own `.blend1`
-# rolling backup and the hand-made `.bak` snapshots an authoring session leaves beside it.
+# A CANONICAL blend is canonical BY LOCATION: `assets/<id>/<id>.blend` — one directory under
+# `assets/`, named after that directory, which is where the trio rule looks for a source and where
+# every derived path is cut from. Those are tracked (LFS, `.gitattributes`), because the committed
+# derivative — the glb, the LOD chain, the manifest — must travel with the source it was cut from or
+# nothing can re-cut it; the shared material library at `assets/materials/materials.blend` has that
+# shape too, and every tank blend links its substances out of it. A second vehicle is tracked by
+# that rule and edits nothing here. Everything else blend-shaped is local authoring scratch: a blend
+# anywhere else, Blender's own `.blend1` rolling backup, and the hand-made `.bak` snapshots a
+# session leaves beside it.
+#
+# THE NEGATION BELOW IS BROADER THAN THAT LAW and cannot be narrowed: a gitignore pattern has no way
+# to say "named after its own directory", so `!assets/*/*.blend` unignores every blend in an asset's
+# directory, `assets/tiger_1/scratch.blend` included. The canonical shape is stated where it is
+# executable — `assets_blend_shape` in `scripts/hooks/pushed_assets.sh`, which refuses a push, and
+# the CI assets job, which refuses the commit.
 *.blend
-!assets/tiger_1/tiger_1.blend
-!assets/materials/materials.blend
+!assets/*/*.blend
 *.blend1
 *.bak
 
-# Scratch output of `scripts/encode-tank-ktx2.sh` when it is run by hand with default arguments.
-# The BAKED glb is the tracked one (`assets/tiger_1/tiger_1.glb`); there is exactly one tank glb
-# in LFS and this line makes a second one impossible to commit by accident.
+# Scratch output of a hand-run texture bake. The BAKED glb is the tracked one; an asset ships one
+# glb and this line makes a second one impossible to commit by accident.
 *.mipped.glb
 
 # Firecrawl research scratch (web search/scrape cache)

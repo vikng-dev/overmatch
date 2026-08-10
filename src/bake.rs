@@ -3,7 +3,7 @@
 //! Invariant (ADR-0014): simulation construction uses synchronously extracted data, never a loaded
 //! scene. The shadow verifier compares that data with instantiated view geometry.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -12,11 +12,99 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
-mod embedding;
-
-use crate::spec::{TankSpec, TankSpecHandle};
+use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
 use crate::substances::SubstanceRegistry;
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
+
+mod embedding;
+#[cfg(test)]
+mod fixture;
+/// The one finding shape every stage of the asset door emits.
+mod report;
+
+use report::sorted;
+pub use report::{Check, Finding, Severity, Stage, Subject, SubjectKind, has_error, render};
+
+/// The L2 consumer contract, one static row per law. Severity is compiled in beside the id: every
+/// row is an error, because every row is a refusal to build the sim from this asset.
+static L2_SPEC: Check = Check {
+    id: "L2.SPEC",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "the tank RON parses, passes TankSpec::validate, and every typed node reference resolves \
+          to a model node",
+};
+/// Not a law about the model: the condition under which the laws below can be evaluated at all.
+static L2_DOCUMENT: Check = Check {
+    id: "L2.DOCUMENT",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "the GLB opens, holds a scene, resolves every buffer, and names every node uniquely",
+};
+static L2_ROLE_COHERENCE: Check = Check {
+    id: "L2.ROLE_COHERENCE",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "a mesh is either wholly a substance solid or wholly art; a declared collider is not \
+          armour and carries usable mesh data; every declared component and roadwheel is a \
+          ballistic node",
+};
+static L2_PRIMITIVE_FORM: Check = Check {
+    id: "L2.PRIMITIVE_FORM",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "a consumed primitive has POSITION data and a non-empty index buffer whose length is a \
+          multiple of three, every index in range",
+};
+static L2_UNIT_SCALE: Check = Check {
+    id: "L2.UNIT_SCALE",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "the composed authored scale of a ballistic node, and the authored scale of every node \
+          the rigid pose composition traverses, is bit-exactly (1, 1, 1)",
+};
+static L2_CERTIFIED_RANGE: Check = Check {
+    id: "L2.CERTIFIED_RANGE",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "every ballistic coordinate is exactly zero or inside CERTIFIED_RANGE in magnitude",
+};
+static L2_EXACT_DEGENERACY: Check = Check {
+    id: "L2.EXACT_DEGENERACY",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "after the exact-position weld, every triangle has three distinct welded ids and encloses \
+          exactly non-zero area",
+};
+static L2_MANIFOLD_WINDING: Check = Check {
+    id: "L2.MANIFOLD_WINDING",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "each directed welded edge occurs exactly once and its reverse exactly once",
+};
+static L2_POSITIVE_SHELL_VOLUME: Check = Check {
+    id: "L2.POSITIVE_SHELL_VOLUME",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "every edge-connected shell has finite, strictly positive signed volume",
+};
+/// The door's own row, not a law of the asset: the substance registry is DATA, and a lane
+/// verifying a REVISION must evaluate that revision's registry rather than whatever the running
+/// binary was compiled against. The door hands the file over; a file it cannot hand over is the
+/// door failing to feed the contract, which is a mechanical refusal of the same kind as an
+/// unpinned exporter — never a finding about the model.
+static DOOR_REGISTRY: Check = Check {
+    id: "door.registry",
+    stage: Stage::Door,
+    severity: Severity::Error,
+    law: "the substance registry the door supplied with --registry is readable and parses",
+};
+static L2_SHELL_EMBEDDING: Check = Check {
+    id: "L2.SHELL_EMBEDDING",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "two triangles of one shell meet only inside the welded feature they declare",
+};
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
 /// `GltfNode{index}` — `bevy_gltf::loader::gltf_ext::scene::node_name`), so scene entities and
@@ -205,8 +293,9 @@ fn classify(
     // physics-only meshes were exactly this case before the restructure.)
     let material = primitive.material().name()?;
     // Not a substance ⇒ ordinary art. The registry's `Unknown` arm IS the classifier; the error case
-    // is a name that only LOOKS like a substance, which the bind test's near-miss lint catches (a
-    // `.001` duplicate means the material-library link drifted from LINKED to appended).
+    // is a name that only LOOKS like a substance, which `L1.SUBSTANCE_IDENTITY` refuses at the
+    // source (a `.001` duplicate means the material-library link drifted from LINKED to appended,
+    // and only the .blend can tell a linked datablock from a copy of one).
     let substance = registry.get(material).ok()?;
     Some(PrimitiveSubstance {
         name: material.to_owned(),
@@ -251,6 +340,16 @@ pub(crate) fn certified_coordinate(value: f32) -> bool {
     magnitude == 0.0 || (magnitude >= CERTIFIED_RANGE.0 && magnitude <= CERTIFIED_RANGE.1)
 }
 
+/// One check emits one finding per subject: the first offender in the check's own deterministic
+/// order, and how many there are. A primitive that fails a law fails it thousands of times, and a
+/// report with one row per triangle is a report nobody reads.
+fn first_of(offenders: &[String]) -> Option<String> {
+    offenders.first().map(|first| match offenders.len() {
+        1 => first.clone(),
+        count => format!("{first} (and {} more)", count - 1),
+    })
+}
+
 /// The §13.6 per-primitive manifold gate: weld by position, then closed-manifold + consistent
 /// outward orientation per connected shell.
 ///
@@ -289,28 +388,57 @@ pub(crate) fn manifold_gate(
     index: usize,
     primitive: &MeshGeometry,
     scale: Vec3,
-) -> Result<ShellCertificate, String> {
-    let defect = |what: String| format!("node `{node}` primitive {index}: {what}");
+) -> Result<ShellCertificate, Vec<Finding>> {
+    let at = || Subject::node(node).element(format!("primitive {index}"));
+    let mut findings: Vec<Finding> = Vec::new();
 
     if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
-        return Err(defect(format!(
-            "{} indices is not a non-empty multiple of 3 — a substance primitive must be an \
-             indexed triangle soup",
-            primitive.indices.len()
-        )));
+        findings.push(Finding::new(
+            &L2_PRIMITIVE_FORM,
+            at(),
+            format!("{} indices", primitive.indices.len()),
+            "export the primitive as an indexed triangle soup — triangulate the mesh and keep the \
+             exporter's index buffer",
+        ));
     }
     // Bit-exact, not near: there is no scale that is almost 1.
     if scale.to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
-        return Err(defect(format!(
-            "composed authored scale is {scale:?}, not 1 — a ballistic node must be authored at \
-             unit scale (apply the object scale in the .blend and re-export)"
-        )));
+        findings.push(Finding::new(
+            &L2_UNIT_SCALE,
+            at(),
+            format!("composed authored scale {scale:?}"),
+            "apply the object scale in the .blend (Ctrl+A → Scale, on the node and every parent) \
+             and re-export",
+        ));
+    }
+    // A coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
+    // watertight kernel that has a bound to offer.
+    let uncertified: Vec<String> = primitive
+        .positions
+        .iter()
+        .enumerate()
+        .filter(|(_, position)| !position.iter().copied().all(certified_coordinate))
+        .map(|(vertex, position)| format!("vertex {vertex} at {position:?}"))
+        .collect();
+    if let Some(evidence) = first_of(&uncertified) {
+        findings.push(Finding::new(
+            &L2_CERTIFIED_RANGE,
+            at(),
+            evidence,
+            format!(
+                "move the geometry into 0 or {low:e}..={high:e} m in magnitude — the domain \
+                 `collect`'s watertight projection carries a proven error bound over",
+                low = CERTIFIED_RANGE.0,
+                high = CERTIFIED_RANGE.1,
+            ),
+        ));
+    }
+    if !findings.is_empty() {
+        return Err(sorted(findings));
     }
 
     // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
-    // pattern (otherwise two vertices at the same point can fail to weld and open a phantom seam);
-    // a coordinate outside [`CERTIFIED_RANGE`] cannot be welded, integrated, or projected by a
-    // watertight kernel that has a bound to offer.
+    // pattern; otherwise two vertices at the same point can fail to weld and open a phantom seam.
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
     let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
     // The canonical position of each welded id, which is what the embedding certificate measures:
@@ -320,16 +448,6 @@ pub(crate) fn manifold_gate(
     for position in &primitive.positions {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
-            if !certified_coordinate(*value) {
-                return Err(defect(format!(
-                    "vertex coordinate {position:?} is outside the certified range — a ballistic \
-                     coordinate must reach the corridor kernel as 0 or {low:e}..={high:e} m in \
-                     magnitude, which is the domain `collect`'s watertight projection carries a \
-                     proven error bound over",
-                    low = CERTIFIED_RANGE.0,
-                    high = CERTIFIED_RANGE.1,
-                )));
-            }
             *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
         }
         let next = canonical.len() as u32;
@@ -341,23 +459,64 @@ pub(crate) fn manifold_gate(
     }
 
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(primitive.indices.len() / 3);
+    let mut out_of_range: Vec<String> = Vec::new();
+    let mut degenerate: Vec<String> = Vec::new();
     for (triangle, corners) in primitive.indices.chunks_exact(3).enumerate() {
         let mut welded_corners = [0u32; 3];
+        let mut resolved = true;
         for (slot, &corner) in welded_corners.iter_mut().zip(corners) {
-            *slot = *welded.get(corner as usize).ok_or_else(|| {
-                defect(format!(
-                    "triangle {triangle} indexes vertex {corner}, out of range"
-                ))
-            })?;
+            match welded.get(corner as usize) {
+                Some(id) => *slot = *id,
+                None => {
+                    out_of_range.push(format!(
+                        "triangle {triangle} indexes vertex {corner} of {}",
+                        welded.len()
+                    ));
+                    resolved = false;
+                }
+            }
         }
+        if !resolved {
+            continue;
+        }
+        // ZERO AREA, in both its spellings. Repeated welded ids is the cheap one; three DISTINCT
+        // ids on one line is the other, and it is exact — the integer plane normal of the welded
+        // positions, not a float cross product with a threshold under it. A face with no
+        // orientation breaks edge parity and gives the embedding certificate no plane to intersect.
         let [a, b, c] = welded_corners;
         if a == b || b == c || a == c {
-            return Err(defect(format!(
-                "triangle {triangle} is degenerate after welding (corners {welded_corners:?}) — a \
-                 zero-area face has no orientation and breaks edge parity"
-            )));
+            degenerate.push(format!(
+                "triangle {triangle} welds to corners {welded_corners:?}"
+            ));
+        } else if embedding::encloses_zero_area(&welded_corners.map(|id| points[id as usize])) {
+            degenerate.push(format!(
+                "triangle {triangle} welds to corners {welded_corners:?}, which are collinear — it \
+                 encloses exactly zero area"
+            ));
         }
         triangles.push(welded_corners);
+    }
+    if let Some(evidence) = first_of(&out_of_range) {
+        findings.push(Finding::new(
+            &L2_PRIMITIVE_FORM,
+            at(),
+            evidence,
+            "re-export the primitive — its index buffer addresses vertices its POSITION accessor \
+             does not hold",
+        ));
+    }
+    if let Some(evidence) = first_of(&degenerate) {
+        findings.push(Finding::new(
+            &L2_EXACT_DEGENERACY,
+            at(),
+            evidence,
+            "dissolve the zero-area face in the .blend (Mesh → Clean Up → Degenerate Dissolve at \
+             zero distance finds them) and re-export — a face with no orientation breaks edge \
+             parity and has no plane for the walk to cross",
+        ));
+    }
+    if !findings.is_empty() {
+        return Err(sorted(findings));
     }
 
     // Directed-edge census: closure AND winding consistency. A `BTreeMap` and two ORDERED passes,
@@ -370,22 +529,41 @@ pub(crate) fn manifold_gate(
             *directed.entry(edge).or_insert(0) += 1;
         }
     }
-    if let Some((&(a, b), &count)) = directed.iter().find(|&(_, &count)| count != 1) {
-        return Err(defect(format!(
-            "directed edge {a}→{b} is traversed {count} times — two triangles wind the same face \
-             the same way (inconsistent orientation, or a duplicated face)"
-        )));
-    }
-    if let Some((&(a, b), _)) = directed
+    let rewound: Vec<String> = directed
         .iter()
-        .find(|&(&(a, b), _)| directed.get(&(b, a)).copied().unwrap_or(0) != 1)
-    {
-        let opposite = directed.get(&(b, a)).copied().unwrap_or(0);
-        return Err(defect(format!(
-            "edge {a}—{b} is shared by {} triangle(s), not 2 — the shell is not closed (a hole, a \
-             boundary edge, or a non-manifold fin)",
-            1 + opposite
-        )));
+        .filter(|&(_, &count)| count != 1)
+        .map(|(&(a, b), &count)| format!("directed edge {a}→{b} is traversed {count} times"))
+        .collect();
+    if let Some(evidence) = first_of(&rewound) {
+        findings.push(Finding::new(
+            &L2_MANIFOLD_WINDING,
+            at(),
+            evidence,
+            "flip the inconsistently wound face, or delete the duplicated one — two triangles wind \
+             the same face the same way",
+        ));
+    }
+    let unpaired: Vec<String> = directed
+        .iter()
+        .filter(|&(&(a, b), _)| directed.get(&(b, a)).copied().unwrap_or(0) != 1)
+        .map(|(&(a, b), &count)| {
+            format!(
+                "edge {a}—{b} is shared by {} triangle(s), not 2",
+                count + directed.get(&(b, a)).copied().unwrap_or(0)
+            )
+        })
+        .collect();
+    if let Some(evidence) = first_of(&unpaired) {
+        findings.push(Finding::new(
+            &L2_MANIFOLD_WINDING,
+            at(),
+            evidence,
+            "close the shell in the .blend — a hole, a boundary edge or a non-manifold fin leaves \
+             the walk without the exit face, which is silently zero armour",
+        ));
+    }
+    if !findings.is_empty() {
+        return Err(sorted(findings));
     }
 
     // Connected shells, by shared welded edge. Union-find over triangles.
@@ -431,14 +609,19 @@ pub(crate) fn manifold_gate(
         *volumes.entry(shell).or_insert(0.0) +=
             (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
     }
-    for (shell, volume) in &volumes {
-        if !volume.is_finite() || *volume <= 0.0 {
-            return Err(defect(format!(
-                "shell rooted at triangle {shell} has signed volume {volume} — a closed shell must \
-                 enclose positive volume with outward winding (a negative one is inside-out; zero \
-                 is a degenerate/flat shell)"
-            )));
-        }
+    let hollow: Vec<String> = volumes
+        .iter()
+        .filter(|(_, volume)| !volume.is_finite() || **volume <= 0.0)
+        .map(|(shell, volume)| format!("the shell rooted at triangle {shell} encloses {volume} m³"))
+        .collect();
+    if let Some(evidence) = first_of(&hollow) {
+        return Err(sorted(vec![Finding::new(
+            &L2_POSITIVE_SHELL_VOLUME,
+            at(),
+            evidence,
+            "recompute the shell's outward normals in the .blend — a negative volume is an \
+             inside-out shell whose entry faces the walk reads as exits, and a zero one is flat",
+        )]));
     }
 
     // Publish the roots as DENSE ids in first-triangle order. The root is a union-find artefact —
@@ -456,7 +639,16 @@ pub(crate) fn manifold_gate(
     // what says a ray that enters it leaves it. Unconditional — no flag and no allowlist, because
     // a shell that passes through itself charges a fraction of the plate it crossed and the walk's
     // one-dimensional evidence for that can cancel before it is read.
-    embedding::certify_embedding(&triangles, &shells, &points).map_err(defect)?;
+    if let Err(evidence) = embedding::certify_embedding(&triangles, &shells, &points) {
+        return Err(sorted(vec![Finding::new(
+            &L2_SHELL_EMBEDDING,
+            at(),
+            evidence,
+            "separate the two faces in the .blend — a shell that passes through itself charges a \
+             fraction of the plate the walk crossed, and the one-dimensional evidence for that can \
+             cancel before it is read",
+        )]));
+    }
 
     Ok(ShellCertificate {
         shells,
@@ -481,49 +673,198 @@ fn extract_at_startup(mut commands: Commands) {
     // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
     let root = crate::assets::asset_root();
     let path = root.join(crate::tank::TIGER_GLB_PATH);
-    // The spec is parsed BEFORE the glb because extraction now consumes it: `colliders` and
-    // `roadwheels` are explicit declarations there, not name patterns here (§12 identity rule).
-    let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON)
-        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed to parse: {err}"));
-    spec.validate()
-        .unwrap_or_else(|err| panic!("bake: embedded Tiger spec failed validation: {err}"));
-    let geometry = extract_tank_geometry(&path, &spec).unwrap_or_else(|err| {
+    let asset = certify_asset(&path, TIGER_SPEC_RON, &SubstanceRegistry::shipped())
+        .unwrap_or_else(|findings| {
         panic!(
-            "bake: extracting {} failed: {err}\n\
+            "bake: {} did not pass the consumer contract:\n{}\n\
              bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir; \
              a macOS `.app` exe in Contents/MacOS resolves to Contents/Resources/assets). \
              Resolved assets root: {}. If this path is wrong, the packaging layout and asset_root() \
              disagree — see crate::assets.",
             path.display(),
+            render(&findings),
             root.display(),
         )
     });
-    let mesh_nodes = geometry
+    let mesh_nodes = asset
+        .geometry
         .nodes
         .iter()
         .filter(|n| !n.primitives.is_empty())
         .count();
     info!(
         "bake: extracted tank geometry — {} nodes, {} mesh-captured, {} ballistic volumes",
-        geometry.nodes.len(),
+        asset.geometry.nodes.len(),
         mesh_nodes,
-        geometry.ballistic_volumes.len(),
+        asset.geometry.ballistic_volumes.len(),
     );
 
     commands.insert_resource(TankBlueprint {
-        geometry: Arc::new(geometry),
-        spec: Arc::new(spec),
+        geometry: Arc::new(asset.geometry),
+        spec: Arc::new(asset.spec),
     });
+}
+
+/// A GLB/spec pair that passed the whole L2 contract: the spec sheet and the certified geometry.
+pub(crate) struct CertifiedAsset {
+    pub spec: TankSpec,
+    pub geometry: TankGeometry,
+}
+
+/// **The consumer contract.** Parse a spec sheet and the model it names, and either certify the
+/// pair or say — in one report shape, deterministically ordered — exactly what refused it.
+///
+/// This is the single implementation of every `L2.*` law. The runtime bake calls it at startup on
+/// the shipped asset; [`verify_asset`] calls it from the CLI on an export candidate before the
+/// texture encode, and from CI on every committed pair. There is no second copy to drift from.
+pub(crate) fn certify_asset(
+    glb: &Path,
+    spec_ron: &str,
+    registry: &SubstanceRegistry,
+) -> Result<CertifiedAsset, Vec<Finding>> {
+    let spec_subject = || Subject::spec(Path::new(&spec_ron_name(glb)));
+    let spec: TankSpec = ron::de::from_str(spec_ron).map_err(|err| {
+        vec![Finding::new(
+            &L2_SPEC,
+            spec_subject(),
+            err.to_string(),
+            "fix the RON so it deserializes into TankSpec — the parser names the offending \
+             position and field",
+        )]
+    })?;
+    spec.validate().map_err(|err| {
+        vec![Finding::new(
+            &L2_SPEC,
+            spec_subject(),
+            err.to_string(),
+            "author a value inside the domain the rejection names — a spec that parses but cannot \
+             yield a working vehicle never reaches the sim",
+        )]
+    })?;
+    let geometry = extract_tank_geometry(glb, &spec, registry)?;
+    Ok(CertifiedAsset { spec, geometry })
+}
+
+/// The substance registry one verification runs against: the file the door named, or — for the
+/// game, which ships its own registry inside the binary that reads it — the compiled-in one.
+fn registry_at(path: Option<&Path>) -> Result<SubstanceRegistry, Vec<Finding>> {
+    let Some(path) = path else {
+        return Ok(SubstanceRegistry::shipped());
+    };
+    let refused = |evidence: String| {
+        vec![Finding::new(
+            &DOOR_REGISTRY,
+            Subject::door("registry"),
+            evidence,
+            format!(
+                "hand `--registry` the `assets/materials/materials.ron` of the revision this model \
+                 came from — {} is the file the substance names in the model are read against, and \
+                 a gate that cannot read it knows no substances at all",
+                path.display()
+            ),
+        )]
+    };
+    let text = std::fs::read_to_string(path).map_err(|err| refused(err.to_string()))?;
+    SubstanceRegistry::from_ron(&text).map_err(|err| refused(err.to_string()))
+}
+
+/// The sibling spec sheet of a model, by the mechanical `<id>.glb` → `<id>.tank.ron` rule.
+fn spec_ron_name(glb: &Path) -> String {
+    glb.with_extension("").to_string_lossy().into_owned() + ".tank.ron"
+}
+
+/// Verify one asset pair and return the whole report, in order. Empty means certified.
+///
+/// The pair is named by the model alone: the spec sheet is its sibling `<id>.tank.ron`.
+pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
+    let registry = match registry_at(registry) {
+        Ok(registry) => registry,
+        Err(findings) => return findings,
+    };
+    let spec_path = spec_ron_name(glb);
+    let spec_ron = match std::fs::read_to_string(&spec_path) {
+        Ok(text) => text,
+        Err(err) => {
+            return vec![Finding::new(
+                &L2_SPEC,
+                Subject::spec(Path::new(&spec_path)),
+                err.to_string(),
+                "every model ships beside its spec sheet — an asset is the trio `<id>.blend`, \
+                 `<id>.tank.ron`, `<id>.glb` in `assets/<id>/`",
+            )];
+        }
+    };
+    match certify_asset(glb, &spec_ron, &registry) {
+        Ok(_) => Vec::new(),
+        Err(findings) => findings,
+    }
+}
+
+/// **The canon file.** The two lists the `.blend` source pass may not maintain for itself, read
+/// off the canonical Rust definitions and handed across the language boundary as one JSON document:
+///
+/// ```json
+/// {"node_references": [{"field": "volumes", "node": "Hull_Front"}], "substance_keys": ["Cast"]}
+/// ```
+///
+/// `node_references` is [`TankSpec::node_references`] — so a spec field added later reaches
+/// `L1.SPEC_REFERENCES` without Python learning its name — and `substance_keys` is the registry
+/// [`classify`] decides membership by. Both are already ordered by their producers.
+///
+/// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
+/// is one report shape, and a canon generator that invented a second vocabulary would be a second
+/// door.
+pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, Vec<Finding>> {
+    let refused = |evidence: String, repair: &str| {
+        vec![Finding::new(
+            &L2_SPEC,
+            Subject::spec(spec_path),
+            evidence,
+            repair.to_owned(),
+        )]
+    };
+    let spec_ron = std::fs::read_to_string(spec_path)
+        .map_err(|err| refused(err.to_string(), "name the tank's `<id>.tank.ron`"))?;
+    let spec: TankSpec = ron::de::from_str(&spec_ron).map_err(|err| {
+        refused(
+            err.to_string(),
+            "fix the RON so it deserializes into TankSpec — the parser names the offending \
+             position and field",
+        )
+    })?;
+    let references: Vec<serde_json::Value> = spec
+        .node_references()
+        .into_iter()
+        .map(|reference| serde_json::json!({"field": reference.field, "node": reference.node}))
+        .collect();
+    Ok(serde_json::json!({
+        "node_references": references,
+        "substance_keys": registry_at(registry)?.keys(),
+    })
+    .to_string())
 }
 
 /// Parse the glb as data into [`TankGeometry`]. Pure with respect to the app: `gltf` crate only,
 /// usable identically from the runtime (step 0/phase 1) and the offline compiler (phase 2).
-pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<TankGeometry, String> {
-    let gltf::Gltf { document, mut blob } =
-        gltf::Gltf::open(path).map_err(|e| format!("open: {e}"))?;
-    // The one substance vocabulary, shared with `materials.blend`. A malformed registry panics
-    // inside `shipped()` — a broken authored contract is a build defect, not a runtime condition.
-    let registry = SubstanceRegistry::shipped();
+pub(crate) fn extract_tank_geometry(
+    path: &Path,
+    spec: &TankSpec,
+    registry: &SubstanceRegistry,
+) -> Result<TankGeometry, Vec<Finding>> {
+    let refused = |evidence: String, repair: &str| {
+        vec![Finding::new(
+            &L2_DOCUMENT,
+            Subject::document(path),
+            evidence,
+            repair.to_owned(),
+        )]
+    };
+    let gltf::Gltf { document, mut blob } = gltf::Gltf::open(path).map_err(|err| {
+        refused(
+            err.to_string(),
+            "re-export the model — this file is not a glb",
+        )
+    })?;
     let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`); external `.bin`
@@ -531,15 +872,20 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for buffer in document.buffers() {
         match buffer.source() {
-            gltf::buffer::Source::Bin => buffers.push(
-                blob.take()
-                    .ok_or_else(|| "glb has a Bin buffer but no blob".to_string())?,
-            ),
+            gltf::buffer::Source::Bin => buffers.push(blob.take().ok_or_else(|| {
+                refused(
+                    "the document declares a Bin buffer and carries no BIN chunk".to_string(),
+                    "re-export the model as a self-contained binary glb",
+                )
+            })?),
             gltf::buffer::Source::Uri(uri) => {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                buffers.push(
-                    std::fs::read(parent.join(uri)).map_err(|e| format!("buffer {uri}: {e}"))?,
-                );
+                buffers.push(std::fs::read(parent.join(uri)).map_err(|err| {
+                    refused(
+                        format!("buffer `{uri}`: {err}"),
+                        "re-export the model as a self-contained binary glb",
+                    )
+                })?);
             }
         }
     }
@@ -548,10 +894,12 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
     // scene (`Scene{i}` fallback) whose transform is the coordinate-conversion transform —
     // IDENTITY while bevy_gltf's opt-in glTF→Bevy conversion stays off (the repo never enables
     // it; the shadow compare is exactly what catches a future default flip — design §7.2).
-    let scene = document
-        .scenes()
-        .next()
-        .ok_or_else(|| "glb has no scene".to_string())?;
+    let scene = document.scenes().next().ok_or_else(|| {
+        refused(
+            "the document holds no scene".to_string(),
+            "export with an active scene — the loader instantiates scene 0",
+        )
+    })?;
     let mut nodes = vec![NodeGeometry {
         name: scene
             .name()
@@ -566,6 +914,7 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
     }];
     let mut by_name: HashMap<String, usize> = HashMap::new();
     by_name.insert(nodes[0].name.clone(), 0);
+    let mut findings: Vec<Finding> = Vec::new();
 
     // Depth-first over the node tree, mirroring the loader's spawn recursion.
     let mut stack: Vec<(gltf::Node, usize)> = scene.nodes().map(|n| (n, 0usize)).collect();
@@ -604,7 +953,7 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
             let mut ballistic = 0usize;
             let mut plain = 0usize;
             for primitive in mesh.primitives() {
-                match classify(&primitive, &registry) {
+                match classify(&primitive, registry) {
                     Some(substance) => {
                         ballistic += 1;
                         captured.push((primitive.index(), Some(substance)));
@@ -621,42 +970,58 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
             // whole, so a partially-captured node would quietly stop being covered, and the walk
             // would meet a solid whose other half it cannot see.
             if ballistic > 0 && plain > 0 {
-                return Err(format!(
-                    "node `{name}` mixes {ballistic} substance primitive(s) with {plain} \
-                     non-substance one(s) — a mesh is either a ballistic solid or it is art. \
-                     Membership is the material (§12): split the object, or give every primitive a \
-                     registry substance"
+                findings.push(Finding::new(
+                    &L2_ROLE_COHERENCE,
+                    Subject::node(&name),
+                    format!(
+                        "{ballistic} substance primitive(s) and {plain} non-substance one(s) in \
+                         one mesh"
+                    ),
+                    "split the object, or give every primitive a registry substance — membership \
+                     is the material (§12)",
                 ));
             }
             if is_collider && ballistic > 0 {
-                return Err(format!(
-                    "node `{name}` is declared a collision proxy but wears a registry substance — a \
-                     convex hull that is ALSO armour would be charged twice by the march"
+                findings.push(Finding::new(
+                    &L2_ROLE_COHERENCE,
+                    Subject::node(&name),
+                    format!(
+                        "declared a collision proxy and wearing {ballistic} registry substance(s)"
+                    ),
+                    "strip the substance material, or drop the node from the spec's `colliders` — \
+                     a convex hull that is also armour is charged twice by the march",
                 ));
             }
             for (index, substance) in captured {
-                let primitive = mesh
-                    .primitives()
-                    .nth(index)
-                    .ok_or_else(|| format!("node `{name}`: primitive {index} vanished"))?;
+                let Some(primitive) = mesh.primitives().nth(index) else {
+                    continue;
+                };
                 let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
-                let positions: Vec<[f32; 3]> = reader
-                    .read_positions()
-                    .ok_or_else(|| format!("node `{name}`: primitive has no POSITION"))?
-                    .collect();
+                let Some(positions) = reader.read_positions() else {
+                    findings.push(Finding::new(
+                        &L2_PRIMITIVE_FORM,
+                        Subject::node(&name).element(format!("primitive {index}")),
+                        "no POSITION accessor",
+                        "re-export the mesh — a primitive the sim consumes must carry its vertex \
+                         positions",
+                    ));
+                    continue;
+                };
                 let indices: Vec<u32> = reader
                     .read_indices()
                     .map(|i| i.into_u32().collect())
                     .unwrap_or_default();
                 let mut geometry = MeshGeometry {
-                    positions,
+                    positions: positions.collect(),
                     indices,
                     substance,
                     certificate: None,
                 };
                 if geometry.substance.is_some() {
-                    geometry.certificate =
-                        Some(manifold_gate(&name, index, &geometry, root_scale)?);
+                    match manifold_gate(&name, index, &geometry, root_scale) {
+                        Ok(certificate) => geometry.certificate = Some(certificate),
+                        Err(refusals) => findings.extend(refusals),
+                    }
                 }
                 primitives.push(geometry);
             }
@@ -666,7 +1031,13 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
         // Blender enforces unique object names and the fallback names are unique by index; a
         // collision would make the name-keyed join ambiguous, so it is fatal at extract time.
         if by_name.insert(name.clone(), index).is_some() {
-            return Err(format!("duplicate node name `{name}`"));
+            findings.push(Finding::new(
+                &L2_DOCUMENT,
+                Subject::node(&name),
+                "two nodes carry this name",
+                "rename one of them in the .blend — every consumer joins the model to the scene by \
+                 node name",
+            ));
         }
         nodes.push(NodeGeometry {
             name,
@@ -684,19 +1055,13 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
 
     // The sim's typed lists, resolved once here (design §8 step 3): two from the spec's explicit
     // declarations, one from the material verdict. Nothing scans a node name for sim meaning.
-    let resolve = |name: &str, what: &str| -> Result<usize, String> {
-        by_name
-            .get(name)
-            .copied()
-            .ok_or_else(|| format!("spec declares {what} `{name}`, which is absent from the model"))
-    };
     let mut collision_proxies: Vec<usize> = Vec::new();
     for name in &spec.colliders {
-        collision_proxies.push(resolve(name, "collision proxy")?);
+        collision_proxies.extend(by_name.get(name).copied());
     }
     let mut roadwheels: Vec<(usize, TrackSide)> = Vec::new();
     for wheel in &spec.roadwheels {
-        roadwheels.push((resolve(&wheel.node, "roadwheel")?, wheel.side));
+        roadwheels.extend(by_name.get(&wheel.node).map(|&index| (index, wheel.side)));
     }
     // Name-sorted so spawn order never depends on the glTF node order.
     let mut ballistic_volumes: Vec<usize> = nodes
@@ -708,13 +1073,93 @@ pub(crate) fn extract_tank_geometry(path: &Path, spec: &TankSpec) -> Result<Tank
         .collect();
     ballistic_volumes.sort_by(|a, b| nodes[*a].name.cmp(&nodes[*b].name));
 
-    Ok(TankGeometry {
+    let geometry = TankGeometry {
         nodes,
         by_name,
         roadwheels,
         collision_proxies,
         ballistic_volumes,
-    })
+    };
+    findings.extend(declared_roles_resolve(&geometry, spec));
+    if report::has_error(&findings) {
+        return Err(sorted(findings));
+    }
+    Ok(geometry)
+}
+
+/// What the spec DECLARED, met with what the model turned out to hold: every typed reference
+/// resolves (`L2.SPEC`), every declared role is one the resolved node can actually play
+/// (`L2.ROLE_COHERENCE`), and every node the rigid pose composition walks through is authored at
+/// unit scale (`L2.UNIT_SCALE`).
+///
+/// The reference vocabulary is `TankSpec::node_references`, so a spec field added later is checked
+/// here without this function learning its name.
+fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let mut scaled: BTreeSet<&str> = BTreeSet::new();
+    for NodeReference {
+        role, node: name, ..
+    } in spec.node_references()
+    {
+        let Some(&index) = geometry.by_name.get(name) else {
+            findings.push(Finding::new(
+                &L2_SPEC,
+                Subject::node(name).element(format!("declared {role:?}")),
+                "no node of the model carries this name",
+                "name a node the model holds, or export the object the spec expects — nothing \
+                 infers a node from a name pattern",
+            ));
+            continue;
+        };
+        let node = &geometry.nodes[index];
+        let ballistic = node.is_ballistic();
+        let refusal = match role {
+            // A facet on a node the march never meets is inert; a station that is not its own
+            // armour is a wheel shells pass through.
+            NodeRole::Volume | NodeRole::Roadwheel if !ballistic => {
+                Some("no primitive of it wears a registry substance".to_string())
+            }
+            NodeRole::Collider if node.primitives.iter().any(|p| p.indices.is_empty()) => {
+                Some("its mesh data is unindexed".to_string())
+            }
+            NodeRole::Collider if node.primitives.is_empty() => {
+                Some("it holds no mesh data at all".to_string())
+            }
+            _ => None,
+        };
+        if let Some(evidence) = refusal {
+            findings.push(Finding::new(
+                &L2_ROLE_COHERENCE,
+                Subject::node(&node.name).element(format!("declared {role:?}")),
+                evidence,
+                "give the node the geometry its declared role needs, or declare the role on the \
+                 node that has it",
+            ));
+        }
+        // `rig_world_pose` composes rigidly — position and rotation only — so a scale anywhere on
+        // the chain is silently dropped by the sim and kept by the view.
+        if role.rigid_pose() {
+            let mut walk = Some(index);
+            while let Some(current) = walk {
+                let node = &geometry.nodes[current];
+                if node.transform.scale.to_array().map(f32::to_bits) != [1.0f32.to_bits(); 3] {
+                    scaled.insert(node.name.as_str());
+                }
+                walk = node.parent;
+            }
+        }
+    }
+    for name in scaled {
+        let index = geometry.by_name[name];
+        findings.push(Finding::new(
+            &L2_UNIT_SCALE,
+            Subject::node(name),
+            format!("authored scale {:?}", geometry.nodes[index].transform.scale),
+            "apply the object scale in the .blend and re-export — the sim composes this chain \
+             rigidly and drops the scale the view keeps",
+        ));
+    }
+    findings
 }
 
 /// The shadow harness: on every tank scene instantiation, verify the extracted geometry against
@@ -946,263 +1391,780 @@ fn transform_bits_eq(a: &Transform, b: &Transform) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::TankSpec;
+    use fixture::{CLOSED, Node, Primitive, pierced, solid};
 
-    fn tiger_spec() -> TankSpec {
-        ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("tiger_1.tank.ron must parse")
+    /// A registry substance, and a material name that is not one. Which two does not matter — what
+    /// matters is that membership is decided by the registry and by nothing else.
+    const SUBSTANCE: &str = "RHA";
+    const ART: &str = "Mat_Decor";
+
+    /// The gate at scale 1 — the case every synthetic fixture below is about.
+    fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, Vec<Finding>> {
+        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
     }
 
-    fn tiger_glb() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(crate::tank::TIGER_GLB_PATH)
+    /// The check ids a report names, in report order.
+    fn refusals(findings: &[Finding]) -> Vec<&str> {
+        findings.iter().map(|finding| finding.check.id).collect()
     }
 
-    fn tiger_geometry(spec: &TankSpec) -> TankGeometry {
-        extract_tank_geometry(&tiger_glb(), spec).expect("tiger_1.glb must extract")
+    /// A substance primitive built from a raw index buffer.
+    fn ballistic(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> MeshGeometry {
+        MeshGeometry {
+            positions,
+            indices,
+            substance: Some(PrimitiveSubstance {
+                name: SUBSTANCE.into(),
+                factor: 1000.0,
+            }),
+            certificate: None,
+        }
     }
 
-    /// The extractor's golden test: extract the Tiger and hold it to the same contract the binder
-    /// enforces at runtime — every spec-declared node present, the structural singletons, the
-    /// declared proxies and stations, and sim-consumed mesh data captured with the buffers avian
-    /// requires (indices are mandatory for BOTH collider paths: avian's
-    /// `extract_mesh_vertices_indices` bails on unindexed meshes even for the hull).
+    /// The unit tetrahedron: the smallest closed, outward-wound, positive-volume shell.
+    fn tetrahedron(indices: Vec<u32>) -> MeshGeometry {
+        ballistic(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            indices,
+        )
+    }
+
+    /// A vehicle that certifies: a hull, a plate, a collision proxy, and one station per side.
+    fn sound_vehicle() -> (Vec<Node>, String) {
+        let nodes = vec![
+            Node::new("Hull"),
+            Node::new("Plate")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [0.0, 0.0, 0.0])),
+            Node::new("Proxy")
+                .child_of("Hull")
+                .holding(solid(ART, [0.0, 0.0, 0.0])),
+            Node::new("Station_L")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [3.0, 0.0, 0.0])),
+            Node::new("Station_R")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [6.0, 0.0, 0.0])),
+        ];
+        let spec = fixture::spec(
+            &["Proxy"],
+            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &[],
+        );
+        (nodes, spec)
+    }
+
+    /// Write a synthetic trio and put it through the whole contract, exactly as the CLI and CI do.
+    fn verify(id: &str, nodes: &[Node], spec: &str) -> Vec<Finding> {
+        let asset = fixture::write(id, nodes, spec);
+        verify_asset(&asset.glb, None)
+    }
+
+    /// THE REGISTRY IS AN INPUT, because it is DATA. A lane verifying a REVISION hydrates that
+    /// revision's trio and its material library, and the substance numbers those bytes were
+    /// authored against travel with them; a gate reading whatever registry the running binary was
+    /// compiled with would certify a pair that never existed. So the door names the file, and a
+    /// file it cannot name is a refusal of the door's own — never silence, and never a fallback to
+    /// the compiled-in one, which is exactly how a wrong verdict would look like a right one.
     #[test]
-    fn tiger_1_extracts_to_contract() {
-        let spec = tiger_spec();
-        let geometry = tiger_geometry(&spec);
+    fn the_registry_the_door_supplies_is_the_one_the_contract_reads() {
+        let (nodes, spec) = sound_vehicle();
+        let asset = fixture::write("supplied-registry", &nodes, &spec);
+        let elsewhere = asset.glb.with_file_name("materials.ron");
 
-        let node = |name: &str| -> &NodeGeometry {
-            let index = geometry
-                .by_name
-                .get(name)
-                .unwrap_or_else(|| panic!("extracted geometry is missing node `{name}`"));
-            &geometry.nodes[*index]
-        };
-
-        // Every spec-declared node resolves (the bind contract, from data alone).
-        for servo in spec.servos.keys() {
-            node(servo);
-        }
-        for weapon in spec.weapons.values() {
-            node(&weapon.muzzle);
-            if let Some(barrel) = &weapon.barrel {
-                node(barrel);
-            }
-        }
-        for view in spec.views.values() {
-            node(&view.node);
-        }
-        node("Hull");
-        node("Center_Of_Mass");
-
-        // Every ballistic volume the MATERIAL rule found carries usable geometry: a substance on
-        // every primitive, a positive factor, and an indexed mesh. (Watertightness is not asserted
-        // here — extraction REFUSES a non-manifold substance primitive outright, so reaching this
-        // line already proves every shell closed and outward-wound.)
-        assert!(
-            !geometry.ballistic_volumes.is_empty(),
-            "the material rule found no ballistic volume at all"
-        );
-        for &index in &geometry.ballistic_volumes {
-            let volume = &geometry.nodes[index];
-            let name = &volume.name;
-            assert!(
-                !volume.primitives.is_empty(),
-                "volume `{name}` captured no mesh data"
-            );
-            for primitive in &volume.primitives {
-                let substance = primitive.substance.as_ref().unwrap_or_else(|| {
-                    panic!("volume `{name}` holds a primitive with no substance")
-                });
-                assert!(
-                    substance.factor > 0.0,
-                    "volume `{name}` is `{}`, whose factor is not positive",
-                    substance.name
-                );
-                assert!(
-                    primitive.positions.len() >= 3,
-                    "volume `{name}`: degenerate"
-                );
-                assert!(!primitive.indices.is_empty(), "volume `{name}`: unindexed");
-            }
-        }
-        // Name-sorted: the deterministic spawn order.
-        let volume_names: Vec<&str> = geometry
-            .ballistic_volumes
-            .iter()
-            .map(|&index| geometry.nodes[index].name.as_str())
-            .collect();
-        let mut sorted = volume_names.clone();
-        sorted.sort_unstable();
-        assert_eq!(
-            volume_names, sorted,
-            "volumes must be extracted name-sorted"
-        );
-
-        // Every declared component names a ballistic volume — a facet on a node the march never
-        // meets is inert, and the binder refuses it, so the shipped pair must agree here first.
-        for component in spec.volumes.keys() {
-            assert!(
-                geometry.is_ballistic(component),
-                "component `{component}` is not a ballistic volume (no primitive of its node wears \
-                 a registry substance)"
-            );
-        }
-
-        // Wheels: 8 per side on the Tiger (snapshot; SIM-EVIDENCE's 16/16), via the extractor's
-        // typed list, in the DECLARED order — the load-bearing `WheelIndex` slot order both wire
-        // ends derive.
-        let per_side = |want| {
-            geometry
-                .roadwheels
-                .iter()
-                .filter(|&&(_, side)| side == want)
-                .count()
-        };
-        assert_eq!(per_side(crate::tank::TrackSide::Left), 8);
-        assert_eq!(per_side(crate::tank::TrackSide::Right), 8);
-        let wheel_names: Vec<&str> = geometry
-            .roadwheels
-            .iter()
-            .map(|&(index, _)| geometry.nodes[index].name.as_str())
-            .collect();
-        assert_eq!(
-            wheel_names,
-            spec.roadwheels
-                .iter()
-                .map(|wheel| wheel.node.as_str())
-                .collect::<Vec<_>>()
-        );
-        // Station AND armour in one node: the wheels ship as one object per station, so every
-        // station must also have been classified a volume by its materials. Re-split the asset, or
-        // strip a wheel's substance, and this fails at CI time instead of leaving the wheels
-        // silently invisible to the penetration march.
-        for &name in &wheel_names {
-            assert!(
-                geometry.is_ballistic(name),
-                "roadwheel `{name}` carries the wheel mesh but wears no substance"
-            );
-        }
-
-        // Collision proxies: the declared list, captured, indexed, and NOT armour.
-        assert_eq!(geometry.collision_proxies.len(), spec.colliders.len());
-        for &index in &geometry.collision_proxies {
-            let collider = &geometry.nodes[index];
-            assert!(!collider.primitives.is_empty());
-            assert!(
-                !collider.is_ballistic(),
-                "`{}` is a collision proxy AND armour",
-                collider.name
-            );
-            for p in &collider.primitives {
-                assert!(
-                    p.positions.len() >= 4,
-                    "`{}`: degenerate hull source",
-                    collider.name
-                );
-                assert!(!p.indices.is_empty(), "`{}`: unindexed mesh", collider.name);
-            }
-        }
-
-        // Rig chains are authored scale-1 (`rig_world_pose` composes rigidly) — pin it for every
-        // node the sim's pose chains traverse.
-        for name in spec
-            .servos
-            .keys()
-            .map(String::as_str)
-            .chain(
-                spec.weapons
-                    .values()
-                    .flat_map(|w| std::iter::once(w.muzzle.as_str()).chain(w.barrel.as_deref())),
+        // The same substances the model names, from a file rather than from this binary.
+        std::fs::write(
+            &elsewhere,
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/materials/materials.ron"),
             )
-            .chain(["Hull", "Center_Of_Mass"])
-        {
-            assert_eq!(
-                node(name).transform.scale,
-                Vec3::ONE,
-                "rig node `{name}` is not scale-1"
+            .expect("the shipped registry is readable"),
+        )
+        .expect("the fixture registry is writable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert!(findings.is_empty(), "{}", render(&findings));
+
+        // A registry that declares OTHER substances is a different verdict about the same bytes,
+        // which is the whole reason the file has to come from the right revision.
+        std::fs::write(
+            &elsewhere,
+            "SubstanceRegistry(substances: {\"Cheese\": (factor: 1.0, paintable: false)})",
+        )
+        .expect("the fixture registry is writable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert_eq!(
+            refusals(&findings)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["L2.ROLE_COHERENCE"].into_iter().collect(),
+            "{}",
+            render(&findings)
+        );
+
+        // And a registry the door could not hand over refuses mechanically, under the door's own
+        // id — not as a finding about the model, and not by falling back to the embedded one.
+        std::fs::remove_file(&elsewhere).expect("the fixture registry is removable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert_eq!(
+            refusals(&findings),
+            ["door.registry"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+        assert_eq!(findings[0].check.stage, Stage::Door);
+
+        let refused = canon_lists(Path::new(&spec_ron_name(&asset.glb)), Some(&elsewhere))
+            .expect_err("the canon lists are stated in the registry too");
+        assert_eq!(
+            refusals(&refused),
+            ["door.registry"],
+            "{}",
+            render(&refused)
+        );
+    }
+
+    /// The door's own shape: a sound pair certifies, and the report it produces is empty.
+    #[test]
+    fn a_sound_pair_certifies_with_an_empty_report() {
+        let (nodes, spec) = sound_vehicle();
+        let findings = verify("sound", &nodes, &spec);
+        assert!(findings.is_empty(), "{}", render(&findings));
+        assert!(!has_error(&findings));
+    }
+
+    /// EVERY SHIPPED ASSET, THROUGH THE REAL GATE. Discovery, not a list: a second vehicle is a
+    /// directory, never a line of test code.
+    #[test]
+    fn every_shipped_asset_passes_the_consumer_contract() {
+        let shipped = fixture::shipped_assets();
+        assert!(
+            !shipped.is_empty(),
+            "no `assets/<id>/<id>.glb` beside an `<id>.tank.ron` was discovered at all"
+        );
+        for model in shipped {
+            let findings = verify_asset(&model, None);
+            assert!(
+                findings.is_empty(),
+                "{} does not pass the consumer contract:\n{}",
+                model.display(),
+                render(&findings)
             );
+            let spec_ron =
+                std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
+            let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
+                .expect("the pair certifies");
+            let geometry = &asset.geometry;
+
+            // What certification means, held to at the data: every volume the material rule found
+            // carries usable armour, and the spawn order is the name order rather than the glTF
+            // node order.
+            let names: Vec<&str> = geometry
+                .ballistic_volumes
+                .iter()
+                .map(|&index| geometry.nodes[index].name.as_str())
+                .collect();
+            let mut sorted_names = names.clone();
+            sorted_names.sort_unstable();
+            assert_eq!(names, sorted_names, "volumes must be extracted name-sorted");
+            for &index in &geometry.ballistic_volumes {
+                let volume = &geometry.nodes[index];
+                for primitive in &volume.primitives {
+                    let substance = primitive
+                        .substance
+                        .as_ref()
+                        .expect("a volume holds only substance primitives");
+                    assert!(
+                        substance.factor > 0.0,
+                        "`{}` wears `{}`, whose factor is not positive",
+                        volume.name,
+                        substance.name
+                    );
+                    assert!(
+                        primitive.certificate.is_some(),
+                        "`{}` passed the gate without a certificate",
+                        volume.name
+                    );
+                }
+            }
+            // A station driven by a local rotation spins about its own origin. One left at the
+            // model root orbits the tank instead, and reads as `(0, 0, 0)` to anything that takes
+            // the origin for the axle centre.
+            for &(index, _) in &geometry.roadwheels {
+                let station = &geometry.nodes[index];
+                assert!(
+                    station.root_position.length() > 1.0e-4,
+                    "roadwheel `{}` has no authored origin — set the object origin to the axle",
+                    station.name
+                );
+            }
         }
     }
 
-    /// The SUBSTANCE CENSUS — the pin that makes "decor must never wear a substance material" a
-    /// mechanical fact rather than an eyeball rule.
+    /// THE MATERIAL-IMPLIED LINTS, over every shipped asset. A substance whose whole meaning is a
+    /// consequence must have the facet that states it: Flesh that no one can kill, an Ammunition
+    /// rack that cannot cook off, and an EngineBlock with no hp are each a plate pretending to be
+    /// a module. The declared collision proxies and the structural singletons the assembler
+    /// resolves by name are the same kind of claim — about the class "tank", asserted here rather
+    /// than at spawn, where a bad asset would only surface as a panic.
     ///
-    /// Membership is the material now, so a decor object that acquires a registry material silently
-    /// becomes armour: it would march, it would be charged, and nothing else in the pipeline would
-    /// object. Nothing can detect that from the material alone (wearing one IS the declaration), so
-    /// the guard is this snapshot: the exact number of volumes, and the exact number of PRIMITIVES
-    /// per substance. A deliberate model change updates these numbers in the same commit; an
-    /// accidental one fails CI naming the substance whose count moved.
+    /// The substance names are the GLOBAL registry's, shared by every vehicle, and the loop is
+    /// discovery: nothing here is one model's count, and a second tank adds no line.
     #[test]
-    fn tiger_1_substance_census_is_pinned() {
-        let geometry = tiger_geometry(&tiger_spec());
-        let mut census: BTreeMap<&str, usize> = BTreeMap::new();
-        for node in &geometry.nodes {
-            for primitive in &node.primitives {
-                if let Some(substance) = &primitive.substance {
-                    *census.entry(substance.name.as_str()).or_default() += 1;
+    fn every_shipped_asset_states_the_consequences_its_materials_imply() {
+        for model in fixture::shipped_assets() {
+            let spec_ron =
+                std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
+            let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
+                .expect("the pair certifies");
+            let (geometry, spec) = (&asset.geometry, &asset.spec);
+            let named = |what: &str| format!("{}: `{what}`", model.display());
+
+            assert!(
+                !geometry.ballistic_volumes.is_empty(),
+                "{}: no node wears a registry substance — the material library link is broken, \
+                 and every plate on this vehicle is decor to the march",
+                model.display()
+            );
+            // The assembler resolves these by name and nothing declares them, so nothing else can
+            // notice they are gone until a tank is spawned.
+            for singleton in ["Hull", "Center_Of_Mass"] {
+                assert!(
+                    geometry.by_name.contains_key(singleton),
+                    "{} is absent — the tank assembler resolves it by name",
+                    named(singleton)
+                );
+            }
+            for &index in &geometry.collision_proxies {
+                let proxy = &geometry.nodes[index];
+                assert!(
+                    !proxy.is_ballistic(),
+                    "{} is a declared collision proxy wearing a substance — it would be charged as \
+                     armour AND stand in for the body, counting the hull twice",
+                    named(&proxy.name)
+                );
+            }
+            for &index in &geometry.ballistic_volumes {
+                let node = &geometry.nodes[index];
+                let facets = spec.volumes.get(&node.name);
+                let worn = node.substance_groups();
+                if worn.contains_key("Flesh") {
+                    assert!(
+                        facets.is_some_and(|facets| facets.crew.is_some()),
+                        "{} is made of Flesh and declares no crew facet — a crewman nobody can \
+                         kill, and a seat nothing can knock out",
+                        named(&node.name)
+                    );
+                }
+                if worn.contains_key("Ammunition") {
+                    assert!(
+                        facets.is_some_and(|facets| facets.ammo),
+                        "{} is made of Ammunition and declares no ammo facet — a rack that cannot \
+                         cook off",
+                        named(&node.name)
+                    );
+                }
+                if worn.contains_key("EngineBlock") {
+                    assert!(
+                        facets.is_some(),
+                        "{} is an EngineBlock with no component entry — a powerplant with no hp is \
+                         armour pretending to be a module",
+                        named(&node.name)
+                    );
                 }
             }
         }
-        assert_eq!(
-            census,
-            BTreeMap::from([
-                ("Ammunition", 4),
-                // 4, was 5: `Turret_Cupola` is GONE — the commander's cupola was rebuilt
-                // 2026-08-08 as `Commander_Cupola` + `Commander_Hatch`, and both are RHA below.
-                // The substance moved with the modelling: the old single object was cast
-                // (`Panzerguß`) because it was one lump; the rebuilt cupola is a rolled-plate ring
-                // with a separate hatch, which is what the real Tiger's later cupola is.
-                ("Cast", 4),
-                ("EngineBlock", 2),
-                ("Flesh", 5),
-                ("GunSteel", 6),
-                // 26, was 22: the running gear joined the ballistics 2026-08-07 — `Sprocket_L/R`
-                // and `Idler_L/R`, one primitive each, `Mat_RunningGear_Paint` -> `MildSteel`.
-                // Machinery `Stahlguß`, not `Panzerguß`, so MildSteel and not Cast.
-                ("MildSteel", 26),
-                // 19, was 17: `Commander_Cupola` (832 tris) and `Commander_Hatch` (190), the two
-                // halves of the rebuilt cupola, both rolled plate. Net armour primitives +1, not
-                // +2, because `Turret_Cupola` left `Cast` in the same edit.
-                ("RHA", 19),
-                ("Rubber", 16),
-            ]),
-            "the Tiger's substance census moved — see the doc above before re-pinning"
-        );
-        // 66, was 65: one volume out (`Turret_Cupola`), two in (`Commander_Cupola`,
-        // `Commander_Hatch`). Total primitives 89, was 88, by the same arithmetic — this IS new
-        // geometry, unlike the 2026-08-07 running-gear change, which was a re-classification.
-        assert_eq!(geometry.ballistic_volumes.len(), 66);
-
-        // Closed shells, the grain the walk pairs on. Pinned alongside the primitives because a
-        // remodel that splits or merges an island changes what the walk can tell apart, and
-        // nothing else in the pipeline would notice.
-        let shells: usize = geometry
-            .nodes
-            .iter()
-            .flat_map(|node| &node.primitives)
-            .map(|primitive| {
-                primitive.certificate.as_ref().map_or(0, |certificate| {
-                    certificate
-                        .shells
-                        .iter()
-                        .copied()
-                        .max()
-                        .map_or(0, |max| max as usize + 1)
-                })
-            })
-            .sum();
-        // 131 shells over 89 primitives: multi-shell primitives are the ordinary case here, not a
-        // wheel-only curiosity.
-        assert_eq!(shells, 131, "the Tiger's shell census moved");
     }
 
-    /// The gate at scale 1 — the case every synthetic fixture below is about.
-    fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, String> {
-        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
+    /// L2.SPEC — the sheet parses, validates, and every typed reference it makes resolves.
+    #[test]
+    fn an_unreadable_sheet_or_an_unresolved_reference_is_refused() {
+        let (nodes, _) = sound_vehicle();
+        let findings = verify("unparsable", &nodes, "TankSpec(mass: ");
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+
+        // Parses, but declares a vehicle that cannot drive: no station on one side.
+        let refused = fixture::spec(&["Proxy"], &[("Station_L", "Left")], &[]);
+        let findings = verify("half-tracked", &nodes, &refused);
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+
+        // Parses and validates, and names a node the model does not hold.
+        let absent = fixture::spec(
+            &["Proxy"],
+            &[("Station_L", "Left"), ("Absent", "Right")],
+            &[],
+        );
+        let findings = verify("absent-node", &nodes, &absent);
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+        assert!(
+            findings[0].subject.name == "Absent"
+                && findings[0].evidence.contains("no node of the model"),
+            "{}",
+            render(&findings)
+        );
+
+        // The missing sibling sheet is the same refusal: an asset is a trio.
+        let asset = fixture::write("orphan", &nodes, "");
+        std::fs::remove_file(spec_ron_name(&asset.glb)).expect("the sheet is removable");
+        assert_eq!(refusals(&verify_asset(&asset.glb, None)), ["L2.SPEC"]);
+    }
+
+    /// The canon file — the document shape the Blender source pass parses, and the two canonical
+    /// lists inside it. Python maintains no vocabulary of RON field names or substance keys, so
+    /// this is the only place either is pinned.
+    #[test]
+    fn the_canon_file_carries_the_reference_list_and_the_registry_keys() {
+        let (nodes, _) = sound_vehicle();
+        // EVERY role, and both of a weapon's two node fields: the RON path is what the Blender
+        // pass prints as the line to go to, and a role does not determine one.
+        let declared = fixture::spec_with(
+            &["Proxy"],
+            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &["Plate"],
+            r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous)},
+    weapons: {"Main": (
+        trigger: Primary,
+        muzzle: "Muzzle",
+        barrel: "Recoil",
+        speed: 1.0, caliber: 0.1, mass: 1.0,
+        fire_mode: Single(reload_secs: 1.0),
+        recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
+    )},
+    views: {Gunner: (node: "Sight", fov: 0.5)},"#,
+        );
+        let asset = fixture::write("canon", &nodes, &declared);
+        let json =
+            canon_lists(Path::new(&spec_ron_name(&asset.glb)), None).expect("the sheet parses");
+        let document: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
+
+        let references: Vec<(&str, &str)> = document["node_references"]
+            .as_array()
+            .expect("node_references is an array")
+            .iter()
+            .map(|row| {
+                (
+                    row["field"].as_str().expect("field is a string"),
+                    row["node"].as_str().expect("node is a string"),
+                )
+            })
+            .collect();
+        // Role order, then node, then the authored path — `TankSpec::node_references`' own
+        // ordering, carried through. Every field here is pinned nowhere else: Python maintains no
+        // vocabulary of RON paths and renders whatever arrives in this document.
+        assert_eq!(
+            references,
+            [
+                ("servos", "Turret_Yaw"),
+                ("volumes", "Plate"),
+                ("colliders", "Proxy"),
+                ("roadwheels[0].node", "Station_L"),
+                ("roadwheels[1].node", "Station_R"),
+                ("weapons[\"Main\"].muzzle", "Muzzle"),
+                ("weapons[\"Main\"].barrel", "Recoil"),
+                ("views[Gunner].node", "Sight"),
+            ]
+        );
+
+        let keys: Vec<&str> = document["substance_keys"]
+            .as_array()
+            .expect("substance_keys is an array")
+            .iter()
+            .map(|key| key.as_str().expect("a key is a string"))
+            .collect();
+        assert_eq!(keys, SubstanceRegistry::shipped().keys());
+        assert!(
+            keys.contains(&SUBSTANCE),
+            "the vocabulary is the registry's"
+        );
+
+        // A sheet that does not parse is the consumer contract's own refusal, not a second one.
+        let broken = fixture::write("canon-unparsable", &nodes, "TankSpec(mass: ");
+        let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)), None)
+            .expect_err("an unparsable sheet has no canon");
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+    }
+
+    /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.
+    #[test]
+    fn a_node_that_cannot_play_its_declared_role_is_refused() {
+        let (mut nodes, spec) = sound_vehicle();
+        // A station that wears no substance is a wheel the march passes straight through.
+        nodes[3] = Node::new("Station_L")
+            .child_of("Hull")
+            .holding(solid(ART, [3.0, 0.0, 0.0]));
+        let findings = verify("inert-station", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.ROLE_COHERENCE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Station_L");
+
+        // A collision proxy wearing armour would be charged twice by the march.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[2] = Node::new("Proxy")
+            .child_of("Hull")
+            .holding(solid(SUBSTANCE, [0.0, 3.0, 0.0]));
+        let findings = verify("armoured-proxy", &nodes, &spec);
+        assert_eq!(refusals(&findings), ["L2.ROLE_COHERENCE"]);
+
+        // Half armour and half art in one mesh: the shadow compare diffs a node's bytes whole, so
+        // a partly-captured node quietly stops being covered.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate")
+            .child_of("Hull")
+            .holding(solid(SUBSTANCE, [0.0, 0.0, 0.0]))
+            .holding(solid(ART, [0.0, 0.0, 0.0]));
+        let findings = verify("half-armour", &nodes, &spec);
+        assert_eq!(refusals(&findings), ["L2.ROLE_COHERENCE"]);
+        assert_eq!(findings[0].subject.name, "Plate");
+
+        // A hull source avian cannot read: `extract_mesh_vertices_indices` bails on an unindexed
+        // mesh even for the convex hull.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[2] = Node::new("Proxy").child_of("Hull").holding(Primitive {
+            material: ART.into(),
+            positions: solid(ART, [0.0, 0.0, 0.0]).positions,
+            indices: Vec::new(),
+        });
+        let findings = verify("unindexed-proxy", &nodes, &spec);
+        assert_eq!(refusals(&findings), ["L2.ROLE_COHERENCE"]);
+
+        // A component facet on a node the march never meets is inert.
+        let (nodes, _) = sound_vehicle();
+        let facets = fixture::spec(
+            &["Proxy"],
+            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &["Proxy"],
+        );
+        let findings = verify("inert-facet", &nodes, &facets);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.ROLE_COHERENCE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Proxy");
+    }
+
+    /// L2.PRIMITIVE_FORM — what the sim reads has to be there, and has to be triangles.
+    #[test]
+    fn a_primitive_the_sim_cannot_read_is_refused() {
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions: Vec::new(),
+            indices: Vec::new(),
+        });
+        // The glTF reader refuses a primitive with no POSITION accessor before the contract can
+        // ask anything about it, so the document law is what names this one.
+        let findings = verify("no-position", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.DOCUMENT"],
+            "{}",
+            render(&findings)
+        );
+        assert!(
+            findings[0].evidence.contains("POSITION"),
+            "{}",
+            render(&findings)
+        );
+
+        // An index buffer that is not whole triangles, and one that addresses vertices the
+        // POSITION accessor does not hold.
+        let positions = solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions;
+        for indices in [vec![0u32, 1, 2, 3], vec![0u32, 1, 9]] {
+            let (mut nodes, spec) = sound_vehicle();
+            nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+                material: SUBSTANCE.into(),
+                positions: positions.clone(),
+                indices,
+            });
+            let findings = verify("malformed-indices", &nodes, &spec);
+            assert_eq!(
+                refusals(&findings),
+                ["L2.PRIMITIVE_FORM"],
+                "{}",
+                render(&findings)
+            );
+        }
+    }
+
+    /// L2.UNIT_SCALE — the composed scale on armour, and the authored scale on every node the
+    /// rigid pose composition walks through.
+    #[test]
+    fn a_scaled_node_the_sim_composes_through_is_refused() {
+        // The armour half: a node whose COMPOSED scale is not one, anywhere up the chain.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[0] = Node::new("Hull").scaled([2.0, 2.0, 2.0]);
+        let findings = verify("scaled-hull", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            [
+                "L2.UNIT_SCALE",
+                "L2.UNIT_SCALE",
+                "L2.UNIT_SCALE",
+                "L2.UNIT_SCALE"
+            ],
+            "{}",
+            render(&findings)
+        );
+        assert!(
+            findings.iter().any(|f| f.subject.name == "Hull"),
+            "the ANCESTOR that carries the scale must be named: {}",
+            render(&findings)
+        );
+
+        // The rig half: a station is a rig node, and `rig_world_pose` composes rigidly, so a scale
+        // on it is dropped by the sim and kept by the view.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[3] = Node::new("Station_L")
+            .child_of("Hull")
+            .scaled([1.0, 1.0, f32::from_bits(1.0f32.to_bits() + 1)])
+            .holding(solid(SUBSTANCE, [3.0, 0.0, 0.0]));
+        let findings = verify("scaled-station", &nodes, &spec);
+        assert!(
+            refusals(&findings).iter().all(|id| *id == "L2.UNIT_SCALE"),
+            "{}",
+            render(&findings)
+        );
+        assert!(findings.iter().any(|f| f.subject.name == "Station_L"));
+    }
+
+    /// A BALLISTIC NODE IS UNIT-SCALE OR IT IS REFUSED, BY NAME.
+    ///
+    /// The same geometry passes at `1` and fails at every other scale, including one a millionth of
+    /// an ULP away — nothing here compensates, rescales, or tolerates. The message names the node,
+    /// because the fix is in the .blend and the artist has to be told which object.
+    #[test]
+    fn the_gate_refuses_every_composed_scale_that_is_not_exactly_one() {
+        let tetra = tetrahedron(CLOSED.to_vec());
+        gate("Unscaled", &tetra).expect("at scale 1 it is ordinary geometry");
+
+        // A uniform shrink, a single stretched axis, a mirror, a collapse, and one ULP: all the
+        // same verdict, because the contract is bit-exact equality with 1 and nothing weaker.
+        for scale in [
+            Vec3::splat(0.9312),
+            Vec3::new(1.0, 2.0, 1.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(1.0, 1.0, 0.0),
+            Vec3::new(1.0, 1.0, f32::from_bits(1.0f32.to_bits() + 1)),
+        ] {
+            let Err(findings) = manifold_gate("Scaled_Plate", 0, &tetra, scale) else {
+                panic!("a ballistic node at {scale:?} must be refused");
+            };
+            assert_eq!(refusals(&findings), ["L2.UNIT_SCALE"]);
+            assert_eq!(findings[0].subject.name, "Scaled_Plate");
+        }
+    }
+
+    /// L2.CERTIFIED_RANGE — a coordinate the watertight projection has no proven bound over never
+    /// reaches the corridor kernel.
+    #[test]
+    fn a_coordinate_outside_the_certified_range_is_refused() {
+        let (low, high) = CERTIFIED_RANGE;
+        for outside in [
+            f32::from_bits(low.to_bits() - 1),
+            f32::from_bits(high.to_bits() + 1),
+            f32::INFINITY,
+            f32::NAN,
+        ] {
+            let mut positions = tetrahedron(CLOSED.to_vec()).positions;
+            positions[3] = [0.0, 0.0, outside];
+            let findings = gate("Fringe", &ballistic(positions, CLOSED.to_vec()))
+                .expect_err("an uncertified coordinate is refused");
+            assert_eq!(refusals(&findings), ["L2.CERTIFIED_RANGE"]);
+        }
+        // And through the door, so the law's refusal is one the report carries rather than one only
+        // a caller of the gate can see.
+        let (mut nodes, spec) = sound_vehicle();
+        let mut positions = solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions;
+        positions[3] = [0.0, 0.0, f32::from_bits(high.to_bits() + 1)];
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions,
+            indices: CLOSED.to_vec(),
+        });
+        let findings = verify("uncertified", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.CERTIFIED_RANGE"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+
+        // Exact zero is legal and exact; the floor refuses what is merely NEAR zero.
+        for inside in [0.0f32, -0.0, low, high] {
+            let mut positions = tetrahedron(CLOSED.to_vec()).positions;
+            positions[3] = [0.0, 0.0, inside];
+            let primitive = ballistic(positions, CLOSED.to_vec());
+            let refused = gate("Fringe", &primitive)
+                .err()
+                .map(|findings| refusals(&findings).contains(&"L2.CERTIFIED_RANGE"));
+            assert_ne!(
+                refused,
+                Some(true),
+                "{inside:e} is inside the certified range"
+            );
+        }
+    }
+
+    /// L2.EXACT_DEGENERACY — a face with no orientation, in BOTH its spellings: welded ids that
+    /// repeat, and three DISTINCT welded ids on one line. One law, because they are one defect —
+    /// a triangle that encloses exactly zero area breaks edge parity and leaves the embedding
+    /// certificate no plane to intersect.
+    #[test]
+    fn a_zero_area_face_is_refused() {
+        // Two corners at one position: the welded ids repeat.
+        let mut repeated = CLOSED.to_vec();
+        repeated.extend_from_slice(&[0, 1, 1]);
+        let findings =
+            gate("Repeated", &tetrahedron(repeated)).expect_err("a repeated corner is refused");
+        assert_eq!(refusals(&findings)[0], "L2.EXACT_DEGENERACY");
+
+        // Three DISTINCT welded ids, on one line: a fourth vertex collinear with an existing edge.
+        let collinear = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0],
+        ];
+        let mut indices = CLOSED.to_vec();
+        indices.extend_from_slice(&[0, 1, 4]);
+        let findings = gate("Collinear", &ballistic(collinear, indices))
+            .expect_err("three distinct ids on one line are refused");
+        assert_eq!(refusals(&findings)[0], "L2.EXACT_DEGENERACY");
+        assert!(
+            findings[0].evidence.contains("collinear"),
+            "{}",
+            render(&findings)
+        );
+
+        // And through the door, both spellings.
+        let (mut nodes, spec) = sound_vehicle();
+        let mut repeated = CLOSED.to_vec();
+        repeated.extend_from_slice(&[0, 1, 1]);
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions: solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions,
+            indices: repeated,
+        });
+        let findings = verify("repeated-corner", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.EXACT_DEGENERACY"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+
+        let (mut nodes, spec) = sound_vehicle();
+        let plate = solid(SUBSTANCE, [0.0, 0.0, 0.0]);
+        let mut positions = plate.positions.clone();
+        positions.push([2.0, 0.0, 0.0]);
+        let mut indices = plate.indices.clone();
+        indices.extend_from_slice(&[0, 1, (positions.len() - 1) as u32]);
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions,
+            indices,
+        });
+        let findings = verify("collinear-corners", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.EXACT_DEGENERACY"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+
+        // One ulp off the line is a triangle, and the weld must not call it degenerate.
+        let sliver = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, f32::from_bits(1), 0.0],
+        ];
+        let mut indices = CLOSED.to_vec();
+        indices.extend_from_slice(&[0, 1, 4]);
+        let findings = gate("Sliver", &ballistic(sliver, indices))
+            .expect_err("the sliver is open, not degenerate");
+        assert!(
+            !refusals(&findings).contains(&"L2.EXACT_DEGENERACY"),
+            "{}",
+            render(&findings)
+        );
+    }
+
+    /// L2.MANIFOLD_WINDING and L2.POSITIVE_SHELL_VOLUME — what silently-zero armour is made of.
+    /// Driven on synthetic primitives, because a shipped asset must (and does) pass: the gate's
+    /// value is entirely in what it rejects.
+    #[test]
+    fn open_inverted_and_doubled_shells_are_refused() {
+        let closed = CLOSED.to_vec();
+        let shells =
+            gate("Good", &tetrahedron(closed.clone())).expect("a closed tetrahedron passes");
+        assert_eq!(shells, vec![0; 4], "one tetrahedron is one shell");
+
+        // One face removed: an open shell. This is the defect that makes armour worth ZERO — the
+        // walk never finds the exit face and the volume is never charged.
+        let mut open = closed.clone();
+        open.truncate(9);
+        let findings = gate("Open", &tetrahedron(open)).expect_err("an open shell is refused");
+        assert_eq!(refusals(&findings), ["L2.MANIFOLD_WINDING"]);
+        assert!(
+            findings[0].evidence.contains("not 2"),
+            "{}",
+            render(&findings)
+        );
+
+        // A duplicated face: closed by undirected count, but one directed edge is traversed twice.
+        let mut doubled = closed.clone();
+        doubled.extend_from_slice(&[0, 2, 1]);
+        let findings =
+            gate("Doubled", &tetrahedron(doubled)).expect_err("a duplicated face is refused");
+        assert!(
+            findings[0].evidence.contains("directed edge"),
+            "{}",
+            render(&findings)
+        );
+
+        // Every face flipped: closed, but wound inward — the walk would read its entries as exits.
+        let inverted: Vec<u32> = closed
+            .chunks_exact(3)
+            .flat_map(|face| [face[0], face[2], face[1]])
+            .collect();
+        let findings = gate("Inverted", &tetrahedron(inverted.clone()))
+            .expect_err("an inside-out shell is refused");
+        assert_eq!(refusals(&findings), ["L2.POSITIVE_SHELL_VOLUME"]);
+        assert_eq!(findings[0].subject.name, "Inverted");
+
+        // Both laws through the door, so each one's refusal is a row of the one report.
+        for (id, indices) in [
+            ("L2.MANIFOLD_WINDING", closed[..9].to_vec()),
+            ("L2.POSITIVE_SHELL_VOLUME", inverted),
+        ] {
+            let (mut nodes, spec) = sound_vehicle();
+            nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+                material: SUBSTANCE.into(),
+                positions: solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions,
+                indices,
+            });
+            let findings = verify("hollow", &nodes, &spec);
+            assert_eq!(refusals(&findings), [id], "{}", render(&findings));
+            assert_eq!(findings[0].subject.name, "Plate");
+            assert!(has_error(&findings));
+        }
     }
 
     /// SAME-PRIMITIVE FACE-TO-FACE CONTACT IS REFUSED, AND THAT IS THE CONTRACT (§13.7).
@@ -1250,78 +2212,66 @@ mod tests {
                 indices.extend(face.map(|corner| base + corner));
             }
         }
-        let abutting = MeshGeometry {
-            positions,
-            indices,
-            substance: Some(PrimitiveSubstance {
-                name: "RHA".into(),
-                factor: 1000.0,
-            }),
-            certificate: None,
-        };
-        let err = gate("Abutting", &abutting)
-            .expect_err("face-to-face contact inside one primitive must be refused");
-        assert!(err.contains("directed edge"), "{err}");
+        let findings = gate("Abutting", &ballistic(positions, indices))
+            .expect_err("face-to-face contact inside one primitive is refused");
+        assert!(
+            refusals(&findings)
+                .iter()
+                .all(|id| *id == "L2.MANIFOLD_WINDING"),
+            "{}",
+            render(&findings)
+        );
+        assert!(
+            findings[0].evidence.contains("directed edge"),
+            "{}",
+            render(&findings)
+        );
     }
 
-    /// The manifold gate refuses what silently-zero armour is made of, and names it. Driven on
-    /// synthetic primitives, because the shipped asset must (and does) pass — the gate's value is
-    /// entirely in what it rejects.
+    /// L2.SHELL_EMBEDDING — A SHELL THAT PASSES THROUGH ITSELF IS REFUSED, THROUGH THE WHOLE
+    /// CONTRACT.
+    ///
+    /// `fixture::pierced` is built to reach this law and no earlier one: it is closed, consistently
+    /// wound and encloses a positive volume, so the census and the volume gate both pass it and the
+    /// embedding certificate is the only thing between it and the walk. That is what the pair-level
+    /// witnesses in `embedding::tests` cannot say — they are handed a triangle list, not an asset —
+    /// and it is the whole reason this case is driven from the glb.
     #[test]
-    fn the_manifold_gate_refuses_open_inverted_and_degenerate_shells() {
-        // A unit tetrahedron, outward-wound: the smallest closed positive-volume shell.
-        let tetra = |indices: Vec<u32>| MeshGeometry {
-            positions: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            indices,
-            substance: Some(PrimitiveSubstance {
-                name: "RHA".into(),
-                factor: 1000.0,
-            }),
-            certificate: None,
-        };
-        let closed = vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3];
-        let shells = gate("Good", &tetra(closed.clone())).expect("a closed tetrahedron passes");
-        assert_eq!(shells, vec![0; 4], "one tetrahedron is one shell");
-
-        // One face removed: an open shell. This is the defect that makes armour worth ZERO — the
-        // walk never finds the exit face and the volume is never charged.
-        let mut open = closed.clone();
-        open.truncate(9);
-        let err = gate("Open", &tetra(open)).expect_err("an open shell must be refused");
-        assert!(err.contains("Open") && err.contains("not closed"), "{err}");
-
-        // Every face flipped: closed, but wound inward — the walk would read entries as exits.
-        let inverted: Vec<u32> = closed
-            .chunks_exact(3)
-            .flat_map(|t| [t[0], t[2], t[1]])
-            .collect();
-        let err =
-            gate("Inverted", &tetra(inverted)).expect_err("an inside-out shell must be refused");
-        assert!(err.contains("Inverted") && err.contains("volume"), "{err}");
-
-        // A duplicated face: closed by undirected count, but one directed edge is traversed twice.
-        let mut doubled = closed.clone();
-        doubled.extend_from_slice(&[0, 2, 1]);
-        let err = gate("Doubled", &tetra(doubled)).expect_err("a duplicated face must be refused");
+    fn a_shell_that_passes_through_itself_is_refused() {
+        // The gate's own three products first: the defect is not a census or a volume defect.
+        let solid = pierced(SUBSTANCE, [0.0, 0.0, 0.0]);
+        let geometry = ballistic(solid.positions.clone(), solid.indices.clone());
+        let findings = gate("Pierced", &geometry).expect_err("a pierced shell is refused");
+        assert_eq!(refusals(&findings), ["L2.SHELL_EMBEDDING"]);
         assert!(
-            err.contains("Doubled") && err.contains("directed edge"),
-            "{err}"
+            findings[0].evidence.contains("triangles 2 and 8")
+                && findings[0].evidence.contains("welded vertex 4"),
+            "{}",
+            render(&findings)
         );
 
-        // A degenerate (zero-area) triangle has no orientation to check.
-        let mut degenerate = closed.clone();
-        degenerate.extend_from_slice(&[0, 1, 1]);
-        let err =
-            gate("Degenerate", &tetra(degenerate)).expect_err("a zero-area face must be refused");
-        assert!(
-            err.contains("Degenerate") && err.contains("degenerate"),
-            "{err}"
+        // And through the door: one glb, one spec sheet, one report.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(solid);
+        let findings = verify("pierced-shell", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.SHELL_EMBEDDING"],
+            "{}",
+            render(&findings)
         );
+        assert_eq!(findings[0].subject.name, "Plate");
+        assert_eq!(findings[0].check.severity, Severity::Error);
+        assert!(has_error(&findings), "the door exits non-zero on it");
+
+        // The same box with its corner where a box has one certifies: nothing about the mutation
+        // beyond the pierced corner is what refuses it.
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate")
+            .child_of("Hull")
+            .holding(fixture::boxed(SUBSTANCE, [0.0, 0.0, 0.0]));
+        let findings = verify("intact-box", &nodes, &spec);
+        assert!(findings.is_empty(), "{}", render(&findings));
     }
 
     /// Weld-by-position is what makes the gate measure the SURFACE instead of the export's vertex
@@ -1338,25 +2288,14 @@ mod tests {
             [0.0, 1.0, 0.0],
             [0.0, 0.0, 1.0],
         ];
-        let faces = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
         let mut positions = Vec::new();
         let mut indices = Vec::new();
-        for face in faces {
-            for corner in face {
-                indices.push(positions.len() as u32);
-                positions.push(corners[corner]);
-            }
+        for corner in CLOSED {
+            indices.push(positions.len() as u32);
+            positions.push(corners[corner as usize]);
         }
-        let split = MeshGeometry {
-            positions,
-            indices,
-            substance: Some(PrimitiveSubstance {
-                name: "RHA".into(),
-                factor: 1000.0,
-            }),
-            certificate: None,
-        };
-        gate("Split", &split).expect("welding by position closes the split shell");
+        gate("Split", &ballistic(positions, indices))
+            .expect("welding by position closes the split shell");
     }
 
     /// TWO SHELLS IN ONE PRIMITIVE ARE TWO KEYS, AND ONE SHARED VERTEX DOES NOT MERGE THEM.
@@ -1383,16 +2322,8 @@ mod tests {
                 indices.extend(face.map(|corner| if corner == 0 { 0 } else { base + corner - 1 }));
             }
         }
-        let pair = MeshGeometry {
-            positions,
-            indices,
-            substance: Some(PrimitiveSubstance {
-                name: "RHA".into(),
-                factor: 1000.0,
-            }),
-            certificate: None,
-        };
-        let shells = gate("Pair", &pair).expect("two closed outward tetrahedra pass");
+        let shells = gate("Pair", &ballistic(positions, indices))
+            .expect("two closed outward tetrahedra pass");
         assert_eq!(
             shells,
             vec![0, 0, 0, 0, 1, 1, 1, 1],
@@ -1400,91 +2331,43 @@ mod tests {
         );
     }
 
-    /// A BALLISTIC NODE IS UNIT-SCALE OR IT IS REFUSED, BY NAME.
-    ///
-    /// The same geometry passes at `1` and fails at every other scale, including one a millionth of
-    /// an ULP away — nothing here compensates, rescales, or tolerates. The message names the node,
-    /// because the fix is in the .blend and the artist has to be told which object.
+    /// The report is one shape, in one order: stage, severity, check id, subject, element. Two
+    /// runs of a defective asset produce the same rows in the same order, or nobody can diff them.
     #[test]
-    fn a_ballistic_node_that_is_not_unit_scale_is_refused_by_name() {
-        let tetra = MeshGeometry {
-            positions: vec![
-                [0.0, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
-            substance: Some(PrimitiveSubstance {
-                name: "RHA".into(),
-                factor: 1000.0,
-            }),
-            certificate: None,
-        };
-        gate("Unscaled", &tetra).expect("at scale 1 it is ordinary geometry");
-
-        // A uniform shrink, a single stretched axis, a mirror, a collapse, and one ULP: all the
-        // same verdict, because the contract is bit-exact equality with 1 and nothing weaker.
-        for scale in [
-            Vec3::splat(0.9312),
-            Vec3::new(1.0, 2.0, 1.0),
-            Vec3::new(1.0, 1.0, -1.0),
-            Vec3::new(1.0, 1.0, 0.0),
-            Vec3::new(1.0, 1.0, f32::from_bits(1.0f32.to_bits() + 1)),
-        ] {
-            let Err(err) = manifold_gate("Turret_Bottom", 0, &tetra, scale) else {
-                panic!("a ballistic node at {scale:?} must be refused");
-            };
-            assert!(
-                err.contains("Turret_Bottom") && err.contains("unit scale"),
-                "{err}"
-            );
+    fn the_report_is_deterministic_and_carries_every_field() {
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions: solid(SUBSTANCE, [0.0, 0.0, 0.0]).positions,
+            indices: vec![0, 1, 2],
+        });
+        nodes[4] = Node::new("Station_R")
+            .child_of("Hull")
+            .scaled([2.0, 1.0, 1.0])
+            .holding(solid(SUBSTANCE, [6.0, 0.0, 0.0]));
+        let findings = verify("many-defects", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.MANIFOLD_WINDING", "L2.UNIT_SCALE", "L2.UNIT_SCALE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings, verify("many-defects", &nodes, &spec));
+        for finding in &findings {
+            assert_eq!(finding.check.stage, Stage::Consumer);
+            assert_eq!(finding.check.severity, Severity::Error);
+            assert!(!finding.check.law.is_empty());
+            assert!(!finding.evidence.is_empty());
+            assert!(!finding.repair.is_empty());
+            let rendering = finding.to_string();
+            assert!(rendering.contains(finding.check.id));
+            assert!(rendering.contains(&finding.subject.name));
+            assert!(rendering.contains(&finding.evidence));
+            assert!(rendering.contains(&finding.repair));
         }
-    }
-
-    /// Every node that SPINS must carry its axle in its own origin.
-    ///
-    /// A rotating part is driven by writing a local rotation onto its node — which turns the mesh
-    /// about that node's origin. If the origin sits at the model root (geometry baked into the
-    /// vertices, zero node translation — Blender's default for a mesh that was never re-origined),
-    /// the part orbits the tank instead of spinning in place, and any consumer that reads the
-    /// origin as the axle centre reads `(0, 0, 0)`.
-    ///
-    /// The check is deliberately blunt — *at the root* is the failure mode that actually happens on
-    /// export, and it is invisible in Blender unless you look at the gizmo. It is not a proof that
-    /// the origin is on the true axle (only the mesh centroid can say that; see
-    /// `track::marker_model`), just that an origin was authored at all.
-    #[test]
-    fn rotating_nodes_carry_their_own_axle_origin() {
-        let geometry = tiger_geometry(&tiger_spec());
-
-        // Roadwheels come from the extractor's typed list; the drive/idler hubs are named directly
-        // (they are rig meshes, not `Wheel_<side>_<n>` empties, so no typed list carries them).
-        let spinning: Vec<&NodeGeometry> = geometry
-            .roadwheels
-            .iter()
-            .map(|&(index, _)| &geometry.nodes[index])
-            .chain(
-                ["Sprocket_L", "Sprocket_R", "Idler_L", "Idler_R"]
-                    .into_iter()
-                    .map(|name| {
-                        let index = geometry.by_name.get(name).unwrap_or_else(|| {
-                            panic!("extracted geometry is missing drive hub `{name}`")
-                        });
-                        &geometry.nodes[*index]
-                    }),
-            )
-            .collect();
-
-        let at_root: Vec<&str> = spinning
-            .iter()
-            .filter(|n| n.root_position.length() < 1.0e-4)
-            .map(|n| n.name.as_str())
-            .collect();
         assert!(
-            at_root.is_empty(),
-            "rotating nodes whose origin is at the model root (set the object origin to the axle \
-             in Blender and re-export): {at_root:?}"
+            has_error(&findings),
+            "an error makes the exit status non-zero"
         );
     }
 }

@@ -23,14 +23,15 @@ This is an IMAGE swap inside the existing `Mat_Track_Link`, not a re-authoring:
 Old FreePBR image datablocks are removed from the blend so no paid-license content survives in
 either the .blend or the exported .glb.
 
-Export goes through `.agents/blender/export_tiger.py`, never `bpy.ops.export_scene.gltf` directly:
-the raw exporter embeds PNG/JPEG, which bevy uploads with ONE mip level, and the helper folds the
-KTX2 mip bake into the export so a mipless glb cannot reach the tracked path. Settings underneath
-are still plain `export_format='GLB'` with no other arguments — verified last session to reproduce
-the shipped pipeline byte-for-byte structurally.
+Export goes through `scripts/tank/asset_door.py`, never `bpy.ops.export_scene.gltf` directly: the
+raw exporter embeds PNG/JPEG, which bevy uploads with ONE mip level, and the door folds the KTX2
+mip bake into the export so a mipless glb cannot reach the tracked path. This script saves and
+hands the stored file over; every export setting is the door's frozen list.
 """
 import bpy
 import os
+import shutil
+import subprocess
 import sys
 
 MAT_NAME = "Mat_Track_Link"
@@ -41,12 +42,9 @@ if not SRC or not os.path.isdir(SRC):
     raise SystemExit(f"need a source dir of pre-sized 512 maps, got {SRC!r}")
 
 BLEND = bpy.data.filepath
-GLB = os.path.join(os.path.dirname(BLEND), "tiger_1.glb")
 
-# The blend lives at <root>/assets/tiger_1/, so the shared export helper is three levels up.
+# The blend lives at <root>/assets/<id>/, so the work tree is three levels up.
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(BLEND)))
-sys.path.insert(0, os.path.join(ROOT, ".agents", "blender"))
-import export_tiger  # noqa: E402  (path must be set first)
 
 mat = bpy.data.materials.get(MAT_NAME)
 if mat is None:
@@ -142,5 +140,13 @@ print(f"OK material={mat.name} uv_layers={len(link.data.uv_layers)} "
 
 bpy.ops.wm.save_mainfile()
 print(f"SAVED {BLEND}")
-export_tiger.export(root=ROOT, glb=GLB)  # exports to a temp glb, then mip-bakes onto GLB
+# The one door, on the saved file: source pass ▸ raw candidate ▸ consumer contract ▸ KTX2
+# derivation ▸ the tracked glb, which only a chain that passed every stage may replace.
+door = subprocess.run(
+    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "asset_door.py"),
+     "export", BLEND],
+    cwd=ROOT,
+)
+if door.returncode:
+    raise SystemExit(door.returncode)
 print("DONE")

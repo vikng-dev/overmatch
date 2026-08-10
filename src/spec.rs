@@ -168,7 +168,7 @@ pub struct RecoilSpec {
 /// A crew viewpoint — the camera/optic anchor. A closed set of kinds (each its own bespoke camera
 /// behaviour in code), keyed in [`TankSpec::views`]; the *parameters* (which node, later FOV/zoom)
 /// are data. The gunner's view node is also how the binder finds the gunner's chain for the rig.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ViewKind {
     Gunner,
     Commander,
@@ -616,7 +616,107 @@ pub struct TankSpec {
     pub capabilities: HashMap<Capability, Requirement>,
 }
 
+/// What the sim does with a node the spec names — the role half of a typed node reference.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum NodeRole {
+    /// An actuator mount.
+    Servo,
+    /// A component facet: hit points, crew, ammunition, a function.
+    Volume,
+    /// A collision proxy — a convex-hull source, never armour.
+    Collider,
+    /// A roadwheel station, which carries its own wheel mesh.
+    Roadwheel,
+    /// A weapon's bore or its recoiling barrel.
+    Weapon,
+    /// A crew viewpoint anchor.
+    View,
+}
+
+/// One typed node reference: what the sim does with the node, the node's name, and the RON path
+/// the reference was AUTHORED at — the line a report sends a human to.
+///
+/// The field is carried per reference and not derived from the role, because a role does not
+/// determine one: a weapon names its bore in `muzzle` and its recoiling barrel in `barrel`, and
+/// both are the same role. Declaration order is sort order — role, then node, then the path inside
+/// it — so a report groups by what a node is for and reads the same between runs.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct NodeReference<'a> {
+    pub role: NodeRole,
+    pub node: &'a str,
+    pub field: String,
+}
+
+impl NodeRole {
+    /// Whether `crate::tank::rig_world_pose` composes through a node in this role. That composition
+    /// is rigid — position and rotation only — so such a node and every ancestor of it must be
+    /// authored at unit scale or the sim and the view disagree about where the part is.
+    pub(crate) fn rigid_pose(self) -> bool {
+        match self {
+            Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
+            Self::Volume | Self::Collider => false,
+        }
+    }
+}
+
 impl TankSpec {
+    /// Every model node this sheet names, with the role it names it in — the canonical reference
+    /// list, so no consumer (the bake gate, the source lint, a future editor) maintains a second
+    /// vocabulary of RON field names. Sorted by role then name: the maps are unordered, and a
+    /// report that reorders between runs is one nobody can diff.
+    pub fn node_references(&self) -> Vec<NodeReference<'_>> {
+        let mut references: Vec<NodeReference<'_>> = Vec::new();
+        fn at(role: NodeRole, node: &str, field: String) -> NodeReference<'_> {
+            NodeReference { role, node, field }
+        }
+        // `servos` and `volumes` are keyed BY the node name and `colliders` is a list of them, so
+        // the field alone names the entry; the rest hold the name inside a keyed or indexed one.
+        references.extend(
+            self.servos
+                .keys()
+                .map(|node| at(NodeRole::Servo, node, "servos".to_owned())),
+        );
+        references.extend(
+            self.volumes
+                .keys()
+                .map(|node| at(NodeRole::Volume, node, "volumes".to_owned())),
+        );
+        references.extend(
+            self.colliders
+                .iter()
+                .map(|node| at(NodeRole::Collider, node, "colliders".to_owned())),
+        );
+        references.extend(self.roadwheels.iter().enumerate().map(|(index, wheel)| {
+            at(
+                NodeRole::Roadwheel,
+                &wheel.node,
+                format!("roadwheels[{index}].node"),
+            )
+        }));
+        for (name, weapon) in &self.weapons {
+            references.push(at(
+                NodeRole::Weapon,
+                &weapon.muzzle,
+                format!("weapons[\"{name}\"].muzzle"),
+            ));
+            if let Some(barrel) = weapon.barrel.as_deref() {
+                references.push(at(
+                    NodeRole::Weapon,
+                    barrel,
+                    format!("weapons[\"{name}\"].barrel"),
+                ));
+            }
+        }
+        references.extend(
+            self.views.iter().map(|(kind, view)| {
+                at(NodeRole::View, &view.node, format!("views[{kind:?}].node"))
+            }),
+        );
+        references.sort_unstable();
+        references.dedup();
+        references
+    }
+
     /// Fail-fast semantic validation past what serde's shape check catches (ADR-0011: a competitive
     /// sim never runs on silently-bricked stats). serde proves the *fields* exist and typecheck; this
     /// proves the *values* yield a weapon that can actually fire and cycle. Each rejection names the
@@ -1422,180 +1522,5 @@ mod tests {
             TransmissionArchitecture::FixedRadii.mode(),
             TransmissionMode::FixedRadii
         );
-    }
-
-    /// The spec↔model **bind contract** — the CI-time twin of the runtime contract in the private
-    /// tank assembler, but without launching Bevy: it reads the glTF directly and checks both
-    /// directions.
-    ///
-    /// FORWARD: every node the spec references — servos, weapon muzzles/barrels, view anchors,
-    /// component keys, the declared colliders and roadwheels, and the fixed structural singletons —
-    /// must exist in the `.glb`.
-    ///
-    /// REVERSE: the **material-implied lints** that replaced the old `*_Ballistic` orphan scan. The
-    /// suffix is gone, so "is this node armour?" is answered by the material it wears, and the
-    /// questions worth asking flip around: a Flesh volume that is not declared crew, an Ammunition
-    /// volume that will not cook off, an engine block with no component entry — each is a substance
-    /// whose whole point is a consequence the RON forgot to state. Plus the closure lint: a material
-    /// whose name is a registry key with Blender's `.001` duplicate suffix means the material library
-    /// stopped being LINKED and got appended, which silently un-declares every plate wearing it.
-    ///
-    /// Add a tank variant → add a case here.
-    #[test]
-    fn tiger_1_spec_binds_to_model() {
-        use std::collections::{BTreeMap, BTreeSet, HashSet};
-
-        let gltf = gltf::Gltf::open("assets/tiger_1/tiger_1.glb").expect("tiger_1.glb must open");
-        let nodes: HashSet<String> = gltf
-            .nodes()
-            .filter_map(|n| n.name().map(str::to_string))
-            .collect();
-        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("tiger_1.tank.ron must parse");
-        let registry = crate::substances::SubstanceRegistry::shipped();
-
-        let has = |name: &str| {
-            assert!(
-                nodes.contains(name),
-                "spec references node `{name}`, which is absent from the model"
-            );
-        };
-
-        // Forward: every spec-declared node resolves to a model node.
-        for servo in spec.servos.keys() {
-            has(servo);
-        }
-        for weapon in spec.weapons.values() {
-            has(&weapon.muzzle);
-            if let Some(barrel) = &weapon.barrel {
-                has(barrel);
-            }
-        }
-        for component in spec.volumes.keys() {
-            has(component);
-        }
-        for view in spec.views.values() {
-            has(&view.node);
-        }
-        for collider in &spec.colliders {
-            has(collider);
-        }
-        for wheel in &spec.roadwheels {
-            has(&wheel.node);
-        }
-
-        // Fixed structural contract mirrored from complete tank assembly.
-        has("Hull");
-        has("Center_Of_Mass");
-
-        // Which substances each node wears — the membership verdict, read straight off the model.
-        let mut worn: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-        let mut all_materials: BTreeSet<&str> = BTreeSet::new();
-        for node in gltf.nodes() {
-            let Some(name) = node.name() else { continue };
-            let Some(mesh) = node.mesh() else { continue };
-            for primitive in mesh.primitives() {
-                let Some(material) = primitive.material().name() else {
-                    continue;
-                };
-                all_materials.insert(material);
-                if registry.get(material).is_ok() {
-                    worn.entry(name).or_default().insert(material);
-                }
-            }
-        }
-        assert!(
-            !worn.is_empty(),
-            "no node in the model wears a registry substance — the material library link is broken"
-        );
-
-        // Closure + near-miss: every substance material in the glb is a registry key by
-        // construction (that IS the test above), so what is left to catch is a name that LOOKS like
-        // one. Blender appends `.001` when a datablock is duplicated instead of linked, and the
-        // result reads identically to a human while classifying as decor.
-        for material in &all_materials {
-            if registry.get(material).is_ok() {
-                continue;
-            }
-            let stem = material
-                .rsplit_once('.')
-                .map_or(*material, |(stem, suffix)| {
-                    if suffix.len() == 3 && suffix.bytes().all(|b| b.is_ascii_digit()) {
-                        stem
-                    } else {
-                        material
-                    }
-                });
-            assert!(
-                registry.get(stem).is_err(),
-                "material `{material}` is a duplicate of the registry substance `{stem}` — the \
-                 material library was APPENDED instead of linked, so every mesh wearing this is \
-                 silently no longer a ballistic volume"
-            );
-        }
-
-        // Reverse, the material-implied lints: a substance whose meaning is a facet must have it.
-        for (node, substances) in &worn {
-            let facets = spec.volumes.get(*node);
-            if substances.contains("Flesh") {
-                assert!(
-                    facets.is_some_and(|facets| facets.crew.is_some()),
-                    "`{node}` is made of Flesh but declares no crew facet — a crewman nobody can \
-                     kill, and a seat nothing can knock out"
-                );
-            }
-            if substances.contains("Ammunition") {
-                assert!(
-                    facets.is_some_and(|facets| facets.ammo),
-                    "`{node}` is made of Ammunition but declares no ammo facet — a rack that \
-                     cannot cook off"
-                );
-            }
-            if substances.contains("EngineBlock") {
-                assert!(
-                    facets.is_some(),
-                    "`{node}` is an EngineBlock with no component entry — a powerplant with no hp \
-                     is armour pretending to be a module"
-                );
-            }
-        }
-
-        // A collision proxy must never wear a substance: it would be charged as armour AND stand in
-        // for the body, double-counting the hull.
-        for collider in &spec.colliders {
-            assert!(
-                !worn.contains_key(collider.as_str()),
-                "collision proxy `{collider}` wears a substance material"
-            );
-        }
-        // A roadwheel station must wear one: the station node IS its own armour volume.
-        for wheel in &spec.roadwheels {
-            assert!(
-                worn.contains_key(wheel.node.as_str()),
-                "roadwheel `{}` wears no substance — the wheel would be invisible to the march",
-                wheel.node
-            );
-        }
-
-        // Unused registry keys are a WARNING, not an error: the registry is global (every tank
-        // shares it), so a substance this vehicle happens not to use is legitimate.
-        let used: BTreeSet<&str> = worn.values().flatten().copied().collect();
-        for substance in [
-            "RHA",
-            "GunSteel",
-            "Cast",
-            "MildSteel",
-            "EngineBlock",
-            "Ammunition",
-            "Rubber",
-            "Flesh",
-        ] {
-            if !used.contains(substance) {
-                eprintln!(
-                    "note: registry substance `{substance}` is unused by tiger_1 (fine — the \
-                     registry is shared across vehicles)"
-                );
-            }
-        }
     }
 }

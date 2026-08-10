@@ -1,12 +1,9 @@
-import bpy, math, os, statistics, sys
+import bpy, math, os, shutil, statistics, subprocess, sys
 from mathutils import Vector
 
-# Export goes through the shared helper, which folds the KTX2 mip bake into the export so a
-# mipless glb can never land on the tracked path — see .agents/blender/export_tiger.py.
+# This script AUTHORS; it does not export. The export is the one door's — see the tail.
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(bpy.data.filepath)))
-sys.path.insert(0, os.path.join(ROOT, ".agents", "blender"))
-import export_tiger  # noqa: E402  (path must be set first)
-SP="/private/tmp/claude-502/-Users-Yan-Desktop-github-vikng-dev-personal-overmatch/aa6ae501-da41-487d-a38f-23a2004cf55d/scratchpad"
+SP = os.environ.get("OVERMATCH_TRACK_SCRATCH") or sys.exit("set OVERMATCH_TRACK_SCRATCH to the directory holding metal512/ — the session scratchpad this was authored in is gone")
 SRC = SP + "/metal512"
 TILE_M   = 0.35
 MAT_NAME = "Mat_Track_Link"
@@ -60,6 +57,17 @@ b.inputs["Metallic"].default_value = 1.0
 link.data.materials.clear(); link.data.materials.append(m)
 for p in link.data.polygons: p.material_index = 0
 print(f"OK unwrap={len(link.data.uv_layers)}L tile={TILE_M}m mat={MAT_NAME} imgs=512px")
+
+# Save, then hand the SAVED file to the one door. It opens the blend in its own Blender, runs the
+# L1 source pass, exports the raw candidate, runs the consumer contract and the KTX2 derivation,
+# and only then replaces the tracked glb — `scripts/tank/asset_door.py`. Nothing about the export
+# is decided here.
 bpy.ops.wm.save_mainfile()
-export_tiger.export(root=ROOT)
+door = subprocess.run(
+    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "asset_door.py"),
+     "export", bpy.data.filepath],
+    cwd=ROOT,
+)
+if door.returncode:
+    raise SystemExit(door.returncode)
 print("DONE")

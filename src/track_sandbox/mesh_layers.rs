@@ -412,7 +412,12 @@ mod tests {
         let glb = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets")
             .join(crate::tank::TIGER_GLB_PATH);
-        crate::bake::extract_tank_geometry(&glb, &spec).expect("the Tiger glb extracts")
+        crate::bake::extract_tank_geometry(
+            &glb,
+            &spec,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .expect("the Tiger glb extracts")
     }
 
     /// The classifier, driven by the exact node names the shipped Tiger glb carries: the declared

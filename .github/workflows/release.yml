@@ -60,18 +60,49 @@ jobs:
             echo "::error::Release identity mismatch: tag=${GITHUB_REF_NAME} Cargo.toml=${cargo_version:-<missing>} Cargo.lock=${lock_version:-<missing>}"
             exit 1
           fi
-      # The tank glb ships inside every client archive. Blender's glTF exporter embeds PNG/JPEG,
-      # which bevy uploads with ONE mip level — a shimmering, cache-thrashing tank that reads as a
-      # renderer bug rather than a missing build step. The KTX2 mip bake is folded into the
-      # scripted export and gated again by `scripts/hooks/pre-push`, but a hook is one
-      # `--no-verify` away; this is the gate that makes shipping it *impossible*. It runs here, in
-      # the first job, so a mipless glb costs seconds instead of three cold Bevy builds. Milliseconds
-      # of work behind one targeted LFS fetch.
-      - name: Verify the tank glb is mip-baked (KTX2)
+      # Every asset ships inside every client archive, and every build job DELETES the `.blend`
+      # before packaging — after which nothing downstream can re-derive the model or say what it
+      # was cut from. So the committed bytes answer for themselves here, once, in the job the
+      # client jobs `need`: the consumer contract on the tracked glb/spec pair, and the derivation
+      # verifier on the tracked glb. Full re-derivation from the source is CI's, with the pinned
+      # Blender. This half is the one that must not be skippable, because `scripts/hooks/pre-push`
+      # is one `--no-verify` away. `asset_verify` links the whole crate, so this job carries an
+      # uncached bevy build and the linux system libs that build needs.
+      #
+      # The assets are DISCOVERED, by the same trio rule the door and the hook use — `<id>.blend`,
+      # `<id>.tank.ron`, `<id>.glb` in one directory — so a second vehicle is gated by the rule that
+      # found the first. Only the models are hydrated: a `.blend` in the checkout is a pointer file,
+      # which is all discovery reads.
+      - name: Verify every shipped asset
+        shell: bash
         run: |
+          set -euo pipefail
+          stems=()
+          while IFS= read -r stem; do stems+=("$stem"); done < <(
+            git ls-files |
+            awk '
+              /\.blend$/     { blend[substr($0, 1, length($0) - 6)] = 1; next }
+              /\.tank\.ron$/ { sheet[substr($0, 1, length($0) - 9)] = 1; next }
+              /\.glb$/       { model[substr($0, 1, length($0) - 4)] = 1 }
+              END { for (stem in blend) if (stem in sheet && stem in model) print stem }
+            ' | LC_ALL=C sort
+          )
+          if [[ ${#stems[@]} -eq 0 ]]; then
+            echo "::error::No asset trio found — the release would ship models nothing verified"
+            exit 1
+          fi
+          printf 'asset: %s\n' "${stems[@]}"
           git lfs install --local
-          git lfs pull --include='assets/tiger_1/tiger_1.glb'
-          python3 scripts/tank/glb_ktx2.py verify assets/tiger_1/tiger_1.glb
+          git lfs pull --include="$(IFS=,; echo "${stems[*]/%/.glb}")"
+          # The linker needs the same system libs the Linux client build does.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+          cargo run --locked --quiet --bin asset_verify -- "${stems[@]/%/.glb}"
+          for stem in "${stems[@]}"; do
+            python3 scripts/tank/glb_ktx2.py verify "$stem.glb"
+          done
 
       # A release client must match the server already running on our droplet. Require the tag to
       # name current main, then require a successful, non-skipped deploy job for that exact SHA.
