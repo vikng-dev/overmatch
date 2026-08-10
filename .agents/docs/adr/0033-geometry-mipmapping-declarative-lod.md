@@ -11,11 +11,13 @@ adversarial-review triage that shaped them.
 Every renderable mesh gets a mip-style chain, generated at export, selected at runtime by
 screen-space error. No manual LOD steps exist for any asset.
 
-1. **L0 = the source**, defined precisely as the *evaluated render snapshot* of the artist's
-   object (modifier stack applied, instances realized, transforms normalized) — the surface
-   that ships is the surface that anchors deviation. Source hygiene (re-encoding an
-   over-tessellated source) is authoring, done by a human in the .blend, and the result
-   becomes the source.
+1. **L0 = the source**, defined precisely as the *stored modifier-free mesh* of the artist's
+   object (instances realized, transforms normalized) — the surface that ships is the
+   surface that anchors deviation, and it has to be the surface a human can open the file
+   and inspect. Modifiers are not part of source identity: an export-bound object carries
+   none, enabled or not (`L1.MODIFIER_STACK`), so there is no evaluated snapshot that
+   differs from what the file holds. Source hygiene (re-encoding an over-tessellated
+   source) is authoring, done by a human in the .blend, and the result becomes the source.
 2. **One global octave grid**: deviation targets e₁·2^(N−1), e₁ declared once game-wide
    (ratified from the left-wall measurement of a reference asset). Per-asset chains are
    SPARSE SUBSETS of the grid: each asset starts at the first rung whose candidate sheds a
