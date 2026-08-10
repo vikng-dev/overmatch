@@ -154,7 +154,9 @@ class Canon:
     vocabulary of substances; both laws are stated here in words Rust owns.
     """
 
-    #: `(RON field, node name)` pairs, in the order the generator emitted them.
+    #: `(RON path, node name)` pairs, in the order the generator emitted them. The path is the
+    #: line the reference was AUTHORED at — `weapons["Coax_MG"].barrel` — and is rendered
+    #: verbatim: the vocabulary is Rust's, and a second one here is what the design forbids.
     node_references: tuple
     #: Every material datablock name the registry declares.
     substance_keys: frozenset
@@ -765,16 +767,16 @@ def check_spec_references(source: Source) -> List[Finding]:
         return []
     carried = Counter(obj.name for obj in source.objects)
     findings = []
-    for ron_field, node in source.canon.node_references:
+    for field, node in source.canon.node_references:
         matches = carried[node]
         if matches == 1:
             continue
         findings.append(Finding(
             SPEC_REFERENCES,
-            Subject(SubjectKind.OBJECT, node, "declared in `{}`".format(ron_field)),
+            Subject(SubjectKind.OBJECT, node, "declared in `{}`".format(field)),
             "{} export-bound object(s) carry this name".format(matches),
             "rename the object the spec means to `{}`, export the one it expects, or edit `{}` in "
-            "the spec sheet to the name the model actually carries".format(node, ron_field),
+            "the spec sheet to the name the model actually carries".format(node, field),
         ))
     return findings
 
