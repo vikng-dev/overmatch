@@ -20,6 +20,13 @@ already passed everything.
 `verify` is the same chain into a temporary directory, ending in an exact comparison with the
 tracked glb. It writes nothing.
 
+`--from-raw <candidate.glb>` is the same run continued rather than started: the caller has ALREADY
+run the Blender half in a Blender of its own (the GUI adapter, `.agents/blender/addons/
+overmatch_export.py`, which is inside one), so the door skips the launch and picks the chain up at
+the consumer contract on the candidate it was handed. Documented-internal: every stage after the
+raw candidate is the same call in the same order, so this is one implementation reached from two
+places and not a second door.
+
 WHY THE DOOR IS THE ORCHESTRATOR AND NOT A BLENDER SCRIPT
 ---------------------------------------------------------
 Blender's embedded interpreter is where the source pass belongs and nowhere else: the consumer
@@ -140,12 +147,15 @@ def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
     )])
 
 
-def preflight(mode: str):
-    """The pinned programs, before anything long runs. Blender for every mode; the texture encoder
-    for the two that derive textures. Returns `(findings, blender)`, the second being the binary
-    every mode then launches — asked for once, so the chain runs the program the pin was read off."""
-    blender = toolchain.blender()
-    programs = [blender] if mode == "lint" else [blender, toolchain.basisu()]
+def preflight(mode: str, launches_blender: bool = True):
+    """The pinned programs, before anything long runs. Blender for every mode that launches one;
+    the texture encoder for the two that derive textures. Returns `(findings, blender)`, the second
+    being the binary the chain then launches — asked for once, so the chain runs the program the pin
+    was read off, and None for a continuation that launches no Blender at all (the caller is inside
+    one, and `export_tank.check_exporter` asserted its half of the pin there)."""
+    blender = toolchain.blender() if launches_blender else None
+    programs = [program for program in (blender, None if mode == "lint" else toolchain.basisu())
+                if program is not None]
     findings = []
     for program in programs:
         row = toolchain.finding(program)
@@ -153,7 +163,7 @@ def preflight(mode: str):
             print("door  ▸ toolchain: {} ({})".format(program, program.binary), flush=True)
             continue
         findings.append(row)
-    return (findings, blender.binary)
+    return (findings, blender.binary if blender is not None else None)
 
 
 def digest(path: str) -> str:
@@ -221,32 +231,39 @@ def compare(baked: str, glb: str) -> None:
 
 # ── the chain ────────────────────────────────────────────────────────────────────────────────────
 
-def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blender: str) -> None:
-    """Every stage, in order, raising `Refused` at the first one that says no.
-
-    The order is what makes the door cheap to fail: the source pass and the consumer contract both
-    run before the MEASURED minute of texture encoding, and the tracked glb is touched after
-    everything.
-    """
-    stem = os.path.splitext(os.path.basename(blend))[0]
-    canon = os.path.join(work, "canon.json")
-    with open(canon, "wb") as handle:
+def canon_file(spec: str, root: str, work: str) -> str:
+    """The two canonical lists the source pass may not maintain for itself, written where Blender
+    can read them. Public because the GUI adapter runs the source pass in its own Blender and needs
+    the same file from the same generator."""
+    path = os.path.join(work, "canon.json")
+    with open(path, "wb") as handle:
         run_stage(
             "canon",
             ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", "--canon", spec],
             root, stdout=handle,
         )
+    return path
 
-    raw = candidate(work, "raw", stem, spec) if mode != "lint" else None
+
+def source_pass(mode: str, blend: str, spec: str, glb: str, canon: str, raw: Optional[str],
+                root: str, blender: str) -> None:
+    """The Blender half: the L1 source pass, and — for the modes with a chain behind them — the raw
+    candidate the rest of it reads."""
     command = [
         blender, "--background", "--factory-startup", blend,
         "--python", os.path.join(root, SOURCE_PASS), "--",
         "--mode", mode, "--spec", spec, "--glb", glb, "--canon", canon,
     ]
     run_stage("source", command + (["--raw", raw] if raw else []), root)
-    if mode == "lint":
-        return
 
+
+def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work: str) -> None:
+    """Everything after the raw candidate: the consumer contract on it, the texture derivation, the
+    derivation verifier, the contract again on the baked bytes, and the tracked path.
+
+    This is where `--from-raw` joins, so a candidate cut inside somebody's Blender and one cut by
+    the door's own launch travel exactly the same stages in exactly the same order.
+    """
     run_stage("consumer (raw)",
               ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", raw], root)
 
@@ -270,6 +287,50 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
     ), flush=True)
 
 
+def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blender: str) -> None:
+    """Every stage, in order, raising `Refused` at the first one that says no.
+
+    The order is what makes the door cheap to fail: the source pass and the consumer contract both
+    run before the MEASURED minute of texture encoding, and the tracked glb is touched after
+    everything.
+    """
+    stem = os.path.splitext(os.path.basename(blend))[0]
+    canon = canon_file(spec, root, work)
+    raw = candidate(work, "raw", stem, spec) if mode != "lint" else None
+    source_pass(mode, blend, spec, glb, canon, raw, root, blender)
+    if mode == "lint":
+        return
+    derive(mode, raw, stem, spec, glb, root, work)
+
+
+def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
+              from_raw: str) -> None:
+    """The chain picked up at the candidate somebody else's Blender already wrote.
+
+    The raw candidate must exist: the caller's source pass either wrote it or refused, and a missing
+    file is that refusal arriving here as silence.
+
+    It is staged into the door's own candidate layout rather than read where it lies, because the
+    consumer contract names a pair by the model alone and finds the spec sheet beside it. The caller
+    is free to have called its temporary file anything.
+    """
+    if not os.path.isfile(from_raw):
+        raise Refused("from-raw", [Finding(
+            STAGE_FAILED,
+            Subject(SubjectKind.DOOR, "from-raw", from_raw),
+            "no raw candidate at this path",
+            "run the source pass that writes it, or drop --from-raw and let the door launch "
+            "Blender itself — the chain continues from a candidate, and there is none",
+        )])
+    stem = os.path.splitext(os.path.basename(blend))[0]
+    print("door  ▸ from-raw: {} — the source pass ran in the caller's Blender".format(
+        shown([from_raw], root)
+    ), flush=True)
+    raw = candidate(work, "raw", stem, spec)
+    shutil.copyfile(from_raw, raw)
+    derive(mode, raw, stem, spec, glb, root, work)
+
+
 # ── the command line ─────────────────────────────────────────────────────────────────────────────
 
 def parse(argv: Optional[List[str]] = None):
@@ -280,23 +341,33 @@ def parse(argv: Optional[List[str]] = None):
                                        "the blend's stem")
     parser.add_argument("--glb", help="TEST ONLY: the tracked model, which otherwise derives from "
                                       "the blend's stem")
-    return parser.parse_args(argv)
+    parser.add_argument("--from-raw", help="INTERNAL: continue the chain from a raw candidate a "
+                                           "caller's own Blender already wrote, instead of "
+                                           "launching one")
+    arguments = parser.parse_args(argv)
+    if arguments.from_raw and arguments.mode == "lint":
+        parser.error("--from-raw continues the derivation chain, and lint has none behind it")
+    return arguments
 
 
-def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None) -> int:
+def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None,
+         from_raw: Optional[str] = None) -> int:
     """One invocation. Returns the exit code: non-zero exactly when a stage refused."""
     blend = os.path.abspath(blend)
     stem = os.path.splitext(blend)[0]
     spec = os.path.abspath(spec or stem + ".tank.ron")
     glb = os.path.abspath(glb or stem + ".glb")
 
-    findings, blender = preflight(mode)
+    findings, blender = preflight(mode, launches_blender=from_raw is None)
     stage = "toolchain"
     if not findings:
         try:
             root = repo_root()
             with tempfile.TemporaryDirectory(prefix="asset-door-") as work:
-                chain(mode, blend, spec, glb, root, work, blender)
+                if from_raw is None:
+                    chain(mode, blend, spec, glb, root, work, blender)
+                else:
+                    continued(mode, blend, spec, glb, root, work, os.path.abspath(from_raw))
         except Refused as refusal:
             stage, findings = refusal.stage, refusal.findings
         else:
@@ -312,7 +383,8 @@ def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] =
 
 def main() -> int:
     arguments = parse()
-    return door(arguments.mode, arguments.blend, arguments.spec, arguments.glb)
+    return door(arguments.mode, arguments.blend, arguments.spec, arguments.glb,
+                arguments.from_raw)
 
 
 if __name__ == "__main__":

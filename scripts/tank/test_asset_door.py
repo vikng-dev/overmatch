@@ -69,10 +69,10 @@ def trio(name, defect="none"):
     return os.path.join(directory, "assets", "testbed", "testbed.blend")
 
 
-def door(mode, blend, env=None):
+def door(mode, blend, env=None, *extra):
     """One door invocation, as anyone would run it. Returns `(exit code, everything printed)`."""
     result = subprocess.run(
-        [sys.executable, DOOR, mode, blend], cwd=ROOT, text=True,
+        [sys.executable, DOOR, mode, blend] + list(extra), cwd=ROOT, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, **(env or {})),
     )
     return (result.returncode, result.stdout)
@@ -323,6 +323,59 @@ class DoorMechanics(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("door.mode-unimplemented", result.stdout)
+
+    def blender_half(self, blend, raw):
+        """The Blender half, run the way the GUI adapter runs it: the caller's own Blender, the
+        canon file from the one generator, the candidate written where the caller says."""
+        spec = os.path.splitext(blend)[0] + ".tank.ron"
+        canon = os.path.join(os.path.dirname(raw), "canon.json")
+        with open(canon, "wb") as handle:
+            written = subprocess.run(
+                ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", "--canon", spec],
+                cwd=ROOT, stdout=handle,
+            )
+        self.assertEqual(written.returncode, 0)
+        result = subprocess.run(
+            [toolchain.blender().binary, "--background", "--factory-startup", blend,
+             "--python", SOURCE_PASS, "--", "--mode", "export", "--spec", spec,
+             "--glb", os.path.splitext(blend)[0] + ".glb", "--canon", canon, "--raw", raw],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(os.path.isfile(raw), result.stdout)
+
+    def test_a_continued_chain_bakes_the_bytes_the_full_chain_bakes(self):
+        """`--from-raw` is the GUI adapter's whole claim to being an adapter: the stages after the
+        candidate are the same calls in the same order, so the model it lands is the model the
+        headless door lands, to the byte. Anything else would be a second door."""
+        blend = trio("from-raw")
+        glb = os.path.splitext(blend)[0] + ".glb"
+        self.assertEqual(door("export", blend)[0], 0)
+        whole = digest(glb)
+
+        os.remove(glb)
+        work = os.path.join(_WORK, "from-raw-work")
+        os.makedirs(work, exist_ok=True)
+        raw = os.path.join(work, "testbed.raw.glb")
+        self.blender_half(blend, raw)
+
+        code, printed = door("export", blend, None, "--from-raw", raw)
+        self.assertEqual(code, 0, printed)
+        self.assertIn("door  ▸ from-raw", printed)
+        self.assertNotIn("door  ▸ source", printed, "the continuation launched a second Blender")
+        for mark in ("consumer (raw):", "ktx2:", "derivation:", "consumer (baked):", "export:"):
+            self.assertIn("door  ▸ " + mark, printed, "the continuation skipped a stage")
+        self.assertEqual(digest(glb), whole, "the continued chain baked different bytes")
+
+    def test_a_continuation_with_no_candidate_refuses(self):
+        """The caller's source pass either wrote the candidate or refused. A missing file is that
+        refusal arriving as silence, so the door names it instead of encoding nothing."""
+        blend = build()
+        code, printed = door("export", blend, None, "--from-raw",
+                             os.path.join(_WORK, "no-such-candidate.glb"))
+        self.assertEqual(code, 1, printed)
+        self.assertIn("door.stage-failed", printed)
+        self.assertIn("refused at from-raw", printed)
 
     def test_the_lod_lane_and_the_door_pin_the_same_toolchain(self):
         """`scripts/lod/config.py` still carries its own copy of the pins: its bytes are hashed into
