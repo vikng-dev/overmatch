@@ -2,7 +2,7 @@
 //!
 //! One test does the gating; the rest prove the gate itself is not vacuous, which for a fuzzer is
 //! the failure mode that matters. A ray generator that misses the tank, a target set that resolves
-//! to nothing, or a bless list that swallows everything all produce a green run that means nothing.
+//! to nothing, or a finding path that never fires all produce a green run that means nothing.
 
 use super::*;
 
@@ -22,8 +22,8 @@ fn ci_report() -> Report {
     .expect("the probe world builds")
 }
 
-/// THE GATE. Every §13.6 invariant, over 10⁴ rays at the bound Tiger, with every corridor reaching
-/// crew or ammunition adjudicated against the checked-in bless list.
+/// THE GATE. Every §13.6 invariant, over 10⁴ rays at the bound Tiger, and no corridor reaching crew
+/// or ammunition at all.
 #[test]
 fn the_union_field_contract_holds_at_ci_scale() {
     let report = ci_report();
@@ -41,21 +41,18 @@ fn the_union_field_contract_holds_at_ci_scale() {
          larger than the run"
     );
     assert!(
-        report.unexplained_walk_errors().is_empty(),
-        "a corridor through the bound tank failed to walk on a volume that is NOT one of the \
-         measured bake defects (see `DEGENERATE_BAKE_RESIDUE`). Every one of these is a round that \
-         stops dead in mid-armour:\n{:#?}",
-        report.unexplained_walk_errors(),
+        report.walk_errors.is_empty(),
+        "a corridor through the bound tank failed to walk. Every one of these is a round that stops \
+         dead in mid-armour — re-fire the named ray with `--replay` at this seed, it depends on \
+         nothing else:\n{:#?}",
+        report.walk_errors,
     );
 
-    let bless = BlessList::shipped();
-    let verdict = adjudicate(&report, &bless);
     assert!(
-        verdict.unblessed.is_empty(),
-        "UNBLESSED corridor to crew/ammunition. Each is either a hole to fix or a weakspot to add \
-         to assets/tiger_1/tiger_1.bless.ron — §13.6: the bless list is where weakspots are \
-         decided, not discovered by players as bugs.\n{}",
-        render(&report, &bless, &verdict),
+        report.regions.is_empty(),
+        "a corridor reaches crew or ammunition below the gate floor — an effectively unarmoured \
+         route into the tank. There is no exemption: fix it in the model.\n{}",
+        render(&report),
     );
 }
 
@@ -91,13 +88,12 @@ fn every_crew_and_ammunition_volume_is_actually_reached() {
     );
 }
 
-/// The bless machinery has teeth: raise the finding floor until real corridors appear, and they must
-/// come back UNBLESSED rather than being quietly absorbed.
+/// The gate has teeth: raise the finding floor until real corridors appear, and the run must FAIL.
 ///
-/// Without this, an empty bless list and a clean tank would make the gate's headline assertion
-/// unfalsifiable — it would pass just as happily if `adjudicate` returned nothing at all.
+/// Without this, a clean tank would make the gate's headline assertion unfalsifiable — it would
+/// pass just as happily if the finding path produced nothing at all.
 #[test]
-fn a_corridor_above_the_gate_floor_is_reported_unblessed() {
+fn a_corridor_above_the_gate_floor_fails_the_gate() {
     let report = fuzz(&FuzzConfig {
         rays: 2_000,
         // Above the tank's thinnest authored plate, so ordinary roof and belly shots qualify.
@@ -120,11 +116,9 @@ fn a_corridor_above_the_gate_floor_is_reported_unblessed() {
             "every opening is measured against every gun"
         );
     }
-    let verdict = adjudicate(&report, &BlessList::shipped());
-    assert_eq!(
-        verdict.unblessed.len(),
-        report.regions.len(),
-        "the shipped bless list must not absorb corridors it never named"
+    assert!(
+        !report.is_clean(),
+        "a corridor to crew or ammunition must fail the gate, unconditionally"
     );
 }
 
@@ -164,29 +158,6 @@ fn a_run_is_a_pure_function_of_its_seed() {
     );
 }
 
-/// The bless list on disk parses and every entry is usable — a blessing with a zero radius or an
-/// unstated reason is a decision nobody recorded.
-#[test]
-fn the_shipped_bless_list_is_well_formed() {
-    for opening in &BlessList::shipped().openings {
-        assert!(
-            opening.radius > 0.0,
-            "blessing `{}` covers nothing",
-            opening.name
-        );
-        assert!(
-            opening.admits > 0.0,
-            "blessing `{}` records no measured admitting caliber",
-            opening.name
-        );
-        assert!(
-            opening.reason.len() > 16,
-            "blessing `{}` has no reason worth reading",
-            opening.name
-        );
-    }
-}
-
 /// SURVEY (`cargo test -- --ignored survey --nocapture`): the full report at CI scale, for a human.
 /// Set `FUZZ_FLOOR` to raise the finding floor and see the graded weakspots above the gate's line.
 #[test]
@@ -200,7 +171,5 @@ fn survey() {
         ..default()
     })
     .expect("world");
-    let bless = BlessList::shipped();
-    let verdict = adjudicate(&report, &bless);
-    println!("{}", render(&report, &bless, &verdict));
+    println!("{}", render(&report));
 }

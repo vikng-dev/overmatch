@@ -212,7 +212,7 @@ const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 /// The MEASURED triangle count of the base shoe — the manifest's level 0, which is the tank glb's
 /// own `Link` primitive. Only ever used to report the reductions as a percentage.
-const SHOE_BASE_TRIS: usize = 764;
+const SHOE_BASE_TRIS: usize = 1520;
 
 /// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
 /// indexed to.
@@ -249,7 +249,7 @@ const LOD_BUDGET_PX: f32 = 1.0;
 /// nothing — it is carried anyway because it is the same slack `scripts/lod/config.py` adds, and a
 /// derivation that agreed with the manifest only after dropping a term would not be the manifest's
 /// derivation (ADR 0033 §9).
-const SHOE_ORIGIN_RADIUS_M: f32 = 0.400124;
+const SHOE_ORIGIN_RADIUS_M: f32 = 0.380365;
 
 /// The distance beyond which a worst-case surface deviation of `worst_dev_mm` fits inside the pixel
 /// budget of the reference view — THE derivation behind every threshold in [`SHOE_LOD_CHAIN`],
@@ -303,57 +303,71 @@ struct ShoeLevel {
 /// beyond — see [`shoe_lod_range`], which is the ONE place that arithmetic lives.
 ///
 /// A slice rather than a fixed-size array on purpose: the ladder's LENGTH is an output of
-/// generation (`skip_fraction` dropped rungs 1 and 2 on this asset, which is why the glbs start at
-/// rung3), so nothing here may name a level count. It has already changed once — the chain was four
-/// levels deep when it was cut from the 1 661-triangle pre-weld shoe, and is three deep now.
+/// generation, so nothing here may name a level count. It has changed three times — four levels
+/// deep from the 1 661-triangle pre-weld shoe, three from the 764-triangle welded one, and FOUR
+/// from the 1 520-triangle rebuilt one.
 ///
 /// # What the numbers are
 ///
 /// | level | glb | tris | dev (mm) | from (m) |
 /// |---|---|---|---|---|
-/// | L1 | `rung3` | 432 | 14.170 | 255.16 |
-/// | L2 | `rung4` | 270 | 24.593 | 442.53 |
-/// | L3 | `rung5` | 182 | 56.535 | 1 016.80 |
+/// | L1 | `rung1` | 678 | 3.339 | 60.40 |
+/// | L2 | `rung3` | 390 | 14.962 | 269.38 |
+/// | L3 | `rung4` | 254 | 29.344 | 527.94 |
+/// | L4 | `rung6` | 146 | 77.741 | 1 499.58 |
 ///
-/// RE-CUT 2026-08-07 against the welded, gate-clean shoe: L0 is 764 triangles now, not 1 661, so
-/// the ladder is REBASED rather than edited — every old rung was a reduction of a surface that no
-/// longer ships, and the old L1 (854 tris) was larger than the whole new source. Three rungs
-/// instead of four is the arithmetic working: a source with 46% of the triangles reaches the
-/// topology floor in fewer octaves.
+/// RE-CUT 2026-08-08 against Yan's rebuilt shoe. L0 is 1 520 triangles, so every previous rung was
+/// a reduction of a surface that no longer ships and the ladder is REBASED, not edited. The rung
+/// numbers are octave indices, not chain indices, so the gaps are real: rungs 2 and 5 were skipped
+/// for shedding under the 30 % `SKIP_FRACTION` (536 tris at 20.9 %, 186 at 26.8 %), and the
+/// manifest carries both skip records.
 ///
-/// L3 is the ladder's TOPOLOGY FLOOR — the decimator could not shed another triangle without
-/// destroying the shoe's component count — which is why the chain stops there rather than at the
-/// right wall (the map diagonal, 1 414 m).
-///
-/// L3's band opens BEYOND THE MAP: 1 016.80 m on a 1 000 m world means nothing is ever far enough to
-/// draw it in the game as it stands today. It is wired regardless, for two reasons. It costs one
-/// entity per shoe and no triangles (an out-of-range entity is walked, never submitted), and the
-/// alternative — a chain that stops at L2 — makes L2 the level that owns `[443, ∞)`, which is a
-/// DIFFERENT claim about a map that grows. When the world reaches 5 km (ADR 0033 §3's north star)
-/// this row starts earning its keep with no edit at all.
+/// L4's band opens BEYOND THE MAP: 1 499.58 m on a 1 000 m world means nothing is ever far enough
+/// to draw it today. It is wired regardless — it costs one entity per shoe and no triangles (an
+/// out-of-range entity is walked, never submitted), and the alternative makes L3 own `[528, ∞)`,
+/// which is a DIFFERENT claim about a map that grows.
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
+        glb: "tiger_1/tiger_1_link.rung1.glb",
+        tris: 678,
+        worst_dev_mm: 3.338514,
+        from_m: 60.4024,
+        // 229.1 px at 60 m — judged, not abstained, and PASSED. All three views cleared the
+        // ABSOLUTE FLOOR (worst mean |dI| 0.0048 against the ratified 0.02, worst frac-over 0.0126
+        // against 0.02), which is the path that admits them: edge-on's relative score is 4.88
+        // against the 2.0 fraction. At this deviation the absolute difference is negligible while
+        // the noise-to-defect span the ratio is taken over is narrow.
+        render_gate_abstained: false,
+    },
+    ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung3.glb",
-        tris: 432,
-        worst_dev_mm: 14.170197,
-        from_m: 255.1575,
-        // 54.1 px at 255 m — judged, and PASSED at 1.000 against the ratified limit of 2.0.
+        tris: 390,
+        worst_dev_mm: 14.962055,
+        from_m: 269.376,
+        // 51.4 px at 269 m — judged, and PASSED at 1.000 against the ratified limit of 2.0.
         render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 270,
-        worst_dev_mm: 24.59259,
-        from_m: 442.5344,
-        // 31.2 px at 443 m — judged, and PASSED at 1.000.
+        tris: 254,
+        worst_dev_mm: 29.343982,
+        from_m: 527.94,
+        // 26.3 px at 528 m — judged, and PASSED at 1.000.
         render_gate_abstained: false,
     },
     ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung5.glb",
-        tris: 182,
-        worst_dev_mm: 56.5349,
-        from_m: 1016.8048,
-        // 13.1 px at 1017 m — UNDER the ratified 20 px floor, so the gate abstained.
+        glb: "tiger_1/tiger_1_link.rung6.glb",
+        tris: 146,
+        // THE PAIRWISE BOUND, not the source-relative one, and this is the first level in the
+        // chain's history where the two differ. L4 sits 77.741 mm from L0 but 83.389 mm from L3,
+        // its own parent — and the switch is the distance at which the step from the level ACTUALLY
+        // ON SCREEN becomes sub-pixel, so the larger of the two is what owns the threshold. The
+        // manifest records both (`switch_from_source_dev_m` 1398.03, `switch_from_pairwise_m`
+        // 1499.58) and takes the max; wiring the source-relative number here would switch 100 m too
+        // early against a visible step.
+        worst_dev_mm: 83.388_74,
+        from_m: 1499.578,
+        // 8.7 px at 1500 m — UNDER the ratified 20 px floor, so the gate abstained.
         render_gate_abstained: true,
     },
 ];
@@ -1289,13 +1303,14 @@ mod tests {
                 SHOE_LOD_CHAIN.iter().map(|l| l.from_m).collect::<Vec<_>>(),
                 "the wired thresholds are the chain's, in order",
             );
-            // ...and the chain as it SHIPS is the manifest's three reductions. Spelled out so a
+            // ...and the chain as it SHIPS is the manifest's four reductions. Spelled out so a
             // level added or dropped is a deliberate edit here, not a silent one — the ladder's
             // LENGTH is an output of generation, so it is exactly the thing a regeneration can
-            // change without anyone noticing. It DID change: the 2026-08-07 re-cut against the
-            // welded 764-triangle shoe dropped the chain from four reductions to three, and this
-            // line is the one that made that visible rather than silent.
-            assert_eq!(thresholds, vec![255.1575, 442.5344, 1016.8048]);
+            // change without anyone noticing. It has changed twice: the 2026-08-07 re-cut against
+            // the welded 764-triangle shoe dropped four reductions to three, and the 2026-08-08
+            // re-cut against the rebuilt 1 520-triangle shoe took it back to four. This line is
+            // what made both visible rather than silent.
+            assert_eq!(thresholds, vec![60.4024, 269.376, 527.94, 1499.578]);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
@@ -1392,12 +1407,18 @@ mod tests {
         }
         assert!(SHOE_LOD_CHAIN[0].tris < SHOE_BASE_TRIS);
 
-        // The arithmetic itself, pinned against the manifest's own L3 row by hand:
-        // `0.027841808 m × 2160 / (2 × tan(0.06)) + 0.400124 = 500.9511 m`. Without this the loop
+        // The arithmetic itself, worked by hand:
+        // `0.027841808 m × 2160 / (2 × tan(0.06)) + 0.380365 = 500.9314 m`. Without this the loop
         // above would happily pass a `sub_pixel_distance_m` that had lost its units, as long as the
         // wired distances had lost them the same way.
+        //
+        // 27.841808 mm was the manifest's L3 deviation when this pin was written. That row is gone
+        // (the 2026-08-08 chain is one level deep), and the value stays anyway BECAUSE it is now a
+        // pure units probe: what it checks is the formula, and a probe tied to a live row would
+        // have to be rewritten every re-cut for no gain. The expected metres moved only by the
+        // 19.8 mm the shoe's origin radius did.
         assert!(
-            (sub_pixel_distance_m(27.841808) - 500.9511).abs() < 0.01,
+            (sub_pixel_distance_m(27.841808) - 500.9314).abs() < 0.01,
             "the derivation is `dev_m × height_px / (2·tan(vfov/2)·budget_px) + radius`, got {}",
             sub_pixel_distance_m(27.841808),
         );

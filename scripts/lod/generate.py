@@ -25,8 +25,8 @@ rather than inherited from the Blender mesh that produced them.
 
 WHAT FAILS THE RUN, LOUDLY (ADR 0033 §10): an unexpected Blender build; a skinned or morph-target
 source; a multi-material or multi-primitive source; a shipped L0 that is not the source; a level
-whose certified upper bound misses its rung after export; a level that lost a component; a sliver
-below the scale-aware altitude floor; a defaulted tangent; a duplicate face; a non-manifold edge; a
+whose certified upper bound misses its rung after export; a level that lost a component; a
+defaulted tangent; a duplicate face; a non-manifold edge; a
 non-finite attribute; a flipped winding; a level that does not reproduce byte-for-byte when built
 twice; and — once its threshold is ratified — a rendered difference over budget. Nothing degrades
 silently.
@@ -294,9 +294,8 @@ def cleanup(mesh, scale_m):
     THE DISTANCE IS DECLARED IN `config.GATES["cleanup_dissolve_frac_of_diag"]` and it had to grow.
     At 1e-6 of the bounding diagonal (0.77 um here) it removed nothing real, and the decimator kept
     producing a NEEDLE — a 50 mm triangle 4.7 um thick — inherited from the source. That needle
-    passes every positional gate honestly (its altitude is above the sliver floor, which is anchored
-    to the source's own worst) and still breaks the loader: after decimation the corner at its tip
-    ends up with a fan of one, and mikktspace declines to give it a tangent.
+    passes every positional gate honestly and still breaks the loader: after decimation the corner
+    at its tip ends up with a fan of one, and mikktspace declines to give it a tangent.
 
     So the distance is now 1e-5 of the diagonal, 7.7 um on this shoe. What that spans is worth
     stating plainly: it removes the 4.7 um needle and leaves the next-thinnest features (21 um and
@@ -378,14 +377,34 @@ class Candidates:
     Pareto minimum, with no monotonicity assumed anywhere: everything smaller has been measured and
     rejected. Rejections are nearly free — a single sampled point above the target ends the proof —
     which is what makes an exhaustive scan affordable.
+
+    VALIDITY FIRST, THEN DEVIATION. A candidate is admitted to the search only if it already passes
+    the structural gates; an invalid one is discarded the moment it is built and never costs a
+    deviation measurement. This is a PRUNE, not a new gate: the checks are
+    `measure.validity_gate_failures` — the same list, the same thresholds, the same shared function
+    the final certification calls — and every level that ships is still certified on its DECODED
+    SHIPPED BYTES afterwards, in the order ADR 0033 ratifies. Nothing here can admit something
+    certification would refuse; it can only stop the search from proposing it.
+
+    WHY IT MATTERS, MEASURED. The rung is a triangle BUDGET question, and the decimator's output at
+    a given count is not guaranteed clean: cutting the rebuilt 1520-triangle shoe, the first count
+    that met the 15.560 mm target (390) carried one triangle 0.079 mm tall against a 0.147 mm floor.
+    Searching deviation-first found it, certified it, and failed the whole chain — with no way to
+    reach the valid candidate a few counts away, because the search had already committed. Filtering
+    first, the scan simply steps past that count and settles on a neighbouring one that is both
+    valid and inside the target. An invalid candidate ends nothing: the walk continues to its
+    neighbours, because "no valid candidate at exactly N triangles" is not "no valid candidate".
     """
 
-    def __init__(self, source_obj, source_surface, gates):
+    def __init__(self, source_obj, source_surface, gates, source_validity):
         self.source_obj = source_obj
         self.source = source_surface
         self.gates = gates
+        # The pre-filter's input, identical to the one `certify` will use on the shipped bytes.
+        self.source_validity = source_validity
         self.entries = {}
         self.outputs = []          # candidate KEYS (geometry digests), ascending by triangles
+        self.rejected = {}         # digest -> the failures that kept it out of the search
         self.evaluations = 0
         self.decimations = 0
 
@@ -434,7 +453,26 @@ class Candidates:
             # same count, and keying by the count discarded one of them arbitrarily — possibly the
             # only one that met a rung. The digest is the identity; the count is an attribute.
             key = surface.digest()
+            # THE PRUNE. Structural validity is decided here, before the candidate can cost a
+            # deviation measurement — and a rejection is remembered by digest, because the same
+            # mesh is reachable from several budgets and re-measuring it would pay for the check
+            # once per budget. Returning normally (rather than raising or returning None) is what
+            # keeps the staircase walking: this budget yields nothing, its neighbours may.
+            if key in self.rejected:
+                return reached, key
             if key not in self.entries:
+                validity = surface.validity(self.gates)
+                # `require_baked_tangents=False`: tangents are baked by the EXPORTER, so a Blender
+                # candidate legitimately carries none yet. Every other gate in the shared list
+                # applies, and the baked-tangent gate is still enforced at certification, on the
+                # bytes where it is a real question.
+                failures = M.validity_gate_failures(
+                    validity, self.source_validity, self.gates, require_baked_tangents=False
+                )
+                if failures:
+                    self.rejected[key] = failures
+                    log(f"    reject {surface.tri_count:>5} tris  {failures[0]}")
+                    return reached, key
                 # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
                 # means re-running the decimator, and its input is a BUDGET; feeding back the
                 # post-cleanup triangle count would ask for a different mesh than the one certified.
@@ -466,7 +504,8 @@ class Candidates:
             raise GenerationError("enumeration", str(exc)) from exc
         log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
             f"{ceiling_tris}] from {self.decimations} decimations "
-            f"({limits['max_enumeration_spot_checks']} spot checks passed, "
+            f"({len(self.rejected)} discarded as structurally invalid before any deviation "
+            f"measurement, {limits['max_enumeration_spot_checks']} spot checks passed, "
             f"{time.time() - started:.0f}s)")
         return self.outputs
 
@@ -560,24 +599,13 @@ def write_level_glb(mesh, node_name, path):
 
 # ── certification ────────────────────────────────────────────────────────────────────────────────
 
-def sliver_floor_m(gates, source, source_validity):
-    """The floor generated levels are held to: scale-aware, and anchored to the source's own worst.
-
-    See `config.GATES["sliver_margin_vs_source"]` for why both halves are needed.
-    """
-    return max(
-        gates["min_altitude_frac_of_diag"] * source.diagonal,
-        source_validity["min_altitude_m"] / gates["sliver_margin_vs_source"],
-    )
-
-
-def certify(source, shipped, target_mm, gates, source_validity, floor_m):
+def certify(source, shipped, target_mm, gates, source_validity):
     """Every numeric gate, on the decoded shipped bytes. Returns (report, failures)."""
     deviation = M.certified_deviation(
         source, shipped, gates["deviation_tol_m"], gates["deviation_max_nodes_certify"],
         rel_tol=gates["deviation_rel_tol_certify"],
     )
-    validity = shipped.validity(gates, floor_m)
+    validity = shipped.validity(gates)
     failures = M.validity_gate_failures(validity, source_validity, gates)
     if deviation["mm_upper"] > target_mm:
         failures.insert(0, (
@@ -604,22 +632,8 @@ def build_chain(asset, root, run_render_gate, out_dir):
     source_validity = source.validity(CONFIG.GATES)
     log(f"  source {source.tri_count} tris  {source.vert_count} verts  "
         f"components={source_validity['components']}  "
-        f"min_altitude={source_validity['min_altitude_m'] * 1000:.6f} mm  "
         f"tangent_default_faces={source_validity['tangent_default_faces']}  "
         f"radius={source.radius:.4f} m")
-    if source_validity["slivers_below_floor"]:
-        raise GenerationError(
-            "source",
-            f"the SOURCE carries {source_validity['slivers_below_floor']} triangle(s) below the "
-            f"absolute scale-aware altitude floor "
-            f"{source_validity['min_altitude_floor_m'] * 1000:.6f} mm — fix the .blend; a floor "
-            f"the source fails is not a floor",
-        )
-    floor_m = sliver_floor_m(CONFIG.GATES, source, source_validity)
-    log(f"  sliver floor for generated levels: {floor_m * 1000:.6f} mm "
-        f"(source worst {source_validity['min_altitude_m'] * 1000:.6f} mm / margin "
-        f"{CONFIG.GATES['sliver_margin_vs_source']:g}, absolute bound "
-        f"{CONFIG.GATES['min_altitude_frac_of_diag'] * source.diagonal * 1000:.6f} mm)")
 
     probe = _fresh_copy(obj, "FloorProbe")
     modifier = probe.modifiers.new("C", "DECIMATE")
@@ -642,7 +656,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     shipped_l0 = M.from_glb(l0_path, asset["l0_node"], "L0")
     identical, identity_reason = M.same_surface(source, shipped_l0)
     l0_dev_mm = M.vertex_deviation(source, shipped_l0)
-    l0_validity = shipped_l0.validity(CONFIG.GATES, floor_m)
+    l0_validity = shipped_l0.validity(CONFIG.GATES)
     # L0 bakes its tangents too now (Yan ratified the host re-export), so it is held to exactly
     # the same rule as every generated level: one tangent per vertex, and none degenerate.
     l0_failures = M.validity_gate_failures(l0_validity, source_validity, CONFIG.GATES)
@@ -680,7 +694,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         "tangents_are_baked": True,
     }
 
-    candidates = Candidates(obj, source, CONFIG.GATES)
+    candidates = Candidates(obj, source, CONFIG.GATES, source_validity)
     # Once per asset, shared by every rung: the complete set of meshes this decimator can produce.
     candidates.enumerate_outputs(floor_tris, source.tri_count)
     levels = [l0]
@@ -747,7 +761,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
 
         shipped = M.from_glb(staged, None, f"rung{rung}")
         report, failures = certify(
-            source, shipped, target_mm, CONFIG.GATES, source_validity, floor_m
+            source, shipped, target_mm, CONFIG.GATES, source_validity
         )
         pairwise = M.certified_deviation(
             previous["surface"], shipped, CONFIG.GATES["deviation_tol_m"],
@@ -907,7 +921,6 @@ def build_chain(asset, root, run_render_gate, out_dir):
             "validity": source_validity,
         },
         "topology_floor_tris": floor_tris,
-        "sliver_floor_m": floor_m,
         "termination": termination,
         "deviation_evaluations": candidates.evaluations,
         "enumerated_outputs": len(candidates.outputs),

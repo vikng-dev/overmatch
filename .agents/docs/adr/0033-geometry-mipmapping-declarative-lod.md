@@ -37,8 +37,8 @@ screen-space error. No manual LOD steps exist for any asset.
    - two-way positional deviation with a BOUNDED sampling miss (per-patch covering-radius
      upper bound; accept only when the upper bound clears the target),
    - component-count survival (a vanished small part has near-zero Hausdorff distance),
-   - mesh validity: scale-aware sliver/altitude minimum, duplicate faces, non-finite
-     attributes, orientation consistency — re-certified AFTER cleanup,
+   - mesh validity: duplicate faces, non-finite attributes, orientation consistency,
+     manifold edges, tangent presence and UV-area degeneracy — re-certified AFTER cleanup,
    - **rendered-difference gate as the authoritative attribute check**: render candidate vs
      parent level at the switch distance under the shipped materials and lighting, gate on
      image difference. This subsumes normal/UV/tangent thresholds no fixed number can

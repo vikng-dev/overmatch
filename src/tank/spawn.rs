@@ -17,7 +17,9 @@ use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole,
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
-use crate::ballistics::{ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume};
+use crate::ballistics::{
+    ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
+};
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
@@ -577,9 +579,11 @@ fn insert_weapons(
 /// collision response (`filters = NONE`) so it never perturbs the body — watertight solids may be
 /// concave, fine for the march's raycast (ADR-0008).
 ///
-/// The extracted buffers are node-LOCAL and unscaled, and each collider is spawned as a child of its
-/// volume's node entity: avian's `ColliderTransform` composes the ancestor `Transform` scales onto
-/// the shape, so a volume authored at scale != 1 is sized right without pre-baking anything here.
+/// The extracted buffers are node-LOCAL, and each collider is spawned as a child of its volume's
+/// node entity with an IDENTITY local transform: avian's `ColliderTransform` composes the ancestor
+/// `Transform` scales onto the shape, and a ballistic volume's chain is unit-scale by contract
+/// (`bake::manifold_gate`), so the shape parry gets is the buffer the gate certified. `collect`
+/// re-checks the live scale before it walks one.
 ///
 /// # Where the factor lands, and why it is not always the node
 ///
@@ -681,6 +685,20 @@ fn insert_ballistic_volumes(
                     !triangles.is_empty(),
                     "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
                 );
+                // The bake's manifold certificate, index-aligned with those triangles. Armour
+                // without it is armour the walk cannot pair, so it is refused here rather than
+                // collected ambiguously later.
+                let certificate = primitive
+                    .certificate
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("ballistic volume `{name}` was never certified"));
+                assert_eq!(
+                    certificate.shells.len(),
+                    triangles.len(),
+                    "ballistic volume `{name}` has {} triangles and {} certified faces",
+                    triangles.len(),
+                    certificate.shells.len(),
+                );
                 let mut collider = commands.spawn((
                     ChildOf(entity),
                     // ADR-0015 shields this authored local pose from position sync.
@@ -690,6 +708,10 @@ fn insert_ballistic_volumes(
                         triangles,
                         TrimeshFlags::MERGE_DUPLICATE_VERTICES,
                     ),
+                    BallisticSurfaces {
+                        shells: certificate.shells.as_slice().into(),
+                        corners: certificate.corners.as_slice().into(),
+                    },
                     CollisionLayers::new([Layer::Armor], LayerMask::NONE),
                 ));
                 if split {
@@ -872,4 +894,20 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             muzzle,
         },
     );
+
+    // UNIT SCALE AT THE ROOT, BIT-EXACTLY (§13.6). `bake::manifold_gate` refuses an authored scale
+    // other than 1 and `ballistics::collect` refuses a collider that reaches the world at one, but
+    // the collector only judges a CANDIDATE: a scaled root moves and shrinks every collider's
+    // world AABB, so the swept query can miss the armour entirely and leave nothing to refuse. The
+    // root bundle is arbitrary caller data, so this is where that seam closes — before the first
+    // corridor, by name, on the whole hierarchy at once.
+    commands.queue(move |world: &mut World| {
+        let scale = world.get::<Transform>(root).map_or(Vec3::ONE, |t| t.scale);
+        assert_eq!(
+            scale.to_array().map(f32::to_bits),
+            [1.0f32.to_bits(); 3],
+            "tank root {root} was spawned at scale {scale:?}, not 1 — armour is certified in the \
+             buffer it was authored in and reaches the world through an unscaled hierarchy"
+        );
+    });
 }

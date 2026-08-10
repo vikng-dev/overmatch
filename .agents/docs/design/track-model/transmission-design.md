@@ -332,8 +332,10 @@ WWII 57-t heavies) → `brake_force: 96_000` per side. The stop-force law
 `B = clamp(R − Q − vI/dt, ±cap)` and the park latch are untouched — only the datum moved.
 Measured service-brake stop 6 → 1 m/s: **2.23 s** (analytic ≈ 0.5 s input slew +
 5.0 m/s ÷ ~3.6 m/s² brake+drag); gate `decel_tiger` ≤ 3 s, coast leg unchanged (10.7 s);
-new gate `slope_park_holds_20_deg_tiger` pins the 20° hold (measured drift 0.000 m over
-4 s, latch engaged). At this stage, before the static/dynamic split below, 30° ramps
+the 20° hold measured drift 0.000 m over 4 s with the latch engaged (the drift gate was
+later retired — emergent holding is benchmarked, never required; the latch requirement
+lives in `slope_park_benchmarks_the_30_deg_holding_power_tiger`). At this stage, before
+the static/dynamic split below, 30° ramps
 back-drove (139.8 kN/side DERIVED demand > dynamic capacity). Supersede the inferred
 values with a real Argus brake/output-torque rating when sourced.
 

@@ -537,8 +537,7 @@ it. Do not write engine code from memory.
   **Amended 2026-08-03/04 (§13.7):** manifold-per-volume is the only geometric gate.
   **Face-to-face contact** is the preferred joint style (x-ray legibility, physical honesty);
   overlap is tolerated (the union walk charges shared space once) and mutual exact-fit is NOT
-  required — sub-caliber slop in either direction is harmless (§13.5). Deliberate openings stay
-  honest (caliber-gated weakspots, fuzzer-blessed); accidental super-caliber corridors are
+  required — sub-caliber slop in either direction is harmless (§13.5). Super-caliber corridors are
   fuzzer-hunted.
 - **No numbers in the model.** `material_factor`, `hp`, and future facets live in RON keyed by node
   name (ADR-0010). Model = named manifold solids; code (RON) = all semantics.
@@ -642,10 +641,38 @@ today independent of unions.
 
 ### 13.4 The walk (per sample ray) — welded runs
 
-1. **All-hits collection** along the segment (not first-hit), grouped per volume entity — parry's
-   double-sided triangles guarantee every crossing is seen.
-2. **Per-entity parity pairing** into `[enter, exit]` intervals — sound iff each volume is
-   individually manifold (§13.6's per-plate gate).
+1. **All-hits collection** along the segment (not first-hit) — parry's double-sided triangles
+   guarantee every crossing is seen.
+2. **Pairing per CERTIFIED SURFACE, into `[enter, exit]` intervals.** Every crossing names the
+   closed shell it came from (§13.6's manifold gate publishes its own edge-connected components)
+   and the welded FEATURE the ray met — a triangle interior, a welded edge, or a welded vertex.
+   Both are exact and neither is a tolerance:
+   - **Identity is the dedup rule.** Claims are the same crossing when they name one contact of one
+     shell, and never because their `t` are close. The collector deliberately lets every triangle
+     incident on a feature claim a ray through it (a duplicate is recoverable, a dropped crossing is
+     not), and the sheared edge test cancels to *exactly* zero on that feature in all of them, so
+     the fan identifies itself. A ray merely NEAR a feature cancels nothing and is claimed once.
+   - **A fan that disagrees about direction is a tangent** — the ray met the surface and left on the
+     side it came from. No interval, no cost, no event. A fan that agrees is transverse and is one
+     oriented crossing. Two contacts are two crossings however close they land.
+   - **No threshold decides what counts as a hit.** Parallel is an exactly zero determinant and
+     nothing else — a crossing whose determinant cancels to a fraction of an ULP is still a
+     crossing, taken in exact integer arithmetic when the float filter's own error bound reaches
+     zero. A shell thinner than any window is two different
+     contacts and stays an ordinary crossing, charged, with its own entrance and exit. The contact
+     parameter is carried at `f64`, from the collector's exact projection through to the cost
+     integral, so two contacts keep their exact ORDER and a chargeable metric CHORD even where their
+     public `f32` values coincide — a sub-ULP chord is charged like any other traversal. Only two
+     contacts bit-equal in the *exact* parameter are refused by name: tangent grade, measure zero,
+     no order between them and no thickness to charge.
+   - **Occupancy is a boolean and alternation is required.** A certified shell is entered from
+     outside and left from inside; a second entry is a violated certificate, not a deeper winding,
+     and it is named. Embedding — no self-intersection within one shell — is proven at the bake
+     (§13.6), so this is a backstop against a live collider drifting from the buffer that was
+     certified, not the only guard.
+   - Identity survives the RESTART: a corridor resuming inside material declares which *shells* it
+     is inside, never which primitives. It is a runtime identity only — entity-keyed and dense in
+     the bake's triangle order — and never crosses a save, replay or wire seam.
 3. **ε-weld:** runs separated by less than the weld tolerance merge into one run. Semantics
    sharpened 2026-08-04:
    - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
@@ -676,7 +703,11 @@ today independent of unions.
    free flight — **spaced armor is emergent**.
 
 Entry-face semantics (incidence, normalization, ricochet test, the terminal/`Impact` reads) evaluate
-at the outermost *significant* factor step; spall at downward steps. The output per sample ray is a
+at the outermost *significant* factor step; spall at downward steps. **A boundary buried under
+equal-or-higher factor is deliberately eventless** — it is not a field step, so there is no ricochet,
+no spall, no impact and no normal to attribute, and the exposed outer boundary is read from the face
+that actually moves the field. That is the qualifier on "a thin shell has real events": it has
+ordinary entrance and exit crossings, and they are silent wherever the union hides them. The output per sample ray is a
 sequence of welded runs `[t_in, t_out]` with chords, factors, and entry/exit faces — the inputs
 §13.5 aggregates.
 
@@ -767,15 +798,35 @@ Revisit only if seam-threading shots ever matter.
 Enforced mechanically, not by eyeball:
 
 - **Ray fuzzer** (bake/CI gate): 10⁵–10⁶ random rays at the bound tank, asserting the invariants,
-  and reporting every corridor/opening that reaches crew/ammo with its **admitting caliber and
-  per-caliber η** ("this seam admits ≥8mm; at 88mm η = 0.93"). Each finding is either a real hole
-  (**fix**) or a deliberate opening (**bless** — turret ring, MG port, vision slits: historical
-  weakspots consciously kept as gameplay, with exact knowledge of how they'll play at every gun in
-  the game). The bless-list is where weakspots are decided, not discovered by players as bugs.
+  and reporting every corridor that reaches crew/ammo with its **admitting caliber and per-caliber
+  η** ("this seam admits ≥8mm; at 88mm η = 0.93"). **Any such corridor fails the gate by name.**
+  There is no exemption channel: a route into the crew compartment that no gun has to pay for is a
+  defect in the model, and it is fixed in the model.
 - **Per-primitive manifold gate:** weld-by-position, then closed-manifold + positive-orientation
-  test, per substance primitive (classifier precedent 2026-08-07 — the gate keys off the material,
-  not a name). (The mesh-unification open tab's watertightness gate, now *per primitive* — a far
-  easier standard than mutual fit, since each plate can be a dumb extruded solid.)
+  test per connected shell, on every substance primitive (classifier precedent 2026-08-07 — the gate
+  keys off the material, not a name). Welding, degeneracy, closure, winding and signed volume are all
+  judged on the authored buffer, and its edge-connected components ARE the surface identity §13.4
+  pairs on, published rather than discarded.
+- **Embedding, per shell, unconditionally.** Closure says a shell has an inside; embedding says the
+  ray that enters it leaves it. For every same-shell triangle pair whose closed AABBs overlap, the
+  exact intersection `I` must lie inside the feature `F` the two DECLARE they share — their common
+  welded ids: none, one vertex, one edge, and three is one face exported twice. No adjacent pair is
+  exempt; the exemption IS the declared feature. Every sign is exact — a float filter decides only
+  where its own proven roundoff excludes zero, and coplanarity, collinearity and tangency are
+  exact-zero. There is no flag and no allowlist: a shell that passes through itself charges a
+  fraction of the plate it crossed, and §13.4's alternation cannot be relied on to notice, because
+  a fan whose claims disagree about direction is a tangent that carries no evidence.
+- **Unit scale is the authoring contract for ballistic geometry, at every seam it can be broken
+  at.** A componentwise scale is injective over the reals and not over `f32` — two authored
+  coordinates can land on one, turning a positive-thickness shell into a zero-thickness one that the
+  gate has already passed — so the model carries the scale in its vertices, never on its nodes.
+  Three refusals, all bit-exact against 1 and none of them a compensation: the bake refuses a
+  substance primitive whose composed node scale is not 1, naming the node (fix it in the .blend and
+  re-export); the spawn refuses a tank root spawned at any other scale, because a scaled root moves
+  and shrinks every collider's world AABB and the swept query can then miss the armour entirely,
+  leaving nothing downstream to refuse; and the collector refuses a live collider that reaches the
+  world at any other scale, which is what catches a runtime mutation of a hierarchy that spawned
+  clean.
 
 ### 13.7 Authoring contract (amends the §12 mesh bullet; revised 2026-08-04)
 
@@ -791,9 +842,16 @@ Enforced mechanically, not by eyeball:
   ε-weld (longitudinal) or self-heal at η ≈ 1 (lateral cracks). Don't sweat sub-caliber precision.
 - Components may clip into walls; the damage law makes the slop harmless.
 - **Real openings are modeled honestly, not plugged** — the turret ring, MG ports, vision slits
-  become caliber-gated, η-graded weakspots by the disc law, and are *blessed* in the fuzzer.
+  become caliber-gated, η-graded weakspots by the disc law. On the Tiger they are modelled as solid
+  cast steel, so the disc law has no geometry to grade and the fuzzer finds no corridor at all.
 - The remaining geometry sin is the **super-caliber accidental corridor** — hunted by the fuzzer,
   not the eyeball.
+- **Plates that touch face to face are separate PRIMITIVES.** Two closed shells of one primitive
+  sharing a welded edge put four triangles on it, and the manifold gate refuses that before shell
+  identity is assigned — deliberately, because guessing geometrically where one shell ends and the
+  next begins is exactly the ambiguity §13.4's pairing exists to remove. Inside one primitive the
+  legal contacts between islands are a shared vertex and interior intersection; face-to-face contact
+  between *primitives* is unaffected and remains the preferred joint style.
 - **Substance boundaries are geometry, never paint** (2026-08-07, wheels precedent): a
   mixed-substance part is authored as one object holding **one closed shell per substance
   region**, each shell wearing its substance material — the Tiger road wheel is five islands

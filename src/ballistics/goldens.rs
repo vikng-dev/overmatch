@@ -22,7 +22,7 @@
 //!
 //! # The shot lines
 //!
-//! Stated in TANK-LOCAL metres (the frame `fuzz`'s bless list uses), converted once at the fixture
+//! Stated in TANK-LOCAL metres (the frame `fuzz` reports its findings in), converted once at the fixture
 //! seam. Local `-Z` is the front, `+Z` the rear, `+Y` up. The lines were measured off the bound
 //! volumes' own bounding boxes, not guessed.
 

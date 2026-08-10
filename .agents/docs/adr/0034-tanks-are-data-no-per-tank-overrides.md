@@ -13,7 +13,7 @@ the spec, and nothing may be tested, asserted, tweaked or modeled around it spec
    rule), no constant is "the Tiger's number", no branch exists because one vehicle needed
    it.
 2. **Per-tank truth is declarative asset data, and only that.** `<tank>.tank.ron`,
-   `assets/materials/materials.ron`, `<tank>.bless.ron`, the LOD manifest. Data files
+   `assets/materials/materials.ron`, the LOD manifest. Data files
    *describe* a vehicle: they supply measured parameters to generic laws and select among
    generic models (e.g. a transmission model). They never patch, scale, or exempt system
    behavior for one vehicle. A field whose only honest name would be "make tank X do Y" is

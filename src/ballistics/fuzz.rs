@@ -26,11 +26,10 @@
 //! Not "a ray reached the crew" — a shot that pays for 100 mm of front plate and kills the driver is
 //! the game working. A finding is a corridor whose factor-weighted cost to a crew or ammunition
 //! volume is BELOW the smallest probe round's capability: an effectively unarmoured route. Each one
-//! is then measured against the whole gun list (§13.5's caliber gate: a big disc engages the rim of
-//! a small opening and pays for it, a small one flies through), and is either a real hole to fix or
-//! a deliberate opening to BLESS — the turret ring, the MG ports, the vision slits. The bless list
-//! (`assets/tiger_1/tiger_1.bless.ron`) is where weakspots are DECIDED; an unblessed corridor fails
-//! the CI gate by name.
+//! is measured against the whole gun list (§13.5's caliber gate: a big disc engages the rim of a
+//! small opening and pays for it, a small one flies through) and reported with its admitting
+//! caliber, and then it FAILS THE GATE BY NAME. There is no exemption channel: a corridor is a
+//! defect in the model, and the fix is in the model.
 //!
 //! # Determinism
 //!
@@ -43,7 +42,6 @@ use std::time::{Duration, Instant};
 
 use avian3d::prelude::{Collider, ColliderAabb, Position, RigidBody, Rotation, SpatialQueryFilter};
 use bevy::prelude::*;
-use serde::Deserialize;
 
 use super::resolve::{self, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
@@ -137,7 +135,7 @@ pub const PROBE_ROUNDS: &[ProbeRound] = &[
 // ---------------------------------------------------------------------------------------------
 
 /// Tank-local metres per clustering cell. Findings landing in one cell are ONE opening in the
-/// report, which is what makes a 10⁶-ray run readable and what a bless-list region has to match.
+/// report, which is what makes a 10⁶-ray run readable.
 ///
 /// 0.15 m: coarse enough that a vision slit is one region rather than forty, fine enough that the
 /// hull MG port and the driver's visor — 0.5 m apart on the real tank — never merge.
@@ -224,7 +222,7 @@ pub struct Region {
     /// Tank-local clustering cell (`entry_local / REGION_CELL`, floored).
     pub cell: [i32; 3],
     /// Where the witness corridor pierced the tank's local bounding box — the "where on the tank
-    /// does this come in" descriptor a bless-list region is written against.
+    /// does this come in" descriptor the finding is reported with.
     pub entry_local: Vec3,
     /// Tank-local travel direction of the witness ray.
     pub axis_local: Vec3,
@@ -273,8 +271,8 @@ pub struct Violation {
     pub detail: String,
 }
 
-/// A [`WalkError`] the fuzzer met. Should be empty on a gated asset — the per-primitive manifold
-/// gate (`bake`) is what makes that claim, and this is what tests it against real shot lines.
+/// A [`WalkError`] the fuzzer met. Empty on a gated asset — the per-primitive manifold gate
+/// (`bake`) is what makes that claim, and this is what tests it against real shot lines.
 #[derive(Clone, Debug)]
 pub struct WalkFailure {
     pub ray: u64,
@@ -289,7 +287,7 @@ pub struct WalkFailure {
     /// unrepresentable by the walk's per-primitive parity pairing); two entries a micron apart are a
     /// tolerance problem instead. The distinction is the whole diagnosis, so the fuzzer collects it
     /// rather than leaving it to a debugger.
-    pub crossings: Vec<(f32, f32)>,
+    pub crossings: Vec<(f64, f32)>,
 }
 
 /// The volume a [`WalkError`] blames, when it blames one.
@@ -299,22 +297,23 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::UnknownVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
         | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(key.volume)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(key.volume),
         WalkError::IncompleteCorridor { open, .. } => open.first().map(|key| key.volume),
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
+        | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. } => None,
     }
 }
 
-/// The PRIMITIVE a [`WalkError`] blames, when the error is about one.
-fn blamed_primitive(error: &WalkError) -> Option<walk::PrimitiveKey> {
+/// The SHELL a [`WalkError`] blames, when the error is about one.
+fn blamed_shell(error: &WalkError) -> Option<walk::ShellKey> {
     match error {
-        WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
-            Some(*key)
-        }
+        WalkError::UnexpectedExit { key, .. }
+        | WalkError::UnexpectedEntry { key, .. }
+        | WalkError::UnrepresentableChord { key, .. } => Some(*key),
         WalkError::IncompleteCorridor { open, .. } => open.first().copied(),
         _ => None,
     }
@@ -352,148 +351,18 @@ pub struct Report {
     pub radius: f32,
 }
 
-/// Volumes carrying a MESH DEFECT this fuzzer has measured and an asset-side investigation owns.
-///
-/// NOT a walk-semantics excuse. Every entry below is a baked corridor that contradicts itself —
-/// an exit before its own entry, two exits at one `t`, an entry with no exit anywhere in a 14 m
-/// corridor. No pairing rule can resolve a contradiction; the walk is right to refuse, and the fix
-/// is in the mesh, not here. Each is listed with the exact signature it was measured by, so a row
-/// that stops matching its signature is a row that has to be re-earned rather than inherited.
-///
-/// This list REPLACED a much broader one. Until 2026-08-07 it was `KNOWN_MULTI_SHELL_VOLUMES` and
-/// excused three prefixes — `Hull_Rear`, `Turret_Cupola`, `Wheel_` — covering 4591 of 4592 failures
-/// at a million rays, on the theory that the walk's boolean per-primitive pairing could not
-/// represent §13.7's legal several-shells-per-object authoring. It could not, and now it does:
-/// presence is a depth. That excuse is spent, and keeping its name would have been a lie about what
-/// the remaining rays are.
-///
-/// MEASURED 2026-08-07, seed 7, 1 000 000 rays, on the fixed walk: 5 failures TOTAL, one ray each,
-/// listed below. The gate refuses any walk error blamed on ANYTHING ELSE, so a new defect still
-/// fails loudly — and with the list this short, so does a defect that spreads.
-pub const DEGENERATE_BAKE_RESIDUE: &[&str] = &[
-    // ray 505821 — `UnexpectedExit` at t 8.9248, with the crossing dump reading
-    // `8.9248out 8.9250in 8.9507in 9.0489out`: the exit face sits 0.2 MM IN FRONT of the entry face
-    // it belongs to. An inverted or duplicated triangle on the rear plate's inner skin.
-    "Hull_Rear",
-    // ray 233264 — `IncompleteCorridor` with one primitive left open: entry at t 7.0039 and no exit
-    // in the whole 14.05 m corridor. A hole in the shell, so the ray never comes out of the solid.
-    "Hull_Side_Lower_L",
-    // ray 960102 — `IncompleteCorridor`, the same shape: entry at t 8.5621, no exit.
-    "Idler_L",
-    // ray 416399 — `UnexpectedExit` at t 5.9726 with the dump reading `5.9726out` and NOTHING before
-    // it: an exit face reached without ever entering, i.e. an outward-facing triangle on the inside.
-    "Wheel_L_3",
-    // ray 539618 — `IncompleteCorridor` off `7.0035in 7.0709in 7.1294out 7.1318in 7.1408out
-    // 7.1408out`: TWO EXITS AT THE SAME `t`, so one of the three shells this ray opened is closed
-    // twice and another is never closed at all. Coincident duplicate faces.
-    "Wheel_R_0",
-];
-
-/// Whether a walk error on this volume is one of the measured bake defects rather than a new one.
-///
-/// Prefix-matched, because the bake suffixes a split volume (`Wheel_R_0 (shard)`); the prefixes are
-/// whole volume names, so this names five volumes and not a family.
-pub fn is_degenerate_bake_residue(volume: &str) -> bool {
-    DEGENERATE_BAKE_RESIDUE
-        .iter()
-        .any(|known| volume.starts_with(known))
-}
-
 impl Report {
-    /// Walk errors this run cannot explain — anything not blamed on
-    /// [`DEGENERATE_BAKE_RESIDUE`]. THE gate quantity: a rate is not a contract, but "no
-    /// unexplained failure" is.
-    pub fn unexplained_walk_errors(&self) -> Vec<&WalkFailure> {
-        self.walk_errors
-            .iter()
-            .filter(|failure| !is_degenerate_bake_residue(&failure.volume))
-            .collect()
-    }
-
-    /// Nothing the gate refuses: no violated invariant, no unexplained walk error.
+    /// Nothing the gate refuses: no violated invariant, no walk error, and no corridor to crew or
+    /// ammunition.
+    ///
+    /// HARD ZERO ON ALL THREE, and there is no exemption channel. A `WalkError` is a round that
+    /// stops dead in mid-armour, so one of them is a gameplay defect and a hundred are the same
+    /// defect spreading — there is no rate at which the answer is "expected". A corridor is an
+    /// effectively unarmoured route to a crew member or a magazine, which is the defect §13.6
+    /// exists to find; it is named, and it is fixed in the model. A run that meets any of the three
+    /// names the ray, and `replay_ray` re-fires it.
     pub fn is_clean(&self) -> bool {
-        self.violations.is_empty() && self.unexplained_walk_errors().is_empty()
-    }
-}
-
-// ---------------------------------------------------------------------------------------------
-// The bless list
-// ---------------------------------------------------------------------------------------------
-
-/// The checked-in list of DELIBERATE openings — §13.6's "the bless-list is where weakspots are
-/// decided, not discovered by players as bugs".
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BlessList {
-    pub openings: Vec<Blessing>,
-}
-
-/// One blessed opening.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Blessing {
-    pub name: String,
-    /// Tank-local centre (metres) of the region on the tank's bounding box the corridors come in
-    /// through — the same descriptor [`Region::entry_local`] carries.
-    pub center: [f32; 3],
-    /// Tank-local radius (metres) around `center` this blessing covers.
-    pub radius: f32,
-    /// The smallest caliber (metres) MEASURED to get through. Documentation of what was accepted,
-    /// not a threshold the gate enforces — the gate is regional.
-    pub admits: f32,
-    pub reason: String,
-}
-
-impl Blessing {
-    fn covers(&self, point: Vec3) -> bool {
-        point.distance(Vec3::from_array(self.center)) <= self.radius
-    }
-}
-
-impl BlessList {
-    /// The shipped Tiger bless list, embedded so the gate never depends on asset-server timing.
-    pub fn shipped() -> Self {
-        ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.bless.ron"))
-            .expect("assets/tiger_1/tiger_1.bless.ron must parse")
-    }
-}
-
-/// The gate's verdict on a report.
-#[derive(Clone, Debug, Default)]
-pub struct Verdict {
-    /// Openings nobody has decided about. THE failure condition — each is either a hole to fix or a
-    /// weakspot to bless, and the point of the gate is that somebody has to say which.
-    pub unblessed: Vec<Region>,
-    /// Blessings no corridor came in through. A warning, not a failure: geometry moved, or the run
-    /// was too small to find it again.
-    pub stale: Vec<String>,
-}
-
-/// Match every region against the bless list.
-pub fn adjudicate(report: &Report, bless: &BlessList) -> Verdict {
-    let mut matched = vec![false; bless.openings.len()];
-    let mut unblessed = Vec::new();
-    for region in &report.regions {
-        let mut covered = false;
-        for (index, opening) in bless.openings.iter().enumerate() {
-            if opening.covers(region.entry_local) {
-                matched[index] = true;
-                covered = true;
-            }
-        }
-        if !covered {
-            unblessed.push(region.clone());
-        }
-    }
-    Verdict {
-        unblessed,
-        stale: bless
-            .openings
-            .iter()
-            .zip(&matched)
-            .filter(|(_, hit)| !**hit)
-            .map(|(opening, _)| opening.name.clone())
-            .collect(),
+        self.violations.is_empty() && self.walk_errors.is_empty() && self.regions.is_empty()
     }
 }
 
@@ -705,7 +574,7 @@ struct Pass<'a, 'w, 's> {
 ///
 /// f64 accumulation, matching [`walk::RayWalk`]'s own cost, so a prefix taken at the corridor end
 /// equals the walk's reported total rather than drifting from it.
-fn prefix_cost(spans: &[Span], t: f32) -> f64 {
+fn prefix_cost(spans: &[Span], t: f64) -> f64 {
     spans
         .iter()
         .map(|span| {
@@ -713,7 +582,7 @@ fn prefix_cost(spans: &[Span], t: f32) -> f64 {
             if end <= span.start {
                 0.0
             } else {
-                (end as f64 - span.start as f64) * span.factor as f64
+                (end - span.start) * span.factor as f64
             }
         })
         .sum()
@@ -792,14 +661,14 @@ impl Pass<'_, '_, '_> {
 
     /// Every crossing of the primitive a [`WalkError`] blamed, as `(t, axis · n)` — see
     /// [`WalkFailure::crossings`] for what the shape of that list diagnoses.
-    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f32, f32)> {
-        let Some(key) = blamed_primitive(error) else {
+    fn blamed_crossings(&self, ray: &FuzzRay, error: &WalkError) -> Vec<(f64, f32)> {
+        let Some(key) = blamed_shell(error) else {
             return Vec::new();
         };
         let Ok((corridor, _)) = self.probe_parts(ray) else {
             return Vec::new();
         };
-        let mut out: Vec<(f32, f32)> = corridor
+        let mut out: Vec<(f64, f32)> = corridor
             .hits
             .iter()
             .filter(|hit| hit.volume == key.volume && hit.primitive == key.primitive)
@@ -878,7 +747,7 @@ impl Pass<'_, '_, '_> {
     }
 
     /// Where the ray pierces the tank's local bounding box, in tank-local metres — the regional
-    /// descriptor a bless-list entry is written against. `None` when the ray misses the box.
+    /// descriptor a finding is reported with. `None` when the ray misses the box.
     fn pierce_local(&self, ray: &FuzzRay) -> Option<Vec3> {
         let origin = self.to_local.transform_point3(ray.origin);
         let direction = self.to_local.transform_vector3(ray.direction);
@@ -1024,7 +893,12 @@ fn run_fuzz(
     // `'static` spelled out because `ResolveContext` (the march's own borrow group) names the
     // query that way: `Query`'s data parameter is invariant, so an elided lifetime here will not
     // coerce into it.
-    colliders: Query<(&'static Position, &'static Rotation, &'static Collider)>,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticSurfaces>,
+    )>,
     aabbs: Query<&ColliderAabb>,
     facets: Query<(Entity, &Name, Option<&CrewStation>, Has<Ammo>)>,
     names: Query<(Entity, &Name)>,
@@ -1263,17 +1137,136 @@ pub fn fuzz(config: &FuzzConfig) -> Result<Report, String> {
     Ok(app.world().resource::<FuzzOutput>().0.clone())
 }
 
+/// One ray's corridor, dumped.
+///
+/// The report names a failing ray by `(seed, index)` and calls that a complete reproduction recipe.
+/// This is what consumes it: the ray generator is re-run for that index alone and every crossing
+/// along the corridor is printed in order, with the volume that owns it, the triangle that produced
+/// it and the sign that makes it an entry or an exit. Which is what a `WalkError` has to be read
+/// against — the error names one primitive, and the defect is almost always in what its neighbours
+/// did or did not report.
+#[derive(Resource, Clone)]
+struct ReplayJob {
+    config: FuzzConfig,
+    ray: u64,
+}
+
+#[derive(Resource, Default)]
+struct ReplayOutput(String);
+
+fn run_replay(
+    job: Res<ReplayJob>,
+    mut output: ResMut<ReplayOutput>,
+    tank: Res<ProbeTank>,
+    spares: Res<Spares>,
+    world: ProjectileMarchWorld,
+    colliders: Query<(
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static super::BallisticSurfaces>,
+    )>,
+    aabbs: Query<&ColliderAabb>,
+    names: Query<(Entity, &Name)>,
+    roots: Query<&GlobalTransform>,
+    mut commands: Commands,
+) {
+    use std::fmt::Write as _;
+    let root = roots
+        .get(tank.0)
+        .expect("the probe tank has a global transform");
+    let to_local = root.affine().inverse();
+    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+    let context = ResolveContext {
+        world: &world,
+        colliders: &colliders,
+        armor: &armor,
+        deposit: false,
+        laws: walk::WalkLaws::default(),
+    };
+    let Some((center, radius, local_min, local_max)) = tank_bounds(&world, &aabbs, to_local) else {
+        panic!("the probe tank presented no ballistic collider to fuzz");
+    };
+    let pass = Pass {
+        context,
+        spares: *spares,
+        targets: BTreeMap::new(),
+        names: names
+            .iter()
+            .map(|name| (name.0, name.1.as_str().to_owned()))
+            .collect(),
+        to_local,
+        local_min,
+        local_max,
+    };
+
+    let ray = ray_for(job.ray, &job.config, center, radius);
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "seed {} ray {}: origin {:?} direction {:?} length {}",
+        job.config.seed, job.ray, ray.origin, ray.direction, ray.length
+    );
+    match pass.probe_parts(&ray) {
+        Ok((corridor, _)) => {
+            let mut hits = corridor.hits;
+            hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+            for hit in &hits {
+                let along = ray.direction.dot(hit.true_normal);
+                let _ = writeln!(
+                    text,
+                    "  t={:.7} {:>3} {:<28} volume={:?} primitive={:?} triangle={} axis·n={:+.6}",
+                    hit.t,
+                    if along < 0.0 { "IN" } else { "OUT" },
+                    pass.volume_name(hit.volume),
+                    hit.volume,
+                    hit.primitive,
+                    hit.triangle,
+                    along,
+                );
+            }
+        }
+        Err(error) => {
+            let _ = writeln!(text, "  the corridor would not collect: {error:?}");
+        }
+    }
+    let _ = writeln!(
+        text,
+        "walk: {}",
+        match pass.probe(&ray, 0.0) {
+            Ok(_) => "resolved".to_owned(),
+            Err(error) => format!("{error:?}"),
+        }
+    );
+    output.0 = text;
+    commands.remove_resource::<ReplayJob>();
+}
+
+/// Re-fire one ray of a run and dump its corridor — see [`ReplayJob`].
+pub fn replay_ray(config: &FuzzConfig, ray: u64) -> Result<String, String> {
+    let mut app = probe_world()?;
+    app.init_resource::<ReplayOutput>()
+        .insert_resource(ReplayJob {
+            config: config.clone(),
+            ray,
+        })
+        .add_systems(Update, run_replay.run_if(resource_exists::<ReplayJob>));
+    app.update();
+    Ok(app.world().resource::<ReplayOutput>().0.clone())
+}
+
 /// `cargo run --bin ballistic_fuzzer [-- --rays N --seed S --out PATH]` — the bake-scale sweep.
 ///
-/// Exit code 1 means the gate FAILED: a violated invariant, a walk error, or an unblessed corridor
-/// to crew or ammunition. The report file is written either way, because a failing run is exactly
-/// the one whose report somebody has to read.
+/// Exit code 1 means the gate FAILED: a violated invariant, a walk error, or a corridor to crew or
+/// ammunition. The report file is written either way, because a failing run is exactly the one
+/// whose report somebody has to read.
 pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = FuzzConfig {
         rays: 200_000,
         ..default()
     };
     let mut out = std::path::PathBuf::from("target/ballistic-fuzzer-report.md");
+    let mut replay: Vec<u64> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         let mut value = || args.next().ok_or_else(|| format!("{flag} needs a value"));
@@ -1281,21 +1274,26 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
             "--rays" => config.rays = value()?.parse()?,
             "--seed" => config.seed = value()?.parse()?,
             "--out" => out = value()?.into(),
+            "--replay" => replay.push(value()?.parse()?),
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
+    if !replay.is_empty() {
+        for ray in replay {
+            println!("{}", replay_ray(&config, ray)?);
+        }
+        return Ok(());
+    }
 
     let report = fuzz(&config)?;
-    let bless = BlessList::shipped();
-    let verdict = adjudicate(&report, &bless);
-    let text = render(&report, &bless, &verdict);
+    let text = render(&report);
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&out, &text)?;
     println!("{text}");
     println!("report written to {}", out.display());
-    if report.is_clean() && verdict.unblessed.is_empty() {
+    if report.is_clean() {
         Ok(())
     } else {
         Err("the §13.6 gate did not pass — see the report".into())
@@ -1307,7 +1305,7 @@ pub fn run_ballistic_fuzzer() -> Result<(), Box<dyn std::error::Error>> {
 // ---------------------------------------------------------------------------------------------
 
 /// The report, as markdown.
-pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
+pub fn render(report: &Report) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let _ = writeln!(out, "# Ballistic ray fuzzer — Tiger I\n");
@@ -1344,12 +1342,7 @@ pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
         report.rays
     );
     for (volume, count) in &report.walk_error_volumes {
-        let known = if is_degenerate_bake_residue(volume) {
-            "degenerate bake residue"
-        } else {
-            "**UNEXPLAINED**"
-        };
-        let _ = writeln!(out, "- `{volume}` — {count} ({known})");
+        let _ = writeln!(out, "- `{volume}` — {count}");
     }
     for failure in report.walk_errors.iter().take(10) {
         let _ = writeln!(
@@ -1396,17 +1389,17 @@ pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
         let _ = writeln!(out, "None.");
     }
     for region in &report.regions {
-        render_region(&mut out, region, bless);
+        render_region(&mut out, region);
     }
 
     let _ = writeln!(out, "\n## Verdict\n");
-    if verdict.unblessed.is_empty() {
-        let _ = writeln!(out, "- every corridor found is blessed");
+    if report.regions.is_empty() {
+        let _ = writeln!(out, "- no corridor reaches crew or ammunition");
     }
-    for region in &verdict.unblessed {
+    for region in &report.regions {
         let _ = writeln!(
             out,
-            "- **UNBLESSED** {:?} → {:?} at local {:?} (admits {})",
+            "- **CORRIDOR** {:?} → {:?} at local {:?} (admits {})",
             region.kind.label(),
             region.targets,
             region.entry_local,
@@ -1415,22 +1408,14 @@ pub fn render(report: &Report, bless: &BlessList, verdict: &Verdict) -> String {
                 .map_or("nothing".to_owned(), |i| PROBE_ROUNDS[i].name.to_owned()),
         );
     }
-    for stale in &verdict.stale {
-        let _ = writeln!(out, "- stale blessing (no corridor found): `{stale}`");
-    }
     out
 }
 
-fn render_region(out: &mut String, region: &Region, bless: &BlessList) {
+fn render_region(out: &mut String, region: &Region) {
     use std::fmt::Write as _;
-    let opening = bless
-        .openings
-        .iter()
-        .find(|opening| opening.covers(region.entry_local));
     let _ = writeln!(
         out,
-        "### {} · {} · {}",
-        opening.map_or("UNBLESSED", |opening| opening.name.as_str()),
+        "### {} · {}",
         region.kind.label(),
         region
             .targets
@@ -1439,14 +1424,6 @@ fn render_region(out: &mut String, region: &Region, bless: &BlessList) {
             .collect::<Vec<_>>()
             .join(", "),
     );
-    if let Some(opening) = opening {
-        let _ = writeln!(
-            out,
-            "- blessed: admits {:.0} mm — {}",
-            opening.admits * 1000.0,
-            opening.reason
-        );
-    }
     if let Some(caliber) = region.admitting_caliber() {
         let _ = writeln!(out, "- admitting caliber: {:.1} mm", caliber * 1000.0);
     }

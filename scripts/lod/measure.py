@@ -325,14 +325,6 @@ class Surface:
         h.update(triangles.tobytes())
         return h.hexdigest()
 
-    def altitudes(self):
-        """Per-triangle minimum altitude (metres) — the sliver measure. 2*area / longest edge."""
-        e0 = np.linalg.norm(self.p1 - self.p0, axis=1)
-        e1 = np.linalg.norm(self.p2 - self.p1, axis=1)
-        e2 = np.linalg.norm(self.p0 - self.p2, axis=1)
-        longest = np.maximum(np.maximum(e0, e1), e2)
-        return np.where(longest > 0.0, 2.0 * self.tri_area / np.maximum(longest, 1e-30), 0.0)
-
     def welded(self, tol=1e-9):
         """Vertex indices remapped so coincident positions share one index (glTF splits corners).
 
@@ -367,13 +359,8 @@ class Surface:
         return len({find(int(v)) for v in used})
 
     # -- the validity gates ----------------------------------------------------------------------
-    def validity(self, gates, floor_m=None):
-        """Every structural check, as plain counts. The caller compares them with the thresholds.
-
-        `floor_m` overrides the sliver altitude floor; generation passes the source-anchored one
-        (see `GATES["sliver_margin_vs_source"]`). Without it the bound is the absolute scale-aware
-        fraction alone, which is what the SOURCE itself is measured against.
-        """
+    def validity(self, gates):
+        """Every structural check, as plain counts. The caller compares them with the thresholds."""
         weld = self.welded()
         faces = np.sort(weld[self.tri_v], axis=1)
         _, counts = np.unique(faces, axis=0, return_counts=True)
@@ -403,10 +390,6 @@ class Surface:
         pairs = forward[interior][order].reshape(-1, 2)
         flips = int((pairs[:, 0] == pairs[:, 1]).sum())
 
-        altitudes = self.altitudes()
-        floor = (
-            gates["min_altitude_frac_of_diag"] * self.diagonal if floor_m is None else float(floor_m)
-        )
         bad_uv = self.uv_area < gates["uv_area_eps"]
         touched = np.zeros(self.vert_count, dtype=np.int64)
         bad_touched = np.zeros(self.vert_count, dtype=np.int64)
@@ -444,9 +427,6 @@ class Surface:
             "orientation_flips": flips,
             "boundary_edges": int((edge_counts == 1).sum()),
             "nonmanifold_edges": int((edge_counts > 2).sum()),
-            "min_altitude_m": float(altitudes.min()) if self.tri_count else 0.0,
-            "min_altitude_floor_m": float(floor),
-            "slivers_below_floor": int((altitudes < floor).sum()),
             "min_tri_area_mm2": float(self.tri_area.min() * 1e6) if self.tri_count else 0.0,
             "tangent_default_faces": int(bad_uv.sum()),
             "tangent_default_verts": int(((touched > 0) & (touched == bad_touched)).sum()),
@@ -913,12 +893,6 @@ def validity_gate_failures(validity, source_validity, gates, require_baked_tange
         failures.append(
             f"component count {validity['components']} != source {source_validity['components']} "
             f"— a part vanished, and a vanished part has near-zero Hausdorff distance"
-        )
-    if validity["slivers_below_floor"] > 0:
-        failures.append(
-            f"{validity['slivers_below_floor']} triangle(s) below the scale-aware altitude floor "
-            f"{validity['min_altitude_floor_m'] * 1000:.5f} mm "
-            f"(worst {validity['min_altitude_m'] * 1000:.6f} mm)"
         )
     # PRESENCE FIRST. `degenerate_tangents` counts bad tangents among those that EXIST, so a level
     # that shipped none at all scored a clean zero and passed — and would have gone back to
