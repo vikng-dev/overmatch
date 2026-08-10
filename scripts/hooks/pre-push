@@ -50,10 +50,12 @@ echo "pre-push ▸ git lfs pre-push"
 printf '%s\n' "$refs" | git lfs pre-push "$@"
 
 # Tank assets. `asset_door.py verify` re-cuts each asset from its own stored source and proves the
-# tracked model is byte-identical to what that source, that spec sheet and the pinned toolchain
-# produce. That one verdict is why this lane replaces the old mip gate rather than joining it: a
-# tracked glb equal to a candidate the derivation verifier passed is mipped KTX2 by construction,
-# and it is also L1-clean and L2-certified, which the mip gate never said.
+# tracked model is, section by section, what that source, that spec sheet and the pinned toolchain
+# produce — byte for byte wherever the chain is deterministic, and by stated KTX2 header facts over
+# the texture payloads, which `basisu` cuts differently on different architectures. That one verdict
+# is why this lane replaces the old mip gate rather than joining it: a tracked glb the compare law
+# holds against a candidate the derivation verifier passed is mipped KTX2 by construction, and it is
+# also L1-clean and L2-certified, which the mip gate never said.
 #
 # IT VERIFIES THE PUSHED REVISIONS, not the work tree — the LOD lane's rule, for the LOD lane's
 # reason: a dirty-but-coherent tree blesses a different commit, and pushing a branch that is not

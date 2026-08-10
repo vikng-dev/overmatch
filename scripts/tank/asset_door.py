@@ -17,8 +17,10 @@ replaces the tracked glb only after every error-producing stage has passed. Any 
 tracked glb untouched, because the tracked path is written by one `os.replace` of a file that
 already passed everything.
 
-`verify` is the same chain into a temporary directory, ending in an exact comparison with the
-tracked glb. It writes nothing.
+`verify` is the same chain into a temporary directory, ending in a section-by-section comparison
+with the tracked glb — byte-exact wherever the pipeline is deterministic, by stated KTX2 header
+facts over the texture payloads, which the encoder cuts differently on different architectures
+(`compare`). It writes nothing.
 
 `--from-raw <candidate.glb>` is the same run continued rather than started: the caller has ALREADY
 run the Blender half in a Blender of its own (the GUI adapter, `.agents/blender/addons/
@@ -46,9 +48,12 @@ Exit is non-zero exactly when a stage refused.
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
+import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -57,7 +62,8 @@ from typing import List, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import report  # noqa: E402  — the paths above are what make these importable
+import glb_ktx2  # noqa: E402  — the paths above are what make these importable
+import report  # noqa: E402
 import toolchain  # noqa: E402
 from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa: E402
 
@@ -84,7 +90,13 @@ CANDIDATE_MISMATCH = Check(
     id="door.candidate-mismatch",
     stage=Stage.DERIVATION,
     severity=Severity.ERROR,
-    law="a candidate rebuilt from the stored source is byte-identical to the tracked glb",
+    law="a candidate rebuilt from the stored source and the tracked glb agree section by section: "
+        "every non-image bufferView's bytes are identical, the two documents are identical apart "
+        "from the bufferViews' byteOffset, the image bufferViews' byteLength and the buffer's "
+        "byteLength, and every tracked image payload is a KTX2 declaring the dimensions, level "
+        "count, format, supercompression, colour space and per-level uncompressed size its rebuilt "
+        "counterpart declares — the encoder's own output bytes are certified at export, by the "
+        "machine that cut them",
 )
 
 CONTINUATION = Check(
@@ -182,23 +194,13 @@ def preflight(mode: str, launches_blender: bool = True):
     return (findings, blender.binary if blender is not None else None)
 
 
-def digest_of(handle) -> str:
-    """sha256 of an OPEN file, read in blocks: a tank glb is tens of megabytes.
-
-    Of the bytes this handle delivers, which is the point: a path is a name that can be made to
-    mean another file between two opens, and a digest taken twice off one pathname is a digest of
-    whatever stood there each time.
-    """
-    hashed = hashlib.sha256()
-    for block in iter(lambda: handle.read(1 << 20), b""):
-        hashed.update(block)
-    return hashed.hexdigest()
-
-
 def digest(path: str) -> str:
-    """sha256 of a file, opened once."""
+    """sha256 of a file, opened once and read in blocks: a tank glb is tens of megabytes."""
+    hashed = hashlib.sha256()
     with open(path, "rb") as handle:
-        return digest_of(handle)
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            hashed.update(block)
+    return hashed.hexdigest()
 
 
 def candidate(work: str, name: str, stem: str, spec: str) -> str:
@@ -261,8 +263,217 @@ def identity(status) -> tuple:
     return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
 
 
+# ── the tracked model, section by section, against a candidate rebuilt from its source ───────────
+
+def without_encoder_spans(js: dict, images) -> dict:
+    """The document with the fields the encoder's output SIZE moves dropped from it, so that what
+    remains can be compared whole. They are every bufferView's byteOffset, an image bufferView's
+    byteLength, and the byteLength of the buffer they all live in — the fields the derivation law
+    sanctions (`glb_ktx2._bufferviews`, `_buffers`), for the same reason, and no others."""
+    document = copy.deepcopy(js)
+    for index, view in enumerate(document.get("bufferViews", [])):
+        view.pop("byteOffset", None)
+        if index in images:
+            view.pop("byteLength", None)
+    buffers = document.get("buffers", [])
+    if buffers:
+        buffers[0].pop("byteLength", None)
+    return document
+
+
+def image_views(js: dict) -> set:
+    """Every bufferView index this document fills with an image. Read off the CANDIDATE, which was
+    cut from the stored source and certified by the derivation verifier a stage ago: which views
+    hold textures is a fact about what the source produces, and that the tracked document says the
+    same is the `images` row's business, not an input to it."""
+    return {image["bufferView"] for image in js.get("images", []) if "bufferView" in image}
+
+
+def ktx2_facts(parsed) -> dict:
+    """What a KTX2 payload IS, as against how many bytes this machine's encoder spent saying it.
+    Every fact here is a function of the raster the encoder read and the flags it was handed; a
+    level record's offset and compressed length are the encoder's own search, and they are not
+    here. MEASURED on one asset cut twice, macOS/arm64 against Linux/x86_64: all nine payloads
+    differ in every compressed level length and agree on every fact below."""
+    return {
+        "vkFormat": parsed.vk_format,
+        "typeSize": parsed.type_size,
+        "pixelWidth": parsed.width,
+        "pixelHeight": parsed.height,
+        "pixelDepth": parsed.depth,
+        "layerCount": parsed.layers,
+        "faceCount": parsed.faces,
+        "levelCount": parsed.levels,
+        "supercompressionScheme": parsed.supercompression,
+        "colourModel": parsed.model,
+        "transferFunction": parsed.transfer,
+        "uncompressedLevelBytes": [record[2] for record in parsed.records],
+    }
+
+
+REBUILD = ("run `asset_door.py export` and commit the result — the tracked model is not what this "
+           "source, this spec sheet and this toolchain produce")
+
+
+def mismatch(subject: Subject, evidence: str) -> Finding:
+    return Finding(CANDIDATE_MISMATCH, subject, evidence, REBUILD)
+
+
+def section(glb: str, element: str, evidence: str) -> Finding:
+    return mismatch(Subject(SubjectKind.FILE, glb, element), evidence)
+
+
+def stated(value) -> str:
+    return json.dumps(value, sort_keys=True)[:120]
+
+
+def difference(tracked, rebuilt) -> str:
+    """How two JSON values differ: the counts when two collections are different lengths, the first
+    entry that moved when they are not, the values themselves otherwise."""
+    if isinstance(tracked, list) and isinstance(rebuilt, list):
+        if len(tracked) != len(rebuilt):
+            return "{} entries tracked, {} rebuilt".format(len(tracked), len(rebuilt))
+        moved = next(at for at, (x, y) in enumerate(zip(tracked, rebuilt)) if x != y)
+        return "{} entries on both sides, and entry {} differs: tracked {}, rebuilt {}".format(
+            len(tracked), moved, stated(tracked[moved]), stated(rebuilt[moved]))
+    return "tracked {}, rebuilt {}".format(stated(tracked), stated(rebuilt))
+
+
+def document_sections(tracked: dict, rebuilt: dict, images, glb: str) -> List[Finding]:
+    """The two JSON documents, key by key, with the encoder's own spans dropped from both."""
+    a, b = without_encoder_spans(tracked, images), without_encoder_spans(rebuilt, images)
+    findings = []
+    for key in sorted(set(a) | set(b)):
+        if (key in a) != (key in b):
+            findings.append(section(glb, key, "present in the {} document only".format(
+                "tracked" if key in a else "rebuilt")))
+        elif a[key] != b[key]:
+            findings.append(section(glb, key, difference(a[key], b[key])))
+    return findings
+
+
+def view_sections(tracked, tracked_bin, rebuilt, rebuilt_bin, images, glb: str) -> List[Finding]:
+    """Every bufferView that holds no image, by its bytes. These are the exporter's output — the
+    same bytes on every machine — so they are compared byte for byte and nothing less. Over the
+    views both documents hold: a document with a different number of them said so in a
+    `bufferViews` row already, and the ones it does hold are still answerable."""
+    views = min(len(tracked.get("bufferViews", [])), len(rebuilt.get("bufferViews", [])))
+    diverged = [index for index in range(views) if index not in images
+                and glb_ktx2.view_bytes(tracked, tracked_bin, index)
+                != glb_ktx2.view_bytes(rebuilt, rebuilt_bin, index)]
+    if not diverged:
+        return []
+    before = glb_ktx2.view_bytes(tracked, tracked_bin, diverged[0])
+    after = glb_ktx2.view_bytes(rebuilt, rebuilt_bin, diverged[0])
+    return [section(glb, "bufferView {}".format(diverged[0]),
+                    "holds no image, and its {} tracked bytes (sha256 {}) are {} rebuilt bytes "
+                    "(sha256 {}); {} of {} non-image bufferViews diverge".format(
+                        len(before), hashlib.sha256(before).hexdigest(),
+                        len(after), hashlib.sha256(after).hexdigest(),
+                        len(diverged), views - len(images)))]
+
+
+def image_sections(tracked, tracked_bin, rebuilt, rebuilt_bin, glb: str) -> List[Finding]:
+    """Every image payload, by what its header says it is. The bytes themselves are the encoder's,
+    and `basisu` is SIMD-dependent: one raster encoded on two machines is two payloads that decode
+    to the same image. So the payload the tracked model carries is read as a KTX2 and held against
+    the facts its rebuilt counterpart declares — and that its pixels are the ones this source
+    produced is certified at export, where the encoder that cut them ran.
+
+    Over the images both documents hold, for the reason the bufferViews above are.
+    """
+    images = rebuilt.get("images", [])
+    payloads = (glb_ktx2.payloads_in_memory(tracked, tracked_bin),
+                glb_ktx2.payloads_in_memory(rebuilt, rebuilt_bin))
+    findings = []
+    for index in range(min(len(tracked.get("images", [])), len(images))):
+        subject = glb_ktx2.image_subject(glb, index, images[index])
+        data = payloads[0](index)
+        if data is None:
+            findings.append(mismatch(subject, "carries no embedded payload"))
+            continue
+        parsed = glb_ktx2.parse_ktx2(data)
+        if parsed is None:
+            findings.append(mismatch(subject, "is {} byte(s) that are not a KTX2 file".format(
+                data.size)))
+            continue
+        # Only the tracked side is read for shape: the candidate answered `D.KTX2_MIPS` a stage ago
+        # (`derive`), so a candidate that is not a mipped KTX2 is a refusal the door already made.
+        facts = (ktx2_facts(parsed), ktx2_facts(glb_ktx2.parse_ktx2(payloads[1](index))))
+        differ = [name for name in facts[0] if facts[0][name] != facts[1][name]]
+        if differ:
+            findings.append(mismatch(subject, "; ".join(
+                "{}: tracked {}, rebuilt {}".format(name, facts[0][name], facts[1][name])
+                for name in differ
+            )))
+    return findings
+
+
+def container_sections(raw: bytes, tracked, tracked_bin, glb: str) -> List[Finding]:
+    """The bytes no section above names: the container's declared size, and the alignment padding
+    between bufferViews. Their content is what the repack writes on every machine — the file's own
+    length, and zero — so they are stated against that rather than against the candidate, whose
+    padding follows its own image sizes. Nothing in a glb is then unexamined."""
+    findings = []
+    declared = struct.unpack_from("<I", raw, 8)[0]
+    if declared != len(raw):
+        findings.append(section(glb, "container", "the header declares a {} byte file and the file "
+                                                  "is {} bytes".format(declared, len(raw))))
+    spans = sorted(
+        (view.get("byteOffset", 0), view.get("byteOffset", 0) + view.get("byteLength", 0))
+        for view in tracked.get("bufferViews", [])
+    )
+    at = 0
+    for start, end in spans + [(len(tracked_bin), len(tracked_bin))]:
+        gap = tracked_bin[at:start] if start > at else b""
+        if gap.strip(b"\0"):
+            findings.append(section(glb, "container",
+                                    "the BIN chunk holds {} byte(s) outside every bufferView at "
+                                    "{}..{}, and they are not the zero padding the derivation "
+                                    "writes".format(len(gap), at, start)))
+            break
+        at = max(at, end)
+    return findings
+
+
+def divergence(raw: bytes, glb: str, baked: str) -> List[Finding]:
+    """Every section in which the tracked model is not what a candidate rebuilt from the stored
+    source says it must be. No rows is the verdict `verify` certifies.
+
+    A document neither half can read is one row of its own: `verify` is run by a hook and a CI lane,
+    and a traceback there is a refusal nobody can act on.
+    """
+    try:
+        tracked, tracked_bin = glb_ktx2.parse_glb(raw, glb)
+        rebuilt, rebuilt_bin = glb_ktx2.read_glb(baked)
+        images = image_views(rebuilt)
+        findings = document_sections(tracked, rebuilt, images, glb)
+        findings += view_sections(tracked, tracked_bin, rebuilt, rebuilt_bin, images, glb)
+        findings += image_sections(tracked, tracked_bin, rebuilt, rebuilt_bin, glb)
+        return findings + container_sections(raw, tracked, tracked_bin, glb)
+    except (SystemExit, ValueError, TypeError, KeyError, IndexError, struct.error) as error:
+        return [section(glb, "document", "cannot be read as the glb this law compares: {}".format(
+            error))]
+
+
 def compare(baked: str, glb: str) -> None:
     """Verify's verdict: the candidate this chain just rebuilt against the tracked bytes.
+
+    SECTION BY SECTION, because one of the sections is not a function of the machine that cut it.
+    `basisu` selects its UASTC blocks with SIMD, so the same raster encoded on macOS/arm64 and on
+    Linux/x86_64 gives two payloads of different lengths that carry the same image (MEASURED: one
+    asset cut twice, 9 of 9 image payloads differ, 289 of 289 non-image bufferViews byte-identical).
+    A whole-file digest therefore says "not what this source produces" about a candidate that IS
+    what this source produces, on any machine but the one that last exported. Every section that is
+    deterministic is compared byte for byte; the image payloads are compared by the facts their
+    headers declare. Nothing here has a tolerance: a section is either identical or equal in stated
+    facts. This is one law with no environment in it, and it runs the same everywhere.
+
+    WHERE THE PIXEL BYTES ARE CERTIFIED, then: at export, by the machine that ran the encoder. That
+    machine wrote the tracked path with bytes its own chain had just produced and verified
+    (`derive`), and the byte-stable double export proves an encoder is deterministic with itself.
+    What travels to another machine is the claim that the tracked payloads are a KTX2 of the same
+    image, which is what this comparison re-establishes there.
 
     The tracked model is OPENED ONCE and the verdict is about the bytes that handle delivered.
     Asking whether the path exists and then opening it are two questions about two moments; so are
@@ -291,7 +502,8 @@ def compare(baked: str, glb: str) -> None:
             "none here",
         )]) from error
     with tracked_file:
-        tracked = digest_of(tracked_file)
+        raw = tracked_file.read()
+    tracked = hashlib.sha256(raw).hexdigest()
     rebuilt = digest(baked)
 
     try:
@@ -308,9 +520,10 @@ def compare(baked: str, glb: str) -> None:
             "about the model that is there when it is given, and another writer landed one here "
             "mid-comparison",
         )])
-    if rebuilt == tracked:
-        print("door  ▸ compare: {} matches the rebuilt candidate ({})".format(glb, tracked),
-              flush=True)
+    findings = divergence(raw, glb, baked)
+    if not findings:
+        print("door  ▸ compare: {} matches the rebuilt candidate ({}, rebuilt {})".format(
+            glb, tracked, rebuilt), flush=True)
         return
     # The candidate lives in this invocation's temporary directory, which is gone by the time
     # anyone reads the refusal — and on a CI runner, so is the machine. OVERMATCH_DOOR_KEEP names
@@ -319,16 +532,12 @@ def compare(baked: str, glb: str) -> None:
     note = ""
     if kept:
         os.makedirs(kept, exist_ok=True)
-        copy = os.path.join(kept, os.path.basename(glb) + ".rebuilt")
-        shutil.copyfile(baked, copy)
-        note = "; the rebuilt candidate is kept at {}".format(copy)
-    raise Refused("compare", [Finding(
-        CANDIDATE_MISMATCH,
-        Subject(SubjectKind.FILE, glb),
-        "tracked sha256 {}, rebuilt sha256 {}{}".format(tracked, rebuilt, note),
-        "run `asset_door.py export` and commit the result — the tracked model is not what this "
-        "source, this spec sheet and this toolchain produce",
-    )])
+        copied = os.path.join(kept, os.path.basename(glb) + ".rebuilt")
+        shutil.copyfile(baked, copied)
+        note = "; the rebuilt candidate is kept at {}".format(copied)
+    print("door  ▸ compare: {} is not the rebuilt candidate — tracked sha256 {}, rebuilt sha256 "
+          "{}{}".format(glb, tracked, rebuilt, note), flush=True)
+    raise Refused("compare", findings)
 
 
 # ── the chain ────────────────────────────────────────────────────────────────────────────────────

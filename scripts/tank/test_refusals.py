@@ -107,7 +107,9 @@ COVERAGE = {
     "door.continuation": (DOOR, "test_an_untrusted_raw_refuses"),
     "door.registry": (CONTRACT, "the_registry_the_door_supplies_is_the_one_the_contract_reads"),
     "door.stage-failed": (DOOR, "test_an_encoder_failure_refuses"),
-    "door.candidate-mismatch": (DOOR, "test_a_flipped_byte_is_a_mismatch_naming_both_digests"),
+    "door.candidate-mismatch": (
+        DOOR, "test_a_mesh_bufferview_byte_flip_is_a_mismatch_naming_the_section"
+    ),
 }
 
 #: `id: "L2.SOMETHING"` in a Rust `Check { … }` initialiser.

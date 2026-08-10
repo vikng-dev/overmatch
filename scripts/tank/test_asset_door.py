@@ -7,10 +7,12 @@ against the tank `.agents/blender/fixture_tank.py` builds in a temporary directo
 `assets/` is read or written, and the fixture is a second vehicle rather than a copy of the first:
 a door that only works on the Tiger is not a door.
 
-Two classes of claim are proven here. That the chain CERTIFIES: lint is clean, export writes a
-mip-baked glb, a second export is byte-identical, and verify accepts what export just wrote. And
-that every refusal LEAVES THE TRACKED GLB ALONE — one case per stage, each proving the model on
-disk is the byte-for-byte file it was before the door ran.
+Three classes of claim are proven here. That the chain CERTIFIES: lint is clean, export writes a
+mip-baked glb, a second export is byte-identical, and verify accepts what export just wrote. That
+every refusal LEAVES THE TRACKED GLB ALONE — one case per stage, each proving the model on disk is
+the byte-for-byte file it was before the door ran. And what verify's own comparison says about a
+tracked model, clause by clause (`ComparisonLaw`), including the one section it does not compare
+byte for byte.
 
 The two stages with no defect a fixture can carry — an encoder that fails, and a consumer contract
 that refuses the BAKED bytes after the raw ones passed — are reached by putting a stub earlier on
@@ -22,6 +24,7 @@ import json
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -34,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
 
 import asset_door  # noqa: E402
+import glb_ktx2  # noqa: E402
 import report  # noqa: E402
 import toolchain  # noqa: E402
 
@@ -107,6 +111,102 @@ def on_path(*paths):
     )}
 
 
+class Model:
+    """A tracked model open for surgery: its document, its BIN chunk, and the KTX2 payload of any
+    image. Written back through the derivation's own writer, so what a case produces is a document
+    of the shape the pipeline produces and not a file only this suite can make."""
+
+    def __init__(self, path):
+        self.path = path
+        self.js, chunk = glb_ktx2.read_glb(path)
+        self.bin = bytearray(chunk)
+
+    def write(self):
+        glb_ktx2.write_glb(self.path, self.js, bytes(self.bin))
+        return self.path
+
+    def start(self, index):
+        """Where image `index`'s payload begins in the BIN chunk."""
+        view = self.js["bufferViews"][self.js["images"][index]["bufferView"]]
+        return view.get("byteOffset", 0)
+
+    def payload(self, index):
+        view = self.js["bufferViews"][self.js["images"][index]["bufferView"]]
+        at = view.get("byteOffset", 0)
+        return bytes(self.bin[at : at + view["byteLength"]])
+
+    def ktx2(self, index):
+        return glb_ktx2.parse_ktx2(
+            glb_ktx2.payloads_in_memory(self.js, bytes(self.bin))(index)
+        )
+
+    def patch(self, at, data):
+        self.bin[at : at + len(data)] = data
+
+    def header(self, index, field, value):
+        """One of the nine u32 header fields of image `index`'s KTX2 payload, by its position."""
+        self.patch(self.start(index) + 12 + 4 * field, struct.pack("<I", value))
+
+    def descriptor(self, index, at, value):
+        """One byte of the payload's data-format descriptor."""
+        self.patch(self.start(index) + self.ktx2(index).dfd_offset + at, bytes([value]))
+
+    def record(self, index, level, field, value):
+        """One field of one level index record: 0 offset, 1 length, 2 uncompressed."""
+        self.patch(
+            self.start(index) + glb_ktx2.KTX2_HEADER
+            + glb_ktx2.KTX2_LEVEL_RECORD * level + 8 * field,
+            struct.pack("<Q", value),
+        )
+
+    def non_image_view(self):
+        """The first bufferView holding no image."""
+        images = {image["bufferView"] for image in self.js["images"]}
+        return next(index for index in range(len(self.js["bufferViews"])) if index not in images)
+
+    def repack(self, payloads):
+        """The document rebuilt with `payloads` (image index -> bytes) in place of its own, every
+        offset, length and buffer size recomputed the way `glb_ktx2.cmd_repack` computes them —
+        which is what a machine whose encoder emitted other bytes would have written."""
+        replaced = {self.js["images"][index]["bufferView"]: data
+                    for index, data in payloads.items()}
+        out = bytearray()
+        for index, view in enumerate(self.js["bufferViews"]):
+            data = replaced.get(index, glb_ktx2.view_bytes(self.js, bytes(self.bin), index))
+            out += b"\0" * (-len(out) % 4)
+            view["byteOffset"] = len(out)
+            view["byteLength"] = len(data)
+            out += data
+        self.js["buffers"][0]["byteLength"] = len(out)
+        self.bin = out
+        return self
+
+
+def re_encoded(payload):
+    """The payload another machine's encoder would have written for the same image: different
+    bytes, a different length, and every fact its header states untouched. `basisu` selects UASTC
+    blocks with SIMD, so this is the shape of the only difference a cross-platform re-cut has."""
+    data = bytearray(payload)
+    data[-1] ^= 0xFF
+    return bytes(data) + b"\x5a" * 7
+
+
+def re_encode(glb, index=0):
+    """One image of a tracked model re-encoded in place."""
+    model = Model(glb)
+    return model.repack({index: re_encoded(model.payload(index))}).write()
+
+
+def flip_in_a_mesh_view(glb):
+    """One byte of the first bufferView that holds no image — geometry, which every machine's
+    exporter writes identically."""
+    model = Model(glb)
+    index = model.non_image_view()
+    model.bin[model.js["bufferViews"][index].get("byteOffset", 0)] ^= 0xFF
+    model.write()
+    return index
+
+
 class ExportChain(unittest.TestCase):
     """The chain when everything is right."""
 
@@ -161,21 +261,41 @@ class ExportChain(unittest.TestCase):
 
 
 class VerifyComparison(unittest.TestCase):
-    """Verify's own verdict: the rebuilt candidate against the tracked bytes."""
+    """Verify's own verdict, through the door: the rebuilt candidate against the tracked bytes.
 
-    def test_a_flipped_byte_is_a_mismatch_naming_both_digests(self):
+    `ComparisonLaw` below is where the law's clauses are mutated one at a time; these two cases are
+    the claim that the door as a program answers with it — one model it must accept and one it must
+    refuse, each costing a full re-cut.
+    """
+
+    def test_a_model_whose_images_were_encoded_elsewhere_certifies(self):
+        """THE CROSS-PLATFORM CASE, which is what this law exists for: a tracked model cut on
+        another architecture carries the same images in different bytes, because `basisu` selects
+        UASTC blocks with SIMD. Simulated by re-encoding one payload in place — different bytes, a
+        different length, every header fact untouched — and the whole document repacked around it,
+        which is exactly what the other machine's repack wrote.
+        """
+        blend = trio("re-encoded-images")
+        self.assertEqual(door("export", blend)[0], 0)
+        glb = os.path.splitext(blend)[0] + ".glb"
+        before = digest(glb)
+        re_encode(glb)
+        self.assertNotEqual(digest(glb), before, "the case did not re-encode anything")
+
+        code, printed = door("verify", blend)
+        self.assertEqual(code, 0, printed)
+        self.assertIn("verify certified", printed)
+
+    def test_a_mesh_bufferview_byte_flip_is_a_mismatch_naming_the_section(self):
         blend = trio("flipped-byte")
         self.assertEqual(door("export", blend)[0], 0)
         glb = os.path.splitext(blend)[0] + ".glb"
-        with open(glb, "rb") as handle:
-            tracked = bytearray(handle.read())
-        tracked[-1] ^= 0xFF
-        with open(glb, "wb") as handle:
-            handle.write(bytes(tracked))
+        index = flip_in_a_mesh_view(glb)
 
         code, printed = door("verify", blend)
         self.assertEqual(code, 1, printed)
         self.assertIn("door.candidate-mismatch", printed)
+        self.assertIn("bufferView {}".format(index), printed)
         self.assertIn(digest(glb), printed)
         self.assertIn("rebuilt sha256", printed)
 
@@ -185,11 +305,7 @@ class VerifyComparison(unittest.TestCase):
         blend = trio("kept-candidate")
         self.assertEqual(door("export", blend)[0], 0)
         glb = os.path.splitext(blend)[0] + ".glb"
-        with open(glb, "rb") as handle:
-            tracked = bytearray(handle.read())
-        tracked[-1] ^= 0xFF
-        with open(glb, "wb") as handle:
-            handle.write(bytes(tracked))
+        flip_in_a_mesh_view(glb)
 
         kept = os.path.join(_WORK, "kept-candidates")
         code, printed = door("verify", blend, env={"OVERMATCH_DOOR_KEEP": kept})
@@ -218,6 +334,241 @@ class VerifyComparison(unittest.TestCase):
             name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
         }
         self.assertEqual(before, after)
+
+
+#: Every fact the compare law reads off a KTX2 header, and one operation that makes a tracked
+#: payload state it differently. The nine u32 header fields are addressed by position, the colour
+#: model and transfer function by their byte in the data-format descriptor, and a level's
+#: uncompressed size by its record — so a case locates each byte itself rather than asking the code
+#: under test where it put it.
+KTX2_FACTS = {
+    "vkFormat": lambda model: model.header(0, 0, model.ktx2(0).vk_format + 1),
+    "typeSize": lambda model: model.header(0, 1, model.ktx2(0).type_size + 1),
+    "pixelWidth": lambda model: model.header(0, 2, model.ktx2(0).width // 2),
+    "pixelHeight": lambda model: model.header(0, 3, model.ktx2(0).height // 2),
+    "pixelDepth": lambda model: model.header(0, 4, model.ktx2(0).depth + 1),
+    "layerCount": lambda model: model.header(0, 5, model.ktx2(0).layers + 1),
+    "faceCount": lambda model: model.header(0, 6, model.ktx2(0).faces + 1),
+    "levelCount": lambda model: model.header(0, 7, model.ktx2(0).levels - 1),
+    "supercompressionScheme": lambda model: model.header(0, 8, 0),
+    "colourModel": lambda model: model.descriptor(0, 12, 163),
+    "transferFunction": lambda model: model.descriptor(
+        0, 14, glb_ktx2.DFD_SRGB if model.ktx2(0).transfer == glb_ktx2.DFD_LINEAR
+        else glb_ktx2.DFD_LINEAR),
+    "uncompressedLevelBytes": lambda model: model.record(0, 0, 2, model.ktx2(0).records[0][2] * 2),
+}
+
+
+class ComparisonLaw(unittest.TestCase):
+    """`door.candidate-mismatch`, clause by clause, driven at `asset_door.compare` over a model the
+    real chain baked.
+
+    Surgery on a copy of a certified model rather than a defective fixture, because this law is
+    about a COMPARISON: no blend can carry a texture payload encoded on another architecture, and
+    only an operation on the bytes can say what one machine's model may and may not differ from
+    another's in. The candidate side is the certified model itself — the one every case is held
+    against.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        blend = trio("comparison-law")
+        code, printed = door("export", blend)
+        assert code == 0, "the certified model this class compares against failed to build:\n{}" \
+            .format(printed)
+        cls.candidate = os.path.splitext(blend)[0] + ".glb"
+
+    def tracked(self, name):
+        """A private copy of the certified model, standing in for a tracked one."""
+        path = os.path.join(_WORK, "comparison-law-{}.glb".format(name))
+        shutil.copyfile(self.candidate, path)
+        return path
+
+    def row(self, tracked, element):
+        """How a finding about one section of the tracked document reads, whole — a row named `x`
+        and a row whose evidence mentions `x` are not the same claim."""
+        return "file `{}` {}".format(tracked, element)
+
+    def certifies(self, tracked):
+        asset_door.compare(self.candidate, tracked)
+
+    def refuses(self, tracked, *phrases):
+        """The law refused, as errors of its own check, measuring each of `phrases`."""
+        with self.assertRaises(asset_door.Refused) as refusal:
+            asset_door.compare(self.candidate, tracked)
+        findings = refusal.exception.findings
+        self.assertTrue(findings, "the refusal carries no finding")
+        for finding in findings:
+            self.assertEqual(finding.check.id, "door.candidate-mismatch")
+            self.assertEqual(finding.check.severity, report.Severity.ERROR)
+            self.assertTrue(finding.evidence and finding.repair)
+        measured = "\n".join(
+            "{} {}".format(finding.subject, finding.evidence) for finding in findings
+        )
+        for phrase in phrases:
+            self.assertIn(phrase, measured, "the refusal does not name it: {}".format(measured))
+        return measured
+
+    def test_the_certified_model_is_its_own_match(self):
+        """Every case below is this model minus one clause, so a law that cannot certify it proves
+        nothing about them."""
+        self.certifies(self.tracked("identical"))
+
+    def test_images_encoded_on_another_machine_certify(self):
+        """THE ACCEPTED BOUNDARY, stated as what it is: bytes inside a texture payload are not
+        compared at all. A payload of a different length whose header facts are the tracked one's
+        passes — including one whose pixels would decode differently, which is the price of a law
+        that must accept `basisu`'s SIMD-dependent output. The pixels are certified where the
+        encoder ran: `export` writes the tracked path with payloads its own chain cut and verified,
+        and a second export on that machine is byte-identical.
+        """
+        tracked = self.tracked("re-encoded")
+        model = Model(tracked)
+        before = model.payload(0)
+        model.repack({0: re_encoded(before)}).write()
+        after = Model(tracked)
+        self.assertNotEqual(after.payload(0), before, "the case re-encoded nothing")
+        self.assertNotEqual(len(after.payload(0)), len(before),
+                            "the case did not change the payload's length, which is what moves "
+                            "every offset behind it")
+        self.assertNotEqual(digest(tracked), digest(self.candidate))
+        self.certifies(tracked)
+
+    def test_a_mesh_bufferview_byte_flip_refuses_naming_the_view(self):
+        """The other side of the same line: geometry is the exporter's output, identical on every
+        machine, and it is compared byte for byte."""
+        tracked = self.tracked("mesh-byte")
+        index = flip_in_a_mesh_view(tracked)
+        self.refuses(tracked, "bufferView {}".format(index), "holds no image")
+
+    def test_every_ktx2_fact_the_law_reads_refuses_by_name(self):
+        """One case per fact, because a fact dropped from the table is a payload difference nothing
+        would see — and the door would then certify a tracked model whose textures are the wrong
+        size, the wrong codec, the wrong colour space or a shorter mip chain."""
+        for fact, surgery in KTX2_FACTS.items():
+            with self.subTest(fact=fact):
+                tracked = self.tracked("fact-" + fact)
+                model = Model(tracked)
+                surgery(model)
+                model.write()
+                self.refuses(tracked, "image 0", fact + ": tracked ")
+
+    def test_a_payload_that_is_not_a_ktx2_file_refuses(self):
+        tracked = self.tracked("not-ktx2")
+        model = Model(tracked)
+        model.patch(model.start(0), b"\x89PNG\r\n\x1a\n")
+        model.write()
+        self.refuses(tracked, "image 0", "not a KTX2 file")
+
+    def test_an_image_that_is_not_embedded_refuses(self):
+        """A payload this law cannot read at all is not a payload it may pass over."""
+        tracked = self.tracked("unembedded-image")
+        model = Model(tracked)
+        model.js["images"][0].pop("bufferView")
+        model.js["images"][0]["uri"] = "elsewhere.ktx2"
+        model.write()
+        self.refuses(tracked, "image 0", "carries no embedded payload")
+
+    def test_a_dropped_image_refuses(self):
+        tracked = self.tracked("dropped-image")
+        model = Model(tracked)
+        model.js["images"].pop()
+        model.write()
+        self.refuses(tracked, self.row(tracked, "images"), "entries tracked")
+
+    def test_an_added_image_refuses(self):
+        """A duplicate entry is the smallest addition: same payload, same mimeType, one image more
+        than the source produces."""
+        tracked = self.tracked("added-image")
+        model = Model(tracked)
+        model.js["images"].append(dict(model.js["images"][0]))
+        model.write()
+        self.refuses(tracked, self.row(tracked, "images"), "entries tracked")
+
+    def test_json_outside_the_sanctioned_spans_refuses(self):
+        """Everything the encoder's output size does not move is compared whole, and the row names
+        the collection it moved in."""
+        tracked = self.tracked("json-drift")
+        model = Model(tracked)
+        model.js["nodes"][0]["name"] = "Renamed"
+        model.write()
+        self.refuses(tracked, self.row(tracked, "nodes"), "entry 0 differs")
+
+    def test_a_collection_the_source_does_not_produce_refuses(self):
+        """A key on one side only, which is neither two values to compare nor a difference the
+        encoder's output size can produce."""
+        tracked = self.tracked("extra-collection")
+        model = Model(tracked)
+        model.js["extensionsRequired"] = [glb_ktx2.BASISU]
+        model.write()
+        self.refuses(tracked, self.row(tracked, "extensionsRequired"),
+                     "present in the tracked document only")
+
+    def test_a_dropped_bufferview_refuses(self):
+        """The count, before any span is read: a document holding fewer views than the source
+        produces is answered by the row that counts them."""
+        tracked = self.tracked("dropped-view")
+        model = Model(tracked)
+        model.js["bufferViews"].pop()
+        model.write()
+        self.refuses(tracked, self.row(tracked, "bufferViews"), "entries tracked")
+
+    def test_a_resized_mesh_bufferview_refuses(self):
+        """byteLength is sanctioned for an IMAGE bufferView and for no other: a mesh view that
+        claims a different span is a document the exporter did not write."""
+        tracked = self.tracked("resized-view")
+        model = Model(tracked)
+        index = model.non_image_view()
+        model.js["bufferViews"][index]["byteLength"] -= 4
+        model.write()
+        self.refuses(tracked, self.row(tracked, "bufferViews"),
+                     "entry {} differs".format(index))
+
+    def test_a_moved_image_bufferview_is_the_encoder_doing_its_job(self):
+        """The sanctioned change, stated so the rows above cannot be tightened into refusing every
+        honest re-cut: a payload of another length moves its own span, every span behind it, and the
+        buffer they all live in."""
+        tracked = self.tracked("sanctioned-spans")
+        model = Model(tracked)
+        moved = model.repack({0: re_encoded(model.payload(0))})
+        self.assertNotEqual(
+            moved.js["buffers"][0]["byteLength"],
+            glb_ktx2.read_glb(self.candidate)[0]["buffers"][0]["byteLength"],
+            "the case did not move the buffer it claims to",
+        )
+        moved.write()
+        self.certifies(tracked)
+
+    def test_a_stray_byte_in_the_alignment_padding_refuses(self):
+        """The bytes no other clause names. The derivation pads bufferViews to four bytes with
+        zeros, so anything else living in a gap is content nothing in this document accounts for."""
+        tracked = self.tracked("stray-padding")
+        model = Model(tracked)
+        index = next(number for number, image in enumerate(model.js["images"])
+                     if image["bufferView"] < len(model.js["bufferViews"]) - 1)
+        payload = model.payload(index)
+        # A payload one byte past an alignment boundary, so the view behind it is padded — the gap
+        # is built rather than looked for, and the case then writes in one that is certainly there.
+        model.repack({index: payload + b"\x5a" * ((1 - len(payload)) % 4)})
+        view = model.js["bufferViews"][model.js["images"][index]["bufferView"]]
+        model.bin[view["byteOffset"] + view["byteLength"]] = 0x7F
+        model.write()
+        self.refuses(tracked, "container", "outside every bufferView")
+
+    def test_a_container_that_lies_about_its_own_length_refuses(self):
+        tracked = self.tracked("short-container")
+        with open(tracked, "r+b") as handle:
+            handle.seek(8)
+            handle.write(struct.pack("<I", os.path.getsize(tracked) - 4))
+        self.refuses(tracked, "container", "declares a")
+
+    def test_a_tracked_model_that_is_not_a_glb_is_a_finding_not_a_traceback(self):
+        """Fail-closed at the parse: `verify` is run by a hook and a CI lane, and a traceback there
+        is a refusal nobody can act on."""
+        tracked = self.tracked("not-a-glb")
+        with open(tracked, "wb") as handle:
+            handle.write(b"not a glb at all")
+        self.refuses(tracked, "document", "cannot be read")
 
 
 class RefusalsLeaveTheModelAlone(unittest.TestCase):

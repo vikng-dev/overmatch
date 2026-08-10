@@ -26,8 +26,10 @@ The **asset lane** runs `scripts/tank/asset_door.py verify` — the one door —
 changes, and on every asset it discovers when the push changes the shared surface the door's verdict
 is computed from (the material library, the toolchain pin, the source pass, the door, the encoder,
 the derivation verifier, the Rust consumer contract). `verify` re-cuts the asset from its own stored
-source and requires the tracked glb to be byte-identical to the result, which subsumes the mip gate
-this lane replaced: a tracked glb equal to a candidate the derivation verifier passed is mipped KTX2
+source and holds the tracked glb against the result section by section — byte for byte wherever the
+chain is deterministic, and by stated KTX2 header facts over the texture payloads, whose bytes
+`basisu` varies with the SIMD it was built for. That subsumes the mip gate this lane replaced: a
+tracked glb the compare law holds against a candidate the derivation verifier passed is mipped KTX2
 by construction.
 
 Assets are **discovered**, never listed: an asset is a sibling trio `<id>.blend`, `<id>.tank.ron`,
