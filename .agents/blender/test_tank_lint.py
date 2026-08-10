@@ -26,6 +26,7 @@ import tempfile
 import traceback
 
 import bpy
+import mathutils
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
@@ -763,6 +764,63 @@ def unapplied_scale_reads_delta_scale():
     scene = clean_scene()
     assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
     bpy.data.objects["Turret"].delta_scale = (1.0, 1.0, 2.0)
+    assert_fires(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE", Severity.WARNING)
+
+
+@case
+def unapplied_scale_reads_the_parent_inverse_matrix():
+    """The scale both channels miss. Blender writes the inverse of the parent's world matrix into
+    `matrix_parent_inverse` when a child is parented, so a parent that was scaled at that moment
+    leaves its scale composed into every descendant's local transform with `scale` and
+    `delta_scale` both reading (1,1,1)."""
+    scene = clean_scene()
+    turret = bpy.data.objects["Turret"]
+    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    turret.matrix_parent_inverse = mathutils.Matrix.Diagonal((2.0, 1.0, 1.0, 1.0))
+    assert tuple(turret.scale) == (1.0, 1.0, 1.0) and tuple(turret.delta_scale) == (1.0, 1.0, 1.0), (
+        "the fixture moved a scale channel, which is the clause above"
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
+    hits = of(findings, "L1.UNAPPLIED_SCALE")
+    assert len(hits) == 1 and hits[0].subject.element == "parent inverse", [
+        (finding.subject.element, finding.evidence) for finding in hits
+    ]
+    assert_exit(findings, 0)
+
+
+@case
+def unapplied_scale_leaves_a_parent_inverse_that_only_offsets_alone():
+    """The shape the live tank is in: MEASURED, 37 of the tiger's 86 objects carry a non-identity
+    parent inverse and every one of them is a pure translation. Translation is not scale, and a
+    warning that fires on all of them is noise."""
+    scene = clean_scene()
+    bpy.data.objects["Turret"].matrix_parent_inverse = mathutils.Matrix.Translation(
+        (0.5, -1.25, 3.0)
+    )
+    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+
+
+@case
+def unapplied_scale_leaves_an_exactly_rotated_parent_inverse_alone():
+    """A rotation stored exactly — a quarter turn about Z, written as the signed permutation it is
+    — is scale-free bit-exactly, and the law reads it as the rotation it is.
+
+    Its counterpart is the price of no tolerance, and it is recorded here rather than softened:
+    `Matrix.Rotation(pi/2, 4, "Z")` stores cos(pi/2) as 6.1e-17, so ITS columns are 1.0000000000000058
+    long and the law says so. That row is a warning, it never fails a build, and it names the
+    measured Gram — which is the honest thing to print about a stored basis that is not unit.
+    """
+    scene = clean_scene()
+    bpy.data.objects["Turret"].matrix_parent_inverse = mathutils.Matrix((
+        (0.0, -1.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    inexact = mathutils.Matrix.Rotation(math.pi / 2.0, 4, "Z")
+    bpy.data.objects["Turret"].matrix_parent_inverse = inexact
     assert_fires(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE", Severity.WARNING)
 
 

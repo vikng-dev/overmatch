@@ -263,7 +263,8 @@ UNAPPLIED_SCALE = Check(
     id="L1.UNAPPLIED_SCALE",
     stage=Stage.SOURCE,
     severity=Severity.WARNING,
-    law="every export-bound local scale is bit-exact (1,1,1)",
+    law="every export-bound local scale is bit-exact (1,1,1), in the authored channels and in the "
+        "parent-inverse matrix the local transform is composed with",
 )
 
 UNIQUE_NAMES = Check(
@@ -625,6 +626,41 @@ def check_handedness(source: Source) -> List[Finding]:
     return findings
 
 
+def _parent_inverse_gram(obj):
+    """The 3x3 parent-inverse basis dotted with itself, when that is not the identity — the exact
+    measure of a matrix that scales or shears. None when the matrix only rotates and translates.
+
+    `matrix_local` is `matrix_parent_inverse @ matrix_basis`, and `matrix_basis` is exactly the
+    scale/rotation/translation channels including their deltas. So this matrix is the ONLY other
+    place a local scale comes from: Blender writes the inverse of the parent's world matrix here
+    when a child is parented, so a parent that was scaled at that moment leaves the scale in it
+    while both channels still read (1,1,1).
+
+    EXACT, and it has to be measured this way. The Gram matrix — every basis column dotted with
+    every other — is the identity exactly when the columns are unit-length and mutually
+    perpendicular, which is what "rotates without scaling" means; asking for column LENGTHS instead
+    would need a square root, and asking whether the matrix is the identity would refuse an honest
+    rotation. Every product and sum is over the stored values in Python's float64, so a matrix that
+    is scale-free AS STORED says so bit-exactly. MEASURED on the live tiger: 37 of 86 objects carry
+    a non-identity parent inverse (Blender puts the parent's offset there) and all 86 Grams are
+    exactly the identity.
+
+    The price of that exactness, stated rather than softened: a rotation by an angle floats cannot
+    hold — a quarter turn built from `cos(pi/2)` — stores columns 1.0000000000000058 long, and this
+    reports it. The row is a WARNING that never fails a build and it prints the Gram it measured,
+    which is the true thing to say about a stored basis that is not unit.
+    """
+    matrix = obj.matrix_parent_inverse
+    columns = [[matrix[row][index] for row in range(3)] for index in range(3)]
+    gram = tuple(
+        tuple(sum(columns[i][axis] * columns[j][axis] for axis in range(3)) for j in range(3))
+        for i in range(3)
+    )
+    if all(gram[i][j] == (1.0 if i == j else 0.0) for i in range(3) for j in range(3)):
+        return None
+    return gram
+
+
 def check_unapplied_scale(source: Source) -> List[Finding]:
     """Reported generically here; the strict refusal for sim-consumed nodes is L2.UNIT_SCALE."""
     findings = []
@@ -632,15 +668,25 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
     for obj in source.objects:
         scale = tuple(obj.scale)
         delta = tuple(obj.delta_scale)
-        if scale == unit and delta == unit:
-            continue
-        findings.append(Finding(
-            UNAPPLIED_SCALE,
-            Subject(SubjectKind.OBJECT, obj.name),
-            "scale {}, delta scale {}".format(scale, delta),
-            "apply the scale (Ctrl+A → Scale) — bit-exact, not near: there is no scale that is "
-            "almost 1",
-        ))
+        if scale != unit or delta != unit:
+            findings.append(Finding(
+                UNAPPLIED_SCALE,
+                Subject(SubjectKind.OBJECT, obj.name),
+                "scale {}, delta scale {}".format(scale, delta),
+                "apply the scale (Ctrl+A → Scale) — bit-exact, not near: there is no scale that is "
+                "almost 1",
+            ))
+        gram = _parent_inverse_gram(obj)
+        if gram is not None:
+            findings.append(Finding(
+                UNAPPLIED_SCALE,
+                Subject(SubjectKind.OBJECT, obj.name, "parent inverse"),
+                "the parent-inverse matrix is not scale-free: its basis columns dotted with each "
+                "other are {}, not the identity".format(gram),
+                "clear it and re-parent with Keep Transform (Object ▸ Parent ▸ Clear Parent "
+                "Inverse, then Ctrl+P) after applying the parent's scale — Blender wrote the "
+                "inverse of a scaled parent here, and it multiplies this node's own scale",
+            ))
     return findings
 
 
