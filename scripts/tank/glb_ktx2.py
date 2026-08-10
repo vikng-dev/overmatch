@@ -518,8 +518,8 @@ def check_tangents(js, path):
                     "material `{}` samples {} and the primitive has no TANGENT accessor "
                     "({} POSITION elements)".format(named, slot, elements),
                     "unwrap the mesh and re-export — `export_tangents` is already frozen on in "
-                    ".agents/blender/export_tank.py, and the exporter emits no tangents for a "
-                    "primitive it has no UV map to generate them from",
+                    ".agents/blender/export_tank.py's EXPORT_SETTINGS, and the exporter emits no "
+                    "tangents for a primitive it has no UV map to generate them from",
                 ))
                 continue
             carried = accessors[tangent]["count"] \

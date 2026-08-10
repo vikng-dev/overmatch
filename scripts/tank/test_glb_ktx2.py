@@ -154,6 +154,42 @@ def derivation(before, after):
     return glb_ktx2.derivation_findings(a, abin, b, bbin, "baked.glb")
 
 
+#: glTF component and element sizes, restated here so a case can locate a byte without asking the
+#: code under test where that byte is.
+_COMPONENT = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
+_ELEMENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+
+
+def last_byte(js, index):
+    """The final byte accessor `index` owns, for a tightly packed accessor."""
+    accessor = js["accessors"][index]
+    element = _COMPONENT[accessor["componentType"]] * _ELEMENTS[accessor["type"]]
+    view = js["bufferViews"][accessor["bufferView"]]
+    start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    return start + accessor["count"] * element - 1
+
+
+class Synthetic(Document):
+    """A document built rather than exported, for a shape this pipeline cannot produce."""
+
+    def __init__(self, js, bin_):  # noqa: PLW0231 — built, not copied from a parsed pair
+        self.js = js
+        self.bin = bytearray(bin_)
+
+
+def strided(payload):
+    """One glb holding one accessor of three VEC2 floats interleaved into a 12-byte stride, so its
+    last element ends past where the same accessor packed tightly would."""
+    return Synthetic({
+        "asset": {"version": "2.0"},
+        "extensionsUsed": [glb_ktx2.BASISU],
+        "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC2"}],
+        "bufferViews": [{"buffer": 0, "byteOffset": 4, "byteLength": len(payload),
+                         "byteStride": 12}],
+        "buffers": [{"byteLength": 4 + len(payload)}],
+    }, b"\0" * 4 + payload)
+
+
 def normal_mapped(js):
     """(mesh index, primitive index) of the one primitive the fixture normal-maps."""
     for index, mesh in enumerate(js["meshes"]):
@@ -325,9 +361,11 @@ class Roles(Fires):
         self.fires(document.findings(), "D.KTX2_MIPS", "extensionsUsed is []")
 
     def test_a_texture_selecting_no_image_refuses(self):
+        """A reference is read twice — once walking the materials for the role, once as the
+        declaration — and a texture no material samples is reached only by the second."""
         document = baked()
         document.js["textures"][0]["source"] = len(document.js["images"])
-        self.fires(document.findings(), "D.KTX2_MIPS", "image(s)")
+        self.fires(document.findings(), "D.KTX2_MIPS", "texture 0 source is")
 
 
 class Tangents(Fires):
@@ -392,6 +430,41 @@ class Structure(Fires):
         start = after.js["bufferViews"][view].get("byteOffset", 0)
         after.bin[start] ^= 0xFF
         self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "accessor 0")
+
+    def test_the_end_of_an_accessor_is_compared_too(self):
+        """The span is every element, not the first: a stream that diverges only in its last vertex
+        is the same law, and the row still has to name the accessor it is about.
+
+        The byte is located from the accessor's own JSON here rather than by asking the code under
+        test where its span ends — a case that reads its subject's answer proves nothing.
+        """
+        after = baked()
+        index, end = max(
+            ((index, last_byte(after.js, index)) for index in range(len(after.js["accessors"]))),
+            key=lambda pair: pair[1],
+        )
+        after.bin[end] ^= 0xFF
+        self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION",
+                   "accessor {}".format(index))
+
+    def test_an_interleaved_accessor_is_measured_by_its_stride(self):
+        """A document glTF allows and this pipeline does not write. With elements spread across a
+        stride, the byte the accessor's LAST element occupies is past where a packed reading of the
+        same accessor stops, so only the stride says which bytes it owns."""
+        before, after = strided(b"\x11" * 32), strided(b"\x11" * 31 + b"\x22")
+        self.fires(derivation(before, after), "D.STRUCTURAL_DERIVATION", "accessor 0")
+
+    def test_a_baked_image_left_unbaked_refuses(self):
+        """The pair's own statement of it: the raw document said PNG, and the baked one still
+        does. `D.KTX2_MIPS` says the same thing of the baked document alone."""
+        after = baked()
+        after.js["images"][0]["mimeType"] = "image/png"
+        self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "and the bake writes")
+
+    def test_a_dropped_texture_refuses(self):
+        after = baked()
+        after.js["textures"].pop()
+        self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "textures")
 
     def test_a_rewritten_non_image_bufferview_refuses(self):
         after = baked()
