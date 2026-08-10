@@ -406,9 +406,9 @@ def link_object(path, name):
     return linked
 
 
-#: The one path the canonical material library is identified by, built where a repository would hold
-#: it. Nothing under the real `assets/` is read: the laws measure the path relationship, so a
-#: fixture library standing at the same relationship IS the canonical library to them.
+#: The canonical material library of the repository the session's blend stands in: `BLEND_PATH` is
+#: `<_WORK>/assets/testbed/testbed.blend`, so `<_WORK>` is the root and this is its one library.
+#: Nothing under the real `assets/` is read.
 MATERIAL_LIBRARY = os.path.join(_WORK, "assets", "materials", "materials.blend")
 
 
@@ -434,6 +434,10 @@ def link_material(name, path=MATERIAL_LIBRARY):
     linked = target.materials[0]
     assert linked is not None, "{} does not hold materials[{}]".format(path, name)
     assert linked.library is not None, "{} came back local".format(name)
+    # As Blender stores it in a saved blend: `//` relative to the file that links it, which is what
+    # lets a checkout move. MEASURED on the live tiger: `//../materials/materials.blend`.
+    linked.library.filepath = bpy.path.relpath(path)
+    assert linked.library.filepath.startswith("//"), linked.library.filepath
     return linked
 
 
@@ -1187,9 +1191,12 @@ def zero_area_uv_ignores_a_material_that_samples_nothing():
 
 # ── L1.SUBSTANCE_IDENTITY ────────────────────────────────────────────────────────────────────────
 
-#: A second library, standing somewhere a repository would not keep the canonical one. The law's
-#: identity is the path relationship, so this file is a stranger however its materials are named.
+#: A second library, standing somewhere this repository does not keep the canonical one.
 SURPLUS_LIBRARY = os.path.join(_WORK, "assets", "surplus", "materials.blend")
+
+#: A library at the SAME three-component suffix under a DIFFERENT root — another checkout's copy,
+#: another registry, and nothing about its path tail or its contents says so.
+IMPOSTOR_LIBRARY = os.path.join(_WORK, "impostor", "assets", "materials", "materials.blend")
 
 
 def plated(name, path=MATERIAL_LIBRARY, local=False):
@@ -1248,6 +1255,23 @@ def substance_identity_a_registry_name_linked_from_some_other_library():
     findings = export_tank.lint(source_of(plated("RHA", path=SURPLUS_LIBRARY)))
     assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
     assert "surplus" in of(findings, "L1.SUBSTANCE_IDENTITY")[0].evidence
+
+
+@case
+def substance_identity_a_registry_name_linked_from_another_repository():
+    """CANONICAL is one file, not three directory names. A second checkout — or a downloaded
+    asset pack — holds `assets/materials/materials.blend` too, and its `RHA` was issued by a
+    registry this repository never read."""
+    findings = export_tank.lint(source_of(plated("RHA", path=IMPOSTOR_LIBRARY)))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    hits = of(findings, "L1.SUBSTANCE_IDENTITY")
+    assert len(hits) == 1, [finding.evidence for finding in hits]
+    assert IMPOSTOR_LIBRARY in hits[0].evidence, hits[0].evidence
+    assert MATERIAL_LIBRARY in hits[0].evidence, (
+        "the row does not name the library this source's own repository holds: {}".format(
+            hits[0].evidence
+        )
+    )
 
 
 @case

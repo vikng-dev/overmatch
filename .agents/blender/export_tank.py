@@ -1402,19 +1402,43 @@ SUBSTANCE_IDENTITY = Check(
 
 SUBSTANCE_IDENTITY_CANON = _canon_gate(SUBSTANCE_IDENTITY)
 
-#: Where the canonical material library stands, innermost last. Identity is that path relationship
-#: — the library datablock's own name is `materials.blend` for any file so called.
+#: Where the canonical material library stands INSIDE the repository that holds the tank source.
 CANONICAL_LIBRARY = ("assets", "materials", "materials.blend")
 
 
-def _canonically_linked(material) -> bool:
-    """Whether this material IS the datablock the canonical library owns."""
+def canonical_library(source: Source) -> Optional[str]:
+    """The one `materials.blend` a substance may come from, as an absolute path.
+
+    CANONICAL means the library of the repository this tank source belongs to, and the repository
+    is derived from the source's own location: an asset is a trio at `<root>/assets/<id>/<id>.blend`
+    — the derivation the wrapper cuts the spec and glb paths with, and the one the pre-push hook
+    lays a hydrated asset out by — so the library stands at `<root>/assets/materials/materials.blend`
+    and nowhere else. A path SUFFIX would accept any other checkout's copy of a file so named,
+    which is a different registry wearing the same three directory names.
+
+    None when the blend has never been saved: there is no repository to anchor to, and
+    `L1.SAVED_SOURCE` has already refused.
+    """
+    if not source.filepath:
+        return None
+    directory = os.path.dirname(os.path.abspath(source.filepath))
+    root = os.path.dirname(os.path.dirname(directory))
+    return os.path.realpath(os.path.join(root, *CANONICAL_LIBRARY))
+
+
+def _linked_from(material) -> Optional[str]:
+    """Where this material's library stands, resolved through Blender's own path semantics —
+    `//` is relative to the blend that links it, which is how a moved checkout still resolves."""
     library = getattr(material, "library", None)
     if library is None:
-        return False
-    directory, filename = os.path.split(os.path.abspath(bpy.path.abspath(library.filepath)))
-    holder = os.path.basename(directory)
-    return (os.path.basename(os.path.dirname(directory)), holder, filename) == CANONICAL_LIBRARY
+        return None
+    return os.path.realpath(bpy.path.abspath(library.filepath))
+
+
+def _canonically_linked(material, canonical: Optional[str]) -> bool:
+    """Whether this material IS the datablock the canonical library owns."""
+    linked = _linked_from(material)
+    return linked is not None and canonical is not None and linked == canonical
 
 
 def _near_miss(name: str, keys) -> Optional[str]:
@@ -1453,24 +1477,26 @@ def check_substance_identity(source: Source) -> List[Finding]:
     if source.canon is None:
         return _canon_missing(SUBSTANCE_IDENTITY_CANON, source)
     keys = source.canon.substance_keys
+    library = canonical_library(source)
     findings = []
     for material, obj in _export_materials(source):
         subject = Subject(SubjectKind.MATERIAL, material.name, "on object `{}`".format(obj.name))
-        canonical = _canonically_linked(material)
+        canonical = _canonically_linked(material, library)
         if material.name in keys:
             if canonical:
                 continue
             findings.append(Finding(
                 SUBSTANCE_IDENTITY,
                 subject,
-                "bears the registry key `{}` and is {}".format(
+                "bears the registry key `{}` and is {}; this source's library is {}".format(
                     material.name,
                     "local to this blend" if material.library is None else
-                    "linked from {}".format(material.library.filepath),
+                    "linked from {}".format(_linked_from(material)),
+                    library or "nowhere — the blend has never been saved",
                 ),
-                "delete it and link `{}` from assets/materials/{} (File ▸ Link) — a substance is "
-                "the library's datablock, never a name typed over it".format(
-                    material.name, CANONICAL_LIBRARY[-1]
+                "delete it and link `{}` from {} (File ▸ Link) — a substance is the library's "
+                "datablock, never a name typed over it".format(
+                    material.name, library or os.path.join(*CANONICAL_LIBRARY)
                 ),
             ))
             continue
@@ -1480,9 +1506,9 @@ def check_substance_identity(source: Source) -> List[Finding]:
                 SUBSTANCE_IDENTITY,
                 subject,
                 "reads as the registry key `{}` without being it".format(near),
-                "if this is armour, delete it and link `{}` from assets/materials/{}; if it is art, "
-                "give it a name that is not one of the registry's".format(
-                    near, CANONICAL_LIBRARY[-1]
+                "if this is armour, delete it and link `{}` from {}; if it is art, give it a name "
+                "that is not one of the registry's".format(
+                    near, library or os.path.join(*CANONICAL_LIBRARY)
                 ),
             ))
             continue
@@ -1490,7 +1516,8 @@ def check_substance_identity(source: Source) -> List[Finding]:
             findings.append(Finding(
                 SUBSTANCE_IDENTITY,
                 subject,
-                "linked from the canonical library, and the registry declares no such key",
+                "linked from the canonical library at {}, and the registry declares no such "
+                "key".format(library),
                 "relink the material to a key the registry declares, or author `{}` in "
                 "assets/materials/materials.ron — the datablock name is the join key between the "
                 "library and the numbers".format(material.name),
