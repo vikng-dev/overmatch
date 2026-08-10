@@ -50,7 +50,11 @@ OUT="$2"
 [ -n "$IN" ] && [ -n "$OUT" ] || {
     echo "usage: scripts/encode-tank-ktx2.sh <in.glb> <out.glb>" >&2; exit 2; }
 
-command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
+# The same resolution rule as scripts/toolchain.py: OVERMATCH_BASISU names the binary when the
+# pinned build is not the one on PATH (CI installs it outside PATH).
+BASISU="${OVERMATCH_BASISU:-basisu}"
+command -v "$BASISU" >/dev/null || {
+    echo "need basisu: brew install basis_universal (or set OVERMATCH_BASISU)" >&2; exit 1; }
 
 # ── work dir ─────────────────────────────────────────────────────────────────────────────────────
 # A FRESH dir per run, because two bakes can be in flight at once: the user exporting from the
@@ -123,7 +127,7 @@ while read -r idx role file; do
             set -- -uastc -uastc_level 2 -linear -mip_linear ;;
         *) echo "unknown role: $role" >&2; exit 1 ;;
     esac
-    basisu "$@" -ktx2 -ktx2_zstandard_level 9 -mipmap \
+    "$BASISU" "$@" -ktx2 -ktx2_zstandard_level 9 -mipmap \
         -file "$WORK/src/$file" -output_file "$out" >"$WORK/ktx2/$idx.log" 2>&1 ||
         { echo "basisu failed on image $idx ($file) — see $WORK/ktx2/$idx.log" >&2; exit 1; }
     echo "ktx2  ▸ [$idx] $role $(basename "$file") — $(du -h "$out" | cut -f1)"
