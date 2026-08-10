@@ -225,7 +225,9 @@ for path in \
     src/bake/embedding.rs \
     src/spec.rs \
     src/exact.rs \
-    src/substances.rs
+    src/substances.rs \
+    src/bin/asset_verify.rs \
+    src/lib.rs
 do
     surface "$path"
     says "$path moves every verdict" yes $?

@@ -64,14 +64,17 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 
 # Whether the changed set touches the surface EVERY asset's verdict is computed from: the shared
 # material library, the pinned toolchain, the source pass, the door, the finding shape, the encoder,
-# the derivation verifier, and the Rust consumer contract with the three modules it certifies
-# against. `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what
-# the shared material data means to the gate and hands the canon file its key list, so it moves
-# every asset's verdict exactly as `assets/materials/` does. Any of those moving means the door now
-# answers differently about bytes that did not move, so every discovered trio is re-verified rather
-# than none of them.
+# the derivation verifier, and the Rust consumer contract with the modules it certifies against.
+# `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what the shared
+# material data means to the gate and hands the canon file its key list, so it moves every asset's
+# verdict exactly as `assets/materials/` does. `src/bin/asset_verify.rs` and `src/lib.rs` are in it
+# because they are the contract's EXECUTABLE surface: the adapter owns the exit status and the
+# report the lane reads, and the crate root is where the contract is exposed at all — a push that
+# moves only one of them changes every verdict while touching no law. Any of those moving means the
+# door now answers differently about bytes that did not move, so every discovered trio is
+# re-verified rather than none of them.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances))'
+    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/bin/asset_verify\.rs$|src/lib\.rs$)'
 }
 
 # EVERY (revision, asset) pair a push must verify, one per line:
