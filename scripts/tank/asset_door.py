@@ -166,13 +166,23 @@ def preflight(mode: str, launches_blender: bool = True):
     return (findings, blender.binary if blender is not None else None)
 
 
-def digest(path: str) -> str:
-    """sha256 of a file, read in blocks: a tank glb is tens of megabytes."""
+def digest_of(handle) -> str:
+    """sha256 of an OPEN file, read in blocks: a tank glb is tens of megabytes.
+
+    Of the bytes this handle delivers, which is the point: a path is a name that can be made to
+    mean another file between two opens, and a digest taken twice off one pathname is a digest of
+    whatever stood there each time.
+    """
     hashed = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            hashed.update(block)
+    for block in iter(lambda: handle.read(1 << 20), b""):
+        hashed.update(block)
     return hashed.hexdigest()
+
+
+def digest(path: str) -> str:
+    """sha256 of a file, opened once."""
+    with open(path, "rb") as handle:
+        return digest_of(handle)
 
 
 def candidate(work: str, name: str, stem: str, spec: str) -> str:
@@ -185,13 +195,36 @@ def candidate(work: str, name: str, stem: str, spec: str) -> str:
     return os.path.join(directory, stem + ".glb")
 
 
-def replace(baked: str, glb: str) -> None:
-    """Put the certified candidate at the tracked path, atomically. Staged beside the tracked file
-    so the rename is within one filesystem, which is what makes it atomic."""
-    staging = os.path.join(os.path.dirname(glb) or ".", "." + os.path.basename(glb) + ".door")
+def replace(baked: str, glb: str) -> str:
+    """Put the certified candidate at the tracked path, atomically. Returns its sha256.
+
+    THE STAGING NAME IS UNIQUE PER INVOCATION, from `mkstemp`, and it is created in the tracked
+    file's own directory so the rename is within one filesystem — which is what makes it atomic. A
+    fixed staging name is not merely untidy: two exports running at once open and truncate the same
+    file, and the one that renames first leaves the other writing through the renamed inode, now at
+    the tracked path. The first would then report success over bytes still being written. With a
+    name nobody else can hold, that finding cannot be constructed.
+
+    The digest is of the bytes actually written, taken as they are copied, so the line the door
+    prints names the file it landed rather than whatever a second read of that path would find.
+    """
+    directory = os.path.dirname(glb) or "."
+    handle, staging = tempfile.mkstemp(
+        prefix="." + os.path.basename(glb) + ".", suffix=".door", dir=directory,
+    )
     try:
-        shutil.copyfile(baked, staging)
+        hashed = hashlib.sha256()
+        with os.fdopen(handle, "wb") as target, open(baked, "rb") as candidate:
+            for block in iter(lambda: candidate.read(1 << 20), b""):
+                hashed.update(block)
+                target.write(block)
+        # `mkstemp` creates 0600. A tracked model is an ordinary file, so it gets the mode an
+        # ordinary write would have given it.
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(staging, 0o666 & ~mask)
         os.replace(staging, glb)
+        return hashed.hexdigest()
     except OSError as error:
         if os.path.exists(staging):
             os.remove(staging)
@@ -200,22 +233,34 @@ def replace(baked: str, glb: str) -> None:
             Subject(SubjectKind.DOOR, "replace", glb),
             str(error),
             "free the space or fix the permissions on {} — the tracked glb is unchanged".format(
-                os.path.dirname(glb) or "."
+                directory
             ),
         )]) from error
 
 
 def compare(baked: str, glb: str) -> None:
-    """Verify's verdict: the candidate this chain just rebuilt against the tracked bytes."""
-    if not os.path.isfile(glb):
+    """Verify's verdict: the candidate this chain just rebuilt against the tracked bytes.
+
+    The tracked model is OPENED ONCE and the verdict is about the bytes that handle delivered.
+    Asking whether the path exists and then opening it are two questions about two moments; so are
+    two digests of one pathname. Neither can be made to disagree here, because there is one open
+    and the answer is about what came out of it.
+    """
+    try:
+        tracked_file = open(glb, "rb")  # noqa: SIM115 — closed by the `with` below
+    except OSError as error:
         raise Refused("compare", [Finding(
             CANDIDATE_MISMATCH,
             Subject(SubjectKind.FILE, glb),
-            "the tracked glb does not exist; the rebuilt candidate is {}".format(digest(baked)),
+            "the tracked glb cannot be read ({}); the rebuilt candidate is {}".format(
+                error, digest(baked)
+            ),
             "run `asset_door.py export` — verify compares against a tracked model, and there is "
             "none here",
-        )])
-    rebuilt, tracked = digest(baked), digest(glb)
+        )]) from error
+    with tracked_file:
+        tracked = digest_of(tracked_file)
+    rebuilt = digest(baked)
     if rebuilt == tracked:
         print("door  ▸ compare: {} matches the rebuilt candidate ({})".format(glb, tracked),
               flush=True)
@@ -281,9 +326,9 @@ def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work:
     if mode == "verify":
         compare(baked, glb)
         return
-    replace(baked, glb)
+    landed = replace(baked, glb)
     print("door  ▸ export: {} — {:.1f} MB, sha256 {}".format(
-        glb, os.path.getsize(glb) / 1e6, digest(glb)
+        glb, os.path.getsize(baked) / 1e6, landed
     ), flush=True)
 
 

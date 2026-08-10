@@ -24,6 +24,8 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -298,6 +300,91 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
         self.assertEqual(code, 1, printed)
         self.assertIn("door.toolchain", printed)
         self.assertIn("5.0.1", printed)
+
+
+class TrackedPath(unittest.TestCase):
+    """The two things the door does to a path it does not hold alone — stage and rename, read and
+    compare — driven directly, because what is under test is what a SECOND door doing the same
+    thing at the same moment can make of them."""
+
+    def candidates(self, name, count=2):
+        """Distinct candidates, big enough that copying one is not instantaneous."""
+        directory = os.path.join(_WORK, name)
+        os.makedirs(directory, exist_ok=True)
+        paths = []
+        for index in range(count):
+            path = os.path.join(directory, "candidate-{}.bin".format(index))
+            with open(path, "wb") as handle:
+                handle.write(bytes([index + 1]) * (8 << 20))
+            paths.append(path)
+        return (directory, paths)
+
+    def test_an_export_renames_the_file_it_wrote(self):
+        """The staging name is unique to the invocation, so no second export can be writing through
+        the file this one is about to rename. With a name every export shares, the rename is of
+        whatever the last writer left there — under the first writer's verdict.
+
+        Deterministic rather than lucky: the first export is held AT its rename until the second has
+        finished staging its own bytes, which is exactly the window the defect lives in. The claim
+        is then simply that what each export renamed is what that export reported.
+        """
+        directory, (first, second) = self.candidates("renames-its-own")
+        tracked = os.path.join(directory, "tracked.glb")
+        shutil.copyfile(first, tracked)
+
+        staged = threading.Event()
+        held = []
+        renamed = []
+        real_replace = os.replace
+
+        def observed(staging, target):
+            if not held:                       # the first export through waits here
+                held.append(True)
+                staged.wait(30)
+            renamed.append(digest(staging))
+            real_replace(staging, target)
+
+        landed = {}
+        os.replace = observed
+        try:
+            thread = threading.Thread(
+                target=lambda: landed.__setitem__("first", asset_door.replace(first, tracked))
+            )
+            thread.start()
+            while not held:
+                time.sleep(0.01)
+            landed["second"] = asset_door.replace(second, tracked)
+            staged.set()
+            thread.join(30)
+        finally:
+            os.replace = real_replace
+
+        self.assertEqual(len(landed), 2, "an export did not complete: {}".format(landed))
+        self.assertEqual(sorted(renamed), sorted(landed.values()),
+                         "an export renamed a file it did not write")
+        self.assertEqual(digest(tracked), landed["first"],
+                         "the last export to rename did not land its own bytes")
+        self.assertEqual(
+            [name for name in sorted(os.listdir(directory)) if ".door" in name], [],
+            "a staging file outlived the export that made it",
+        )
+
+    def test_a_tracked_model_that_cannot_be_read_is_a_finding_not_a_traceback(self):
+        """Existence and readability are one question here, asked once, by opening the file. Asked
+        as two — does it exist, then open it — the answers are about two different moments, and the
+        second one raising is a traceback where the report should be."""
+        directory, (candidate,) = self.candidates("unreadable", count=1)
+        tracked = os.path.join(directory, "tracked.glb")
+        shutil.copyfile(candidate, tracked)
+        os.chmod(tracked, 0)
+        try:
+            with self.assertRaises(asset_door.Refused) as refusal:
+                asset_door.compare(candidate, tracked)
+        finally:
+            os.chmod(tracked, 0o644)
+        findings = refusal.exception.findings
+        self.assertEqual([finding.check.id for finding in findings], ["door.candidate-mismatch"])
+        self.assertIn("cannot be read", findings[0].evidence)
 
 
 class DoorMechanics(unittest.TestCase):
