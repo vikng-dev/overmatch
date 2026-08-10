@@ -16,6 +16,7 @@ import dataclasses
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import traceback
@@ -138,6 +139,41 @@ def sampled_hull(unwrapped=True, **material):
     return scene
 
 
+def git(directory, *arguments):
+    subprocess.run(("git",) + arguments, cwd=directory, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def commit_blend(name, contents=None):
+    """A git worktree holding one committed `assets/<name>/<name>.blend` — the baseline
+    L1.SOURCE_CENSUS resolves from HEAD. `contents` replaces the blend with literal bytes, which is
+    how the LFS-pointer case gets a baseline whose object this clone does not hold."""
+    top = os.path.join(_WORK, "repo-" + name)
+    directory = os.path.join(top, "assets", name)
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, name + ".blend")
+    with open(os.path.join(directory, name + ".tank.ron"), "w", encoding="utf-8") as handle:
+        handle.write("()\n")
+    if contents is None:
+        # `copy=True`: the fixture writes a blend without becoming it, so the rest of the run still
+        # has the never-saved session `lint_mode_reads_the_live_blend` measures.
+        bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
+    else:
+        with open(path, "wb") as handle:
+            handle.write(contents)
+    git(top, "init", "-q")
+    git(top, "config", "user.email", "lint@overmatch.test")
+    git(top, "config", "user.name", "tank lint")
+    git(top, "add", "-A")
+    git(top, "commit", "-q", "-m", "baseline")
+    return path
+
+
+def census_rows(findings):
+    """The census as `{row label: measured}` — the rendering a human reads, keyed."""
+    return {finding.subject.element: finding.evidence for finding in of(findings, "L1.SOURCE_CENSUS")}
+
+
 def clean_scene():
     """A tank shaped like the laws want one: a parented MESH/EMPTY hierarchy, unit transforms, no
     modifiers, no animation, and not one stock name."""
@@ -225,9 +261,13 @@ def case(function):
 # ── the clean fixture is clean ───────────────────────────────────────────────────────────────────
 
 @case
-def clean_source_has_no_findings():
+def clean_source_reports_nothing_but_its_census():
+    """The census is INFO and always present, so a clean source is a report holding only census
+    rows — never an empty one."""
     findings = export_tank.lint(source_of(clean_scene()))
-    assert not findings, "the clean fixture reported {}".format(report.render_text(findings))
+    other = [finding for finding in findings if finding.check.id != "L1.SOURCE_CENSUS"]
+    assert not other, "the clean fixture reported {}".format(report.render_text(other))
+    assert findings, "the census did not report the clean fixture at all"
     assert_exit(findings, 0)
 
 
@@ -712,6 +752,98 @@ def zero_area_uv_ignores_a_material_that_samples_nothing():
     assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV")
 
 
+# ── L1.TEXTURE_SOURCE ────────────────────────────────────────────────────────────────────────────
+
+@case
+def texture_source_file_that_is_not_there():
+    scene = sampled_hull()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE")
+    image = bpy.data.images["Painted"]
+    assert image.packed_file is None, "the fixture packed the image, so the file is not the source"
+    os.remove(bpy.path.abspath(image.filepath))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_SOURCE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+@case
+def texture_source_node_holding_no_image():
+    scene = sampled_hull()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE")
+    for node in bpy.data.materials["Painted"].node_tree.nodes:
+        if node.type == "TEX_IMAGE":
+            node.image = None
+    assert_fires(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE", Severity.ERROR)
+
+
+# ── L1.SOURCE_CENSUS ─────────────────────────────────────────────────────────────────────────────
+
+@case
+def source_census_counts_the_live_source():
+    """A primitive is a material slot the polygons reference, not an object and not a mesh — so the
+    fixture makes the three counts disagree, and one hull wears two substances."""
+    scene = clean_scene()
+    mesh = reshape(
+        "Hull",
+        positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                   (2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (2.0, 1.0, 0.0)),
+        faces=((0, 1, 2), (3, 4, 5)),
+    )
+    mesh.materials.append(bpy.data.materials.new("Zimmerit"))
+    mesh.polygons[1].material_index = 1
+    rows = census_rows(export_tank.lint(source_of(scene)))
+    assert rows["objects"] == "3" and rows["meshes"] == "2", rows
+    assert rows["primitives"] == "3", rows
+    assert rows["ballistic objects"] == "1", rows
+    assert rows["substance `Steel`"] == "1 primitive(s)", rows
+    assert rows["substance `Zimmerit`"] == "1 primitive(s)", rows
+
+
+@case
+def source_census_without_a_baseline_is_neither_pass_nor_fail():
+    scene = clean_scene()
+    findings = export_tank.lint(source_of(scene))
+    rows = census_rows(findings)
+    assert rows["baseline"].startswith("no source baseline"), rows["baseline"]
+    assert "baseline" not in rows["objects"], "an absent baseline still printed a comparison"
+    assert_fires(findings, "L1.SOURCE_CENSUS", Severity.INFO)
+    assert_exit(findings, 0)
+
+
+@case
+def source_census_against_the_previous_commit():
+    scene = clean_scene()
+    path = commit_blend("census")
+    rows = census_rows(export_tank.lint(source_of(scene, filepath=path)))
+    assert rows["baseline"].startswith("compared against"), rows["baseline"]
+    assert rows["objects"] == "3 (baseline 3, +0)", rows["objects"]
+
+    scene.collection.objects.link(bpy.data.objects.new("Sponson", triangle_mesh("Sponson")))
+    findings = export_tank.lint(source_of(scene, filepath=path))
+    rows = census_rows(findings)
+    assert rows["objects"] == "4 (baseline 3, +1)", rows["objects"]
+    assert rows["meshes"] == "3 (baseline 2, +1)", rows["meshes"]
+    assert rows["substance `Steel`"] == "1 (baseline 1, +0) primitive(s)", rows
+    assert_exit(findings, 0)
+
+
+@case
+def source_census_without_the_lfs_object():
+    """The baseline is resolved offline: a pointer whose object this clone never fetched is an
+    absent baseline, not a download and not a verdict."""
+    scene = clean_scene()
+    pointer = (
+        b"version https://git-lfs.github.com/spec/v1\n"
+        b"oid sha256:" + b"0" * 64 + b"\nsize 63000000\n"
+    )
+    path = commit_blend("lfs", contents=pointer)
+    findings = export_tank.lint(source_of(scene, filepath=path))
+    rows = census_rows(findings)
+    assert "LFS object" in rows["baseline"], rows["baseline"]
+    assert rows["objects"] == "3", rows["objects"]
+    assert_exit(findings, 0)
+
+
 # ── the door's own modes ─────────────────────────────────────────────────────────────────────────
 
 @case
@@ -727,12 +859,14 @@ def unimplemented_modes_refuse_by_name():
 @case
 def lint_mode_reads_the_live_blend():
     """`run('lint')` builds its Source from the open blend rather than from a fixture, and this
-    process never saved one — so a clean scene reports L1.SAVED_SOURCE and nothing else."""
+    process never saved one — so a clean scene reports L1.SAVED_SOURCE, and a census that says it
+    has nothing to compare against."""
     clean_scene()
     findings = export_tank.run("lint")
-    assert [finding.check.id for finding in findings] == ["L1.SAVED_SOURCE"], (
+    assert {finding.check.id for finding in findings} == {"L1.SAVED_SOURCE", "L1.SOURCE_CENSUS"}, (
         "run('lint') reported {}".format([finding.check.id for finding in findings])
     )
+    assert "no source baseline" in census_rows(findings)["baseline"]
     assert_exit(findings, 1)
 
 

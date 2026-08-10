@@ -28,10 +28,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import json
 import math
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -1050,6 +1053,257 @@ def check_zero_area_uv(source: Source) -> List[Finding]:
     return findings
 
 
+# ── L1: materials ────────────────────────────────────────────────────────────────────────────────
+
+TEXTURE_SOURCE = Check(
+    id="L1.TEXTURE_SOURCE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every used image texture is packed or resolves to an existing readable file, and has "
+        "non-zero dimensions",
+)
+
+SOURCE_CENSUS = Check(
+    id="L1.SOURCE_CENSUS",
+    stage=Stage.SOURCE,
+    severity=Severity.INFO,
+    law="the source census is printed and compared only against the previous committed source; no "
+        "count in it is a verdict",
+)
+
+
+def check_texture_source(source: Source) -> List[Finding]:
+    """The blend is the sole source, so a texture it only points at is not in it. Packed bytes or a
+    readable file, and a decodable image either way."""
+    findings = []
+    seen = set()
+    for obj, _mesh in _export_mesh_objects(source):
+        for index, material in sorted(_used_materials(obj).items()):
+            if material is None:
+                continue
+            for node in _image_textures(material):
+                if (material.name, node.name) in seen:
+                    continue
+                seen.add((material.name, node.name))
+                subject = Subject(
+                    SubjectKind.MATERIAL, material.name, "texture `{}`".format(node.name)
+                )
+                image = node.image
+                if image is None:
+                    findings.append(Finding(
+                        TEXTURE_SOURCE,
+                        subject,
+                        "the Image Texture node holds no image",
+                        "assign an image or delete the node — the material samples a texture that "
+                        "does not exist",
+                    ))
+                    continue
+                if image.packed_file is None:
+                    path = bpy.path.abspath(image.filepath, library=image.library)
+                    if not path or not os.path.isfile(path) or not os.access(path, os.R_OK):
+                        findings.append(Finding(
+                            TEXTURE_SOURCE,
+                            subject,
+                            "image `{}` is not packed and its file is not readable: {}".format(
+                                image.name, image.filepath or "<no filepath>"
+                            ),
+                            "pack it (File ▸ External Data ▸ Pack Resources) or repoint it at a "
+                            "file in the repository — the blend is the sole source",
+                        ))
+                        continue
+                width, height = tuple(image.size)
+                if width and height:
+                    continue
+                findings.append(Finding(
+                    TEXTURE_SOURCE,
+                    subject,
+                    "image `{}` decodes to {}x{}".format(image.name, width, height),
+                    "replace it with an image that decodes — a zero-dimension texture bakes to "
+                    "nothing and fails the encoder later and less locally",
+                ))
+    return findings
+
+
+#: The census keys, and the row label each prints under. Sorted output orders the rows; this map
+#: only names them.
+_CENSUS_LABELS = (
+    ("objects", "objects"),
+    ("meshes", "meshes"),
+    ("primitives", "primitives"),
+    ("ballistic_objects", "ballistic objects"),
+)
+
+
+def census(source: Source) -> dict:
+    """The source census: what this blend holds, counted.
+
+    A primitive is one material slot a mesh's polygons reference — what the exporter splits a mesh
+    into and what the consumer binds. CONSTRAINT: a primitive's substance is taken to be its
+    material NAME, and an object is counted ballistic when it carries any material at all. Exact
+    registry membership is `L1.SUBSTANCE_IDENTITY`'s, which reads the canonical key list through the
+    Rust CLI; until that lands, these rows over-count — a collider or visual-only material appears
+    here as a substance. That is tolerable because the census is INFO and no count in it is ever a
+    verdict.
+    """
+    meshes = set()
+    primitives = 0
+    ballistic = 0
+    substances = Counter()
+    for obj in source.objects:
+        if obj.type != "MESH" or obj.data is None:
+            continue
+        meshes.add(obj.data.name)
+        used = _used_materials(obj)
+        primitives += len(used)
+        if any(material is not None for material in used.values()):
+            ballistic += 1
+        for material in used.values():
+            if material is not None:
+                substances[material.name] += 1
+    return {
+        "objects": len(source.objects),
+        "meshes": len(meshes),
+        "primitives": primitives,
+        "ballistic_objects": ballistic,
+        "substances": dict(substances),
+    }
+
+
+#: How the baseline adapter's Blender subprocess hands its census back through Blender's own noise.
+CENSUS_SENTINEL = "SOURCE-CENSUS-JSON"
+
+
+def _git(directory, *arguments):
+    """One git call in the worktree that holds the blend. Returns `(returncode, stdout bytes)`."""
+    try:
+        result = subprocess.run(
+            ("git",) + arguments, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        return (1, str(error).encode())
+    return (result.returncode, result.stdout)
+
+
+#: What Git LFS writes into the tree in place of the file. The blend is LFS-tracked, so HEAD holds
+#: this and not the model.
+_LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
+_LFS_OID = re.compile(rb"^oid sha256:([0-9a-f]{64})$", re.MULTILINE)
+
+
+def _baseline_blend(filepath, workdir):
+    """The previous committed blend as a readable file, or `(None, why not)`.
+
+    The baseline is HEAD of the worktree the blend lives in, resolved offline: an LFS object this
+    clone has not fetched is an absent baseline, never a download and never a verdict.
+    """
+    directory = os.path.dirname(filepath) or "."
+    code, top = _git(directory, "rev-parse", "--show-toplevel")
+    if code:
+        return (None, "{} is not inside a git worktree".format(directory))
+    # Through `realpath` on both sides: git reports the worktree with its symlinks resolved, and a
+    # path relative to the unresolved one climbs out of the repository instead of into it.
+    relative = os.path.relpath(os.path.realpath(filepath), os.path.realpath(top.decode().strip()))
+    revision = "HEAD:{}".format(relative)
+    if _git(directory, "cat-file", "-e", revision)[0]:
+        return (None, "HEAD holds no {}".format(relative))
+    code, blob = _git(directory, "cat-file", "blob", revision)
+    if code:
+        return (None, "git could not read {}".format(revision))
+    if blob.startswith(_LFS_POINTER):
+        match = _LFS_OID.search(blob)
+        if match is None:
+            return (None, "HEAD:{} is an LFS pointer with no oid".format(relative))
+        oid = match.group(1).decode()
+        code, common = _git(directory, "rev-parse", "--git-common-dir")
+        if code:
+            return (None, "git could not locate this clone's object store")
+        store = os.path.join(directory, common.decode().strip())
+        stored = os.path.join(store, "lfs", "objects", oid[:2], oid[2:4], oid)
+        if not os.path.isfile(stored):
+            return (None, "the LFS object for HEAD:{} is not in this clone".format(relative))
+        return (os.path.abspath(stored), None)
+    path = os.path.join(workdir, "baseline.blend")
+    with open(path, "wb") as handle:
+        handle.write(blob)
+    return (path, None)
+
+
+def _census_of(path):
+    """The census of a blend this session does not have open, computed by the same code — Blender
+    opens it in a subprocess and this script prints its own census there."""
+    result = subprocess.run(
+        [
+            bpy.app.binary_path, "--background", "--factory-startup", path,
+            "--python", os.path.abspath(__file__), "--",
+            "--mode", "lint", "--census-json",
+        ],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+    )
+    for line in result.stdout.decode(errors="replace").splitlines():
+        if line.startswith(CENSUS_SENTINEL):
+            return json.loads(line[len(CENSUS_SENTINEL):])
+    return None
+
+
+def baseline_census(filepath):
+    """The previous committed source's census, or `(None, why not)`."""
+    if not filepath:
+        return (None, "this blend has never been written to disk")
+    with tempfile.TemporaryDirectory(prefix="tank-census-") as workdir:
+        path, note = _baseline_blend(filepath, workdir)
+        if path is None:
+            return (None, note)
+        counted = _census_of(path)
+    if counted is None:
+        return (None, "Blender could not read the previous committed {}".format(
+            os.path.basename(filepath)
+        ))
+    return (counted, None)
+
+
+def _census_finding(subject, element, evidence) -> Finding:
+    return Finding(
+        SOURCE_CENSUS,
+        dataclasses.replace(subject, element=element),
+        evidence,
+        "nothing to repair — read the diff as evidence of what this edit did to the source",
+    )
+
+
+def _counted(current, baseline):
+    """One census row: the absolute count, and the movement when there is a baseline to move from."""
+    if baseline is None:
+        return "{}".format(current)
+    return "{} (baseline {}, {:+d})".format(current, baseline, current - baseline)
+
+
+def check_source_census(source: Source) -> List[Finding]:
+    """Evidence, never a gate. The design forbids reading any of these counts as a pass condition:
+    a second vehicle is a different model, not a broken one."""
+    current = census(source)
+    baseline, note = baseline_census(source.filepath)
+    subject = Subject(SubjectKind.FILE, source.filepath or "<unsaved>")
+    findings = [_census_finding(
+        subject, "baseline",
+        "no source baseline — {}".format(note) if baseline is None else
+        "compared against the previous committed source at HEAD",
+    )]
+    for key, label in _CENSUS_LABELS:
+        findings.append(_census_finding(
+            subject, label, _counted(current[key], None if baseline is None else baseline[key])
+        ))
+    substances = current["substances"]
+    was = {} if baseline is None else baseline["substances"]
+    for name in sorted(set(substances) | set(was)):
+        findings.append(_census_finding(
+            subject, "substance `{}`".format(name),
+            "{} primitive(s)".format(_counted(
+                substances.get(name, 0), None if baseline is None else was.get(name, 0)
+            )),
+        ))
+    return findings
+
+
 #: The source pass, in table order. A check appears here exactly once; the report's own sort, not
 #: this order, decides what the console prints first.
 L1_CHECKS = (
@@ -1072,6 +1326,8 @@ L1_CHECKS = (
     check_texture_uv_source,
     check_uv_finite,
     check_zero_area_uv,
+    check_texture_source,
+    check_source_census,
 )
 
 
@@ -1112,11 +1368,19 @@ def _parse(argv: Optional[List[str]] = None):
                                        "blend stem, never from this path")
     parser.add_argument("--glb", help="the tracked glb the chain writes in export mode and "
                                       "compares against in verify mode")
+    parser.add_argument("--census-json", action="store_true",
+                        help="print this blend's source census as one tagged JSON line and exit; "
+                             "how L1.SOURCE_CENSUS reads the previous committed blend through this "
+                             "same code, in a Blender that has that blend open")
     return parser.parse_args(argv)
 
 
 def main() -> int:
     arguments = _parse()
+    if arguments.census_json:
+        print("{}{}".format(CENSUS_SENTINEL, json.dumps(census(Source.live()), sort_keys=True)),
+              flush=True)
+        return 0
     findings = run(arguments.mode)
     print(report.render_text(findings), end="", flush=True)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
