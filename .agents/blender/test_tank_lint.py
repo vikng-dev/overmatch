@@ -377,7 +377,7 @@ def canon(*node_references, substance_keys=CANON_KEYS):
 CANON = canon()
 
 
-def source_of(scene=None, filepath=None, canonical=CANON):
+def source_of(scene=None, filepath=None, canonical=CANON, opened=export_tank.FRESH):
     """A `Source` read off the live blend through the same path the door uses, with the one fact a
     headless fixture cannot set — the canon file the wrapper writes — overridden.
 
@@ -385,7 +385,7 @@ def source_of(scene=None, filepath=None, canonical=CANON):
     `Source.live` reads it the way the door does. `filepath` exists for the census cases, which
     need the blend to stand in a git worktree somewhere else.
     """
-    live = export_tank.Source.live(scene or bpy.context.window.scene)
+    live = export_tank.Source.live(opened, scene or bpy.context.window.scene)
     if filepath is not None:
         live = dataclasses.replace(live, filepath=filepath)
     return dataclasses.replace(live, canon=canonical)
@@ -533,6 +533,41 @@ def saved_source_unsaved_blend():
         "string: {}".format([finding.evidence for finding in hits])
     )
     assert_exit(findings, 1)
+
+
+@case
+def saved_source_an_in_session_export_with_unsaved_changes():
+    """The GUI adapter's context, and the only one where the flag means anything.
+
+    There, stored and live are equal ONLY because the adapter saved; a save clears
+    `bpy.data.is_dirty`, so a flag still set after one is an edit the stored file does not hold. A
+    fresh headless load makes no such claim — Blender sets the flag while versioning an older file
+    at load — so the same session under `FRESH` says nothing.
+    """
+    scene = clean_scene()
+    bpy.ops.wm.save_mainfile()
+    assert not bpy.data.is_dirty, "the fixture's save did not clear the flag"
+    assert_silent(
+        export_tank.lint(source_of(scene, opened=export_tank.IN_SESSION)), "L1.SAVED_SOURCE"
+    )
+
+    # What a GUI edit is, mechanically: every interactive change pushes undo, and that is what sets
+    # the flag. Assigning the property in a headless process does not, and `is_dirty` is read-only.
+    bpy.data.objects["Turret"].location = (1.0, 0.0, 0.0)
+    bpy.ops.ed.undo_push(message="an edit after the adapter saved")
+    assert bpy.data.is_dirty, "the fixture's edit did not dirty the session"
+    findings = export_tank.lint(source_of(scene, opened=export_tank.IN_SESSION))
+    assert_fires(findings, "L1.SAVED_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.SAVED_SOURCE")
+    assert len(hits) == 1 and "is_dirty is still True" in hits[0].evidence, [
+        finding.evidence for finding in hits
+    ]
+    assert_exit(findings, 1)
+
+    assert_silent(
+        export_tank.lint(source_of(scene, opened=export_tank.FRESH)), "L1.SAVED_SOURCE"
+    )
+    bpy.ops.wm.save_mainfile()
 
 
 @case
@@ -1779,7 +1814,7 @@ def an_l1_error_stops_before_the_raw_export():
     clean_scene()
     bpy.data.objects["Hull"].modifiers.new(name="Bevel", type="BEVEL")
     path = os.path.join(_WORK, "raw-never-written.glb")
-    findings = export_tank.run("export", raw=path)
+    findings = export_tank.run("export", export_tank.FRESH, raw=path)
     assert_fires(findings, "L1.MODIFIER_STACK", Severity.ERROR)
     assert not os.path.exists(path), "the exporter ran on a source the pass refused"
     assert_exit(findings, 1)
@@ -1798,7 +1833,7 @@ def an_exporter_that_writes_no_candidate_is_one_refusal_of_the_door_s_own():
     clean_scene()
     path = os.path.join(_WORK, "raw-is-a-directory.glb")
     os.makedirs(path, exist_ok=True)
-    findings = export_tank.run("export", canon_file, raw=path)
+    findings = export_tank.run("export", export_tank.FRESH, canon_file, raw=path)
     assert_fires(findings, "door.raw-export", Severity.ERROR)
     assert of(findings, "door.raw-export")[0].subject.name == path
     assert not os.path.isfile(path), "the fixture stopped being a directory"
@@ -1850,7 +1885,7 @@ def lint_mode_reads_the_live_blend():
     is stored where L1.SAVED_SOURCE wants it and was given no canon, so a clean scene reports both
     canon refusals and a census that says it has nothing to compare against."""
     clean_scene()
-    findings = export_tank.run("lint")
+    findings = export_tank.run("lint", export_tank.FRESH)
     assert {finding.check.id for finding in findings} == {
         "L1.SOURCE_CENSUS",
         "door.canon-missing",
@@ -1868,7 +1903,7 @@ def lint_mode_reads_the_canon_file_it_is_given():
         "substance_keys": list(CANON_KEYS),
     })
     clean_scene()
-    findings = export_tank.run("lint", path)
+    findings = export_tank.run("lint", export_tank.FRESH, path)
     assert_silent(findings, "door.canon-missing")
     assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
     assert of(findings, "L1.SPEC_REFERENCES")[0].subject.name == "Sponson"
@@ -1915,7 +1950,7 @@ def an_unpinned_exporter_refuses_before_the_source_pass_runs():
     toolchain.GLTF_EXPORTER_VERSION = "0.0.1"
     try:
         clean_scene()
-        findings = export_tank.run("lint")
+        findings = export_tank.run("lint", export_tank.FRESH)
         assert_fires(findings, "door.toolchain", Severity.ERROR)
         assert pinned in findings[0].evidence and "0.0.1" in findings[0].evidence, (
             "the row names neither the running exporter nor the pin: {}".format(

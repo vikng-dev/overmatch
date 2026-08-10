@@ -226,6 +226,9 @@ def every_door_entry_point_the_adapter_calls_still_exists():
 
     source = addon.load(_ROOT, addon.SOURCE_PASS_RELPATH, "test_export_tank_module")
     assert callable(source.run)
+    # The context `L1.SAVED_SOURCE` splits on. The adapter names IN_SESSION at the call, so the
+    # constant disappearing must be a failure here rather than a NameError in front of an artist.
+    assert source.IN_SESSION != source.FRESH, "the two L1.SAVED_SOURCE contexts are one"
     for name in ("render_text", "sorted_findings", "summary", "has_error", "Severity"):
         assert hasattr(source.report, name), "report.{} is gone".format(name)
         assert hasattr(door.report, name), "report.{} is gone".format(name)
