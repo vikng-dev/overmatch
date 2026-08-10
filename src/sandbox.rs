@@ -628,13 +628,13 @@ fn paint_volume(
     }
 }
 
-/// Tag the hull's *visual* meshes (and remember their material), so x-ray can swap them translucent.
-/// A hull mesh is any mesh that is neither a ballistic volume nor a collider proxy — checked up
-/// the hierarchy by component (the sandbox's standalone plates carry both on the mesh entity) and,
-/// in the tank's glb view tree (where the volume/proxy roles live on the sim skeleton, so the mesh's
-/// ancestors only *name* them), by asking the BAKE what those names classify as — the same material
-/// verdict `tank::bind_tank_view` hides by, now that the `*_Ballistic` suffix is retired. Runs each
-/// frame; `Without<HullMesh>` makes it tag each mesh just once.
+/// Tag the model's *visual* meshes (and remember their material), so x-ray can swap them
+/// translucent and let the painted sim volumes show through. A hull mesh is any rendered mesh that
+/// is neither a declared collision proxy nor a sim volume/collider — checked up the hierarchy by
+/// component (the sandbox's standalone plates carry both on the mesh entity) and, in the tank's glb
+/// view tree (where those roles live on the sim skeleton, so the mesh's ancestors only *name*
+/// them), by asking the BAKE what those names declare — the same verdict `tank::bind_tank_view`
+/// hides by. Runs each frame; `Without<HullMesh>` makes it tag each mesh just once.
 fn tag_hull_meshes(
     candidates: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>),
@@ -652,10 +652,10 @@ fn tag_hull_meshes(
         let mut probe = entity;
         let mut is_hull = true;
         loop {
-            let physics_name = names.get(probe).is_ok_and(|name| {
-                geometry.is_some_and(|geometry| geometry.is_physics_only(name.as_str()))
+            let proxy_name = names.get(probe).is_ok_and(|name| {
+                geometry.is_some_and(|geometry| geometry.is_collision_proxy(name.as_str()))
             });
-            if physics_name || volumes.contains(probe) || colliders.contains(probe) {
+            if proxy_name || volumes.contains(probe) || colliders.contains(probe) {
                 is_hull = false;
                 break;
             }

@@ -31,7 +31,7 @@ impl ViewNode {
 pub struct ViewServo;
 
 /// Join an instantiated GLB view to the already-complete sim skeleton by node name. This hides
-/// authored physics meshes, seeds moving parts from current sim pose, and repairs a turret view
+/// declared collision proxies, seeds moving parts from current sim pose, and repairs a turret view
 /// whose sim part detached before presentation arrived. It never creates simulation state.
 pub fn bind_tank_view(
     ready: On<WorldInstanceReady>,
@@ -49,13 +49,12 @@ pub fn bind_tank_view(
     let Ok(parts) = roots.get(ready.entity) else {
         return;
     };
-    // Which glb nodes are physics-only, and therefore must not render. The BAKE decides: a
-    // collision proxy is a declared node and a ballistic volume is one whose primitives wear a
-    // substance material (§12, classifier precedent 2026-08-07). The `*_Ballistic` suffix that used
-    // to answer this is retired and stripped from the source .blend — asking the extraction is the
-    // replacement, and it is the same verdict the march itself rides on, so the two cannot drift.
+    // Which glb nodes must not render: the declared collision proxies, nothing else. The BAKE
+    // decides from the spec declaration — never a name suffix. The ballistic plates are the
+    // vehicle's rendered body since mesh unification, and enclosed component volumes stay
+    // because the closed hull occludes them.
     let geometry = blueprint.as_deref().map(|blueprint| &blueprint.geometry);
-    let hidden = |name: &str| geometry.is_some_and(|geometry| geometry.is_physics_only(name));
+    let hidden = |name: &str| geometry.is_some_and(|geometry| geometry.is_collision_proxy(name));
     // Both trees share names; skip sim entities so links cannot point back to themselves.
     let skeleton: HashSet<Entity> = parts.0.values().copied().collect();
     for entity in children.iter_descendants(ready.entity) {

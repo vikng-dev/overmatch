@@ -123,33 +123,22 @@ pub(crate) struct TankGeometry {
 }
 
 impl TankGeometry {
-    /// Whether a node name is a ballistic volume — the material verdict, published for the VIEW
-    /// layer (which must hide the armour meshes it now cannot recognise by name). Consult this,
-    /// never a suffix.
+    /// Whether a node name is a ballistic volume — the material verdict. Consult this, never a
+    /// suffix.
     pub fn is_ballistic(&self, name: &str) -> bool {
         self.by_name
             .get(name)
             .is_some_and(|index| self.nodes[*index].is_ballistic())
     }
 
-    /// Whether a node exists for the SIM only and must never render — the rule the view binder
-    /// hides by, and the last thing the `*_Ballistic`/`*_Collider` suffixes used to answer.
-    ///
-    /// Collision proxies always. Ballistic volumes *unless they are also a roadwheel station*: the
-    /// wheels are the one place where the visual and the ballistic mesh are the SAME object (the
-    /// mesh-unification precedent), so hiding every volume would delete the running gear from the
-    /// picture. The .blend states this with collections — `Ballistic` vs `RunningGear` — which glTF
-    /// does not carry, so the roadwheel declaration is what carries it across: a station is by
-    /// definition a rendered part of the vehicle. A future unified part joins that list explicitly
-    /// rather than being guessed at from a material or a polygon count.
-    pub fn is_physics_only(&self, name: &str) -> bool {
-        let Some(&index) = self.by_name.get(name) else {
-            return false;
-        };
-        if self.collision_proxies.contains(&index) {
-            return true;
-        }
-        self.nodes[index].is_ballistic() && !self.roadwheels.iter().any(|&(w, _)| w == index)
+    /// Whether a node is a declared collision proxy — the only nodes that exist for the SIM alone
+    /// and must never render (RULED 2026-08-10). Since mesh unification the ballistic plates ARE
+    /// the vehicle's rendered body, and the component volumes they enclose render behind a closed
+    /// hull, so declaration in the spec is the one thing that separates a proxy from the picture.
+    pub fn is_collision_proxy(&self, name: &str) -> bool {
+        self.by_name
+            .get(name)
+            .is_some_and(|index| self.collision_proxies.contains(index))
     }
 }
 
