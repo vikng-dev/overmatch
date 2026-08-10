@@ -103,6 +103,7 @@ COVERAGE = {
     "door.raw-export": (
         LINT, "an_exporter_that_writes_no_candidate_is_one_refusal_of_the_door_s_own"
     ),
+    "door.continuation": (DOOR, "test_an_untrusted_raw_refuses"),
     "door.stage-failed": (DOOR, "test_an_encoder_failure_refuses"),
     "door.candidate-mismatch": (DOOR, "test_a_flipped_byte_is_a_mismatch_naming_both_digests"),
 }

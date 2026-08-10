@@ -87,6 +87,14 @@ CANDIDATE_MISMATCH = Check(
     law="a candidate rebuilt from the stored source is byte-identical to the tracked glb",
 )
 
+CONTINUATION = Check(
+    id="door.continuation",
+    stage=Stage.DOOR,
+    severity=Severity.ERROR,
+    law="a raw candidate the door did not cut itself carries the source pass's continuation token: "
+        "written for these exact bytes, by the pinned toolchain",
+)
+
 
 class Refused(Exception):
     """A stage said no. `stage` names it; `findings` carries the door's own rows when the stage
@@ -355,9 +363,17 @@ def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
     The raw candidate must exist: the caller's source pass either wrote it or refused, and a missing
     file is that refusal arriving here as silence.
 
-    It is staged into the door's own candidate layout rather than read where it lies, because the
-    consumer contract names a pair by the model alone and finds the spec sheet beside it. The caller
-    is free to have called its temporary file anything.
+    AND IT MUST BE AUTHENTICATED, before anything reads it. A continuation enters the chain at the
+    consumer contract, past every L1 law — so a file of the right shape handed to `--from-raw` would
+    be an entrance to the tracked path that no source pass ever looked at, and a model that is
+    L2-clean but cut from a source violating an L1-only law would replace the tracked glb. The
+    source pass leaves a token beside every candidate it cuts (`scripts/toolchain.py`), and this is
+    where it is spent: written for these exact bytes, by the pinned toolchain, or there is no
+    continuation here.
+
+    The candidate is then staged into the door's own layout rather than read where it lies, because
+    the consumer contract names a pair by the model alone and finds the spec sheet beside it. The
+    caller is free to have called its temporary file anything.
     """
     if not os.path.isfile(from_raw):
         raise Refused("from-raw", [Finding(
@@ -366,6 +382,16 @@ def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
             "no raw candidate at this path",
             "run the source pass that writes it, or drop --from-raw and let the door launch "
             "Blender itself — the chain continues from a candidate, and there is none",
+        )])
+    mismatch = toolchain.continuation_mismatch(from_raw)
+    if mismatch:
+        raise Refused("from-raw", [Finding(
+            CONTINUATION,
+            Subject(SubjectKind.DOOR, "from-raw", from_raw),
+            "; ".join(mismatch),
+            "run the source pass over the blend, which writes the token beside the candidate it "
+            "cuts, or drop --from-raw and let the door launch Blender itself — the chain "
+            "continues from a candidate the L1 pass PASSED, not from a file of the right shape",
         )])
     stem = os.path.splitext(os.path.basename(blend))[0]
     print("door  ▸ from-raw: {} — the source pass ran in the caller's Blender".format(

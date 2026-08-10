@@ -18,6 +18,7 @@ PATH. What that injects is the stage's exit code, which is exactly the door's co
 """
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -463,6 +464,66 @@ class DoorMechanics(unittest.TestCase):
         self.assertEqual(code, 1, printed)
         self.assertIn("door.stage-failed", printed)
         self.assertIn("refused at from-raw", printed)
+
+    def refuses_the_continuation(self, name, mutate):
+        """Export a trio, cut an honest raw candidate beside a tracked model, then hand `--from-raw`
+        something `mutate` has made untrustworthy. The tracked glb must be the file it was."""
+        blend = trio(name)
+        glb = os.path.splitext(blend)[0] + ".glb"
+        self.assertEqual(door("export", blend)[0], 0)
+        before = digest(glb)
+        work = os.path.join(_WORK, name + "-work")
+        shutil.rmtree(work, ignore_errors=True)
+        os.makedirs(work)
+        raw = os.path.join(work, "testbed.raw.glb")
+        self.blender_half(blend, raw)
+        self.assertTrue(os.path.isfile(toolchain.continuation_path(raw)),
+                        "the source pass left no continuation token beside the candidate it cut")
+        mutate(raw, glb)
+
+        code, printed = door("export", blend, None, "--from-raw", raw)
+        self.assertEqual(code, 1, printed)
+        self.assertIn("door.continuation", printed)
+        self.assertIn("refused at from-raw", printed)
+        self.assertNotIn("images ▸", printed, "an unauthenticated candidate reached the encoder")
+        self.assertEqual(digest(glb), before, "the refused continuation wrote the tracked glb")
+        return printed
+
+    def test_an_untrusted_raw_refuses(self):
+        """The whole of `--from-raw`'s exposure: it enters the chain at the consumer contract, past
+        every L1 law. A file of the right shape with no source pass behind it — here the tracked
+        model itself, which is L2-clean by construction — must not be a way to the tracked path."""
+        def untrusted(raw, glb):
+            os.remove(toolchain.continuation_path(raw))
+            shutil.copyfile(glb, raw)
+        printed = self.refuses_the_continuation("untrusted-raw", untrusted)
+        self.assertIn("no continuation token", printed)
+
+    def test_a_continuation_whose_token_is_for_other_bytes_refuses(self):
+        """The token names the bytes it was written for, so it cannot be moved onto another file —
+        an honest candidate's token beside a candidate nobody linted is the attack it forecloses."""
+        def swap(raw, _glb):
+            with open(raw, "r+b") as handle:
+                handle.seek(-1, os.SEEK_END)
+                last = handle.read(1)
+                handle.seek(-1, os.SEEK_END)
+                handle.write(bytes([last[0] ^ 0xFF]))
+        printed = self.refuses_the_continuation("stale-token", swap)
+        self.assertIn("these bytes are sha256", printed)
+
+    def test_a_continuation_cut_by_another_toolchain_refuses(self):
+        """A candidate is only as pinned as the Blender that cut it, and the door launches none
+        here. The token carries what that Blender MEASURED, and the pins are the door's."""
+        def repin(raw, _glb):
+            path = toolchain.continuation_path(raw)
+            with open(path, encoding="utf-8") as handle:
+                token = json.load(handle)
+            token["toolchain"]["glTF exporter"] = "4.0.0"
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(token, handle, sort_keys=True)
+        printed = self.refuses_the_continuation("repinned", repin)
+        self.assertIn("glTF exporter", printed)
+        self.assertIn("4.0.0", printed)
 
     def test_the_lod_lane_and_the_door_pin_the_same_toolchain(self):
         """`scripts/lod/config.py` still carries its own copy of the pins: its bytes are hashed into

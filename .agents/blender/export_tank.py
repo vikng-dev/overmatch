@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -2046,6 +2047,28 @@ def export_raw(path: str) -> List[Finding]:
     )]
 
 
+def continuation(raw: str, findings: List[Finding]) -> str:
+    """Leave the token beside the candidate that says which pass cut it.
+
+    `asset_door.py --from-raw` continues a chain a caller's own Blender started — the GUI adapter is
+    inside one — and it has no way to look at a file and see the source pass behind it. The token is
+    that evidence: the sha256 of the bytes just written, the toolchain AS MEASURED in this Blender,
+    and a digest of the report they passed. Without it, `--from-raw` is an entrance at L2, and a
+    model that is L2-clean but cut from a source violating an L1-only law would replace the tracked
+    glb.
+    """
+    build = bpy.app.build_hash
+    return toolchain.write_continuation(
+        raw,
+        {
+            "blender version": ".".join(str(part) for part in bpy.app.version),
+            "blender build": build.decode() if isinstance(build, bytes) else str(build),
+            "glTF exporter": toolchain.gltf_exporter().measured.get("version", "unknown"),
+        },
+        hashlib.sha256(report.render_text(findings).encode("utf-8")).hexdigest(),
+    )
+
+
 def unimplemented(mode: str) -> List[Finding]:
     """A mode with no chain behind it refuses mechanically rather than passing silently."""
     return [Finding(
@@ -2078,7 +2101,10 @@ def run(mode: str, opened: str, canon: Optional[str] = None,
         return findings
     if not raw:
         return report.sorted_findings(findings + unimplemented(mode))
-    return report.sorted_findings(findings + export_raw(raw))
+    findings = report.sorted_findings(findings + export_raw(raw))
+    if not report.has_error(findings):
+        continuation(raw, findings)
+    return findings
 
 
 def _parse(argv: Optional[List[str]] = None):
