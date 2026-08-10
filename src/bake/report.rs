@@ -7,8 +7,14 @@
 use std::fmt;
 
 /// Which pass a check belongs to. The report's primary sort key, declared in pipeline order.
+///
+/// `Door` precedes every pass: it carries the door's own mechanical refusals, which happen before a
+/// check OF the asset can be reached — an input the door failed to supply is not a defect of the
+/// model.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Stage {
+    /// The wrapper's own mechanical refusals (`door.*`).
+    Door,
     /// The `.blend` source pass (`L1.*`).
     Source,
     /// The shared consumer contract (`L2.*`) — this module's callers.
@@ -41,6 +47,8 @@ impl Severity {
 /// What a finding is about.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SubjectKind {
+    /// The door itself; the subject name is the stage that refused.
+    Door,
     /// The `.tank.ron` spec sheet; the subject name is its path.
     Spec,
     /// The GLB document as a whole; the subject name is its path.
@@ -52,6 +60,7 @@ pub enum SubjectKind {
 impl SubjectKind {
     fn label(self) -> &'static str {
         match self {
+            Self::Door => "door",
             Self::Spec => "spec",
             Self::Document => "document",
             Self::Node => "node",
@@ -69,6 +78,14 @@ pub struct Subject {
 }
 
 impl Subject {
+    pub(crate) fn door(stage: &str) -> Self {
+        Self {
+            kind: SubjectKind::Door,
+            name: stage.to_owned(),
+            element: None,
+        }
+    }
+
     pub(crate) fn spec(path: &std::path::Path) -> Self {
         Self {
             kind: SubjectKind::Spec,

@@ -363,7 +363,7 @@ def export_open_blend(root):
     work = tempfile.mkdtemp(prefix="overmatch-door-")
     try:
         try:
-            canon = door.canon_file(spec, root, work)
+            canon = door.canon_file(spec, root, work, door.registry_of(blend))
         except door.Refused as refusal:
             raise Refused(refusal.stage, "the canonical lists could not be written — the spec "
                                          "sheet's own refusal is in the console") from refusal

@@ -6,6 +6,7 @@
 Writes a whole asset under `<workdir>`, in the layout the door derives every path from:
 
     assets/materials/materials.blend    the canonical substance library, linked from below
+    assets/materials/materials.ron      its numeric half, which the consumer contract is handed
     assets/testbed/testbed.blend        the model: a hull, a collision proxy, two roadwheels
     assets/testbed/testbed.tank.ron     the spec sheet those nodes are declared in
     assets/testbed/testbed_*.png        one texture per colour role, so the chain has work to do
@@ -22,9 +23,13 @@ refusal at each stage leaves the tracked glb untouched.
 
 import argparse
 import os
+import shutil
 import sys
 
 import bpy
+
+#: This work tree: `<root>/.agents/blender/fixture_tank.py`.
+_REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 #: A unit cube, wound outward: eight welded corners and six quads. Watertight, positive volume,
 #: every directed edge once — what the consumer contract requires of a ballistic primitive.
@@ -204,6 +209,14 @@ def main():
 
     library = write_library(
         os.path.join(arguments.dir, "assets", "materials", "materials.blend")
+    )
+    # The numeric half of the same library, and the fixture takes THIS repository's copy rather
+    # than inventing numbers: the substances the wheels wear are real registry keys, and the door
+    # hands the contract this file as `--registry`. A fixture with its own registry would be
+    # testing a vocabulary nothing else uses.
+    shutil.copyfile(
+        os.path.join(_REPO, "assets", "materials", "materials.ron"),
+        os.path.join(arguments.dir, "assets", "materials", "materials.ron"),
     )
     directory = os.path.join(arguments.dir, "assets", "testbed")
     os.makedirs(directory, exist_ok=True)

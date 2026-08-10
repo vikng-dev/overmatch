@@ -284,17 +284,35 @@ def compare(baked: str, glb: str) -> None:
 
 # ── the chain ────────────────────────────────────────────────────────────────────────────────────
 
-def canon_file(spec: str, root: str, work: str) -> str:
+def registry_of(blend: str) -> str:
+    """The substance registry this asset is read against — `assets/materials/materials.ron`, beside
+    the material library the blend links its substances out of, derived from the trio's layout the
+    way every other path here is.
+
+    THE DOOR NAMES IT rather than letting the contract use the one compiled into itself, because
+    the registry is DATA: the pre-push lane hydrates a pushed revision's trio and its material
+    library, and a gate reading the work tree's substance numbers over another revision's model
+    certifies a pair that never existed. The game keeps the compiled-in registry, which is right —
+    it ships the two together.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(blend))), "materials", "materials.ron"
+    )
+
+
+def contract(registry: str, *arguments) -> List[str]:
+    """The consumer contract's command line, with the registry it reads substances from."""
+    return ["cargo", "run", "--quiet", "--bin", "asset_verify", "--",
+            "--registry", registry] + list(arguments)
+
+
+def canon_file(spec: str, root: str, work: str, registry: str) -> str:
     """The two canonical lists the source pass may not maintain for itself, written where Blender
     can read them. Public because the GUI adapter runs the source pass in its own Blender and needs
     the same file from the same generator."""
     path = os.path.join(work, "canon.json")
     with open(path, "wb") as handle:
-        run_stage(
-            "canon",
-            ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", "--canon", spec],
-            root, stdout=handle,
-        )
+        run_stage("canon", contract(registry, "--canon", spec), root, stdout=handle)
     return path
 
 
@@ -310,15 +328,15 @@ def source_pass(mode: str, blend: str, spec: str, glb: str, canon: str, raw: Opt
     run_stage("source", command + (["--raw", raw] if raw else []), root)
 
 
-def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work: str) -> None:
+def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work: str,
+           registry: str) -> None:
     """Everything after the raw candidate: the consumer contract on it, the texture derivation, the
     derivation verifier, the contract again on the baked bytes, and the tracked path.
 
     This is where `--from-raw` joins, so a candidate cut inside somebody's Blender and one cut by
     the door's own launch travel exactly the same stages in exactly the same order.
     """
-    run_stage("consumer (raw)",
-              ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", raw], root)
+    run_stage("consumer (raw)", contract(registry, raw), root)
 
     baked = candidate(work, "baked", stem, spec)
     run_tool(
@@ -328,8 +346,7 @@ def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work:
     )
     run_stage("derivation",
               [sys.executable, os.path.join(root, DERIVATION_VERIFIER), "verify", baked], root)
-    run_stage("consumer (baked)",
-              ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", baked], root)
+    run_stage("consumer (baked)", contract(registry, baked), root)
 
     if mode == "verify":
         compare(baked, glb)
@@ -348,12 +365,13 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
     everything.
     """
     stem = os.path.splitext(os.path.basename(blend))[0]
-    canon = canon_file(spec, root, work)
+    registry = registry_of(blend)
+    canon = canon_file(spec, root, work, registry)
     raw = candidate(work, "raw", stem, spec) if mode != "lint" else None
     source_pass(mode, blend, spec, glb, canon, raw, root, blender)
     if mode == "lint":
         return
-    derive(mode, raw, stem, spec, glb, root, work)
+    derive(mode, raw, stem, spec, glb, root, work, registry)
 
 
 def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
@@ -399,7 +417,7 @@ def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
     ), flush=True)
     raw = candidate(work, "raw", stem, spec)
     shutil.copyfile(from_raw, raw)
-    derive(mode, raw, stem, spec, glb, root, work)
+    derive(mode, raw, stem, spec, glb, root, work, registry_of(blend))
 
 
 # ── the command line ─────────────────────────────────────────────────────────────────────────────

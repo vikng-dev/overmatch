@@ -282,6 +282,25 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
             printed = self.refuses(blend, "door.unresolved-library", mode=mode)
             self.assertIn("MildSteel", printed, "the missing datablock is unnamed")
 
+    def test_the_registry_beside_the_asset_is_the_one_the_contract_reads(self):
+        """The substance registry is DATA and travels with the trio: the door names the
+        `assets/materials/materials.ron` beside the model, so a lane verifying a pushed revision
+        reads that revision's numbers rather than whatever this work tree holds.
+
+        Driven by breaking that file. The binary carries a perfectly good registry of its own, so a
+        door that did not name this one would sail past — which is exactly the silent wrong verdict
+        the row exists to make impossible.
+        """
+        blend = self.exported("registry-beside-the-asset")
+        registry = os.path.join(
+            os.path.dirname(os.path.dirname(blend)), "materials", "materials.ron"
+        )
+        self.assertTrue(os.path.isfile(registry), "the fixture ships no substance registry")
+        with open(registry, "w", encoding="utf-8") as handle:
+            handle.write("not a registry\n")
+        printed = self.refuses(blend, "door.registry", mode="verify")
+        self.assertIn(registry, printed, "the refusal does not name the file it could not read")
+
     def test_a_toolchain_mismatch_refuses_before_the_chain(self):
         """The pins are asserted first, so a wrong program costs nothing to discover."""
         encoder = shim("basisu-old", (
@@ -398,8 +417,8 @@ class DoorMechanics(unittest.TestCase):
         canon = os.path.join(_WORK, "canon-no-raw.json")
         with open(canon, "wb") as handle:
             written = subprocess.run(
-                ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", "--canon",
-                 os.path.splitext(blend)[0] + ".tank.ron"],
+                asset_door.contract(asset_door.registry_of(blend), "--canon",
+                                    os.path.splitext(blend)[0] + ".tank.ron"),
                 cwd=ROOT, stdout=handle,
             )
         self.assertEqual(written.returncode, 0)
@@ -419,7 +438,7 @@ class DoorMechanics(unittest.TestCase):
         canon = os.path.join(os.path.dirname(raw), "canon.json")
         with open(canon, "wb") as handle:
             written = subprocess.run(
-                ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", "--canon", spec],
+                asset_door.contract(asset_door.registry_of(blend), "--canon", spec),
                 cwd=ROOT, stdout=handle,
             )
         self.assertEqual(written.returncode, 0)

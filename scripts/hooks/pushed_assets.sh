@@ -157,10 +157,13 @@ assets_hydrate_file() {   # <rev> <path> <dest>
 
 # One asset's bytes, laid out the way the door and the source pass read them: the trio at
 # `<dest>/assets/<id>/<id>.{blend,tank.ron,glb}` — `L1.SAVED_SOURCE` measures those two directory
-# names — beside `<dest>/assets/materials/materials.blend`, which is where the tank source's own
-# relative library link resolves to. Both paths are derived from the discovered stem.
+# names — beside the shared material library, `<dest>/assets/materials/materials.{blend,ron}`. The
+# blend is where the tank source's own relative library link resolves to; the RON is the numeric
+# half of the same library, and the door hands it to the consumer contract as `--registry` so the
+# gate reads THIS revision's substance data rather than the work tree's. Both are DATA, and data
+# must be taken from the revision that ships it. Every path is derived from the discovered stem.
 #
-# Prints the hydrated `.blend`, which is the door's whole argument: it derives the other two.
+# Prints the hydrated `.blend`, which is the door's whole argument: it derives the other four.
 assets_hydrate() {   # <rev> <stem> <dest-root>
     _directory=$3/$(dirname "$2")
     _name=$(basename "$2")
@@ -168,7 +171,9 @@ assets_hydrate() {   # <rev> <stem> <dest-root>
     for _extension in .blend .tank.ron .glb; do
         assets_hydrate_file "$1" "$2$_extension" "$_directory/$_name$_extension" || return 1
     done
-    _library=$(dirname "$(dirname "$2")")/materials/materials.blend
-    assets_hydrate_file "$1" "$_library" "$3/$_library" || return 1
+    _materials=$(dirname "$(dirname "$2")")/materials
+    for _half in materials.blend materials.ron; do
+        assets_hydrate_file "$1" "$_materials/$_half" "$3/$_materials/$_half" || return 1
+    done
     printf '%s\n' "$_directory/$_name.blend"
 }

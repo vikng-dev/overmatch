@@ -66,10 +66,15 @@ printf '%s\n' "$refs" | git lfs pre-push "$@"
 # Rust contract — and every discovered trio is verified, because the door now answers differently
 # about bytes that did not move.
 #
-# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION, unlike the LOD lane: the consumer contract is a
-# binary compiled from THIS work tree and the encoder resolves its paths against it. So the lane
-# runs this tree's door over the pushed revision's bytes; CI, which checks the commit out, is where
-# a revision's own rules meet its own bytes.
+# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION, unlike the LOD lane: the CODE. The consumer
+# contract is a binary compiled from THIS work tree and the encoder resolves its paths against it,
+# so the lane runs this tree's door over the pushed revision's bytes; CI, which checks the commit
+# out, is where a revision's own rules meet its own bytes.
+#
+# The DATA is a different question and is not conceded: the trio, the material library and the
+# substance registry are all hydrated out of the pushed revision, and the door hands the registry to
+# the contract as `--registry`. A push that moves `materials.ron` is verified against the numbers it
+# moves them to, not against the ones this work tree happens to hold.
 #
 # It costs a Blender launch, a full re-export and a MEASURED minute of texture encode per changed
 # asset. `OVERMATCH_SKIP=assets` exists for that, and only because CI re-runs it.

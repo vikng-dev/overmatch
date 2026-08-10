@@ -88,6 +88,17 @@ static L2_POSITIVE_SHELL_VOLUME: Check = Check {
     severity: Severity::Error,
     law: "every edge-connected shell has finite, strictly positive signed volume",
 };
+/// The door's own row, not a law of the asset: the substance registry is DATA, and a lane
+/// verifying a REVISION must evaluate that revision's registry rather than whatever the running
+/// binary was compiled against. The door hands the file over; a file it cannot hand over is the
+/// door failing to feed the contract, which is a mechanical refusal of the same kind as an
+/// unpinned exporter — never a finding about the model.
+static DOOR_REGISTRY: Check = Check {
+    id: "door.registry",
+    stage: Stage::Door,
+    severity: Severity::Error,
+    law: "the substance registry the door supplied with --registry is readable and parses",
+};
 static L2_SHELL_EMBEDDING: Check = Check {
     id: "L2.SHELL_EMBEDDING",
     stage: Stage::Consumer,
@@ -662,7 +673,8 @@ fn extract_at_startup(mut commands: Commands) {
     // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
     let root = crate::assets::asset_root();
     let path = root.join(crate::tank::TIGER_GLB_PATH);
-    let asset = certify_asset(&path, TIGER_SPEC_RON).unwrap_or_else(|findings| {
+    let asset = certify_asset(&path, TIGER_SPEC_RON, &SubstanceRegistry::shipped())
+        .unwrap_or_else(|findings| {
         panic!(
             "bake: {} did not pass the consumer contract:\n{}\n\
              bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir; \
@@ -705,7 +717,11 @@ pub(crate) struct CertifiedAsset {
 /// This is the single implementation of every `L2.*` law. The runtime bake calls it at startup on
 /// the shipped asset; [`verify_asset`] calls it from the CLI on an export candidate before the
 /// texture encode, and from CI on every committed pair. There is no second copy to drift from.
-pub(crate) fn certify_asset(glb: &Path, spec_ron: &str) -> Result<CertifiedAsset, Vec<Finding>> {
+pub(crate) fn certify_asset(
+    glb: &Path,
+    spec_ron: &str,
+    registry: &SubstanceRegistry,
+) -> Result<CertifiedAsset, Vec<Finding>> {
     let spec_subject = || Subject::spec(Path::new(&spec_ron_name(glb)));
     let spec: TankSpec = ron::de::from_str(spec_ron).map_err(|err| {
         vec![Finding::new(
@@ -725,8 +741,31 @@ pub(crate) fn certify_asset(glb: &Path, spec_ron: &str) -> Result<CertifiedAsset
              yield a working vehicle never reaches the sim",
         )]
     })?;
-    let geometry = extract_tank_geometry(glb, &spec)?;
+    let geometry = extract_tank_geometry(glb, &spec, registry)?;
     Ok(CertifiedAsset { spec, geometry })
+}
+
+/// The substance registry one verification runs against: the file the door named, or — for the
+/// game, which ships its own registry inside the binary that reads it — the compiled-in one.
+fn registry_at(path: Option<&Path>) -> Result<SubstanceRegistry, Vec<Finding>> {
+    let Some(path) = path else {
+        return Ok(SubstanceRegistry::shipped());
+    };
+    let refused = |evidence: String| {
+        vec![Finding::new(
+            &DOOR_REGISTRY,
+            Subject::door("registry"),
+            evidence,
+            format!(
+                "hand `--registry` the `assets/materials/materials.ron` of the revision this model \
+                 came from — {} is the file the substance names in the model are read against, and \
+                 a gate that cannot read it knows no substances at all",
+                path.display()
+            ),
+        )]
+    };
+    let text = std::fs::read_to_string(path).map_err(|err| refused(err.to_string()))?;
+    SubstanceRegistry::from_ron(&text).map_err(|err| refused(err.to_string()))
 }
 
 /// The sibling spec sheet of a model, by the mechanical `<id>.glb` → `<id>.tank.ron` rule.
@@ -737,7 +776,11 @@ fn spec_ron_name(glb: &Path) -> String {
 /// Verify one asset pair and return the whole report, in order. Empty means certified.
 ///
 /// The pair is named by the model alone: the spec sheet is its sibling `<id>.tank.ron`.
-pub fn verify_asset(glb: &Path) -> Vec<Finding> {
+pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
+    let registry = match registry_at(registry) {
+        Ok(registry) => registry,
+        Err(findings) => return findings,
+    };
     let spec_path = spec_ron_name(glb);
     let spec_ron = match std::fs::read_to_string(&spec_path) {
         Ok(text) => text,
@@ -751,7 +794,7 @@ pub fn verify_asset(glb: &Path) -> Vec<Finding> {
             )];
         }
     };
-    match certify_asset(glb, &spec_ron) {
+    match certify_asset(glb, &spec_ron, &registry) {
         Ok(_) => Vec::new(),
         Err(findings) => findings,
     }
@@ -771,7 +814,7 @@ pub fn verify_asset(glb: &Path) -> Vec<Finding> {
 /// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
 /// is one report shape, and a canon generator that invented a second vocabulary would be a second
 /// door.
-pub fn canon_lists(spec_path: &Path) -> Result<String, Vec<Finding>> {
+pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, Vec<Finding>> {
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
             &L2_SPEC,
@@ -796,7 +839,7 @@ pub fn canon_lists(spec_path: &Path) -> Result<String, Vec<Finding>> {
         .collect();
     Ok(serde_json::json!({
         "node_references": references,
-        "substance_keys": SubstanceRegistry::shipped().keys(),
+        "substance_keys": registry_at(registry)?.keys(),
     })
     .to_string())
 }
@@ -806,6 +849,7 @@ pub fn canon_lists(spec_path: &Path) -> Result<String, Vec<Finding>> {
 pub(crate) fn extract_tank_geometry(
     path: &Path,
     spec: &TankSpec,
+    registry: &SubstanceRegistry,
 ) -> Result<TankGeometry, Vec<Finding>> {
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
@@ -821,9 +865,6 @@ pub(crate) fn extract_tank_geometry(
             "re-export the model — this file is not a glb",
         )
     })?;
-    // The one substance vocabulary, shared with `materials.blend`. A malformed registry panics
-    // inside `shipped()` — a broken authored contract is a build defect, not a runtime condition.
-    let registry = SubstanceRegistry::shipped();
     let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`); external `.bin`
@@ -912,7 +953,7 @@ pub(crate) fn extract_tank_geometry(
             let mut ballistic = 0usize;
             let mut plain = 0usize;
             for primitive in mesh.primitives() {
-                match classify(&primitive, &registry) {
+                match classify(&primitive, registry) {
                     Some(substance) => {
                         ballistic += 1;
                         captured.push((primitive.index(), Some(substance)));
@@ -1421,7 +1462,71 @@ mod tests {
     /// Write a synthetic trio and put it through the whole contract, exactly as the CLI and CI do.
     fn verify(id: &str, nodes: &[Node], spec: &str) -> Vec<Finding> {
         let asset = fixture::write(id, nodes, spec);
-        verify_asset(&asset.glb)
+        verify_asset(&asset.glb, None)
+    }
+
+    /// THE REGISTRY IS AN INPUT, because it is DATA. A lane verifying a REVISION hydrates that
+    /// revision's trio and its material library, and the substance numbers those bytes were
+    /// authored against travel with them; a gate reading whatever registry the running binary was
+    /// compiled with would certify a pair that never existed. So the door names the file, and a
+    /// file it cannot name is a refusal of the door's own — never silence, and never a fallback to
+    /// the compiled-in one, which is exactly how a wrong verdict would look like a right one.
+    #[test]
+    fn the_registry_the_door_supplies_is_the_one_the_contract_reads() {
+        let (nodes, spec) = sound_vehicle();
+        let asset = fixture::write("supplied-registry", &nodes, &spec);
+        let elsewhere = asset.glb.with_file_name("materials.ron");
+
+        // The same substances the model names, from a file rather than from this binary.
+        std::fs::write(
+            &elsewhere,
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/materials/materials.ron"),
+            )
+            .expect("the shipped registry is readable"),
+        )
+        .expect("the fixture registry is writable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert!(findings.is_empty(), "{}", render(&findings));
+
+        // A registry that declares OTHER substances is a different verdict about the same bytes,
+        // which is the whole reason the file has to come from the right revision.
+        std::fs::write(
+            &elsewhere,
+            "SubstanceRegistry(substances: {\"Cheese\": (factor: 1.0, paintable: false)})",
+        )
+        .expect("the fixture registry is writable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert_eq!(
+            refusals(&findings)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["L2.ROLE_COHERENCE"].into_iter().collect(),
+            "{}",
+            render(&findings)
+        );
+
+        // And a registry the door could not hand over refuses mechanically, under the door's own
+        // id — not as a finding about the model, and not by falling back to the embedded one.
+        std::fs::remove_file(&elsewhere).expect("the fixture registry is removable");
+        let findings = verify_asset(&asset.glb, Some(&elsewhere));
+        assert_eq!(
+            refusals(&findings),
+            ["door.registry"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+        assert_eq!(findings[0].check.stage, Stage::Door);
+
+        let refused = canon_lists(Path::new(&spec_ron_name(&asset.glb)), Some(&elsewhere))
+            .expect_err("the canon lists are stated in the registry too");
+        assert_eq!(
+            refusals(&refused),
+            ["door.registry"],
+            "{}",
+            render(&refused)
+        );
     }
 
     /// The door's own shape: a sound pair certifies, and the report it produces is empty.
@@ -1443,7 +1548,7 @@ mod tests {
             "no `assets/<id>/<id>.glb` beside an `<id>.tank.ron` was discovered at all"
         );
         for model in shipped {
-            let findings = verify_asset(&model);
+            let findings = verify_asset(&model, None);
             assert!(
                 findings.is_empty(),
                 "{} does not pass the consumer contract:\n{}",
@@ -1452,7 +1557,8 @@ mod tests {
             );
             let spec_ron =
                 std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
-            let asset = certify_asset(&model, &spec_ron).expect("the pair certifies");
+            let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
+                .expect("the pair certifies");
             let geometry = &asset.geometry;
 
             // What certification means, held to at the data: every volume the material rule found
@@ -1514,7 +1620,8 @@ mod tests {
         for model in fixture::shipped_assets() {
             let spec_ron =
                 std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
-            let asset = certify_asset(&model, &spec_ron).expect("the pair certifies");
+            let asset = certify_asset(&model, &spec_ron, &SubstanceRegistry::shipped())
+                .expect("the pair certifies");
             let (geometry, spec) = (&asset.geometry, &asset.spec);
             let named = |what: &str| format!("{}: `{what}`", model.display());
 
@@ -1604,7 +1711,7 @@ mod tests {
         // The missing sibling sheet is the same refusal: an asset is a trio.
         let asset = fixture::write("orphan", &nodes, "");
         std::fs::remove_file(spec_ron_name(&asset.glb)).expect("the sheet is removable");
-        assert_eq!(refusals(&verify_asset(&asset.glb)), ["L2.SPEC"]);
+        assert_eq!(refusals(&verify_asset(&asset.glb, None)), ["L2.SPEC"]);
     }
 
     /// The canon file — the document shape the Blender source pass parses, and the two canonical
@@ -1631,7 +1738,8 @@ mod tests {
     views: {Gunner: (node: "Sight", fov: 0.5)},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
-        let json = canon_lists(Path::new(&spec_ron_name(&asset.glb))).expect("the sheet parses");
+        let json =
+            canon_lists(Path::new(&spec_ron_name(&asset.glb)), None).expect("the sheet parses");
         let document: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
 
         let references: Vec<(&str, &str)> = document["node_references"]
@@ -1676,7 +1784,7 @@ mod tests {
 
         // A sheet that does not parse is the consumer contract's own refusal, not a second one.
         let broken = fixture::write("canon-unparsable", &nodes, "TankSpec(mass: ");
-        let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)))
+        let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)), None)
             .expect_err("an unparsable sheet has no canon");
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
     }

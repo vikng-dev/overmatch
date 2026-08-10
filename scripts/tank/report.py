@@ -24,7 +24,8 @@ class Stage(enum.IntEnum):
     """Which pass a check belongs to. The report's primary sort key, declared in pipeline order.
 
     `DOOR` precedes every pass: it carries the door's own mechanical refusals, which happen before
-    a check of the asset can be reached. The Rust half never emits it and so does not declare it.
+    a check of the asset can be reached — an input the door failed to supply is not a defect of the
+    model. Both halves declare it; both emit it.
     """
 
     DOOR = 0

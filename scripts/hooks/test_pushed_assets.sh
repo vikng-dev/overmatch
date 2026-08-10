@@ -378,6 +378,9 @@ is "a whole asset hydrates as the trio the door reads" \
 is "…beside the shared material library its source links" \
    "material library v1" "$(cat "$SCRATCH/whole/assets/materials/materials.blend" 2>/dev/null)"
 
+is "…and the registry half of that library, from the same revision" \
+   "SubstanceRegistry()" "$(cat "$SCRATCH/whole/assets/materials/materials.ron" 2>/dev/null)"
+
 is "…with all three siblings, and their real bytes" \
    "tiger blend v1 TankSpec(mass: 1.0) tiger model v1" \
    "$(cat "$SCRATCH/whole/assets/tiger_1/tiger_1.blend" \
@@ -393,6 +396,24 @@ is "a second vehicle hydrates by the same rule" \
 
 assets_hydrate "$UNFETCHED" assets/tiger_1/tiger_1 "$SCRATCH/broken" >/dev/null 2>&1
 says "an asset with one unfetchable file refuses whole" no $?
+
+# The registry is DATA, so it is the pushed revision's registry or it is nobody's: a lane that
+# hydrated an older trio and read today's substance numbers would certify a pair that never existed.
+write assets/materials/materials.ron "SubstanceRegistry(edited)"
+# …and the trio is whole again, so the two absence cases below refuse for the reason they name
+# rather than for the unfetchable model the case above left at HEAD.
+pointer assets/tiger_1/tiger_1.glb "tiger model v4" place
+commit "the registry moves"
+is "an earlier revision's registry is that revision's" \
+   "SubstanceRegistry()" \
+   "$(assets_hydrate "$BASE" assets/tiger_1/tiger_1 "$SCRATCH/oldreg" >/dev/null 2>&1
+      cat "$SCRATCH/oldreg/assets/materials/materials.ron" 2>/dev/null)"
+
+git rm -q --cached assets/materials/materials.ron >/dev/null
+rm -f assets/materials/materials.ron
+git commit -q -m "a revision without the substance registry"
+assets_hydrate "$(at HEAD)" assets/tiger_1/tiger_1 "$SCRATCH/noregistry" >/dev/null 2>&1
+says "a revision without the substance registry refuses" no $?
 
 git rm -q --cached assets/materials/materials.blend >/dev/null
 rm -f assets/materials/materials.blend
