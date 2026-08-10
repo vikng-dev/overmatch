@@ -204,7 +204,8 @@ SAVED_SOURCE = Check(
     id="L1.SAVED_SOURCE",
     stage=Stage.SOURCE,
     severity=Severity.ERROR,
-    law="the live file is saved at assets/<id>/<id>.blend and has a sibling <id>.tank.ron",
+    law="the live file IS the stored file: a readable assets/<id>/<id>.blend that this Blender has "
+        "open, with a sibling <id>.tank.ron",
 )
 
 EXPORT_SCOPE = Check(
@@ -334,10 +335,16 @@ class Source:
 def check_saved_source(source: Source) -> List[Finding]:
     """The stored file is the model; the door refuses to certify anything else.
 
-    Stored and live are the same bytes by construction, not by a flag: the headless door hands
-    Blender the file to open, and the GUI adapter saves before it invokes. `bpy.data.is_dirty`
-    measures Blender's load-time versioning of an older file, so a freshly opened, untouched blend
-    reports dirty (MEASURED, 5.1.2) and re-saving cannot clear it.
+    STORED AND LIVE ARE THE SAME BYTES BY CONSTRUCTION, NOT BY A FLAG. The headless door hands
+    Blender the file to open, so what this process holds came off that disk; the GUI adapter saves
+    before it invokes, so what it certifies is what it just wrote. `bpy.data.is_dirty` is not read
+    and is not the seam: Blender sets it while VERSIONING an older file at load, so a freshly
+    opened, untouched blend reports dirty (MEASURED, 5.1.2) and no save clears it.
+
+    What is left for this law to prove is that the path is real and is THIS session's: a file that
+    exists, carries the `.blend` extension, sits at the layout every derived path is cut from, is
+    the file `bpy.data.filepath` names, and has its spec sheet beside it. A path measured against a
+    file that was renamed, deleted or never opened certifies a model nobody can reopen.
     """
     findings = []
     if not source.filepath:
@@ -349,8 +356,19 @@ def check_saved_source(source: Source) -> List[Finding]:
         )]
 
     directory, filename = os.path.split(source.filepath)
-    stem = os.path.splitext(filename)[0]
+    stem, extension = os.path.splitext(filename)
     subject = Subject(SubjectKind.FILE, source.filepath)
+
+    if extension != ".blend":
+        findings.append(Finding(
+            SAVED_SOURCE,
+            subject,
+            "the stored file is named `{}`, whose extension is `{}`".format(
+                filename, extension or "<none>"
+            ),
+            "save it as {}.blend — every derived path, the trio discovery in the hooks and the "
+            "release prune all name the source by that extension".format(stem),
+        ))
 
     holder = os.path.basename(directory)
     collection = os.path.basename(os.path.dirname(directory))
@@ -361,6 +379,25 @@ def check_saved_source(source: Source) -> List[Finding]:
             "stored at {}/{}/{}, not assets/{}/{}".format(collection, holder, filename, stem, filename),
             "move the blend to assets/{stem}/{stem}.blend — the wrapper derives the spec and glb "
             "paths from that layout".format(stem=stem),
+        ))
+
+    if not os.path.isfile(source.filepath):
+        findings.append(Finding(
+            SAVED_SOURCE,
+            subject,
+            "no file stands at this path — the blend was renamed or deleted after it was opened",
+            "save the session back to {} (File ▸ Save As) — the door certifies a file the next "
+            "reader can open, and there is none here".format(source.filepath),
+        ))
+
+    open_path = bpy.data.filepath
+    if os.path.realpath(open_path or "") != os.path.realpath(source.filepath):
+        findings.append(Finding(
+            SAVED_SOURCE,
+            subject,
+            "this Blender has {} open".format(open_path or "no file at all"),
+            "run the door against the blend this session holds — a report on one file's path and "
+            "another file's model certifies neither",
         ))
 
     spec = os.path.join(directory, stem + ".tank.ron")

@@ -18,6 +18,7 @@ import io
 import json
 import math
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -42,13 +43,28 @@ from report import Severity  # noqa: E402
 
 _WORK = tempfile.mkdtemp(prefix="tank-lint-test-")
 
-#: A stored path with the shape L1.SAVED_SOURCE requires, and a real sibling spec beside it. The
-#: blend itself is never written: the law measures the path and the sibling, not the bytes.
-_ASSET_DIR = os.path.join(_WORK, "assets", "testbed")
-os.makedirs(_ASSET_DIR, exist_ok=True)
-BLEND_PATH = os.path.join(_ASSET_DIR, "testbed.blend")
-with open(os.path.join(_ASSET_DIR, "testbed.tank.ron"), "w", encoding="utf-8") as _handle:
-    _handle.write("()\n")
+
+def stored_at(stem, holder=None, collection="assets", extension=".blend", spec=True):
+    """SAVE THE SESSION at the path a case is about, and return it.
+
+    L1.SAVED_SOURCE measures a file on disk and the file this Blender has open, so its fixtures are
+    real saves and not paths handed to a `Source`. Every case that moves the session puts it back
+    with `stored_at("testbed")`, which is where the rest of the suite expects to be stored.
+    """
+    directory = os.path.join(_WORK, collection, holder or stem)
+    os.makedirs(directory, exist_ok=True)
+    if spec:
+        with open(os.path.join(directory, stem + ".tank.ron"), "w", encoding="utf-8") as handle:
+            handle.write("()\n")
+    path = os.path.join(directory, stem + extension)
+    bpy.ops.wm.save_as_mainfile(filepath=path)
+    assert bpy.data.filepath == path, "Blender stored the session at {}".format(bpy.data.filepath)
+    return path
+
+
+#: Where the suite's session is stored: the layout L1.SAVED_SOURCE requires, with a real sibling
+#: spec beside it, so every case that is not about that law runs against a clean stored path.
+BLEND_PATH = stored_at("testbed")
 
 
 def purge():
@@ -160,8 +176,8 @@ def commit_blend(name, contents=None):
     with open(os.path.join(directory, name + ".tank.ron"), "w", encoding="utf-8") as handle:
         handle.write("()\n")
     if contents is None:
-        # `copy=True`: the fixture writes a blend without becoming it, so the rest of the run still
-        # has the never-saved session `lint_mode_reads_the_live_blend` measures.
+        # `copy=True`: the fixture writes a blend without becoming it, so the session stays stored
+        # where `stored_at` put it and L1.SAVED_SOURCE stays silent for the rest of the run.
         bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
     else:
         with open(path, "wb") as handle:
@@ -209,11 +225,18 @@ def canon(*node_references, substance_keys=CANON_KEYS):
 CANON = canon()
 
 
-def source_of(scene=None, filepath=BLEND_PATH, canonical=CANON):
-    """A `Source` read off the live blend through the same path the door uses, with the two facts a
-    headless fixture cannot set — the stored path and the canon file — overridden."""
+def source_of(scene=None, filepath=None, canonical=CANON):
+    """A `Source` read off the live blend through the same path the door uses, with the one fact a
+    headless fixture cannot set — the canon file the wrapper writes — overridden.
+
+    The stored path is NOT overridden by default: the session is really saved at `BLEND_PATH`, so
+    `Source.live` reads it the way the door does. `filepath` exists for the census cases, which
+    need the blend to stand in a git worktree somewhere else.
+    """
     live = export_tank.Source.live(scene or bpy.context.window.scene)
-    return dataclasses.replace(live, filepath=filepath, canon=canonical)
+    if filepath is not None:
+        live = dataclasses.replace(live, filepath=filepath)
+    return dataclasses.replace(live, canon=canonical)
 
 
 def write_library(name):
@@ -323,33 +346,97 @@ def clean_source_reports_nothing_but_its_census():
 
 # ── L1.SAVED_SOURCE ──────────────────────────────────────────────────────────────────────────────
 
+def only_saved_source(scene, expected):
+    """The findings of one relocated session, asserting the law refused for exactly one reason. A
+    fixture that trips two clauses proves neither."""
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.SAVED_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.SAVED_SOURCE")
+    assert len(hits) == 1, "the fixture tripped {} clauses: {}".format(
+        len(hits), [finding.evidence for finding in hits]
+    )
+    assert expected in hits[0].evidence, hits[0].evidence
+    return hits[0]
+
+
 @case
 def saved_source_unsaved_blend():
+    """The one clause a saved session cannot reach: a Blender that has never written this model."""
     scene = clean_scene()
     assert_silent(export_tank.lint(source_of(scene)), "L1.SAVED_SOURCE")
     findings = export_tank.lint(source_of(scene, filepath=""))
     assert_fires(findings, "L1.SAVED_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.SAVED_SOURCE")
+    assert len(hits) == 1 and "never been written to disk" in hits[0].evidence, (
+        "an unsaved blend is one refusal that says so, not the path clauses reading an empty "
+        "string: {}".format([finding.evidence for finding in hits])
+    )
     assert_exit(findings, 1)
 
 
 @case
 def saved_source_wrong_layout():
     scene = clean_scene()
-    stray = os.path.join(_WORK, "scratch", "testbed.blend")
-    os.makedirs(os.path.dirname(stray), exist_ok=True)
     assert_silent(export_tank.lint(source_of(scene)), "L1.SAVED_SOURCE")
-    assert_fires(export_tank.lint(source_of(scene, filepath=stray)), "L1.SAVED_SOURCE", Severity.ERROR)
+    try:
+        stored_at("testbed", collection="scratch")
+        only_saved_source(scene, "not assets/testbed/testbed.blend")
+    finally:
+        stored_at("testbed")
 
 
 @case
 def saved_source_missing_spec():
     scene = clean_scene()
-    lonely = os.path.join(_WORK, "assets", "lonely", "lonely.blend")
-    os.makedirs(os.path.dirname(lonely), exist_ok=True)
-    assert_silent(export_tank.lint(source_of(scene)), "L1.SAVED_SOURCE")
-    assert_fires(
-        export_tank.lint(source_of(scene, filepath=lonely)), "L1.SAVED_SOURCE", Severity.ERROR
-    )
+    try:
+        stored_at("lonely", spec=False)
+        only_saved_source(scene, "no sibling lonely.tank.ron")
+    finally:
+        stored_at("testbed")
+
+
+@case
+def saved_source_a_file_that_is_no_longer_there():
+    """A blend renamed or deleted after it was opened. The session still holds the model and still
+    names the path, and nothing at that path is what the next reader would open."""
+    scene = clean_scene()
+    try:
+        path = stored_at("ghost")
+        assert os.path.isfile(path), "the fixture did not store a blend"
+        os.remove(path)
+        only_saved_source(scene, "no file stands at this path")
+    finally:
+        stored_at("testbed")
+
+
+@case
+def saved_source_a_stored_file_that_is_not_a_blend():
+    """Blender stores wherever it is told (measured, 5.1.2: `save_as_mainfile` keeps a `.blend2`
+    name verbatim). Every derived path, the hooks' trio discovery and the release prune name the
+    source by its extension, so a file without it is an asset none of them can find."""
+    scene = clean_scene()
+    try:
+        stored_at("oddball", extension=".blend2")
+        only_saved_source(scene, "whose extension is `.blend2`")
+    finally:
+        stored_at("testbed")
+
+
+@case
+def saved_source_a_path_this_session_does_not_hold():
+    """A well-formed stored path, on disk, with its sibling sheet — belonging to another file. The
+    report would carry that path over this session's model."""
+    scene = clean_scene()
+    elsewhere = os.path.join(_WORK, "assets", "otherbed")
+    os.makedirs(elsewhere, exist_ok=True)
+    with open(os.path.join(elsewhere, "otherbed.tank.ron"), "w", encoding="utf-8") as handle:
+        handle.write("()\n")
+    path = os.path.join(elsewhere, "otherbed.blend")
+    shutil.copyfile(BLEND_PATH, path)
+    findings = export_tank.lint(source_of(scene, filepath=path))
+    hits = of(findings, "L1.SAVED_SOURCE")
+    assert len(hits) == 1, [finding.evidence for finding in hits]
+    assert BLEND_PATH in hits[0].evidence, hits[0].evidence
 
 
 # ── L1.EXPORT_SCOPE ──────────────────────────────────────────────────────────────────────────────
@@ -1043,13 +1130,16 @@ def source_census_against_the_previous_commit():
     write_material_library("RHA")
     scene = clean_scene()
     bpy.data.meshes["Hull"].materials[0] = link_material("RHA")
+    # The census alone: the baseline is HEAD of the worktree the blend stands in, so the fixture's
+    # blend has to stand somewhere this session is not stored — which is L1.SAVED_SOURCE's refusal
+    # and not this law's business.
     path = commit_blend("census")
-    rows = census_rows(export_tank.lint(source_of(scene, filepath=path)))
+    rows = census_rows(export_tank.check_source_census(source_of(scene, filepath=path)))
     assert rows["baseline"].startswith("compared against"), rows["baseline"]
     assert rows["objects"] == "3 (baseline 3, +0)", rows["objects"]
 
     scene.collection.objects.link(bpy.data.objects.new("Sponson", triangle_mesh("Sponson")))
-    findings = export_tank.lint(source_of(scene, filepath=path))
+    findings = export_tank.check_source_census(source_of(scene, filepath=path))
     rows = census_rows(findings)
     assert rows["objects"] == "4 (baseline 3, +1)", rows["objects"]
     assert rows["meshes"] == "3 (baseline 2, +1)", rows["meshes"]
@@ -1067,7 +1157,7 @@ def source_census_without_the_lfs_object():
         b"oid sha256:" + b"0" * 64 + b"\nsize 63000000\n"
     )
     path = commit_blend("lfs", contents=pointer)
-    findings = export_tank.lint(source_of(scene, filepath=path))
+    findings = export_tank.check_source_census(source_of(scene, filepath=path))
     rows = census_rows(findings)
     assert "LFS object" in rows["baseline"], rows["baseline"]
     assert rows["objects"] == "3", rows["objects"]
@@ -1140,13 +1230,12 @@ def a_resolved_library_is_not_an_unresolved_one():
 
 @case
 def lint_mode_reads_the_live_blend():
-    """`run('lint')` builds its Source from the open blend rather than from a fixture, and this
-    process never saved one nor was given a canon — so a clean scene reports L1.SAVED_SOURCE, both
-    canon refusals, and a census that says it has nothing to compare against."""
+    """`run('lint')` builds its Source from the open blend rather than from a fixture. The session
+    is stored where L1.SAVED_SOURCE wants it and was given no canon, so a clean scene reports both
+    canon refusals and a census that says it has nothing to compare against."""
     clean_scene()
     findings = export_tank.run("lint")
     assert {finding.check.id for finding in findings} == {
-        "L1.SAVED_SOURCE",
         "L1.SOURCE_CENSUS",
         "L1.SPEC_REFERENCES.canon-missing",
         "L1.SUBSTANCE_IDENTITY.canon-missing",
