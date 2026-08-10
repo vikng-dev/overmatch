@@ -398,6 +398,42 @@ git commit -q -m "a revision without the canonical material library"
 assets_hydrate "$(at HEAD)" assets/tiger_1/tiger_1 "$SCRATCH/nolib" >/dev/null 2>&1
 says "a revision without the material library refuses" no $?
 
+# ── tracking: which blends a revision can hold at all ────────────────────────────────────────────
+#
+# Discovery can only find a trio a revision HOLDS, so the lane's generality ends at `.gitignore`: a
+# second vehicle whose source is ignored is discovered by nothing and verified by nobody. The law is
+# LOCATION — `assets/<id>/<id>.blend` is canonical, everything else blend-shaped is authoring
+# scratch — and it is driven over the REAL file, in a repository of its own, because `git
+# check-ignore` is the only thing that answers what git would do with a path.
+
+group "tracking — the repository's own .gitignore"
+
+IGNORE=$WORK/ignore
+git init -q "$IGNORE"
+cp "$_here/../../.gitignore" "$IGNORE/.gitignore"
+
+ignored() { git -C "$IGNORE" check-ignore -q "$1"; }
+
+for path in \
+    assets/tiger_1/tiger_1.blend \
+    assets/materials/materials.blend \
+    assets/panther/panther.blend
+do
+    ignored "$path"
+    says "$path is version-controlled" no $?
+done
+
+for path in \
+    assets/tiger_1/tiger_1.blend1 \
+    assets/tiger_1/tiger_1.blend.pre-weld.bak \
+    assets/tiger_1/backup/tiger_1.blend \
+    scratch/panther.blend \
+    panther.blend
+do
+    ignored "$path"
+    says "$path is authoring scratch" yes $?
+done
+
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 
 printf '\ntest_pushed_assets ▸ %s cases, %s passed, %s failed\n' \
