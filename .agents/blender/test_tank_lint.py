@@ -857,6 +857,56 @@ def unapplied_scale_reads_the_composed_local_transform():
     assert tuple(turret.matrix_local.to_scale()) == (1.0, 1.0, 1.0), (
         "the fixture does not compose to unit: {}".format(tuple(turret.matrix_local.to_scale()))
     )
+
+
+# ── L1.COMPENSATED_SCALE ─────────────────────────────────────────────────────────────────────────
+
+@case
+def compensated_scale_channels_that_undo_each_other():
+    """A scale one channel takes back is the one spelling of non-unit scale that reaches NO later
+    stage: `matrix_local` is exactly scale-free, so the exported node is unscaled and
+    `L2.UNIT_SCALE` has nothing to refuse. It is an error here because nothing measures it after
+    here, and either half moving alone moves the model."""
+    scene = clean_scene()
+    turret = bpy.data.objects["Turret"]
+    assert_silent(export_tank.lint(source_of(scene)), "L1.COMPENSATED_SCALE")
+    turret.scale = (2.0, 1.0, 1.0)
+    turret.delta_scale = (0.5, 1.0, 1.0)
+    assert tuple(turret.matrix_local.to_scale()) == (1.0, 1.0, 1.0), (
+        "the fixture does not compose to unit: {}".format(tuple(turret.matrix_local.to_scale()))
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.COMPENSATED_SCALE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+@case
+def compensated_scale_a_channel_the_parent_inverse_takes_back():
+    """The same composition, written across the other pair: an authored channel and the matrix
+    Blender wrote when the object was parented. The law is stated over what the composition does to
+    the channel, not over which two matrices did it."""
+    scene = clean_scene()
+    turret = bpy.data.objects["Turret"]
+    turret.scale = (1.0, 4.0, 1.0)
+    turret.matrix_parent_inverse = mathutils.Matrix.Diagonal((1.0, 0.25, 1.0, 1.0))
+    assert tuple(turret.matrix_local.to_scale()) == (1.0, 1.0, 1.0), (
+        "the fixture does not compose to unit: {}".format(tuple(turret.matrix_local.to_scale()))
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.COMPENSATED_SCALE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+@case
+def compensated_scale_leaves_a_scale_that_survives_into_the_model_alone():
+    """The negative half, and the whole reason this is a second check: a scale that reaches
+    `matrix_local` is in the exported node, where `L2.UNIT_SCALE` refuses it on every sim-consumed
+    node. Here it stays the generic warning it was, and the report still exits zero."""
+    scene = clean_scene()
+    bpy.data.objects["Turret"].scale = (2.0, 2.0, 2.0)
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
+    assert_silent(findings, "L1.COMPENSATED_SCALE")
     assert_exit(findings, 0)
 
 

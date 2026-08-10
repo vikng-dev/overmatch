@@ -293,6 +293,14 @@ UNAPPLIED_SCALE = Check(
         "parent-inverse matrix the local transform is composed with",
 )
 
+COMPENSATED_SCALE = Check(
+    id="L1.COMPENSATED_SCALE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="no export-bound object's scale is composed away: a non-unit authored channel under a "
+        "local transform that is exactly scale-free",
+)
+
 UNIQUE_NAMES = Check(
     id="L1.UNIQUE_NAMES",
     stage=Stage.SOURCE,
@@ -704,6 +712,11 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
     one direction and stronger in the other: a scale in the parent inverse leaves both channels at
     (1,1,1), and compensating base/delta channels compose to a local transform that carries no
     scale at all. So each measurement is its own element, and the report says which one moved.
+
+    THE COMPOSED-AWAY CASE IS AN ERROR, under its own check. Every other spelling of a non-unit
+    scale survives into `matrix_local`, so `L2.UNIT_SCALE` refuses it on any sim-consumed node; a
+    scale one channel undoes reaches no later stage at all, and either channel moving alone moves
+    the model with nothing measuring it.
     """
     findings = []
     unit = (1.0, 1.0, 1.0)
@@ -718,6 +731,16 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
                 "apply the scale (Ctrl+A → Scale) — bit-exact, not near: there is no scale that is "
                 "almost 1",
             ))
+            if _scale_gram(obj.matrix_local) is None:
+                findings.append(Finding(
+                    COMPENSATED_SCALE,
+                    Subject(SubjectKind.OBJECT, obj.name),
+                    "scale {}, delta scale {} — and the composed local transform is exactly "
+                    "scale-free, so this scale is composed away".format(scale, delta),
+                    "apply the scale (Ctrl+A → Scale) so both channels read (1,1,1) — the "
+                    "composition is unit, so no later stage measures this pair, and either half of "
+                    "it moving alone moves the model",
+                ))
         # Blender writes the inverse of the parent's world matrix here when a child is parented, so
         # a parent that was scaled at that moment leaves the scale in it while both channels above
         # still read (1,1,1).

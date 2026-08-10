@@ -63,6 +63,7 @@ COVERAGE = {
     "L1.TRANSFORM_FINITE": (LINT, "transform_finite_nan_translation"),
     "L1.HANDEDNESS": (LINT, "handedness_mirrored_node"),
     "L1.UNAPPLIED_SCALE": (LINT, "unapplied_scale_is_a_warning_that_does_not_fail"),
+    "L1.COMPENSATED_SCALE": (LINT, "compensated_scale_channels_that_undo_each_other"),
     "L1.UNIQUE_NAMES": (LINT, "unique_names_duplicate_across_a_library"),
     "L1.DEFAULT_NAMES": (LINT, "default_names_object"),
     "L1.SPEC_REFERENCES": (LINT, "spec_references_a_node_the_scene_does_not_hold"),
