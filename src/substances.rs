@@ -154,6 +154,13 @@ impl SubstanceRegistry {
             .unwrap_or_else(|err| panic!("substances: embedded materials.ron is unusable: {err}"))
     }
 
+    /// Every material datablock name the registry declares, in name order. The join key list
+    /// itself: `materials.blend` carries exactly these datablocks, and the source lint holds the
+    /// tank's materials to them through the canon file.
+    pub fn keys(&self) -> Vec<&str> {
+        self.substances.0.keys().map(String::as_str).collect()
+    }
+
     /// Look a substance up by material datablock name. Hard error on an unknown name — never a
     /// default (module doc).
     pub fn get(&self, name: &str) -> Result<Substance, SubstanceError> {

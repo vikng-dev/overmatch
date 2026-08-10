@@ -29,7 +29,8 @@ mod bake;
 /// adapter over [`verify_asset`]; the runtime bake calls the same implementation at startup, so a
 /// law cannot hold at one door and not the other.
 pub use bake::{
-    Check, Finding, Severity, Stage, Subject, SubjectKind, has_error, render, verify_asset,
+    Check, Finding, Severity, Stage, Subject, SubjectKind, canon_lists, has_error, render,
+    verify_asset,
 };
 mod ballistics;
 /// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate

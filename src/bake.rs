@@ -747,6 +747,50 @@ pub fn verify_asset(glb: &Path) -> Vec<Finding> {
     }
 }
 
+/// **The canon file.** The two lists the `.blend` source pass may not maintain for itself, read
+/// off the canonical Rust definitions and handed across the language boundary as one JSON document:
+///
+/// ```json
+/// {"node_references": [{"field": "volumes", "node": "Hull_Front"}], "substance_keys": ["Cast"]}
+/// ```
+///
+/// `node_references` is [`TankSpec::node_references`] — so a spec field added later reaches
+/// `L1.SPEC_REFERENCES` without Python learning its name — and `substance_keys` is the registry
+/// [`classify`] decides membership by. Both are already ordered by their producers.
+///
+/// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
+/// is one report shape, and a canon generator that invented a second vocabulary would be a second
+/// door.
+pub fn canon_lists(spec_path: &Path) -> Result<String, Vec<Finding>> {
+    let refused = |evidence: String, repair: &str| {
+        vec![Finding::new(
+            &L2_SPEC,
+            Subject::spec(spec_path),
+            evidence,
+            repair.to_owned(),
+        )]
+    };
+    let spec_ron = std::fs::read_to_string(spec_path)
+        .map_err(|err| refused(err.to_string(), "name the tank's `<id>.tank.ron`"))?;
+    let spec: TankSpec = ron::de::from_str(&spec_ron).map_err(|err| {
+        refused(
+            err.to_string(),
+            "fix the RON so it deserializes into TankSpec — the parser names the offending \
+             position and field",
+        )
+    })?;
+    let references: Vec<serde_json::Value> = spec
+        .node_references()
+        .into_iter()
+        .map(|(role, node)| serde_json::json!({"field": role.ron_field(), "node": node}))
+        .collect();
+    Ok(serde_json::json!({
+        "node_references": references,
+        "substance_keys": SubstanceRegistry::shipped().keys(),
+    })
+    .to_string())
+}
+
 /// Parse the glb as data into [`TankGeometry`]. Pure with respect to the app: `gltf` crate only,
 /// usable identically from the runtime (step 0/phase 1) and the offline compiler (phase 2).
 pub(crate) fn extract_tank_geometry(
@@ -1474,6 +1518,62 @@ mod tests {
         let asset = fixture::write("orphan", &nodes, "");
         std::fs::remove_file(spec_ron_name(&asset.glb)).expect("the sheet is removable");
         assert_eq!(refusals(&verify_asset(&asset.glb)), ["L2.SPEC"]);
+    }
+
+    /// The canon file — the document shape the Blender source pass parses, and the two canonical
+    /// lists inside it. Python maintains no vocabulary of RON field names or substance keys, so
+    /// this is the only place either is pinned.
+    #[test]
+    fn the_canon_file_carries_the_reference_list_and_the_registry_keys() {
+        let (nodes, _) = sound_vehicle();
+        let declared = fixture::spec(
+            &["Proxy"],
+            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &["Plate"],
+        );
+        let asset = fixture::write("canon", &nodes, &declared);
+        let json = canon_lists(Path::new(&spec_ron_name(&asset.glb))).expect("the sheet parses");
+        let document: serde_json::Value = serde_json::from_str(&json).expect("one JSON document");
+
+        let references: Vec<(&str, &str)> = document["node_references"]
+            .as_array()
+            .expect("node_references is an array")
+            .iter()
+            .map(|row| {
+                (
+                    row["field"].as_str().expect("field is a string"),
+                    row["node"].as_str().expect("node is a string"),
+                )
+            })
+            .collect();
+        // Role order, then name — `TankSpec::node_references`' own ordering, carried through.
+        assert_eq!(
+            references,
+            [
+                ("volumes", "Plate"),
+                ("colliders", "Proxy"),
+                ("roadwheels.node", "Station_L"),
+                ("roadwheels.node", "Station_R"),
+            ]
+        );
+
+        let keys: Vec<&str> = document["substance_keys"]
+            .as_array()
+            .expect("substance_keys is an array")
+            .iter()
+            .map(|key| key.as_str().expect("a key is a string"))
+            .collect();
+        assert_eq!(keys, SubstanceRegistry::shipped().keys());
+        assert!(
+            keys.contains(&SUBSTANCE),
+            "the vocabulary is the registry's"
+        );
+
+        // A sheet that does not parse is the consumer contract's own refusal, not a second one.
+        let broken = fixture::write("canon-unparsable", &nodes, "TankSpec(mass: ");
+        let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)))
+            .expect_err("an unparsable sheet has no canon");
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
     }
 
     /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.

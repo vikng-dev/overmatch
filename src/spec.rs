@@ -634,6 +634,20 @@ pub enum NodeRole {
 }
 
 impl NodeRole {
+    /// The RON field a reference in this role is authored in, dotted from the sheet's root. What a
+    /// report names so a human can go to the line — which entry of that field is identified by the
+    /// node name the reference carries beside it.
+    pub fn ron_field(self) -> &'static str {
+        match self {
+            Self::Servo => "servos",
+            Self::Volume => "volumes",
+            Self::Collider => "colliders",
+            Self::Roadwheel => "roadwheels.node",
+            Self::Weapon => "weapons.muzzle/barrel",
+            Self::View => "views.node",
+        }
+    }
+
     /// Whether `crate::tank::rig_world_pose` composes through a node in this role. That composition
     /// is rigid — position and rotation only — so such a node and every ancestor of it must be
     /// authored at unit scale or the sim and the view disagree about where the part is.
