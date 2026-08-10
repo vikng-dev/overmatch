@@ -21,8 +21,8 @@ No transform, animation, material-classification, node-reference, topology, UV, 
 lint belongs here — those are the source pass (`.agents/blender/export_tank.py`) and the consumer
 contract (`src/bake/`), and a fourth home for them is how one law ends up with three answers.
 
-`D.STRUCTURAL_DERIVATION` is the raw→baked half only. That a rebuilt candidate is byte-identical to
-the TRACKED glb is the door's own `door.candidate-mismatch` (`scripts/tank/asset_door.py`), which is
+`D.STRUCTURAL_DERIVATION` is the raw→baked half only. How a rebuilt candidate is held against the
+TRACKED glb is the door's own `door.candidate-mismatch` (`scripts/tank/asset_door.py`), which is
 where the tracked path is known.
 
 Findings are `scripts/tank/report.Finding`, rendered and exit-coded by that module: every stage of
@@ -145,7 +145,12 @@ TYPE_COLUMNS = {"MAT2": 2, "MAT3": 3, "MAT4": 4}
 
 def read_glb(path):
     """Return (json_dict, bin_bytes) for a binary glTF."""
-    raw = Path(path).read_bytes()
+    return parse_glb(Path(path).read_bytes(), path)
+
+
+def parse_glb(raw, path):
+    """The same, for a document already in memory — a caller holding the bytes is the caller that
+    has to answer about THOSE bytes, and a second read of the pathname is a second file."""
     magic, version, _total = struct.unpack_from("<III", raw, 0)
     if magic != 0x46546C67:
         raise SystemExit(f"{path}: not a glb")
@@ -385,7 +390,7 @@ def _file(path, element):
     return Subject(SubjectKind.FILE, path, element)
 
 
-def _image_subject(path, index, image):
+def image_subject(path, index, image):
     name = image.get("name")
     return _file(path, "image {} `{}`".format(index, name) if name else "image {}".format(index))
 
@@ -422,7 +427,7 @@ def image_roles(js, path):
                 continue
             if roles.setdefault(source, role) != role:
                 findings.append(Finding(
-                    KTX2_MIPS, _image_subject(path, source, images[source]),
+                    KTX2_MIPS, image_subject(path, source, images[source]),
                     "sampled as {} by {} and as {} by {}".format(
                         roles[source], sampled_by[source], role, where),
                     "give the two slots their own image — one texture cannot be both "
@@ -436,7 +441,7 @@ def image_roles(js, path):
         if index in roles:
             continue
         findings.append(Finding(
-            KTX2_MIPS, _image_subject(path, index, image),
+            KTX2_MIPS, image_subject(path, index, image),
             "no known material slot samples it, so it has no colour role",
             "sample it from a material, or add its slot to SLOT_ROLES in "
             "scripts/tank/glb_ktx2.py — an image with no role is one the encoder would guess a "
@@ -538,7 +543,7 @@ def check_baked_images(js, roles, payload, path, raw_sizes=None):
     """`D.KTX2_MIPS` over the payloads: what each image IS, against what its role requires."""
     findings = []
     for index, image in enumerate(js.get("images", [])):
-        subject = _image_subject(path, index, image)
+        subject = image_subject(path, index, image)
         mime = image.get("mimeType")
         if mime != BAKED_MIME:
             findings.append(Finding(
@@ -838,7 +843,7 @@ def _images(a, abin, b, bbin, path):
         )]
     findings = []
     for index, (raw, baked) in enumerate(zip(a.get("images", []), b.get("images", []))):
-        subject = _image_subject(path, index, raw)
+        subject = image_subject(path, index, raw)
         if {k: v for k, v in raw.items() if k != "mimeType"} != \
                 {k: v for k, v in baked.items() if k != "mimeType"}:
             findings.append(Finding(
