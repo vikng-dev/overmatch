@@ -2,21 +2,19 @@
 # encode-tank-ktx2.sh — POST-EXPORT bake: convert a freshly exported tank glb's embedded PNG/JPEG
 # textures to mipped, block-compressed KTX2 *inside* the glb.
 #
-# NOT A STEP ANYONE RUNS BY HAND. `.agents/blender/export_tiger.py` — the script door the Tiger glb
-# leaves Blender through, and the thing the GUI add-on `.agents/blender/addons/overmatch_export.py`
-# calls for File ▸ Export — invokes it as
+# NOT A STEP ANYONE RUNS BY HAND. The one asset door — `scripts/tank/asset_door.py`, which the GUI
+# add-on `.agents/blender/addons/overmatch_export.py` is an adapter over — invokes it as
 #
-#     scripts/encode-tank-ktx2.sh <temp-export.glb> assets/tiger_1/tiger_1.glb
+#     scripts/encode-tank-ktx2.sh <raw-candidate.glb> <baked-candidate.glb>
 #
-# i.e. Blender exports to a throwaway mipless file and THIS script produces the tracked glb. That
-# ordering is deliberate: the tracked path is only ever written by a bake that succeeded, so a
-# missing basisu or an unhandled texture slot leaves the last good glb in place instead of quietly
-# reinstating the shimmer. `scripts/hooks/pre-push` and `release.yml` gate the result
-# (`scripts/tank/glb_ktx2.py verify`). Re-running it on its own output is refused.
+# i.e. Blender exports to a throwaway mipless candidate and THIS script produces the baked one, and
+# only a chain that passed every stage after it replaces the tracked glb. That ordering is
+# deliberate: a missing basisu or an unhandled texture slot leaves the last good glb in place
+# instead of quietly reinstating the shimmer. `scripts/tank/glb_ktx2.py verify` gates the result.
+# Re-running it on its own output is refused.
 #
-# WHY: bevy's PNG/JPEG loaders produce a texture with ONE mip level. The Tiger carries three 4k
-# maps on the hull/turret atlas, two 2k maps on the road-wheel rubber and three 512s on the track
-# link — every one of them minified hard at combat range. One mip level means shimmer on every
+# WHY: bevy's PNG/JPEG loaders produce a texture with ONE mip level. A tank carries several 4k and
+# 2k maps, every one of them minified hard at combat range. One mip level means shimmer on every
 # rivet edge plus a texture-cache miss per fetch: exactly the pathology that measured 30 fps on the
 # terrain before `scripts/encode-terrain-ktx2.sh` moved it to KTX2. Same medicine, applied to the
 # glb instead of loose files.
@@ -30,9 +28,8 @@
 # set: gltf-json 1.4.1 fails validation on a required extension it does not know
 # (gltf-json-1.4.1/src/root.rs:160), and bevy validates by default.
 #
-#   usage: scripts/encode-tank-ktx2.sh [in.glb [out.glb]]   (defaults are the one-off manual form:
-#          a mipless glb in the asset folder -> a .mipped.glb beside it, which is gitignored so the
-#          repo keeps exactly ONE tank glb in LFS)
+#   usage: scripts/encode-tank-ktx2.sh <in.glb> <out.glb>   (both required — an asset default here
+#          would be one vehicle's name compiled into a generic stage)
 #   needs: basisu (brew install basis_universal), python3
 #
 # ENCODING POLICY — UASTC 4x4 everywhere, no ETC1S. ETC1S is a palettized codec: it destroys
@@ -48,8 +45,10 @@
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
-IN="${1:-assets/tiger_1/tiger_1.glb}"
-OUT="${2:-assets/tiger_1/tiger_1.mipped.glb}"
+IN="$1"
+OUT="$2"
+[ -n "$IN" ] && [ -n "$OUT" ] || {
+    echo "usage: scripts/encode-tank-ktx2.sh <in.glb> <out.glb>" >&2; exit 2; }
 
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
 
@@ -98,7 +97,7 @@ trap cleanup EXIT
 python3 scripts/tank/glb_ktx2.py unpack "$IN" "$WORK"
 
 # The encode is the ~60 s the caller has to sit through, and it is the only phase with a countable
-# unit of work. Announcing the total here lets `export_tiger.bake()` — which reads this stdout line
+# unit of work. Announcing the total here lets the GUI adapter — which reads the door's stdout line
 # by line — turn the `ktx2  ▸` lines below into a real percentage instead of a guess.
 echo "images ▸ $(grep -c '[^[:space:]]' "$WORK/roles.txt") to encode"
 

@@ -25,7 +25,7 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 The **tank glb mip gate** (`scripts/tank/glb_ktx2.py verify`) asserts every texture embedded in
 `assets/tiger_1/tiger_1.glb` is mipped KTX2. A glb exported straight out of Blender carries PNG/JPEG,
 which bevy uploads with one mip level — a shimmering tank that looks like a renderer bug. The bake is
-folded into the scripted export (`.agents/blender/export_tiger.py`), so this only fires on a glb that
+folded into the one asset door (`scripts/tank/asset_door.py`), so this only fires on a glb that
 came from somewhere else; `release.yml` runs the same check, which is the gate `--no-verify` cannot
 skip. It reads the committed bytes out of the local git-lfs object cache, not the work tree.
 

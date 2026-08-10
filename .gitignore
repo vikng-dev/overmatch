@@ -15,9 +15,8 @@
 *.blend1
 *.bak
 
-# Scratch output of `scripts/encode-tank-ktx2.sh` when it is run by hand with default arguments.
-# The BAKED glb is the tracked one (`assets/tiger_1/tiger_1.glb`); there is exactly one tank glb
-# in LFS and this line makes a second one impossible to commit by accident.
+# Scratch output of a hand-run texture bake. The BAKED glb is the tracked one; an asset ships one
+# glb and this line makes a second one impossible to commit by accident.
 *.mipped.glb
 
 # Firecrawl research scratch (web search/scrape cache)
