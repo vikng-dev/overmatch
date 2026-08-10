@@ -1800,10 +1800,15 @@ CENSUS_SENTINEL = "SOURCE-CENSUS-JSON"
 
 
 def _git(directory, *arguments):
-    """One git call in the worktree that holds the blend. Returns `(returncode, stdout bytes)`."""
+    """One git call in the worktree that holds the blend. Returns `(returncode, stdout bytes)`.
+
+    The environment drops git's hook exports: `GIT_DIR` without `GIT_WORK_TREE` makes location
+    questions answer about the hook's repo, with CWD reported as toplevel."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
         result = subprocess.run(
-            ("git",) + arguments, cwd=directory, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            ("git",) + arguments, cwd=directory, env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
     except OSError as error:
         return (1, str(error).encode())

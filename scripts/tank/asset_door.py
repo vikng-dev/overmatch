@@ -109,12 +109,19 @@ class Refused(Exception):
 
 # ── running the phases ───────────────────────────────────────────────────────────────────────────
 
+def own_env() -> dict:
+    """The environment every stage runs in: the caller's, minus git's hook exports. A hook sets
+    `GIT_DIR` without `GIT_WORK_TREE`, under which `rev-parse --show-toplevel` answers with the
+    subprocess's CWD — so any child asking git a location question inherits the wrong repo."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def repo_root(start: Optional[str] = None) -> str:
     """The work tree this door belongs to. Every stage runs from here: the encoder resolves its own
     paths against it, and cargo needs the manifest."""
     directory = os.path.dirname(os.path.abspath(start or __file__))
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], cwd=directory,
+        ["git", "rev-parse", "--show-toplevel"], cwd=directory, env=own_env(),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     if result.returncode:
@@ -135,7 +142,7 @@ def run_stage(stage: str, command, root: str, stdout=None) -> None:
     exit is a `Refused` naming the stage, with no finding of the door's own: the stage that refused
     said why, in its own report."""
     print("door  ▸ {}: {}".format(stage, shown(command, root)), flush=True)
-    result = subprocess.run(command, cwd=root, stdout=stdout)
+    result = subprocess.run(command, cwd=root, env=own_env(), stdout=stdout)
     if result.returncode:
         raise Refused(stage)
 
@@ -144,7 +151,7 @@ def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
     """The same, for a stage that reports prose rather than findings — the encoder. Its exit code
     becomes one `door.stage-failed` row so the report still holds every refusal in one shape."""
     print("door  ▸ {}: {}".format(stage, shown(command, root)), flush=True)
-    result = subprocess.run(command, cwd=root)
+    result = subprocess.run(command, cwd=root, env=own_env())
     if not result.returncode:
         return
     raise Refused(stage, [Finding(

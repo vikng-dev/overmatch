@@ -555,5 +555,38 @@ class DoorMechanics(unittest.TestCase):
         self.assertEqual(lod.EXPECTED_GLTF_EXPORTER, toolchain.GLTF_EXPORTER_VERSION)
 
 
+class HookEnvironment(unittest.TestCase):
+    """A pre-push hook exports `GIT_DIR` (without `GIT_WORK_TREE`), under which git answers
+    location questions about the hook's repo and reports the asker's CWD as toplevel. The door and
+    every stage it launches must keep their own bearings under that environment."""
+
+    def test_repo_root_ignores_the_hooks_git_exports(self):
+        """`repo_root()` names the door's own work tree even when GIT_DIR points elsewhere and the
+        process sits in a foreign repo — the exact shape of a pre-push hook run."""
+        elsewhere = os.path.join(_WORK, "foreign-repo")
+        os.makedirs(elsewhere, exist_ok=True)
+        subprocess.run(["git", "init", "--quiet", elsewhere], check=True)
+        hooked = dict(os.environ, GIT_DIR=os.path.join(elsewhere, ".git"))
+        reported = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, {!r}); import asset_door; "
+             "print(asset_door.repo_root())".format(os.path.dirname(DOOR))],
+            cwd=elsewhere, env=hooked, stdout=subprocess.PIPE, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(reported, ROOT)
+
+    def test_stages_run_without_the_hooks_git_exports(self):
+        """Children launched by `run_stage` see no `GIT_*` at all: Blender's source pass and the
+        encoder each ask git their own location questions."""
+        probe = [sys.executable, "-c",
+                 "import os, sys; sys.exit(1 if [k for k in os.environ if k.startswith('GIT_')] "
+                 "else 0)"]
+        os.environ["GIT_DIR"] = os.path.join(_WORK, "foreign-repo", ".git")
+        try:
+            asset_door.run_stage("probe", probe, ROOT)
+        finally:
+            del os.environ["GIT_DIR"]
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
