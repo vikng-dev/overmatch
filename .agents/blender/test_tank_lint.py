@@ -460,6 +460,9 @@ def assert_silent(findings, check_id):
 
 
 def assert_fires(findings, check_id, severity):
+    """The law fired, at the tier compiled into it, saying what it measured — and, where that tier
+    is ERROR, over a report that exits non-zero. The exit status of a warning is the warning cases'
+    own claim (`assert_exit(findings, 0)`): a report holding a warning may hold an error too."""
     hits = of(findings, check_id)
     assert hits, "{} did not fire; report held {}".format(
         check_id, sorted({finding.check.id for finding in findings}) or "nothing"
@@ -471,6 +474,8 @@ def assert_fires(findings, check_id, severity):
         assert finding.evidence and finding.repair, "{} came back without evidence or repair".format(
             check_id
         )
+    if severity == Severity.ERROR:
+        assert_exit(findings, 1)
 
 
 def assert_exit(findings, code):
@@ -1753,6 +1758,25 @@ def an_l1_error_stops_before_the_raw_export():
     assert_fires(findings, "L1.MODIFIER_STACK", Severity.ERROR)
     assert not os.path.exists(path), "the exporter ran on a source the pass refused"
     assert_exit(findings, 1)
+
+
+@case
+def an_exporter_that_writes_no_candidate_is_one_refusal_of_the_door_s_own():
+    """The other half of the same claim: a source the pass CERTIFIED, and an exporter that still
+    produced nothing. It is a row of the report rather than a traceback, so the chain stops at the
+    candidate it could not write. Driven by naming a candidate path that is already a directory,
+    which no exporter can open for writing."""
+    canon_file = write_canon("raw-export", {
+        "node_references": [],
+        "substance_keys": list(CANON_KEYS),
+    })
+    clean_scene()
+    path = os.path.join(_WORK, "raw-is-a-directory.glb")
+    os.makedirs(path, exist_ok=True)
+    findings = export_tank.run("export", canon_file, raw=path)
+    assert_fires(findings, "door.raw-export", Severity.ERROR)
+    assert of(findings, "door.raw-export")[0].subject.name == path
+    assert not os.path.isfile(path), "the fixture stopped being a directory"
 
 
 @case
