@@ -92,7 +92,8 @@ CONTINUATION = Check(
     stage=Stage.DOOR,
     severity=Severity.ERROR,
     law="a raw candidate the door did not cut itself carries the source pass's continuation token: "
-        "written for these exact bytes, by the pinned toolchain",
+        "written by the pinned toolchain for these exact bytes, cut from this blend against this "
+        "spec sheet, and carrying the passing report they earned",
 )
 
 
@@ -393,8 +394,10 @@ def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
     be an entrance to the tracked path that no source pass ever looked at, and a model that is
     L2-clean but cut from a source violating an L1-only law would replace the tracked glb. The
     source pass leaves a token beside every candidate it cuts (`scripts/toolchain.py`), and this is
-    where it is spent: written for these exact bytes, by the pinned toolchain, or there is no
-    continuation here.
+    where it is spent: EVERY input the L1 verdict is a function of is re-measured HERE, off the
+    files this invocation was handed — the candidate, the blend it claims to come from, the spec
+    sheet it was cut against, the pinned toolchain — and the report it carries is re-read rather
+    than believed. Any of them disagreeing is not a continuation.
 
     The candidate is then staged into the door's own layout rather than read where it lies, because
     the consumer contract names a pair by the model alone and finds the spec sheet beside it. The
@@ -408,7 +411,7 @@ def continued(mode: str, blend: str, spec: str, glb: str, root: str, work: str,
             "run the source pass that writes it, or drop --from-raw and let the door launch "
             "Blender itself — the chain continues from a candidate, and there is none",
         )])
-    mismatch = toolchain.continuation_mismatch(from_raw)
+    mismatch = toolchain.continuation_mismatch(from_raw, blend, spec)
     if mismatch:
         raise Refused("from-raw", [Finding(
             CONTINUATION,

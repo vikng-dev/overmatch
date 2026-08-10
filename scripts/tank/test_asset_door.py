@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
 
 import asset_door  # noqa: E402
+import report  # noqa: E402
 import toolchain  # noqa: E402
 
 ROOT = asset_door.repo_root()
@@ -498,7 +499,7 @@ class DoorMechanics(unittest.TestCase):
         self.blender_half(blend, raw)
         self.assertTrue(os.path.isfile(toolchain.continuation_path(raw)),
                         "the source pass left no continuation token beside the candidate it cut")
-        mutate(raw, glb)
+        mutate(raw, blend, glb)
 
         code, printed = door("export", blend, None, "--from-raw", raw)
         self.assertEqual(code, 1, printed)
@@ -508,11 +509,21 @@ class DoorMechanics(unittest.TestCase):
         self.assertEqual(digest(glb), before, "the refused continuation wrote the tracked glb")
         return printed
 
+    def token(self, raw, **fields):
+        """The token beside `raw`, with `fields` written over it."""
+        path = toolchain.continuation_path(raw)
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+        document.update(fields)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, sort_keys=True)
+        return document
+
     def test_an_untrusted_raw_refuses(self):
         """The whole of `--from-raw`'s exposure: it enters the chain at the consumer contract, past
         every L1 law. A file of the right shape with no source pass behind it — here the tracked
         model itself, which is L2-clean by construction — must not be a way to the tracked path."""
-        def untrusted(raw, glb):
+        def untrusted(raw, _blend, glb):
             os.remove(toolchain.continuation_path(raw))
             shutil.copyfile(glb, raw)
         printed = self.refuses_the_continuation("untrusted-raw", untrusted)
@@ -521,25 +532,85 @@ class DoorMechanics(unittest.TestCase):
     def test_a_continuation_whose_token_is_for_other_bytes_refuses(self):
         """The token names the bytes it was written for, so it cannot be moved onto another file —
         an honest candidate's token beside a candidate nobody linted is the attack it forecloses."""
-        def swap(raw, _glb):
+        def swap(raw, _blend, _glb):
             with open(raw, "r+b") as handle:
                 handle.seek(-1, os.SEEK_END)
                 last = handle.read(1)
                 handle.seek(-1, os.SEEK_END)
                 handle.write(bytes([last[0] ^ 0xFF]))
         printed = self.refuses_the_continuation("stale-token", swap)
-        self.assertIn("these bytes are sha256", printed)
+        self.assertIn("raw sha256", printed)
+
+    def test_a_continuation_replayed_against_an_edited_blend_refuses(self):
+        """The token is spent on ONE state of the source. Keep it, edit the blend, and it certifies
+        a candidate cut from a model that no longer exists — which is the whole of a replay: an old
+        pass's verdict spent on today's source. The blend's bytes are sealed, so the token dies with
+        the edit."""
+        def edit(_raw, blend, _glb):
+            with open(blend, "ab") as handle:
+                handle.write(b"\x00")
+        printed = self.refuses_the_continuation("replayed-blend", edit)
+        self.assertIn("blend sha256", printed)
+
+    def test_a_continuation_replayed_against_an_edited_spec_sheet_refuses(self):
+        """The other half of the same source: the spec sheet the canonical lists were cut from, and
+        with them `L1.SPEC_REFERENCES` and `L1.SUBSTANCE_IDENTITY`. Its bytes decide an L1 verdict,
+        so they are sealed like the model's."""
+        def edit(_raw, blend, _glb):
+            with open(os.path.splitext(blend)[0] + ".tank.ron", "a", encoding="utf-8") as handle:
+                handle.write("\n")
+        printed = self.refuses_the_continuation("replayed-spec", edit)
+        self.assertIn("spec sha256", printed)
+
+    def test_a_continuation_carrying_a_doctored_report_refuses(self):
+        """The token CARRIES the report rather than a claim about it, and the digest is over the
+        bytes it carries. Rewriting the verdict inside the token is caught by the same arithmetic
+        that catches rewriting the candidate."""
+        def doctor(raw, _blend, _glb):
+            self.token(raw, report=report.render_json([]))
+        printed = self.refuses_the_continuation("doctored-report", doctor)
+        self.assertIn("report sha256", printed)
+
+    def test_a_forged_token_whose_report_is_not_clean_refuses(self):
+        """Nothing here is a signature — this is a local pipeline, and a token is only as private as
+        the machine it is written on. So the report is READ, not believed: a token forged
+        consistently end to end, every digest recomputed to match, still cannot certify a candidate
+        whose own carried report says the source failed.
+        """
+        refused = report.render_json([report.Finding(
+            report.Check(id="L1.MODIFIER_STACK", stage=report.Stage.SOURCE,
+                         severity=report.Severity.ERROR,
+                         law="every export-bound object has zero modifiers"),
+            report.Subject(report.SubjectKind.OBJECT, "Hull", "Bevel"),
+            "1 modifier: Bevel (BEVEL)",
+            "apply it or delete it",
+        )])
+
+        def forge(raw, _blend, _glb):
+            self.token(
+                raw, report=refused,
+                report_sha256=hashlib.sha256(refused.encode("utf-8")).hexdigest(),
+            )
+        printed = self.refuses_the_continuation("forged-report", forge)
+        self.assertNotIn("report sha256", printed, "the forgery was caught before its own claim")
+        self.assertIn("error row", printed)
+        self.assertIn("L1.MODIFIER_STACK", printed)
+
+    def test_a_forged_token_carrying_no_report_at_all_refuses(self):
+        """The same reading, on a token that carries something which is not a report. A reader that
+        cannot find the verdict has not found a passing one."""
+        def forge(raw, _blend, _glb):
+            self.token(raw, report="", report_sha256=hashlib.sha256(b"").hexdigest())
+        printed = self.refuses_the_continuation("forged-nonreport", forge)
+        self.assertIn("is not a report", printed)
 
     def test_a_continuation_cut_by_another_toolchain_refuses(self):
         """A candidate is only as pinned as the Blender that cut it, and the door launches none
         here. The token carries what that Blender MEASURED, and the pins are the door's."""
-        def repin(raw, _glb):
-            path = toolchain.continuation_path(raw)
-            with open(path, encoding="utf-8") as handle:
-                token = json.load(handle)
-            token["toolchain"]["glTF exporter"] = "4.0.0"
-            with open(path, "w", encoding="utf-8") as handle:
-                json.dump(token, handle, sort_keys=True)
+        def repin(raw, _blend, _glb):
+            self.token(raw, toolchain=dict(
+                self.token(raw)["toolchain"], **{"glTF exporter": "4.0.0"}
+            ))
         printed = self.refuses_the_continuation("repinned", repin)
         self.assertIn("glTF exporter", printed)
         self.assertIn("4.0.0", printed)

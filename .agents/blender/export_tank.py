@@ -2052,46 +2052,56 @@ def export_raw(path: str) -> List[Finding]:
     )]
 
 
-def continuation(raw: str, findings: List[Finding]) -> str:
+def continuation(raw: str, spec: str, findings: List[Finding]) -> str:
     """Leave the token beside the candidate that says which pass cut it.
 
     `asset_door.py --from-raw` continues a chain a caller's own Blender started — the GUI adapter is
     inside one — and it has no way to look at a file and see the source pass behind it. The token is
-    that evidence: the sha256 of the bytes just written, the toolchain AS MEASURED in this Blender,
-    and a digest of the report they passed. Without it, `--from-raw` is an entrance at L2, and a
-    model that is L2-clean but cut from a source violating an L1-only law would replace the tracked
-    glb.
+    that evidence: the sha256 of the bytes just written, of the stored blend they were cut from and
+    of the spec sheet they were cut against, the toolchain AS MEASURED in this Blender, and the
+    report they passed, carried whole. Without it, `--from-raw` is an entrance at L2, and a model
+    that is L2-clean but cut from a source violating an L1-only law would replace the tracked glb.
+
+    The blend is `bpy.data.filepath` — the file `L1.SAVED_SOURCE` has just proved this live model
+    IS, which is the only reason its bytes can stand for the model the pass looked at.
     """
     build = bpy.app.build_hash
     return toolchain.write_continuation(
         raw,
+        bpy.data.filepath,
+        spec,
         {
             "blender version": ".".join(str(part) for part in bpy.app.version),
             "blender build": build.decode() if isinstance(build, bytes) else str(build),
             "glTF exporter": toolchain.gltf_exporter().measured.get("version", "unknown"),
         },
-        hashlib.sha256(report.render_text(findings).encode("utf-8")).hexdigest(),
+        report.render_json(findings),
     )
 
 
-def unimplemented(mode: str) -> List[Finding]:
-    """A mode with no chain behind it refuses mechanically rather than passing silently."""
+def unimplemented(mode: str, missing: str) -> List[Finding]:
+    """A mode the caller did not give the inputs of refuses mechanically rather than passing
+    silently. `missing` names the one it did not supply."""
     return [Finding(
         MODE_UNIMPLEMENTED,
         Subject(SubjectKind.DOOR, mode),
-        "mode `{}` has no chain behind it in this door".format(mode),
+        "mode `{}` has no {} in this door".format(mode, missing),
         "run `--mode lint`, or invoke the door through scripts/tank/asset_door.py, which passes "
-        "the candidate path every other mode writes to",
+        "the candidate path every other mode writes to and the spec sheet it cuts them against",
     )]
 
 
-def run(mode: str, opened: str, canon: Optional[str] = None,
-        raw: Optional[str] = None) -> List[Finding]:
+def run(mode: str, opened: str, canon: Optional[str] = None, raw: Optional[str] = None,
+        spec: Optional[str] = None) -> List[Finding]:
     """The Blender half of one mode: the precondition, the source pass, and — for the two modes
-    with a chain behind them — the raw candidate.
+    with a chain behind them — the raw candidate and the token that continues it.
 
     `opened` is `FRESH` or `IN_SESSION`, and every caller states it: it is the context
     `L1.SAVED_SOURCE` is split on, and a default would be one caller's context imposed on another's.
+
+    `spec` is the spec sheet this verdict was reached against — the file the canonical lists were
+    cut from — and the token seals its bytes, so a chain continued elsewhere derives against the
+    sheet the source pass actually read.
 
     An L1 ERROR stops before the export: a candidate cut from a refused source is a file nobody may
     consume, and writing one invites it being picked up. Warnings do not stop anything.
@@ -2105,10 +2115,13 @@ def run(mode: str, opened: str, canon: Optional[str] = None,
     if report.has_error(findings):
         return findings
     if not raw:
-        return report.sorted_findings(findings + unimplemented(mode))
+        return report.sorted_findings(findings + unimplemented(mode, "candidate path"))
     findings = report.sorted_findings(findings + export_raw(raw))
-    if not report.has_error(findings):
-        continuation(raw, findings)
+    if report.has_error(findings):
+        return findings
+    if not spec:
+        return report.sorted_findings(findings + unimplemented(mode, "spec sheet"))
+    continuation(raw, spec, findings)
     return findings
 
 
@@ -2118,7 +2131,8 @@ def _parse(argv: Optional[List[str]] = None):
         argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(prog="export_tank.py", allow_abbrev=False)
     parser.add_argument("--mode", required=True, choices=("lint", "export", "verify"))
-    parser.add_argument("--spec", help="the tank's spec sheet, read by the derivation chain; the "
+    parser.add_argument("--spec", help="the tank's spec sheet — the sheet the canonical lists were "
+                                       "cut from, whose bytes the continuation token seals; the "
                                        "sibling L1.SAVED_SOURCE requires is derived from the "
                                        "blend stem, never from this path")
     parser.add_argument("--glb", help="the tracked glb the chain writes in export mode and "
@@ -2146,7 +2160,7 @@ def main() -> int:
     # FRESH by construction: reaching `main` means Blender was launched with `--python` on the
     # blend the wrapper named, which is a load from disk. A session that had a file open cannot
     # arrive here — the adapter calls `run` in process, and says IN_SESSION when it does.
-    findings = run(arguments.mode, FRESH, arguments.canon, arguments.raw)
+    findings = run(arguments.mode, FRESH, arguments.canon, arguments.raw, arguments.spec)
     print(report.render_text(findings), end="", flush=True)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)

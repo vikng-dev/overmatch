@@ -371,7 +371,7 @@ def export_open_blend(root):
         source = load(root, SOURCE_PASS_RELPATH, "overmatch_export_tank")
         raw = os.path.join(work, stem + ".raw.glb")
         report = source.report
-        findings = source.run("export", source.IN_SESSION, canon, raw)
+        findings = source.run("export", source.IN_SESSION, canon, raw, spec)
         print(report.render_text(findings), end="", flush=True)
         print("source ▸ {}".format(report.summary(findings)), flush=True)
         if report.has_error(findings):
