@@ -7,7 +7,7 @@ standalone gate the asset door and the pre-push hook run (`scripts/hooks/pre-pus
                                     derive each one's colour ROLE from the materials that sample it
     repack <in.glb> <work> <out>    rebuild the glb with <work>/ktx2/<i>.ktx2 in place of the images
     diff   <raw.glb> <baked.glb>    the whole derivation law, both documents in hand
-    verify [--allow-pointer] <glb>  the two laws a baked document answers on its own
+    verify <glb>                    the two laws a baked document answers on its own
 
 The role table is the point of the unpack step: glTF fixes the colour space of every texture slot,
 so it can be read off the document instead of typed into a table that rots on the next re-export.
@@ -971,33 +971,25 @@ def cmd_diff(raw_glb, baked_glb):
     return rendered("diff", findings)
 
 
-def cmd_verify(*args):
+def cmd_verify(path):
     """The ship gate: the two laws a baked document answers on its own.
 
-    Runs on any glb-shaped file — including a raw `.git/lfs/objects/**` blob, which is how the
-    pre-push hook checks the COMMITTED bytes rather than whatever is sitting in the work tree.
+    Runs on any glb-shaped file — including a raw `.git/lfs/objects/**` blob, which is how a caller
+    checks COMMITTED bytes rather than whatever is sitting in the work tree.
 
-    An unfetched git-lfs POINTER is an error by default, because "I could not read it" must not
-    read as "it is fine" in the release workflow. `--allow-pointer` downgrades it to a skip, for
-    the pre-push hook: a dev whose clone never smudged the glb cannot have changed it either, and
-    failing their push over someone else's asset would be noise.
+    An unfetched git-lfs pointer is a refusal: "I could not read it" must not read as "it is fine".
 
     Deliberately streaming: it reads the 12-byte header, the JSON chunk, and a few hundred bytes
     per image, never the ~63 MB payload. That keeps it at a few milliseconds, which is what earns
     it a place in a hook that already pays for a compile.
     """
-    allow_pointer = "--allow-pointer" in args
-    (path,) = [a for a in args if not a.startswith("--")]
     with open(path, "rb") as handle:
         head = handle.read(12)
         if head.startswith(b"version http"):  # first line of a git-lfs pointer
-            if not allow_pointer:
-                raise SystemExit(
-                    f"{path} is an unfetched git-lfs pointer — cannot verify the shipped bytes. "
-                    "Run `git lfs pull` first (or pass --allow-pointer to treat this as a skip)."
-                )
-            print(f"verify ▸ {path}: git-lfs pointer, content not fetched — SKIPPED")
-            return 0
+            raise SystemExit(
+                f"{path} is an unfetched git-lfs pointer — cannot verify the shipped bytes. "
+                "Run `git lfs pull` first."
+            )
         if len(head) < 12 or struct.unpack_from("<I", head, 0)[0] != 0x46546C67:
             raise SystemExit(f"{path}: not a glb")
 

@@ -3,7 +3,7 @@ from mathutils import Vector
 
 # This script AUTHORS; it does not export. The export is the one door's — see the tail.
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(bpy.data.filepath)))
-SP="/private/tmp/claude-502/-Users-Yan-Desktop-github-vikng-dev-personal-overmatch/aa6ae501-da41-487d-a38f-23a2004cf55d/scratchpad"
+SP = os.environ.get("OVERMATCH_TRACK_SCRATCH") or sys.exit("set OVERMATCH_TRACK_SCRATCH to the directory holding metal512/ — the session scratchpad this was authored in is gone")
 SRC = SP + "/metal512"
 TILE_M   = 0.35
 MAT_NAME = "Mat_Track_Link"
