@@ -677,8 +677,11 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
             "Supercompression System v{}'; exit 0; }}\n"
             "echo 'injected encoder failure' >&2\nexit 1\n"
         ).format(toolchain.BASISU_VERSION))
+        # Injected through OVERMATCH_BASISU — the FIRST channel of the resolution rule, so the
+        # injection holds on a machine whose own environment already names a pinned encoder (CI).
         printed = self.refuses(
-            self.exported("refuse-encode"), "door.stage-failed", on_path(encoder)
+            self.exported("refuse-encode"), "door.stage-failed",
+            {toolchain.BASISU_ENV: encoder},
         )
         self.assertIn("refused at ktx2", printed)
 
