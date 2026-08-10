@@ -219,6 +219,9 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
 
     def test_an_l1_error_stops_before_the_raw_export(self):
         printed = self.refuses(self.exported("refuse-l1", "modifier"), "L1.MODIFIER_STACK")
+        # The exporter announces the candidate it wrote. A refused source produces none: a file cut
+        # from a model the pass refused is one nobody may consume.
+        self.assertNotIn("raw   ▸", printed, "the exporter ran on a source the pass refused")
         self.assertNotIn("consumer (raw)", printed, "a refused source reached the contract")
 
     def test_a_consumer_refusal_on_the_raw_candidate_stops_before_the_encode(self):
