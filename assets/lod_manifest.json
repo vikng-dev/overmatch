@@ -95,7 +95,7 @@
       "name": "tiger_1_link",
       "source": {
         "blend": "assets/tiger_1/tiger_1.blend",
-        "blend_sha256": "7e54c2f713605a992d9ce7c3d735f8197e99fc81ceb04dd1693f736377292ade",
+        "blend_sha256": "a70850d323f14b735f24f7614981ad0b6c3e907b366a3d83805605510f7129ba",
         "object": "Link",
         "evaluated_digest": "07b5686ef77712df3dcf0d8dc401a4dd06c4dfc379ce455927fe281e97f0401b",
         "tris": 1520,
@@ -188,7 +188,7 @@
             "radius_m": 0.384491,
             "origin_radius_m": 0.380365
           },
-          "glb_sha256": "5d32d654abb8f1d74242962e2ff6553143c9f82f4153c5fb5cd583d3b72fd436",
+          "glb_sha256": "3c17b498cc66bf17b1ab7b59b4b82aeac28cab144fab1130ac82e3364c2025e9",
           "blender_source_verts": 744,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,
