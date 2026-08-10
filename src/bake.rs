@@ -73,7 +73,8 @@ static L2_EXACT_DEGENERACY: Check = Check {
     id: "L2.EXACT_DEGENERACY",
     stage: Stage::Consumer,
     severity: Severity::Error,
-    law: "after the exact-position weld, every triangle has three distinct welded ids",
+    law: "after the exact-position weld, every triangle has three distinct welded ids and encloses \
+          exactly non-zero area",
 };
 static L2_MANIFOLD_WINDING: Check = Check {
     id: "L2.MANIFOLD_WINDING",
@@ -91,8 +92,7 @@ static L2_SHELL_EMBEDDING: Check = Check {
     id: "L2.SHELL_EMBEDDING",
     stage: Stage::Consumer,
     severity: Severity::Error,
-    law: "every triangle encloses exactly non-zero area, and two triangles of one shell meet only \
-          inside the welded feature they declare",
+    law: "two triangles of one shell meet only inside the welded feature they declare",
 };
 
 /// One glTF node, extracted. `name` follows bevy_gltf's rule exactly (authored name, else
@@ -468,10 +468,19 @@ pub(crate) fn manifold_gate(
         if !resolved {
             continue;
         }
+        // ZERO AREA, in both its spellings. Repeated welded ids is the cheap one; three DISTINCT
+        // ids on one line is the other, and it is exact — the integer plane normal of the welded
+        // positions, not a float cross product with a threshold under it. A face with no
+        // orientation breaks edge parity and gives the embedding certificate no plane to intersect.
         let [a, b, c] = welded_corners;
         if a == b || b == c || a == c {
             degenerate.push(format!(
                 "triangle {triangle} welds to corners {welded_corners:?}"
+            ));
+        } else if embedding::encloses_zero_area(&welded_corners.map(|id| points[id as usize])) {
+            degenerate.push(format!(
+                "triangle {triangle} welds to corners {welded_corners:?}, which are collinear — it \
+                 encloses exactly zero area"
             ));
         }
         triangles.push(welded_corners);
@@ -1900,10 +1909,10 @@ mod tests {
         }
     }
 
-    /// L2.EXACT_DEGENERACY — a face whose welded ids repeat has no orientation. The other spelling
-    /// of a zero-area face, three DISTINCT welded ids on one line, is refused by the shell
-    /// embedding certificate, which has no plane to intersect: see
-    /// `embedding::tests::a_collinear_triangle_is_refused_before_any_pair_is_tested`.
+    /// L2.EXACT_DEGENERACY — a face with no orientation, in BOTH its spellings: welded ids that
+    /// repeat, and three DISTINCT welded ids on one line. One law, because they are one defect —
+    /// a triangle that encloses exactly zero area breaks edge parity and leaves the embedding
+    /// certificate no plane to intersect.
     #[test]
     fn a_zero_area_face_is_refused() {
         // Two corners at one position: the welded ids repeat.
@@ -1913,7 +1922,26 @@ mod tests {
             gate("Repeated", &tetrahedron(repeated)).expect_err("a repeated corner is refused");
         assert_eq!(refusals(&findings)[0], "L2.EXACT_DEGENERACY");
 
-        // And through the door.
+        // Three DISTINCT welded ids, on one line: a fourth vertex collinear with an existing edge.
+        let collinear = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 0.0],
+        ];
+        let mut indices = CLOSED.to_vec();
+        indices.extend_from_slice(&[0, 1, 4]);
+        let findings = gate("Collinear", &ballistic(collinear, indices))
+            .expect_err("three distinct ids on one line are refused");
+        assert_eq!(refusals(&findings)[0], "L2.EXACT_DEGENERACY");
+        assert!(
+            findings[0].evidence.contains("collinear"),
+            "{}",
+            render(&findings)
+        );
+
+        // And through the door, both spellings.
         let (mut nodes, spec) = sound_vehicle();
         let mut repeated = CLOSED.to_vec();
         repeated.extend_from_slice(&[0, 1, 1]);
@@ -1923,6 +1951,26 @@ mod tests {
             indices: repeated,
         });
         let findings = verify("repeated-corner", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.EXACT_DEGENERACY"],
+            "{}",
+            render(&findings)
+        );
+        assert!(has_error(&findings));
+
+        let (mut nodes, spec) = sound_vehicle();
+        let plate = solid(SUBSTANCE, [0.0, 0.0, 0.0]);
+        let mut positions = plate.positions.clone();
+        positions.push([2.0, 0.0, 0.0]);
+        let mut indices = plate.indices.clone();
+        indices.extend_from_slice(&[0, 1, (positions.len() - 1) as u32]);
+        nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
+            material: SUBSTANCE.into(),
+            positions,
+            indices,
+        });
+        let findings = verify("collinear-corners", &nodes, &spec);
         assert_eq!(
             refusals(&findings),
             ["L2.EXACT_DEGENERACY"],
