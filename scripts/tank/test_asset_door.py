@@ -130,12 +130,14 @@ class ExportChain(unittest.TestCase):
         ))
         self.assertEqual(found, sorted(found), "the stages ran out of order: {}".format(marks))
         # The derivation happened: the tracked model carries mipped KTX2, not the exporter's PNG.
+        # Asserted through the verifier the release workflow and the pre-push hook run, on the
+        # TRACKED path — `scripts/tank/test_glb_ktx2.py` is where its laws are mutated one by one.
         verified = subprocess.run(
             [sys.executable, os.path.join(ROOT, asset_door.DERIVATION_VERIFIER), "verify", glb],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         self.assertEqual(verified.returncode, 0, verified.stdout)
-        self.assertIn("all image/ktx2", verified.stdout)
+        self.assertIn("0 errors", verified.stdout)
 
         first = digest(glb)
         code, printed = door("export", blend)
