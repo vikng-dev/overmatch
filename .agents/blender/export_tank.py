@@ -62,8 +62,7 @@ SAVED_SOURCE = Check(
     id="L1.SAVED_SOURCE",
     stage=Stage.SOURCE,
     severity=Severity.ERROR,
-    law="the live file is saved at assets/<id>/<id>.blend, has no unsaved changes, and has a "
-        "sibling <id>.tank.ron",
+    law="the live file is saved at assets/<id>/<id>.blend and has a sibling <id>.tank.ron",
 )
 
 EXPORT_SCOPE = Check(
@@ -154,13 +153,10 @@ EXPORT_BOUND_TYPES = frozenset({"MESH", "EMPTY"})
 
 @dataclass
 class Source:
-    """The lint's whole view of one tank: where the blend is stored, whether that store is current,
-    and the export-bound objects."""
+    """The lint's whole view of one tank: where the blend is stored, and the export-bound objects."""
 
     #: `bpy.data.filepath` — empty when the blend has never been saved.
     filepath: str
-    #: `bpy.data.is_dirty` — whether memory holds edits the stored file does not.
-    is_dirty: bool
     scene_name: str
     objects: List[object] = field(default_factory=list)
 
@@ -171,14 +167,19 @@ class Source:
         scene = scene or bpy.context.scene
         return cls(
             filepath=bpy.data.filepath,
-            is_dirty=bpy.data.is_dirty,
             scene_name=scene.name,
             objects=list(scene.objects),
         )
 
 
 def check_saved_source(source: Source) -> List[Finding]:
-    """The stored file is the model; the door refuses to certify anything else."""
+    """The stored file is the model; the door refuses to certify anything else.
+
+    Stored and live are the same bytes by construction, not by a flag: the headless door hands
+    Blender the file to open, and the GUI adapter saves before it invokes. `bpy.data.is_dirty`
+    measures Blender's load-time versioning of an older file, so a freshly opened, untouched blend
+    reports dirty (MEASURED, 5.1.2) and re-saving cannot clear it.
+    """
     findings = []
     if not source.filepath:
         return [Finding(
@@ -201,15 +202,6 @@ def check_saved_source(source: Source) -> List[Finding]:
             "stored at {}/{}/{}, not assets/{}/{}".format(collection, holder, filename, stem, filename),
             "move the blend to assets/{stem}/{stem}.blend — the wrapper derives the spec and glb "
             "paths from that layout".format(stem=stem),
-        ))
-
-    if source.is_dirty:
-        findings.append(Finding(
-            SAVED_SOURCE,
-            subject,
-            "bpy.data.is_dirty — memory holds edits the stored file does not",
-            "save the blend (Ctrl+S) and re-run; the door certifies the stored bytes, not the "
-            "session",
         ))
 
     spec = os.path.join(directory, stem + ".tank.ron")

@@ -84,11 +84,11 @@ def clean_scene():
     return scene
 
 
-def source_of(scene=None, filepath=BLEND_PATH, is_dirty=False):
-    """A `Source` read off the live blend through the same path the door uses, with the two
-    filesystem facts a headless fixture cannot set overridden."""
+def source_of(scene=None, filepath=BLEND_PATH):
+    """A `Source` read off the live blend through the same path the door uses, with the one
+    filesystem fact a headless fixture cannot set overridden."""
     live = export_tank.Source.live(scene or bpy.context.window.scene)
-    return dataclasses.replace(live, filepath=filepath, is_dirty=is_dirty)
+    return dataclasses.replace(live, filepath=filepath)
 
 
 def write_library(name):
@@ -179,15 +179,6 @@ def saved_source_wrong_layout():
     os.makedirs(os.path.dirname(stray), exist_ok=True)
     assert_silent(export_tank.lint(source_of(scene)), "L1.SAVED_SOURCE")
     assert_fires(export_tank.lint(source_of(scene, filepath=stray)), "L1.SAVED_SOURCE", Severity.ERROR)
-
-
-@case
-def saved_source_unsaved_changes():
-    scene = clean_scene()
-    assert_silent(export_tank.lint(source_of(scene)), "L1.SAVED_SOURCE")
-    assert_fires(
-        export_tank.lint(source_of(scene, is_dirty=True)), "L1.SAVED_SOURCE", Severity.ERROR
-    )
 
 
 @case
