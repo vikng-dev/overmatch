@@ -197,17 +197,12 @@ jobs:
 
       # The pins are read OUT OF `scripts/toolchain.py`, never restated here: that file is the one
       # declaration, and a version written down in a workflow is a second one that drifts silently.
+      # It is RUN rather than quoted into a step, because a step is executable by nothing — no suite
+      # can run it, and the one that imported this module from the wrong directory shipped red.
       - name: Resolve the pinned toolchain
         run: |
           set -euo pipefail
-          python3 - >> "${GITHUB_ENV}" <<'PY'
-          import sys
-          sys.path.insert(0, "scripts")
-          import toolchain
-          print(f"OVERMATCH_BLENDER_VERSION={toolchain.BLENDER_VERSION}")
-          print(f"OVERMATCH_BLENDER_BUILD={toolchain.BLENDER_BUILD}")
-          print(f"OVERMATCH_BASISU_VERSION={toolchain.BASISU_VERSION}")
-          PY
+          python3 scripts/toolchain.py --pins >> "${GITHUB_ENV}"
 
       # Blender is a ~300 MB download and the same bytes on every run of a given pin, so it is
       # cached on the pin itself — a moved pin is a different key and a fresh download.
@@ -259,19 +254,7 @@ jobs:
           echo "OVERMATCH_BASISU=${HOME}/.cache/overmatch/basisu/basisu" >> "${GITHUB_ENV}"
           export OVERMATCH_BLENDER="${HOME}/.cache/overmatch/blender/blender"
           export OVERMATCH_BASISU="${HOME}/.cache/overmatch/basisu/basisu"
-          python3 - <<'PY'
-          import sys
-          sys.path.insert(0, "scripts")
-          import report, toolchain
-          findings = [row for row in
-                      (toolchain.finding(program)
-                       for program in (toolchain.blender(), toolchain.basisu()))
-                      if row is not None]
-          print(report.render_text(report.sorted_findings(findings)), end="")
-          for program in (toolchain.blender(), toolchain.basisu()):
-              print(f"toolchain ▸ {program} ({program.binary})")
-          sys.exit(report.exit_code(findings))
-          PY
+          python3 scripts/toolchain.py
 
       # Every discovered trio, re-cut from its own stored source and compared with the tracked glb.
       # The reports are kept whole: warnings never fail this lane, and the artifact is where they

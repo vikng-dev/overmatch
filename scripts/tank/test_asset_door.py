@@ -555,6 +555,68 @@ class DoorMechanics(unittest.TestCase):
         self.assertEqual(lod.EXPECTED_GLTF_EXPORTER, toolchain.GLTF_EXPORTER_VERSION)
 
 
+class ToolchainProgram(unittest.TestCase):
+    """`scripts/toolchain.py` as the lane that installs these programs runs it.
+
+    The pins are declared in that file and asserted BY RUNNING IT. A few lines of Python quoted into
+    a workflow step are executable by the runner and by nothing else: no suite can call them, so the
+    step that imported this module with only `scripts/` on its path was red on every run of the lane
+    and green in every suite — until the lane was required, which is the worst possible moment to
+    find out. The step now runs a file, and this is that file being run.
+    """
+
+    def toolchain(self, *arguments, env=None):
+        result = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "toolchain.py")] + list(arguments),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env=dict(os.environ, **(env or {})),
+        )
+        return (result.returncode, result.stdout)
+
+    def test_running_it_asserts_the_installed_programs(self):
+        code, printed = self.toolchain()
+        self.assertEqual(code, 0, printed)
+        for program in ("blender", "basisu"):
+            self.assertIn("toolchain ▸ {}".format(program), printed)
+
+    def test_a_program_that_is_not_the_pinned_one_exits_non_zero(self):
+        encoder = shim("basisu-unpinned", (
+            "#!/bin/sh\necho 'Basis Universal LDR/HDR GPU Texture Supercompression System "
+            "v1.16.4'\n"
+        ))
+        code, printed = self.toolchain(env={toolchain.BASISU_ENV: encoder})
+        self.assertEqual(code, 1, printed)
+        self.assertIn("door.toolchain", printed)
+        self.assertIn("1.16.4", printed)
+
+    def test_the_pins_it_prints_are_the_pins_it_declares(self):
+        """The lane installs by version before it can assert a version, and cuts its caches on the
+        same numbers. They come out of the declaration rather than a second copy in YAML."""
+        code, printed = self.toolchain("--pins")
+        self.assertEqual(code, 0, printed)
+        self.assertEqual(
+            dict(line.split("=", 1) for line in printed.splitlines()),
+            {
+                "OVERMATCH_BLENDER_VERSION": toolchain.BLENDER_VERSION,
+                "OVERMATCH_BLENDER_BUILD": toolchain.BLENDER_BUILD,
+                "OVERMATCH_BASISU_VERSION": toolchain.BASISU_VERSION,
+            },
+        )
+
+    def test_the_workflow_runs_this_file_and_holds_no_python_of_its_own(self):
+        """The class the regression came from, closed: a workflow that holds no Python holds none
+        that no suite runs."""
+        with open(os.path.join(ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8") as handle:
+            workflow = handle.read()
+        self.assertEqual(
+            [line.strip() for line in workflow.splitlines() if "python3 - " in line], [],
+            "a workflow step holds inline python — the runner is the only thing that can execute "
+            "it, so it is the only thing that can discover it is broken",
+        )
+        for command in ("python3 scripts/toolchain.py --pins", "python3 scripts/toolchain.py\n"):
+            self.assertIn(command, workflow, "the lane does not run the file this case drives")
+
+
 class HookEnvironment(unittest.TestCase):
     """A pre-push hook exports `GIT_DIR` (without `GIT_WORK_TREE`), under which git answers
     location questions about the hook's repo and reports the asker's CWD as toplevel. The door and

@@ -15,10 +15,17 @@ one law is stated once and reads the same wherever it fires.
 
 Stdlib only apart from the report shape, and it never imports `bpy`: the door's preflight runs
 under the system interpreter, before there is a Blender to ask.
+
+It is also a PROGRAM — `python3 scripts/toolchain.py` asserts the pins, `--pins` prints them — so
+the lane that must install these versions before it can assert them runs this file rather than a
+few lines of Python written into a workflow step. Nothing in a YAML step can be executed by any
+suite, which is how a step that imported a module from the wrong directory shipped deterministically
+red.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -31,6 +38,7 @@ from typing import Dict, List, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "tank"))
 
+import report  # noqa: E402  — the path above is what makes this importable
 from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa: E402
 
 # ── the pins ─────────────────────────────────────────────────────────────────────────────────────
@@ -273,3 +281,38 @@ def gltf_exporter() -> Program:
         {"version": ".".join(str(part) for part in version) if version else "unknown"},
         expected,
     )
+
+
+# ── the pins as a program ────────────────────────────────────────────────────────────────────────
+
+#: The pins a lane must know BEFORE it can assert them: it downloads Blender by version and build,
+#: and builds the encoder from the tag its version names. Printed as environment lines, so the
+#: version a cache key is cut from is the one this file declares and never a second copy in YAML.
+ENVIRONMENT = (
+    ("OVERMATCH_BLENDER_VERSION", BLENDER_VERSION),
+    ("OVERMATCH_BLENDER_BUILD", BLENDER_BUILD),
+    ("OVERMATCH_BASISU_VERSION", BASISU_VERSION),
+)
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """`--pins` prints what to install; no argument asserts what is installed, in the door's own
+    report shape and with the door's own exit status."""
+    parser = argparse.ArgumentParser(prog="toolchain.py", allow_abbrev=False)
+    parser.add_argument("--pins", action="store_true",
+                        help="print the pinned versions as KEY=VALUE lines, for a lane that must "
+                             "install these programs before it can assert them")
+    if parser.parse_args(argv).pins:
+        for key, value in ENVIRONMENT:
+            print("{}={}".format(key, value))
+        return 0
+    programs = [blender(), basisu()]
+    findings = [row for row in (finding(program) for program in programs) if row is not None]
+    print(report.render_text(report.sorted_findings(findings)), end="")
+    for program in programs:
+        print("toolchain ▸ {} ({})".format(program, program.binary))
+    return report.exit_code(findings)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
