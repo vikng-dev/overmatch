@@ -282,8 +282,9 @@ fn classify(
     // physics-only meshes were exactly this case before the restructure.)
     let material = primitive.material().name()?;
     // Not a substance ⇒ ordinary art. The registry's `Unknown` arm IS the classifier; the error case
-    // is a name that only LOOKS like a substance, which the bind test's near-miss lint catches (a
-    // `.001` duplicate means the material-library link drifted from LINKED to appended).
+    // is a name that only LOOKS like a substance, which `L1.SUBSTANCE_IDENTITY` refuses at the
+    // source (a `.001` duplicate means the material-library link drifted from LINKED to appended,
+    // and only the .blend can tell a linked datablock from a copy of one).
     let substance = registry.get(material).ok()?;
     Some(PrimitiveSubstance {
         name: material.to_owned(),
@@ -1483,6 +1484,80 @@ mod tests {
                     "roadwheel `{}` has no authored origin — set the object origin to the axle",
                     station.name
                 );
+            }
+        }
+    }
+
+    /// THE MATERIAL-IMPLIED LINTS, over every shipped asset. A substance whose whole meaning is a
+    /// consequence must have the facet that states it: Flesh that no one can kill, an Ammunition
+    /// rack that cannot cook off, and an EngineBlock with no hp are each a plate pretending to be
+    /// a module. The declared collision proxies and the structural singletons the assembler
+    /// resolves by name are the same kind of claim — about the class "tank", asserted here rather
+    /// than at spawn, where a bad asset would only surface as a panic.
+    ///
+    /// The substance names are the GLOBAL registry's, shared by every vehicle, and the loop is
+    /// discovery: nothing here is one model's count, and a second tank adds no line.
+    #[test]
+    fn every_shipped_asset_states_the_consequences_its_materials_imply() {
+        for model in fixture::shipped_assets() {
+            let spec_ron =
+                std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
+            let asset = certify_asset(&model, &spec_ron).expect("the pair certifies");
+            let (geometry, spec) = (&asset.geometry, &asset.spec);
+            let named = |what: &str| format!("{}: `{what}`", model.display());
+
+            assert!(
+                !geometry.ballistic_volumes.is_empty(),
+                "{}: no node wears a registry substance — the material library link is broken, \
+                 and every plate on this vehicle is decor to the march",
+                model.display()
+            );
+            // The assembler resolves these by name and nothing declares them, so nothing else can
+            // notice they are gone until a tank is spawned.
+            for singleton in ["Hull", "Center_Of_Mass"] {
+                assert!(
+                    geometry.by_name.contains_key(singleton),
+                    "{} is absent — the tank assembler resolves it by name",
+                    named(singleton)
+                );
+            }
+            for &index in &geometry.collision_proxies {
+                let proxy = &geometry.nodes[index];
+                assert!(
+                    !proxy.is_ballistic(),
+                    "{} is a declared collision proxy wearing a substance — it would be charged as \
+                     armour AND stand in for the body, counting the hull twice",
+                    named(&proxy.name)
+                );
+            }
+            for &index in &geometry.ballistic_volumes {
+                let node = &geometry.nodes[index];
+                let facets = spec.volumes.get(&node.name);
+                let worn = node.substance_groups();
+                if worn.contains_key("Flesh") {
+                    assert!(
+                        facets.is_some_and(|facets| facets.crew.is_some()),
+                        "{} is made of Flesh and declares no crew facet — a crewman nobody can \
+                         kill, and a seat nothing can knock out",
+                        named(&node.name)
+                    );
+                }
+                if worn.contains_key("Ammunition") {
+                    assert!(
+                        facets.is_some_and(|facets| facets.ammo),
+                        "{} is made of Ammunition and declares no ammo facet — a rack that cannot \
+                         cook off",
+                        named(&node.name)
+                    );
+                }
+                if worn.contains_key("EngineBlock") {
+                    assert!(
+                        facets.is_some(),
+                        "{} is an EngineBlock with no component entry — a powerplant with no hp is \
+                         armour pretending to be a module",
+                        named(&node.name)
+                    );
+                }
             }
         }
     }

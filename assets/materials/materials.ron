@@ -51,8 +51,10 @@
 //
 // THIS FILE IS THE CLASSIFIER (slice 3, 2026-08-07). A glTF primitive is a ballistic volume iff
 // its material name is a key here; per-node material_factor in the tank RON is gone. Adding a key
-// makes every mesh wearing that material armour — and removing one silently un-declares them, so
-// the bind test pins the substance census.
+// makes every mesh wearing that material armour — and removing one silently un-declares them. What
+// SHOWS that is `L1.SOURCE_CENSUS`, which prints per-substance primitive counts against the
+// previous committed source: evidence for a human to read, never a pass condition. No test pins
+// those counts, because a second vehicle is a different model and not a broken one.
 (
     substances: {
         "RHA":         (factor: 1000.0, paintable: true),
