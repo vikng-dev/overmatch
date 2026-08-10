@@ -8,12 +8,13 @@ Writes a whole asset under `<workdir>`, in the layout the door derives every pat
     assets/materials/materials.blend    the canonical substance library, linked from below
     assets/testbed/testbed.blend        the model: a hull, a collision proxy, two roadwheels
     assets/testbed/testbed.tank.ron     the spec sheet those nodes are declared in
-    assets/testbed/testbed.png          the one texture, so the chain has something to encode
+    assets/testbed/testbed_*.png        one texture per colour role, so the chain has work to do
 
 It is the smallest thing that is a TANK to every stage of the door: the source pass finds a clean
 source, the consumer contract finds two watertight ballistic wheels and a usable collision proxy,
-and the texture derivation finds an image to bake. Nothing here is Tiger-shaped — the door is
-generic, so its fixture is a second vehicle.
+and the texture derivation finds a colour map, a normal map and a data map to bake — one per role,
+which is what makes the derivation's role, transfer and tangent laws apply to it at all. Nothing
+here is Tiger-shaped — the door is generic, so its fixture is a second vehicle.
 
 `--defect` builds the same trio with exactly one thing wrong, which is how the suite proves that a
 refusal at each stage leaves the tracked glb untouched.
@@ -111,23 +112,41 @@ def place(scene, name, mesh, location, material):
     return obj
 
 
-def painted(name, directory):
-    """A material sampling one 8x8 PNG stored beside the blend — the texture the KTX2 derivation
-    has to find, encode and repack."""
+def png(name, directory, colour):
+    """One 8x8 PNG stored beside the blend, in the colour space its slot is read in."""
     image = bpy.data.images.new(name, 8, 8)
-    image.filepath_raw = os.path.join(directory, "testbed.png")
+    image.filepath_raw = os.path.join(directory, name + ".png")
     image.file_format = "PNG"
+    image.colorspace_settings.name = colour
     image.save()
+    return image
 
+
+def painted(name, directory):
+    """A material sampling one image per ROLE — colour, direction and scalar data — because the
+    derivation derives its encoder flags from the slot and the roles must not collide. The normal
+    map is also what makes `D.TANGENTS` apply to this fixture's hull.
+    """
     material = bpy.data.materials.new(name)
     tree = material.node_tree
     tree.nodes.clear()
     output = tree.nodes.new("ShaderNodeOutputMaterial")
     shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
-    texture = tree.nodes.new("ShaderNodeTexImage")
-    texture.image = image
     tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
-    tree.links.new(texture.outputs["Color"], shader.inputs["Base Color"])
+
+    for slot, colour, socket in (
+        ("testbed_base", "sRGB", "Base Color"),
+        ("testbed_rough", "Non-Color", "Roughness"),
+    ):
+        texture = tree.nodes.new("ShaderNodeTexImage")
+        texture.image = png(slot, directory, colour)
+        tree.links.new(texture.outputs["Color"], shader.inputs[socket])
+
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = png("testbed_normal", directory, "Non-Color")
+    tangent_space = tree.nodes.new("ShaderNodeNormalMap")
+    tree.links.new(texture.outputs["Color"], tangent_space.inputs["Color"])
+    tree.links.new(tangent_space.outputs["Normal"], shader.inputs["Normal"])
     return material
 
 
