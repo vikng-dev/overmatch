@@ -14,6 +14,7 @@ which exist so the path-shaped and link-shaped laws have something real to measu
 
 import contextlib
 import dataclasses
+import hashlib
 import io
 import json
 import math
@@ -311,10 +312,12 @@ def git(directory, *arguments):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def commit_blend(name, contents=None):
+def commit_blend(name, contents=None, become=False):
     """A git worktree holding one committed `assets/<name>/<name>.blend` — the baseline
     L1.SOURCE_CENSUS resolves from HEAD. `contents` replaces the blend with literal bytes, which is
-    how the LFS-pointer case gets a baseline whose object this clone does not hold."""
+    how the LFS-pointer case gets a baseline whose object this clone does not hold; `become` stores
+    the SESSION there, which is what a case comparing two censuses of one asset needs — both are
+    then anchored on the same repository, as they are in the door."""
     top = os.path.join(_WORK, "repo-" + name)
     directory = os.path.join(top, "assets", name)
     os.makedirs(directory, exist_ok=True)
@@ -324,7 +327,10 @@ def commit_blend(name, contents=None):
     if contents is None:
         # `copy=True`: the fixture writes a blend without becoming it, so the session stays stored
         # where `stored_at` put it and L1.SAVED_SOURCE stays silent for the rest of the run.
-        bpy.ops.wm.save_as_mainfile(filepath=path, copy=True)
+        # `relative_remap=False`: a committed tank blend holds `//../materials/materials.blend`
+        # (MEASURED on the live tiger), and remapping would rewrite it to point back at where this
+        # fixture was standing rather than beside where it now stands.
+        bpy.ops.wm.save_as_mainfile(filepath=path, copy=not become, relative_remap=False)
     else:
         with open(path, "wb") as handle:
             handle.write(contents)
@@ -1496,6 +1502,101 @@ def source_census_counts_the_live_source():
 
 
 @case
+def source_census_counts_a_substance_only_from_the_canonical_library():
+    """The same mechanism L1.SUBSTANCE_IDENTITY holds: a material linked from ANY library was a
+    substance, so a linked art material — or another repository's copy of `materials.blend` — moved
+    the ballistic and per-substance counts the source diff is read for."""
+    scene = plated("RHA", path=IMPOSTOR_LIBRARY)
+    rows = census_rows(export_tank.lint(source_of(scene)))
+    assert rows["ballistic objects"] == "0", rows
+    assert rows["shells"] == "0", rows
+    assert not [row for row in rows if row.startswith("substance")], rows
+
+
+#: One tetrahedron's faces, outward-wound — the smallest closed shell, the same one the consumer
+#: contract's own fixtures are built from.
+TETRAHEDRON = ((0, 2, 1), (0, 1, 3), (0, 3, 2), (1, 2, 3))
+
+
+def solids(*corners):
+    """`(positions, faces)` for one unit tetrahedron per given corner."""
+    positions = []
+    faces = []
+    for index, (x, y, z) in enumerate(corners):
+        positions.extend(((x, y, z), (x + 1.0, y, z), (x, y + 1.0, z), (x, y, z + 1.0)))
+        faces.extend(tuple(corner + index * 4 for corner in face) for face in TETRAHEDRON)
+    return (tuple(positions), tuple(faces))
+
+
+def armoured_hull(corners, substances=("RHA",), slot_of_face=None):
+    """The clean tank whose hull is one tetrahedron per corner, wearing library substances. Returns
+    the scene; `slot_of_face` gives each face's material slot, all of them the first by default."""
+    write_material_library(*substances)
+    scene = clean_scene()
+    positions, faces = solids(*corners)
+    mesh = reshape("Hull", positions=positions, faces=faces)
+    for name in substances:
+        mesh.materials.append(link_material(name))
+    for index, polygon in enumerate(mesh.polygons):
+        polygon.material_index = 1 + (slot_of_face(index) if slot_of_face else 0)
+    return scene
+
+
+@case
+def source_census_counts_one_shell_per_edge_connected_component():
+    """Two closed solids in one substance primitive that touch at nothing are two shells — the
+    partition the consumer contract publishes as shell ids, computed here on the stored mesh."""
+    scene = armoured_hull(((0.0, 0.0, 0.0), (8.0, 0.0, 0.0)))
+    rows = census_rows(export_tank.lint(source_of(scene)))
+    assert rows["ballistic objects"] == "1", rows
+    assert rows["shells"] == "2", rows
+
+
+@case
+def source_census_welds_shells_by_exact_position():
+    """One surface authored twice, on distinct vertices at the same coordinates, shares every edge
+    once welded and is therefore one shell — as the contract sees it."""
+    scene = armoured_hull(((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+    assert census_rows(export_tank.lint(source_of(scene)))["shells"] == "1"
+
+
+@case
+def source_census_shells_are_edge_connected_and_not_vertex_connected():
+    """Two solids meeting at a single welded corner are two shells: §13.7's legal touch, and the
+    line the contract's own partition draws."""
+    scene = armoured_hull(((0.0, 0.0, 0.0), (-1.0, 0.0, 0.0)))
+    assert census_rows(export_tank.lint(source_of(scene)))["shells"] == "2"
+
+
+@case
+def source_census_partitions_shells_inside_one_primitive_at_a_time():
+    """A primitive is one material slot, and the contract welds and partitions each on its own. Two
+    solids in DIFFERENT substances that share a welded edge are two shells, not one."""
+    scene = armoured_hull(
+        ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), substances=("RHA", "Rubber"),
+        slot_of_face=lambda index: index // len(TETRAHEDRON),
+    )
+    rows = census_rows(export_tank.lint(source_of(scene)))
+    assert rows["shells"] == "2", rows
+    assert rows["substance `RHA`"] == "1 primitive(s)" and rows["substance `Rubber`"] == \
+        "1 primitive(s)", rows
+
+
+@case
+def source_census_counts_mesh_datablocks_by_identity():
+    """A linked mesh datablock and a local one may carry the same name — the census that counts
+    names cannot see the second one arrive."""
+    library = write_library("Hull")
+    scene = clean_scene()
+    assert census_rows(export_tank.lint(source_of(scene)))["meshes"] == "2"
+    linked = link_object(library, "Hull")
+    assert linked.data.name == "Hull", "the fixture did not produce a shared mesh name"
+    rows = census_rows(export_tank.lint(source_of(scene)))
+    assert rows["meshes"] == "3", rows
+    assert rows["objects"] == "4", rows
+
+
+@case
 def source_census_without_a_baseline_is_neither_pass_nor_fail():
     scene = clean_scene()
     findings = export_tank.lint(source_of(scene))
@@ -1511,21 +1612,67 @@ def source_census_against_the_previous_commit():
     write_material_library("RHA")
     scene = clean_scene()
     bpy.data.meshes["Hull"].materials[0] = link_material("RHA")
-    # The census alone: the baseline is HEAD of the worktree the blend stands in, so the fixture's
-    # blend has to stand somewhere this session is not stored — which is L1.SAVED_SOURCE's refusal
-    # and not this law's business.
-    path = commit_blend("census")
-    rows = census_rows(export_tank.check_source_census(source_of(scene, filepath=path)))
-    assert rows["baseline"].startswith("compared against"), rows["baseline"]
-    assert rows["objects"] == "3 (baseline 3, +0)", rows["objects"]
+    # The session STANDS in the fixture's worktree for this case: the baseline is HEAD of the
+    # worktree the blend lives in, and both censuses are anchored on the repository the blend is in
+    # — which is one repository in the door, and has to be one here.
+    try:
+        commit_blend("census", become=True)
+        rows = census_rows(export_tank.lint(source_of(scene)))
+        assert rows["baseline"].startswith("compared against"), rows["baseline"]
+        assert rows["objects"] == "3 (baseline 3, +0)", rows["objects"]
 
-    scene.collection.objects.link(bpy.data.objects.new("Sponson", triangle_mesh("Sponson")))
-    findings = export_tank.check_source_census(source_of(scene, filepath=path))
-    rows = census_rows(findings)
-    assert rows["objects"] == "4 (baseline 3, +1)", rows["objects"]
-    assert rows["meshes"] == "3 (baseline 2, +1)", rows["meshes"]
-    assert rows["substance `RHA`"] == "1 (baseline 1, +0) primitive(s)", rows
-    assert_exit(findings, 0)
+        scene.collection.objects.link(bpy.data.objects.new("Sponson", triangle_mesh("Sponson")))
+        findings = export_tank.lint(source_of(scene))
+        rows = census_rows(findings)
+        assert rows["objects"] == "4 (baseline 3, +1)", rows["objects"]
+        assert rows["meshes"] == "3 (baseline 2, +1)", rows["meshes"]
+        assert rows["substance `RHA`"] == "1 (baseline 1, +0) primitive(s)", rows
+        assert rows["shells"] == "1 (baseline 1, +0)", rows
+        assert_exit(findings, 0)
+    finally:
+        stored_at("testbed")
+
+
+@case
+def source_census_reads_a_baseline_out_of_the_lfs_object_store():
+    """The shape the shipped asset is really in: HEAD holds a pointer and the bytes are in this
+    clone's own object store. They have to be laid out as an ASSET before they are counted — a tank
+    blend links `//../materials/materials.blend`, so a baseline read at a content-addressed store
+    path resolves its library nowhere, classifies no substance, and prints a baseline of zero
+    against a live source that has them."""
+    write_material_library("RHA")
+    scene = clean_scene()
+    bpy.data.meshes["Hull"].materials[0] = link_material("RHA")
+    try:
+        top = os.path.join(_WORK, "repo-lfs-object")
+        directory = os.path.join(top, "assets", "lfsobj")
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "lfsobj.tank.ron"), "w", encoding="utf-8") as handle:
+            handle.write("()\n")
+        path = os.path.join(directory, "lfsobj.blend")
+        bpy.ops.wm.save_as_mainfile(filepath=path, relative_remap=False)
+        with open(path, "rb") as handle:
+            model = handle.read()
+        oid = hashlib.sha256(model).hexdigest()
+        with open(path, "wb") as handle:
+            handle.write("version https://git-lfs.github.com/spec/v1\noid sha256:{}\nsize {}\n"
+                         .format(oid, len(model)).encode())
+        git(top, "init", "-q")
+        git(top, "config", "user.email", "lint@overmatch.test")
+        git(top, "config", "user.name", "tank lint")
+        git(top, "add", "-A")
+        git(top, "commit", "-q", "-m", "baseline")
+        objects = os.path.join(top, ".git", "lfs", "objects", oid[:2], oid[2:4])
+        os.makedirs(objects, exist_ok=True)
+        with open(os.path.join(objects, oid), "wb") as handle:
+            handle.write(model)
+
+        rows = census_rows(export_tank.lint(source_of(scene)))
+        assert rows["baseline"].startswith("compared against"), rows["baseline"]
+        assert rows["substance `RHA`"] == "1 (baseline 1, +0) primitive(s)", rows
+        assert rows["shells"] == "1 (baseline 1, +0)", rows
+    finally:
+        stored_at("testbed")
 
 
 @case

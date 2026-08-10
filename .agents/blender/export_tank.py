@@ -45,6 +45,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1653,7 +1654,49 @@ _CENSUS_LABELS = (
     ("meshes", "meshes"),
     ("primitives", "primitives"),
     ("ballistic_objects", "ballistic objects"),
+    ("shells", "shells"),
 )
+
+
+def _components(corners) -> int:
+    """Edge-connected components over triangles given as welded corner ids — THE bake's own shell
+    partition, union-find over the unordered welded edge, so the number this prints and the number
+    `src/bake.rs` publishes as shell ids are the same quantity computed the same way."""
+    parent = list(range(len(corners)))
+
+    def find(node):
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    owner = {}
+    for index, (a, b, c) in enumerate(corners):
+        for u, v in ((a, b), (b, c), (c, a)):
+            edge = (u, v) if u < v else (v, u)
+            if edge in owner:
+                parent[find(index)] = find(owner[edge])
+            else:
+                owner[edge] = index
+    return len({find(index) for index in range(len(corners))})
+
+
+def _shells(mesh, slots) -> int:
+    """The shells one object's substance primitives hold, counted per primitive because that is the
+    unit the consumer contract welds and partitions: a glTF primitive is one material slot."""
+    triangles = _triangles(mesh)
+    positions = _vertex_positions(mesh)
+    corners = _triangle_vertices(mesh, triangles)
+    wears = _flat(triangles, "material_index", 1)
+    total = 0
+    for slot in slots:
+        weld = {}
+        welded = [
+            tuple(weld.setdefault(positions[corner], len(weld)) for corner in corners[index])
+            for index in range(len(triangles)) if int(wears[index]) == slot
+        ]
+        total += _components(welded)
+    return total
 
 
 def census(source: Source) -> dict:
@@ -1661,31 +1704,40 @@ def census(source: Source) -> dict:
 
     A primitive is one material slot a mesh's polygons reference — what the exporter splits a mesh
     into and what the consumer binds. CONSTRAINT: a primitive is a SUBSTANCE primitive when its
-    material is library-linked, and an object is ballistic when it carries one — the same mechanism
-    `L1.SUBSTANCE_IDENTITY` holds exactly, membership through the link to the canonical library.
-    The census does not read the registry key list: it is INFO, and no count in it is a verdict.
+    material is the canonical library's own datablock, and an object is ballistic when it carries
+    one — the same mechanism `L1.SUBSTANCE_IDENTITY` holds exactly. The census does not read the
+    registry key list: it is INFO, and no count in it is a verdict.
+
+    Datablocks are counted by IDENTITY, never by name: a linked mesh and a local one may share a
+    name, and two datablocks counted as one is a census that cannot see a part arrive.
     """
+    library = canonical_library(source)
     meshes = set()
     primitives = 0
     ballistic = 0
+    shells = 0
     substances = Counter()
     for obj in source.objects:
         if obj.type != "MESH" or obj.data is None:
             continue
-        meshes.add(obj.data.name)
+        meshes.add(obj.data.as_pointer())
         used = _used_materials(obj)
         primitives += len(used)
-        linked = [material for material in used.values()
-                  if material is not None and material.library is not None]
-        if linked:
+        slots = sorted(
+            slot for slot, material in used.items()
+            if material is not None and _canonically_linked(material, library)
+        )
+        if slots:
             ballistic += 1
-        for material in linked:
-            substances[material.name] += 1
+            shells += _shells(obj.data, slots)
+        for slot in slots:
+            substances[used[slot].name] += 1
     return {
         "objects": len(source.objects),
         "meshes": len(meshes),
         "primitives": primitives,
         "ballistic_objects": ballistic,
+        "shells": shells,
         "substances": dict(substances),
     }
 
@@ -1709,6 +1761,34 @@ def _git(directory, *arguments):
 #: this and not the model.
 _LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
 _LFS_OID = re.compile(rb"^oid sha256:([0-9a-f]{64})$", re.MULTILINE)
+
+
+def _laid_out(filepath, workdir):
+    """Where the baseline blend has to STAND to be countable: `<workdir>/assets/<id>/<id>.blend`.
+
+    The substance classification is anchored on the blend's own location (`canonical_library`), and
+    the library link inside a tank blend is `//../materials/materials.blend` — so a baseline read
+    from a content-addressed object-store path would classify nothing as a substance and print a
+    baseline of zero. Laid out here, the link resolves to `<workdir>/assets/materials/materials.blend`
+    and so does the anchor, which is what makes the two censuses comparable. The library file
+    itself need not exist: the classification compares paths, and the material NAMES are in the
+    blend either way.
+    """
+    stem = os.path.splitext(os.path.basename(filepath))[0]
+    directory = os.path.join(workdir, "assets", stem)
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, stem + ".blend")
+
+
+def _placed(stored, filepath, workdir):
+    """The stored bytes at the layout above, by hard link where the filesystem allows one and by
+    copy where it does not — a tank blend is tens of megabytes."""
+    path = _laid_out(filepath, workdir)
+    try:
+        os.link(stored, path)
+    except OSError:
+        shutil.copyfile(stored, path)
+    return path
 
 
 def _baseline_blend(filepath, workdir):
@@ -1742,8 +1822,8 @@ def _baseline_blend(filepath, workdir):
         stored = os.path.join(store, "lfs", "objects", oid[:2], oid[2:4], oid)
         if not os.path.isfile(stored):
             return (None, "the LFS object for HEAD:{} is not in this clone".format(relative))
-        return (os.path.abspath(stored), None)
-    path = os.path.join(workdir, "baseline.blend")
+        return (_placed(os.path.abspath(stored), filepath, workdir), None)
+    path = _laid_out(filepath, workdir)
     with open(path, "wb") as handle:
         handle.write(blob)
     return (path, None)
