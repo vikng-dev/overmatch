@@ -254,6 +254,13 @@ def replace(baked: str, glb: str) -> str:
         )]) from error
 
 
+def identity(status) -> tuple:
+    """Which file a stat is about, and which version of it: device and inode name the file, size and
+    modification time name its content's generation. Two stats that agree here are of one file that
+    nobody has rewritten in between."""
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+
+
 def compare(baked: str, glb: str) -> None:
     """Verify's verdict: the candidate this chain just rebuilt against the tracked bytes.
 
@@ -261,9 +268,18 @@ def compare(baked: str, glb: str) -> None:
     Asking whether the path exists and then opening it are two questions about two moments; so are
     two digests of one pathname. Neither can be made to disagree here, because there is one open
     and the answer is about what came out of it.
+
+    AND THE ANSWER IS ABOUT THE FILE STILL AT THE PATH WHEN IT IS GIVEN. An open handle survives its
+    own pathname: another process replacing the tracked model mid-comparison leaves this one hashing
+    an inode nothing can reach any more, and `verify` would then certify a path holding bytes it
+    never read — the verdict pre-push and CI both act on. So the open file is `fstat`ed, and the
+    pathname is `stat`ed again after the comparison: same device, inode, size and mtime, or this is
+    a refusal. A precondition of the door rather than a defect of the model, and fail-closed — a
+    path that cannot be stated at all is also not one this verdict can describe.
     """
     try:
         tracked_file = open(glb, "rb")  # noqa: SIM115 — closed by the `with` below
+        opened = identity(os.fstat(tracked_file.fileno()))
     except OSError as error:
         raise Refused("compare", [Finding(
             CANDIDATE_MISMATCH,
@@ -277,6 +293,21 @@ def compare(baked: str, glb: str) -> None:
     with tracked_file:
         tracked = digest_of(tracked_file)
     rebuilt = digest(baked)
+
+    try:
+        landed = identity(os.stat(glb))
+    except OSError as error:
+        landed = str(error)
+    if landed != opened:
+        raise Refused("compare", [Finding(
+            CANDIDATE_MISMATCH,
+            Subject(SubjectKind.FILE, glb),
+            "the file at this path changed while it was being compared: it was {} and it is now "
+            "{}; the bytes read were sha256 {}".format(opened, landed, tracked),
+            "run `asset_door.py verify` again with nothing else writing this path — a verdict is "
+            "about the model that is there when it is given, and another writer landed one here "
+            "mid-comparison",
+        )])
     if rebuilt == tracked:
         print("door  ▸ compare: {} matches the rebuilt candidate ({})".format(glb, tracked),
               flush=True)

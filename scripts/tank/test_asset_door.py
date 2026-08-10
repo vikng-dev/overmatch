@@ -390,6 +390,102 @@ class TrackedPath(unittest.TestCase):
             "a staging file outlived the export that made it",
         )
 
+    def interrupted(self, name, writer):
+        """A comparison that would otherwise CERTIFY — the tracked file starts as a byte-for-byte
+        copy of the candidate — interrupted at its one window by `writer(other, tracked)`.
+
+        Deterministic rather than lucky: the interruption happens INSIDE the comparison, at the
+        moment the defect needs, by standing in for the rebuilt candidate's digest — the step
+        between reading the tracked bytes and answering about them. Returns `(tracked, findings)`.
+        """
+        directory, (candidate, other) = self.candidates(name)
+        tracked = os.path.join(directory, "tracked.glb")
+        shutil.copyfile(candidate, tracked)
+        real_digest = asset_door.digest
+
+        def interrupt(path):
+            writer(other, tracked)
+            return real_digest(path)
+
+        asset_door.digest = interrupt
+        try:
+            with self.assertRaises(asset_door.Refused) as refusal:
+                asset_door.compare(candidate, tracked)
+        finally:
+            asset_door.digest = real_digest
+        findings = refusal.exception.findings
+        self.assertEqual([finding.check.id for finding in findings], ["door.candidate-mismatch"])
+        self.assertIn("changed while it was being compared", findings[0].evidence)
+        return (tracked, findings)
+
+    def test_verify_refuses_a_model_replaced_while_it_was_being_compared(self):
+        """An open handle outlives the pathname it was opened by, so the digest and the answer are
+        about two different moments unless something says otherwise. Another writer landing its own
+        model at the tracked path mid-comparison would leave verify certifying an inode nothing can
+        reach — and that verdict is what pre-push and CI act on."""
+        tracked, _ = self.interrupted("replaced-mid-compare", os.replace)
+        self.assertTrue(os.path.isfile(tracked))
+        self.assertNotEqual(
+            digest(tracked), digest(os.path.join(os.path.dirname(tracked), "candidate-0.bin")),
+            "the case did not replace the tracked model it claims to",
+        )
+
+    def test_the_identity_compared_is_the_handle_the_digest_came_from(self):
+        """The identity the answer is checked against comes off the OPEN FILE, not off the pathname
+        a second time. A replacement landing between the open and that measurement would otherwise
+        have both measurements describing the newcomer while the digest — read through the handle —
+        describes the file that is gone: a certified path whose bytes were never read.
+
+        Driven at that exact window, by standing in for the `fstat` that closes it.
+        """
+        directory, (candidate, other) = self.candidates("replaced-before-the-fstat")
+        tracked = os.path.join(directory, "tracked.glb")
+        shutil.copyfile(candidate, tracked)
+        real_fstat = os.fstat
+
+        def racing(handle):
+            os.fstat = real_fstat        # the window is open once, and this is inside it
+            os.replace(other, tracked)
+            return real_fstat(handle)
+
+        os.fstat = racing
+        try:
+            with self.assertRaises(asset_door.Refused) as refusal:
+                asset_door.compare(candidate, tracked)
+        finally:
+            os.fstat = real_fstat
+        self.assertIn("changed while it was being compared",
+                      refusal.exception.findings[0].evidence)
+
+    def test_verify_refuses_a_model_rewritten_in_place_while_it_was_being_compared(self):
+        """Not every second writer renames. One that writes THROUGH the tracked path leaves the
+        device and inode alone, and only the generation of the content — its size and its
+        modification time — says the bytes are no longer the ones this verdict read."""
+        def rewrite(other, path):
+            with open(other, "rb") as source, open(path, "r+b") as target:
+                target.write(source.read())
+        self.interrupted("rewritten-mid-compare", rewrite)
+
+    def test_the_identity_is_the_file_and_the_generation_of_its_content(self):
+        """Four fields, each load-bearing, so the tuple is stated whole: device and inode name WHICH
+        file — a pathname can be made to mean another one — and size and modification time name
+        which generation of its content, for the writer that goes through the path instead of
+        around it. A field dropped from it is a class of replacement nothing would see."""
+        class Stat:
+            st_dev, st_ino, st_size, st_mtime_ns = 11, 22, 33, 44
+            st_ctime_ns, st_mode, st_uid = 55, 66, 77
+
+        self.assertEqual(asset_door.identity(Stat()), (11, 22, 33, 44))
+
+    def test_verify_refuses_a_model_taken_away_while_it_was_being_compared(self):
+        """The same precondition, fail-closed: a path that cannot be stated at all is not one this
+        verdict can describe either, and an unlinked tracked model is exactly that."""
+        tracked, findings = self.interrupted(
+            "removed-mid-compare", lambda _other, path: os.remove(path)
+        )
+        self.assertFalse(os.path.exists(tracked))
+        self.assertIn("No such file", findings[0].evidence)
+
     def test_a_tracked_model_that_cannot_be_read_is_a_finding_not_a_traceback(self):
         """Existence and readability are one question here, asked once, by opening the file. Asked
         as two — does it exist, then open it — the answers are about two different moments, and the
