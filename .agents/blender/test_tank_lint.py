@@ -1884,38 +1884,19 @@ def an_unpinned_exporter_refuses_before_the_source_pass_runs():
 # ── the report shape ─────────────────────────────────────────────────────────────────────────────
 
 @case
-def report_sorts_errors_before_warnings_and_renders_both_ways():
+def the_pass_returns_a_report_already_in_its_declared_order():
+    """The seam this suite owns: `lint` sorts before it returns, so the console, the JSON and a GUI
+    popup read the same rows in the same order whatever order the checks discovered them in. WHAT
+    that order is, what each rendering holds, and what the exit code means are the shape's own
+    contract and are fenced in `scripts/tank/test_report.py`, which needs no Blender."""
     scene = clean_scene()
     bpy.data.objects["Turret"].scale = (2.0, 2.0, 2.0)          # warning
     bpy.data.objects["Hull"].modifiers.new(name="Bevel", type="BEVEL")  # error
     findings = export_tank.lint(source_of(scene))
-    severities = [finding.check.severity for finding in findings]
-    assert severities == sorted(severities), "the report is not in severity order: {}".format(
-        [severity.label for severity in severities]
+    assert findings == report.sorted_findings(list(reversed(findings))), (
+        "the pass returned {}".format([finding.check.id for finding in findings])
     )
     assert_exit(findings, 1)
-
-    rendered = json.loads(report.render_json(findings))["findings"]
-    assert [row["check"] for row in rendered] == [finding.check.id for finding in findings], (
-        "the JSON rendering holds different rows in a different order than the text one"
-    )
-    text = report.render_text(findings)
-    for finding in findings:
-        assert finding.check.law in text and finding.repair in text, (
-            "{} lost its law or repair in the text rendering".format(finding.check.id)
-        )
-
-
-@case
-def report_sort_is_independent_of_discovery_order():
-    scene = clean_scene()
-    bpy.data.objects["Turret"].scale = (2.0, 2.0, 2.0)
-    bpy.data.objects["Hull"].modifiers.new(name="Bevel", type="BEVEL")
-    findings = export_tank.lint(source_of(scene))
-    shuffled = report.sorted_findings(list(reversed(findings)))
-    assert shuffled == findings, "the sort does not settle: {} vs {}".format(
-        [finding.check.id for finding in shuffled], [finding.check.id for finding in findings]
-    )
 
 
 # ── runner ───────────────────────────────────────────────────────────────────────────────────────
