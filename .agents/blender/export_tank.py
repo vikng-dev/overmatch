@@ -10,10 +10,16 @@ Run by the outer wrapper, never by hand:
       --canon <canon.json>
 
 `lint` runs the L1 source pass over the open blend and prints one report. `export` and `verify`
-run the derivation chain; until that chain lands they refuse with `door.mode-unimplemented`.
+run the same pass and, when it holds no error, write the raw candidate the rest of the chain reads
+— the consumer contract, the texture bake and the comparison are the wrapper's phases, because
+Blender's embedded interpreter is not where a Rust CLI or a minute-long encoder belongs.
 
 The canon file is the wrapper's job to produce, with `asset_verify --canon`; two of the laws are
 stated in canonical Rust lists and refuse mechanically without it.
+
+`door.unresolved-library` precedes every mode and every check: Blender replaces a datablock whose
+library it cannot read with a placeholder carrying that datablock's name, so a blend with an
+unresolved link is not the stored model and there is nothing here worth measuring.
 
 EXPORT-BOUND means every object in the active scene, because the exporter is invoked with
 active-scene scope. Other workbench scenes in the same blend are outside the door.
@@ -62,6 +68,54 @@ MODE_UNIMPLEMENTED = Check(
     severity=Severity.ERROR,
     law="the requested door mode runs its whole chain",
 )
+
+UNRESOLVED_LIBRARY = Check(
+    id="door.unresolved-library",
+    stage=Stage.DOOR,
+    severity=Severity.ERROR,
+    law="every library this blend links resolves, and every linked datablock is the library's own",
+)
+
+
+def check_unresolved_library() -> List[Finding]:
+    """The door's precondition, ahead of every mode and every check.
+
+    Blender substitutes a PLACEHOLDER for a datablock whose library it cannot read, and a
+    placeholder satisfies the identity laws: it carries the name and the library filepath of the
+    datablock that is not there. So a blend with an unresolved link is not the stored model, and
+    measuring it certifies a substitute — the substance census, `L1.SUBSTANCE_IDENTITY` and the
+    exported material assignments would all read as if the library were present.
+
+    `ID.is_missing` is the placeholder flag; `Library.users_id` is every datablock that came (or
+    should have come) out of one library.
+    """
+    findings = []
+    for library in bpy.data.libraries:
+        path = os.path.abspath(bpy.path.abspath(library.filepath))
+        placeholders = sorted(
+            "{} `{}`".format(type(datablock).__name__, datablock.name)
+            for datablock in library.users_id
+            if getattr(datablock, "is_missing", False)
+        )
+        readable = os.path.isfile(path)
+        if readable and not placeholders:
+            continue
+        held = "{} placeholder datablock(s): {}".format(
+            len(placeholders), ", ".join(placeholders)
+        ) if placeholders else "no placeholder datablock, and the file is not readable"
+        findings.append(Finding(
+            UNRESOLVED_LIBRARY,
+            Subject(SubjectKind.FILE, library.filepath, "linked library"),
+            "{} — {}".format(
+                "resolves to {}, which is not a readable file".format(path) if not readable
+                else "resolves to {}".format(path),
+                held,
+            ),
+            "restore the library at {} (or relink the datablocks to where it stands) and reopen the "
+            "blend — Blender replaces a datablock it cannot read with a placeholder that carries "
+            "its name, so what is open is not the stored model".format(path),
+        ))
+    return findings
 
 
 # ── the canon file ───────────────────────────────────────────────────────────────────────────────
@@ -1555,20 +1609,81 @@ def lint(source: Source) -> List[Finding]:
 
 # ── the modes ────────────────────────────────────────────────────────────────────────────────────
 
+RAW_EXPORT = Check(
+    id="door.raw-export",
+    stage=Stage.DOOR,
+    severity=Severity.ERROR,
+    law="the exporter writes the raw candidate the rest of the chain reads",
+)
+
+#: The exporter's whole argument list, frozen: any other argument changes the asset.
+#:
+#: `export_animations=False` is defence against the exporter's own default and never a substitute
+#: for `L1.ANIMATION`. `use_active_scene=True` is what makes EXPORT-BOUND mean what the source pass
+#: measured — without it the exporter writes every scene in the file, workbench scenes included.
+EXPORT_SETTINGS = {
+    "export_format": "GLB",
+    "export_tangents": True,
+    "export_animations": False,
+    "use_active_scene": True,
+}
+
+
+def export_raw(path: str) -> List[Finding]:
+    """Write the raw, mipless candidate to `path`. Nothing is repaired, reduced or replayed on the
+    way out: the exported bytes are what the blend holds."""
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    try:
+        result = bpy.ops.export_scene.gltf(filepath=path, **EXPORT_SETTINGS)
+    except RuntimeError as error:
+        result = str(error)
+    if result == {"FINISHED"} and os.path.isfile(path):
+        print("raw   ▸ {} — {:.1f} MB (mipless, temporary)".format(
+            path, os.path.getsize(path) / 1e6
+        ), flush=True)
+        return []
+    return [Finding(
+        RAW_EXPORT,
+        Subject(SubjectKind.FILE, path),
+        "export_scene.gltf returned {} and {} the file".format(
+            result, "wrote" if os.path.isfile(path) else "did not write"
+        ),
+        "read the exporter's own error above — the tracked glb is untouched, and the chain stops "
+        "at the candidate it could not write",
+    )]
+
+
 def unimplemented(mode: str) -> List[Finding]:
-    """`export` and `verify` refuse mechanically until the derivation chain lands behind them."""
+    """A mode with no chain behind it refuses mechanically rather than passing silently."""
     return [Finding(
         MODE_UNIMPLEMENTED,
         Subject(SubjectKind.DOOR, mode),
         "mode `{}` has no chain behind it in this door".format(mode),
-        "run `--mode lint`, and export through the existing exporter until the generic door lands",
+        "run `--mode lint`, or invoke the door through scripts/tank/asset_door.py, which passes "
+        "the candidate path every other mode writes to",
     )]
 
 
-def run(mode: str, canon: Optional[str] = None) -> List[Finding]:
+def run(mode: str, canon: Optional[str] = None, raw: Optional[str] = None) -> List[Finding]:
+    """The Blender half of one mode: the precondition, the source pass, and — for the two modes
+    with a chain behind them — the raw candidate.
+
+    An L1 ERROR stops before the export: a candidate cut from a refused source is a file nobody may
+    consume, and writing one invites it being picked up. Warnings do not stop anything.
+    """
+    unresolved = check_unresolved_library()
+    if unresolved:
+        return report.sorted_findings(unresolved)
+    findings = lint(Source.live(canon_path=canon))
     if mode == "lint":
-        return lint(Source.live(canon_path=canon))
-    return unimplemented(mode)
+        return findings
+    if report.has_error(findings):
+        return findings
+    if not raw:
+        return report.sorted_findings(findings + unimplemented(mode))
+    return report.sorted_findings(findings + export_raw(raw))
 
 
 def _parse(argv: Optional[List[str]] = None):
@@ -1585,6 +1700,9 @@ def _parse(argv: Optional[List[str]] = None):
     parser.add_argument("--canon", help="the canon file `{}` writes: the canonical node-reference "
                                         "list and substance keys L1.SPEC_REFERENCES and "
                                         "L1.SUBSTANCE_IDENTITY are stated in".format(CANON_COMMAND))
+    parser.add_argument("--raw", help="where export and verify write the raw candidate — the "
+                                      "wrapper's temporary file, never the tracked glb, which only "
+                                      "a chain that passed every stage may replace")
     parser.add_argument("--census-json", action="store_true",
                         help="print this blend's source census as one tagged JSON line and exit; "
                              "how L1.SOURCE_CENSUS reads the previous committed blend through this "
@@ -1598,7 +1716,7 @@ def main() -> int:
         print("{}{}".format(CENSUS_SENTINEL, json.dumps(census(Source.live()), sort_keys=True)),
               flush=True)
         return 0
-    findings = run(arguments.mode, arguments.canon)
+    findings = run(arguments.mode, arguments.canon, arguments.raw)
     print(report.render_text(findings), end="", flush=True)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)

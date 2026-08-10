@@ -18,6 +18,7 @@ import io
 import json
 import math
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1073,14 +1074,66 @@ def source_census_without_the_lfs_object():
 
 # ── the door's own modes ─────────────────────────────────────────────────────────────────────────
 
+def glb_json(path):
+    """The JSON chunk of a glb, as a dict."""
+    with open(path, "rb") as handle:
+        magic, _version, _total = struct.unpack("<4sII", handle.read(12))
+        assert magic == b"glTF", "{} is not a glb".format(path)
+        length, kind = struct.unpack("<II", handle.read(8))
+        assert kind == 0x4E4F534A, "{} does not start with a JSON chunk".format(path)
+        return json.loads(handle.read(length))
+
+
 @case
-def unimplemented_modes_refuse_by_name():
-    for mode in ("export", "verify"):
-        findings = export_tank.run(mode)
-        assert len(findings) == 1, "{} reported {} findings".format(mode, len(findings))
-        assert_fires(findings, "door.mode-unimplemented", Severity.ERROR)
-        assert findings[0].subject.name == mode
-        assert_exit(findings, 1)
+def an_l1_error_stops_before_the_raw_export():
+    """A candidate cut from a refused source is a file nobody may consume, so it is never written."""
+    clean_scene()
+    bpy.data.objects["Hull"].modifiers.new(name="Bevel", type="BEVEL")
+    path = os.path.join(_WORK, "raw-never-written.glb")
+    findings = export_tank.run("export", raw=path)
+    assert_fires(findings, "L1.MODIFIER_STACK", Severity.ERROR)
+    assert not os.path.exists(path), "the exporter ran on a source the pass refused"
+    assert_exit(findings, 1)
+
+
+@case
+def the_raw_export_writes_the_active_scene_only():
+    """`use_active_scene=True` is what makes EXPORT-BOUND mean what the source pass measured: a
+    workbench scene in the same file is outside the door and outside the bytes."""
+    clean_scene()
+    workbench = bpy.data.scenes.new("Workbench")
+    workbench.collection.objects.link(bpy.data.objects.new("Jig", triangle_mesh("Jig")))
+    path = os.path.join(_WORK, "raw-active-scene.glb")
+    assert not export_tank.export_raw(path), "the clean fixture failed to export"
+    names = {node.get("name") for node in glb_json(path).get("nodes", [])}
+    assert "Hull" in names, "the exported document does not hold the active scene: {}".format(names)
+    assert "Jig" not in names, "a workbench scene reached the candidate: {}".format(names)
+
+
+@case
+def the_raw_export_writes_no_animation():
+    """The exporter animates by default. The explicit argument is defence against that default,
+    beside — never instead of — L1.ANIMATION."""
+    clean_scene()
+    turret = bpy.data.objects["Turret"]
+    # Through the keying path, not `actions.new`: 5.1's slotted actions hold no fcurves of their own.
+    turret.keyframe_insert("location", frame=1)
+    turret.location[0] = 1.0
+    turret.keyframe_insert("location", frame=8)
+    assert turret.animation_data.action is not None, "the fixture animated nothing"
+    path = os.path.join(_WORK, "raw-no-animation.glb")
+    assert not export_tank.export_raw(path), "the fixture failed to export"
+    assert "animations" not in glb_json(path), "the candidate carries an animation clip"
+
+
+@case
+def a_resolved_library_is_not_an_unresolved_one():
+    """The precondition measures placeholders, not links: a library that loaded is silent. The
+    firing case needs a saved blend reopened without its library, and lives in the door's own
+    end-to-end test."""
+    write_material_library("RHA")
+    plated("RHA")
+    assert not export_tank.check_unresolved_library(), "a resolved library read as unresolved"
 
 
 @case
