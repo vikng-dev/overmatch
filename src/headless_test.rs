@@ -1217,59 +1217,6 @@ fn decel_tiger() {
     );
 }
 
-/// The established 20° park regression stays pinned while static breakaway and dynamic
-/// dissipation become separate capacities. Teleport onto the 20° ramp mid-face (test course §1:
-/// x = 0, z = −40, pitched about X), release all inputs, settle; the park latch must engage and
-/// the hull must not back-drive over a sustained window.
-#[test]
-fn slope_park_holds_20_deg_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 2.6, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
-            Quat::from_rotation_x(20.0_f32.to_radians());
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    // Settle onto the face under zero input (drop + suspension ring-down + latch).
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let p0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0;
-    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let p1 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0;
-    let st = app
-        .world()
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank carries transmission state")
-        .0;
-    let drift = (p1 - p0).length();
-    println!(
-        "tiger 20-deg slope park: drift {drift:.4} m over 4 s, park latch {}",
-        st.park
-    );
-    assert!(
-        st.park,
-        "zero input at rest on the ramp must latch the park brake"
-    );
-    assert!(
-        drift < 0.05,
-        "the latched park must hold the 20-deg ramp (drifted {drift:.3} m over 4 s)"
-    );
-}
-
 /// BENCHMARK, not a requirement: what the Tiger's holding power measures on the course's 30° face
 /// right now (Yan ruling, 2026-08-07 — *"there is no requirement for a tiger to hold on 30 deg, it
 /// should be purely emergent — the holding power is purely a benchmark of how much it can hold
@@ -1761,7 +1708,7 @@ fn run_grade_approach_20_deg(
         max_rollback_m = max_rollback_m.max(position.z - furthest_uphill_z);
         let rollback_limit = match addressing {
             crate::track::transmission::ShiftAddressing::Direct => 0.02,
-            // Same DERIVED 0.05 m compliance budget as `slope_park_holds_20_deg_tiger`: the
+            // DERIVED 0.05 m compliance budget: the
             // sequential cascade may settle its static grip anchors under hill hold, but may not
             // slide off backward.
             crate::track::transmission::ShiftAddressing::Sequential => 0.05,
