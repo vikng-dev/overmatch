@@ -156,14 +156,24 @@ def painted(name, directory):
 
 
 def write_library(path):
-    """The canonical material library: one datablock per substance, at the path the source pass
-    identifies a substance by."""
+    """The canonical material library, BOTH halves: one datablock per substance at the path the
+    source pass identifies a substance by, and the registry the door hands the consumer contract as
+    `--registry` beside it.
+
+    The registry is THIS repository's copy rather than numbers of the fixture's own: the substances
+    the wheels wear are real registry keys, and a fixture with its own vocabulary would be testing
+    one nothing else uses.
+    """
     purge()
     donors = {bpy.data.materials.new(name) for name in SUBSTANCES}
     for material in donors:
         assert material.name in SUBSTANCES, "the donor was renamed to {}".format(material.name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     bpy.data.libraries.write(path, donors, fake_user=True)
+    shutil.copyfile(
+        os.path.join(_REPO, "assets", "materials", "materials.ron"),
+        os.path.join(os.path.dirname(path), "materials.ron"),
+    )
     return path
 
 
@@ -209,14 +219,6 @@ def main():
 
     library = write_library(
         os.path.join(arguments.dir, "assets", "materials", "materials.blend")
-    )
-    # The numeric half of the same library, and the fixture takes THIS repository's copy rather
-    # than inventing numbers: the substances the wheels wear are real registry keys, and the door
-    # hands the contract this file as `--registry`. A fixture with its own registry would be
-    # testing a vocabulary nothing else uses.
-    shutil.copyfile(
-        os.path.join(_REPO, "assets", "materials", "materials.ron"),
-        os.path.join(arguments.dir, "assets", "materials", "materials.ron"),
     )
     directory = os.path.join(arguments.dir, "assets", "testbed")
     os.makedirs(directory, exist_ok=True)
