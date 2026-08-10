@@ -1525,9 +1525,14 @@ def check_texture_source(source: Source) -> List[Finding]:
             if material is None:
                 continue
             for node, context in _image_textures(material):
-                if (material.name, node.name) in seen:
+                # By DATABLOCK, never by name: Blender numbers a node's name inside its own tree
+                # only, so two materials — a counterfeit beside the datablock it imitates, say —
+                # ordinarily both hold an `Image Texture` and one name key would check one of them.
+                # The same node reached through two objects is still one node, which is what this
+                # skips.
+                if node.as_pointer() in seen:
                     continue
-                seen.add((material.name, node.name))
+                seen.add(node.as_pointer())
                 subject = Subject(
                     SubjectKind.MATERIAL, material.name,
                     "{}texture `{}`".format(_group_path(context), node.name),

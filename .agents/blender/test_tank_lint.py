@@ -252,6 +252,43 @@ def muted_material(name, layer="UVMap", muted=True):
     return material
 
 
+def nested_material(name):
+    """ONE material holding two Image Texture nodes in two different node trees — where Blender
+    names them the SAME thing, because it numbers a name inside its own tree only. The outer one is
+    sound; the inner one holds no image."""
+    material, tree, shader = surface(name)
+    outer = tree.nodes.new("ShaderNodeTexImage")
+    outer.image = stored_image(name + "_outer")
+    tree.links.new(outer.outputs["Color"], shader.inputs["Base Color"])
+
+    group = bpy.data.node_groups.new(name + "_Group", "ShaderNodeTree")
+    group.interface.new_socket("Fac", in_out="OUTPUT", socket_type="NodeSocketFloat")
+    inner_out = group.nodes.new("NodeGroupOutput")
+    inner = group.nodes.new("ShaderNodeTexImage")
+    group.links.new(inner.outputs["Color"], inner_out.inputs["Fac"])
+    node = tree.nodes.new("ShaderNodeGroup")
+    node.node_tree = group
+    tree.links.new(node.outputs["Fac"], shader.inputs["Roughness"])
+    assert outer.name == inner.name, "the fixture's two texture nodes are called {} and {}".format(
+        outer.name, inner.name
+    )
+    return material
+
+
+def write_textured_library(name, path=None):
+    """A library blend holding one material that SAMPLES a texture, so a linked material and a
+    local one of the same name each carry a node tree with an identically named node in it."""
+    path = path or os.path.join(_WORK, "library-textured-{}.blend".format(name))
+    purge()
+    material, tree, shader = surface(name)
+    assert material.name == name, "the donor was renamed to {}".format(material.name)
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = stored_image(name + "_library")
+    tree.links.new(texture.outputs["Color"], shader.inputs["Base Color"])
+    bpy.data.libraries.write(path, {material}, fake_user=True)
+    return path
+
+
 def hull_wearing(build, unwrapped=True):
     """The clean tank with its hull unwrapped and wearing the material `build(name)` makes — what
     the sampled-UV laws need in front of them before they measure anything at all."""
@@ -1308,6 +1345,46 @@ def texture_source_node_holding_no_image():
         if node.type == "TEX_IMAGE":
             node.image = None
     assert_fires(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE", Severity.ERROR)
+
+
+@case
+def texture_source_reads_two_same_named_nodes_in_one_material():
+    """A name is unique inside its own node tree and nowhere else. Two textures called `Image
+    Texture` in one material's two trees are two textures, and the second one is where the defect
+    is."""
+    scene = hull_wearing(nested_material)
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.TEXTURE_SOURCE")
+    assert len(hits) == 1 and "holds no image" in hits[0].evidence, [
+        (finding.subject.element, finding.evidence) for finding in hits
+    ]
+    assert "group `Painted_Group`" in hits[0].subject.element, hits[0].subject
+
+
+@case
+def texture_source_reads_two_same_named_nodes_in_two_same_named_materials():
+    """A material name is unique inside its own library and nowhere else — the counterfeit case the
+    substance law is built on — so two materials called `Painted` each hold their own `Image
+    Texture`, and the sound one must not answer for the broken one."""
+    library = write_textured_library("Painted")
+    scene = clean_scene()
+    linked = link_material("Painted", path=library)
+    bpy.data.meshes["Hull"].materials[0] = linked
+    local, tree, shader = surface("Painted")
+    assert local.name == "Painted", "the fixture's local material is {}".format(local.name)
+    broken = tree.nodes.new("ShaderNodeTexImage")
+    tree.links.new(broken.outputs["Color"], shader.inputs["Base Color"])
+    bpy.data.meshes["Turret"].materials.append(local)
+    assert broken.name in {node.name for node in linked.node_tree.nodes}, (
+        "the fixture's two texture nodes do not share a name"
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.TEXTURE_SOURCE")
+    assert len(hits) == 1 and "holds no image" in hits[0].evidence, [
+        (finding.subject.element, finding.evidence) for finding in hits
+    ]
 
 
 # ── L1.SOURCE_CENSUS ─────────────────────────────────────────────────────────────────────────────
