@@ -1138,12 +1138,10 @@ def census(source: Source) -> dict:
     """The source census: what this blend holds, counted.
 
     A primitive is one material slot a mesh's polygons reference — what the exporter splits a mesh
-    into and what the consumer binds. CONSTRAINT: a primitive's substance is taken to be its
-    material NAME, and an object is counted ballistic when it carries any material at all. Exact
-    registry membership is `L1.SUBSTANCE_IDENTITY`'s, which reads the canonical key list through the
-    Rust CLI; until that lands, these rows over-count — a collider or visual-only material appears
-    here as a substance. That is tolerable because the census is INFO and no count in it is ever a
-    verdict.
+    into and what the consumer binds. CONSTRAINT: a primitive is a SUBSTANCE primitive when its
+    material is library-linked, and an object is ballistic when it carries one — the same mechanism
+    `L1.SUBSTANCE_IDENTITY` holds exactly, membership through the link to the canonical library.
+    The census does not read the registry key list: it is INFO, and no count in it is a verdict.
     """
     meshes = set()
     primitives = 0
@@ -1155,11 +1153,12 @@ def census(source: Source) -> dict:
         meshes.add(obj.data.name)
         used = _used_materials(obj)
         primitives += len(used)
-        if any(material is not None for material in used.values()):
+        linked = [material for material in used.values()
+                  if material is not None and material.library is not None]
+        if linked:
             ballistic += 1
-        for material in used.values():
-            if material is not None:
-                substances[material.name] += 1
+        for material in linked:
+            substances[material.name] += 1
     return {
         "objects": len(source.objects),
         "meshes": len(meshes),

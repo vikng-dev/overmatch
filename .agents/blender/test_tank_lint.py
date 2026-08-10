@@ -219,6 +219,37 @@ def link_object(path, name):
     return linked
 
 
+#: The one path the canonical material library is identified by, built where a repository would hold
+#: it. Nothing under the real `assets/` is read: the laws measure the path relationship, so a
+#: fixture library standing at the same relationship IS the canonical library to them.
+MATERIAL_LIBRARY = os.path.join(_WORK, "assets", "materials", "materials.blend")
+
+
+def write_material_library(*names, path=MATERIAL_LIBRARY):
+    """Write a library blend holding one material per name. Purges first, for `write_library`'s
+    reason: a local datablock already holding the name would push the donor to `.001`."""
+    purge()
+    donors = set()
+    for name in names:
+        material = bpy.data.materials.new(name)
+        assert material.name == name, "the donor was renamed to {}".format(material.name)
+        donors.add(material)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    bpy.data.libraries.write(path, donors, fake_user=True)
+    return path
+
+
+def link_material(name, path=MATERIAL_LIBRARY):
+    """Link one material out of a library blend. A linked material's name is read-only, which is
+    exactly the identity the substance law rests on."""
+    with bpy.data.libraries.load(path, link=True) as (_source, target):
+        target.materials = [name]
+    linked = target.materials[0]
+    assert linked is not None, "{} does not hold materials[{}]".format(path, name)
+    assert linked.library is not None, "{} came back local".format(name)
+    return linked
+
+
 # ── assertions ───────────────────────────────────────────────────────────────────────────────────
 
 def of(findings, check_id):
@@ -781,7 +812,10 @@ def texture_source_node_holding_no_image():
 @case
 def source_census_counts_the_live_source():
     """A primitive is a material slot the polygons reference, not an object and not a mesh — so the
-    fixture makes the three counts disagree, and one hull wears two substances."""
+    fixture makes the three counts disagree. A SUBSTANCE primitive is one wearing a library-linked
+    material, so the hull's local `Steel` is a primitive that is not a substance, and the object is
+    ballistic through the linked plate alone."""
+    write_material_library("RHA")
     scene = clean_scene()
     mesh = reshape(
         "Hull",
@@ -789,14 +823,14 @@ def source_census_counts_the_live_source():
                    (2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (2.0, 1.0, 0.0)),
         faces=((0, 1, 2), (3, 4, 5)),
     )
-    mesh.materials.append(bpy.data.materials.new("Zimmerit"))
+    mesh.materials.append(link_material("RHA"))
     mesh.polygons[1].material_index = 1
     rows = census_rows(export_tank.lint(source_of(scene)))
     assert rows["objects"] == "3" and rows["meshes"] == "2", rows
     assert rows["primitives"] == "3", rows
     assert rows["ballistic objects"] == "1", rows
-    assert rows["substance `Steel`"] == "1 primitive(s)", rows
-    assert rows["substance `Zimmerit`"] == "1 primitive(s)", rows
+    assert rows["substance `RHA`"] == "1 primitive(s)", rows
+    assert "substance `Steel`" not in rows, "a local material was counted as a substance: {}".format(rows)
 
 
 @case
@@ -812,7 +846,9 @@ def source_census_without_a_baseline_is_neither_pass_nor_fail():
 
 @case
 def source_census_against_the_previous_commit():
+    write_material_library("RHA")
     scene = clean_scene()
+    bpy.data.meshes["Hull"].materials[0] = link_material("RHA")
     path = commit_blend("census")
     rows = census_rows(export_tank.lint(source_of(scene, filepath=path)))
     assert rows["baseline"].startswith("compared against"), rows["baseline"]
@@ -823,7 +859,7 @@ def source_census_against_the_previous_commit():
     rows = census_rows(findings)
     assert rows["objects"] == "4 (baseline 3, +1)", rows["objects"]
     assert rows["meshes"] == "3 (baseline 2, +1)", rows["meshes"]
-    assert rows["substance `Steel`"] == "1 (baseline 1, +0) primitive(s)", rows
+    assert rows["substance `RHA`"] == "1 (baseline 1, +0) primitive(s)", rows
     assert_exit(findings, 0)
 
 
