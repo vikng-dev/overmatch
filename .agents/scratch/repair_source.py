@@ -1,7 +1,11 @@
 """repair_source.py — fix the two defects in `assets/tiger_1/tiger_1.blend` AT THE SOURCE.
 
-    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py
-    blender -b assets/tiger_1/tiger_1.blend -P .agents/blender/repair_source.py -- --dry-run
+DONE, AND KEPT AS THE RECORD OF IT. This ran once, against one blend, and the repair it describes
+is in the committed source. It is not part of the standing door — nothing invokes it, and the door
+never edits a model — so it lives here in scratch rather than beside the source pass.
+
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/scratch/repair_source.py
+    blender -b assets/tiger_1/tiger_1.blend -P .agents/scratch/repair_source.py -- --dry-run
 
 THIS SCRIPT SAVES THE .BLEND, once, explicitly, after every check below has passed. The door never
 edits a model: `scripts/tank/asset_door.py` opens the stored file read-only and exports what it
