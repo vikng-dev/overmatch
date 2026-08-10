@@ -64,11 +64,14 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 
 # Whether the changed set touches the surface EVERY asset's verdict is computed from: the shared
 # material library, the pinned toolchain, the source pass, the door, the finding shape, the encoder,
-# the derivation verifier, and the Rust consumer contract with the two modules it certifies against.
-# Any of those moving means the door now answers differently about bytes that did not move, so every
-# discovered trio is re-verified rather than none of them.
+# the derivation verifier, and the Rust consumer contract with the three modules it certifies
+# against. `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what
+# the shared material data means to the gate and hands the canon file its key list, so it moves
+# every asset's verdict exactly as `assets/materials/` does. Any of those moving means the door now
+# answers differently about bytes that did not move, so every discovered trio is re-verified rather
+# than none of them.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact))'
+    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances))'
 }
 
 # EVERY (revision, asset) pair a push must verify, one per line:
