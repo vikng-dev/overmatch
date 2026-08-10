@@ -76,7 +76,7 @@ def purge():
         if scene is not bpy.context.window.scene:
             bpy.data.scenes.remove(scene)
     for collection in (
-        bpy.data.objects, bpy.data.meshes, bpy.data.materials,
+        bpy.data.objects, bpy.data.meshes, bpy.data.materials, bpy.data.node_groups,
         bpy.data.actions, bpy.data.armatures, bpy.data.images,
     ):
         for datablock in list(collection):
@@ -149,15 +149,123 @@ def textured_material(name, uv_map=None, coordinate=None):
     return material
 
 
-def sampled_hull(unwrapped=True, **material):
-    """The clean tank with its hull unwrapped and wearing a texture-sampling material — what the
-    sampled-UV laws need in front of them before they measure anything at all."""
+def surface(name):
+    """A material's own Material Output and Principled BSDF, cleared of Blender's defaults. Returns
+    `(material, tree, shader)` — where every fixture below hangs a texture."""
+    material = bpy.data.materials.new(name)
+    tree = material.node_tree
+    tree.nodes.clear()
+    output = tree.nodes.new("ShaderNodeOutputMaterial")
+    shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
+    tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
+    return (material, tree, shader)
+
+
+def group_material(name, layer=None, spare=None, decoy_output=False):
+    """A material whose texture lives inside a node GROUP, driven from outside through the group's
+    own input socket — the shape a walk that stops at Group Input misreads.
+
+    NOTHING here is in the first interface slot: the used input and the read output are both
+    declared SECOND, so a walk matching sockets positionally instead of by identifier crosses the
+    interface into the wrong one.
+
+    `spare` adds a second group output carrying a second texture and connects it to nothing
+    outside; its value is the image that texture holds, `False` meaning the broken one nothing
+    reads. `decoy_output` adds an inactive Group Output node, which Blender does not evaluate.
+    """
+    material, tree, shader = surface(name)
+
+    group = bpy.data.node_groups.new(name + "_Group", "ShaderNodeTree")
+    group.interface.new_socket("Unused", in_out="INPUT", socket_type="NodeSocketVector")
+    group.interface.new_socket("Vec", in_out="INPUT", socket_type="NodeSocketVector")
+    if spare is not None:
+        group.interface.new_socket("Spare", in_out="OUTPUT", socket_type="NodeSocketColor")
+    group.interface.new_socket("Colour", in_out="OUTPUT", socket_type="NodeSocketColor")
+    inner_in = group.nodes.new("NodeGroupInput")
+    if decoy_output:
+        stale = group.nodes.new("NodeGroupOutput")
+        ignored = group.nodes.new("ShaderNodeTexImage")
+        group.links.new(ignored.outputs["Color"], stale.inputs["Colour"])
+    inner_out = group.nodes.new("NodeGroupOutput")
+    if decoy_output:
+        # Blender keeps the FIRST output node active (measured, 5.1.2), so the flag is moved by
+        # hand — the point of the fixture is that the active one is not the first one in the tree.
+        stale.is_active_output = False
+        inner_out.is_active_output = True
+        assert inner_out.is_active_output and not stale.is_active_output, (
+            "the fixture's decoy Group Output is the active one"
+        )
+    reached = group.nodes.new("ShaderNodeTexImage")
+    reached.image = stored_image(name + "_inner")
+    group.links.new(inner_in.outputs["Vec"], reached.inputs["Vector"])
+    group.links.new(reached.outputs["Color"], inner_out.inputs["Colour"])
+    if spare is not None:
+        stray = group.nodes.new("ShaderNodeTexImage")
+        stray.image = stored_image(name + "_stray") if spare else None
+        group.links.new(stray.outputs["Color"], inner_out.inputs["Spare"])
+
+    node = tree.nodes.new("ShaderNodeGroup")
+    node.node_tree = group
+    tree.links.new(node.outputs["Colour"], shader.inputs["Base Color"])
+    if layer is not None:
+        uv = tree.nodes.new("ShaderNodeUVMap")
+        uv.uv_map = layer
+        tree.links.new(uv.outputs["UV"], node.inputs["Vec"])
+    return material
+
+
+def chained_material(name, hops, layer=None, coordinate=None):
+    """A texture driven through `hops` Mapping nodes. Every hop is a coordinate transform and none
+    of them is a coordinate SOURCE, so the answer is whatever stands at the far end."""
+    material, tree, shader = surface(name)
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = stored_image(name)
+    tree.links.new(texture.outputs["Color"], shader.inputs["Base Color"])
+    socket = texture.inputs["Vector"]
+    for _hop in range(hops):
+        mapping = tree.nodes.new("ShaderNodeMapping")
+        tree.links.new(mapping.outputs["Vector"], socket)
+        socket = mapping.inputs["Vector"]
+    if layer is not None:
+        uv = tree.nodes.new("ShaderNodeUVMap")
+        uv.uv_map = layer
+        tree.links.new(uv.outputs["UV"], socket)
+    elif coordinate is not None:
+        tree.links.new(tree.nodes.new("ShaderNodeTexCoord").outputs[coordinate], socket)
+    return material
+
+
+def muted_material(name, layer="UVMap", muted=True):
+    """A Vector Math node between the UV Map and the texture. It is not a coordinate the door can
+    carry, so the same graph is a UV source or a refusal on one flag: Blender evaluates a MUTED
+    node through its internal link and skips what it does."""
+    material, tree, shader = surface(name)
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = stored_image(name)
+    tree.links.new(texture.outputs["Color"], shader.inputs["Base Color"])
+    maths = tree.nodes.new("ShaderNodeVectorMath")
+    maths.mute = muted
+    uv = tree.nodes.new("ShaderNodeUVMap")
+    uv.uv_map = layer
+    tree.links.new(uv.outputs["UV"], maths.inputs[0])
+    tree.links.new(maths.outputs["Vector"], texture.inputs["Vector"])
+    return material
+
+
+def hull_wearing(build, unwrapped=True):
+    """The clean tank with its hull unwrapped and wearing the material `build(name)` makes — what
+    the sampled-UV laws need in front of them before they measure anything at all."""
     scene = clean_scene()
     mesh = bpy.data.meshes["Hull"]
     if unwrapped:
         unwrap(mesh)
-    mesh.materials[0] = textured_material("Painted", **material)
+    mesh.materials[0] = build("Painted")
     return scene
+
+
+def sampled_hull(unwrapped=True, **material):
+    """The clean tank wearing one flat texture-sampling material."""
+    return hull_wearing(lambda name: textured_material(name, **material), unwrapped=unwrapped)
 
 
 def git(directory, *arguments):
@@ -891,6 +999,100 @@ def texture_uv_source_no_uv_layer_at_all():
     assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
 
 
+# ── the graph walk the four texture laws share ───────────────────────────────────────────────────
+
+@case
+def texture_uv_source_leaves_a_group_through_the_socket_it_was_entered_by():
+    """The texture is inside a group and its UV Map node is outside it. A walk that stops at Group
+    Input calls this a coordinate it cannot carry; Blender carries it, because the group node's
+    input socket and the Group Input node's output socket are one socket seen from two sides."""
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap"))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_UV_SOURCE")
+
+
+@case
+def texture_uv_source_reads_a_group_texture_naming_a_layer_the_mesh_lacks():
+    """The same graph, one layer name changed — so the group is entered, left, and the answer is
+    the UV Map node's, not the interface's."""
+    scene = hull_wearing(lambda name: group_material(name, layer="Decals"))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    hits = of(findings, "L1.TEXTURE_UV_SOURCE")
+    assert len(hits) == 1, [finding.subject.element for finding in hits]
+    assert "layer `Decals`" in hits[0].evidence, hits[0].evidence
+    assert "group `Painted_Group`" in hits[0].subject.element, hits[0].subject
+
+
+@case
+def texture_source_ignores_a_group_output_the_surface_does_not_read():
+    """A group's SECOND output, connected to nothing outside, carries its texture into no material.
+    A walk that queues every Group Output reports a defect in geometry the exporter never writes."""
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap", spare=False))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE")
+
+
+@case
+def texture_source_reads_the_group_output_the_surface_does_read():
+    """The same group with the reached texture broken instead — so the fixture above proves scope
+    and not blindness."""
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap", spare=True))
+    for node in bpy.data.node_groups["Painted_Group"].nodes:
+        if node.type == "TEX_IMAGE" and node.image.name.endswith("_inner"):
+            node.image = None
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_SOURCE", Severity.ERROR)
+    assert "group `Painted_Group`" in of(findings, "L1.TEXTURE_SOURCE")[0].subject.element
+
+
+@case
+def texture_source_ignores_a_group_output_node_blender_does_not_evaluate():
+    """A tree may hold several Group Output nodes and Blender evaluates exactly one. The stale one
+    carries a texture into nothing."""
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap", decoy_output=True))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_SOURCE")
+
+
+@case
+def texture_uv_source_follows_a_chain_no_cutoff_gives_up_on():
+    """Twenty Mapping nodes. A depth cutoff answers `active-render` past its limit, which passes a
+    texture whose UV Map names a layer the mesh does not carry."""
+    scene = hull_wearing(lambda name: chained_material(name, 20, layer="Decals"))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    assert "layer `Decals`" in of(findings, "L1.TEXTURE_UV_SOURCE")[0].evidence
+
+
+@case
+def texture_uv_source_refuses_a_deep_non_uv_coordinate():
+    """The same chain ending at Generated: a procedural coordinate is refused however far away it
+    is declared."""
+    scene = hull_wearing(lambda name: chained_material(name, 20, coordinate="Generated"))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    assert "Generated" in of(findings, "L1.TEXTURE_UV_SOURCE")[0].evidence
+
+
+@case
+def texture_uv_source_refuses_a_mapping_node_driven_by_nothing():
+    """A Mapping node's own unlinked Vector input is the socket's CONSTANT, not the active-render
+    layer. Only the texture's own unlinked Vector is Blender's UV fallback."""
+    scene = hull_wearing(lambda name: chained_material(name, 1))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    assert "unlinked" in of(findings, "L1.TEXTURE_UV_SOURCE")[0].evidence
+
+
+@case
+def texture_uv_source_reads_a_muted_node_the_way_blender_does():
+    """One flag, two graphs: unmuted, a Vector Math node is a coordinate the door cannot carry;
+    muted, Blender routes its internal link and the UV Map node behind it is what the texture
+    reads."""
+    scene = hull_wearing(lambda name: muted_material(name, muted=False))
+    assert_fires(export_tank.lint(source_of(scene)), "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    scene = hull_wearing(lambda name: muted_material(name, muted=True))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.TEXTURE_UV_SOURCE")
+
+
 # ── L1.UV_FINITE ─────────────────────────────────────────────────────────────────────────────────
 
 @case
@@ -901,6 +1103,17 @@ def uv_finite_nan_in_a_sampled_layer():
     findings = export_tank.lint(source_of(scene))
     assert_fires(findings, "L1.UV_FINITE", Severity.ERROR)
     assert_exit(findings, 1)
+
+
+@case
+def uv_finite_reads_a_layer_sampled_from_inside_a_group():
+    """SAMPLED is decided by the same walk. A texture inside a group, driven by a UV Map node
+    outside it, samples that layer — so a NaN in it is this law's, and a walk that misreads the
+    interface drops the layer and reports nothing."""
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap"))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.UV_FINITE")
+    bpy.data.meshes["Hull"].uv_layers["UVMap"].uv[2].vector = (0.0, float("nan"))
+    assert_fires(export_tank.lint(source_of(scene)), "L1.UV_FINITE", Severity.ERROR)
 
 
 # ── L1.ZERO_AREA_UV ──────────────────────────────────────────────────────────────────────────────
@@ -914,6 +1127,15 @@ def zero_area_uv_is_a_warning_that_does_not_fail():
     findings = export_tank.lint(source_of(scene))
     assert_fires(findings, "L1.ZERO_AREA_UV", Severity.WARNING)
     assert_exit(findings, 0)
+
+
+@case
+def zero_area_uv_reads_a_layer_sampled_from_inside_a_group():
+    scene = hull_wearing(lambda name: group_material(name, layer="UVMap"))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV")
+    for corner in bpy.data.meshes["Hull"].uv_layers["UVMap"].uv:
+        corner.vector = (0.25, 0.75)
+    assert_fires(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV", Severity.WARNING)
 
 
 @case

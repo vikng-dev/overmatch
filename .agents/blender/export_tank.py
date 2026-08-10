@@ -1026,32 +1026,117 @@ def _output_node(material):
     return None
 
 
+def _socket_of(sockets, identifier):
+    """The socket on the other side of a group interface. Blender gives a group node's socket and
+    the matching one on the group's own Group Input/Output node the SAME identifier, which is what
+    makes the correspondence exact rather than positional — an interface socket added, removed or
+    reordered moves both ends together."""
+    for socket in sockets:
+        if socket.identifier == identifier:
+            return socket
+    return None
+
+
+def _group_output(node):
+    """The Group Output node a group node's outputs come from: the active one, because a tree may
+    hold several and only that one is evaluated."""
+    tree = node.node_tree
+    if tree is None:
+        return None
+    outputs = [inner for inner in tree.nodes if inner.type == "GROUP_OUTPUT"]
+    for inner in outputs:
+        if getattr(inner, "is_active_output", False):
+            return inner
+    return outputs[0] if outputs else None
+
+
+def _at(context, socket):
+    """One traversal position, as a hashable key. A node inside a group is reached THROUGH a group
+    node, and the same inner socket reached through two group nodes is two positions."""
+    return (tuple(group.as_pointer() for group in context), socket.as_pointer())
+
+
+def _sources(socket, context):
+    """Every `(node, output socket, context)` that actually drives this input socket.
+
+    Three things between two shading operations are not shading operations, and Blender evaluates
+    straight through all of them — so the walk does too, or it reads a graph the renderer and the
+    exporter do not:
+
+    - a MUTED node passes its `internal_links`, which map one of its inputs to one of its outputs;
+      a muted node with no internal link for the output asked about (a group node, measured) drives
+      nothing at all;
+    - a GROUP node is entered at the Group Output socket corresponding to the OUTER output socket
+      the link left from — never at every Group Output the tree holds;
+    - a GROUP INPUT node is left through the corresponding input socket of the group node the walk
+      entered by, which is why the context is a stack and not a flag.
+
+    `context` is the group nodes entered, outermost first. The visited set is over
+    (context, socket), so a diamond is walked once and a cycle terminates.
+    """
+    found = []
+    pending = [(socket, context)]
+    seen = set()
+    while pending:
+        target, where = pending.pop()
+        key = _at(where, target)
+        if key in seen:
+            continue
+        seen.add(key)
+        for link in target.links:
+            node, driving = link.from_node, link.from_socket
+            if node.mute:
+                pending.extend(
+                    (internal.from_socket, where) for internal in node.internal_links
+                    if internal.to_socket.as_pointer() == driving.as_pointer()
+                )
+            elif node.type == "GROUP":
+                inner = _group_output(node)
+                matched = _socket_of(inner.inputs, driving.identifier) if inner else None
+                if matched is not None:
+                    pending.append((matched, where + (node,)))
+            elif node.type == "GROUP_INPUT":
+                matched = _socket_of(where[-1].inputs, driving.identifier) if where else None
+                if matched is not None:
+                    pending.append((matched, where[:-1]))
+            else:
+                found.append((node, driving, where))
+    return found
+
+
+def _group_path(context):
+    """The groups a node was reached through, as a report reads them. The node TREE is named, not
+    the node holding it: a group node is auto-named `Group`, and the tree is what an artist opens."""
+    return "".join(
+        "group `{}` ▸ ".format(group.node_tree.name if group.node_tree else group.name)
+        for group in context
+    )
+
+
 def _image_textures(material):
     """Every Image Texture reachable backwards from the active Material Output, node groups
-    included. A texture the output does not reach is not exported and not sampled, so no law here
-    is about it.
-
-    A group is entered through its internal Group Output; a texture feeding a group from outside is
-    already reached through the group node's own input sockets.
+    included, as `(node, context)` pairs. A texture the output does not reach is not exported and
+    not sampled, so no law here is about it — which is exactly what the socket correspondence in
+    `_sources` decides: a group's OTHER output, connected to nothing, carries none of the textures
+    behind it into this material.
     """
     output = _output_node(material)
     if output is None:
         return []
     found = []
     seen = set()
-    queue = [output]
-    while queue:
-        node = queue.pop()
-        if node in seen:
-            continue
-        seen.add(node)
-        if node.type == "TEX_IMAGE":
-            found.append(node)
-        if node.type == "GROUP" and node.node_tree is not None:
-            queue.extend(inner for inner in node.node_tree.nodes if inner.type == "GROUP_OUTPUT")
-        for socket in node.inputs:
-            queue.extend(link.from_node for link in socket.links)
-    return sorted(found, key=lambda node: node.name)
+    pending = [(socket, ()) for socket in output.inputs]
+    while pending:
+        socket, context = pending.pop()
+        for node, _driving, where in _sources(socket, context):
+            key = (tuple(group.as_pointer() for group in where), node.as_pointer())
+            if key in seen:
+                continue
+            seen.add(key)
+            if node.type == "TEX_IMAGE":
+                found.append((node, where))
+            pending.extend((inner, where) for inner in node.inputs)
+    return sorted(found, key=lambda reached: (_group_path(reached[1]), reached[0].name))
 
 
 #: What an Image Texture samples: a named UV layer, whichever layer is active for render, or a
@@ -1062,23 +1147,58 @@ UV_NAMED, UV_ACTIVE_RENDER, UV_UNSUPPORTED = "named", "active-render", "unsuppor
 _UV_PASSTHROUGH = frozenset({"MAPPING", "REROUTE"})
 
 
-def _uv_source(node, depth=0):
-    """Which UV layer an Image Texture reads, traced back through its Vector input. An unlinked
-    Vector input is Blender's own default: the active-render UV layer."""
-    socket = node.inputs.get("Vector") or (node.inputs[0] if len(node.inputs) else None)
-    if socket is None or not socket.is_linked or depth > 16:
+def _vector_input(node):
+    """The coordinate input of a node that consumes one."""
+    return node.inputs.get("Vector") or (node.inputs[0] if len(node.inputs) else None)
+
+
+def _uv_source(node, context=()):
+    """Which UV layer an Image Texture reads, traced back through its Vector input and out through
+    every group interface between here and whatever drives it.
+
+    There is NO depth limit and no fallback: the walk either arrives at a coordinate the door can
+    name — a UV Map node, Texture Coordinate ▸ UV, or the texture's own unlinked Vector, which is
+    Blender's active-render default — or it refuses. A chain long enough to give up on is not a
+    chain the exporter carries into glTF either. The visited set is what terminates a cycle; the
+    node tree Blender itself builds holds none, so it guards a tree another writer produced.
+
+    Only the TEXTURE's own Vector input falls back to the active-render layer. A Mapping node with
+    nothing in its own Vector reads the socket's constant, which is not a UV at all.
+    """
+    socket = _vector_input(node)
+    if socket is None:
         return (UV_ACTIVE_RENDER, None)
-    link = socket.links[0]
-    upstream = link.from_node
-    if upstream.type == "UVMAP":
-        return (UV_NAMED, upstream.uv_map) if upstream.uv_map else (UV_ACTIVE_RENDER, None)
-    if upstream.type == "TEX_COORD":
-        if link.from_socket.name == "UV":
-            return (UV_ACTIVE_RENDER, None)
-        return (UV_UNSUPPORTED, "Texture Coordinate ▸ {}".format(link.from_socket.name))
-    if upstream.type in _UV_PASSTHROUGH:
-        return _uv_source(upstream, depth + 1)
-    return (UV_UNSUPPORTED, "{} node `{}`".format(upstream.type, upstream.name))
+    fallback = (UV_ACTIVE_RENDER, None)
+    seen = set()
+    while True:
+        key = _at(context, socket)
+        if key in seen:
+            return (UV_UNSUPPORTED, "a cycle through `{}`".format(socket.node.name))
+        seen.add(key)
+        driving = _sources(socket, context)
+        if not driving:
+            return fallback
+        if len(driving) > 1:
+            return (UV_UNSUPPORTED, "{} links driving one coordinate input".format(len(driving)))
+        upstream, from_socket, context = driving[0]
+        if upstream.type == "UVMAP":
+            return (UV_NAMED, upstream.uv_map) if upstream.uv_map else (UV_ACTIVE_RENDER, None)
+        if upstream.type == "TEX_COORD":
+            if from_socket.name == "UV":
+                return (UV_ACTIVE_RENDER, None)
+            return (UV_UNSUPPORTED, "Texture Coordinate ▸ {}".format(from_socket.name))
+        if upstream.type not in _UV_PASSTHROUGH:
+            return (UV_UNSUPPORTED, "{}{} node `{}`".format(
+                _group_path(context), upstream.type, upstream.name
+            ))
+        socket = _vector_input(upstream)
+        if socket is None:
+            return (UV_UNSUPPORTED, "{} node `{}` with no coordinate input".format(
+                upstream.type, upstream.name
+            ))
+        fallback = (UV_UNSUPPORTED, "{}{} node `{}`, whose own coordinate input is unlinked".format(
+            _group_path(context), upstream.type, upstream.name
+        ))
 
 
 def _active_render_uv(mesh):
@@ -1103,10 +1223,12 @@ def _used_materials(obj):
     return used
 
 
-def _texture_element(obj, material, node):
+def _texture_element(obj, material, node, context=()):
     """Where a texture finding sits: the object that carries the mesh, the material on it, the node
-    inside that material."""
-    return "on object `{}`, material `{}` ▸ texture `{}`".format(obj.name, material.name, node.name)
+    groups the walk entered, and the node itself."""
+    return "on object `{}`, material `{}` ▸ {}texture `{}`".format(
+        obj.name, material.name, _group_path(context), node.name
+    )
 
 
 def check_texture_uv_source(source: Source) -> List[Finding]:
@@ -1119,10 +1241,10 @@ def check_texture_uv_source(source: Source) -> List[Finding]:
         for index, material in sorted(_used_materials(obj).items()):
             if material is None:
                 continue
-            for node in _image_textures(material):
-                kind, detail = _uv_source(node)
+            for node, context in _image_textures(material):
+                kind, detail = _uv_source(node, context)
                 subject = Subject(
-                    SubjectKind.MESH, mesh.name, _texture_element(obj, material, node)
+                    SubjectKind.MESH, mesh.name, _texture_element(obj, material, node, context)
                 )
                 if kind == UV_UNSUPPORTED:
                     findings.append(Finding(
@@ -1169,8 +1291,8 @@ def _sampled_uv_layers(obj):
         if material is None:
             continue
         names = set()
-        for node in _image_textures(material):
-            kind, detail = _uv_source(node)
+        for node, context in _image_textures(material):
+            kind, detail = _uv_source(node, context)
             name = detail if kind == UV_NAMED else (render if kind == UV_ACTIVE_RENDER else None)
             if name is not None and mesh.uv_layers.get(name) is not None:
                 names.add(name)
@@ -1402,12 +1524,13 @@ def check_texture_source(source: Source) -> List[Finding]:
         for index, material in sorted(_used_materials(obj).items()):
             if material is None:
                 continue
-            for node in _image_textures(material):
+            for node, context in _image_textures(material):
                 if (material.name, node.name) in seen:
                     continue
                 seen.add((material.name, node.name))
                 subject = Subject(
-                    SubjectKind.MATERIAL, material.name, "texture `{}`".format(node.name)
+                    SubjectKind.MATERIAL, material.name,
+                    "{}texture `{}`".format(_group_path(context), node.name),
                 )
                 image = node.image
                 if image is None:
