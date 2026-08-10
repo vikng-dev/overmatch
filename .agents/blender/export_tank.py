@@ -6,10 +6,14 @@ Run by the outer wrapper, never by hand:
       --python .agents/blender/export_tank.py -- \\
       --mode <lint|export|verify> \\
       --spec assets/<id>/<id>.tank.ron \\
-      --glb assets/<id>/<id>.glb
+      --glb assets/<id>/<id>.glb \\
+      --canon <canon.json>
 
 `lint` runs the L1 source pass over the open blend and prints one report. `export` and `verify`
 run the derivation chain; until that chain lands they refuse with `door.mode-unimplemented`.
+
+The canon file is the wrapper's job to produce, with `asset_verify --canon`; two of the laws are
+stated in canonical Rust lists and refuse mechanically without it.
 
 EXPORT-BOUND means every object in the active scene, because the exporter is invoked with
 active-scene scope. Other workbench scenes in the same blend are outside the door.
@@ -58,6 +62,69 @@ MODE_UNIMPLEMENTED = Check(
     severity=Severity.ERROR,
     law="the requested door mode runs its whole chain",
 )
+
+
+# ── the canon file ───────────────────────────────────────────────────────────────────────────────
+
+#: What writes the canon file, named in the refusal when there is none.
+CANON_COMMAND = "cargo run --quiet --bin asset_verify -- --canon assets/<id>/<id>.tank.ron"
+
+#: Why there is no canon, when nobody asked for one.
+CANON_ABSENT = "no --canon file was given"
+
+
+@dataclass(frozen=True)
+class Canon:
+    """The two canonical lists this pass may not maintain a second copy of, as the Rust CLI emits
+    them: every typed node reference the tank's spec sheet makes, and the substance registry's keys.
+
+    So `L1.SPEC_REFERENCES` holds no vocabulary of RON field names and `L1.SUBSTANCE_IDENTITY` no
+    vocabulary of substances; both laws are stated here in words Rust owns.
+    """
+
+    #: `(RON field, node name)` pairs, in the order the generator emitted them.
+    node_references: tuple
+    #: Every material datablock name the registry declares.
+    substance_keys: frozenset
+
+    @classmethod
+    def read(cls, path):
+        """`(canon, why not)`, exactly one of which is None."""
+        if not path:
+            return (None, CANON_ABSENT)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                document = json.load(handle)
+            references = tuple(
+                (str(row["field"]), str(row["node"])) for row in document["node_references"]
+            )
+            keys = frozenset(str(key) for key in document["substance_keys"])
+        except (OSError, ValueError) as error:
+            return (None, "{} is not readable as one JSON document: {}".format(path, error))
+        except (KeyError, TypeError) as error:
+            return (None, "{} does not hold the canon file's shape: {}".format(path, error))
+        return (cls(references, keys), None)
+
+
+def _canon_gate(check: Check) -> Check:
+    """The mechanical refusal beside a law whose canonical input is absent. Its own id, so a report
+    can never be read as the law itself having been evaluated and passed."""
+    return Check(
+        id=check.id + ".canon-missing",
+        stage=check.stage,
+        severity=Severity.ERROR,
+        law="the canonical list {} is stated in was read".format(check.id),
+    )
+
+
+def _canon_missing(gate: Check, source: "Source") -> List[Finding]:
+    return [Finding(
+        gate,
+        Subject(SubjectKind.FILE, source.filepath or "<unsaved>"),
+        source.canon_note,
+        "write the canon file with `{}` and pass it as --canon <file> — a law whose input is "
+        "missing has not passed".format(CANON_COMMAND),
+    )]
 
 
 # ── L1: scene hygiene and structure ──────────────────────────────────────────────────────────────
@@ -148,6 +215,16 @@ STOCK_DEFAULT_NAMES = frozenset({
     "Object", "Plane", "Sphere", "Suzanne", "Torus",
 })
 
+SPEC_REFERENCES = Check(
+    id="L1.SPEC_REFERENCES",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every typed node reference the canon file carries resolves to exactly one export-bound "
+        "object",
+)
+
+SPEC_REFERENCES_CANON = _canon_gate(SPEC_REFERENCES)
+
 #: Blender's collision suffix: exactly three digits, appended to an otherwise stock name.
 _COPY_SUFFIX = re.compile(r"\.\d{3}$")
 
@@ -157,22 +234,29 @@ EXPORT_BOUND_TYPES = frozenset({"MESH", "EMPTY"})
 
 @dataclass
 class Source:
-    """The lint's whole view of one tank: where the blend is stored, and the export-bound objects."""
+    """The lint's whole view of one tank: where the blend is stored, the export-bound objects, and
+    the canonical lists two of the laws are stated in."""
 
     #: `bpy.data.filepath` — empty when the blend has never been saved.
     filepath: str
     scene_name: str
     objects: List[object] = field(default_factory=list)
+    canon: Optional[Canon] = None
+    #: Why there is no canon, when `canon` is None.
+    canon_note: str = CANON_ABSENT
 
     @classmethod
-    def live(cls, scene=None) -> "Source":
+    def live(cls, scene=None, canon_path=None) -> "Source":
         """The open blend. `view_layer.update()` first: `matrix_local` is otherwise stale."""
         bpy.context.view_layer.update()
         scene = scene or bpy.context.scene
+        canon, note = Canon.read(canon_path)
         return cls(
             filepath=bpy.data.filepath,
             scene_name=scene.name,
             objects=list(scene.objects),
+            canon=canon,
+            canon_note=note or CANON_ABSENT,
         )
 
 
@@ -508,6 +592,28 @@ def check_default_names(source: Source) -> List[Finding]:
         for slot in obj.material_slots:
             if slot.material is not None:
                 note(SubjectKind.MATERIAL, slot.material.name, "on object `{}`".format(obj.name))
+    return findings
+
+
+def check_spec_references(source: Source) -> List[Finding]:
+    """The spec sheet addresses geometry by node name and nothing infers a node from a name pattern,
+    so a reference naming no object binds the sim to a part that is not there — and one naming two
+    binds it to whichever the exporter wrote second."""
+    if source.canon is None:
+        return _canon_missing(SPEC_REFERENCES_CANON, source)
+    carried = Counter(obj.name for obj in source.objects)
+    findings = []
+    for ron_field, node in source.canon.node_references:
+        matches = carried[node]
+        if matches == 1:
+            continue
+        findings.append(Finding(
+            SPEC_REFERENCES,
+            Subject(SubjectKind.OBJECT, node, "declared in `{}`".format(ron_field)),
+            "{} export-bound object(s) carry this name".format(matches),
+            "rename the object the spec means to `{}`, export the one it expects, or edit `{}` in "
+            "the spec sheet to the name the model actually carries".format(node, ron_field),
+        ))
     return findings
 
 
@@ -1055,6 +1161,113 @@ def check_zero_area_uv(source: Source) -> List[Finding]:
 
 # ── L1: materials ────────────────────────────────────────────────────────────────────────────────
 
+SUBSTANCE_IDENTITY = Check(
+    id="L1.SUBSTANCE_IDENTITY",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="a material whose name is a registry key is the one linked from canonical "
+        "assets/materials/materials.blend; a material linked from that library resolves to an "
+        "exact registry key; case-folded and .### near-misses of registry keys are refused",
+)
+
+SUBSTANCE_IDENTITY_CANON = _canon_gate(SUBSTANCE_IDENTITY)
+
+#: Where the canonical material library stands, innermost last. Identity is that path relationship
+#: — the library datablock's own name is `materials.blend` for any file so called.
+CANONICAL_LIBRARY = ("assets", "materials", "materials.blend")
+
+
+def _canonically_linked(material) -> bool:
+    """Whether this material IS the datablock the canonical library owns."""
+    library = getattr(material, "library", None)
+    if library is None:
+        return False
+    directory, filename = os.path.split(os.path.abspath(bpy.path.abspath(library.filepath)))
+    holder = os.path.basename(directory)
+    return (os.path.basename(os.path.dirname(directory)), holder, filename) == CANONICAL_LIBRARY
+
+
+def _near_miss(name: str, keys) -> Optional[str]:
+    """The registry key a name is not, but reads as: the same name up to letter case, Blender's
+    `.###` collision suffix, or both."""
+    spellings = {name.casefold(), _COPY_SUFFIX.sub("", name).casefold()}
+    for key in sorted(keys):
+        if key.casefold() in spellings:
+            return key
+    return None
+
+
+def _export_materials(source: Source):
+    """Every material an export-bound object's polygons reference, once, with an object that wears
+    it. Keyed by name AND library: a counterfeit and the datablock it imitates share a name, which
+    is the defect itself."""
+    seen = set()
+    materials = []
+    for obj, _mesh in _export_mesh_objects(source):
+        for _index, material in sorted(_used_materials(obj).items()):
+            if material is None:
+                continue
+            library = material.library.filepath if material.library is not None else None
+            if (material.name, library) in seen:
+                continue
+            seen.add((material.name, library))
+            materials.append((material, obj))
+    return materials
+
+
+def check_substance_identity(source: Source) -> List[Finding]:
+    """Membership in the substance registry IS wearing the registry's material, so the name and the
+    datablock have to be one thing. A local material called `RHA` is a counterfeit: it would bind
+    armour numbers the library never issued, and the exported glTF says nothing about where a
+    material came from."""
+    if source.canon is None:
+        return _canon_missing(SUBSTANCE_IDENTITY_CANON, source)
+    keys = source.canon.substance_keys
+    findings = []
+    for material, obj in _export_materials(source):
+        subject = Subject(SubjectKind.MATERIAL, material.name, "on object `{}`".format(obj.name))
+        canonical = _canonically_linked(material)
+        if material.name in keys:
+            if canonical:
+                continue
+            findings.append(Finding(
+                SUBSTANCE_IDENTITY,
+                subject,
+                "bears the registry key `{}` and is {}".format(
+                    material.name,
+                    "local to this blend" if material.library is None else
+                    "linked from {}".format(material.library.filepath),
+                ),
+                "delete it and link `{}` from assets/materials/{} (File ▸ Link) — a substance is "
+                "the library's datablock, never a name typed over it".format(
+                    material.name, CANONICAL_LIBRARY[-1]
+                ),
+            ))
+            continue
+        near = _near_miss(material.name, keys)
+        if near is not None:
+            findings.append(Finding(
+                SUBSTANCE_IDENTITY,
+                subject,
+                "reads as the registry key `{}` without being it".format(near),
+                "if this is armour, delete it and link `{}` from assets/materials/{}; if it is art, "
+                "give it a name that is not one of the registry's".format(
+                    near, CANONICAL_LIBRARY[-1]
+                ),
+            ))
+            continue
+        if canonical:
+            findings.append(Finding(
+                SUBSTANCE_IDENTITY,
+                subject,
+                "linked from the canonical library, and the registry declares no such key",
+                "relink the material to a key the registry declares, or author `{}` in "
+                "assets/materials/materials.ron — the datablock name is the join key between the "
+                "library and the numbers".format(material.name),
+            ))
+    return findings
+
+
 TEXTURE_SOURCE = Check(
     id="L1.TEXTURE_SOURCE",
     stage=Stage.SOURCE,
@@ -1317,6 +1530,7 @@ L1_CHECKS = (
     check_unapplied_scale,
     check_unique_names,
     check_default_names,
+    check_spec_references,
     check_nonempty_mesh,
     check_finite_mesh_data,
     check_zero_area_triangle,
@@ -1325,6 +1539,7 @@ L1_CHECKS = (
     check_texture_uv_source,
     check_uv_finite,
     check_zero_area_uv,
+    check_substance_identity,
     check_texture_source,
     check_source_census,
 )
@@ -1350,9 +1565,9 @@ def unimplemented(mode: str) -> List[Finding]:
     )]
 
 
-def run(mode: str) -> List[Finding]:
+def run(mode: str, canon: Optional[str] = None) -> List[Finding]:
     if mode == "lint":
-        return lint(Source.live())
+        return lint(Source.live(canon_path=canon))
     return unimplemented(mode)
 
 
@@ -1367,6 +1582,9 @@ def _parse(argv: Optional[List[str]] = None):
                                        "blend stem, never from this path")
     parser.add_argument("--glb", help="the tracked glb the chain writes in export mode and "
                                       "compares against in verify mode")
+    parser.add_argument("--canon", help="the canon file `{}` writes: the canonical node-reference "
+                                        "list and substance keys L1.SPEC_REFERENCES and "
+                                        "L1.SUBSTANCE_IDENTITY are stated in".format(CANON_COMMAND))
     parser.add_argument("--census-json", action="store_true",
                         help="print this blend's source census as one tagged JSON line and exit; "
                              "how L1.SOURCE_CENSUS reads the previous committed blend through this "
@@ -1380,7 +1598,7 @@ def main() -> int:
         print("{}{}".format(CENSUS_SENTINEL, json.dumps(census(Source.live()), sort_keys=True)),
               flush=True)
         return 0
-    findings = run(arguments.mode)
+    findings = run(arguments.mode, arguments.canon)
     print(report.render_text(findings), end="", flush=True)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)

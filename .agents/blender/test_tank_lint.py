@@ -12,7 +12,9 @@ only files touched are a temporary `assets/<id>/<id>.tank.ron` and a temporary l
 which exist so the path-shaped and link-shaped laws have something real to measure.
 """
 
+import contextlib
 import dataclasses
+import io
 import json
 import math
 import os
@@ -190,11 +192,25 @@ def clean_scene():
     return scene
 
 
-def source_of(scene=None, filepath=BLEND_PATH):
-    """A `Source` read off the live blend through the same path the door uses, with the one
-    filesystem fact a headless fixture cannot set overridden."""
+#: A stand-in registry vocabulary. WHICH names are keys is the Rust generator's business and is
+#: pinned there; what the source pass does with them is this file's.
+CANON_KEYS = ("RHA", "MildSteel", "Rubber")
+
+
+def canon(*node_references, substance_keys=CANON_KEYS):
+    """A canon file's contents, as `Canon.read` would return them."""
+    return export_tank.Canon(tuple(node_references), frozenset(substance_keys))
+
+
+#: The canon a case that is not about the canon gets: no reference to resolve, the vocabulary above.
+CANON = canon()
+
+
+def source_of(scene=None, filepath=BLEND_PATH, canonical=CANON):
+    """A `Source` read off the live blend through the same path the door uses, with the two facts a
+    headless fixture cannot set — the stored path and the canon file — overridden."""
     live = export_tank.Source.live(scene or bpy.context.window.scene)
-    return dataclasses.replace(live, filepath=filepath)
+    return dataclasses.replace(live, filepath=filepath, canon=canonical)
 
 
 def write_library(name):
@@ -585,6 +601,43 @@ def default_names_leave_a_deliberate_name_alone():
     assert_silent(export_tank.lint(source_of(scene)), "L1.DEFAULT_NAMES")
 
 
+# ── L1.SPEC_REFERENCES ───────────────────────────────────────────────────────────────────────────
+
+@case
+def spec_references_resolve_to_one_object_each():
+    """Every field the canon file can carry, resolving. Python knows none of these names — they
+    arrive in the document."""
+    scene = clean_scene()
+    resolving = canon(("volumes", "Hull"), ("servos", "Turret"), ("views.node", "Muzzle"))
+    assert_silent(export_tank.lint(source_of(scene, canonical=resolving)), "L1.SPEC_REFERENCES")
+
+
+@case
+def spec_references_a_node_the_scene_does_not_hold():
+    scene = clean_scene()
+    absent = canon(("volumes", "Hull"), ("volumes", "Sponson"))
+    findings = export_tank.lint(source_of(scene, canonical=absent))
+    assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
+    hits = of(findings, "L1.SPEC_REFERENCES")
+    assert len(hits) == 1, "only the unresolved reference is a finding: {}".format(hits)
+    assert hits[0].subject.name == "Sponson", hits[0].subject
+    assert hits[0].subject.element == "declared in `volumes`", hits[0].subject
+    assert "0 export-bound object(s)" in hits[0].evidence, hits[0].evidence
+    assert_exit(findings, 1)
+
+
+@case
+def spec_references_a_name_two_objects_carry():
+    """A reference to a shared name addresses whichever node the exporter writes second, which is
+    nobody's decision."""
+    library = write_library("Hull")
+    scene = clean_scene()
+    link_object(library, "Hull")
+    findings = export_tank.lint(source_of(scene, canonical=canon(("volumes", "Hull"))))
+    assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
+    assert "2 export-bound object(s)" in of(findings, "L1.SPEC_REFERENCES")[0].evidence
+
+
 # ── L1.NONEMPTY_MESH ─────────────────────────────────────────────────────────────────────────────
 
 @case
@@ -783,6 +836,144 @@ def zero_area_uv_ignores_a_material_that_samples_nothing():
     assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV")
 
 
+# ── L1.SUBSTANCE_IDENTITY ────────────────────────────────────────────────────────────────────────
+
+#: A second library, standing somewhere a repository would not keep the canonical one. The law's
+#: identity is the path relationship, so this file is a stranger however its materials are named.
+SURPLUS_LIBRARY = os.path.join(_WORK, "assets", "surplus", "materials.blend")
+
+
+def plated(name, path=MATERIAL_LIBRARY, local=False):
+    """The clean tank with its hull wearing a material called `name` — linked out of the library at
+    `path`, or authored locally under that name."""
+    if not local:
+        write_material_library(name, path=path)
+    scene = clean_scene()
+    material = bpy.data.materials.new(name) if local else link_material(name, path=path)
+    assert material.name == name, "the fixture's material is called {}".format(material.name)
+    bpy.data.meshes["Hull"].materials[0] = material
+    return scene
+
+
+@case
+def substance_identity_the_canonical_library_s_own_material_is_clean():
+    findings = export_tank.lint(source_of(plated("RHA")))
+    assert_silent(findings, "L1.SUBSTANCE_IDENTITY")
+    assert_exit(findings, 0)
+
+
+@case
+def substance_identity_leaves_a_material_that_is_no_substance_alone():
+    """The hull's local `Steel`: not a key, not a near-miss, not linked. Ordinary art."""
+    assert_silent(export_tank.lint(source_of(clean_scene())), "L1.SUBSTANCE_IDENTITY")
+
+
+@case
+def substance_identity_a_local_counterfeit():
+    """The defect the law exists for: the exported glTF carries a material NAME, so a local
+    datablock typed `RHA` would bind armour the library never issued."""
+    findings = export_tank.lint(source_of(plated("RHA", local=True)))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    assert "local to this blend" in of(findings, "L1.SUBSTANCE_IDENTITY")[0].evidence
+    assert_exit(findings, 1)
+
+
+@case
+def substance_identity_a_counterfeit_standing_beside_the_real_datablock():
+    """Both wear the name `RHA`, so the two are one material to anything that reads names — which
+    is what the exported glTF does. The law separates them by datablock, and refuses only the one
+    the library never issued."""
+    scene = plated("RHA")
+    bpy.data.meshes["Turret"].materials.append(bpy.data.materials.new("RHA"))
+    hits = of(export_tank.lint(source_of(scene)), "L1.SUBSTANCE_IDENTITY")
+    assert len(hits) == 1, "expected the counterfeit alone, got {}".format(
+        [(finding.subject.element, finding.evidence) for finding in hits]
+    )
+    assert hits[0].subject.element == "on object `Turret`", hits[0].subject
+    assert "local to this blend" in hits[0].evidence, hits[0].evidence
+
+
+@case
+def substance_identity_a_registry_name_linked_from_some_other_library():
+    """Linked is not the law; linked FROM `assets/materials/materials.blend` is."""
+    findings = export_tank.lint(source_of(plated("RHA", path=SURPLUS_LIBRARY)))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    assert "surplus" in of(findings, "L1.SUBSTANCE_IDENTITY")[0].evidence
+
+
+@case
+def substance_identity_a_case_folded_near_miss():
+    findings = export_tank.lint(source_of(plated("rha", local=True)))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    assert "reads as the registry key `RHA`" in of(findings, "L1.SUBSTANCE_IDENTITY")[0].evidence
+
+
+@case
+def substance_identity_a_copy_suffixed_near_miss():
+    """`RHA.001` out of the canonical library itself — Blender's collision suffix on a real link is
+    still not the key, and it is refused as the near-miss it is rather than as an unknown one."""
+    findings = export_tank.lint(source_of(plated("RHA.001")))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    hits = of(findings, "L1.SUBSTANCE_IDENTITY")
+    assert len(hits) == 1, "one material, one finding: {}".format(hits)
+    assert "reads as the registry key `RHA`" in hits[0].evidence, hits[0].evidence
+
+
+@case
+def substance_identity_a_linked_material_the_registry_does_not_declare():
+    findings = export_tank.lint(source_of(plated("Unobtainium")))
+    assert_fires(findings, "L1.SUBSTANCE_IDENTITY", Severity.ERROR)
+    assert "declares no such key" in of(findings, "L1.SUBSTANCE_IDENTITY")[0].evidence
+
+
+# ── the canon file ───────────────────────────────────────────────────────────────────────────────
+
+def write_canon(name, document):
+    path = os.path.join(_WORK, "canon-{}.json".format(name))
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(document if isinstance(document, str) else json.dumps(document))
+    return path
+
+
+@case
+def a_missing_canon_refuses_both_laws_that_are_stated_in_it():
+    """A law whose canonical input never arrived has not passed. Each refuses under its own id, so
+    no report can be read as the law itself having been evaluated."""
+    scene = clean_scene()
+    findings = export_tank.lint(source_of(scene, canonical=None))
+    for check_id in ("L1.SPEC_REFERENCES", "L1.SUBSTANCE_IDENTITY"):
+        assert_fires(findings, check_id + ".canon-missing", Severity.ERROR)
+        assert_silent(findings, check_id)
+        hits = of(findings, check_id + ".canon-missing")
+        assert len(hits) == 1, "{} refused {} times".format(check_id, len(hits))
+        assert export_tank.CANON_COMMAND in hits[0].repair, hits[0].repair
+    assert_exit(findings, 1)
+
+
+@case
+def canon_read_takes_the_generator_s_document_and_nothing_else():
+    path = write_canon("good", {
+        "node_references": [{"field": "volumes", "node": "Hull"}],
+        "substance_keys": ["RHA", "Rubber"],
+    })
+    read, note = export_tank.Canon.read(path)
+    assert note is None, note
+    assert read.node_references == (("volumes", "Hull"),), read.node_references
+    assert read.substance_keys == frozenset({"RHA", "Rubber"}), read.substance_keys
+
+    for absent, expected in (
+        (None, "no --canon file"),
+        (os.path.join(_WORK, "canon-never-written.json"), "not readable"),
+        (write_canon("truncated", '{"node_references": ['), "not readable"),
+        (write_canon("half", {"node_references": []}), "shape"),
+        (write_canon("wrong", {"node_references": [{"node": "Hull"}], "substance_keys": []}),
+         "shape"),
+    ):
+        read, note = export_tank.Canon.read(absent)
+        assert read is None, "{} was read as a canon file".format(absent)
+        assert expected in note, note
+
+
 # ── L1.TEXTURE_SOURCE ────────────────────────────────────────────────────────────────────────────
 
 @case
@@ -895,15 +1086,56 @@ def unimplemented_modes_refuse_by_name():
 @case
 def lint_mode_reads_the_live_blend():
     """`run('lint')` builds its Source from the open blend rather than from a fixture, and this
-    process never saved one — so a clean scene reports L1.SAVED_SOURCE, and a census that says it
-    has nothing to compare against."""
+    process never saved one nor was given a canon — so a clean scene reports L1.SAVED_SOURCE, both
+    canon refusals, and a census that says it has nothing to compare against."""
     clean_scene()
     findings = export_tank.run("lint")
-    assert {finding.check.id for finding in findings} == {"L1.SAVED_SOURCE", "L1.SOURCE_CENSUS"}, (
-        "run('lint') reported {}".format([finding.check.id for finding in findings])
-    )
+    assert {finding.check.id for finding in findings} == {
+        "L1.SAVED_SOURCE",
+        "L1.SOURCE_CENSUS",
+        "L1.SPEC_REFERENCES.canon-missing",
+        "L1.SUBSTANCE_IDENTITY.canon-missing",
+    }, "run('lint') reported {}".format([finding.check.id for finding in findings])
     assert "no source baseline" in census_rows(findings)["baseline"]
     assert_exit(findings, 1)
+
+
+@case
+def lint_mode_reads_the_canon_file_it_is_given():
+    """The `--canon` wiring, end to end: `run` reads the file, and the law is evaluated against it
+    rather than refused for want of it."""
+    path = write_canon("wired", {
+        "node_references": [{"field": "volumes", "node": "Sponson"}],
+        "substance_keys": list(CANON_KEYS),
+    })
+    clean_scene()
+    findings = export_tank.run("lint", path)
+    assert_silent(findings, "L1.SPEC_REFERENCES.canon-missing")
+    assert_silent(findings, "L1.SUBSTANCE_IDENTITY.canon-missing")
+    assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
+    assert of(findings, "L1.SPEC_REFERENCES")[0].subject.name == "Sponson"
+
+
+@case
+def the_command_line_carries_the_canon_path_to_the_pass():
+    """The whole plumbing the wrapper will use: `--canon <file>` on the command line, through the
+    parser, into the law that is stated in it."""
+    path = write_canon("cli", {
+        "node_references": [{"field": "volumes", "node": "Sponson"}],
+        "substance_keys": list(CANON_KEYS),
+    })
+    clean_scene()
+    argv, sys.argv = sys.argv, ["blender", "--", "--mode", "lint", "--canon", path]
+    printed = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(printed):
+            code = export_tank.main()
+    finally:
+        sys.argv = argv
+    text = printed.getvalue()
+    assert "canon-missing" not in text, "the canon file did not reach the pass:\n{}".format(text)
+    assert "L1.SPEC_REFERENCES error" in text and "Sponson" in text, text
+    assert code == 1, "an error in the report is a non-zero exit, got {}".format(code)
 
 
 # ── the report shape ─────────────────────────────────────────────────────────────────────────────
