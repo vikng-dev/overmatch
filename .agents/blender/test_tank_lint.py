@@ -1373,18 +1373,46 @@ def write_canon(name, document):
 
 
 @case
-def a_missing_canon_refuses_both_laws_that_are_stated_in_it():
-    """A law whose canonical input never arrived has not passed. Each refuses under its own id, so
-    no report can be read as the law itself having been evaluated."""
+def a_missing_canon_is_one_refusal_of_the_door_s_own():
+    """The door failed to feed the pass, which is the door's to say — one row, under the door's own
+    id, naming the command that writes the file. The two laws stated in it do not run: a report
+    naming them would read as if they had been evaluated."""
     scene = clean_scene()
     findings = export_tank.lint(source_of(scene, canonical=None))
-    for check_id in ("L1.SPEC_REFERENCES", "L1.SUBSTANCE_IDENTITY"):
-        assert_fires(findings, check_id + ".canon-missing", Severity.ERROR)
-        assert_silent(findings, check_id)
-        hits = of(findings, check_id + ".canon-missing")
-        assert len(hits) == 1, "{} refused {} times".format(check_id, len(hits))
-        assert export_tank.CANON_COMMAND in hits[0].repair, hits[0].repair
+    assert_fires(findings, "door.canon-missing", Severity.ERROR)
+    hits = of(findings, "door.canon-missing")
+    assert len(hits) == 1, "the door refused {} times".format(len(hits))
+    assert export_tank.CANON_COMMAND in hits[0].repair, hits[0].repair
+    assert hits[0].check.stage == report.Stage.DOOR, hits[0].check.stage
+    assert_silent(findings, "L1.SPEC_REFERENCES")
+    assert_silent(findings, "L1.SUBSTANCE_IDENTITY")
     assert_exit(findings, 1)
+
+
+@case
+def the_source_inventory_is_closed():
+    """Every check id an L1 pass can emit is a SOURCE-stage id the design's inventory declares, and
+    the door's own refusals are DOOR-stage. A law that fails closed on missing input does so under
+    the door's id, never by inventing a source law nobody ratified."""
+    declared = {
+        "L1.SAVED_SOURCE", "L1.EXPORT_SCOPE", "L1.LOCAL_MODEL_DATA", "L1.MODIFIER_STACK",
+        "L1.DEFORMATION", "L1.ANIMATION", "L1.TRANSFORM_FINITE", "L1.HANDEDNESS",
+        "L1.UNAPPLIED_SCALE", "L1.UNIQUE_NAMES", "L1.DEFAULT_NAMES", "L1.SPEC_REFERENCES",
+        "L1.NONEMPTY_MESH", "L1.FINITE_MESH_DATA", "L1.ZERO_AREA_TRIANGLE",
+        "L1.DUPLICATE_TRIANGLE", "L1.LOOSE_GEOMETRY", "L1.TEXTURE_UV_SOURCE", "L1.UV_FINITE",
+        "L1.ZERO_AREA_UV", "L1.SUBSTANCE_IDENTITY", "L1.TEXTURE_SOURCE", "L1.SOURCE_CENSUS",
+    }
+    emitted = set()
+    for check in export_tank.L1_CHECKS:
+        for finding in check(source_of(clean_scene(), canonical=None)):
+            emitted.add(finding.check.id)
+            assert finding.check.stage == report.Stage.SOURCE, (
+                "{} is not a source row".format(finding.check.id)
+            )
+    assert emitted <= declared, "the source pass emitted {}".format(sorted(emitted - declared))
+    assert len(export_tank.L1_CHECKS) == len(declared), (
+        "{} checks for {} declared ids".format(len(export_tank.L1_CHECKS), len(declared))
+    )
 
 
 @case
@@ -1765,8 +1793,7 @@ def lint_mode_reads_the_live_blend():
     findings = export_tank.run("lint")
     assert {finding.check.id for finding in findings} == {
         "L1.SOURCE_CENSUS",
-        "L1.SPEC_REFERENCES.canon-missing",
-        "L1.SUBSTANCE_IDENTITY.canon-missing",
+        "door.canon-missing",
     }, "run('lint') reported {}".format([finding.check.id for finding in findings])
     assert "no source baseline" in census_rows(findings)["baseline"]
     assert_exit(findings, 1)
@@ -1782,8 +1809,7 @@ def lint_mode_reads_the_canon_file_it_is_given():
     })
     clean_scene()
     findings = export_tank.run("lint", path)
-    assert_silent(findings, "L1.SPEC_REFERENCES.canon-missing")
-    assert_silent(findings, "L1.SUBSTANCE_IDENTITY.canon-missing")
+    assert_silent(findings, "door.canon-missing")
     assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
     assert of(findings, "L1.SPEC_REFERENCES")[0].subject.name == "Sponson"
 

@@ -178,24 +178,33 @@ class Canon:
         return (cls(references, keys), None)
 
 
-def _canon_gate(check: Check) -> Check:
-    """The mechanical refusal beside a law whose canonical input is absent. Its own id, so a report
-    can never be read as the law itself having been evaluated and passed."""
-    return Check(
-        id=check.id + ".canon-missing",
-        stage=check.stage,
-        severity=Severity.ERROR,
-        law="the canonical list {} is stated in was read".format(check.id),
-    )
+CANON_MISSING = Check(
+    id="door.canon-missing",
+    stage=Stage.DOOR,
+    severity=Severity.ERROR,
+    law="the canon file `{}` writes was given to --canon and read; L1.SPEC_REFERENCES and "
+        "L1.SUBSTANCE_IDENTITY are stated in its two lists and do not run without "
+        "it".format(CANON_COMMAND),
+)
 
 
-def _canon_missing(gate: Check, source: "Source") -> List[Finding]:
+def check_canon(source: "Source") -> List[Finding]:
+    """The DOOR's refusal, not a source law's.
+
+    Two of the source laws are stated in canonical Rust lists, and the wrapper produces them. Their
+    absence is the door failing to feed the pass — a mechanical refusal of the same kind as an
+    unpinned exporter or an unresolved library — so it is one row under the door's own id, and the
+    L1 inventory stays exactly the closed one the design ratified. The two laws simply do not run:
+    a report that named them would read as if they had been evaluated.
+    """
+    if source.canon is not None:
+        return []
     return [Finding(
-        gate,
-        Subject(SubjectKind.FILE, source.filepath or "<unsaved>"),
+        CANON_MISSING,
+        Subject(SubjectKind.DOOR, "canon"),
         source.canon_note,
-        "write the canon file with `{}` and pass it as --canon <file> — a law whose input is "
-        "missing has not passed".format(CANON_COMMAND),
+        "write the canon file with `{}` and pass it as --canon <file>, or invoke the door through "
+        "scripts/tank/asset_door.py, which does both".format(CANON_COMMAND),
     )]
 
 
@@ -296,8 +305,6 @@ SPEC_REFERENCES = Check(
     law="every typed node reference the canon file carries resolves to exactly one export-bound "
         "object",
 )
-
-SPEC_REFERENCES_CANON = _canon_gate(SPEC_REFERENCES)
 
 #: Blender's collision suffix: exactly three digits, appended to an otherwise stock name.
 _COPY_SUFFIX = re.compile(r"\.\d{3}$")
@@ -755,7 +762,7 @@ def check_spec_references(source: Source) -> List[Finding]:
     so a reference naming no object binds the sim to a part that is not there — and one naming two
     binds it to whichever the exporter wrote second."""
     if source.canon is None:
-        return _canon_missing(SPEC_REFERENCES_CANON, source)
+        return []
     carried = Counter(obj.name for obj in source.objects)
     findings = []
     for ron_field, node in source.canon.node_references:
@@ -1447,8 +1454,6 @@ SUBSTANCE_IDENTITY = Check(
         "exact registry key; case-folded and .### near-misses of registry keys are refused",
 )
 
-SUBSTANCE_IDENTITY_CANON = _canon_gate(SUBSTANCE_IDENTITY)
-
 #: Where the canonical material library stands INSIDE the repository that holds the tank source.
 CANONICAL_LIBRARY = ("assets", "materials", "materials.blend")
 
@@ -1522,7 +1527,7 @@ def check_substance_identity(source: Source) -> List[Finding]:
     armour numbers the library never issued, and the exported glTF says nothing about where a
     material came from."""
     if source.canon is None:
-        return _canon_missing(SUBSTANCE_IDENTITY_CANON, source)
+        return []
     keys = source.canon.substance_keys
     library = canonical_library(source)
     findings = []
@@ -1935,8 +1940,12 @@ L1_CHECKS = (
 
 
 def lint(source: Source) -> List[Finding]:
-    """Run the L1 source pass. Returns the whole report, sorted."""
-    findings = []
+    """Run the L1 source pass. Returns the whole report, sorted.
+
+    The door's canon refusal comes first because it is not an L1 row: the closed source inventory is
+    exactly `L1_CHECKS`, and what the door failed to supply is the door's to say.
+    """
+    findings = check_canon(source)
     for check in L1_CHECKS:
         findings.extend(check(source))
     return report.sorted_findings(findings)
