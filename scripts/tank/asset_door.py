@@ -312,10 +312,20 @@ def compare(baked: str, glb: str) -> None:
         print("door  ▸ compare: {} matches the rebuilt candidate ({})".format(glb, tracked),
               flush=True)
         return
+    # The candidate lives in this invocation's temporary directory, which is gone by the time
+    # anyone reads the refusal — and on a CI runner, so is the machine. OVERMATCH_DOOR_KEEP names
+    # a directory that receives the refused candidate, so the mismatch can be diffed byte by byte.
+    kept = os.environ.get("OVERMATCH_DOOR_KEEP")
+    note = ""
+    if kept:
+        os.makedirs(kept, exist_ok=True)
+        copy = os.path.join(kept, os.path.basename(glb) + ".rebuilt")
+        shutil.copyfile(baked, copy)
+        note = "; the rebuilt candidate is kept at {}".format(copy)
     raise Refused("compare", [Finding(
         CANDIDATE_MISMATCH,
         Subject(SubjectKind.FILE, glb),
-        "tracked sha256 {}, rebuilt sha256 {}".format(tracked, rebuilt),
+        "tracked sha256 {}, rebuilt sha256 {}{}".format(tracked, rebuilt, note),
         "run `asset_door.py export` and commit the result — the tracked model is not what this "
         "source, this spec sheet and this toolchain produce",
     )])

@@ -179,6 +179,27 @@ class VerifyComparison(unittest.TestCase):
         self.assertIn(digest(glb), printed)
         self.assertIn("rebuilt sha256", printed)
 
+    def test_a_mismatch_keeps_the_candidate_where_asked(self):
+        """OVERMATCH_DOOR_KEEP receives the refused candidate — the temporary directory it was cut
+        in is gone with the refusal, and on a CI runner so is the machine that could diff it."""
+        blend = trio("kept-candidate")
+        self.assertEqual(door("export", blend)[0], 0)
+        glb = os.path.splitext(blend)[0] + ".glb"
+        with open(glb, "rb") as handle:
+            tracked = bytearray(handle.read())
+        tracked[-1] ^= 0xFF
+        with open(glb, "wb") as handle:
+            handle.write(bytes(tracked))
+
+        kept = os.path.join(_WORK, "kept-candidates")
+        code, printed = door("verify", blend, env={"OVERMATCH_DOOR_KEEP": kept})
+        self.assertEqual(code, 1, printed)
+        copy = os.path.join(kept, os.path.basename(glb) + ".rebuilt")
+        self.assertTrue(os.path.isfile(copy), printed)
+        self.assertIn(copy, printed)
+        self.assertNotEqual(digest(copy), digest(glb),
+                            "the kept candidate is the REBUILT bytes, not the tracked ones")
+
     def test_a_missing_tracked_model_is_a_mismatch_not_a_pass(self):
         blend = trio("no-tracked-model")
         code, printed = door("verify", blend)
