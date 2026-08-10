@@ -5,10 +5,13 @@
 /handoff.md
 # The CANONICAL tank blend is tracked (LFS, `.gitattributes`): it is the source every committed
 # derivative — the glb, the LOD chain, the manifest — is cut from, so the two travel together and
-# CI can re-cut them. Everything else blend-shaped is local authoring scratch: Blender's own `.blend1`
+# CI can re-cut them. The shared material library is tracked for the same reason: every tank blend
+# links its substances from it, so a clone without it loads placeholders and the door refuses.
+# Everything else blend-shaped is local authoring scratch: Blender's own `.blend1`
 # rolling backup and the hand-made `.bak` snapshots an authoring session leaves beside it.
 *.blend
 !assets/tiger_1/tiger_1.blend
+!assets/materials/materials.blend
 *.blend1
 *.bak
 
