@@ -27,10 +27,11 @@ contract is a Rust binary, the encoder is a minute of `basisu` per texture, and 
 Blender's main thread behind a frozen window. So the chain is phases in this file — Blender once,
 for the source pass and the raw candidate, and everything after it here.
 
-Each stage prints its OWN report verbatim: the Blender pass and the Rust contract already emit the
-one finding shape (`scripts/tank/report.py`, `src/bake/report.rs`), so the door adds nothing to that
-vocabulary. Its own three checks cover what only it can see — the pinned toolchain, a derivation
-tool that failed mechanically, and a rebuilt candidate that does not match the tracked bytes.
+Each stage prints its OWN report verbatim: the Blender pass, the Rust contract and the derivation
+verifier all emit the one finding shape (`scripts/tank/report.py`, `src/bake/report.rs`,
+`scripts/tank/glb_ktx2.py`), so the door adds nothing to that vocabulary. Its own rows cover what
+only it can see — the pinned toolchain (`scripts/toolchain.py`), a tool that failed mechanically,
+and a rebuilt candidate that does not match the tracked bytes.
 
 Exit is non-zero exactly when a stage refused.
 """
@@ -132,9 +133,8 @@ def run_stage(stage: str, command, root: str, stdout=None) -> None:
 
 
 def run_tool(stage: str, command, root: str, subject: str, repair: str) -> None:
-    """The same, for a stage that reports prose rather than findings — the encoder and the
-    derivation verifier. Its exit code becomes one `door.stage-failed` row so the report still
-    holds every refusal in one shape."""
+    """The same, for a stage that reports prose rather than findings — the encoder. Its exit code
+    becomes one `door.stage-failed` row so the report still holds every refusal in one shape."""
     print("door  ▸ {}: {}".format(stage, shown(command, root)), flush=True)
     result = subprocess.run(command, cwd=root)
     if not result.returncode:
@@ -271,12 +271,8 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
         "read the encoder's output above — the tracked glb is unchanged, and the work directory it "
         "names holds the images it was encoding",
     )
-    run_tool(
-        "derivation", [sys.executable, os.path.join(root, DERIVATION_VERIFIER), "verify", baked],
-        root, os.path.basename(baked),
-        "re-run the export — the baked candidate is not the mipped KTX2 document the derivation "
-        "promises, and the tracked glb is unchanged",
-    )
+    run_stage("derivation",
+              [sys.executable, os.path.join(root, DERIVATION_VERIFIER), "verify", baked], root)
     run_stage("consumer (baked)",
               ["cargo", "run", "--quiet", "--bin", "asset_verify", "--", baked], root)
 
