@@ -30,9 +30,11 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_ROOT, "scripts", "tank"))
+sys.path.insert(0, os.path.join(_ROOT, "scripts"))
 
 import export_tank  # noqa: E402
 import report  # noqa: E402
+import toolchain  # noqa: E402
 from report import Severity  # noqa: E402
 
 
@@ -1189,6 +1191,40 @@ def the_command_line_carries_the_canon_path_to_the_pass():
     assert "canon-missing" not in text, "the canon file did not reach the pass:\n{}".format(text)
     assert "L1.SPEC_REFERENCES error" in text and "Sponson" in text, text
     assert code == 1, "an error in the report is a non-zero exit, got {}".format(code)
+
+
+# ── door.toolchain ───────────────────────────────────────────────────────────────────────────────
+
+@case
+def the_exporter_pin_passes_on_the_pinned_blender():
+    """This suite runs in the Blender the door runs in, so the pin is silent here or the machine is
+    not the one the shipped bytes were cut on."""
+    assert not export_tank.check_exporter(), "the exporter pin fired on the pinned Blender: {}"\
+        .format(report.render_text(export_tank.check_exporter()))
+
+
+@case
+def an_unpinned_exporter_refuses_before_the_source_pass_runs():
+    """The version comes from the add-on, so the mutation is the pin it is compared against. It
+    refuses ahead of every check: a frozen argument list is a promise about one exporter, and
+    measuring a model with another certifies nothing about the bytes it would write."""
+    pinned = toolchain.GLTF_EXPORTER_VERSION
+    toolchain.GLTF_EXPORTER_VERSION = "0.0.1"
+    try:
+        clean_scene()
+        findings = export_tank.run("lint")
+        assert_fires(findings, "door.toolchain", Severity.ERROR)
+        assert pinned in findings[0].evidence and "0.0.1" in findings[0].evidence, (
+            "the row names neither the running exporter nor the pin: {}".format(
+                findings[0].evidence)
+        )
+        assert [finding.check.id for finding in findings] == ["door.toolchain"], (
+            "the source pass ran on an unpinned exporter: {}".format(
+                sorted({finding.check.id for finding in findings}))
+        )
+        assert_exit(findings, 1)
+    finally:
+        toolchain.GLTF_EXPORTER_VERSION = pinned
 
 
 # ── the report shape ─────────────────────────────────────────────────────────────────────────────

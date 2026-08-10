@@ -17,9 +17,12 @@ Blender's embedded interpreter is not where a Rust CLI or a minute-long encoder 
 The canon file is the wrapper's job to produce, with `asset_verify --canon`; two of the laws are
 stated in canonical Rust lists and refuse mechanically without it.
 
-`door.unresolved-library` precedes every mode and every check: Blender replaces a datablock whose
-library it cannot read with a placeholder carrying that datablock's name, so a blend with an
-unresolved link is not the stored model and there is nothing here worth measuring.
+Two refusals precede every mode and every check. `door.toolchain` asserts the glTF exporter this
+Blender loaded against `scripts/toolchain.py` — the frozen `EXPORT_SETTINGS` are promises about
+THAT exporter, and it is readable nowhere but in here. `door.unresolved-library` follows it:
+Blender replaces a datablock whose library it cannot read with a placeholder carrying that
+datablock's name, so a blend with an unresolved link is not the stored model and there is nothing
+here worth measuring.
 
 EXPORT-BOUND means every object in the active scene, because the exporter is invoked with
 active-scene scope. Other workbench scenes in the same blend are outside the door.
@@ -51,12 +54,14 @@ from typing import List, Optional
 
 import bpy
 
-sys.path.insert(0, os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "scripts", "tank",
-))
+_SCRIPTS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "scripts",
+)
+sys.path.insert(0, os.path.join(_SCRIPTS, "tank"))
+sys.path.insert(0, _SCRIPTS)
 
-import report  # noqa: E402  — the path above is what makes it importable
+import report  # noqa: E402  — the paths above are what make these importable
+import toolchain  # noqa: E402
 from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa: E402
 
 
@@ -75,6 +80,18 @@ UNRESOLVED_LIBRARY = Check(
     severity=Severity.ERROR,
     law="every library this blend links resolves, and every linked datablock is the library's own",
 )
+
+
+def check_exporter() -> List[Finding]:
+    """The pin only this half can assert, ahead of every mode.
+
+    `EXPORT_SETTINGS` below is a frozen argument list, which is a promise about the exporter that
+    reads it: an add-on on its own release schedule, bundled with Blender but replaceable, and the
+    thing that decides the bytes of every model. The wrapper's preflight pins the programs it can
+    run; the exporter is importable only from inside Blender, so it is pinned here.
+    """
+    row = toolchain.finding(toolchain.gltf_exporter())
+    return [row] if row else []
 
 
 def check_unresolved_library() -> List[Finding]:
@@ -1673,9 +1690,9 @@ def run(mode: str, canon: Optional[str] = None, raw: Optional[str] = None) -> Li
     An L1 ERROR stops before the export: a candidate cut from a refused source is a file nobody may
     consume, and writing one invites it being picked up. Warnings do not stop anything.
     """
-    unresolved = check_unresolved_library()
-    if unresolved:
-        return report.sorted_findings(unresolved)
+    refused = check_exporter() or check_unresolved_library()
+    if refused:
+        return report.sorted_findings(refused)
     findings = lint(Source.live(canon_path=canon))
     if mode == "lint":
         return findings

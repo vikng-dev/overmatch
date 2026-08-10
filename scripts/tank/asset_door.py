@@ -66,13 +66,6 @@ DERIVATION_VERIFIER = os.path.join("scripts", "tank", "glb_ktx2.py")
 
 # ── the door's own findings ──────────────────────────────────────────────────────────────────────
 
-TOOLCHAIN = Check(
-    id="door.toolchain",
-    stage=Stage.DOOR,
-    severity=Severity.ERROR,
-    law="the foreign programs this chain runs are the versions scripts/toolchain.py pins",
-)
-
 STAGE_FAILED = Check(
     id="door.stage-failed",
     stage=Stage.DERIVATION,
@@ -155,19 +148,11 @@ def preflight(mode: str):
     programs = [blender] if mode == "lint" else [blender, toolchain.basisu()]
     findings = []
     for program in programs:
-        mismatch = program.mismatch
-        if not mismatch:
+        row = toolchain.finding(program)
+        if row is None:
             print("door  ▸ toolchain: {} ({})".format(program, program.binary), flush=True)
             continue
-        findings.append(Finding(
-            TOOLCHAIN,
-            Subject(SubjectKind.DOOR, "toolchain", program.name),
-            "; ".join(mismatch),
-            "install the pinned version, or point {} at it — a program is not a specification, and "
-            "a point release of this one moves the bytes of every asset it touches".format(
-                toolchain.BLENDER_ENV if program.name == "blender" else toolchain.BASISU_ENV
-            ),
-        ))
+        findings.append(row)
     return (findings, blender.binary)
 
 
