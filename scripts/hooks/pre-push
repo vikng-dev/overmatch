@@ -83,6 +83,13 @@ echo "pre-push ▸ asset door (verify, per pushed revision)"
 command -v python3 >/dev/null ||
     { printf '\033[31m  no python3\033[0m — the asset door is a python program\n' >&2; exit 1; }
 assets_tmp=$(mktemp -d)
+# Before any verdict about a trio: every blend the revision holds is a canonical source. Discovery
+# finds trios, so a blend of any other shape is one nothing would ever look at again.
+printf '%s\n' "$refs" |
+    while read -r local_ref local_sha remote_ref remote_sha; do
+        assets_pushed_commit "$local_sha" || continue
+        assets_blend_shape "$local_sha" || exit 1
+    done || exit 1
 printf '%s\n' "$refs" |
     assets_push_targets "${1:-origin}" "$assets_tmp" |
     while read -r local_ref local_sha stem why; do

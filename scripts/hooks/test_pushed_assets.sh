@@ -3,9 +3,9 @@
 #
 #     sh scripts/hooks/test_pushed_assets.sh
 #
-# NOT WIRED TO ANYTHING. Run by hand, and by the CI slice when there is one; the pre-push hook
-# itself must stay a hook, and a lane that tested itself on every push would pay a scratch repo per
-# push to learn nothing about the push.
+# RUN BY HAND AND BY THE CI ASSETS JOB, which invokes it beside the door's own suites. The pre-push
+# hook does not run it: a lane that tested itself on every push would pay a scratch repository per
+# push to learn nothing about that push.
 #
 # It sources `scripts/hooks/pushed_assets.sh` and drives the REAL functions the hook drives — the
 # same file, the same shell — because a copy of the discovery rule tested here would be a second
@@ -428,6 +428,55 @@ says "a revision without the material library refuses" no $?
 # LOCATION — `assets/<id>/<id>.blend` is canonical, everything else blend-shaped is authoring
 # scratch — and it is driven over the REAL file, in a repository of its own, because `git
 # check-ignore` is the only thing that answers what git would do with a path.
+#
+# `.gitignore` states the FIRST half of that and cannot state the second: `!assets/*/*.blend`
+# unignores a directory's whole blend population, so it lets `assets/tiger_1/scratch.blend` be
+# tracked as readily as the source beside it. The shape law is the lane's, driven here over pushed
+# revisions.
+
+group "tracking — the canonical shape, in the lane"
+
+# The revisions built above: canonical trios, plus `assets/shell/shell.blend` and
+# `assets/proto/proto.blend`, which are canonical in shape and merely not trios.
+assets_blend_shape "$BASE" 2>/dev/null
+says "a revision of canonical sources passes" yes $?
+
+assets_blend_shape "$PARTIAL" 2>/dev/null
+says "…including blends that are no trio but are named for their directory" yes $?
+
+write assets/tiger_1/scratch.blend "an authoring scratch file, in a canonical directory"
+commit "a scratch blend beside a source"
+STRAY=$(at HEAD)
+assets_blend_shape "$STRAY" 2>/dev/null
+says "a second blend in an asset's own directory refuses the push" no $?
+
+is "…naming the file and the shape it is not" \
+   "yes" \
+   "$(assets_blend_shape "$STRAY" 2>&1 >/dev/null |
+      grep -q 'assets/tiger_1/scratch.blend' && echo yes || echo no)"
+
+git rm -q assets/tiger_1/scratch.blend
+write assets/tiger_1/backup/tiger_1.blend "a backup, one directory too deep"
+commit "a blend under a subdirectory of an asset"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "a blend below assets/<id>/ refuses the push" no $?
+
+git rm -q assets/tiger_1/backup/tiger_1.blend
+write scratch/panther/panther.blend "the canonical shape, in the wrong tree"
+commit "a blend named for its directory, outside assets/"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "the canonical shape outside assets/ is not canonical" no $?
+
+git rm -q scratch/panther/panther.blend
+write panther.blend "a blend at the top of the tree"
+commit "a blend outside assets/"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "a blend outside assets/ refuses the push" no $?
+
+git rm -q panther.blend
+commit "the tree is canonical again"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "…and the revision that removes it passes again" yes $?
 
 group "tracking — the repository's own .gitignore"
 

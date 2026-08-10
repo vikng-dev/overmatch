@@ -263,6 +263,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/asset-reports"
+          # Every blend the commit holds is a canonical source, before any of them is verified: a
+          # blend of another shape is one discovery would never look at again.
+          sh -c '. scripts/hooks/pushed_assets.sh; assets_blend_shape HEAD'
           stems=()
           while IFS= read -r stem; do stems+=("$stem"); done < <(
             sh -c '. scripts/hooks/pushed_assets.sh; assets_trios HEAD'

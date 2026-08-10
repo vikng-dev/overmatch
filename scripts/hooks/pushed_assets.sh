@@ -53,6 +53,33 @@ assets_trios() {   # <rev>
     ' | LC_ALL=C sort
 }
 
+# Every blend a revision holds is at `assets/<id>/<id>.blend`, or the push is refused.
+#
+# The canonical location is one directory under `assets/`, named by the directory it is in — the
+# shape the trio rule looks for and every derived path is cut from, and the shape
+# `assets/materials/materials.blend` already has. `.gitignore` cannot state that: its negation is
+# broad by construction (`!assets/*/*.blend` unignores `assets/tiger_1/scratch.blend` as readily as
+# the source beside it), and a pattern language with no backreference has no way to say "named after
+# its directory". So the law lives here, where it is executable, and the lane refuses a push
+# carrying a blend of any other shape rather than letting an authoring scratch file be tracked
+# forever as though it were a source.
+assets_blend_shape() {   # <rev>
+    _stray=$(git ls-tree -r --name-only "$1" | awk '
+        /\.blend$/ {
+            depth = split($0, part, "/")
+            stem = substr(part[depth], 1, length(part[depth]) - 6)
+            if (depth != 3 || part[1] != "assets" || stem != part[2]) print
+        }
+    ')
+    [ -n "$_stray" ] || return 0
+    printf '\033[31m  a tracked blend is not a canonical source\033[0m — %s\n' \
+        "a tracked blend is exactly assets/<id>/<id>.blend" >&2
+    printf '%s\n' "$_stray" | sed 's/^/    /' >&2
+    printf '  move it out of assets/<id>/, or name it after the directory it is in — every other\n' >&2
+    printf '  blend is authoring scratch, and .gitignore unignores this shape too broadly to say so\n' >&2
+    return 1
+}
+
 # The stems on stdin whose trio has a file in the changed set.
 assets_changed_trios() {   # <changed-paths-file>; stems on stdin
     while read -r _stem; do
