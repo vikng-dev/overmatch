@@ -54,6 +54,11 @@ GLTF_EXPORTER_VERSION = "5.1.20"
 #: The texture encoder, MEASURED locally: `basisu -version`.
 BASISU_VERSION = "2.10.0"
 
+#: Upstream's tag for that release — its tag scheme does not spell the version
+#: (`v2_10_final_snapshot`, not `v2.10.0`), so the tag is its own pin. The binary built from it
+#: must still print BASISU_VERSION; the assertion run after install holds that.
+BASISU_TAG = "v2_10_final_snapshot"
+
 #: Where a program comes from when it is not the one on PATH.
 BLENDER_ENV = "OVERMATCH_BLENDER"
 BASISU_ENV = "OVERMATCH_BASISU"
@@ -333,12 +338,13 @@ def gltf_exporter() -> Program:
 # ── the pins as a program ────────────────────────────────────────────────────────────────────────
 
 #: The pins a lane must know BEFORE it can assert them: it downloads Blender by version and build,
-#: and builds the encoder from the tag its version names. Printed as environment lines, so the
-#: version a cache key is cut from is the one this file declares and never a second copy in YAML.
+#: and builds the encoder from the pinned tag. Printed as environment lines, so the values a cache
+#: key is cut from are the ones this file declares and never a second copy in YAML.
 ENVIRONMENT = (
     ("OVERMATCH_BLENDER_VERSION", BLENDER_VERSION),
     ("OVERMATCH_BLENDER_BUILD", BLENDER_BUILD),
     ("OVERMATCH_BASISU_VERSION", BASISU_VERSION),
+    ("OVERMATCH_BASISU_TAG", BASISU_TAG),
 )
 
 

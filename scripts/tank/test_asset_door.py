@@ -767,6 +767,7 @@ class ToolchainProgram(unittest.TestCase):
                 "OVERMATCH_BLENDER_VERSION": toolchain.BLENDER_VERSION,
                 "OVERMATCH_BLENDER_BUILD": toolchain.BLENDER_BUILD,
                 "OVERMATCH_BASISU_VERSION": toolchain.BASISU_VERSION,
+                "OVERMATCH_BASISU_TAG": toolchain.BASISU_TAG,
             },
         )
 

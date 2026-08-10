@@ -225,19 +225,21 @@ jobs:
             -o "${RUNNER_TEMP}/${archive}"
           tar -xJf "${RUNNER_TEMP}/${archive}" -C ~/.cache/overmatch/blender --strip-components=1
 
-      # basisu ships no Linux binary release, so it is built from the tag its own version names.
+      # basisu ships no Linux binary release, so it is built from the pinned tag. The tag is a pin
+      # of its own — upstream's tag scheme does not spell the version — and the assertion step
+      # after install proves the built binary prints the pinned version.
       - name: Cache the pinned Basis Universal
         id: basisu-cache
         uses: actions/cache@v4
         with:
           path: ~/.cache/overmatch/basisu
-          key: basisu-${{ env.OVERMATCH_BASISU_VERSION }}-ubuntu-24.04
+          key: basisu-${{ env.OVERMATCH_BASISU_VERSION }}-${{ env.OVERMATCH_BASISU_TAG }}-ubuntu-24.04
 
       - name: Build the pinned Basis Universal
         if: steps.basisu-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "v${OVERMATCH_BASISU_VERSION}" \
+          git clone --depth 1 --branch "${OVERMATCH_BASISU_TAG}" \
             https://github.com/BinomialLLC/basis_universal.git "${RUNNER_TEMP}/basis_universal"
           cmake -S "${RUNNER_TEMP}/basis_universal" -B "${RUNNER_TEMP}/basis_universal/build" \
             -G Ninja -DCMAKE_BUILD_TYPE=Release
