@@ -55,17 +55,87 @@ def purge():
             bpy.data.scenes.remove(scene)
     for collection in (
         bpy.data.objects, bpy.data.meshes, bpy.data.materials,
-        bpy.data.actions, bpy.data.armatures,
+        bpy.data.actions, bpy.data.armatures, bpy.data.images,
     ):
         for datablock in list(collection):
             collection.remove(datablock)
 
 
-def triangle_mesh(name):
+def triangle_mesh(name, positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                  edges=(), faces=((0, 1, 2),)):
     mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata([(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)], [], [(0, 1, 2)])
+    mesh.from_pydata(list(positions), list(edges), list(faces))
     mesh.update()
     return mesh
+
+
+def reshape(name, **geometry):
+    """Give an existing object a differently shaped mesh under the name it already had, so a case
+    that mutates topology still reads as one defect on one part."""
+    obj = bpy.data.objects[name]
+    materials = [slot.material for slot in obj.material_slots]
+    previous = obj.data
+    # Reassign before removing: a mesh datablock takes the objects that use it with it.
+    obj.data = triangle_mesh(name + ".reshaped", **geometry)
+    bpy.data.meshes.remove(previous)
+    obj.data.name = name
+    for material in materials:
+        obj.data.materials.append(material)
+    return obj.data
+
+
+def unwrap(mesh, coordinates=((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)), name="UVMap"):
+    """One UV layer holding a real triangle. A layer Blender just made is all zeroes, which is the
+    collapsed case, not the clean one."""
+    layer = mesh.uv_layers.new(name=name)
+    for index, uv in enumerate(coordinates):
+        layer.uv[index].vector = uv
+    return layer
+
+
+def stored_image(name):
+    """An 8x8 PNG written beside the fixtures and loaded back. Not `Image.pack()`: a generated
+    image reports packed nothing (measured, 5.1.2), and L1.TEXTURE_SOURCE would then read it as the
+    defect it is."""
+    image = bpy.data.images.new(name, 8, 8)
+    image.filepath_raw = os.path.join(_WORK, name + ".png")
+    image.file_format = "PNG"
+    image.save()
+    return image
+
+
+def textured_material(name, uv_map=None, coordinate=None):
+    """A material whose Principled BSDF samples one stored image. `uv_map` drives the texture from
+    a UV Map node naming that layer; `coordinate` drives it from a Texture Coordinate output.
+    Neither, and the texture falls back the way Blender does: the active-render UV layer."""
+    material = bpy.data.materials.new(name)
+    tree = material.node_tree
+    tree.nodes.clear()
+    output = tree.nodes.new("ShaderNodeOutputMaterial")
+    shader = tree.nodes.new("ShaderNodeBsdfPrincipled")
+    texture = tree.nodes.new("ShaderNodeTexImage")
+    texture.image = stored_image(name)
+    tree.links.new(shader.outputs["BSDF"], output.inputs["Surface"])
+    tree.links.new(texture.outputs["Color"], shader.inputs["Base Color"])
+    if uv_map is not None:
+        node = tree.nodes.new("ShaderNodeUVMap")
+        node.uv_map = uv_map
+        tree.links.new(node.outputs["UV"], texture.inputs["Vector"])
+    elif coordinate is not None:
+        node = tree.nodes.new("ShaderNodeTexCoord")
+        tree.links.new(node.outputs[coordinate], texture.inputs["Vector"])
+    return material
+
+
+def sampled_hull(unwrapped=True, **material):
+    """The clean tank with its hull unwrapped and wearing a texture-sampling material — what the
+    sampled-UV laws need in front of them before they measure anything at all."""
+    scene = clean_scene()
+    mesh = bpy.data.meshes["Hull"]
+    if unwrapped:
+        unwrap(mesh)
+    mesh.materials[0] = textured_material("Painted", **material)
+    return scene
 
 
 def clean_scene():
@@ -442,6 +512,204 @@ def default_names_leave_a_deliberate_name_alone():
     bpy.data.objects["Hull"].name = "cube"
     bpy.data.meshes["Hull"].name = "Hull_Cube"
     assert_silent(export_tank.lint(source_of(scene)), "L1.DEFAULT_NAMES")
+
+
+# ── L1.NONEMPTY_MESH ─────────────────────────────────────────────────────────────────────────────
+
+@case
+def nonempty_mesh_without_polygons():
+    scene = clean_scene()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.NONEMPTY_MESH")
+    reshape("Hull", edges=((0, 1), (1, 2)), faces=())
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.NONEMPTY_MESH", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+# ── L1.FINITE_MESH_DATA ──────────────────────────────────────────────────────────────────────────
+
+@case
+def finite_mesh_data_nan_position():
+    scene = clean_scene()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.FINITE_MESH_DATA")
+    bpy.data.meshes["Hull"].vertices[1].co[0] = float("nan")
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.FINITE_MESH_DATA", Severity.ERROR)
+    named = [finding.subject.element for finding in of(findings, "L1.FINITE_MESH_DATA")]
+    assert any("vertex positions" in element for element in named), (
+        "the attribute that holds the NaN is unnamed: {}".format(named)
+    )
+    # No corner-normal fixture exists, and this records why: 5.1.2 sanitizes derived normals. A
+    # face on a NaN position comes back (0,0,1), and a custom split normal written as NaN comes
+    # back as the face normal. The check still reads them, because the law names them and a Blender
+    # that stops sanitizing would otherwise ship the NaN into the accessor unseen.
+    assert all(math.isfinite(value) for normal in bpy.data.meshes["Hull"].corner_normals
+               for value in normal.vector), (
+        "5.1.2 no longer sanitizes derived normals — this case can now pin the corner-normal read"
+    )
+    assert_exit(findings, 1)
+
+
+@case
+def finite_mesh_data_nan_colour_attribute():
+    scene = clean_scene()
+    colours = bpy.data.meshes["Hull"].color_attributes.new(
+        name="Weathering", type="FLOAT_COLOR", domain="CORNER"
+    )
+    assert_silent(export_tank.lint(source_of(scene)), "L1.FINITE_MESH_DATA")
+    colours.data[0].color = (float("nan"), 0.0, 0.0, 1.0)
+    assert_fires(export_tank.lint(source_of(scene)), "L1.FINITE_MESH_DATA", Severity.ERROR)
+
+
+@case
+def finite_mesh_data_reads_a_layer_no_texture_samples():
+    """The two UV laws have different scopes: this one reads every layer export writes, and
+    L1.UV_FINITE only the layers a texture actually samples."""
+    scene = clean_scene()
+    layer = unwrap(bpy.data.meshes["Hull"])
+    assert_silent(export_tank.lint(source_of(scene)), "L1.FINITE_MESH_DATA")
+    layer.uv[1].vector = (float("nan"), 0.0)
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.FINITE_MESH_DATA", Severity.ERROR)
+    assert_silent(findings, "L1.UV_FINITE")
+
+
+# ── L1.ZERO_AREA_TRIANGLE ────────────────────────────────────────────────────────────────────────
+
+@case
+def zero_area_triangle_coincident_vertices():
+    scene = clean_scene()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_TRIANGLE")
+    reshape("Hull", positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0)))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.ZERO_AREA_TRIANGLE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+@case
+def zero_area_triangle_has_no_tolerance():
+    """A triangle whose cross product underflows float32 but not float64 is not zero. The law says
+    exactly non-zero in stored coordinates, so the arithmetic has to be wider than the storage."""
+    scene = clean_scene()
+    tiny = 1.0e-25
+    reshape("Hull", positions=((0.0, 0.0, 0.0), (tiny, 0.0, 0.0), (0.0, tiny, 0.0)))
+    assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_TRIANGLE")
+
+
+# ── L1.DUPLICATE_TRIANGLE ────────────────────────────────────────────────────────────────────────
+
+@case
+def duplicate_triangle_reversed_copy_on_welded_positions():
+    """Distinct vertices at the same coordinates, wound the other way — still one surface twice."""
+    scene = clean_scene()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.DUPLICATE_TRIANGLE")
+    reshape(
+        "Hull",
+        positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                   (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+        faces=((0, 1, 2), (5, 4, 3)),
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.DUPLICATE_TRIANGLE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+# ── L1.LOOSE_GEOMETRY ────────────────────────────────────────────────────────────────────────────
+
+@case
+def loose_geometry_is_a_warning_that_does_not_fail():
+    """A vertex no polygon uses, and no loose edge at all — half the law on its own."""
+    scene = clean_scene()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.LOOSE_GEOMETRY")
+    reshape(
+        "Hull",
+        positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.LOOSE_GEOMETRY", Severity.WARNING)
+    assert "1 of 4 vertices and 0 of 3 edges" in of(findings, "L1.LOOSE_GEOMETRY")[0].evidence
+    assert_exit(findings, 0)
+
+
+@case
+def loose_geometry_reads_an_edge_no_polygon_uses():
+    """The other half, and the shape the live tank is actually in: an edge bridging two faces,
+    belonging to neither, with not one loose vertex to give it away."""
+    scene = clean_scene()
+    reshape(
+        "Hull",
+        positions=((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                   (2.0, 0.0, 0.0), (3.0, 0.0, 0.0), (2.0, 1.0, 0.0)),
+        edges=((0, 3),),
+        faces=((0, 1, 2), (3, 4, 5)),
+    )
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.LOOSE_GEOMETRY", Severity.WARNING)
+    assert "0 of 6 vertices and 1 of 7 edges" in of(findings, "L1.LOOSE_GEOMETRY")[0].evidence
+
+
+# ── L1.TEXTURE_UV_SOURCE ─────────────────────────────────────────────────────────────────────────
+
+@case
+def texture_uv_source_named_layer_the_mesh_does_not_carry():
+    assert_silent(export_tank.lint(source_of(sampled_hull())), "L1.TEXTURE_UV_SOURCE")
+    findings = export_tank.lint(source_of(sampled_hull(uv_map="Decals")))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+@case
+def texture_uv_source_named_layer_the_mesh_does_carry():
+    """The same UV Map node, naming a layer that exists, is silent — the law is about resolution,
+    not about which node drives the texture."""
+    assert_silent(export_tank.lint(source_of(sampled_hull(uv_map="UVMap"))), "L1.TEXTURE_UV_SOURCE")
+
+
+@case
+def texture_uv_source_non_uv_coordinate():
+    findings = export_tank.lint(source_of(sampled_hull(coordinate="Generated")))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+
+
+@case
+def texture_uv_source_no_uv_layer_at_all():
+    findings = export_tank.lint(source_of(sampled_hull(unwrapped=False)))
+    assert_fires(findings, "L1.TEXTURE_UV_SOURCE", Severity.ERROR)
+
+
+# ── L1.UV_FINITE ─────────────────────────────────────────────────────────────────────────────────
+
+@case
+def uv_finite_nan_in_a_sampled_layer():
+    scene = sampled_hull()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.UV_FINITE")
+    bpy.data.meshes["Hull"].uv_layers["UVMap"].uv[2].vector = (0.0, float("nan"))
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.UV_FINITE", Severity.ERROR)
+    assert_exit(findings, 1)
+
+
+# ── L1.ZERO_AREA_UV ──────────────────────────────────────────────────────────────────────────────
+
+@case
+def zero_area_uv_is_a_warning_that_does_not_fail():
+    scene = sampled_hull()
+    assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV")
+    for corner in bpy.data.meshes["Hull"].uv_layers["UVMap"].uv:
+        corner.vector = (0.25, 0.75)
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.ZERO_AREA_UV", Severity.WARNING)
+    assert_exit(findings, 0)
+
+
+@case
+def zero_area_uv_ignores_a_material_that_samples_nothing():
+    """The law's own scope: a collapsed UV under an untextured substance is irrelevant, because
+    nothing reads it."""
+    scene = clean_scene()
+    layer = unwrap(bpy.data.meshes["Hull"], ((0.25, 0.75), (0.25, 0.75), (0.25, 0.75)))
+    assert layer.active_render, "the fixture's UV layer is not the one a texture would fall back to"
+    assert_silent(export_tank.lint(source_of(scene)), "L1.ZERO_AREA_UV")
 
 
 # ── the door's own modes ─────────────────────────────────────────────────────────────────────────

@@ -27,6 +27,7 @@ channel write.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 import os
 import re
@@ -507,8 +508,550 @@ def check_default_names(source: Source) -> List[Finding]:
     return findings
 
 
-#: The scene-hygiene and structure pass, in table order. A check appears here exactly once; the
-#: report's own sort, not this order, decides what the console prints first.
+# ── L1: geometry and attributes ──────────────────────────────────────────────────────────────────
+
+NONEMPTY_MESH = Check(
+    id="L1.NONEMPTY_MESH",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every export-bound mesh has at least one polygon and produces at least one loop triangle",
+)
+
+FINITE_MESH_DATA = Check(
+    id="L1.FINITE_MESH_DATA",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="vertex positions, referenced UV coordinates, colour attributes and derived corner normals "
+        "consumed by export are finite",
+)
+
+ZERO_AREA_TRIANGLE = Check(
+    id="L1.ZERO_AREA_TRIANGLE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="after Blender's own loop triangulation, every triangle has an exactly non-zero cross "
+        "product in stored mesh coordinates — no tolerance",
+)
+
+DUPLICATE_TRIANGLE = Check(
+    id="L1.DUPLICATE_TRIANGLE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="after exact-position welding within a mesh, no two loop triangles have the same unordered "
+        "three positions; opposite winding does not make a duplicate legal",
+)
+
+LOOSE_GEOMETRY = Check(
+    id="L1.LOOSE_GEOMETRY",
+    stage=Stage.SOURCE,
+    severity=Severity.WARNING,
+    law="vertices and edges used by no polygon are reported",
+)
+
+TEXTURE_UV_SOURCE = Check(
+    id="L1.TEXTURE_UV_SOURCE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every image texture reachable from an active Material Output resolves to an existing UV "
+        "layer: a named UV Map node when present, otherwise the mesh's active-render UV layer",
+)
+
+UV_FINITE = Check(
+    id="L1.UV_FINITE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every UV coordinate used by a sampled texture is finite",
+)
+
+ZERO_AREA_UV = Check(
+    id="L1.ZERO_AREA_UV",
+    stage=Stage.SOURCE,
+    severity=Severity.WARNING,
+    law="for each triangle assigned to a texture-sampling material, the referenced UV triangle has "
+        "an exactly non-zero signed area",
+)
+
+
+def _export_meshes(source: Source):
+    """Every export-bound mesh datablock once, named through the first object that carries it. A
+    datablock two objects share is one stored surface, so it is one finding and not two."""
+    seen = set()
+    meshes = []
+    for obj in source.objects:
+        if obj.type != "MESH" or obj.data is None or obj.data in seen:
+            continue
+        seen.add(obj.data)
+        meshes.append((obj.data, Subject(
+            SubjectKind.MESH, obj.data.name, "on object `{}`".format(obj.name)
+        )))
+    return meshes
+
+
+def _export_mesh_objects(source: Source):
+    """Every export-bound (object, mesh) pair. Material-facing checks read these rather than the
+    deduplicated datablocks: a material slot can be linked to the object, so two objects sharing a
+    mesh can sample different textures through it."""
+    return [(obj, obj.data) for obj in source.objects
+            if obj.type == "MESH" and obj.data is not None]
+
+
+def _triangles(mesh):
+    """Blender's own loop triangulation — the same one the exporter writes. It is a cache, so
+    `calc_loop_triangles` is what fills it after any edit a fixture made."""
+    mesh.calc_loop_triangles()
+    return mesh.loop_triangles
+
+
+def _flat(collection, attribute, width):
+    """One `foreach_get` buffer: element `i`'s components are `[i * width : (i + 1) * width]`."""
+    buffer = [0.0] * (len(collection) * width)
+    collection.foreach_get(attribute, buffer)
+    return buffer
+
+
+def _cross(a, b, c):
+    """`(b - a) x (c - a)`, in Python floats.
+
+    Not `mathutils`: its vectors are single precision, and the law decides "exactly non-zero" at
+    the width the positions are stored at, not at a coarser one that rounds a thin triangle to
+    nothing.
+    """
+    ux, uy, uz = b[0] - a[0], b[1] - a[1], b[2] - a[2]
+    vx, vy, vz = c[0] - a[0], c[1] - a[1], c[2] - a[2]
+    return (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+
+
+def _vertex_positions(mesh):
+    """Stored vertex positions as triples, in vertex-index order."""
+    flat = _flat(mesh.vertices, "co", 3)
+    return [tuple(flat[index:index + 3]) for index in range(0, len(flat), 3)]
+
+
+def _triangle_vertices(mesh, triangles):
+    """Each loop triangle's three vertex indices."""
+    flat = _flat(triangles, "vertices", 3)
+    return [tuple(flat[index:index + 3]) for index in range(0, len(flat), 3)]
+
+
+def check_nonempty_mesh(source: Source) -> List[Finding]:
+    """A mesh that triangulates to nothing exports a primitive with no surface, which the ballistic
+    contract then has to refuse far from the file that holds it."""
+    findings = []
+    for mesh, subject in _export_meshes(source):
+        triangles = _triangles(mesh)
+        if len(mesh.polygons) and len(triangles):
+            continue
+        findings.append(Finding(
+            NONEMPTY_MESH,
+            subject,
+            "{} polygon(s), {} loop triangle(s), {} vertices".format(
+                len(mesh.polygons), len(triangles), len(mesh.vertices)
+            ),
+            "give it surface or delete the object — a mesh with no triangle exports a primitive "
+            "nothing can consume",
+        ))
+    return findings
+
+
+def _non_finite(subject, values, width, label, kind):
+    """One finding per attribute per mesh: the count, and the first element that holds it."""
+    for index in range(0, len(values), width):
+        element = values[index:index + width]
+        if all(math.isfinite(value) for value in element):
+            continue
+        count = sum(
+            1 for start in range(0, len(values), width)
+            if not all(math.isfinite(value) for value in values[start:start + width])
+        )
+        return [Finding(
+            FINITE_MESH_DATA,
+            dataclasses.replace(subject, element="{}, {}".format(subject.element, label)),
+            "{} of {} {} are non-finite; first at {} {} = {}".format(
+                count, len(values) // width, kind, kind[:-1], index // width, tuple(element)
+            ),
+            "retype or rebuild the attribute — a non-finite number reaches every consumer of this "
+            "mesh and poisons whatever it is composed with",
+        )]
+    return []
+
+
+def check_finite_mesh_data(source: Source) -> List[Finding]:
+    """Everything export reads off a mesh datablock: positions, every UV layer it writes, colour
+    attributes, and the corner normals it derives."""
+    findings = []
+    for mesh, subject in _export_meshes(source):
+        findings.extend(_non_finite(
+            subject, _flat(mesh.vertices, "co", 3), 3, "vertex positions", "positions"
+        ))
+        for layer in mesh.uv_layers:
+            findings.extend(_non_finite(
+                subject, _flat(layer.uv, "vector", 2), 2,
+                "UV layer `{}`".format(layer.name), "coordinates",
+            ))
+        for attribute in mesh.color_attributes:
+            findings.extend(_non_finite(
+                subject, _flat(attribute.data, "color", 4), 4,
+                "colour attribute `{}`".format(attribute.name), "colours",
+            ))
+        findings.extend(_non_finite(
+            subject, _flat(mesh.corner_normals, "vector", 3), 3, "corner normals", "normals"
+        ))
+    return findings
+
+
+def check_zero_area_triangle(source: Source) -> List[Finding]:
+    """A triangle with no cross product has no normal and no plane; it is a hole the surface says
+    is a face."""
+    findings = []
+    for mesh, subject in _export_meshes(source):
+        triangles = _triangles(mesh)
+        positions = _vertex_positions(mesh)
+        collapsed = []
+        for index, (a, b, c) in enumerate(_triangle_vertices(mesh, triangles)):
+            if any(value != 0.0 for value in _cross(positions[a], positions[b], positions[c])):
+                continue
+            collapsed.append((index, (a, b, c)))
+        if not collapsed:
+            continue
+        index, corners = collapsed[0]
+        findings.append(Finding(
+            ZERO_AREA_TRIANGLE,
+            subject,
+            "{} of {} loop triangles have an exactly zero cross product; first at triangle {}, "
+            "vertices {} at {}".format(
+                len(collapsed), len(triangles), index, corners,
+                tuple(positions[corner] for corner in corners),
+            ),
+            "merge the coincident or collinear vertices (M ▸ By Distance, then Mesh ▸ Clean Up ▸ "
+            "Degenerate Dissolve) — a zero-area face carries no direction for anything to read",
+        ))
+    return findings
+
+
+def check_duplicate_triangle(source: Source) -> List[Finding]:
+    """Welding by exact position first, because two triangles built on distinct vertices that sit
+    at the same coordinates are one surface twice. Winding is not part of the key: a reversed copy
+    is still a second face in the same place."""
+    findings = []
+    for mesh, subject in _export_meshes(source):
+        triangles = _triangles(mesh)
+        positions = _vertex_positions(mesh)
+        weld = {}
+        welded = [weld.setdefault(position, len(weld)) for position in positions]
+        first = {}
+        repeats = []
+        for index, corners in enumerate(_triangle_vertices(mesh, triangles)):
+            key = tuple(sorted(welded[corner] for corner in corners))
+            if key in first:
+                repeats.append((first[key], index, key))
+            else:
+                first[key] = index
+        if not repeats:
+            continue
+        original, repeat, key = repeats[0]
+        findings.append(Finding(
+            DUPLICATE_TRIANGLE,
+            subject,
+            "{} of {} loop triangles repeat a triangle the mesh already carries; first at "
+            "triangles {} and {}, welded vertices {}".format(
+                len(repeats), len(triangles), original, repeat, key
+            ),
+            "delete the duplicated faces (Mesh ▸ Clean Up ▸ Merge by Distance, or select the doubled "
+            "shell and delete it) — a face drawn twice is drawn once with an inside-out twin",
+        ))
+    return findings
+
+
+def check_loose_geometry(source: Source) -> List[Finding]:
+    """Geometry no polygon uses is invisible to the exporter and to the sim, and usually the residue
+    of an edit nobody finished."""
+    findings = []
+    for mesh, subject in _export_meshes(source):
+        used_vertices = set()
+        used_edges = set()
+        for polygon in mesh.polygons:
+            used_vertices.update(polygon.vertices)
+            used_edges.update(polygon.edge_keys)
+        loose_vertices = [
+            index for index in range(len(mesh.vertices)) if index not in used_vertices
+        ]
+        loose_edges = [
+            index for index, edge in enumerate(mesh.edges)
+            if tuple(sorted(edge.vertices)) not in used_edges
+        ]
+        if not loose_vertices and not loose_edges:
+            continue
+        findings.append(Finding(
+            LOOSE_GEOMETRY,
+            subject,
+            "{} of {} vertices and {} of {} edges belong to no polygon; first loose vertex {}, "
+            "first loose edge {}".format(
+                len(loose_vertices), len(mesh.vertices), len(loose_edges), len(mesh.edges),
+                loose_vertices[0] if loose_vertices else "none",
+                loose_edges[0] if loose_edges else "none",
+            ),
+            "select it (Select ▸ All by Trait ▸ Loose Geometry) and either build the face it was "
+            "meant to carry or delete it",
+        ))
+    return findings
+
+
+def _output_node(material):
+    """The active Material Output, or None. `use_nodes` is not read: Blender 5.1 deprecates it, and
+    a material with no node tree has no texture either way."""
+    tree = getattr(material, "node_tree", None)
+    if tree is None:
+        return None
+    for target in ("ALL", "EEVEE", "CYCLES"):
+        node = tree.get_output_node(target)
+        if node is not None:
+            return node
+    return None
+
+
+def _image_textures(material):
+    """Every Image Texture reachable backwards from the active Material Output, node groups
+    included. A texture the output does not reach is not exported and not sampled, so no law here
+    is about it.
+
+    A group is entered through its internal Group Output; a texture feeding a group from outside is
+    already reached through the group node's own input sockets.
+    """
+    output = _output_node(material)
+    if output is None:
+        return []
+    found = []
+    seen = set()
+    queue = [output]
+    while queue:
+        node = queue.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        if node.type == "TEX_IMAGE":
+            found.append(node)
+        if node.type == "GROUP" and node.node_tree is not None:
+            queue.extend(inner for inner in node.node_tree.nodes if inner.type == "GROUP_OUTPUT")
+        for socket in node.inputs:
+            queue.extend(link.from_node for link in socket.links)
+    return sorted(found, key=lambda node: node.name)
+
+
+#: What an Image Texture samples: a named UV layer, whichever layer is active for render, or a
+#: coordinate the door does not carry into glTF.
+UV_NAMED, UV_ACTIVE_RENDER, UV_UNSUPPORTED = "named", "active-render", "unsupported"
+
+#: Vector nodes that only transform coordinates, so the UV source is whatever feeds them.
+_UV_PASSTHROUGH = frozenset({"MAPPING", "REROUTE"})
+
+
+def _uv_source(node, depth=0):
+    """Which UV layer an Image Texture reads, traced back through its Vector input. An unlinked
+    Vector input is Blender's own default: the active-render UV layer."""
+    socket = node.inputs.get("Vector") or (node.inputs[0] if len(node.inputs) else None)
+    if socket is None or not socket.is_linked or depth > 16:
+        return (UV_ACTIVE_RENDER, None)
+    link = socket.links[0]
+    upstream = link.from_node
+    if upstream.type == "UVMAP":
+        return (UV_NAMED, upstream.uv_map) if upstream.uv_map else (UV_ACTIVE_RENDER, None)
+    if upstream.type == "TEX_COORD":
+        if link.from_socket.name == "UV":
+            return (UV_ACTIVE_RENDER, None)
+        return (UV_UNSUPPORTED, "Texture Coordinate ▸ {}".format(link.from_socket.name))
+    if upstream.type in _UV_PASSTHROUGH:
+        return _uv_source(upstream, depth + 1)
+    return (UV_UNSUPPORTED, "{} node `{}`".format(upstream.type, upstream.name))
+
+
+def _active_render_uv(mesh):
+    """The layer Blender exports as the first UV set, or None when the mesh carries none."""
+    for layer in mesh.uv_layers:
+        if layer.active_render:
+            return layer.name
+    return None
+
+
+def _used_materials(obj):
+    """`{slot index: material or None}` for the slots this object's polygons actually reference,
+    resolved through `material_slots` because a slot can be linked to the object rather than to the
+    mesh."""
+    slots = obj.material_slots
+    used = {}
+    for polygon in obj.data.polygons:
+        index = polygon.material_index
+        if index in used:
+            continue
+        used[index] = slots[index].material if 0 <= index < len(slots) else None
+    return used
+
+
+def _texture_element(obj, material, node):
+    """Where a texture finding sits: the object that carries the mesh, the material on it, the node
+    inside that material."""
+    return "on object `{}`, material `{}` ▸ texture `{}`".format(obj.name, material.name, node.name)
+
+
+def check_texture_uv_source(source: Source) -> List[Finding]:
+    """A texture whose UV layer the mesh does not carry samples nothing; a non-UV coordinate is a
+    procedural the exporter cannot write at all."""
+    findings = []
+    for obj, mesh in _export_mesh_objects(source):
+        layers = [layer.name for layer in mesh.uv_layers]
+        render = _active_render_uv(mesh)
+        for index, material in sorted(_used_materials(obj).items()):
+            if material is None:
+                continue
+            for node in _image_textures(material):
+                kind, detail = _uv_source(node)
+                subject = Subject(
+                    SubjectKind.MESH, mesh.name, _texture_element(obj, material, node)
+                )
+                if kind == UV_UNSUPPORTED:
+                    findings.append(Finding(
+                        TEXTURE_UV_SOURCE,
+                        subject,
+                        "sampled through {}, which is not a UV coordinate".format(detail),
+                        "drive the texture from a UV Map node or Texture Coordinate ▸ UV and unwrap "
+                        "the mesh — glTF carries UV sets, not procedural coordinates",
+                    ))
+                elif kind == UV_NAMED and detail not in layers:
+                    findings.append(Finding(
+                        TEXTURE_UV_SOURCE,
+                        subject,
+                        "UV Map node names layer `{}`; this mesh carries {}".format(
+                            detail, layers or "no UV layer"
+                        ),
+                        "rename the layer to `{}` or point the UV Map node at a layer this mesh "
+                        "carries".format(detail),
+                    ))
+                elif kind == UV_ACTIVE_RENDER and render is None:
+                    findings.append(Finding(
+                        TEXTURE_UV_SOURCE,
+                        subject,
+                        "falls back to the active-render UV layer; this mesh carries {}".format(
+                            "no UV layer" if not layers else
+                            "{} layer(s), none marked active for render".format(len(layers))
+                        ),
+                        "unwrap the mesh and mark the layer active for render (Object Data ▸ UV "
+                        "Maps ▸ camera icon)",
+                    ))
+    return findings
+
+
+def _sampled_uv_layers(obj):
+    """`{slot index: [uv layer name, ...]}` — the layers a texture actually reads on this object.
+
+    A texture whose UV source does not resolve is `L1.TEXTURE_UV_SOURCE`'s finding and is dropped
+    here, so the UV laws below never report a second time on it.
+    """
+    mesh = obj.data
+    render = _active_render_uv(mesh)
+    sampled = {}
+    for index, material in _used_materials(obj).items():
+        if material is None:
+            continue
+        names = set()
+        for node in _image_textures(material):
+            kind, detail = _uv_source(node)
+            name = detail if kind == UV_NAMED else (render if kind == UV_ACTIVE_RENDER else None)
+            if name is not None and mesh.uv_layers.get(name) is not None:
+                names.add(name)
+        if names:
+            sampled[index] = sorted(names)
+    return sampled
+
+
+def _sampled_triangles(mesh, triangles, sampled, layer_name):
+    """The loop triangles whose material samples `layer_name`, with their three loop indices."""
+    materials = _flat(triangles, "material_index", 1)
+    loops = _flat(triangles, "loops", 3)
+    return [
+        (index, tuple(loops[index * 3:index * 3 + 3]))
+        for index in range(len(triangles))
+        if layer_name in sampled.get(int(materials[index]), ())
+    ]
+
+
+def _sampled_layer_names(sampled):
+    return sorted({name for names in sampled.values() for name in names})
+
+
+def check_uv_finite(source: Source) -> List[Finding]:
+    """Only the UVs a texture reads: a collapsed or non-finite coordinate under an untextured
+    substance is not a defect in the sampled surface."""
+    findings = []
+    for obj, mesh in _export_mesh_objects(source):
+        sampled = _sampled_uv_layers(obj)
+        if not sampled:
+            continue
+        triangles = _triangles(mesh)
+        for layer_name in _sampled_layer_names(sampled):
+            coordinates = _flat(mesh.uv_layers[layer_name].uv, "vector", 2)
+            bad = sorted({
+                loop
+                for _, corners in _sampled_triangles(mesh, triangles, sampled, layer_name)
+                for loop in corners
+                if not (math.isfinite(coordinates[loop * 2])
+                        and math.isfinite(coordinates[loop * 2 + 1]))
+            })
+            if not bad:
+                continue
+            findings.append(Finding(
+                UV_FINITE,
+                Subject(SubjectKind.MESH, mesh.name, "on object `{}`, sampled UV layer `{}`".format(
+                    obj.name, layer_name
+                )),
+                "{} sampled corner(s) hold a non-finite UV; first at loop {} = {}".format(
+                    len(bad), bad[0], (coordinates[bad[0] * 2], coordinates[bad[0] * 2 + 1])
+                ),
+                "re-unwrap the affected faces — a non-finite UV samples nothing and writes a NaN "
+                "into the exported accessor",
+            ))
+    return findings
+
+
+def check_zero_area_uv(source: Source) -> List[Finding]:
+    """A UV triangle with no signed area samples a single point of the texture, so the whole face
+    takes one texel's colour."""
+    findings = []
+    for obj, mesh in _export_mesh_objects(source):
+        sampled = _sampled_uv_layers(obj)
+        if not sampled:
+            continue
+        triangles = _triangles(mesh)
+        for layer_name in _sampled_layer_names(sampled):
+            coordinates = _flat(mesh.uv_layers[layer_name].uv, "vector", 2)
+            checked = _sampled_triangles(mesh, triangles, sampled, layer_name)
+            collapsed = []
+            for index, corners in checked:
+                (u0, v0), (u1, v1), (u2, v2) = (
+                    (coordinates[loop * 2], coordinates[loop * 2 + 1]) for loop in corners
+                )
+                if (u1 - u0) * (v2 - v0) - (u2 - u0) * (v1 - v0) != 0.0:
+                    continue
+                collapsed.append((index, corners))
+            if not collapsed:
+                continue
+            index, corners = collapsed[0]
+            findings.append(Finding(
+                ZERO_AREA_UV,
+                Subject(SubjectKind.MESH, mesh.name, "on object `{}`, sampled UV layer `{}`".format(
+                    obj.name, layer_name
+                )),
+                "{} of {} sampled loop triangles have an exactly zero signed UV area; first at "
+                "triangle {}, corners {}".format(
+                    len(collapsed), len(checked), index,
+                    tuple((coordinates[loop * 2], coordinates[loop * 2 + 1]) for loop in corners),
+                ),
+                "re-unwrap the affected faces — a collapsed UV triangle paints the whole face with "
+                "one texel",
+            ))
+    return findings
+
+
+#: The source pass, in table order. A check appears here exactly once; the report's own sort, not
+#: this order, decides what the console prints first.
 L1_CHECKS = (
     check_saved_source,
     check_export_scope,
@@ -521,6 +1064,14 @@ L1_CHECKS = (
     check_unapplied_scale,
     check_unique_names,
     check_default_names,
+    check_nonempty_mesh,
+    check_finite_mesh_data,
+    check_zero_area_triangle,
+    check_duplicate_triangle,
+    check_loose_geometry,
+    check_texture_uv_source,
+    check_uv_finite,
+    check_zero_area_uv,
 )
 
 
