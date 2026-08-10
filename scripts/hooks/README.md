@@ -20,14 +20,25 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 | Hook | Command | Mirrors | Cost |
 |------|---------|---------|------|
 | pre-commit | `cargo fmt --all --check` | CI `fmt` job | no compile |
-| pre-push | tank glb mip gate, then fmt + clippy + ordinary tests, excluding the exact 30-receiver stress probe | release workflow's KTX2 gate; CI fmt, clippy, and ordinary-test lanes | ~30 ms + compile; warm cache = tens of seconds |
+| pre-push | the asset door, the LOD chain, then fmt + clippy + ordinary tests, excluding the exact 30-receiver stress probe | CI's asset, LOD, fmt, clippy, and ordinary-test lanes | a Blender launch + a MEASURED minute of texture encode per changed asset; otherwise compile, warm cache = tens of seconds |
 
-The **tank glb mip gate** (`scripts/tank/glb_ktx2.py verify`) asserts every texture embedded in
-`assets/tiger_1/tiger_1.glb` is mipped KTX2. A glb exported straight out of Blender carries PNG/JPEG,
-which bevy uploads with one mip level — a shimmering tank that looks like a renderer bug. The bake is
-folded into the one asset door (`scripts/tank/asset_door.py`), so this only fires on a glb that
-came from somewhere else; `release.yml` runs the same check, which is the gate `--no-verify` cannot
-skip. It reads the committed bytes out of the local git-lfs object cache, not the work tree.
+The **asset lane** runs `scripts/tank/asset_door.py verify` — the one door — on every asset the push
+changes, and on every asset it discovers when the push changes the shared surface the door's verdict
+is computed from (the material library, the toolchain pin, the source pass, the door, the encoder,
+the derivation verifier, the Rust consumer contract). `verify` re-cuts the asset from its own stored
+source and requires the tracked glb to be byte-identical to the result, which subsumes the mip gate
+this lane replaced: a tracked glb equal to a candidate the derivation verifier passed is mipped KTX2
+by construction.
+
+Assets are **discovered**, never listed: an asset is a sibling trio `<id>.blend`, `<id>.tank.ron`,
+`<id>.glb` in one directory. Adding a second vehicle needs no hook edit. Discovery and hydration
+live in `scripts/hooks/pushed_assets.sh`, sourced by the hook.
+
+It reads the **pushed revisions**, not the work tree: the trio's bytes come out of the pushed commit
+(its git-lfs pointers resolved against this clone's object store), because the work tree is a
+different, mutable thing from what the remote is about to receive. If an object or the linked
+`assets/materials/materials.blend` is not there, the lane REFUSES and names what is missing — it
+never falls back to the work tree and never passes on absence.
 
 A green pre-push does not certify the separately bounded CI stress lane; CI remains authoritative.
 
@@ -35,7 +46,7 @@ A green pre-push does not certify the separately bounded CI stress lane; CI rema
 
 ```sh
 OVERMATCH_SKIP=lod git push          # skip one gate lane
-OVERMATCH_SKIP=lod,test git push     # or several: mip, lod, fmt, clippy, test
+OVERMATCH_SKIP=lod,test git push     # or several: assets, lod, fmt, clippy, test
 ```
 
 Every skip prints loudly, and CI re-runs the skipped lane on the pushed commit.

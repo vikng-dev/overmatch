@@ -11,7 +11,7 @@
 # uploads nothing.
 #
 # To skip a failing gate, name it:  OVERMATCH_SKIP=lod git push
-# Comma-separate several: OVERMATCH_SKIP=lod,test — lanes: mip, lod, fmt, clippy, test.
+# Comma-separate several: OVERMATCH_SKIP=lod,test — lanes: assets, lod, fmt, clippy, test.
 # The LFS upload is not a lane and cannot be named. CI re-runs skipped lanes on the
 # pushed commit.
 #
@@ -20,6 +20,14 @@
 # dev target dir). `--locked` catches Cargo.lock drift exactly as CI does.
 set -e
 cd "$(git rev-parse --show-toplevel)"
+
+# What a push contains, read as assets: discovery, the changed set, and hydration out of the pushed
+# revision. Its own file so the exercise script drives the same functions this hook does.
+. scripts/hooks/pushed_assets.sh
+
+# `trap ... EXIT` is ONE slot: a second lane registering its own silently unregisters the first's,
+# so every lane's scratch is torn down from here.
+trap 'rm -rf ${assets_tmp:-} ${lod_tmp:-}' EXIT
 
 # A lane is skipped iff its name appears in comma-separated $OVERMATCH_SKIP.
 skipped() {
@@ -41,28 +49,44 @@ refs=$(cat)
 echo "pre-push ▸ git lfs pre-push"
 printf '%s\n' "$refs" | git lfs pre-push "$@"
 
-# Tank glb mip gate. Blender's glTF exporter embeds PNG/JPEG, and bevy uploads those with ONE mip
-# level — shimmer on every rivet at combat range, plus a texture-cache miss per fetch. The bake
-# (`scripts/encode-tank-ktx2.sh`) is folded into the scripted export, so the normal path is already
-# correct; this is the backstop for a glb that came from somewhere else, e.g. a hand-export out of
-# the Blender GUI. It must be IMPOSSIBLE to ship a mipless tank silently — a shimmery tank looks
-# like a renderer bug, not like a missing build step, so it would be hunted in the wrong place.
+# Tank assets. `asset_door.py verify` re-cuts each asset from its own stored source and proves the
+# tracked model is byte-identical to what that source, that spec sheet and the pinned toolchain
+# produce. That one verdict is why this lane replaces the old mip gate rather than joining it: a
+# tracked glb equal to a candidate the derivation verifier passed is mipped KTX2 by construction,
+# and it is also L1-clean and L2-certified, which the mip gate never said.
 #
-# Checks the COMMITTED bytes, not the work tree: the tracked glb is a git-lfs pointer, so resolve
-# HEAD's pointer to its object in the local lfs cache. (HEAD, not the pushed ref list — that list
-# arrives on STDIN, which belongs to `git lfs pre-push` above and must not be consumed twice. For
-# an ordinary `git push` of the current branch they are the same commit.) Falls back to the work
-# tree when the object was never fetched; `verify` no-ops on an unfetched pointer.
-# Costs ~30 ms: it reads the JSON chunk and 48 bytes per image, never the 63 MB payload.
-if ! skipped mip; then
-echo "pre-push ▸ tank glb is mip-baked (KTX2)"
+# IT VERIFIES THE PUSHED REVISIONS, not the work tree — the LOD lane's rule, for the LOD lane's
+# reason: a dirty-but-coherent tree blesses a different commit, and pushing a branch that is not
+# HEAD, a tag, or several refs at once was not covered at all by the HEAD-shaped gate this replaces.
+# The assets are DISCOVERED there too, as sibling trios (`scripts/hooks/pushed_assets.sh`), so a
+# second vehicle is gated by the rule that found the first and no path is written down here.
+#
+# WHAT IT VERIFIES: the trios the push CHANGED. Change the shared surface instead — the material
+# library, the toolchain pin, the source pass, the door, the encoder, the derivation verifier, the
+# Rust contract — and every discovered trio is verified, because the door now answers differently
+# about bytes that did not move.
+#
+# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION, unlike the LOD lane: the consumer contract is a
+# binary compiled from THIS work tree and the encoder resolves its paths against it. So the lane
+# runs this tree's door over the pushed revision's bytes; CI, which checks the commit out, is where
+# a revision's own rules meet its own bytes.
+#
+# It costs a Blender launch, a full re-export and a MEASURED minute of texture encode per changed
+# asset. `OVERMATCH_SKIP=assets` exists for that, and only because CI re-runs it.
+if ! skipped assets; then
+echo "pre-push ▸ asset door (verify, per pushed revision)"
 command -v python3 >/dev/null ||
-    { printf '\033[31m  no python3\033[0m — needed by the tank glb gate and by the mip bake\n' >&2; exit 1; }
-glb=assets/tiger_1/tiger_1.glb
-oid=$(git cat-file blob "HEAD:$glb" 2>/dev/null | sed -n 's/^oid sha256://p')
-obj="$(git rev-parse --git-common-dir)/lfs/objects/$(printf %.2s "$oid")/$(printf %s "$oid" | cut -c3-4)/$oid"
-[ -n "$oid" ] && [ -f "$obj" ] || obj="$glb"
-python3 scripts/tank/glb_ktx2.py verify --allow-pointer "$obj"
+    { printf '\033[31m  no python3\033[0m — the asset door is a python program\n' >&2; exit 1; }
+assets_tmp=$(mktemp -d)
+printf '%s\n' "$refs" |
+    assets_push_targets "${1:-origin}" "$assets_tmp" |
+    while read -r local_ref local_sha stem why; do
+        echo "  ▸ $stem at ${local_sha} ($local_ref, $why)"
+        blend=$(assets_hydrate "$local_sha" "$stem" "$assets_tmp/$local_sha") || exit 1
+        python3 scripts/tank/asset_door.py verify "$blend" ||
+            { printf '\033[31m  the asset door refused %s at %s\033[0m\n' "$stem" "$local_sha" >&2
+              exit 1; }
+    done || exit 1
 fi
 
 # LOD chain. The manifest is the SINGLE SEAM between the generated geometry chain and the runtime
@@ -82,7 +106,6 @@ fi
 if ! skipped lod; then
 echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
 lod_tmp=$(mktemp -d)
-trap 'rm -rf "$lod_tmp"' EXIT
 checked=0
 printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
     [ -n "$local_sha" ] || continue
