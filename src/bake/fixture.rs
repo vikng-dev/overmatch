@@ -102,6 +102,17 @@ pub(super) fn write(id: &str, nodes: &[Node], spec: &str) -> Asset {
 /// values are the smallest ones `TankSpec::validate` accepts, so nothing here is a vehicle datum
 /// anybody could mistake for balance.
 pub(super) fn spec(colliders: &[&str], roadwheels: &[(&str, &str)], volumes: &[&str]) -> String {
+    spec_with(colliders, roadwheels, volumes, "servos: {},")
+}
+
+/// The same sheet with `declarations` standing in for the empty `servos` block — where a test that
+/// needs the roles a bare vehicle does not declare (servos, weapons, views) authors them.
+pub(super) fn spec_with(
+    colliders: &[&str],
+    roadwheels: &[(&str, &str)],
+    volumes: &[&str],
+    declarations: &str,
+) -> String {
     let colliders = colliders
         .iter()
         .map(|node| format!("\"{node}\""))
@@ -143,7 +154,7 @@ TankSpec(
             engage: 1.0,
         ),
     ),
-    servos: {{}},
+    {declarations}
     volumes: {{{volumes}}},
     colliders: [{colliders}],
     roadwheels: [{roadwheels}],

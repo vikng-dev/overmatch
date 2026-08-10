@@ -12,7 +12,7 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
-use crate::spec::{NodeRole, TankSpec, TankSpecHandle};
+use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
 use crate::substances::SubstanceRegistry;
 use crate::tank::{SimParts, TrackSide, rig_world_pose};
 
@@ -783,7 +783,7 @@ pub fn canon_lists(spec_path: &Path) -> Result<String, Vec<Finding>> {
     let references: Vec<serde_json::Value> = spec
         .node_references()
         .into_iter()
-        .map(|(role, node)| serde_json::json!({"field": role.ron_field(), "node": node}))
+        .map(|reference| serde_json::json!({"field": reference.field, "node": reference.node}))
         .collect();
     Ok(serde_json::json!({
         "node_references": references,
@@ -1047,7 +1047,10 @@ pub(crate) fn extract_tank_geometry(
 fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut scaled: BTreeSet<&str> = BTreeSet::new();
-    for (role, name) in spec.node_references() {
+    for NodeReference {
+        role, node: name, ..
+    } in spec.node_references()
+    {
         let Some(&index) = geometry.by_name.get(name) else {
             findings.push(Finding::new(
                 &L2_SPEC,
@@ -1601,10 +1604,22 @@ mod tests {
     #[test]
     fn the_canon_file_carries_the_reference_list_and_the_registry_keys() {
         let (nodes, _) = sound_vehicle();
-        let declared = fixture::spec(
+        // EVERY role, and both of a weapon's two node fields: the RON path is what the Blender
+        // pass prints as the line to go to, and a role does not determine one.
+        let declared = fixture::spec_with(
             &["Proxy"],
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &["Plate"],
+            r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous)},
+    weapons: {"Main": (
+        trigger: Primary,
+        muzzle: "Muzzle",
+        barrel: "Recoil",
+        speed: 1.0, caliber: 0.1, mass: 1.0,
+        fire_mode: Single(reload_secs: 1.0),
+        recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
+    )},
+    views: {Gunner: (node: "Sight", fov: 0.5)},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
         let json = canon_lists(Path::new(&spec_ron_name(&asset.glb))).expect("the sheet parses");
@@ -1621,14 +1636,20 @@ mod tests {
                 )
             })
             .collect();
-        // Role order, then name — `TankSpec::node_references`' own ordering, carried through.
+        // Role order, then node, then the authored path — `TankSpec::node_references`' own
+        // ordering, carried through. Every field here is pinned nowhere else: Python maintains no
+        // vocabulary of RON paths and renders whatever arrives in this document.
         assert_eq!(
             references,
             [
+                ("servos", "Turret_Yaw"),
                 ("volumes", "Plate"),
                 ("colliders", "Proxy"),
-                ("roadwheels.node", "Station_L"),
-                ("roadwheels.node", "Station_R"),
+                ("roadwheels[0].node", "Station_L"),
+                ("roadwheels[1].node", "Station_R"),
+                ("weapons[\"Main\"].muzzle", "Muzzle"),
+                ("weapons[\"Main\"].barrel", "Recoil"),
+                ("views[Gunner].node", "Sight"),
             ]
         );
 

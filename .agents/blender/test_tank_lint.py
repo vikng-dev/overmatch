@@ -906,25 +906,36 @@ def default_names_leave_a_deliberate_name_alone():
 
 # ── L1.SPEC_REFERENCES ───────────────────────────────────────────────────────────────────────────
 
+#: A RON path of the shape the generator emits. It is deliberately one no code here could have
+#: invented: the field vocabulary is Rust's, pinned in `src/bake.rs`, and this side only has to
+#: carry whatever arrives in the document through to the report unchanged.
+FIELD = 'weapons["Coax_MG"].barrel'
+
+
 @case
 def spec_references_resolve_to_one_object_each():
-    """Every field the canon file can carry, resolving. Python knows none of these names — they
-    arrive in the document."""
+    """Several references, resolving. Python knows none of these paths — they arrive in the
+    document."""
     scene = clean_scene()
-    resolving = canon(("volumes", "Hull"), ("servos", "Turret"), ("views.node", "Muzzle"))
+    resolving = canon(
+        ("volumes", "Hull"), ("roadwheels[3].node", "Turret"), (FIELD, "Muzzle")
+    )
     assert_silent(export_tank.lint(source_of(scene, canonical=resolving)), "L1.SPEC_REFERENCES")
 
 
 @case
 def spec_references_a_node_the_scene_does_not_hold():
     scene = clean_scene()
-    absent = canon(("volumes", "Hull"), ("volumes", "Sponson"))
+    absent = canon(("volumes", "Hull"), (FIELD, "Sponson"))
     findings = export_tank.lint(source_of(scene, canonical=absent))
     assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
     hits = of(findings, "L1.SPEC_REFERENCES")
     assert len(hits) == 1, "only the unresolved reference is a finding: {}".format(hits)
     assert hits[0].subject.name == "Sponson", hits[0].subject
-    assert hits[0].subject.element == "declared in `volumes`", hits[0].subject
+    assert hits[0].subject.element == "declared in `{}`".format(FIELD), hits[0].subject
+    assert FIELD in hits[0].repair, "the repair does not send the artist to the line: {}".format(
+        hits[0].repair
+    )
     assert "0 export-bound object(s)" in hits[0].evidence, hits[0].evidence
     assert_exit(findings, 1)
 
@@ -936,7 +947,7 @@ def spec_references_a_name_two_objects_carry():
     library = write_library("Hull")
     scene = clean_scene()
     link_object(library, "Hull")
-    findings = export_tank.lint(source_of(scene, canonical=canon(("volumes", "Hull"))))
+    findings = export_tank.lint(source_of(scene, canonical=canon((FIELD, "Hull"))))
     assert_fires(findings, "L1.SPEC_REFERENCES", Severity.ERROR)
     assert "2 export-bound object(s)" in of(findings, "L1.SPEC_REFERENCES")[0].evidence
 
@@ -1418,12 +1429,12 @@ def the_source_inventory_is_closed():
 @case
 def canon_read_takes_the_generator_s_document_and_nothing_else():
     path = write_canon("good", {
-        "node_references": [{"field": "volumes", "node": "Hull"}],
+        "node_references": [{"field": FIELD, "node": "Hull"}],
         "substance_keys": ["RHA", "Rubber"],
     })
     read, note = export_tank.Canon.read(path)
     assert note is None, note
-    assert read.node_references == (("volumes", "Hull"),), read.node_references
+    assert read.node_references == ((FIELD, "Hull"),), read.node_references
     assert read.substance_keys == frozenset({"RHA", "Rubber"}), read.substance_keys
 
     for absent, expected in (
@@ -1804,7 +1815,7 @@ def lint_mode_reads_the_canon_file_it_is_given():
     """The `--canon` wiring, end to end: `run` reads the file, and the law is evaluated against it
     rather than refused for want of it."""
     path = write_canon("wired", {
-        "node_references": [{"field": "volumes", "node": "Sponson"}],
+        "node_references": [{"field": FIELD, "node": "Sponson"}],
         "substance_keys": list(CANON_KEYS),
     })
     clean_scene()
@@ -1819,7 +1830,7 @@ def the_command_line_carries_the_canon_path_to_the_pass():
     """The whole plumbing the wrapper will use: `--canon <file>` on the command line, through the
     parser, into the law that is stated in it."""
     path = write_canon("cli", {
-        "node_references": [{"field": "volumes", "node": "Sponson"}],
+        "node_references": [{"field": FIELD, "node": "Sponson"}],
         "substance_keys": list(CANON_KEYS),
     })
     clean_scene()

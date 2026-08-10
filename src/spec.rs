@@ -168,7 +168,7 @@ pub struct RecoilSpec {
 /// A crew viewpoint — the camera/optic anchor. A closed set of kinds (each its own bespoke camera
 /// behaviour in code), keyed in [`TankSpec::views`]; the *parameters* (which node, later FOV/zoom)
 /// are data. The gunner's view node is also how the binder finds the gunner's chain for the rig.
-#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ViewKind {
     Gunner,
     Commander,
@@ -633,21 +633,21 @@ pub enum NodeRole {
     View,
 }
 
-impl NodeRole {
-    /// The RON field a reference in this role is authored in, dotted from the sheet's root. What a
-    /// report names so a human can go to the line — which entry of that field is identified by the
-    /// node name the reference carries beside it.
-    pub fn ron_field(self) -> &'static str {
-        match self {
-            Self::Servo => "servos",
-            Self::Volume => "volumes",
-            Self::Collider => "colliders",
-            Self::Roadwheel => "roadwheels.node",
-            Self::Weapon => "weapons.muzzle/barrel",
-            Self::View => "views.node",
-        }
-    }
+/// One typed node reference: what the sim does with the node, the node's name, and the RON path
+/// the reference was AUTHORED at — the line a report sends a human to.
+///
+/// The field is carried per reference and not derived from the role, because a role does not
+/// determine one: a weapon names its bore in `muzzle` and its recoiling barrel in `barrel`, and
+/// both are the same role. Declaration order is sort order — role, then node, then the path inside
+/// it — so a report groups by what a node is for and reads the same between runs.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct NodeReference<'a> {
+    pub role: NodeRole,
+    pub node: &'a str,
+    pub field: String,
+}
 
+impl NodeRole {
     /// Whether `crate::tank::rig_world_pose` composes through a node in this role. That composition
     /// is rigid — position and rotation only — so such a node and every ancestor of it must be
     /// authored at unit scale or the sim and the view disagree about where the part is.
@@ -664,41 +664,53 @@ impl TankSpec {
     /// list, so no consumer (the bake gate, the source lint, a future editor) maintains a second
     /// vocabulary of RON field names. Sorted by role then name: the maps are unordered, and a
     /// report that reorders between runs is one nobody can diff.
-    pub fn node_references(&self) -> Vec<(NodeRole, &str)> {
-        let mut references: Vec<(NodeRole, &str)> = Vec::new();
+    pub fn node_references(&self) -> Vec<NodeReference<'_>> {
+        let mut references: Vec<NodeReference<'_>> = Vec::new();
+        fn at(role: NodeRole, node: &str, field: String) -> NodeReference<'_> {
+            NodeReference { role, node, field }
+        }
+        // `servos` and `volumes` are keyed BY the node name and `colliders` is a list of them, so
+        // the field alone names the entry; the rest hold the name inside a keyed or indexed one.
         references.extend(
             self.servos
                 .keys()
-                .map(|node| (NodeRole::Servo, node.as_str())),
+                .map(|node| at(NodeRole::Servo, node, "servos".to_owned())),
         );
         references.extend(
             self.volumes
                 .keys()
-                .map(|node| (NodeRole::Volume, node.as_str())),
+                .map(|node| at(NodeRole::Volume, node, "volumes".to_owned())),
         );
         references.extend(
             self.colliders
                 .iter()
-                .map(|node| (NodeRole::Collider, node.as_str())),
+                .map(|node| at(NodeRole::Collider, node, "colliders".to_owned())),
         );
-        references.extend(
-            self.roadwheels
-                .iter()
-                .map(|wheel| (NodeRole::Roadwheel, wheel.node.as_str())),
-        );
-        for weapon in self.weapons.values() {
-            references.push((NodeRole::Weapon, weapon.muzzle.as_str()));
-            references.extend(
-                weapon
-                    .barrel
-                    .as_deref()
-                    .map(|node| (NodeRole::Weapon, node)),
-            );
+        references.extend(self.roadwheels.iter().enumerate().map(|(index, wheel)| {
+            at(
+                NodeRole::Roadwheel,
+                &wheel.node,
+                format!("roadwheels[{index}].node"),
+            )
+        }));
+        for (name, weapon) in &self.weapons {
+            references.push(at(
+                NodeRole::Weapon,
+                &weapon.muzzle,
+                format!("weapons[\"{name}\"].muzzle"),
+            ));
+            if let Some(barrel) = weapon.barrel.as_deref() {
+                references.push(at(
+                    NodeRole::Weapon,
+                    barrel,
+                    format!("weapons[\"{name}\"].barrel"),
+                ));
+            }
         }
         references.extend(
-            self.views
-                .values()
-                .map(|view| (NodeRole::View, view.node.as_str())),
+            self.views.iter().map(|(kind, view)| {
+                at(NodeRole::View, &view.node, format!("views[{kind:?}].node"))
+            }),
         );
         references.sort_unstable();
         references.dedup();
