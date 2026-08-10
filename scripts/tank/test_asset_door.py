@@ -414,6 +414,67 @@ class ComparisonLaw(unittest.TestCase):
         nothing about them."""
         self.certifies(self.tracked("identical"))
 
+    def test_non_canonical_json_encoding_refuses_as_container(self):
+        """The same document re-framed with spaces after separators parses identically — and the
+        parser is exactly what a byte hidden in the encoding evades, so the file must BE the
+        canonical serialization of what it parses as."""
+        tracked = self.tracked("json-spacing")
+        js, bin_ = glb_ktx2.read_glb(tracked)
+        jb = json.dumps(js, separators=(", ", ": ")).encode()
+        jb += b" " * (-len(jb) % 4)
+        bb = bytes(bin_) + b"\0" * (-len(bin_) % 4)
+        with open(tracked, "wb") as handle:
+            handle.write(struct.pack("<III", 0x46546C67, 2, 12 + 8 + len(jb) + 8 + len(bb)))
+            handle.write(struct.pack("<II", len(jb), 0x4E4F534A))
+            handle.write(jb)
+            handle.write(struct.pack("<II", len(bb), 0x004E4942))
+            handle.write(bb)
+        self.refuses(tracked, "container", "canonical serialization")
+
+    def test_an_extra_chunk_refuses_as_container(self):
+        """A chunk the parser ignores, with the declared file length keeping its story straight."""
+        tracked = self.tracked("extra-chunk")
+        with open(tracked, "rb") as handle:
+            raw = bytearray(handle.read())
+        raw += struct.pack("<II", 4, 0x12345678) + b"EVIL"
+        struct.pack_into("<I", raw, 8, len(raw))
+        with open(tracked, "wb") as handle:
+            handle.write(raw)
+        self.refuses(tracked, "container", "canonical serialization")
+
+    def test_a_symlink_at_the_keep_name_is_not_followed(self):
+        """A planted `<name>.glb.rebuilt` symlink must not receive the kept copy wherever it
+        points — the door creates the destination fresh and never follows a link."""
+        tracked = self.tracked("keep-symlink")
+        model = Model(tracked)
+        view = model.js["bufferViews"][model.non_image_view()]
+        at = view.get("byteOffset", 0)
+        model.patch(at, bytes([model.bin[at] ^ 0xFF]))
+        model.write()
+
+        kept = os.path.join(_WORK, "kept-symlink")
+        os.makedirs(kept, exist_ok=True)
+        victim = os.path.join(_WORK, "kept-symlink-victim")
+        with open(victim, "wb") as handle:
+            handle.write(b"the bytes a followed symlink would have destroyed")
+        link = os.path.join(kept, os.path.basename(tracked) + ".rebuilt")
+        if os.path.lexists(link):
+            os.unlink(link)
+        os.symlink(victim, link)
+
+        os.environ["OVERMATCH_DOOR_KEEP"] = kept
+        try:
+            with self.assertRaises(asset_door.Refused):
+                asset_door.compare(self.candidate, tracked)
+        finally:
+            del os.environ["OVERMATCH_DOOR_KEEP"]
+        with open(victim, "rb") as handle:
+            self.assertEqual(handle.read(),
+                             b"the bytes a followed symlink would have destroyed")
+        self.assertFalse(os.path.islink(link), "the kept copy is still the planted symlink")
+        self.assertEqual(digest(link), digest(self.candidate),
+                         "the kept copy is not the rebuilt candidate's bytes")
+
     def test_images_encoded_on_another_machine_certify(self):
         """THE ACCEPTED BOUNDARY, stated as what it is: bytes inside a texture payload are not
         compared at all. A payload of a different length whose header facts are the tracked one's
@@ -560,7 +621,7 @@ class ComparisonLaw(unittest.TestCase):
         with open(tracked, "r+b") as handle:
             handle.seek(8)
             handle.write(struct.pack("<I", os.path.getsize(tracked) - 4))
-        self.refuses(tracked, "container", "declares a")
+        self.refuses(tracked, "container", "canonical serialization")
 
     def test_a_tracked_model_that_is_not_a_glb_is_a_finding_not_a_traceback(self):
         """Fail-closed at the parse: `verify` is run by a hook and a CI lane, and a traceback there

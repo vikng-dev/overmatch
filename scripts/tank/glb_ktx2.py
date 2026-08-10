@@ -170,19 +170,28 @@ def parse_glb(raw, path):
     return js, bin_
 
 
-def write_glb(path, js, bin_):
-    """Write a binary glTF, padding both chunks to the 4-byte alignment the format requires."""
+def glb_bytes(js, bin_):
+    """The one binary glTF serialization this pipeline writes: two chunks, both padded to the
+    4-byte alignment the format requires. Also the definition of CANONICAL for the door's
+    container law — a file that parses to (js, bin) but is not these bytes holds content no
+    section comparison examined."""
     jb = json.dumps(js, separators=(",", ":")).encode()
     jb += b" " * (-len(jb) % 4)
     bb = bin_ + b"\0" * (-len(bin_) % 4)
     total = 12 + 8 + len(jb) + (8 + len(bb) if bb else 0)
-    with open(path, "wb") as f:
-        f.write(struct.pack("<III", 0x46546C67, 2, total))
-        f.write(struct.pack("<II", len(jb), 0x4E4F534A))
-        f.write(jb)
-        if bb:
-            f.write(struct.pack("<II", len(bb), 0x004E4942))
-            f.write(bb)
+    out = bytearray()
+    out += struct.pack("<III", 0x46546C67, 2, total)
+    out += struct.pack("<II", len(jb), 0x4E4F534A)
+    out += jb
+    if bb:
+        out += struct.pack("<II", len(bb), 0x004E4942)
+        out += bb
+    return bytes(out)
+
+
+def write_glb(path, js, bin_):
+    """Write a binary glTF, padding both chunks to the 4-byte alignment the format requires."""
+    Path(path).write_bytes(glb_bytes(js, bin_))
 
 
 def stream_glb(handle, path):

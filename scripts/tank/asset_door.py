@@ -410,15 +410,24 @@ def image_sections(tracked, tracked_bin, rebuilt, rebuilt_bin, glb: str) -> List
 
 
 def container_sections(raw: bytes, tracked, tracked_bin, glb: str) -> List[Finding]:
-    """The bytes no section above names: the container's declared size, and the alignment padding
-    between bufferViews. Their content is what the repack writes on every machine — the file's own
-    length, and zero — so they are stated against that rather than against the candidate, whose
-    padding follows its own image sizes. Nothing in a glb is then unexamined."""
+    """The bytes no section above names. The file must BE the canonical serialization of what it
+    parses as — `glb_ktx2.glb_bytes` of its own document and BIN chunk — which examines every
+    container byte at once: framing, declared lengths, chunk count, JSON encoding and padding. A
+    parser that ignores an extra chunk or a doctored pad byte cannot launder it past an equality
+    with the writer's own output. The alignment padding BETWEEN bufferViews lives inside the BIN
+    chunk, so it gets its own clause: zero, which is what the repack writes on every machine.
+    Nothing in a glb is then unexamined."""
     findings = []
-    declared = struct.unpack_from("<I", raw, 8)[0]
-    if declared != len(raw):
-        findings.append(section(glb, "container", "the header declares a {} byte file and the file "
-                                                  "is {} bytes".format(declared, len(raw))))
+    canonical = glb_ktx2.glb_bytes(tracked, tracked_bin)
+    if raw != canonical:
+        at = next((i for i, (a, b) in enumerate(zip(raw, canonical)) if a != b),
+                  min(len(raw), len(canonical)))
+        findings.append(section(glb, "container",
+                                "the file is {} byte(s) and the canonical serialization of what it "
+                                "parses as is {} byte(s), first divergence at byte {} — container "
+                                "content (framing, an extra chunk, or non-canonical JSON/padding) "
+                                "no section comparison examines".format(
+                                    len(raw), len(canonical), at)))
     spans = sorted(
         (view.get("byteOffset", 0), view.get("byteOffset", 0) + view.get("byteLength", 0))
         for view in tracked.get("bufferViews", [])
@@ -533,7 +542,13 @@ def compare(baked: str, glb: str) -> None:
     if kept:
         os.makedirs(kept, exist_ok=True)
         copied = os.path.join(kept, os.path.basename(glb) + ".rebuilt")
-        shutil.copyfile(baked, copied)
+        # The destination is created fresh and never followed: a symlink planted at this name
+        # would otherwise receive the copy wherever it points — including over the tracked model.
+        if os.path.lexists(copied):
+            os.unlink(copied)
+        handle = os.open(copied, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(handle, "wb") as target, open(baked, "rb") as candidate:
+            shutil.copyfileobj(candidate, target)
         note = "; the rebuilt candidate is kept at {}".format(copied)
     print("door  ▸ compare: {} is not the rebuilt candidate — tracked sha256 {}, rebuilt sha256 "
           "{}{}".format(glb, tracked, rebuilt, note), flush=True)
