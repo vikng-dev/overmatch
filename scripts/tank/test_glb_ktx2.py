@@ -481,6 +481,32 @@ class Structure(Fires):
         after.js["bufferViews"][index]["byteLength"] -= 4
         self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "only byteOffset may move")
 
+    def test_mutated_buffer_metadata_refuses(self):
+        """The one collection the whole-document comparison skips, because the bake resizes it. It
+        resizes ONE field of ONE buffer; a `uri` pointing the model's geometry at a file beside it
+        travels in the same collection and is not a texture bake."""
+        after = baked()
+        after.js["buffers"][0]["uri"] = "elsewhere.bin"
+        self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "only byteLength may move")
+
+    def test_an_appended_buffer_refuses(self):
+        after = baked()
+        after.js["buffers"].append({"byteLength": 4})
+        self.fires(derivation(raw(), after), "D.STRUCTURAL_DERIVATION", "1 raw, 2 baked")
+
+    def test_a_resized_buffer_is_the_bake_doing_its_job(self):
+        """The sanctioned change, stated so the row above cannot be tightened into refusing every
+        bake: buffer 0 holds the images, and KTX2 is not the size the PNG was."""
+        before, after = raw(), baked()
+        self.assertNotEqual(
+            before.js["buffers"][0]["byteLength"], after.js["buffers"][0]["byteLength"],
+            "the fixture pair did not resize the BIN chunk, so this case proves nothing",
+        )
+        self.assertEqual(
+            [finding for finding in derivation(before, after)
+             if "buffer 0" in (finding.subject.element or "")], [],
+        )
+
     def test_a_bufferview_past_the_end_of_the_buffer_refuses(self):
         after = baked()
         after.js["bufferViews"][0]["byteOffset"] = after.js["buffers"][0]["byteLength"]

@@ -690,6 +690,38 @@ def _extensions_used(a, b, path):
     )]
 
 
+def _buffers(a, b, path):
+    """The buffer collection, by count, order and content.
+
+    A glb carries one buffer — the BIN chunk everything else is a span of — and the derivation
+    resizes it, because the images inside it change size. That is the only field the bake owns, on
+    the only buffer it writes. A second buffer, a `uri` pointing the model's geometry at a file
+    beside it, or a buffer reordered under bufferViews that still name the same indices are all
+    documents the exporter did not produce, and none of them is a texture bake.
+    """
+    a_buffers, b_buffers = a.get("buffers", []), b.get("buffers", [])
+    if len(a_buffers) != len(b_buffers):
+        return [Finding(
+            STRUCTURAL_DERIVATION, _file(path, "buffers"),
+            "{} raw, {} baked".format(len(a_buffers), len(b_buffers)), REBAKE,
+        )]
+    findings = []
+    for index, (raw, baked) in enumerate(zip(a_buffers, b_buffers)):
+        moves = {"byteLength"} if index == 0 else set()
+        kept_raw = {key: value for key, value in raw.items() if key not in moves}
+        kept_baked = {key: value for key, value in baked.items() if key not in moves}
+        if kept_raw == kept_baked:
+            continue
+        findings.append(Finding(
+            STRUCTURAL_DERIVATION, _file(path, "buffer {}".format(index)),
+            "{} became {}, and only {} may move".format(
+                json.dumps(raw, sort_keys=True), json.dumps(baked, sort_keys=True),
+                ", ".join(sorted(moves)) or "nothing"),
+            REBAKE,
+        ))
+    return findings
+
+
 def _in_bounds(js, bin_, index, path):
     """One baked bufferView's offsets, against the buffer that is supposed to hold it."""
     view = js["bufferViews"][index]
@@ -850,7 +882,7 @@ def _images(a, abin, b, bbin, path):
 
 def derivation_findings(a, abin, b, bbin, path):
     """`D.STRUCTURAL_DERIVATION`, whole: the baked document against the raw one it came from."""
-    findings = _untouched_json(a, b, path) + _extensions_used(a, b, path)
+    findings = _untouched_json(a, b, path) + _extensions_used(a, b, path) + _buffers(a, b, path)
     aligned, views = _bufferviews(a, abin, b, bbin, path)
     findings += views
     if aligned:
