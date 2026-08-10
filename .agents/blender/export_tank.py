@@ -636,15 +636,9 @@ def check_handedness(source: Source) -> List[Finding]:
     return findings
 
 
-def _parent_inverse_gram(obj):
-    """The 3x3 parent-inverse basis dotted with itself, when that is not the identity — the exact
-    measure of a matrix that scales or shears. None when the matrix only rotates and translates.
-
-    `matrix_local` is `matrix_parent_inverse @ matrix_basis`, and `matrix_basis` is exactly the
-    scale/rotation/translation channels including their deltas. So this matrix is the ONLY other
-    place a local scale comes from: Blender writes the inverse of the parent's world matrix here
-    when a child is parented, so a parent that was scaled at that moment leaves the scale in it
-    while both channels still read (1,1,1).
+def _scale_gram(matrix):
+    """The 3x3 basis dotted with itself, when that is not the identity — the exact measure of a
+    matrix that scales or shears. None when the matrix only rotates and translates.
 
     EXACT, and it has to be measured this way. The Gram matrix — every basis column dotted with
     every other — is the identity exactly when the columns are unit-length and mutually
@@ -660,7 +654,6 @@ def _parent_inverse_gram(obj):
     reports it. The row is a WARNING that never fails a build and it prints the Gram it measured,
     which is the true thing to say about a stored basis that is not unit.
     """
-    matrix = obj.matrix_parent_inverse
     columns = [[matrix[row][index] for row in range(3)] for index in range(3)]
     gram = tuple(
         tuple(sum(columns[i][axis] * columns[j][axis] for axis in range(3)) for j in range(3))
@@ -672,7 +665,16 @@ def _parent_inverse_gram(obj):
 
 
 def check_unapplied_scale(source: Source) -> List[Finding]:
-    """Reported generically here; the strict refusal for sim-consumed nodes is L2.UNIT_SCALE."""
+    """Reported generically here; the strict refusal for sim-consumed nodes is L2.UNIT_SCALE.
+
+    THREE MEASUREMENTS, because the law is about the LOCAL TRANSFORM and a channel is not one. The
+    two authored channels say where an artist put a scale; the parent inverse says where Blender
+    put one; `matrix_local` is what the exporter actually writes, and it is the composition of both
+    — `matrix_parent_inverse @ matrix_basis`. Reading only the channels is weaker than the row in
+    one direction and stronger in the other: a scale in the parent inverse leaves both channels at
+    (1,1,1), and compensating base/delta channels compose to a local transform that carries no
+    scale at all. So each measurement is its own element, and the report says which one moved.
+    """
     findings = []
     unit = (1.0, 1.0, 1.0)
     for obj in source.objects:
@@ -686,7 +688,10 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
                 "apply the scale (Ctrl+A → Scale) — bit-exact, not near: there is no scale that is "
                 "almost 1",
             ))
-        gram = _parent_inverse_gram(obj)
+        # Blender writes the inverse of the parent's world matrix here when a child is parented, so
+        # a parent that was scaled at that moment leaves the scale in it while both channels above
+        # still read (1,1,1).
+        gram = _scale_gram(obj.matrix_parent_inverse)
         if gram is not None:
             findings.append(Finding(
                 UNAPPLIED_SCALE,
@@ -696,6 +701,17 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
                 "clear it and re-parent with Keep Transform (Object ▸ Parent ▸ Clear Parent "
                 "Inverse, then Ctrl+P) after applying the parent's scale — Blender wrote the "
                 "inverse of a scaled parent here, and it multiplies this node's own scale",
+            ))
+        gram = _scale_gram(obj.matrix_local)
+        if gram is not None:
+            findings.append(Finding(
+                UNAPPLIED_SCALE,
+                Subject(SubjectKind.OBJECT, obj.name, "local matrix"),
+                "the composed local transform is not scale-free: its basis columns dotted with "
+                "each other are {}, not the identity".format(gram),
+                "apply the scale (Ctrl+A → Scale) and clear the parent inverse — this is the "
+                "matrix the exporter writes, and whatever the two rows above say, this is the "
+                "scale the model ships with",
             ))
     return findings
 

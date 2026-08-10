@@ -794,9 +794,34 @@ def unapplied_scale_reads_the_parent_inverse_matrix():
     findings = export_tank.lint(source_of(scene))
     assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
     hits = of(findings, "L1.UNAPPLIED_SCALE")
-    assert len(hits) == 1 and hits[0].subject.element == "parent inverse", [
+    # Both the matrix that carries it and the composition it lands in — no channel row, because no
+    # channel moved.
+    assert sorted(hit.subject.element for hit in hits) == ["local matrix", "parent inverse"], [
         (finding.subject.element, finding.evidence) for finding in hits
     ]
+    assert_exit(findings, 0)
+
+
+@case
+def unapplied_scale_reads_the_composed_local_transform():
+    """The law is the LOCAL TRANSFORM, and channels are not it.
+
+    Compensating base and delta channels compose to a local matrix that carries no scale at all —
+    the exporter writes an unscaled node — and channels at (1,1,1) under a scaled parent inverse
+    compose to one that does. Each measurement is its own element, so the report says which.
+    """
+    scene = clean_scene()
+    turret = bpy.data.objects["Turret"]
+    turret.scale = (2.0, 1.0, 1.0)
+    turret.delta_scale = (0.5, 1.0, 1.0)
+    findings = export_tank.lint(source_of(scene))
+    hits = of(findings, "L1.UNAPPLIED_SCALE")
+    assert [hit.subject.element for hit in hits] == [None], [
+        (finding.subject.element, finding.evidence) for finding in hits
+    ]
+    assert tuple(turret.matrix_local.to_scale()) == (1.0, 1.0, 1.0), (
+        "the fixture does not compose to unit: {}".format(tuple(turret.matrix_local.to_scale()))
+    )
     assert_exit(findings, 0)
 
 
