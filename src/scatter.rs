@@ -34,6 +34,11 @@ const TRUNK_RADIUS_M: f32 = 0.4;
 /// Height fraction of a fir at which the canopy cone's base sits; bare trunk below it.
 const CANOPY_BASE_FRACTION: f32 = 0.2;
 
+/// Smallest squared quaternion length [`resolve`] will normalize. Far below any rounding an f32
+/// text export produces (those land within ~1e-7 of unit) and far above the point where the
+/// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
+const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
+
 /// The graybox shape one prototype id resolves to. Dimensions are metres at instance scale 1; the
 /// instance's own scale multiplies both the visual and the collider.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -137,8 +142,9 @@ impl Placement {
 
 /// Resolve the manifest's instance records against the prototype registry and put them in
 /// ITERATION ORDER. Everything past the manifest's own shape check is ADR-0011 fail-fast: an
-/// unknown prototype id, or a pose component that is not finite (a NaN reaches the solver as a NaN
-/// collider), is a broken ship and panics naming the instance.
+/// unknown prototype id, a pose component that is not finite (a NaN reaches the solver as a NaN
+/// collider), or a rotation with no length to normalize is a broken ship and panics naming the
+/// instance.
 fn resolve(records: &[InstanceRecord]) -> Vec<Instance> {
     let mut instances: Vec<Instance> = records
         .iter()
@@ -162,6 +168,17 @@ fn resolve(records: &[InstanceRecord]) -> Vec<Instance> {
                 translation.is_finite() && rotation.is_finite() && scale.is_finite(),
                 "scatter: instance {} has a non-finite pose",
                 raw.id,
+            );
+            // A quaternion the exporter wrote as f32 TEXT is never exactly unit, so an off-unit one
+            // is normalized below and welcome. One with no length is not off-unit, it is not a
+            // rotation: `normalize` divides by zero and hands the solver a NaN collider, which is
+            // finite arithmetic's blind spot — the check above passes it. `[0,0,0,0]` is the
+            // shape this takes in a file.
+            assert!(
+                rotation.length_squared() > MIN_ROTATION_LENGTH_SQ,
+                "scatter: instance {} has rotation {:?}, which names no orientation",
+                raw.id,
+                raw.rotation,
             );
             Instance {
                 prototype,
@@ -381,6 +398,36 @@ mod tests {
         assert_eq!(pose.translation.z, xz.y);
         assert_eq!(pose.translation.y, grid.height_at(xz.x, xz.y));
         assert_eq!(placed(900.0), pose, "the authored Y must change nothing");
+    }
+
+    /// A zero quaternion is FINITE, so the pose check waves it through — and then `normalize`
+    /// divides by a zero length and puts a NaN rotation on a static collider, which reaches Avian
+    /// as geometry nothing can resolve against. It has to be refused where it is still a number in
+    /// a file (ADR-0011).
+    #[test]
+    #[should_panic(expected = "which names no orientation")]
+    fn a_rotation_with_no_length_panics() {
+        let mut raw = record("house_proxy", Vec2::ZERO, 0.0);
+        raw.rotation = [0.0, 0.0, 0.0, 0.0];
+        resolve(&[raw]);
+    }
+
+    /// …and the exporter's ordinary f32 text, which is never exactly unit, is still normalized
+    /// rather than refused. Rejecting off-unit quaternions would refuse the shipped map.
+    #[test]
+    fn an_off_unit_rotation_is_normalized_not_refused() {
+        let mut raw = record("house_proxy", Vec2::ZERO, 0.0);
+        // A yaw whose components carry the rounding an f32 decimal round-trip leaves behind.
+        raw.rotation = [0.0, 0.747_645, 0.0, 0.664_098_6];
+        let resolved = resolve(&[raw]);
+        assert!(
+            (resolved[0].rotation.length() - 1.0).abs() < 1e-6,
+            "the stored rotation must be unit",
+        );
+        assert!(
+            resolved[0].rotation.is_finite(),
+            "no NaN may reach a static collider",
+        );
     }
 
     /// ADR-0011: a map naming a prototype the registry does not carry is a broken ship.
