@@ -89,7 +89,15 @@ use crate::{CombatantId, ShotId};
 /// every belt-first shove 1–3 ticks before its spark, which is exactly the skew class REV exists
 /// to refuse. Surface and type hashes are unchanged; only the REV (and with it the manifest
 /// fingerprint) moves.
-pub const PROTOCOL_REV: u32 = 25;
+///
+/// REV 26 (map2 terrain + 1500 m extent): NO wire-format change. The shipped heightmap and the
+/// square it is hung at both changed — a new 4096² map over 1 500 m spanning 0..50 m, declared by
+/// `assets/terrain/map.ron` instead of the old compile-time 1 000 m / 0..100 m pair. The ground is a
+/// sim input every peer integrates against (belt contacts, spawn heights, hull collisions), so two
+/// peers on opposite sides of this change simulate different worlds from identical snapshots —
+/// exactly the silent sim skew REV exists to refuse. Surface and type hashes are unchanged; only the
+/// REV (and with it the manifest fingerprint) moves.
+pub const PROTOCOL_REV: u32 = 26;
 
 /// How many times the inert `HullShock` rollback condition has been dispatched, across every test
 /// in the process — see the registration for why this exists and how to read it soundly.
@@ -1868,9 +1876,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 24 (`opened` on `HullShock`: same registrations, changed own-type
-        // definitions).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x071e_8763_d8df_98b2;
+        // Re-pinned for REV 26 (map2 terrain + 1500 m extent: same registrations, same own-type
+        // definitions — the REV itself is what moved).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xfa6f_a439_5b90_2e4f;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
