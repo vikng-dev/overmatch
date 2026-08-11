@@ -18,7 +18,9 @@ Enumerating lightyear's `ComponentRegistry` at runtime was considered and reject
 
 ## The operational half
 
-The dedicated server auto-deploys from `main` on every push (`deploy.yml`: build the Linux server via the shared `build-server` recipe, scp the payload to the droplet, extract, restart the systemd unit, verify the live `DEPLOYED_SHA`). So *server* staleness is bounded at minutes — the window in which a freshly-merged wire change leaves the droplet behind a `main`-built client closes on its own, and until it does the two refuse cleanly instead of corrupting. This is why the guard's job is to *refuse*, not to *reconcile*: the deploy pipeline makes the skew short-lived on the one machine we control.
+The dedicated server is deployed by the release pipeline, not by merges: a `vX.Y.Z` tag builds the Linux server, ships that artifact to the droplet, and only then publishes the GitHub Release (`release.yml`, `DEPLOY.md`). So the droplet and the latest downloadable client are the same build *by construction* — the pairing this ADR's refusal exists to protect is guaranteed for every player who has a release in hand, rather than converging after a merge.
+
+What that leaves open is the developer on a `main` ahead of the last tag: their locally built client is skewed against the droplet until the next release, and refuses cleanly instead of corrupting. That skew is now bounded by the release cadence rather than by minutes, which is why the guard's job is to *refuse*, not to *reconcile* — playtest `main` against a local server, and the droplet against a release.
 
 ## What this ADR does not say
 
