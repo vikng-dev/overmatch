@@ -25,7 +25,8 @@
 //!   1. The terrain is FLATTENED — at the GRID, before anything reads it, so the oracle, the
 //!      collider and the render mesh are all flat by the same construction that keeps them agreeing
 //!      on the shipped map (`terrain_grid`'s one-surface doctrine). Flattening only the render mesh
-//!      would put the tanks on invisible hills.
+//!      would put the tanks on invisible hills. The map's object scatter is skipped with it: 709
+//!      houses and firs are scenery standing in front of the thing being looked at.
 //!   2. The player spawns at one edge of the 1 000 m map facing down-range.
 //!   3. At every switch distance in `SHOE_LOD_CHAIN`, a PAIR of stationary Tigers stands broadside
 //!      to the sight line: the LEFT one clamped to the finer level, the RIGHT one to the coarser.
@@ -70,9 +71,9 @@ pub fn plugin(app: &mut App) {
 
 /// Is this process running the LOD showcase?
 ///
-/// Read by [`plugin`], by `tank::scenario`'s spawn (which lays out the pairs instead of the duel)
-/// and by `terrain_grid`'s decode (which flattens the world instead of loading it). Those three are
-/// the whole of its reach.
+/// Read by [`plugin`], by `tank::scenario`'s spawn (which lays out the pairs instead of the duel),
+/// by `terrain_grid`'s decode (which flattens the world instead of loading it) and by `world`'s
+/// scatter call (which skips the map's objects). Those four are the whole of its reach.
 pub(crate) fn enabled() -> bool {
     crate::env_flag("OVERMATCH_LOD_SHOWCASE", false)
 }
@@ -466,20 +467,20 @@ mod tests {
         }
     }
 
-    /// The lever is OFF by default and REACHES only three places, enforced by scanning the source.
+    /// The lever is OFF by default and REACHES only four places, enforced by scanning the source.
     ///
     /// The whole promise of a debug harness is that a build which does not ask for it does not pay
     /// for it and cannot be surprised by it. Two halves to that, and only one of them is checked by
     /// the suite passing: every other test in this crate runs with the variable unset and would go
     /// red if the showcase engaged, which covers BEHAVIOUR. What it cannot cover is REACH — a fourth
-    /// site reading `enabled()` next year is a fourth production path with a debug branch in it, and
+    /// site reading `enabled()` next year is one more production path with a debug branch in it, and
     /// nothing about it would fail. So the sites are enumerated here, and adding one is a deliberate
     /// edit to this list rather than a quiet spread.
     ///
     /// (The variable's NAME is likewise allowed in exactly one file. A second `env_flag` on the same
     /// string would be a second, undiscoverable definition of "enabled".)
     #[test]
-    fn the_showcase_is_off_by_default_and_reaches_exactly_three_places() {
+    fn the_showcase_is_off_by_default_and_reaches_exactly_four_places() {
         assert!(
             !enabled(),
             "the suite runs with the lever unset — a test process that has it set is not testing \
@@ -524,10 +525,17 @@ mod tests {
         assert_eq!(
             callers,
             // The spawn (pairs instead of the duel), the terrain decode (a flat grid instead of the
-            // shipped map), and this file — whose hit is [`plugin`]'s own mount guard AND the
-            // literal this scan is written with, so it can never be absent.
-            ["lod_showcase.rs", "tank/scenario.rs", "terrain_grid.rs"],
-            "the showcase reaches the scenario spawn and the terrain decode, and nowhere else",
+            // shipped map), the world's scatter call (none of the map's objects instead of 709 of
+            // them), and this file — whose hit is [`plugin`]'s own mount guard AND the literal this
+            // scan is written with, so it can never be absent.
+            [
+                "lod_showcase.rs",
+                "tank/scenario.rs",
+                "terrain_grid.rs",
+                "world.rs"
+            ],
+            "the showcase reaches the scenario spawn, the terrain decode and the scatter spawn, \
+             and nowhere else",
         );
     }
 

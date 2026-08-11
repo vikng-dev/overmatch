@@ -128,6 +128,10 @@ pub mod sandbox;
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
 /// windowed root — `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
 /// entry declarer — and never the headless server.
+/// The map's object scatter (`assets/terrain/level.json`): authored building and tree placement
+/// spawned as graybox proxies with static colliders, from shared data on both binaries rather than
+/// over the wire. Buildings join `world::TerrainMap`'s block list; firs carry a trunk collider only.
+mod scatter;
 mod settings;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to

@@ -356,8 +356,9 @@ fn spawn_environment(
     ));
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
-    // no authored test course. `TerrainMap` stays (empty) so `TrackField` rebuilds on the same
-    // revision semantics; the oracle's ground term comes from the grid, not the block list.
+    // no authored test course. The oracle's ground term comes from the grid; `TerrainMap` carries
+    // only what stands ON it (the scatter's buildings, below), on the same revision semantics
+    // `TrackField` rebuilds from.
     if let Some(grid) = grid {
         // The view layer's parry cap must reach across the map the grid actually is (ADR-0011): a
         // world wider than [`VIEW_CAST_MAX_M`]'s diagonal clips aim and camera picks at the cap
@@ -432,6 +433,21 @@ fn spawn_environment(
                 &material,
                 &grid,
                 terrain_lod_view(windows.iter().next(), scale.as_deref()),
+            );
+        }
+        // The map's object scatter (`scatter`): graybox proxies posed from the shipped level file
+        // onto THIS grid, colliders on every composition and meshes only where there is a window.
+        // Appended to `blocks` before the resource is inserted, so a building enters the analytic
+        // track field through the same list the authored course's cuboids do. The showcase world is
+        // excluded for the reason its grid is flat: scenery in front of the thing being looked at.
+        if !crate::lod_showcase::enabled() {
+            crate::scatter::spawn(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &grid,
+                &mut blocks,
+                !windows.is_empty(),
             );
         }
         commands.insert_resource(TerrainMap {
