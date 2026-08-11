@@ -2,9 +2,8 @@ name: Build overmatch-server
 description: >-
   The single canonical build + package recipe for the Linux `overmatch-server`
   dedicated server. Runs as steps inside the caller's job: toolchain -> apt deps
-  -> asset prune -> rust-cache -> cargo build -> tar. Both release.yml
-  (`upload-server`) and deploy.yml call this, so the recipe lives in exactly one
-  place.
+  -> asset prune -> rust-cache -> cargo build -> tar. release.yml's `build-server`
+  is the only caller; its one tarball is both deployed and released.
 
 # CONTRACT (the seam):
 #   * The CALLER checks out the repo FIRST, fetches LFS via committed `.lfsconfig`
@@ -19,10 +18,9 @@ inputs:
   deployed-sha:
     description: >-
       When 'true', embed a DEPLOYED_SHA marker (GITHUB_SHA) inside the tar so the
-      droplet + run log can state exactly which commit is live. Default 'false'
-      keeps the release artifact byte-for-byte as before (no marker). The marker
-      is a packaging detail that goes INSIDE the tar, so it belongs with the
-      packaging step here rather than as a caller-side re-tar — one canonical tar.
+      droplet + run log can state exactly which commit is live. The marker is a
+      packaging detail that goes INSIDE the tar, so it belongs with the packaging
+      step here rather than as a caller-side re-tar — one canonical tar.
     required: false
     default: 'false'
 
