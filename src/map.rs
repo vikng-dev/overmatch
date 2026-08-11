@@ -18,10 +18,11 @@
 //! the way the author placed their objects on it.
 //!
 //! FAILURE LAW (ADR-0011). Absent → `None` → the flat-slab fallback world, the ONLY tolerated
-//! absence. Present → everything it declares must hold: an unparseable file, a mismatched
-//! coordinate system, an extent that describes no world, or a heightmap that is missing or
-//! undecodable panics, because a peer silently falling back to flat while others load the map
-//! would desync the deterministic sim.
+//! absence, and absent means NOT FOUND and nothing else ([`read_manifest`]). Present → everything
+//! it declares must hold: a file that cannot be read, an unparseable one, a mismatched coordinate
+//! system, an extent that describes no world, or a heightmap that is missing or undecodable panics,
+//! because a peer silently falling back to flat while others load the map would desync the
+//! deterministic sim.
 
 use std::path::{Path, PathBuf};
 
@@ -288,15 +289,25 @@ impl ExtentXz {
 /// module doc); a manifest that exists and does not hold panics.
 pub(crate) fn load(root: &Path) -> Option<MapManifest> {
     let path = level_path(root);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Some(parse(&text, &path)),
-        Err(err) => {
-            info!(
-                "map: no level manifest at {} ({err}) — flat world",
-                path.display()
-            );
+    let text = read_manifest(&path)?;
+    Some(parse(&text, &path))
+}
+
+/// The manifest's text, or `None` when there is NO manifest.
+///
+/// ABSENT IS NOT THE SAME AS UNREADABLE. Only [`std::io::ErrorKind::NotFound`] is absence; a file
+/// that exists and cannot be read — a directory in its place, wrong permissions, bytes that are not
+/// UTF-8 — is present-but-broken and panics naming the path and the error (ADR-0011). Folding those
+/// into the fallback would drop this peer onto the flat slab while its opponents load the map, which
+/// is a desync dressed up as a log line.
+fn read_manifest(path: &Path) -> Option<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            info!("map: no level manifest at {} — flat world", path.display());
             None
         }
+        Err(err) => panic!("map: {} cannot be read: {err}", path.display()),
     }
 }
 
@@ -513,6 +524,24 @@ pub(crate) mod tests {
     #[test]
     fn the_shipped_map_declares_the_row_direction_it_was_exported_with() {
         assert_eq!(shipped_manifest().rows, RowOrder::TowardNegativeZ);
+    }
+
+    /// A tree with no `maps/` in it at all is the flat-slab fallback world — the one absence the
+    /// loader tolerates.
+    #[test]
+    fn a_missing_manifest_is_the_only_absence() {
+        assert!(read_manifest(&level_path(Path::new("/nonexistent-asset-root"))).is_none());
+        assert!(load(Path::new("/nonexistent-asset-root")).is_none());
+    }
+
+    /// PRESENT-BUT-BROKEN (ADR-0011): a manifest path that exists and cannot be read is NOT
+    /// absence. Read here as a directory standing where the file should be — the same
+    /// `read_to_string` failure a permission bit or a non-UTF-8 file produces, and the class that
+    /// used to select the flat world silently while every other peer loaded the map.
+    #[test]
+    #[should_panic(expected = "cannot be read")]
+    fn an_unreadable_manifest_panics() {
+        read_manifest(&map_dir(&shipped_assets()));
     }
 
     /// The column index IS X — the decode walks a row-major image, so a `-X` export describes
