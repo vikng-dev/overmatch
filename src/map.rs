@@ -10,6 +10,10 @@
 //! [`MapManifest`]; the terrain decode takes its extent and heightmap from that resource and
 //! [`crate::scatter`] takes its instances from the same one. Nothing else opens the file.
 //!
+//! THE MAP IS A COMPATIBILITY TERM. Nothing here replicates — both peers derive their terrain and
+//! their scatter from these bytes — so which map a process loaded belongs in the connect-time
+//! handshake beside the wire manifest. [`content_digest`] is what it enters as.
+//!
 //! THE READER VERIFIES THE CONVENTIONS. The exporter declares handedness, up axis, units, transform
 //! space and quaternion order; [`CoordinateSystem::check`] refuses anything but the game's own —
 //! a manifest whose poses mean something else is present-but-broken, not absent. It also declares
@@ -311,6 +315,64 @@ fn read_manifest(path: &Path) -> Option<String> {
     }
 }
 
+/// FNV-1a offset basis — the seed every fold below starts from.
+const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The digest a peer with NO map carries. The flat-slab fallback is a WORLD like any other, so it
+/// gets its own labelled term rather than a zero some map's content could land on.
+const NO_MAP_DIGEST: u64 = fnv1a_64(DIGEST_SEED, b"overmatch-map-absent-v1");
+
+/// FNV-1a over bytes. Byte-driven and integer-only — no floats, no hasher whose seed or word size
+/// could differ — so every platform folds the same map to the same digest.
+const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
+    let mut hash = seed;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        i += 1;
+    }
+    hash
+}
+
+/// The CONTENT digest of the world this process will build: the manifest's own bytes plus the bytes
+/// of the heightmap it names — the two files that decide the terrain and the scatter, neither of
+/// which crosses the wire.
+///
+/// CONTENT, not the id: two peers can select the same map name over different files (a stale
+/// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
+/// while the ground disagreed. `crate::net::protocol::protocol_id` folds this into the handshake.
+///
+/// Same failure law as [`load`]: no manifest is a legal world and answers [`NO_MAP_DIGEST`];
+/// a manifest that is present and does not hold panics.
+pub(crate) fn content_digest(root: &Path) -> u64 {
+    let path = level_path(root);
+    let Some(text) = read_manifest(&path) else {
+        return NO_MAP_DIGEST;
+    };
+    let manifest = parse(&text, &path);
+    let heightmap = manifest.heightmap_path();
+    let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
+        panic!(
+            "map: {} names heightmap {} — {}: {err}",
+            path.display(),
+            manifest.heightmap(),
+            heightmap.display(),
+        )
+    });
+    digest_of(text.as_bytes(), &bytes)
+}
+
+/// The fold itself, pure. Each file's LENGTH is folded before its bytes, so no two different pairs
+/// of files can shift bytes across the boundary into the same digest.
+fn digest_of(level: &[u8], heightmap: &[u8]) -> u64 {
+    let hash = fnv1a_64(DIGEST_SEED, b"overmatch-map-content-v1");
+    let hash = fnv1a_64(hash, &(level.len() as u64).to_le_bytes());
+    let hash = fnv1a_64(hash, level);
+    let hash = fnv1a_64(hash, &(heightmap.len() as u64).to_le_bytes());
+    fnv1a_64(hash, heightmap)
+}
+
 /// Parse and check one manifest's text. `path` is where it came from — both the directory every
 /// asset name resolves against and the name every refusal carries.
 pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
@@ -542,6 +604,39 @@ pub(crate) mod tests {
     #[should_panic(expected = "cannot be read")]
     fn an_unreadable_manifest_panics() {
         read_manifest(&map_dir(&shipped_assets()));
+    }
+
+    /// THE COMPATIBILITY TERM. The digest is a function of the CONTENT of both files, each length-
+    /// delimited, so neither a one-byte edit to either nor a re-cut of the boundary between them
+    /// can leave it standing. This is what `net::protocol::protocol_id` folds into the handshake:
+    /// two peers whose worlds differ must not be able to agree on a tag.
+    #[test]
+    fn the_digest_moves_with_either_file() {
+        let base = digest_of(b"level", b"height");
+        assert_ne!(base, digest_of(b"levex", b"height"), "the manifest counts");
+        assert_ne!(base, digest_of(b"level", b"heighu"), "the heightmap counts");
+        assert_ne!(
+            digest_of(b"ab", b"cd"),
+            digest_of(b"abc", b"d"),
+            "the boundary between the two files is part of the digest",
+        );
+    }
+
+    /// The flat-slab fallback is a WORLD, and it gets its own term: a peer with no map and a peer
+    /// with one must never hand the handshake the same tag.
+    #[test]
+    fn the_map_and_its_absence_digest_differently() {
+        let shipped = content_digest(&shipped_assets());
+        assert_eq!(
+            shipped,
+            content_digest(&shipped_assets()),
+            "the same tree must digest the same on every read",
+        );
+        assert_ne!(shipped, NO_MAP_DIGEST);
+        assert_eq!(
+            content_digest(Path::new("/nonexistent-asset-root")),
+            NO_MAP_DIGEST,
+        );
     }
 
     /// The column index IS X — the decode walks a row-major image, so a `-X` export describes

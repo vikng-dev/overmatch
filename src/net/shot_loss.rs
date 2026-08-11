@@ -28,7 +28,7 @@ use super::client::{
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
-use super::protocol::{DamageReceipt, NetCrew, NetTank, PROTOCOL_FINGERPRINT, VolumeSnapshot};
+use super::protocol::{DamageReceipt, NetCrew, NetTank, VolumeSnapshot, protocol_id};
 use super::server::attach_replication_sender;
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 use crate::ballistics::{
@@ -764,7 +764,7 @@ fn build_server(port: u16) -> App {
         .world_mut()
         .spawn((
             NetcodeServer::new(ServerNetcodeConfig {
-                protocol_id: PROTOCOL_FINGERPRINT,
+                protocol_id: protocol_id(),
                 private_key: [0; 32],
                 ..default()
             }),
@@ -926,7 +926,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
                     server_addr,
                     client_id,
                     private_key: [0; 32],
-                    protocol_id: PROTOCOL_FINGERPRINT,
+                    protocol_id: protocol_id(),
                 },
                 NetcodeConfig::default(),
             )

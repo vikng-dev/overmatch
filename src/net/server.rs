@@ -14,8 +14,8 @@ use lightyear::prelude::*;
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::grip::GripRestState;
 use super::protocol::{
-    LaunchedTurretPose, NetCrew, NetTank, NetTrackGripAnchor, PROTOCOL_FINGERPRINT, ServoAngles,
-    SetSpawnPoint,
+    LaunchedTurretPose, NetCrew, NetTank, NetTrackGripAnchor, ServoAngles, SetSpawnPoint,
+    protocol_id,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -81,7 +81,7 @@ pub fn run() {
             Name::new("Server"),
             NetcodeServer::new(NetcodeConfig {
                 // Must match the client's `Authentication::Manual.protocol_id`.
-                protocol_id: PROTOCOL_FINGERPRINT,
+                protocol_id: protocol_id(),
                 private_key: [0; 32], // dev only — matches the client's Authentication::Manual
                 ..default()
             }),

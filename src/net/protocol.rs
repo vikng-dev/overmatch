@@ -35,8 +35,8 @@ use crate::{CombatantId, ShotId};
 // Protocol compatibility guard
 // ---------------------------------------------------------------------------
 // Replicon registration order is wire compatibility. Both netcode endpoints must use
-// `PROTOCOL_FINGERPRINT` as their `protocol_id`; ADR-0018 and the manifest-pinning tests own the
-// compatibility guard.
+// `protocol_id()` — the compile-time `PROTOCOL_FINGERPRINT` plus the runtime map digest — as their
+// netcode `protocol_id`; ADR-0018 and the manifest-pinning tests own the compatibility guard.
 
 /// Bump and re-pin the affected wire manifest value for every wire-surface change.
 ///
@@ -119,6 +119,28 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
     PROTOCOL_REV,
     env!("CARGO_PKG_VERSION"),
 );
+
+/// THE HANDSHAKE TAG both endpoints hand netcode: [`PROTOCOL_FINGERPRINT`] — the compile-time wire
+/// manifest — folded with the digest of the WORLD this process will build
+/// ([`crate::map::content_digest`]).
+///
+/// The map is a RUNTIME choice (`OVERMATCH_MAP`) over content shipped beside the binary, and its
+/// terrain and scatter are DERIVED on both ends rather than replicated. Without this term a
+/// same-build server and client on different maps complete the handshake and then integrate
+/// different ground: belt contacts, spawn heights and hull collisions all diverge, and the first
+/// symptom is a rollback storm nobody can trace to a file. With it the refusal lands at the
+/// connect: netcode encrypts the connect token under `protocol_id` (ADR-0018), so a client holding
+/// another map mints a token the server cannot decrypt and the request is dropped.
+///
+/// Computed once per process. The map's files cannot change under a running peer, and the heightmap
+/// is tens of megabytes.
+pub fn protocol_id() -> u64 {
+    static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *ID.get_or_init(|| {
+        let digest = crate::map::content_digest(&crate::assets::asset_root());
+        fingerprint_field(PROTOCOL_FINGERPRINT, b"map_content", &digest.to_le_bytes())
+    })
+}
 
 /// Const-evaluable FNV-1a fold for the compatibility tag; it is not a security primitive.
 const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
@@ -2373,6 +2395,35 @@ mod tests {
                 &changed_crate,
             ),
             "the crate version must change the handshake",
+        );
+    }
+
+    /// THE WORLD IS PART OF THE HANDSHAKE. The tag both endpoints hand netcode is not the wire
+    /// manifest alone: the map's content digest is folded onto it, so a same-build peer that loaded
+    /// different terrain mints a token the other end cannot decrypt (ADR-0018) instead of
+    /// connecting and then integrating different ground.
+    #[test]
+    fn the_map_content_reaches_the_handshake_tag() {
+        assert_ne!(
+            protocol_id(),
+            PROTOCOL_FINGERPRINT,
+            "the handshake tag must carry a map term, not the wire manifest alone",
+        );
+        assert_eq!(
+            protocol_id(),
+            protocol_id(),
+            "the tag is stable per process"
+        );
+        // Sensitivity, through the production fold rather than a reimplementation of it: two maps
+        // are two tags.
+        let tag = |digest: u64| {
+            fingerprint_field(PROTOCOL_FINGERPRINT, b"map_content", &digest.to_le_bytes())
+        };
+        assert_ne!(tag(1), tag(2), "a different map must be a different tag");
+        assert_eq!(
+            tag(crate::map::content_digest(&crate::assets::asset_root())),
+            protocol_id(),
+            "the tag must be the fold of THIS process's map",
         );
     }
 
