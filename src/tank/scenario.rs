@@ -210,9 +210,10 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// rendered geometry is the base mesh exactly as before and the walk is pure overhead. The near
 /// block at 55..99 m can only show the second. This flag is the other placement, and nothing else.
 ///
-/// It moves the WHOLE offline scene, not just the grid, because the world is 1 000 m on a side
-/// (`terrain_grid::WORLD_SIZE`) and the camera sits at the duel: with the duel where it is, the
-/// furthest in-bounds probe is ~490 m away and every shoe is still the base mesh. So the duel
+/// It moves the WHOLE offline scene, not just the grid, because the camera sits at the duel and the
+/// world is finite (the map declares its side — `terrain_grid::TerrainManifest`): with the duel
+/// where it is, the furthest in-bounds probe on a 1 000 m map is ~490 m away and every shoe is
+/// still the base mesh. So the duel
 /// translates to
 /// [`PROBE_FAR_DUEL_XZ`] and the grid to [`PROBE_FAR_NEAR_Z`] — same spacing, same columns, same
 /// shape, same count, 588..633 m of separation instead of 55..99 m.

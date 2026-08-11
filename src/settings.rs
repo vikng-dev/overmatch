@@ -361,8 +361,8 @@ pub(crate) enum ShadowDistance {
     #[default]
     M350,
     M700,
-    /// The map is 1 km across (`terrain_grid::WORLD_SIZE`), so this is the rung at which the whole
-    /// world casts and the draw volume stops growing — MEASURED: the cost curve saturates around
+    /// This is the rung at which a 1 km map casts whole and the draw volume stops growing —
+    /// MEASURED on that map: the cost curve saturates around
     /// 700 m for exactly that reason (700 and 1000 m are within the session's own repeatability).
     /// It was the shipped default for one day, 2026-07-28; the type doc's envelope table is why it
     /// is a top rung instead. Only affordable together with [`ShadowResolution::X4096`] — at 2048 it

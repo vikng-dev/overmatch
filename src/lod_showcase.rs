@@ -79,9 +79,10 @@ pub(crate) fn enabled() -> bool {
 
 /// Where the player stands: hard against the map's west edge, on the centre line.
 ///
-/// The map is [`crate::terrain_grid::WORLD_SIZE`] = 1 000 m across, so −480 leaves 950 m of usable
-/// down-range with 20 m of shoulder behind the spawn. Down-range is +X and the pairs are laid out
-/// along it; LATERAL is therefore Z, and the player's LEFT (with +Y up and +X forward) is −Z.
+/// −480 leaves 950 m of usable down-range on a 1 000 m map with 20 m of shoulder behind the spawn,
+/// and clears a wider one by more. Down-range is +X and the pairs are laid out along it; LATERAL is
+/// therefore Z, and the player's LEFT (with +Y up and +X forward) is −Z. The map's own square is
+/// what `no_showcase_tank_stands_off_the_map` holds this layout to.
 const START_XZ: Vec2 = Vec2::new(-480.0, 0.0);
 
 /// Half the lateral gap between a pair's two tanks, metres — so the pair straddles the sight line
@@ -112,10 +113,10 @@ const LANE_OFFSET_M: f32 = 15.0;
 
 /// The furthest down-range a pair may stand, metres from [`START_XZ`].
 ///
-/// The map runs out at +500 (`WORLD_HALF_EXTENT`) and a tank needs its footprint clearance inside
-/// it, so 950 m from −480 puts the last pair at x = +470 with 30 m to spare. Any switch beyond this
-/// is a switch that cannot be staged on this map — the legend says so rather than the pair silently
-/// standing somewhere it was not asked to.
+/// The narrowest map this layout targets runs out at +500 and a tank needs its footprint clearance
+/// inside it, so 950 m from −480 puts the last pair at x = +470 with 30 m to spare. Any switch
+/// beyond this is a switch that cannot be staged on this map — the legend says so rather than the
+/// pair silently standing somewhere it was not asked to.
 const MAX_RANGE_M: f32 = 950.0;
 
 /// One tank the showcase spawns.
@@ -449,10 +450,13 @@ mod tests {
     /// the clamp is enough, for whatever the ladder turns out to be.
     #[test]
     fn no_showcase_tank_stands_off_the_map() {
-        use crate::terrain_grid::{SPAWN_FOOTPRINT_HALF_M, WORLD_HALF_EXTENT};
+        use crate::terrain_grid::{SPAWN_FOOTPRINT_HALF_M, tests::shipped_manifest};
 
+        // The SHIPPED map's square, read off its manifest: the showcase stands on whatever world
+        // ships, so a re-scaled map re-asks this question instead of leaving a stale answer.
+        let half = shipped_manifest().extent().half_extent();
         for tank in layout() {
-            let edge = WORLD_HALF_EXTENT - SPAWN_FOOTPRINT_HALF_M;
+            let edge = half - SPAWN_FOOTPRINT_HALF_M;
             assert!(
                 tank.xz.x.abs() <= edge && tank.xz.y.abs() <= edge,
                 "{} stands at {:?}, and its spawn footprint reaches past the {edge} m usable edge",

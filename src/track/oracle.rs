@@ -296,8 +296,9 @@ impl BlockField {
         if let Some(grid) = &self.height {
             out.u32("oracle.height.size", grid.size());
             out.u32("oracle.height.byte_sum", grid.byte_sum());
-            out.f32("oracle.height.world_size", crate::terrain_grid::WORLD_SIZE);
-            out.f32("oracle.height.range", crate::terrain_grid::HEIGHT_RANGE);
+            out.f32("oracle.height.world_size", grid.world_size());
+            out.f32("oracle.height.offset", grid.extent().height_offset_m);
+            out.f32("oracle.height.span", grid.extent().height_span_m);
         }
         out.u32("oracle.grid.bucket_count", self.grid.len() as u32);
         for (bucket, indices) in self.grid.iter().enumerate() {
@@ -412,6 +413,7 @@ impl TerrainOracle for BlockField {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terrain_grid::FIXTURE_EXTENT;
 
     fn slab() -> BlockField {
         // Ground slab: top face at y = 0 (the world.rs idiom).
@@ -438,23 +440,25 @@ mod tests {
     }
 
     /// A height grid whose samples come from `f(i, j)` in 8-bit terms (normalized to meters
-    /// like the decoder; see `terrain_grid` for the mapping).
+    /// like the decoder; see `terrain_grid` for the mapping), hung at the fixture extent.
     fn height_grid(size: u32, f: impl Fn(u32, u32) -> u8) -> HeightGrid {
-        use crate::terrain_grid::HEIGHT_RANGE;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for j in 0..size {
             for i in 0..size {
-                samples.push(f32::from(f(i, j)) * (HEIGHT_RANGE / 255.0));
+                samples.push(f32::from(f(i, j)) * (SPAN / 255.0));
             }
         }
-        HeightGrid::new(samples.into(), size)
+        HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
     }
+
+    /// The fixture world every synthetic grid below is hung at, and its two derived numbers.
+    const SPAN: f32 = FIXTURE_EXTENT.height_span_m;
+    const HALF: f32 = FIXTURE_EXTENT.half_extent();
 
     #[test]
     fn height_term_reads_flat_ground_like_the_slab() {
-        use crate::terrain_grid::HEIGHT_RANGE;
-        // All samples 51 → a flat surface at 51/255 · HEIGHT_RANGE = 0.2 · HEIGHT_RANGE.
-        let h = 51.0 / 255.0 * HEIGHT_RANGE;
+        // All samples 51 → a flat surface at 51/255 · SPAN = 0.2 · SPAN.
+        let h = 51.0 / 255.0 * SPAN;
         let field = BlockField::new(vec![]).with_height(Some(height_grid(4, |_, _| 51)));
         let down = Vec3::NEG_Y;
         // 10 cm above the surface: 10 cm of clearance.
@@ -473,17 +477,16 @@ mod tests {
 
     #[test]
     fn height_term_reads_a_known_slope_exactly() {
-        use crate::terrain_grid::{HEIGHT_RANGE, WORLD_HALF_EXTENT};
-        // A pure x-ramp: h(x) = (x + half) / world · HEIGHT_RANGE, linear — the triangular
+        // A pure x-ramp: h(x) = (x + HALF) / (2·HALF) · SPAN, linear — the triangular
         // surface IS the plane, so a vertical probe must read h(x) − station.y exactly.
         let field = BlockField::new(vec![])
             .with_height(Some(height_grid(2, |i, _| if i == 1 { 255 } else { 0 })));
         let down = Vec3::NEG_Y;
-        // Probe points as FRACTIONS of the half-extent, so re-scaling the world (`WORLD_SIZE`)
-        // keeps every sample inside the map instead of silently landing on the edge clamp.
+        // Probe points as FRACTIONS of the half-extent, so re-scaling the world keeps every
+        // sample inside the map instead of silently landing on the edge clamp.
         for frac in [-0.7_f32, -0.08, 0.0, 0.26, 0.94] {
-            let x = frac * WORLD_HALF_EXTENT;
-            let h = (x + WORLD_HALF_EXTENT) / (2.0 * WORLD_HALF_EXTENT) * HEIGHT_RANGE;
+            let x = frac * HALF;
+            let h = (x + HALF) / (2.0 * HALF) * SPAN;
             let d = field.depth_along(Vec3::new(x, h - 0.07, 5.0), down, 0.5);
             assert!(
                 (d - 0.07).abs() < 1e-3,
@@ -506,17 +509,19 @@ mod tests {
     #[test]
     fn slope_normal_probe_on_a_45_degree_slope_reads_exact_depth() {
         // h(x) = x: a 45° plane through the origin. `HeightGrid::new` takes raw meters, so the
-        // PNG's 0..HEIGHT_RANGE bound does not constrain a test grid.
-        use crate::terrain_grid::WORLD_HALF_EXTENT;
+        // map's declared vertical range does not constrain a test grid.
         let size = 3u32;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for _j in 0..size {
             for i in 0..size {
-                samples.push(-WORLD_HALF_EXTENT + i as f32 * WORLD_HALF_EXTENT);
+                samples.push(-HALF + i as f32 * HALF);
             }
         }
-        let field =
-            BlockField::new(vec![]).with_height(Some(HeightGrid::new(samples.into(), size)));
+        let field = BlockField::new(vec![]).with_height(Some(HeightGrid::new(
+            samples.into(),
+            size,
+            FIXTURE_EXTENT,
+        )));
         // Outward probe direction = downhill surface normal, exactly the divergent case.
         let normal = Vec3::new(-1.0, 1.0, 0.0).normalize();
         let out = -normal;
@@ -542,20 +547,21 @@ mod tests {
     /// through.
     #[test]
     fn ridge_graze_between_old_scan_checkpoints_is_caught() {
-        use crate::terrain_grid::WORLD_HALF_EXTENT;
-        // A 45° tent ridge along z: nodes at x = ∓`WORLD_HALF_EXTENT` and 0, with
-        // h = WORLD_HALF_EXTENT − |x| (raw meters; the PNG's range bound does not constrain a
-        // test grid). Apex h = WORLD_HALF_EXTENT at x = 0.
+        // A 45° tent ridge along z: nodes at x = ∓`HALF` and 0, with h = HALF − |x| (raw meters;
+        // the map's declared range does not constrain a test grid). Apex h = HALF at x = 0.
         let size = 3u32;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for _j in 0..size {
             for i in 0..size {
-                let x = -WORLD_HALF_EXTENT + i as f32 * WORLD_HALF_EXTENT;
-                samples.push(WORLD_HALF_EXTENT - x.abs());
+                let x = -HALF + i as f32 * HALF;
+                samples.push(HALF - x.abs());
             }
         }
-        let field =
-            BlockField::new(vec![]).with_height(Some(HeightGrid::new(samples.into(), size)));
+        let field = BlockField::new(vec![]).with_height(Some(HeightGrid::new(
+            samples.into(),
+            size,
+            FIXTURE_EXTENT,
+        )));
         // A horizontal +X probe 4 cm below the apex: inside the ridge only for x ∈ (−0.04, 0.04)
         // — 8 cm of ray. Station at x = 0.3, reach 0.5 ⇒ ray origin x = −0.2, so the old scan's
         // checkpoints sat at x = −0.075 and +0.05: the penetration interval lies strictly
@@ -563,11 +569,11 @@ mod tests {
         // positive clearance.
         let reach = 0.5_f32;
         let out = Vec3::X;
-        let station = Vec3::new(0.3, WORLD_HALF_EXTENT - 0.04, 7.0);
+        let station = Vec3::new(0.3, HALF - 0.04, 7.0);
         let origin = station - out * reach;
         for k in 1..=8 {
             let p = origin + out * (2.0 * reach) * (k as f32 / 8.0);
-            let h = WORLD_HALF_EXTENT - p.x.abs();
+            let h = HALF - p.x.abs();
             assert!(
                 p.y - h > 0.0,
                 "checkpoint {k} at x={} must sit clear of the ridge (old-scan miss premise)",
@@ -587,12 +593,11 @@ mod tests {
     /// extends for placement queries (belts feeling ground the hull would fall through).
     #[test]
     fn beyond_the_map_edge_the_height_term_reports_no_ground() {
-        use crate::terrain_grid::{HEIGHT_RANGE, WORLD_HALF_EXTENT};
-        // Flat surface at 0.2 · HEIGHT_RANGE across the whole span.
-        let h = 51.0 / 255.0 * HEIGHT_RANGE;
+        // Flat surface at 0.2 · SPAN across the whole span.
+        let h = 51.0 / 255.0 * SPAN;
         let field = BlockField::new(vec![]).with_height(Some(height_grid(4, |_, _| 51)));
         let down = Vec3::NEG_Y;
-        let outside = WORLD_HALF_EXTENT + 10.0;
+        let outside = HALF + 10.0;
         // A probe 5 cm "under" the clamped phantom surface: no ground, full clearance.
         let d = field.depth_along(Vec3::new(outside, h - 0.05, 0.0), down, 0.5);
         assert_eq!(d, -0.5, "outside the span there is no surface to penetrate");
@@ -600,7 +605,7 @@ mod tests {
         let d = field.depth_along(Vec3::new(0.0, h - 50.0, -outside), down, 0.5);
         assert_eq!(d, -0.5, "outside the span nothing is buried");
         // Just inside the edge the surface still answers exactly.
-        let inside = WORLD_HALF_EXTENT - 1.0;
+        let inside = HALF - 1.0;
         let d = field.depth_along(Vec3::new(inside, h - 0.05, 0.0), down, 0.5);
         assert!((d - 0.05).abs() < 1e-3, "inside the edge reads {d}");
     }
@@ -609,7 +614,7 @@ mod tests {
     fn blocks_still_union_on_top_of_the_height_term() {
         // Flat height ground at 0.2·40 = 8 m, plus a block whose top sits 1 m above it: a probe
         // over the block reads the block's top; a probe beside it reads the ground.
-        let ground = 51.0 / 255.0 * crate::terrain_grid::HEIGHT_RANGE;
+        let ground = 51.0 / 255.0 * SPAN;
         let field = BlockField::new(vec![TerrainBlock::new(
             Vec3::new(0.0, ground + 0.5, 0.0),
             Quat::IDENTITY,
