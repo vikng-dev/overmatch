@@ -29,6 +29,10 @@ use crate::tank::{
     PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_assets, spawn_complete_tank,
 };
 use crate::terrain_grid::spawn_pos;
+// The spawn selector reads the world's standing geometry through the SAME encoding the analytic
+// track field is built from (`world::TerrainMap` blocks → `TerrainBlock`), so the two cannot drift.
+use crate::track::oracle::TerrainBlock;
+use crate::world::TerrainMap;
 use crate::{CombatantId, SimPlugin};
 
 const PORT: u16 = 5888;
@@ -442,21 +446,68 @@ fn lane_spawn_pos(
     }
 }
 
+/// The XZ ground a terrain block DENIES a spawn — its world footprint expanded by
+/// [`SPAWN_OCCUPIED_RADIUS_M`], the same body radius a live tank occupies — or `None` for a block
+/// that IS ground rather than something standing on it.
+///
+/// That distinction is the vertical test, taken against the block's OWN ground — the surface under
+/// its centre, where `scatter` projected it — so the margin is the building's own height. A block
+/// whose top does not clear that surface is drivable ground (the flat-slab world's 1500 m ground
+/// block, a buried course slab) and denies nothing. Against the CANDIDATE's ground the margin
+/// would instead be the roof's clearance over `spawn_pos`'s max-over-footprint sample, which the
+/// shipped map cuts to 0.08 m on one house.
+///
+/// The footprint is the [`TerrainBlock`] encoding the analytic track field is built from
+/// (`track::terrain::build_track_field`) — the unit cube posed by the Transform — taken as its
+/// world AABB: exact for an axis-aligned block, conservative for a yawed one.
+fn block_footprint(
+    block: &Transform,
+    height: Option<&crate::terrain_grid::HeightGrid>,
+) -> Option<Rect> {
+    let (min, max) = TerrainBlock::new(block.translation, block.rotation, block.scale).world_aabb();
+    let ground = height.map_or(0.0, |grid| {
+        grid.height_at(block.translation.x, block.translation.z)
+    });
+    (max.y > ground).then(|| {
+        Rect::from_corners(Vec2::new(min.x, min.z), Vec2::new(max.x, max.z))
+            .inflate(SPAWN_OCCUPIED_RADIUS_M)
+    })
+}
+
+/// Whether a [`block_footprint`] denies `candidate`. The boundary is OPEN, exactly like the tank
+/// test (`>=` the occupancy radius is free), so a spawn may stand against a wall at the same
+/// clearance it may stand against a hull.
+fn footprint_denies(footprint: Rect, candidate: Vec2) -> bool {
+    candidate.cmpgt(footprint.min).all() && candidate.cmplt(footprint.max).all()
+}
+
 /// Resolve a requested spawn XZ against live tank positions (Finding: two players clicking the
-/// same point spawned overlapping dynamic colliders). Returns the first UNOCCUPIED point — the
-/// request itself, or the first free candidate of a deterministic outward ring search
-/// ([`SPAWN_SEARCH_RINGS`], candidates clamped into the placeable
-/// square) — plus whether it was nudged; `None` when everything within ~50 m is occupied (the
-/// caller falls back to the lane spawn). Pure, so the policy is unit-testable without a world.
+/// same point spawned overlapping dynamic colliders) and against the standing terrain `blocks`
+/// (Finding: nothing stopped a click from landing a tank inside a house — `spawn_pos` takes Y from
+/// the ground alone). Returns the first UNOCCUPIED point — the request itself, or the first free
+/// candidate of a deterministic outward ring search ([`SPAWN_SEARCH_RINGS`], candidates clamped
+/// into the placeable square) — plus whether it was nudged; `None` when everything within ~50 m is
+/// occupied (the caller falls back to the lane spawn). Pure, so the policy is unit-testable without
+/// a world; `blocks` is the startup-fixed [`TerrainMap`] list, walked in its own order.
 fn resolve_free_spawn_xz(
     half_extent: f32,
     desired: Vec2,
     occupied: &[Vec2],
+    blocks: &[Transform],
+    height: Option<&crate::terrain_grid::HeightGrid>,
 ) -> Option<(Vec2, bool)> {
+    // What STANDS on the map, resolved once in the block list's own fixed order — the ground terms
+    // drop out here rather than per candidate.
+    let standing: Vec<Rect> = blocks
+        .iter()
+        .filter_map(|block| block_footprint(block, height))
+        .collect();
     let free = |candidate: Vec2| {
-        occupied.iter().all(|tank| {
-            candidate.distance_squared(*tank) >= SPAWN_OCCUPIED_RADIUS_M * SPAWN_OCCUPIED_RADIUS_M
-        })
+        !occupied.iter().any(|tank| {
+            candidate.distance_squared(*tank) < SPAWN_OCCUPIED_RADIUS_M * SPAWN_OCCUPIED_RADIUS_M
+        }) && !standing
+            .iter()
+            .any(|footprint| footprint_denies(*footprint, candidate))
     };
     if free(desired) {
         return Some((desired, false));
@@ -802,6 +853,9 @@ fn respawn_player_tanks(
     overrides: Res<SpawnOverrides>,
     // The authority's own ground truth for spawn-map placement; absent in the flat-slab world.
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
+    // The world's standing geometry (the scatter's buildings): occupancy an override spawn checks
+    // against exactly like a live tank. Absent in bare test worlds.
+    map: Option<Res<TerrainMap>>,
     mut commands: Commands,
 ) {
     // (dead root, owner link, owner client id) for every owned tank that both IS dead and asked to
@@ -852,6 +906,8 @@ fn respawn_player_tanks(
                     spawn_map::world_half_extent(height.as_deref()),
                     xz,
                     &occupied,
+                    map.as_ref().map_or(&[][..], |map| &map.blocks),
+                    height.as_deref(),
                 ) {
                     Some((spot, nudged)) => {
                         if nudged {
@@ -1111,13 +1167,13 @@ mod tests {
         let desired = Vec2::new(100.0, -50.0);
         // Free field: untouched, not nudged.
         assert_eq!(
-            resolve_free_spawn_xz(half, desired, &[]),
+            resolve_free_spawn_xz(half, desired, &[], &[], None),
             Some((desired, false))
         );
         // A tank exactly at the radius is NOT blocking (>= is free)…
         let at_radius = desired + Vec2::new(SPAWN_OCCUPIED_RADIUS_M, 0.0);
         assert_eq!(
-            resolve_free_spawn_xz(half, desired, &[at_radius]),
+            resolve_free_spawn_xz(half, desired, &[at_radius], &[], None),
             Some((desired, false)),
         );
         // …but one inside it is, and the search takes candidates in fixed ring order: the
@@ -1125,7 +1181,7 @@ mod tests {
         // away), so the first FREE candidate is +Z@8 — deterministically.
         let blocking = desired + Vec2::new(SPAWN_OCCUPIED_RADIUS_M - 0.1, 0.0);
         let (spot, nudged) =
-            resolve_free_spawn_xz(half, desired, &[blocking]).expect("a ring is free");
+            resolve_free_spawn_xz(half, desired, &[blocking], &[], None).expect("a ring is free");
         assert!(nudged);
         assert_eq!(
             spot,
@@ -1134,7 +1190,7 @@ mod tests {
         );
         // A tank ON the point (opponent parked there): first candidate +X@8 is 8 m away — free.
         let (spot, nudged) =
-            resolve_free_spawn_xz(half, desired, &[desired]).expect("a ring is free");
+            resolve_free_spawn_xz(half, desired, &[desired], &[], None).expect("a ring is free");
         assert!(nudged);
         assert_eq!(spot, desired + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0));
         // Every candidate occupied (a tank parked on each): lane fallback.
@@ -1144,14 +1200,87 @@ mod tests {
                 crowd.push(desired + dir * radius);
             }
         }
-        assert_eq!(resolve_free_spawn_xz(half, desired, &crowd), None);
+        assert_eq!(
+            resolve_free_spawn_xz(half, desired, &crowd, &[], None),
+            None
+        );
         // Candidates near the map edge clamp into the placeable square.
         let limit = spawn_map::spawn_limit(half);
         let corner = Vec2::new(limit, limit);
         let (spot, nudged) =
-            resolve_free_spawn_xz(half, corner, &[corner]).expect("a ring is free");
+            resolve_free_spawn_xz(half, corner, &[corner], &[], None).expect("a ring is free");
         assert!(nudged);
         assert!(spot.x.abs() <= limit && spot.y.abs() <= limit);
+    }
+
+    /// A building block in the [`TerrainMap`] encoding (`world::spawn_block` / `scatter`): a
+    /// `size`-metre box standing on a surface at y = 0, centred at `center` in XZ, its bottom
+    /// `sink` metres under that surface (the house proxy's skirt).
+    fn building(center: Vec2, size: Vec3, sink: f32) -> Transform {
+        Transform::from_xyz(center.x, size.y / 2.0 - sink, center.y).with_scale(size)
+    }
+
+    /// The building rule: a spawn inside a house is refused and the ring search lands the tank
+    /// outside its walls, while the flat-slab world's GROUND block — a block whose top IS the
+    /// surface it defines — denies nothing (it would otherwise swallow the whole placeable square).
+    #[test]
+    fn spawns_inside_a_building_are_refused_and_the_ground_block_is_not() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+        let desired = Vec2::new(100.0, -50.0);
+        // A hall 10 m × 14 m in XZ around the request: with the 6 m clearance its footprint
+        // covers every ring-8 candidate (max |dx| = 8 < 11, |dz| = 8 < 13), so the first free
+        // candidate is ring 16's +X — deterministically, in fixed ring order.
+        let hall = building(desired, Vec3::new(10.0, 6.0, 14.0), 0.5);
+        let (spot, nudged) =
+            resolve_free_spawn_xz(half, desired, &[], &[hall], None).expect("a ring is free");
+        assert!(nudged);
+        assert_eq!(spot, desired + SPAWN_DIRS_13[0] * SPAWN_SEARCH_RINGS[1].0);
+        let walls = block_footprint(&hall, None).expect("a building stands on the map");
+        assert!(
+            !footprint_denies(walls, spot),
+            "the resolved spot must clear the building's walls"
+        );
+        // The flat-slab world's ground: a 1500 m block whose top face IS the surface every spawn
+        // stands on. Under a footprint-only rule it would occupy the entire world.
+        let ground = Transform::from_xyz(0.0, -0.5, 0.0).with_scale(Vec3::new(1500.0, 1.0, 1500.0));
+        assert_eq!(
+            block_footprint(&ground, None),
+            None,
+            "the ground is not a wall"
+        );
+        assert_eq!(
+            resolve_free_spawn_xz(half, desired, &[], &[ground], None),
+            Some((desired, false)),
+        );
+        // A house standing ON that ground is still occupancy — the ground term never masks it.
+        let house = building(desired, Vec3::new(4.0, 3.0, 6.0), 0.5);
+        let (spot, nudged) = resolve_free_spawn_xz(half, desired, &[], &[ground, house], None)
+            .expect("a ring is free");
+        assert!(nudged);
+        assert!(!footprint_denies(
+            block_footprint(&house, None).expect("a house stands on the map"),
+            spot,
+        ));
+    }
+
+    /// A click on a house behaves EXACTLY like a click on an occupied spot — the clicked point is
+    /// validated the same way (clamped into the placeable square) and resolved through the same
+    /// ring search, so the tank is nudged to free ground rather than dropped inside the walls.
+    #[test]
+    fn a_click_on_a_house_resolves_like_a_click_on_an_occupied_spot() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+        let click = SetSpawnPoint { x: 60.0, z: 20.0 };
+        let xz = validate_spawn_request(half, click).expect("a finite click is accepted");
+        // The house proxy's own footprint (4 m × 6 m), centred on the click.
+        let house = building(xz, Vec3::new(4.0, 3.0, 6.0), 0.5);
+        let on_house =
+            resolve_free_spawn_xz(half, xz, &[], &[house], None).expect("a ring is free");
+        let on_tank = resolve_free_spawn_xz(half, xz, &[xz], &[], None).expect("a ring is free");
+        assert_eq!(on_house, on_tank, "a house is occupancy like a tank is");
+        assert_eq!(
+            on_house,
+            (xz + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0), true)
+        );
     }
 
     /// The ring tables are what their doc claims: per-ring count `max(8, ceil(2πr / 8 m))` (so
@@ -1203,7 +1332,7 @@ mod tests {
         for dir in SPAWN_DIRS_8 {
             crowd.push(desired + dir * 48.0);
         }
-        let (spot, nudged) = resolve_free_spawn_xz(half, desired, &crowd)
+        let (spot, nudged) = resolve_free_spawn_xz(half, desired, &crowd, &[], None)
             .expect("a between-spokes candidate is free");
         assert!(nudged);
         // The first free candidate in fixed order: ring 48's direction 1 (9.47° — 7.93 m of arc

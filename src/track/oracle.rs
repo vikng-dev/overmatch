@@ -69,9 +69,12 @@ impl TerrainBlock {
         }
     }
 
-    /// World-space AABB of the block (broadphase bounds): extent along each world axis is the
-    /// rotated half-extent's projection sum.
-    fn world_aabb(&self) -> (Vec3, Vec3) {
+    /// World-space AABB of the block (this field's broadphase bounds, and the spawn selector's
+    /// building footprint): extent along each world axis is the rotated half-extent's projection
+    /// sum. [`FIELD_BURY`] moves the bottom only while the block's local +Y points up (every
+    /// authored block): the centre shift and the half-extent growth cancel along world Y, so
+    /// `max.y` is the authored top.
+    pub(crate) fn world_aabb(&self) -> (Vec3, Vec3) {
         let m = Mat3::from_quat(self.inv_rot.inverse());
         let ext = m.x_axis.abs() * self.half.x
             + m.y_axis.abs() * self.half.y
