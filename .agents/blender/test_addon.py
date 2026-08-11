@@ -21,6 +21,7 @@ and the File ▸ Export menu entry being clickable. Both are drawing.
 import os
 import sys
 import tempfile
+import time
 import traceback
 
 import bpy
@@ -160,6 +161,50 @@ def the_progress_counter_reads_the_encoder_lines_and_keeps_what_it_printed():
     assert ticks == [50.0, 100.0], ticks
     # Kept, not merely echoed: on macOS the popup is the only rendering an artist ever sees.
     assert printed == ["images ▸ 2 to encode", "ktx2  ▸ 0.ktx2", "ktx2  ▸ 1.ktx2"], printed
+
+
+def _gone(pid, within=15.0):
+    """Whether `pid` is no longer a live process. Polled: a killed grandchild is reaped by init
+    rather than by us, so its disappearance is not instantaneous."""
+    limit = time.monotonic() + within
+    while time.monotonic() < limit:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+@case
+def a_door_that_never_returns_is_killed_and_refused():
+    """Blender's main thread is INSIDE `run_streamed`, so a door that hangs is a Blender that hangs
+    and a force-quit is the artist's only way out. The fake door launches a child of its own and
+    then sleeps past an injected deadline: both processes must be gone, and what reaches the artist
+    must be the ordinary refusal, naming the constant that decided it."""
+    pids = os.path.join(_WORK, "hung.pids")
+    script = (
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        "open({!r}, 'w').write('{{}} {{}}'.format(os.getpid(), child.pid))\n"
+        "time.sleep(120)\n"
+    ).format(pids)
+    original = addon.DOOR_DEADLINE_SECONDS
+    addon.DOOR_DEADLINE_SECONDS = 3.0
+    started = time.monotonic()
+    try:
+        addon.run_streamed([sys.executable, "-c", script], _WORK)
+    except addon.Refused as refusal:
+        assert refusal.stage == "deadline", refusal.stage
+        assert "DOOR_DEADLINE_SECONDS" in str(refusal), str(refusal)
+        assert "tracked model is unchanged" in str(refusal), str(refusal)
+    else:
+        raise AssertionError("a door that outlived the deadline was waited on anyway")
+    finally:
+        addon.DOOR_DEADLINE_SECONDS = original
+    assert time.monotonic() - started < 60, "the deadline did not end the wait"
+    for pid in (int(field) for field in open(pids).read().split()):
+        assert _gone(pid), "{} survived the deadline — the process group was not killed".format(pid)
 
 
 # ── what reaches the artist when the door says no ────────────────────────────────────────────────

@@ -62,9 +62,12 @@ bl_info = {
 }
 
 import os
+import select
 import shutil
+import signal
 import subprocess
 import tempfile
+import time
 
 import bpy
 from bpy.types import Operator
@@ -93,6 +96,21 @@ FREEZE_NOTICE = (
     "mid-run leaves the previous tracked model in place but wastes the export. The full report "
     "prints to the system console (Window ▸ Toggle System Console on Windows; on macOS relaunch "
     "Blender from a terminal to see it)."
+)
+
+#: The whole run's ceiling, from the moment the door is launched. A full chain is MINUTES — the door
+#: opens a Blender of its own and every image is KTX2-encoded — and Blender's window is frozen for
+#: all of it, so this is generous by construction: what it bounds is the freeze, not the work.
+DOOR_DEADLINE_SECONDS = 30 * 60
+
+#: Said when it expires, in the shape of every other refusal the artist reads: what happened, what
+#: it means for the tracked model, what to do next.
+DOOR_DEADLINE_EXPIRED = (
+    "The asset door did not finish within {:.0f} minutes (DOOR_DEADLINE_SECONDS in this add-on) "
+    "and was killed, along with every process it had launched.\n"
+    "The tracked model is unchanged.\n"
+    "Run the door in a terminal to see where it stopped:\n"
+    "    python3 scripts/tank/asset_door.py export <blend>"
 )
 
 #: Emitted once per encoded image by `scripts/encode-tank-ktx2.sh`, and once up front with the
@@ -247,9 +265,35 @@ class Progress:
         self.wm = None
 
 
+def _readable(stream, timeout):
+    """Whether `stream` has something to read within `timeout` seconds. A pipe that cannot be waited
+    on says yes and is then read blocking, which checks the deadline between lines only."""
+    try:
+        return bool(select.select([stream], [], [], timeout)[0])
+    except (OSError, ValueError):
+        return True
+
+
+def _kill_group(process):
+    """The door AND the Blender it launched. `start_new_session=True` puts them in a process group
+    of their own, so one signal reaches every one of them and none reaches this Blender."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, OSError):
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_streamed(command, root):
     """Run the door with its stdout on a pipe, echoing, counting and KEEPING it. Returns
     `(exit code, every line it printed)`.
+
+    A run that outlives `DOOR_DEADLINE_SECONDS` is killed with its process group and raised as a
+    `Refused` at the stage `deadline` — the same path a red door takes to the popup. Blender's main
+    thread is inside this call, so a door that never returns is a Blender that never returns.
 
     The pipe is the entire progress mechanism. `subprocess.run` with an inherited stdout gives the
     user minutes of nothing (the door's lines sit in Blender's console buffer behind a main thread
@@ -269,12 +313,21 @@ def run_streamed(command, root):
     progress = Progress()
     total, done = 0, 0
     printed = []
+    expired = Refused("deadline", DOOR_DEADLINE_EXPIRED.format(DOOR_DEADLINE_SECONDS / 60.0))
+    deadline = time.monotonic() + DOOR_DEADLINE_SECONDS
+    process = None
     try:
         process = subprocess.Popen(
             command, cwd=root, env=env, text=True, bufsize=1,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
         )
-        for line in process.stdout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not _readable(process.stdout, remaining):
+                raise expired
+            line = process.stdout.readline()
+            if not line:
+                break
             print(line, end="", flush=True)
             printed.append(line.rstrip("\n"))
             if line.startswith(_TOTAL_LINE):
@@ -285,16 +338,23 @@ def run_streamed(command, root):
                 done += 1
                 # Unknown total (an older encoder) still moves, it just cannot promise 100%.
                 progress.update(100.0 * done / total if total else min(90.0, 10.0 * done))
-        process.stdout.close()
-        return (process.wait(), printed)
+        try:
+            return (process.wait(timeout=max(1.0, deadline - time.monotonic())), printed)
+        except subprocess.TimeoutExpired:
+            raise expired
     finally:
         progress.end()
+        if process is not None:
+            if process.poll() is None:
+                _kill_group(process)
+            process.stdout.close()
 
 
 # ── the one call ─────────────────────────────────────────────────────────────────────────────────
 
 class Refused(Exception):
-    """The chain said no. `stage` names where, so the operator can say it without parsing prose."""
+    """The chain said no, or never came back. `stage` names where, so the operator can say it
+    without parsing prose."""
 
     def __init__(self, stage, message):
         super().__init__(message)
