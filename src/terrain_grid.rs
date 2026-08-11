@@ -1,6 +1,6 @@
-//! The world height grid: `assets/terrain/terrain_height.png` decoded synchronously at startup
-//! (ADR-0014 — sim construction never waits on the async asset server) into a shared, immutable
-//! sample slab that every terrain representation derives from:
+//! The world height grid: the heightmap the map's manifest names ([`crate::map`]), decoded
+//! synchronously at startup (ADR-0014 — sim construction never waits on the async asset server)
+//! into a shared, immutable sample slab that every terrain representation derives from:
 //!
 //! * the track oracle's ground term ([`crate::track::oracle::BlockField`] — the surface the
 //!   suspension's `depth_along` probes),
@@ -13,8 +13,8 @@
 //!
 //! There is exactly ONE ground surface, and every consumer reads the SAME one:
 //!
-//! 1. The decoded map is downsampled ONCE to [`GRID_RESOLUTION`]² (~0.977 m spacing) and THAT grid
-//!    is the [`HeightGrid`] resource. No consumer ever sees the full-resolution decode.
+//! 1. The decoded map is downsampled ONCE to [`GRID_RESOLUTION`]² and THAT grid is the
+//!    [`HeightGrid`] resource. No consumer ever sees the full-resolution decode.
 //! 2. [`HeightGrid::height_at`] is piecewise-TRIANGULAR, splitting every cell along the SAME
 //!    diagonal parry's heightfield triangulation uses (the anti-diagonal — pinned empirically by
 //!    `parry_splits_cells_along_the_anti_diagonal` and `oracle_matches_collider_at_seeded_points`
@@ -29,10 +29,12 @@
 //! (oracle vs render): the hull could touch ground the belts never felt. Do not reintroduce a
 //! second resolution anywhere.
 //!
-//! One decode, one mapping, identical bytes on every peer (the PNG ships in `assets/` on the
-//! client archives AND the server tar — see `.github/actions/build-server`), so the
-//! deterministic sim reads the same ground everywhere. When the PNG is absent the resource is
-//! simply not inserted and `world` falls back to the flat slab + authored test course.
+//! One decode, one mapping, identical bytes on every peer (the map directory ships in `assets/` on
+//! the client archives AND the server tar — see `.github/actions/build-server`), so the
+//! deterministic sim reads the same ground everywhere. WHAT the map is — its square, its vertical
+//! range, which file it is — is the map's own declaration ([`crate::map::MapManifest`]), not a
+//! constant here; when the manifest is absent the resource is simply not inserted and `world`
+//! falls back to the flat slab + authored test course.
 
 use std::sync::Arc;
 
@@ -41,40 +43,78 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
-/// Side length (m) of the square heightmap world. The map's 4096 px are STRETCHED over this side
-/// (0.244 m/px), independently of what the map was authored at: the heightmap is a shape, this
-/// pair is the scale we choose to hang it at. Single home for the world mapping — the oracle term,
-/// collider, render mesh, and spawn queries all derive from this constant pair.
+/// The square a height grid covers and the metres its samples span — the SCALE a heightmap is hung
+/// at, as opposed to the shape the heightmap itself is. The map declares its own
+/// ([`crate::map::MapManifest`]); the code never chooses one for it.
 ///
-/// Re-scaled 2560 → 1000 m (with [`HEIGHT_RANGE`] 150 → 100 m): the SAME heights over a 2.56×
-/// smaller footprint, so every slope on the map steepens by ~1.7× (2.56 × 100/150). That is the
-/// point — a tighter, more dramatic battlefield — but it is a real physics change, not a view one:
-/// grades the tank used to climb at speed are now 1.7× steeper.
-pub const WORLD_SIZE: f32 = 1000.0;
+/// Single home for the world mapping: every grid carries a copy ([`HeightGrid::extent`]), and the
+/// oracle term, collider, render mesh, and spawn queries all read it from there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainExtent {
+    /// Side length (m) of the square world. A map's pixels are STRETCHED over this side,
+    /// independently of what the map was authored at.
+    pub world_size_m: f32,
+    /// Metre height a full-scale-ZERO sample maps to.
+    pub height_offset_m: f32,
+    /// Metres a full-scale sample adds on top of [`Self::height_offset_m`]. Paired with
+    /// [`Self::world_size_m`]: the two together set every slope on the map.
+    pub height_span_m: f32,
+}
 
-/// Half the world side (m): world XZ spans `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]`, centered
-/// on the origin. Exposed for spawn-map bounds clamping / UV mapping (`net::spawn_map`).
-pub const WORLD_HALF_EXTENT: f32 = WORLD_SIZE / 2.0;
+/// Which world direction a heightmap's ROWS increase toward. The column index is X either way (the
+/// decode walks a row-major image), so this is the one image-axis convention an export is free to
+/// choose, and the map declares its own (`crate::map::MapManifest::rows`).
+///
+/// Folded in ONCE, at [`grid_from_png`]: a `-Z` image has its rows reversed there, so every
+/// [`HeightGrid`] in memory runs toward `+Z` and no consumer downstream ever asks again — the
+/// ONE-SURFACE invariant covers orientation as much as it covers resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOrder {
+    /// Row 0 at `z = -half`, matching the grid's own mapping — decoded straight through.
+    TowardPositiveZ,
+    /// Row 0 at `z = +half` — the row order is reversed at decode.
+    TowardNegativeZ,
+}
 
-/// Vertical range (m): a full-scale sample maps to this, zero to 0 m. At 8 bits that quantizes
-/// height in ~0.392 m steps (100/255) — the shipped map is 16-bit, and the decode path normalizes
-/// samples to full-scale-relative values regardless of bit depth, so either bit depth is a
-/// drop-in. Paired with [`WORLD_SIZE`]: the two together set every slope on the map.
-pub const HEIGHT_RANGE: f32 = 100.0;
+impl TerrainExtent {
+    /// Half the world side (m): world XZ spans `[-half, +half]`, centered on the origin.
+    pub const fn half_extent(&self) -> f32 {
+        self.world_size_m / 2.0
+    }
 
-/// The heightmap, relative to the resolved asset root (`crate::assets::asset_root`).
-const HEIGHT_MAP_PATH: &str = "terrain/terrain_height.png";
+    /// Metres per unit of a full-scale-relative sample, and the metre floor to add it to — the
+    /// decode's `offset + normalized · span`, pre-divided per bit depth by the caller.
+    fn scale_from(&self, full_scale: f32) -> (f32, f32) {
+        (self.height_span_m / full_scale, self.height_offset_m)
+    }
+}
+
+/// The extent every SYNTHETIC world is hung at: the flat-slab fallback world (`world::GROUND_SIZE`,
+/// whose top face at y = 0 is the whole surface), the analytic ramp probes, and the unit fixtures.
+/// FIXTURE data — a shipped map declares its own extent and never reads this.
+pub(crate) const FIXTURE_EXTENT: TerrainExtent = TerrainExtent {
+    world_size_m: 1000.0,
+    height_offset_m: 0.0,
+    height_span_m: 100.0,
+};
+
+/// The extent the world is hung at whether or not a heightmap decoded: the grid's own when there is
+/// one, the flat slab's when there is not. The bounds consumers that must answer in BOTH worlds —
+/// the spawn map's UV mapping and the authority's spawn clamp — resolve through this.
+pub(crate) fn world_extent(grid: Option<&HeightGrid>) -> TerrainExtent {
+    grid.map_or(FIXTURE_EXTENT, HeightGrid::extent)
+}
 
 /// Import-time Gaussian smoothing width, in source pixels; `0.0` = pass-through (the current
 /// setting — the shipped map is the author's 16-bit export, whose ~1.5 mm quantization steps
 /// need no de-terracing).
 ///
-/// Why it exists: an 8-BIT source quantizes height in [`HEIGHT_RANGE`]/255 ≈ 0.392 m steps
-/// (±0.196 m error) — terracing at real obstacle scale for the suspension. The separable Gaussian
-/// ([`gaussian_smooth`]) removes that BOUNDED quantization noise (≤ half a step) at the cost of
-/// rounding real terrain features smaller than ~the kernel radius (3σ ≈ 4.4 m on the ground at
-/// the current 0.244 m/px — the width is in PIXELS, so it shrinks with the world). Set this back
-/// to [`SMOOTH_KERNEL_SIGMA`] if an 8-bit map ever ships again.
+/// Why it exists: an 8-BIT source quantizes height in `height_span_m`/255 steps (±half a step)
+/// — terracing at real obstacle scale for the suspension. The separable Gaussian
+/// ([`gaussian_smooth`]) removes that BOUNDED quantization noise at the cost of rounding real
+/// terrain features smaller than ~the kernel radius (3σ = 18 px, whose ground size follows the
+/// map's own metres per pixel — the width is in PIXELS, so it shrinks with the world). Set this
+/// back to [`SMOOTH_KERNEL_SIGMA`] if an 8-bit map ever ships again.
 ///
 /// Determinism: the blur is pure f32 arithmetic in a fixed order over identical bytes, so every
 /// peer computes the same grid bit-for-bit. The kernel weights are EMBEDDED CONSTANTS
@@ -112,10 +152,11 @@ const SMOOTH_KERNEL: [f32; 19] = [
     0.000_740_138_36, // k = 18
 ];
 
-/// Sample count per side of THE ground surface (~0.977 m spacing over the 1000 m world): the decode
-/// is downsampled ONCE to this, and the resulting grid is what the oracle, the collider, the
-/// render mesh, and spawn placement all read — see the ONE-SURFACE INVARIANT in the module doc.
-/// (The full 4096² decode is too heavy for parry, so the shared resolution is the collider's.)
+/// Sample count per side of THE ground surface: the decode is downsampled ONCE to this, and the
+/// resulting grid is what the oracle, the collider, the render mesh, and spawn placement all read —
+/// see the ONE-SURFACE INVARIANT in the module doc. (The full 4096² decode is too heavy for parry,
+/// so the shared resolution is the collider's.) Sample SPACING follows the map's declared extent:
+/// 1.465 m on the shipped 1500 m world.
 pub(crate) const GRID_RESOLUTION: u32 = 1025;
 
 /// Render-mesh tile size in CELLS per side: the mesh carries the grid's own 1025² vertices (the
@@ -197,14 +238,15 @@ pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
         // Fail loud (ADR-0011): outside the span there IS no surface — the parry collider ends and
         // `height_at`'s clamped read would hand back an edge height for a point in the void, so the
         // tank spawns over nothing and falls forever. Every caller either clamps into the placeable
-        // square first (`net::spawn_map::SPAWN_LIMIT_M`) or spawns at a compile-time constant, so
+        // square first (`net::spawn_map::spawn_limit`) or spawns at a compile-time constant, so
         // reaching here out of bounds is a code bug, never client input.
         assert!(
             grid.contains_xz(xz.x, xz.y),
-            "spawn at ({}, {}) is outside the ±{WORLD_HALF_EXTENT} m world span — spawn points \
-             must be clamped into the placeable square before they are resolved",
+            "spawn at ({}, {}) is outside the ±{} m world span — spawn points must be clamped \
+             into the placeable square before they are resolved",
             xz.x,
             xz.y,
+            grid.half_extent(),
         );
         grid.max_height_in_square(xz.x, xz.y, SPAWN_FOOTPRINT_HALF_M)
     })
@@ -222,23 +264,26 @@ pub(crate) fn spawn_pos(grid: Option<&HeightGrid>, xz: Vec2) -> Vec3 {
 }
 
 /// The decoded height grid: heights in METERS as f32 (row-major, row = z, column = x), already
-/// bit-depth-normalized (8-bit `v` → `v / 255`, 16-bit → `v / 65535`, then × [`HEIGHT_RANGE`])
-/// and import-smoothed ([`SMOOTH_SIGMA_PX`]) — every consumer reads THIS one truth, so the sim,
-/// collider, and visuals cannot diverge. Shared via `Arc` so the oracle's copy inside
-/// [`crate::track::terrain::TrackField`] is free.
+/// bit-depth-normalized (8-bit `v` → `v / 255`, 16-bit → `v / 65535`, then scaled and offset by the
+/// grid's own [`TerrainExtent`]) and import-smoothed ([`SMOOTH_SIGMA_PX`]) — every consumer reads
+/// THIS one truth, so the sim, collider, and visuals cannot diverge. Shared via `Arc` so the
+/// oracle's copy inside [`crate::track::terrain::TrackField`] is free.
 ///
 /// Mapping (the single convention every consumer uses): sample `(i, j)` sits at
-/// `x = -WORLD_HALF_EXTENT + i * WORLD_SIZE / (size - 1)` (same for `z` with `j`), so the grid
-/// spans `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` inclusive on both axes. Outside the span
-/// [`Self::height_at`] clamps (a placement-only convenience) — but THE WORLD ENDS AT THE
-/// COLLIDER EDGE: the parry heightfield stops at the span, and so do the surface queries
-/// ([`Self::cast_ray`], the track oracle's ground term). See [`Self::contains_xz`].
+/// `x = -half_extent + i * world_size / (size - 1)` (same for `z` with `j`), so the grid spans
+/// `[-half_extent, +half_extent]` inclusive on both axes. Outside the span [`Self::height_at`]
+/// clamps (a placement-only convenience) — but THE WORLD ENDS AT THE COLLIDER EDGE: the parry
+/// heightfield stops at the span, and so do the surface queries ([`Self::cast_ray`], the track
+/// oracle's ground term). See [`Self::contains_xz`].
 #[derive(Resource, Clone)]
 pub struct HeightGrid {
     samples: Arc<[f32]>,
-    /// Samples per side ([`GRID_RESOLUTION`] = 1025 for the shipped map after the one-time
-    /// downsample; tests build smaller grids).
+    /// Samples per side ([`GRID_RESOLUTION`] for the shipped map after the one-time downsample;
+    /// tests build smaller grids).
     size: u32,
+    /// The square these samples cover and the metres they span — carried rather than looked up, so
+    /// every mapping in this module is a function of the grid alone.
+    extent: TerrainExtent,
 }
 
 /// One terrain-surface hit from [`HeightGrid::cast_ray`]: `t` is the hit parameter along the
@@ -252,16 +297,20 @@ pub struct TerrainRayHit {
 }
 
 impl HeightGrid {
-    /// Build from height samples in meters; `samples.len()` must be `size * size` and
-    /// `size >= 2`.
-    pub fn new(samples: Arc<[f32]>, size: u32) -> Self {
+    /// Build from height samples in meters over `extent`; `samples.len()` must be `size * size`
+    /// and `size >= 2`.
+    pub fn new(samples: Arc<[f32]>, size: u32, extent: TerrainExtent) -> Self {
         assert!(size >= 2, "height grid needs at least 2 samples per side");
         assert_eq!(
             samples.len(),
             (size as usize) * (size as usize),
             "height grid sample count must be size²"
         );
-        Self { samples, size }
+        Self {
+            samples,
+            size,
+            extent,
+        }
     }
 
     /// Samples per side.
@@ -269,10 +318,20 @@ impl HeightGrid {
         self.size
     }
 
-    /// World half-extent (m) this grid spans — `WORLD_HALF_EXTENT`, exposed as an accessor so
-    /// consumers holding a grid need not name the constant.
+    /// The square this grid covers and the metres it spans.
+    pub fn extent(&self) -> TerrainExtent {
+        self.extent
+    }
+
+    /// World side length (m) this grid spans.
+    pub fn world_size(&self) -> f32 {
+        self.extent.world_size_m
+    }
+
+    /// World half-extent (m) this grid spans, so consumers holding a grid need not reach through
+    /// [`Self::extent`].
     pub fn half_extent(&self) -> f32 {
-        WORLD_HALF_EXTENT
+        self.extent.half_extent()
     }
 
     /// One sample (meters). `pub(crate)` because the render-LOD ladder
@@ -302,8 +361,9 @@ impl HeightGrid {
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
         let n = self.size as usize;
         let last = (n - 1) as f32;
-        let u = ((x + WORLD_HALF_EXTENT) / WORLD_SIZE * last).clamp(0.0, last);
-        let v = ((z + WORLD_HALF_EXTENT) / WORLD_SIZE * last).clamp(0.0, last);
+        let (half, world) = (self.half_extent(), self.world_size());
+        let u = ((x + half) / world * last).clamp(0.0, last);
+        let v = ((z + half) / world * last).clamp(0.0, last);
         let i0 = (u as usize).min(n - 2);
         let j0 = (v as usize).min(n - 2);
         let fu = u - i0 as f32;
@@ -333,7 +393,8 @@ impl HeightGrid {
     pub fn max_height_in_square(&self, x: f32, z: f32, half: f32) -> f32 {
         let n = self.size as usize;
         let last = (n - 1) as f32;
-        let node = |w: f32| ((w + WORLD_HALF_EXTENT) / WORLD_SIZE * last).clamp(0.0, last);
+        let (half_extent, world) = (self.half_extent(), self.world_size());
+        let node = |w: f32| ((w + half_extent) / world * last).clamp(0.0, last);
         let i0 = node(x - half).floor() as usize;
         let i1 = (node(x + half).ceil() as usize).min(n - 1);
         let j0 = node(z - half).floor() as usize;
@@ -352,7 +413,8 @@ impl HeightGrid {
     /// there) — [`Self::height_at`]'s clamped reads outside the span are for placement queries
     /// only, never a surface anything can stand on.
     pub fn contains_xz(&self, x: f32, z: f32) -> bool {
-        x.abs() <= WORLD_HALF_EXTENT && z.abs() <= WORLD_HALF_EXTENT
+        let half = self.half_extent();
+        x.abs() <= half && z.abs() <= half
     }
 
     /// Exact first hit of a ray with the triangular surface within `t ∈ [0, t_max]`, or `None`.
@@ -371,7 +433,7 @@ impl HeightGrid {
     /// THE WORLD ENDS AT THE COLLIDER EDGE: outside the grid span there is no ground — the ray
     /// meets the surface only where cells exist, exactly like the parry heightfield collider
     /// (which spans the same square and stops). Spawn placement clamps every tank inside
-    /// ±`net::spawn_map::SPAWN_LIMIT_M` (= 95 % of the half-extent — derived, so it follows a
+    /// ±`net::spawn_map::spawn_limit` (= 95 % of the half-extent — derived, so it follows a
     /// re-scaled world instead of naming a metre count that goes stale), well off the edge.
     /// This deliberately DISAGREES with `height_at`'s clamped, placement-only reads.
     ///
@@ -380,10 +442,11 @@ impl HeightGrid {
         let n = self.size as usize;
         let last = (n - 1) as f32;
         // Grid-space ray: u(t) = u0 + du·t, v(t) = v0 + dv·t (the exact `height_at` mapping).
-        let u0 = (origin.x + WORLD_HALF_EXTENT) / WORLD_SIZE * last;
-        let v0 = (origin.z + WORLD_HALF_EXTENT) / WORLD_SIZE * last;
-        let du = dir.x / WORLD_SIZE * last;
-        let dv = dir.z / WORLD_SIZE * last;
+        let (half, world) = (self.half_extent(), self.world_size());
+        let u0 = (origin.x + half) / world * last;
+        let v0 = (origin.z + half) / world * last;
+        let du = dir.x / world * last;
+        let dv = dir.z / world * last;
         // Clip [0, t_max] against the grid span (slab test per axis): an empty clip means the
         // footprint never crosses the span — no ground anywhere along the ray.
         let (mut t0, mut t1) = (0.0_f32, t_max);
@@ -497,7 +560,7 @@ impl HeightGrid {
     ) -> Option<TerrainRayHit> {
         const EPS_DIAG: f32 = 1.0e-5;
         let in_window = |t: f32| t >= t_lo && t <= t_hi && t >= hard.0 && t <= hard.1;
-        let scale = (self.size - 1) as f32 / WORLD_SIZE; // cells per world metre (slope units)
+        let scale = (self.size - 1) as f32 / self.world_size(); // cells per world metre (slope units)
         let h00 = self.sample(i, j);
         let h10 = self.sample(i + 1, j);
         let h01 = self.sample(i, j + 1);
@@ -553,10 +616,18 @@ impl HeightGrid {
 }
 
 /// Decode the heightmap synchronously at Startup (before `world::spawn_environment`, which is
-/// chained after this in `world::plugin`). Missing file → no resource → the flat slab + test
-/// course world (deleting the PNG restores the old world). A PRESENT but undecodable/non-square
-/// map is a broken ship and panics (ADR-0011 fail-fast) — a peer silently falling back to flat
-/// while others load the map would desync the deterministic sim.
+/// chained after this in `world::plugin`).
+///
+/// THE MANIFEST IS THE MAP. The selected map's `level.json` ([`crate::map::MapManifest`]) is the
+/// presence marker: absent → no resource → the flat slab + test course world (deleting it restores
+/// the old world). Present, everything it declares must hold — an unparseable or invalid manifest,
+/// a missing heightmap, or an undecodable/non-square one is a broken ship and panics (ADR-0011
+/// fail-fast), because a peer silently falling back to flat while others load the map would desync
+/// the deterministic sim. `map::tests::shipped_map_ships_a_valid_manifest` refuses a half-shipped
+/// map at build time rather than at first boot.
+///
+/// THE ONE PARSE. The manifest is read here and published as a resource, so `scatter` places the
+/// author's objects out of the same struct this decode took its extent from.
 pub(crate) fn decode_height_grid(
     mut commands: Commands,
     flat: Option<Res<ForceFlatWorld>>,
@@ -569,23 +640,17 @@ pub(crate) fn decode_height_grid(
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
         return;
     }
-    if crate::lod_showcase::enabled() {
-        // A GRID of zeros, not "no grid": the missing-file branch below drops the resource, and the
-        // world then builds its flat slab AND its authored obstacle course, which is scenery in
-        // front of the thing being looked at. A zero grid keeps the real terrain path — same
-        // decode-free construction, same collider, same render tiles, same oracle — so the one
-        // surface stays one surface and it is level everywhere. Flattening only the render mesh
-        // would leave the tanks standing on invisible hills, which is the exact class of bug the
-        // one-surface doctrine exists to make impossible.
-        let size = GRID_RESOLUTION;
-        let samples = vec![0.0_f32; (size as usize) * (size as usize)];
-        info!(
-            "terrain: OVERMATCH_LOD_SHOWCASE set — {size}x{size} grid FLATTENED to y = 0 (oracle, \
-             collider and render mesh all from these samples)",
-        );
-        commands.insert_resource(HeightGrid::new(samples.into(), size));
+    let root = crate::assets::asset_root();
+    let Some(manifest) = crate::map::load(&root) else {
         return;
-    }
+    };
+    let extent = manifest.extent;
+    let rows = manifest.rows;
+    let path = manifest.heightmap_path();
+    let heightmap = manifest.heightmap().to_owned();
+    // Published before every early return below: a preset or flattened grid still stands on the
+    // map's objects, which read their placement out of this resource.
+    commands.insert_resource(manifest);
     if let Some(preset) = preset {
         info!(
             "terrain: pre-inserted height grid {size}x{size} — skipping the shipped map decode",
@@ -593,62 +658,85 @@ pub(crate) fn decode_height_grid(
         );
         return;
     }
-    let path = crate::assets::asset_root().join(HEIGHT_MAP_PATH);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(err) => {
-            info!(
-                "terrain: no heightmap at {} ({err}) — flat world",
-                path.display()
-            );
-            return;
-        }
-    };
-    let grid = grid_from_png(&bytes)
+    if crate::lod_showcase::enabled() {
+        // A GRID of zeros, not "no grid": the no-manifest branch above drops the resource, and the
+        // world then builds its flat slab AND its authored obstacle course, which is scenery in
+        // front of the thing being looked at. A zero grid keeps the real terrain path — same
+        // decode-free construction, same collider, same render tiles, same oracle — so the one
+        // surface stays one surface and it is level everywhere. Flattening only the render mesh
+        // would leave the tanks standing on invisible hills, which is the exact class of bug the
+        // one-surface doctrine exists to make impossible. The map's own extent is kept, so the
+        // showcase's range ladder stands on the same square the shipped map spans.
+        let size = GRID_RESOLUTION;
+        let samples = vec![0.0_f32; (size as usize) * (size as usize)];
+        info!(
+            "terrain: OVERMATCH_LOD_SHOWCASE set — {size}x{size} grid FLATTENED to y = 0 (oracle, \
+             collider and render mesh all from these samples)",
+        );
+        commands.insert_resource(HeightGrid::new(samples.into(), size, extent));
+        return;
+    }
+    let bytes = std::fs::read(&path).unwrap_or_else(|err| {
+        panic!(
+            "terrain: {} declares heightmap {heightmap} — {}: {err}",
+            crate::map::level_path(&root).display(),
+            path.display(),
+        )
+    });
+    let grid = grid_from_png(&bytes, extent, rows)
         .unwrap_or_else(|err| panic!("terrain: {} failed to decode: {err}", path.display()));
     info!(
-        "terrain: height grid {size}x{size} decoded ({world} m span, 0..{range} m, smoothing σ = {sigma} px)",
+        "terrain: height grid {size}x{size} decoded ({world} m span, {lo}..{hi} m, smoothing σ = {sigma} px)",
         size = grid.size(),
-        world = WORLD_SIZE,
-        range = HEIGHT_RANGE,
+        world = extent.world_size_m,
+        lo = extent.height_offset_m,
+        hi = extent.height_offset_m + extent.height_span_m,
         sigma = SMOOTH_SIGMA_PX,
     );
     commands.insert_resource(grid);
 }
 
-/// PNG bytes → [`HeightGrid`]: decode, bit-depth-normalize, and (when [`SMOOTH_SIGMA_PX`] is
-/// active) smooth. Pure, so the shipped asset itself is pinned by a unit test — which also
-/// makes a Git-LFS pointer file shipping in place of the map fail in CI instead of at boot.
-pub(crate) fn grid_from_png(bytes: &[u8]) -> Result<HeightGrid, String> {
+/// PNG bytes + the extent and row order the map declares → [`HeightGrid`]: decode,
+/// bit-depth-normalize, orient, and (when [`SMOOTH_SIGMA_PX`] is active) smooth. Pure, so the
+/// shipped asset itself is pinned by a unit test — which also makes a Git-LFS pointer file shipping
+/// in place of the map fail in CI instead of at boot.
+pub(crate) fn grid_from_png(
+    bytes: &[u8],
+    extent: TerrainExtent,
+    rows: RowOrder,
+) -> Result<HeightGrid, String> {
     let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
-    // Normalize to 0..1 of full scale regardless of source bit depth, then scale to meters —
-    // the author's 16-bit export and the earlier 8-bit map interchange freely.
+    // Normalize to 0..1 of full scale regardless of source bit depth, then scale and offset to
+    // meters — an 8-bit and a 16-bit export of the same map interchange freely.
     let (samples, width, height): (Vec<f32>, u32, u32) = match image {
         image::DynamicImage::ImageLuma8(buf) => {
             let (w, h) = buf.dimensions();
+            let (scale, offset) = extent.scale_from(255.0);
             let samples = buf
                 .into_raw()
                 .into_iter()
-                .map(|v| f32::from(v) * (HEIGHT_RANGE / 255.0))
+                .map(|v| f32::from(v) * scale + offset)
                 .collect();
             (samples, w, h)
         }
         image::DynamicImage::ImageLuma16(buf) => {
             let (w, h) = buf.dimensions();
+            let (scale, offset) = extent.scale_from(65535.0);
             let samples = buf
                 .into_raw()
                 .into_iter()
-                .map(|v| f32::from(v) * (HEIGHT_RANGE / 65535.0))
+                .map(|v| f32::from(v) * scale + offset)
                 .collect();
             (samples, w, h)
         }
         other => {
             let buf = other.into_luma16();
             let (w, h) = buf.dimensions();
+            let (scale, offset) = extent.scale_from(65535.0);
             let samples = buf
                 .into_raw()
                 .into_iter()
-                .map(|v| f32::from(v) * (HEIGHT_RANGE / 65535.0))
+                .map(|v| f32::from(v) * scale + offset)
                 .collect();
             (samples, w, h)
         }
@@ -656,6 +744,14 @@ pub(crate) fn grid_from_png(bytes: &[u8]) -> Result<HeightGrid, String> {
     if width != height {
         return Err(format!("must be square, got {width}x{height}"));
     }
+    // ORIENT ONCE, HERE. The map declares which way its rows run; a `-Z` image is reversed row-wise
+    // so row 0 lands at `z = -half` like every other grid in the process. A pure index remap — the
+    // sample VALUES are the decoded bytes, bit for bit — and it runs before the downsample, so the
+    // one surface every consumer reads is already in the world's frame.
+    let samples = match rows {
+        RowOrder::TowardPositiveZ => samples,
+        RowOrder::TowardNegativeZ => flip_rows(&samples, width as usize),
+    };
     // The import-time de-terracing pass (see `SMOOTH_SIGMA_PX`; currently 0.0 = pass-through
     // for the 16-bit source): when active, smoothed BEFORE the resource exists, so the oracle,
     // collider, mesh, and spawn queries all read one smoothed truth.
@@ -668,7 +764,7 @@ pub(crate) fn grid_from_png(bytes: &[u8]) -> Result<HeightGrid, String> {
     } else {
         samples
     };
-    let grid = HeightGrid::new(samples.into(), width);
+    let grid = HeightGrid::new(samples.into(), width, extent);
     // THE ONE-SURFACE INVARIANT (module doc): the decode is resampled ONCE, here, down to
     // GRID_RESOLUTION — the resource every consumer reads. A map already at or below that
     // resolution passes through untouched (tests build tiny grids directly).
@@ -679,22 +775,33 @@ pub(crate) fn grid_from_png(bytes: &[u8]) -> Result<HeightGrid, String> {
     }
 }
 
+/// Reverse a square row-major sample slab's ROW order, moving values without touching them — the
+/// `-Z` image's one and only correction (see [`RowOrder`]).
+fn flip_rows(samples: &[f32], size: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(samples.len());
+    for j in (0..size).rev() {
+        out.extend_from_slice(&samples[j * size..(j + 1) * size]);
+    }
+    out
+}
+
 /// Resample `grid` onto a `target`² node lattice over the same world square: each new node reads
 /// `height_at` at its own world position (the source's triangular surface — pure f32 arithmetic
 /// in a fixed order, so every peer downsamples bit-identically). Runs ONCE at decode; after it,
 /// the source resolution no longer exists anywhere.
 pub(crate) fn downsample(grid: &HeightGrid, target: u32) -> HeightGrid {
     let n = target as usize;
-    let step = WORLD_SIZE / (n - 1) as f32;
+    let half = grid.half_extent();
+    let step = grid.world_size() / (n - 1) as f32;
     let mut samples = Vec::with_capacity(n * n);
     for j in 0..n {
-        let z = -WORLD_HALF_EXTENT + j as f32 * step;
+        let z = -half + j as f32 * step;
         for i in 0..n {
-            let x = -WORLD_HALF_EXTENT + i as f32 * step;
+            let x = -half + i as f32 * step;
             samples.push(grid.height_at(x, z));
         }
     }
-    HeightGrid::new(samples.into(), target)
+    HeightGrid::new(samples.into(), target, grid.extent())
 }
 
 /// Separable, edge-clamped Gaussian blur over a square grid — the [`SMOOTH_SIGMA_PX`]
@@ -759,7 +866,8 @@ pub(crate) fn heightfield_collider(grid: &HeightGrid) -> Collider {
         }
         rows.push(row);
     }
-    Collider::heightfield(rows, Vec3::new(WORLD_SIZE, 1.0, WORLD_SIZE))
+    let world = grid.world_size();
+    Collider::heightfield(rows, Vec3::new(world, 1.0, world))
 }
 
 /// The client-only terrain render meshes: the grid's OWN samples as vertices (the ONE-SURFACE
@@ -824,7 +932,7 @@ pub(crate) fn terrain_mesh_tiles(grid: &HeightGrid) -> Vec<Mesh> {
 /// [`HeightGrid::height_at`] inverts, exposed so the render mesh and the LOD ladder place their
 /// vertices at exactly the same points instead of each rebuilding the arithmetic.
 pub(crate) fn node_world_coord(grid: &HeightGrid, k: usize) -> f32 {
-    -WORLD_HALF_EXTENT + k as f32 * (WORLD_SIZE / (grid.size() - 1) as f32)
+    -grid.half_extent() + k as f32 * (grid.world_size() / (grid.size() - 1) as f32)
 }
 
 /// THE shading normal at grid node `(i, j)`: central differences over the FULL grid, one-sided at
@@ -837,7 +945,7 @@ pub(crate) fn node_world_coord(grid: &HeightGrid, k: usize) -> f32 {
 /// shared row's normal at every level.
 pub(crate) fn surface_normal_at(grid: &HeightGrid, i: usize, j: usize) -> [f32; 3] {
     let n = grid.size() as usize;
-    let step = WORLD_SIZE / (n - 1) as f32;
+    let step = grid.world_size() / (n - 1) as f32;
     let (il, ih) = (i.saturating_sub(1), (i + 1).min(n - 1));
     let (jl, jh) = (j.saturating_sub(1), (j + 1).min(n - 1));
     let dhdx = (grid.sample(ih, j) - grid.sample(il, j)) / ((ih - il) as f32 * step);
@@ -877,14 +985,18 @@ pub(crate) fn mesh_tile_node_ranges(grid: &HeightGrid) -> Vec<[usize; 4]> {
 pub(crate) mod tests {
     use super::*;
 
-    /// The shipped heightmap, decoded through the real path — the ground every spawn assertion is
-    /// made against.
+    use crate::map::tests::shipped_manifest;
+
+    /// The shipped heightmap, decoded through the real path at the extent its manifest declares —
+    /// the ground every spawn assertion is made against.
     pub(crate) fn shipped_grid() -> HeightGrid {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(HEIGHT_MAP_PATH);
-        grid_from_png(&std::fs::read(path).expect("shipped heightmap"))
-            .expect("shipped heightmap must decode")
+        let manifest = shipped_manifest();
+        grid_from_png(
+            &std::fs::read(manifest.heightmap_path()).expect("shipped heightmap"),
+            manifest.extent,
+            manifest.rows,
+        )
+        .expect("shipped heightmap must decode")
     }
 
     /// One spawn point, one verdict: inside the world span, above the surface at its own XZ, and
@@ -893,9 +1005,10 @@ pub(crate) mod tests {
     pub(crate) fn assert_spawn_clears_terrain(grid: &HeightGrid, name: &str, xz: Vec2) {
         assert!(
             grid.contains_xz(xz.x, xz.y),
-            "{name} spawns at ({}, {}), outside the ±{WORLD_HALF_EXTENT} m world span",
+            "{name} spawns at ({}, {}), outside the ±{} m world span",
             xz.x,
             xz.y,
+            grid.half_extent(),
         );
         let spawned = spawn_pos(Some(grid), xz);
         let surface = grid.height_at(xz.x, xz.y);
@@ -916,6 +1029,11 @@ pub(crate) mod tests {
     use avian3d::parry::math::{Pose, Vector};
     use avian3d::parry::query::Ray;
 
+    /// The square and vertical range every synthetic fixture below is written in — the fixture
+    /// extent's own, so re-hanging the fixtures needs no edit here.
+    const FIXTURE_SPAN: f32 = FIXTURE_EXTENT.height_span_m;
+    const FIXTURE_HALF: f32 = FIXTURE_EXTENT.half_extent();
+
     /// A grid whose samples come from `f(i, j)` in 8-bit terms (normalized like the decoder,
     /// no smoothing — these tests pin the raw PIECEWISE-TRIANGULAR surface, which is the
     /// collider's and deliberately not bilinear).
@@ -923,15 +1041,15 @@ pub(crate) mod tests {
         let mut samples = Vec::with_capacity((size * size) as usize);
         for j in 0..size {
             for i in 0..size {
-                samples.push(f32::from(f(i, j)) * (HEIGHT_RANGE / 255.0));
+                samples.push(f32::from(f(i, j)) * (FIXTURE_SPAN / 255.0));
             }
         }
-        HeightGrid::new(samples.into(), size)
+        HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
     }
 
     /// Downward parry raycast against the collider at world `(x, z)`; returns the hit height.
     fn cast_down(collider: &Collider, x: f32, z: f32) -> f32 {
-        let origin_y = HEIGHT_RANGE + 100.0;
+        let origin_y = FIXTURE_SPAN + 100.0;
         let toi = parry_cast(collider, Vec3::new(x, origin_y, z), Vec3::NEG_Y, 1.0e5)
             .unwrap_or_else(|| panic!("terrain collider missed a vertical ray at ({x}, {z})"));
         origin_y - toi
@@ -954,21 +1072,21 @@ pub(crate) mod tests {
         // 2x2 corners: (i=0,j=0)=0, (i=1,j=0)=255, (i=0,j=1)=0, (i=1,j=1)=255 — a pure x-ramp.
         // Planar data, so both cell triangles lie in the ramp plane: exact everywhere.
         let grid = grid_from(2, |i, _| if i == 1 { 255 } else { 0 });
-        let h = WORLD_HALF_EXTENT;
+        let h = FIXTURE_HALF;
         assert_eq!(grid.height_at(-h, 0.0), 0.0);
-        assert!((grid.height_at(h, 0.0) - HEIGHT_RANGE).abs() < 1e-4);
-        assert!((grid.height_at(0.0, 123.0) - HEIGHT_RANGE * 0.5).abs() < 1e-4);
-        assert!((grid.height_at(h / 2.0, -h) - HEIGHT_RANGE * 0.75).abs() < 1e-4);
+        assert!((grid.height_at(h, 0.0) - FIXTURE_SPAN).abs() < 1e-4);
+        assert!((grid.height_at(0.0, 123.0) - FIXTURE_SPAN * 0.5).abs() < 1e-4);
+        assert!((grid.height_at(h / 2.0, -h) - FIXTURE_SPAN * 0.75).abs() < 1e-4);
         // Beyond the map edge the surface continues flat (clamped).
         assert_eq!(grid.height_at(-h - 500.0, 0.0), 0.0);
-        assert!((grid.height_at(h + 500.0, 9999.0) - HEIGHT_RANGE).abs() < 1e-4);
+        assert!((grid.height_at(h + 500.0, 9999.0) - FIXTURE_SPAN).abs() < 1e-4);
 
         // A genuinely non-planar cell: one raised corner (h11 = H), sample the interior. On the
         // anti-diagonal split, (fu, fv) = (0.75, 0.75) lies in the upper triangle
         // {h10, h11, h01}: H + (0 − H)·0.25 + (0 − H)·0.25 = 0.5·H — NOT bilinear's 0.5625·H,
         // and NOT a main-diagonal split's 0.75·H. This is the same point the collider test
         // below raycasts, so height_at and parry are pinned to the same answer.
-        let hi = 200.0 / 255.0 * HEIGHT_RANGE;
+        let hi = 200.0 / 255.0 * FIXTURE_SPAN;
         let corner = grid_from(2, |i, j| if i == 1 && j == 1 { 200 } else { 0 });
         assert!((corner.height_at(h / 2.0, h / 2.0) - hi * 0.5).abs() < 1e-4);
         // Dead center (fu = fv = 0.5) sits ON the split diagonal, where the raised corner
@@ -982,7 +1100,7 @@ pub(crate) mod tests {
     /// and heights must match `height_at` (planar ramps make triangle == bilinear exactly).
     #[test]
     fn heightfield_matches_grid_orientation_and_scale() {
-        let h = WORLD_HALF_EXTENT;
+        let h = FIXTURE_HALF;
 
         let x_ramp = grid_from(4, |i, _| (i * 85) as u8); // 0, 85, 170, 255 along x
         let collider = heightfield_collider(&x_ramp);
@@ -997,7 +1115,7 @@ pub(crate) mod tests {
         // The discriminator: 3/4 across +X must be 3/4 of the range, NOT the z-value (0.5·range).
         let got = cast_down(&collider, h * 0.5, 0.0);
         assert!(
-            (got - HEIGHT_RANGE * 0.75).abs() < 1e-3,
+            (got - FIXTURE_SPAN * 0.75).abs() < 1e-3,
             "x-ramp must rise along +X (transposed heightfield?): cast {got}"
         );
 
@@ -1005,7 +1123,7 @@ pub(crate) mod tests {
         let collider = heightfield_collider(&z_ramp);
         let got = cast_down(&collider, 0.0, h * 0.5);
         assert!(
-            (got - HEIGHT_RANGE * 0.75).abs() < 1e-3,
+            (got - FIXTURE_SPAN * 0.75).abs() < 1e-3,
             "z-ramp must rise along +Z (transposed heightfield?): cast {got}"
         );
         let got = cast_down(&collider, -h * 0.8, -h * 0.5);
@@ -1020,8 +1138,8 @@ pub(crate) mod tests {
     /// surface. If parry ever changes convention, this fails before anything subtle does.
     #[test]
     fn parry_splits_cells_along_the_anti_diagonal() {
-        let h = WORLD_HALF_EXTENT;
-        let hi = 200.0 / 255.0 * HEIGHT_RANGE;
+        let h = FIXTURE_HALF;
+        let hi = 200.0 / 255.0 * FIXTURE_SPAN;
         let corner = grid_from(2, |i, j| if i == 1 && j == 1 { 200 } else { 0 });
         let collider = heightfield_collider(&corner);
         // (fu, fv) = (0.75, 0.75): anti-diagonal → 0.5·H; main diagonal would read 0.75·H and
@@ -1062,9 +1180,9 @@ pub(crate) mod tests {
         let size = 33u32;
         let mut samples = Vec::with_capacity((size * size) as usize);
         for _ in 0..size * size {
-            samples.push(next() * HEIGHT_RANGE);
+            samples.push(next() * FIXTURE_SPAN);
         }
-        HeightGrid::new(samples.into(), size)
+        HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
     }
 
     /// The ONE-SURFACE tolerance pin: `height_at` AND `cast_ray` vs a parry raycast of the
@@ -1085,20 +1203,20 @@ pub(crate) mod tests {
             // Full span, outer 2% included: 1/8 of the points land in the outer band, and
             // boundary-exact rays (a measure-zero parry edge case) are avoided by the noise.
             let span = if k % 8 == 0 {
-                WORLD_HALF_EXTENT * 0.9999
+                FIXTURE_HALF * 0.9999
             } else {
-                WORLD_HALF_EXTENT
+                FIXTURE_HALF
             };
             let x = (next() * 2.0 - 1.0) * span;
             let z = (next() * 2.0 - 1.0) * span;
-            if x.abs() >= WORLD_HALF_EXTENT || z.abs() >= WORLD_HALF_EXTENT {
+            if x.abs() >= FIXTURE_HALF || z.abs() >= FIXTURE_HALF {
                 continue;
             }
             let cast = cast_down(&collider, x, z);
             let analytic = grid.height_at(x, z);
             worst = worst.max((cast - analytic).abs());
             // The exact caster reads the identical surface point.
-            let origin = Vec3::new(x, HEIGHT_RANGE + 100.0, z);
+            let origin = Vec3::new(x, FIXTURE_SPAN + 100.0, z);
             let ours = grid
                 .cast_ray(origin, Vec3::NEG_Y, 1.0e5)
                 .unwrap_or_else(|| panic!("cast_ray missed a vertical ray at ({x}, {z})"));
@@ -1114,13 +1232,13 @@ pub(crate) mod tests {
         // Just OUTSIDE the span both surfaces must agree there is NO ground: the collider ends
         // at the edge, and the caster ends with it (a vertical ray outside misses both).
         for _ in 0..64 {
-            let along = (next() * 2.0 - 1.0) * (WORLD_HALF_EXTENT + 200.0);
-            let out = WORLD_HALF_EXTENT + 0.5 + next() * 200.0;
+            let along = (next() * 2.0 - 1.0) * (FIXTURE_HALF + 200.0);
+            let out = FIXTURE_HALF + 0.5 + next() * 200.0;
             let (x, z) = match (next() > 0.5, next() > 0.5) {
                 (true, flip) => (if flip { out } else { -out }, along),
                 (false, flip) => (along, if flip { out } else { -out }),
             };
-            let origin = Vec3::new(x, HEIGHT_RANGE + 100.0, z);
+            let origin = Vec3::new(x, FIXTURE_SPAN + 100.0, z);
             assert!(
                 parry_cast(&collider, origin, Vec3::NEG_Y, 1.0e5).is_none(),
                 "collider must end at the span edge (hit at ({x}, {z}))"
@@ -1147,8 +1265,8 @@ pub(crate) mod tests {
         let mut worst = 0.0f32;
         let mut hits = 0u32;
         for _ in 0..512 {
-            let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.98;
-            let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.98;
+            let x = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
+            let z = (next() * 2.0 - 1.0) * FIXTURE_HALF * 0.98;
             let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
             // Downward elevation from 1.7° (shallow graze) to ~86°; any azimuth. Test-only
             // trig — the production caster itself stays transcendental-free.
@@ -1238,7 +1356,7 @@ pub(crate) mod tests {
         let source = grid_from(9, |i, _| (i * 30) as u8); // planar x-ramp
         let down = downsample(&source, 5);
         assert_eq!(down.size(), 5);
-        let h = WORLD_HALF_EXTENT;
+        let h = FIXTURE_HALF;
         for (x, z) in [
             (-h, -h),
             (-321.5, 47.0),
@@ -1288,7 +1406,7 @@ pub(crate) mod tests {
     #[test]
     fn smoothing_flattens_a_quantized_staircase_onto_the_ideal_ramp() {
         let size = 128usize;
-        let step = HEIGHT_RANGE / 255.0; // the 8-bit quantum, ~0.588 m
+        let step = FIXTURE_SPAN / 255.0; // the 8-bit quantum, ~0.588 m
         let slope = step / 4.0; // one quantization step every ~4 px
         let ideal = |i: usize| i as f32 * slope;
         let quantized = |i: usize| (ideal(i) / step).round() * step;
@@ -1314,16 +1432,16 @@ pub(crate) mod tests {
         );
     }
 
-    /// The SHIPPED asset, decoded through the real path: 4096² 16-bit source, downsampled ONCE
-    /// to [`GRID_RESOLUTION`]² (the ONE surface), using the full `0..`[`HEIGHT_RANGE`] range (the
-    /// bounds below are derived from the constants, so a re-scaled world needs no edit). Also the LFS
+    /// The SHIPPED asset, decoded through the real path at the extent its own manifest declares,
+    /// downsampled ONCE to [`GRID_RESOLUTION`]² (the ONE surface). Every bound below is read off
+    /// the manifest, so re-authoring or re-scaling the map needs no edit here. Also the LFS
     /// tripwire — a pointer file (~130 text bytes) fails the size guard here in CI instead of
     /// panicking at first boot on the droplet.
     #[test]
     fn shipped_heightmap_decodes_full_range_through_the_real_path() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(HEIGHT_MAP_PATH);
+        let manifest = shipped_manifest();
+        let extent = manifest.extent;
+        let path = manifest.heightmap_path();
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("shipped heightmap missing at {}: {err}", path.display()));
         assert!(
@@ -1332,29 +1450,115 @@ pub(crate) mod tests {
             path.display(),
             bytes.len()
         );
-        let grid = grid_from_png(&bytes).expect("shipped heightmap must decode");
+        let grid =
+            grid_from_png(&bytes, extent, manifest.rows).expect("shipped heightmap must decode");
         assert_eq!(
             grid.size(),
             GRID_RESOLUTION,
             "the decode must land at the ONE shared surface resolution"
         );
+        assert_eq!(
+            grid.extent(),
+            extent,
+            "the grid must carry the map's extent"
+        );
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let step = WORLD_SIZE / 128.0;
+        let half = extent.half_extent();
+        let step = extent.world_size_m / 128.0;
         for j in 0..=128 {
             for i in 0..=128 {
-                let h = grid.height_at(
-                    -WORLD_HALF_EXTENT + i as f32 * step,
-                    -WORLD_HALF_EXTENT + j as f32 * step,
-                );
+                let h = grid.height_at(-half + i as f32 * step, -half + j as f32 * step);
                 lo = lo.min(h);
                 hi = hi.max(h);
             }
         }
-        assert!(lo >= 0.0 && hi <= HEIGHT_RANGE + 1e-3, "range [{lo}, {hi}]");
+        let (floor, ceiling) = (
+            extent.height_offset_m,
+            extent.height_offset_m + extent.height_span_m,
+        );
+        assert!(
+            lo >= floor - 1e-3 && hi <= ceiling + 1e-3,
+            "range [{lo}, {hi}] escapes the declared [{floor}, {ceiling}]"
+        );
         assert!(
             hi - lo > 10.0,
             "the map should span real relief, got [{lo}, {hi}]"
         );
+    }
+
+    /// The DECODE LAW, end to end: the extent comes out of a `level.json` terrain block through the
+    /// real reader, a full-scale-zero sample lands on the floor that block declares and a full-scale
+    /// sample on its ceiling, at the corners of the declared square. Pins the arithmetic
+    /// (`offset + normalized · span`) that every consumer's metres come from.
+    #[test]
+    fn manifest_decode_maps_full_scale_onto_the_declared_range() {
+        let manifest = crate::map::tests::fixture_manifest(750.0, -12.5, 50.0);
+        let extent = manifest.extent;
+        // 2x2 16-bit PNG: full-scale ZERO down the -X column, FULL SCALE down the +X column.
+        let mut source = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
+        for y in 0..2 {
+            source.put_pixel(0, y, image::Luma([0]));
+            source.put_pixel(1, y, image::Luma([u16::MAX]));
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma16(source)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("fixture png must encode");
+        let grid = grid_from_png(&png, extent, manifest.rows).expect("fixture png must decode");
+        assert_eq!(grid.extent(), extent);
+        let half = extent.half_extent();
+        assert_eq!(half, 750.0, "the declared square is what the grid spans");
+        let (floor, ceiling) = (
+            extent.height_offset_m,
+            extent.height_offset_m + extent.height_span_m,
+        );
+        assert!((grid.height_at(-half, 0.0) - floor).abs() < 1e-4);
+        assert!((grid.height_at(half, 0.0) - ceiling).abs() < 1e-4);
+        // Halfway across is halfway up: the mapping is affine, not merely pinned at its ends.
+        assert!((grid.height_at(0.0, 0.0) - (floor + ceiling) / 2.0).abs() < 1e-4);
+    }
+
+    /// THE ORIENTATION LAW: the manifest's declared row direction decides which world Z edge the
+    /// image's FIRST row lands on, and the grid comes out in the world's frame either way.
+    ///
+    /// The fixture is asymmetric on BOTH axes (four distinct heights over a 2×2 image, whose nodes
+    /// ARE the map corners), so a flip along either axis — or a transpose — moves at least one
+    /// corner's value. A `-Z` export is the shipped bundle's own declaration; read straight through
+    /// it would stand the whole world north–south mirrored under the author's objects.
+    #[test]
+    fn the_declared_row_direction_places_the_first_image_row() {
+        // Row 0 = [0, 1/3], row 1 = [2/3, 1] of full scale — every corner distinct.
+        let mut source = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
+        let third = u16::MAX / 3;
+        source.put_pixel(0, 0, image::Luma([0]));
+        source.put_pixel(1, 0, image::Luma([third]));
+        source.put_pixel(0, 1, image::Luma([third * 2]));
+        source.put_pixel(1, 1, image::Luma([u16::MAX]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma16(source)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("fixture png must encode");
+
+        let corner = |rows: &str, x: f32, z: f32| {
+            let manifest = crate::map::tests::fixture_manifest_with_rows(500.0, 0.0, 100.0, rows);
+            let grid =
+                grid_from_png(&png, manifest.extent, manifest.rows).expect("fixture png decodes");
+            grid.height_at(x, z)
+        };
+        let (half, span) = (500.0_f32, 100.0_f32);
+        let height = |raw: u16| span * f32::from(raw) / f32::from(u16::MAX);
+        let row_0 = [height(0), height(third)];
+        let row_1 = [height(third * 2), height(u16::MAX)];
+        // "+Z": the first image row is the -Z edge, straight through.
+        assert!((corner("+Z", -half, -half) - row_0[0]).abs() < 1e-3);
+        assert!((corner("+Z", half, -half) - row_0[1]).abs() < 1e-3);
+        assert!((corner("+Z", -half, half) - row_1[0]).abs() < 1e-3);
+        // "-Z": the first image row is the +Z edge — the slab is reversed row-wise, and ONLY
+        // row-wise (the columns still run toward +X).
+        assert!((corner("-Z", -half, half) - row_0[0]).abs() < 1e-3);
+        assert!((corner("-Z", half, half) - row_0[1]).abs() < 1e-3);
+        assert!((corner("-Z", -half, -half) - row_1[0]).abs() < 1e-3);
+        assert!((corner("-Z", half, -half) - row_1[1]).abs() < 1e-3);
     }
 
     /// The render mesh is the grid's own surface (ONE-SURFACE invariant): vertices are the grid
@@ -1404,7 +1608,7 @@ pub(crate) mod tests {
                 samples.push(((i * 7 + j * 13) % 97) as f32 * 0.5);
             }
         }
-        let grid = HeightGrid::new(samples.into(), size);
+        let grid = HeightGrid::new(samples.into(), size, FIXTURE_EXTENT);
         let tiles = terrain_mesh_tiles(&grid);
         assert_eq!(tiles.len(), 4);
         let mut triangles = 0;
@@ -1417,9 +1621,9 @@ pub(crate) mod tests {
             for p in positions {
                 // Vertices must BE grid samples (not merely near the interpolated surface):
                 // recover the node indices from the exact world position and compare raw.
-                let step = WORLD_SIZE / (size - 1) as f32;
-                let i = ((p[0] + WORLD_HALF_EXTENT) / step).round() as usize;
-                let j = ((p[2] + WORLD_HALF_EXTENT) / step).round() as usize;
+                let step = FIXTURE_EXTENT.world_size_m / (size - 1) as f32;
+                let i = ((p[0] + FIXTURE_HALF) / step).round() as usize;
+                let j = ((p[2] + FIXTURE_HALF) / step).round() as usize;
                 let expected = grid.sample(i, j);
                 assert_eq!(
                     p[1], expected,
@@ -1690,7 +1894,7 @@ pub(crate) mod tests {
     #[should_panic(expected = "outside the")]
     fn a_spawn_outside_the_world_span_fails_loud() {
         let grid = grid_from(9, |_, _| 40);
-        spawn_pos(Some(&grid), Vec2::new(WORLD_HALF_EXTENT + 1.0, 0.0));
+        spawn_pos(Some(&grid), Vec2::new(FIXTURE_HALF + 1.0, 0.0));
     }
 
     /// No grid = the flat-slab fallback world: the rule reproduces the historical `y = 2.0` pad

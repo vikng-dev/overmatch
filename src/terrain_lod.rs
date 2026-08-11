@@ -1329,12 +1329,13 @@ mod tests {
     /// plus a content hash over the whole set as the cheap tripwire for future diffs.
     #[test]
     fn level_zero_is_the_pre_lod_tiler_bit_for_bit() {
-        use crate::terrain_grid::{TEXTURE_TILE_M, WORLD_HALF_EXTENT, WORLD_SIZE};
+        use crate::terrain_grid::TEXTURE_TILE_M;
         let grid = shipped_grid();
         let n = grid.size() as usize;
         let cells = n - 1;
-        let step = WORLD_SIZE / cells as f32;
-        let world_at = |k: usize| -WORLD_HALF_EXTENT + k as f32 * step;
+        let step = grid.world_size() / cells as f32;
+        let half = grid.half_extent();
+        let world_at = |k: usize| -half + k as f32 * step;
         let normal_at = |i: usize, j: usize| -> [f32; 3] {
             let (il, ih) = (i.saturating_sub(1), (i + 1).min(n - 1));
             let (jl, jh) = (j.saturating_sub(1), (j + 1).min(n - 1));
@@ -1418,8 +1419,10 @@ mod tests {
         }
         // The tripwire value, produced by this test on the shipped map. It is a CONSEQUENCE of the
         // assertions above, not an independent claim — if it moves, one of them moved first.
+        // Re-pinned when the decode began honouring the map's declared row order
+        // (`terrain_grid::RowOrder`): the same samples, reversed row-wise, are a different surface.
         assert_eq!(
-            hash, 0x70e7_f9e5_e6cf_c91b,
+            hash, 0x4063_c4c4_5e28_ed45,
             "the level-zero surface changed; the assertions above name which part"
         );
     }
@@ -1619,8 +1622,8 @@ mod tests {
     fn interior_vertices_are_exact_grid_samples() {
         let grid = shipped_grid();
         let lod = build(&grid);
-        let step = crate::terrain_grid::WORLD_SIZE / (grid.size() - 1) as f32;
-        let half = crate::terrain_grid::WORLD_HALF_EXTENT;
+        let step = grid.world_size() / (grid.size() - 1) as f32;
+        let half = grid.half_extent();
         for tile in &lod.tiles {
             for level in &tile.levels {
                 let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
@@ -2337,7 +2340,7 @@ mod tests {
 #[cfg(test)]
 mod tactical {
     use super::*;
-    use crate::terrain_grid::{WORLD_HALF_EXTENT, WORLD_SIZE, tests::shipped_grid};
+    use crate::terrain_grid::tests::shipped_grid;
 
     /// One tile-level's geometry, indexed for O(1) point location.
     ///
@@ -2367,7 +2370,7 @@ mod tactical {
         fn new(grid: &'a HeightGrid) -> Self {
             let lod = build(grid);
             let cells_per_side = grid.size() as usize - 1;
-            let step = WORLD_SIZE / cells_per_side as f32;
+            let step = grid.world_size() / cells_per_side as f32;
             let mut levels = Vec::with_capacity(lod.tiles.len());
             for (tile, [ia, _, ja, _]) in lod.tiles.iter().zip(mesh_tile_node_ranges(grid)) {
                 let mut per_level = Vec::with_capacity(tile.levels.len());
@@ -2392,10 +2395,11 @@ mod tactical {
                     // coordinate of a vertex is recovered from its POSITION — legitimate because
                     // every LOD vertex is an exact grid sample sitting exactly on a node
                     // (`interior_vertices_are_exact_grid_samples`), so the round-trip is exact.
+                    let half = grid.half_extent();
                     let local = |p: Vec3| {
                         (
-                            ((p.x + WORLD_HALF_EXTENT) / step).round() as i64 - ia as i64,
-                            ((p.z + WORLD_HALF_EXTENT) / step).round() as i64 - ja as i64,
+                            ((p.x + half) / step).round() as i64 - ia as i64,
+                            ((p.z + half) / step).round() as i64 - ja as i64,
                         )
                     };
                     let mut cells = vec![[u32::MAX; 2]; MESH_TILE_CELLS * MESH_TILE_CELLS];
@@ -2453,8 +2457,9 @@ mod tactical {
         /// The tile containing world `(x, z)`.
         fn tile_at(&self, x: f32, z: f32) -> usize {
             let cells = self.grid.size() as usize - 1;
-            let step = WORLD_SIZE / cells as f32;
-            let clamp = |w: f32| (((w + WORLD_HALF_EXTENT) / step) as usize).min(cells - 1);
+            let step = self.grid.world_size() / cells as f32;
+            let half = self.grid.half_extent();
+            let clamp = |w: f32| (((w + half) / step) as usize).min(cells - 1);
             (clamp(z) / MESH_TILE_CELLS) * self.tiles_per_side + clamp(x) / MESH_TILE_CELLS
         }
 
@@ -2506,11 +2511,12 @@ mod tactical {
             let ladder = self.ladder;
             let n = ladder.grid.size() as usize;
             let last = (n - 1) as f32;
+            let (half, world) = (ladder.grid.half_extent(), ladder.grid.world_size());
             let (u0, v0) = (
-                (origin.x + WORLD_HALF_EXTENT) / WORLD_SIZE * last,
-                (origin.z + WORLD_HALF_EXTENT) / WORLD_SIZE * last,
+                (origin.x + half) / world * last,
+                (origin.z + half) / world * last,
             );
-            let (du, dv) = (dir.x / WORLD_SIZE * last, dir.z / WORLD_SIZE * last);
+            let (du, dv) = (dir.x / world * last, dir.z / world * last);
             let (mut t0, mut t1) = (0.0f32, t_max);
             for (o, d) in [(u0, du), (v0, dv)] {
                 if d == 0.0 {
@@ -2771,7 +2777,7 @@ mod tactical {
                                 if wanted == 0 {
                                     break;
                                 }
-                                let half = WORLD_HALF_EXTENT * 0.95;
+                                let half = grid.half_extent() * 0.95;
                                 let (qx, qz) = (region % 2, region / 2);
                                 let x = -half + (qx as f32 + next()) * half;
                                 let z = -half + (qz as f32 + next()) * half;
@@ -2883,7 +2889,7 @@ mod tactical {
                         if wanted == 0 {
                             break;
                         }
-                        let half = WORLD_HALF_EXTENT * 0.98;
+                        let half = grid.half_extent() * 0.98;
                         let x = (next() * 2.0 - 1.0) * half;
                         let z = (next() * 2.0 - 1.0) * half;
                         let azimuth =
@@ -2933,8 +2939,8 @@ mod tactical {
                 println!(
                     "    NOTE: every hit landed on an exact-level tile. At this profile the \
                      nearest coarse switch is {:.0} m and the farthest a camera can be from any \
-                     tile centre on a {WORLD_SIZE} m map is ~{:.0} m — terrain LOD never fires in \
-                     this view, so these zeroes are the honest answer and not a passing gate.",
+                     tile centre on a {} m map is ~{:.0} m — terrain LOD never fires in this \
+                     view, so these zeroes are the honest answer and not a passing gate.",
                     view.switch_distance_m(
                         ladder.lod.tiles[0]
                             .levels
@@ -2942,7 +2948,8 @@ mod tactical {
                             .map_or(TERRAIN_LOD_LADDER.len() - 1, |level| level.rung),
                         radius,
                     ),
-                    WORLD_SIZE * std::f32::consts::SQRT_2 / 2.0 + radius,
+                    ladder.grid.world_size(),
+                    ladder.grid.world_size() * std::f32::consts::SQRT_2 / 2.0 + radius,
                 );
             }
 
@@ -3001,8 +3008,8 @@ mod tactical {
         let mut next = lcg(0x243F_6A88_85A3_08D3);
         let (mut worst, mut hits) = (0.0f32, 0u32);
         for _ in 0..512 {
-            let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
-            let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.95;
+            let x = (next() * 2.0 - 1.0) * grid.half_extent() * 0.95;
+            let z = (next() * 2.0 - 1.0) * grid.half_extent() * 0.95;
             let origin = Vec3::new(x, grid.height_at(x, z) + 0.5 + next() * 30.0, z);
             // Steep to shallow-grazing: a shallow ray amplifies any surface mismatch by
             // 1/sin(elevation), so this is the harshest agreement the two casters face.
@@ -3103,8 +3110,8 @@ mod tactical {
         let mut next = lcg(0x452_821E_638D_0137);
         let (mut worst, mut hits, mut cast) = (0.0f32, 0u32, 0u32);
         for _ in 0..64 {
-            let x = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.9;
-            let z = (next() * 2.0 - 1.0) * WORLD_HALF_EXTENT * 0.9;
+            let x = (next() * 2.0 - 1.0) * grid.half_extent() * 0.9;
+            let z = (next() * 2.0 - 1.0) * grid.half_extent() * 0.9;
             let origin = Vec3::new(x, grid.height_at(x, z) + 1.5 + next() * 10.0, z);
             // Weighted toward the grazing band the harness reports on, where a wrong surface moves
             // the hit furthest and is therefore easiest to catch.

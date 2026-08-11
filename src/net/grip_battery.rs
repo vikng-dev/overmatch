@@ -979,7 +979,7 @@ mod jip_udp {
 
     use super::*;
     use crate::CombatantId;
-    use crate::net::protocol::{NetTank, PROTOCOL_FINGERPRINT};
+    use crate::net::protocol::{NetTank, protocol_id};
     use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
     #[derive(Resource, Default)]
@@ -1108,7 +1108,7 @@ mod jip_udp {
             .world_mut()
             .spawn((
                 NetcodeServer::new(ServerNetcodeConfig {
-                    protocol_id: PROTOCOL_FINGERPRINT,
+                    protocol_id: protocol_id(),
                     private_key: [0; 32],
                     ..default()
                 }),
@@ -1144,7 +1144,7 @@ mod jip_udp {
                         server_addr,
                         client_id: 9_001,
                         private_key: [0; 32],
-                        protocol_id: PROTOCOL_FINGERPRINT,
+                        protocol_id: protocol_id(),
                     },
                     NetcodeConfig::default(),
                 )

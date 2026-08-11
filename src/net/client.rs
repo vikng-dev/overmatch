@@ -22,7 +22,7 @@ use serde_json::json;
 
 use super::protocol::{
     DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, ImpactConfirm,
-    NetTank, PROTOCOL_FINGERPRINT, RicochetKeyframe,
+    NetTank, RicochetKeyframe, protocol_id,
 };
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
@@ -483,7 +483,7 @@ pub fn run() {
                 client_id,
                 private_key: [0; 32],
                 // Must match the server's `NetcodeConfig.protocol_id`.
-                protocol_id: PROTOCOL_FINGERPRINT,
+                protocol_id: protocol_id(),
             },
             NetcodeConfig {
                 client_timeout_secs: 3,
@@ -696,8 +696,9 @@ const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 
 /// After this many failed connect attempts the status overlay stops saying only "CONNECTING…" and
 /// adds the version-mismatch hint. WHY a count and not a specific "PROTOCOL MISMATCH" line: a
-/// fingerprint-skewed peer is refused by netcode dropping the undecryptable connect token silently
-/// (see `net::protocol::PROTOCOL_FINGERPRINT`), which the client observes as
+/// fingerprint-skewed peer — a different wire manifest OR a different map — is refused by netcode
+/// dropping the undecryptable connect token silently (see `net::protocol::protocol_id`), which the
+/// client observes as
 /// `ConnectionRequestTimedOut` — byte-for-byte the same terminal state as a down/unreachable server
 /// (verified against vendored `lightyear_netcode` client.rs `update_state`). The two are transport-
 /// indistinguishable, so the honest message names BOTH causes. Three attempts (~a few seconds of

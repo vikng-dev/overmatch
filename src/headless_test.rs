@@ -2905,9 +2905,14 @@ fn probe_list<T: std::str::FromStr + Copy>(name: &str, default: &[T]) -> Vec<T> 
 /// EXACT for a plane — the grid interpolates linearly inside a cell — so the oracle, the collider
 /// and the render mesh all read the authored grade everywhere, with no quantization to chase.
 fn ramp_grid(grade: f32) -> crate::terrain_grid::HeightGrid {
-    let half = crate::terrain_grid::WORLD_HALF_EXTENT;
+    let extent = crate::terrain_grid::FIXTURE_EXTENT;
+    let half = extent.half_extent();
     let (lo, hi) = (-grade * half, grade * half);
-    crate::terrain_grid::HeightGrid::new(std::sync::Arc::from([lo, hi, lo, hi].as_slice()), 2)
+    crate::terrain_grid::HeightGrid::new(
+        std::sync::Arc::from([lo, hi, lo, hi].as_slice()),
+        2,
+        extent,
+    )
 }
 
 /// Boot on [`ramp_grid`], settle onto the belt contacts, and hand back the controlled Tiger.

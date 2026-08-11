@@ -25,7 +25,8 @@
 //!   1. The terrain is FLATTENED — at the GRID, before anything reads it, so the oracle, the
 //!      collider and the render mesh are all flat by the same construction that keeps them agreeing
 //!      on the shipped map (`terrain_grid`'s one-surface doctrine). Flattening only the render mesh
-//!      would put the tanks on invisible hills.
+//!      would put the tanks on invisible hills. The map's object scatter is skipped with it: 709
+//!      houses and firs are scenery standing in front of the thing being looked at.
 //!   2. The player spawns at one edge of the 1 000 m map facing down-range.
 //!   3. At every switch distance in `SHOE_LOD_CHAIN`, a PAIR of stationary Tigers stands broadside
 //!      to the sight line: the LEFT one clamped to the finer level, the RIGHT one to the coarser.
@@ -70,18 +71,19 @@ pub fn plugin(app: &mut App) {
 
 /// Is this process running the LOD showcase?
 ///
-/// Read by [`plugin`], by `tank::scenario`'s spawn (which lays out the pairs instead of the duel)
-/// and by `terrain_grid`'s decode (which flattens the world instead of loading it). Those three are
-/// the whole of its reach.
+/// Read by [`plugin`], by `tank::scenario`'s spawn (which lays out the pairs instead of the duel),
+/// by `terrain_grid`'s decode (which flattens the world instead of loading it) and by `world`'s
+/// scatter call (which skips the map's objects). Those four are the whole of its reach.
 pub(crate) fn enabled() -> bool {
     crate::env_flag("OVERMATCH_LOD_SHOWCASE", false)
 }
 
 /// Where the player stands: hard against the map's west edge, on the centre line.
 ///
-/// The map is [`crate::terrain_grid::WORLD_SIZE`] = 1 000 m across, so −480 leaves 950 m of usable
-/// down-range with 20 m of shoulder behind the spawn. Down-range is +X and the pairs are laid out
-/// along it; LATERAL is therefore Z, and the player's LEFT (with +Y up and +X forward) is −Z.
+/// −480 leaves 950 m of usable down-range on a 1 000 m map with 20 m of shoulder behind the spawn,
+/// and clears a wider one by more. Down-range is +X and the pairs are laid out along it; LATERAL is
+/// therefore Z, and the player's LEFT (with +Y up and +X forward) is −Z. The map's own square is
+/// what `no_showcase_tank_stands_off_the_map` holds this layout to.
 const START_XZ: Vec2 = Vec2::new(-480.0, 0.0);
 
 /// Half the lateral gap between a pair's two tanks, metres — so the pair straddles the sight line
@@ -112,10 +114,10 @@ const LANE_OFFSET_M: f32 = 15.0;
 
 /// The furthest down-range a pair may stand, metres from [`START_XZ`].
 ///
-/// The map runs out at +500 (`WORLD_HALF_EXTENT`) and a tank needs its footprint clearance inside
-/// it, so 950 m from −480 puts the last pair at x = +470 with 30 m to spare. Any switch beyond this
-/// is a switch that cannot be staged on this map — the legend says so rather than the pair silently
-/// standing somewhere it was not asked to.
+/// The narrowest map this layout targets runs out at +500 and a tank needs its footprint clearance
+/// inside it, so 950 m from −480 puts the last pair at x = +470 with 30 m to spare. Any switch
+/// beyond this is a switch that cannot be staged on this map — the legend says so rather than the
+/// pair silently standing somewhere it was not asked to.
 const MAX_RANGE_M: f32 = 950.0;
 
 /// One tank the showcase spawns.
@@ -449,10 +451,14 @@ mod tests {
     /// the clamp is enough, for whatever the ladder turns out to be.
     #[test]
     fn no_showcase_tank_stands_off_the_map() {
-        use crate::terrain_grid::{SPAWN_FOOTPRINT_HALF_M, WORLD_HALF_EXTENT};
+        use crate::map::tests::shipped_manifest;
+        use crate::terrain_grid::SPAWN_FOOTPRINT_HALF_M;
 
+        // The SHIPPED map's square, read off its manifest: the showcase stands on whatever world
+        // ships, so a re-scaled map re-asks this question instead of leaving a stale answer.
+        let half = shipped_manifest().extent.half_extent();
         for tank in layout() {
-            let edge = WORLD_HALF_EXTENT - SPAWN_FOOTPRINT_HALF_M;
+            let edge = half - SPAWN_FOOTPRINT_HALF_M;
             assert!(
                 tank.xz.x.abs() <= edge && tank.xz.y.abs() <= edge,
                 "{} stands at {:?}, and its spawn footprint reaches past the {edge} m usable edge",
@@ -462,20 +468,20 @@ mod tests {
         }
     }
 
-    /// The lever is OFF by default and REACHES only three places, enforced by scanning the source.
+    /// The lever is OFF by default and REACHES only four places, enforced by scanning the source.
     ///
     /// The whole promise of a debug harness is that a build which does not ask for it does not pay
     /// for it and cannot be surprised by it. Two halves to that, and only one of them is checked by
     /// the suite passing: every other test in this crate runs with the variable unset and would go
     /// red if the showcase engaged, which covers BEHAVIOUR. What it cannot cover is REACH — a fourth
-    /// site reading `enabled()` next year is a fourth production path with a debug branch in it, and
+    /// site reading `enabled()` next year is one more production path with a debug branch in it, and
     /// nothing about it would fail. So the sites are enumerated here, and adding one is a deliberate
     /// edit to this list rather than a quiet spread.
     ///
     /// (The variable's NAME is likewise allowed in exactly one file. A second `env_flag` on the same
     /// string would be a second, undiscoverable definition of "enabled".)
     #[test]
-    fn the_showcase_is_off_by_default_and_reaches_exactly_three_places() {
+    fn the_showcase_is_off_by_default_and_reaches_exactly_four_places() {
         assert!(
             !enabled(),
             "the suite runs with the lever unset — a test process that has it set is not testing \
@@ -520,10 +526,17 @@ mod tests {
         assert_eq!(
             callers,
             // The spawn (pairs instead of the duel), the terrain decode (a flat grid instead of the
-            // shipped map), and this file — whose hit is [`plugin`]'s own mount guard AND the
-            // literal this scan is written with, so it can never be absent.
-            ["lod_showcase.rs", "tank/scenario.rs", "terrain_grid.rs"],
-            "the showcase reaches the scenario spawn and the terrain decode, and nowhere else",
+            // shipped map), the world's scatter call (none of the map's objects instead of 709 of
+            // them), and this file — whose hit is [`plugin`]'s own mount guard AND the literal this
+            // scan is written with, so it can never be absent.
+            [
+                "lod_showcase.rs",
+                "tank/scenario.rs",
+                "terrain_grid.rs",
+                "world.rs"
+            ],
+            "the showcase reaches the scenario spawn, the terrain decode and the scatter spawn, \
+             and nowhere else",
         );
     }
 

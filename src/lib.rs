@@ -81,6 +81,10 @@ mod hud;
 /// verdict (the L2→L3 switch scores 1.674 against an 0.5 allowance); adds nothing to a process that
 /// does not set the variable.
 mod lod_showcase;
+/// The map manifest (`assets/maps/<id>/level.json`): map selection, the ONE parse of the file that
+/// declares a map's terrain block, its object placement and the coordinate conventions it was
+/// exported in. `terrain_grid` reads it at Startup; `scatter` places out of the same struct.
+mod map;
 /// The networking implementation. Executables enter through [`run_client`] and [`run_server`];
 /// the adapter tree is private to the library.
 mod net;
@@ -128,6 +132,10 @@ pub mod sandbox;
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
 /// windowed root — `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
 /// entry declarer — and never the headless server.
+/// The map's object scatter (the map's own `level.json`): authored building and tree placement
+/// spawned as graybox proxies with static colliders, from shared data on both binaries rather than
+/// over the wire. Buildings join `world::TerrainMap`'s block list; firs carry a trunk collider only.
+mod scatter;
 mod settings;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to

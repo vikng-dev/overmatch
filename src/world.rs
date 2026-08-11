@@ -20,8 +20,10 @@ pub struct TerrainMap {
     pub blocks: Vec<Transform>,
 }
 
-/// Side length of the (square) ground plane, in metres.
-const GROUND_SIZE: f32 = 1000.0;
+/// Side length of the (square) ground plane, in metres — the fallback world's extent
+/// (`terrain_grid::FIXTURE_EXTENT`), which is what the spawn map's UV mapping and the authority's
+/// spawn clamp resolve against when no heightmap decoded.
+const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;
 /// Thickness of the ground slab. Only the top face (at y=0) matters; the rest is buried.
 const GROUND_THICKNESS: f32 = 1.0;
 
@@ -325,6 +327,9 @@ fn spawn_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    // The one parse of the map's manifest (`terrain_grid::decode_height_grid` publishes it), which
+    // the scatter's placement is read out of.
+    manifest: Option<Res<crate::map::MapManifest>>,
     windows: Query<&Window>,
     scale: Option<Res<crate::render_scale::RenderScale>>,
     asset_server: Res<AssetServer>,
@@ -354,9 +359,18 @@ fn spawn_environment(
     ));
 
     // The heightmap world: when the grid decoded, the heightfield IS the world — no flat slab,
-    // no authored test course. `TerrainMap` stays (empty) so `TrackField` rebuilds on the same
-    // revision semantics; the oracle's ground term comes from the grid, not the block list.
+    // no authored test course. The oracle's ground term comes from the grid; `TerrainMap` carries
+    // only what stands ON it (the scatter's buildings, below), on the same revision semantics
+    // `TrackField` rebuilds from.
     if let Some(grid) = grid {
+        // The view layer's parry cap must reach across the map the grid actually is (ADR-0011): a
+        // world wider than [`VIEW_CAST_MAX_M`]'s diagonal clips aim and camera picks at the cap
+        // instead of at the ground, and the clip is invisible — the miss fallback looks like sky.
+        assert!(
+            VIEW_CAST_MAX_M >= grid.world_size() * std::f32::consts::SQRT_2,
+            "VIEW_CAST_MAX_M ({VIEW_CAST_MAX_M} m) must cover the {} m world's diagonal",
+            grid.world_size(),
+        );
         commands.spawn((
             Transform::IDENTITY,
             RigidBody::Static,
@@ -422,6 +436,22 @@ fn spawn_environment(
                 &material,
                 &grid,
                 terrain_lod_view(windows.iter().next(), scale.as_deref()),
+            );
+        }
+        // The map's object scatter (`scatter`): graybox proxies posed from the shipped level file
+        // onto THIS grid, colliders on every composition and meshes only where there is a window.
+        // Appended to `blocks` before the resource is inserted, so a building enters the analytic
+        // track field through the same list the authored course's cuboids do. The showcase world is
+        // excluded for the reason its grid is flat: scenery in front of the thing being looked at.
+        if let Some(manifest) = manifest.filter(|_| !crate::lod_showcase::enabled()) {
+            crate::scatter::spawn(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &manifest,
+                &grid,
+                &mut blocks,
+                !windows.is_empty(),
             );
         }
         commands.insert_resource(TerrainMap {
@@ -571,20 +601,16 @@ fn spawn_test_course(
     }
 }
 
-/// Longest CAST any view-layer ground/aim ray needs, metres: the world is the
-/// ±`terrain_grid::WORLD_HALF_EXTENT` square, so no terrain sightline can exceed the full
-/// diagonal — 1000·√2 ≈ 1414.2 m — from any in-world origin; 1500 adds headroom (compile-time
-/// checked below, so a re-scaled world fails the BUILD rather than silently clipping picks).
+/// Longest CAST any view-layer ground/aim ray needs, metres: no terrain sightline can exceed the
+/// world's full diagonal — `world_size·√2`, 2 121.3 m on the shipped 1 500 m map — from any
+/// in-world origin, and this adds headroom on top. The world's side is the MAP's to declare
+/// (`map::MapManifest`), so the bound is checked against the decoded grid in
+/// [`spawn_environment`] rather than at compile time.
 /// Purely a parry-traversal cap for the view layer (aim/sight picks, the bore dot, the camera
 /// pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky" FALLBACK distance,
 /// so committed aim points and all in-range behavior are unchanged — nothing exists between the
 /// diagonal and 10 km for a ray to hit. Sim code must not read this.
-pub(crate) const VIEW_CAST_MAX_M: f32 = 1_500.0;
-const _: () = assert!(
-    VIEW_CAST_MAX_M * VIEW_CAST_MAX_M
-        >= 2.0 * crate::terrain_grid::WORLD_SIZE * crate::terrain_grid::WORLD_SIZE,
-    "VIEW_CAST_MAX_M must cover the world diagonal"
-);
+pub(crate) const VIEW_CAST_MAX_M: f32 = 2_500.0;
 
 /// Distance along `ray` to the terrain, capped at `max`, falling back to `max` when the ray
 /// misses (sky / above the horizon). A world raycast against the `Terrain` layer ONLY — the orbit

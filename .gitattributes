@@ -1,11 +1,16 @@
 *.blend filter=lfs diff=lfs merge=lfs -text
 *.glb filter=lfs diff=lfs merge=lfs -text
 *.dae filter=lfs diff=lfs merge=lfs -text
-# Terrain: the world heightmaps at the root (PNG), plus one folder per surface texture pack
-# holding its KTX2 maps (assets/terrain/<pack>/<pack>_{diff|col,nor_gl,arm}.ktx2, built by
-# scripts/encode-terrain-ktx2.sh). `**/` matches zero or more directories, so these patterns cover
-# BOTH the root files and every pack folder — a pack added without touching this file is still
-# LFS-tracked. The jpg line stays for any future non-terrain-pack image dropped in here.
+# Terrain: the game's surface texture library, one folder per pack holding its KTX2 maps
+# (assets/terrain/<pack>/<pack>_{diff|col,nor_gl,arm}.ktx2, built by scripts/encode-terrain-ktx2.sh).
+# `**/` matches zero or more directories, so a pack added without touching this file is still
+# LFS-tracked. The png/jpg lines stay for any non-pack image dropped in here.
 assets/terrain/**/*.png filter=lfs diff=lfs merge=lfs -text
 assets/terrain/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 assets/terrain/**/*.ktx2 filter=lfs diff=lfs merge=lfs -text
+# Maps: one folder per map (assets/maps/<id>/), holding its level.json manifest, the heightmap the
+# manifest names, and derived/ for what we generate from it. Same extensions, same `**/` reach, so a
+# map added without touching this file is LFS-tracked too.
+assets/maps/**/*.png filter=lfs diff=lfs merge=lfs -text
+assets/maps/**/*.jpg filter=lfs diff=lfs merge=lfs -text
+assets/maps/**/*.ktx2 filter=lfs diff=lfs merge=lfs -text

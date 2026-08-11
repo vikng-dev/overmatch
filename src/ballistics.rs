@@ -4843,7 +4843,11 @@ mod march_tests {
     /// production resource).
     fn flat_grid(height: f32) -> HeightGrid {
         let size = 33usize;
-        HeightGrid::new(vec![height; size * size].into(), size as u32)
+        HeightGrid::new(
+            vec![height; size * size].into(),
+            size as u32,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        )
     }
 
     /// Terrain stops come from the exact `HeightGrid` caster when the heightmap world is live:
