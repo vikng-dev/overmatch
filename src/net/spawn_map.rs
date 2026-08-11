@@ -46,8 +46,14 @@ pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
 }
 
 /// The map image, in the selected map's `derived/` folder: an 8-BIT RGB copy of the terrain
-/// heightmap, generated from the 16-bit source the manifest names (python3/PIL: numpy `>> 8`
-/// downshift, LANCZOS resize to 1024², grayscale → RGB).
+/// heightmap, generated from the 16-bit source the manifest names (python3/PIL: the manifest's own
+/// row order applied first — rows reversed for a `-Z` export, exactly as `terrain_grid::RowOrder`
+/// does at decode — then numpy `>> 8` downshift, LANCZOS resize to 1024², grayscale → RGB).
+///
+/// The row order is not a detail of the recipe, it is the whole point: this image is what the
+/// player clicks on, and [`uv_to_world`] answers in the world the GRID describes. Generated from
+/// the file's raw rows instead, the panel would show a map mirrored north–south against the terrain
+/// it points at — `ui_map_shows_the_world_the_click_math_points_at` is the standing check.
 ///
 /// The UI must NOT load the 16-bit file directly: bevy decodes a Luma16 PNG into an `R16Uint`
 /// GPU texture, and `Uint` textures are not filterable — `bevy_ui`'s `ui_material_bind_group`
@@ -235,11 +241,13 @@ fn panel_uv(panel: &SpawnMapPanel, cursor: Vec2) -> Option<Vec2> {
 /// row 0 / `uv.y = 0` is world `z = -HALF_EXTENT`, and `uv.x = 0` is world `x = -HALF_EXTENT`.
 /// Both axes are then plain increasing maps of the same form — no flip anywhere.
 ///
-/// This is not a free choice: it is the SAME convention `terrain_grid::HeightGrid` decodes the PNG
-/// with (row-major, row = z, column = x, sample `(i, j)` at `x = -HALF + i·step`,
-/// `z = -HALF + j·step`), so the pixel the player clicks is the pixel whose height the authority
-/// spawns them on. The own-tank marker is the standing empirical check: if the two ever disagreed,
-/// the tank dot would sit mirrored about the panel's horizontal centreline while driving.
+/// This is not a free choice: it is the SAME convention `terrain_grid::HeightGrid` holds its
+/// samples in (row-major, row = z, column = x, sample `(i, j)` at `x = -HALF + i·step`,
+/// `z = -HALF + j·step` — after the decode has folded in the map's declared
+/// `terrain_grid::RowOrder`), so the pixel the player clicks is the pixel whose height the authority
+/// spawns them on. That holds only while [`UI_MAP_FILE`] is generated in the same row order; the
+/// own-tank marker is the standing empirical check, and the tank dot sitting mirrored about the
+/// panel's horizontal centreline while driving is what a disagreement looks like.
 fn uv_to_world(half_extent: f32, uv: Vec2) -> Vec2 {
     Vec2::new(
         (uv.x * 2.0 - 1.0) * half_extent,
@@ -644,5 +652,69 @@ mod tests {
             image.color(),
         );
         assert_eq!(image.width(), image.height(), "UI map must be square");
+    }
+
+    /// THE FULL CHAIN, end to end: heightmap rows → derived UI rows → panel UV → world XZ. A click
+    /// on a hill in the panel must land on THAT hill in the world, which is only true if the derived
+    /// image carries the same row order the decode folded into the grid ([`UI_MAP_FILE`]).
+    ///
+    /// Pinned as a correlation between what the panel DRAWS and what [`uv_to_world`] ANSWERS, over
+    /// the whole square: brighter pixel, higher ground. The mirrored reading is measured alongside
+    /// it rather than assumed absent — on this map it scores 0.56 against 1.00, so the test would
+    /// fail loudly if the derived image were ever regenerated from the file's raw rows.
+    #[test]
+    fn ui_map_shows_the_world_the_click_math_points_at() {
+        let path = crate::assets::asset_root().join(crate::map::derived_asset(UI_MAP_FILE));
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("UI map missing at {}: {err}", path.display()));
+        let image = image::load_from_memory(&bytes)
+            .expect("UI map must decode")
+            .to_luma8();
+        let grid = crate::terrain_grid::tests::shipped_grid();
+        let half = grid.half_extent();
+        let (mut drawn, mut mirrored, mut ground) = (Vec::new(), Vec::new(), Vec::new());
+        const SAMPLES: u32 = 64;
+        let pixel = |uv: Vec2| {
+            let px = |t: f32, n: u32| ((t * n as f32) as u32).min(n - 1);
+            f32::from(
+                image
+                    .get_pixel(px(uv.x, image.width()), px(uv.y, image.height()))
+                    .0[0],
+            )
+        };
+        for j in 0..SAMPLES {
+            for i in 0..SAMPLES {
+                let uv = (Vec2::new(i as f32, j as f32) + 0.5) / SAMPLES as f32;
+                drawn.push(pixel(uv));
+                mirrored.push(pixel(Vec2::new(uv.x, 1.0 - uv.y)));
+                let world = uv_to_world(half, uv);
+                ground.push(grid.height_at(world.x, world.y));
+            }
+        }
+        let honest = correlation(&drawn, &ground);
+        let flipped = correlation(&mirrored, &ground);
+        assert!(
+            honest > 0.95,
+            "the panel's pixels and the click math's world disagree (correlation {honest:.3}) — \
+             the derived UI map is not in the grid's row order",
+        );
+        assert!(
+            flipped < honest - 0.2,
+            "north–south mirroring the panel reads just as well ({flipped:.3} vs {honest:.3}), so \
+             this claim proves nothing about orientation",
+        );
+    }
+
+    /// Pearson correlation of two equal-length series — the orientation check's one statistic.
+    fn correlation(a: &[f32], b: &[f32]) -> f32 {
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let (ma, mb) = (mean(a), mean(b));
+        let (mut cov, mut va, mut vb) = (0.0f32, 0.0f32, 0.0f32);
+        for (x, y) in a.iter().zip(b) {
+            cov += (x - ma) * (y - mb);
+            va += (x - ma) * (x - ma);
+            vb += (y - mb) * (y - mb);
+        }
+        cov / (va * vb).sqrt()
     }
 }

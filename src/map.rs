@@ -12,7 +12,10 @@
 //!
 //! THE READER VERIFIES THE CONVENTIONS. The exporter declares handedness, up axis, units, transform
 //! space and quaternion order; [`CoordinateSystem::check`] refuses anything but the game's own —
-//! a manifest whose poses mean something else is present-but-broken, not absent.
+//! a manifest whose poses mean something else is present-but-broken, not absent. It also declares
+//! which way its heightmap's pixels run ([`HeightmapBlock::row_order`]), and THAT one is honoured
+//! rather than refused: the reader reverses a `-Z` image's rows once at decode, so the world stands
+//! the way the author placed their objects on it.
 //!
 //! FAILURE LAW (ADR-0011). Absent → `None` → the flat-slab fallback world, the ONLY tolerated
 //! absence. Present → everything it declares must hold: an unparseable file, a mismatched
@@ -24,7 +27,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
-use crate::terrain_grid::TerrainExtent;
+use crate::terrain_grid::{RowOrder, TerrainExtent};
 
 /// The map loaded when nothing selects another.
 pub(crate) const DEFAULT_MAP_ID: &str = "kalinovo";
@@ -80,6 +83,9 @@ pub(crate) struct MapManifest {
     heightmap: String,
     /// The square the map hangs at and the metres its samples span.
     pub(crate) extent: TerrainExtent,
+    /// Which world direction the heightmap's rows increase toward, as declared — the decode's one
+    /// orientation input ([`crate::terrain_grid::grid_from_png`]).
+    pub(crate) rows: RowOrder,
     /// The author's object placement, in file order.
     pub(crate) instances: Vec<InstanceRecord>,
 }
@@ -127,7 +133,26 @@ struct HeightmapBlock {
     /// Heightmap file name, resolved against the manifest's own directory.
     asset: String,
     world_extent_xz: ExtentXz,
+    /// Which world directions the image's columns and rows run in.
+    image_axes: ImageAxes,
+    /// The corner pixels' world centres — a second, redundant statement of the same axes, which is
+    /// what makes it a cross-check. Optional: an exporter that omits it simply offers no second
+    /// opinion.
+    sample_centers_xz: Option<SampleCenters>,
     height_decode: HeightDecode,
+}
+
+/// The image's own axes, as the exporter declares them.
+#[derive(serde::Deserialize)]
+struct ImageAxes {
+    column_increases_toward: String,
+    row_increases_toward: String,
+}
+
+/// The world XZ the corner pixels' centres sit at, as declared.
+#[derive(serde::Deserialize)]
+struct SampleCenters {
+    pixel_0_0: [f32; 2],
 }
 
 /// The world square, as `[X, Z]` corner pairs in metres.
@@ -176,6 +201,53 @@ impl CoordinateSystem {
                 path.display(),
             );
         }
+    }
+}
+
+impl HeightmapBlock {
+    /// The declared row direction, as the decode's own type.
+    ///
+    /// Columns are not a choice: the decode walks a row-major image with the column index as X, so
+    /// anything but `+X` describes a different image than the one that would be read. Rows ARE —
+    /// an exporter whose image origin sits at the `+Z` corner declares `-Z`, and
+    /// [`crate::terrain_grid::grid_from_png`] reverses the row order once at decode.
+    ///
+    /// [`SampleCenters`], when present, must agree: a manifest that contradicts itself is
+    /// present-but-broken (ADR-0011), because nothing here can know which of the two declarations
+    /// is the lie.
+    fn row_order(&self, path: &Path) -> RowOrder {
+        let ImageAxes {
+            column_increases_toward: columns,
+            row_increases_toward: declared_rows,
+        } = &self.image_axes;
+        assert!(
+            columns == "+X",
+            "map: {} declares image_axes.column_increases_toward = {columns:?}, the game reads \
+             \"+X\"",
+            path.display(),
+        );
+        let rows = match declared_rows.as_str() {
+            "+Z" => RowOrder::TowardPositiveZ,
+            "-Z" => RowOrder::TowardNegativeZ,
+            other => panic!(
+                "map: {} declares image_axes.row_increases_toward = {other:?}, the game reads \
+                 \"+Z\" or \"-Z\"",
+                path.display(),
+            ),
+        };
+        if let Some(centers) = &self.sample_centers_xz {
+            let [x, z] = centers.pixel_0_0;
+            // Pixel (0, 0) is the first column of the first row: on the `-X` side because columns
+            // run toward `+X`, and on the far side of whichever way the rows run.
+            let z_agrees = (z > 0.0) == (rows == RowOrder::TowardNegativeZ);
+            assert!(
+                x < 0.0 && z_agrees,
+                "map: {} declares sample_centers_xz.pixel_0_0 = [{x}, {z}], which is not the \
+                 corner image_axes ({columns} columns, {declared_rows} rows) puts it in",
+                path.display(),
+            );
+        }
+        rows
     }
 }
 
@@ -236,6 +308,7 @@ pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
     level.coordinate_system.check(path);
     let heightmap = level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
+    let rows = heightmap.row_order(path);
     let (offset_m, scale_m) = (
         heightmap.height_decode.offset_m,
         heightmap.height_decode.scale_m,
@@ -255,6 +328,7 @@ pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
             height_offset_m: offset_m,
             height_span_m: scale_m,
         },
+        rows,
         instances: level.instances,
     }
 }
@@ -275,24 +349,40 @@ pub(crate) mod tests {
     }
 
     /// A minimal manifest text: the terrain block a decode needs, the conventions the reader
-    /// checks, and no instances.
-    fn manifest_text(half_m: f32, offset_m: f32, scale_m: f32) -> String {
+    /// checks, and no instances. `rows` is the declared row direction, and `pixel_0_0` the corner
+    /// centre that must agree with it.
+    fn manifest_text(half_m: f32, offset_m: f32, scale_m: f32, rows: &str) -> String {
+        let corner_z = if rows == "-Z" { half_m } else { -half_m };
         format!(
             r#"{{"coordinate_system":{{"handedness":"right","up_axis":"+Y",
                "horizontal_axes":["+X","+Z"],"units":"meters","transform_space":"world",
                "rotation":"quaternion_xyzw"}},
                "terrain":{{"heightmap":{{"asset":"h.png",
                "world_extent_xz":{{"minimum":[{min},{min}],"maximum":[{half_m},{half_m}]}},
+               "image_axes":{{"column_increases_toward":"+X","row_increases_toward":"{rows}"}},
+               "sample_centers_xz":{{"pixel_0_0":[{min},{corner_z}]}},
                "height_decode":{{"offset_m":{offset_m},"scale_m":{scale_m}}}}}}},
                "instances":[]}}"#,
             min = -half_m,
         )
     }
 
-    /// The terrain block a decode test hangs its fixture PNG at, parsed through the real reader.
+    /// The terrain block a decode test hangs its fixture PNG at, parsed through the real reader —
+    /// in the grid's own row direction, so a decode test that is not ABOUT orientation reads the
+    /// image as written.
     pub(crate) fn fixture_manifest(half_m: f32, offset_m: f32, scale_m: f32) -> MapManifest {
+        fixture_manifest_with_rows(half_m, offset_m, scale_m, "+Z")
+    }
+
+    /// The same fixture at a declared row direction — the orientation law's one input.
+    pub(crate) fn fixture_manifest_with_rows(
+        half_m: f32,
+        offset_m: f32,
+        scale_m: f32,
+        rows: &str,
+    ) -> MapManifest {
         parse(
-            &manifest_text(half_m, offset_m, scale_m),
+            &manifest_text(half_m, offset_m, scale_m, rows),
             Path::new("fixture/level.json"),
         )
     }
@@ -351,7 +441,7 @@ pub(crate) mod tests {
     #[should_panic(expected = "declares coordinate_system.up_axis = \"+Z\"")]
     fn a_foreign_coordinate_system_panics() {
         let text =
-            manifest_text(750.0, 0.0, 50.0).replace(r#""up_axis":"+Y""#, r#""up_axis":"+Z""#);
+            manifest_text(750.0, 0.0, 50.0, "+Z").replace(r#""up_axis":"+Y""#, r#""up_axis":"+Z""#);
         parse(&text, Path::new("fixture/level.json"));
     }
 
@@ -360,7 +450,8 @@ pub(crate) mod tests {
     #[test]
     #[should_panic(expected = "declares coordinate_system.rotation")]
     fn a_foreign_quaternion_order_panics() {
-        let text = manifest_text(750.0, 0.0, 50.0).replace("quaternion_xyzw", "quaternion_wxyz");
+        let text =
+            manifest_text(750.0, 0.0, 50.0, "+Z").replace("quaternion_xyzw", "quaternion_wxyz");
         parse(&text, Path::new("fixture/level.json"));
     }
 
@@ -370,7 +461,7 @@ pub(crate) mod tests {
     #[should_panic(expected = "centred on the origin")]
     fn an_off_centre_extent_panics() {
         // Still a 1 500 m square, shifted 250 m along +X.
-        let text = manifest_text(750.0, 0.0, 50.0).replace(
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace(
             r#""minimum":[-750,-750],"maximum":[750,750]"#,
             r#""minimum":[-500,-750],"maximum":[1000,750]"#,
         );
@@ -381,7 +472,7 @@ pub(crate) mod tests {
     #[test]
     #[should_panic(expected = "the world is a square")]
     fn a_non_square_extent_panics() {
-        let text = manifest_text(750.0, 0.0, 50.0).replace("[750,750]", "[750,500]");
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace("[750,750]", "[750,500]");
         parse(&text, Path::new("fixture/level.json"));
     }
 
@@ -400,5 +491,60 @@ pub(crate) mod tests {
         );
         assert_eq!(manifest.heightmap(), "h.png");
         assert_eq!(manifest.heightmap_path(), Path::new("fixture/h.png"));
+    }
+
+    /// The declared row direction reaches the decode as itself, both ways — the ONE orientation
+    /// input `terrain_grid::grid_from_png` acts on.
+    #[test]
+    fn the_declared_row_direction_reaches_the_decode() {
+        assert_eq!(
+            fixture_manifest_with_rows(750.0, 0.0, 50.0, "+Z").rows,
+            RowOrder::TowardPositiveZ,
+        );
+        assert_eq!(
+            fixture_manifest_with_rows(750.0, 0.0, 50.0, "-Z").rows,
+            RowOrder::TowardNegativeZ,
+        );
+    }
+
+    /// THE SHIPPED BUNDLE'S OWN DECLARATION. It exports rows toward `-Z`; if that ever changes in
+    /// the file it must change here too, because the grid is mirrored north–south between the two
+    /// answers and every authored object then stands on different ground.
+    #[test]
+    fn the_shipped_map_declares_the_row_direction_it_was_exported_with() {
+        assert_eq!(shipped_manifest().rows, RowOrder::TowardNegativeZ);
+    }
+
+    /// The column index IS X — the decode walks a row-major image, so a `-X` export describes
+    /// pixels nobody reads.
+    #[test]
+    #[should_panic(expected = "image_axes.column_increases_toward = \"-X\"")]
+    fn a_foreign_column_axis_panics() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace(
+            r#""column_increases_toward":"+X""#,
+            r#""column_increases_toward":"-X""#,
+        );
+        parse(&text, Path::new("fixture/level.json"));
+    }
+
+    /// Rows run along Z or the manifest is not describing this world at all.
+    #[test]
+    #[should_panic(expected = "image_axes.row_increases_toward = \"+X\"")]
+    fn an_off_axis_row_direction_panics() {
+        parse(
+            &manifest_text(750.0, 0.0, 50.0, "+X"),
+            Path::new("fixture/level.json"),
+        );
+    }
+
+    /// The corner centres are the exporter's second opinion on the same axes. When the two
+    /// disagree, one of them is a lie and nothing here can tell which — so neither is believed.
+    #[test]
+    #[should_panic(expected = "not the corner image_axes")]
+    fn corner_centres_contradicting_the_axes_panic() {
+        // `-Z` rows put pixel (0, 0) at +Z; this one claims the opposite corner.
+        let text = manifest_text(750.0, 0.0, 50.0, "-Z")
+            .replace(r#""pixel_0_0":[-750,750]"#, r#""pixel_0_0":[-750,-750]"#);
+        parse(&text, Path::new("fixture/level.json"));
     }
 }

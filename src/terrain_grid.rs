@@ -61,6 +61,21 @@ pub struct TerrainExtent {
     pub height_span_m: f32,
 }
 
+/// Which world direction a heightmap's ROWS increase toward. The column index is X either way (the
+/// decode walks a row-major image), so this is the one image-axis convention an export is free to
+/// choose, and the map declares its own (`crate::map::MapManifest::rows`).
+///
+/// Folded in ONCE, at [`grid_from_png`]: a `-Z` image has its rows reversed there, so every
+/// [`HeightGrid`] in memory runs toward `+Z` and no consumer downstream ever asks again — the
+/// ONE-SURFACE invariant covers orientation as much as it covers resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowOrder {
+    /// Row 0 at `z = -half`, matching the grid's own mapping — decoded straight through.
+    TowardPositiveZ,
+    /// Row 0 at `z = +half` — the row order is reversed at decode.
+    TowardNegativeZ,
+}
+
 impl TerrainExtent {
     /// Half the world side (m): world XZ spans `[-half, +half]`, centered on the origin.
     pub const fn half_extent(&self) -> f32 {
@@ -630,6 +645,7 @@ pub(crate) fn decode_height_grid(
         return;
     };
     let extent = manifest.extent;
+    let rows = manifest.rows;
     let path = manifest.heightmap_path();
     let heightmap = manifest.heightmap().to_owned();
     // Published before every early return below: a preset or flattened grid still stands on the
@@ -667,7 +683,7 @@ pub(crate) fn decode_height_grid(
             path.display(),
         )
     });
-    let grid = grid_from_png(&bytes, extent)
+    let grid = grid_from_png(&bytes, extent, rows)
         .unwrap_or_else(|err| panic!("terrain: {} failed to decode: {err}", path.display()));
     info!(
         "terrain: height grid {size}x{size} decoded ({world} m span, {lo}..{hi} m, smoothing σ = {sigma} px)",
@@ -680,11 +696,15 @@ pub(crate) fn decode_height_grid(
     commands.insert_resource(grid);
 }
 
-/// PNG bytes + the extent the map declares → [`HeightGrid`]: decode, bit-depth-normalize, and
-/// (when [`SMOOTH_SIGMA_PX`] is active) smooth. Pure, so the shipped asset itself is pinned by a
-/// unit test — which also makes a Git-LFS pointer file shipping in place of the map fail in CI
-/// instead of at boot.
-pub(crate) fn grid_from_png(bytes: &[u8], extent: TerrainExtent) -> Result<HeightGrid, String> {
+/// PNG bytes + the extent and row order the map declares → [`HeightGrid`]: decode,
+/// bit-depth-normalize, orient, and (when [`SMOOTH_SIGMA_PX`] is active) smooth. Pure, so the
+/// shipped asset itself is pinned by a unit test — which also makes a Git-LFS pointer file shipping
+/// in place of the map fail in CI instead of at boot.
+pub(crate) fn grid_from_png(
+    bytes: &[u8],
+    extent: TerrainExtent,
+    rows: RowOrder,
+) -> Result<HeightGrid, String> {
     let image = image::load_from_memory(bytes).map_err(|err| err.to_string())?;
     // Normalize to 0..1 of full scale regardless of source bit depth, then scale and offset to
     // meters — an 8-bit and a 16-bit export of the same map interchange freely.
@@ -724,6 +744,14 @@ pub(crate) fn grid_from_png(bytes: &[u8], extent: TerrainExtent) -> Result<Heigh
     if width != height {
         return Err(format!("must be square, got {width}x{height}"));
     }
+    // ORIENT ONCE, HERE. The map declares which way its rows run; a `-Z` image is reversed row-wise
+    // so row 0 lands at `z = -half` like every other grid in the process. A pure index remap — the
+    // sample VALUES are the decoded bytes, bit for bit — and it runs before the downsample, so the
+    // one surface every consumer reads is already in the world's frame.
+    let samples = match rows {
+        RowOrder::TowardPositiveZ => samples,
+        RowOrder::TowardNegativeZ => flip_rows(&samples, width as usize),
+    };
     // The import-time de-terracing pass (see `SMOOTH_SIGMA_PX`; currently 0.0 = pass-through
     // for the 16-bit source): when active, smoothed BEFORE the resource exists, so the oracle,
     // collider, mesh, and spawn queries all read one smoothed truth.
@@ -745,6 +773,16 @@ pub(crate) fn grid_from_png(bytes: &[u8], extent: TerrainExtent) -> Result<Heigh
     } else {
         Ok(grid)
     }
+}
+
+/// Reverse a square row-major sample slab's ROW order, moving values without touching them — the
+/// `-Z` image's one and only correction (see [`RowOrder`]).
+fn flip_rows(samples: &[f32], size: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(samples.len());
+    for j in (0..size).rev() {
+        out.extend_from_slice(&samples[j * size..(j + 1) * size]);
+    }
+    out
 }
 
 /// Resample `grid` onto a `target`² node lattice over the same world square: each new node reads
@@ -956,6 +994,7 @@ pub(crate) mod tests {
         grid_from_png(
             &std::fs::read(manifest.heightmap_path()).expect("shipped heightmap"),
             manifest.extent,
+            manifest.rows,
         )
         .expect("shipped heightmap must decode")
     }
@@ -1411,7 +1450,8 @@ pub(crate) mod tests {
             path.display(),
             bytes.len()
         );
-        let grid = grid_from_png(&bytes, extent).expect("shipped heightmap must decode");
+        let grid =
+            grid_from_png(&bytes, extent, manifest.rows).expect("shipped heightmap must decode");
         assert_eq!(
             grid.size(),
             GRID_RESOLUTION,
@@ -1452,7 +1492,8 @@ pub(crate) mod tests {
     /// (`offset + normalized · span`) that every consumer's metres come from.
     #[test]
     fn manifest_decode_maps_full_scale_onto_the_declared_range() {
-        let extent = crate::map::tests::fixture_manifest(750.0, -12.5, 50.0).extent;
+        let manifest = crate::map::tests::fixture_manifest(750.0, -12.5, 50.0);
+        let extent = manifest.extent;
         // 2x2 16-bit PNG: full-scale ZERO down the -X column, FULL SCALE down the +X column.
         let mut source = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
         for y in 0..2 {
@@ -1463,7 +1504,7 @@ pub(crate) mod tests {
         image::DynamicImage::ImageLuma16(source)
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("fixture png must encode");
-        let grid = grid_from_png(&png, extent).expect("fixture png must decode");
+        let grid = grid_from_png(&png, extent, manifest.rows).expect("fixture png must decode");
         assert_eq!(grid.extent(), extent);
         let half = extent.half_extent();
         assert_eq!(half, 750.0, "the declared square is what the grid spans");
@@ -1475,6 +1516,49 @@ pub(crate) mod tests {
         assert!((grid.height_at(half, 0.0) - ceiling).abs() < 1e-4);
         // Halfway across is halfway up: the mapping is affine, not merely pinned at its ends.
         assert!((grid.height_at(0.0, 0.0) - (floor + ceiling) / 2.0).abs() < 1e-4);
+    }
+
+    /// THE ORIENTATION LAW: the manifest's declared row direction decides which world Z edge the
+    /// image's FIRST row lands on, and the grid comes out in the world's frame either way.
+    ///
+    /// The fixture is asymmetric on BOTH axes (four distinct heights over a 2×2 image, whose nodes
+    /// ARE the map corners), so a flip along either axis — or a transpose — moves at least one
+    /// corner's value. A `-Z` export is the shipped bundle's own declaration; read straight through
+    /// it would stand the whole world north–south mirrored under the author's objects.
+    #[test]
+    fn the_declared_row_direction_places_the_first_image_row() {
+        // Row 0 = [0, 1/3], row 1 = [2/3, 1] of full scale — every corner distinct.
+        let mut source = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
+        let third = u16::MAX / 3;
+        source.put_pixel(0, 0, image::Luma([0]));
+        source.put_pixel(1, 0, image::Luma([third]));
+        source.put_pixel(0, 1, image::Luma([third * 2]));
+        source.put_pixel(1, 1, image::Luma([u16::MAX]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageLuma16(source)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("fixture png must encode");
+
+        let corner = |rows: &str, x: f32, z: f32| {
+            let manifest = crate::map::tests::fixture_manifest_with_rows(500.0, 0.0, 100.0, rows);
+            let grid =
+                grid_from_png(&png, manifest.extent, manifest.rows).expect("fixture png decodes");
+            grid.height_at(x, z)
+        };
+        let (half, span) = (500.0_f32, 100.0_f32);
+        let height = |raw: u16| span * f32::from(raw) / f32::from(u16::MAX);
+        let row_0 = [height(0), height(third)];
+        let row_1 = [height(third * 2), height(u16::MAX)];
+        // "+Z": the first image row is the -Z edge, straight through.
+        assert!((corner("+Z", -half, -half) - row_0[0]).abs() < 1e-3);
+        assert!((corner("+Z", half, -half) - row_0[1]).abs() < 1e-3);
+        assert!((corner("+Z", -half, half) - row_1[0]).abs() < 1e-3);
+        // "-Z": the first image row is the +Z edge — the slab is reversed row-wise, and ONLY
+        // row-wise (the columns still run toward +X).
+        assert!((corner("-Z", -half, half) - row_0[0]).abs() < 1e-3);
+        assert!((corner("-Z", half, half) - row_0[1]).abs() < 1e-3);
+        assert!((corner("-Z", -half, -half) - row_1[0]).abs() < 1e-3);
+        assert!((corner("-Z", half, -half) - row_1[1]).abs() < 1e-3);
     }
 
     /// The render mesh is the grid's own surface (ONE-SURFACE invariant): vertices are the grid

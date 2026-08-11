@@ -1419,8 +1419,10 @@ mod tests {
         }
         // The tripwire value, produced by this test on the shipped map. It is a CONSEQUENCE of the
         // assertions above, not an independent claim — if it moves, one of them moved first.
+        // Re-pinned when the decode began honouring the map's declared row order
+        // (`terrain_grid::RowOrder`): the same samples, reversed row-wise, are a different surface.
         assert_eq!(
-            hash, 0x80ed_49fc_d38c_a950,
+            hash, 0x4063_c4c4_5e28_ed45,
             "the level-zero surface changed; the assertions above name which part"
         );
     }

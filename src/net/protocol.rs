@@ -96,7 +96,11 @@ use crate::{CombatantId, ShotId};
 /// sim input every peer integrates against (belt contacts, spawn heights, hull collisions), so two
 /// peers on opposite sides of this change simulate different worlds from identical snapshots —
 /// exactly the silent sim skew REV exists to refuse. Surface and type hashes are unchanged; only the
-/// REV (and with it the manifest fingerprint) moves.
+/// REV (and with it the manifest fingerprint) moves. The same REV carries the ORIENTATION half of
+/// that ground: the decode now honours the map's declared `image_axes` and reverses a `-Z` image's
+/// rows once (`terrain_grid::RowOrder`), which mirrors the whole surface north–south against what an
+/// earlier REV-26 build integrates. REV 26 has not shipped, so that lands as an edit here rather
+/// than a further bump — the REV-19 precedent above.
 pub const PROTOCOL_REV: u32 = 26;
 
 /// How many times the inert `HullShock` rollback condition has been dispatched, across every test
