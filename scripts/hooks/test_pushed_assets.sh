@@ -130,6 +130,7 @@ SUBSTANCES=$(at HEAD)
 git -C "$REPO" checkout -q -b side "$TWO"
 write src/net.rs "// the sim, edited on a side branch"
 commit "a side branch"
+SIDE=$(at side)
 git -C "$REPO" checkout -q "$MAIN"
 git -C "$REPO" merge -q --no-ff --no-commit side >/dev/null 2>&1
 write assets/tiger_1/tiger_1.tank.ron "TankSpec(mass: 1.5)"   # in neither parent
@@ -321,6 +322,96 @@ refs/tags/v1 $SUBSTANCES assets/tiger_1/tiger_1 shared-surface" \
 is "a new ref carries its own local ref name" \
    "refs/heads/topic" \
    "$(targets "refs/heads/topic $PANTHER refs/heads/topic $ZERO" | head -1 | cut -d' ' -f1)"
+
+# ── the CI gate: whether a RANGE can have moved any verdict ──────────────────────────────────────
+#
+# CI's assets lane pays a MEASURED ~35 minutes to re-cut every trio from Blender. This is what tells
+# it not to, and the whole of what it may skip on. Every case below drives the real function over a
+# real range in the scratch repository; nothing about the decision lives in the workflow.
+
+group "the CI gate — assets_range_affected"
+
+affected() { assets_range_affected "$1" "$2" "$SCRATCH" >/dev/null 2>&1; }
+because() { assets_range_affected "$1" "$2" "$SCRATCH" 2>/dev/null; }
+
+affected "$TWO" "$PANTHER"
+says "a range that re-exports a trio is affected" yes $?
+
+affected "$PANTHER" "$SUBSTANCES"
+says "a range that moves the shared surface is affected" yes $?
+
+affected "$BASE" "$PARTIAL"
+says "a range of paths no verdict is computed from is unaffected" no $?
+
+is "…and says so, and says what it looked at" \
+   "yes" \
+   "$(because "$BASE" "$PARTIAL" | grep -q '^assets ▸ unaffected:.*no asset trio and no shared surface' &&
+      echo yes || echo no)"
+
+is "an affected range names what it found" \
+   "yes" \
+   "$(because "$TWO" "$PANTHER" | grep -q 'assets/panther/panther' && echo yes || echo no)"
+
+# EVERY WAY OF NOT KNOWING RUNS THE LANE. A gate that skips when it cannot see is worse than no
+# gate: it reports success over the one push nobody looked at.
+affected "$ZERO" "$PANTHER"
+says "a zero baseline — a branch's first push — is affected" yes $?
+
+affected "" "$PANTHER"
+says "an absent baseline is affected" yes $?
+
+affected "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$PANTHER"
+says "a baseline this clone cannot resolve is affected" yes $?
+
+affected "$BASE" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+says "a head this clone cannot resolve is affected" yes $?
+
+affected "$BASE" ""
+says "an absent head is affected" yes $?
+
+ORPHAN=$(git commit-tree "$(git hash-object -w -t tree /dev/null)" -m orphan </dev/null)
+affected "$ORPHAN" "$PANTHER"
+says "a baseline with no merge base — a force-push onto another history — is affected" yes $?
+
+# THE BASELINE IS THE MERGE BASE. `$SIDE` branched at `$TWO` and changed only `src/net.rs`; `$PANTHER`
+# re-exported an asset on the main line after it. A two-tree diff of the two tips reports that asset
+# as changed — it differs between them — and would run the lane for somebody else's commit, printing
+# a reason that is not true of this range.
+is "a base branch that moved under the range does not become this range's change" \
+   "no" \
+   "$(affected "$PANTHER" "$SIDE" && echo yes || echo no)"
+
+is "…while the two-tree diff of the same pair does see the asset" \
+   "assets/panther/panther.glb" \
+   "$(git diff --name-only "$PANTHER" "$SIDE" | grep 'panther')"
+
+group "the CI gate — assets_ci_scope"
+
+scope() {   # <event> <base> <head>; prints the decision, writes $SCRATCH/github-output
+    : > "$SCRATCH/github-output"
+    (
+        GITHUB_EVENT_NAME=$1 ASSETS_BASE=$2 ASSETS_HEAD=$3 GITHUB_OUTPUT=$SCRATCH/github-output
+        export GITHUB_EVENT_NAME ASSETS_BASE ASSETS_HEAD GITHUB_OUTPUT
+        assets_ci_scope 2>/dev/null | tail -1
+    )
+}
+
+is "a push whose range moves a trio is affected" \
+   "true" "$(scope push "$TWO" "$PANTHER")"
+
+is "a push whose range moves nothing a verdict reads is not" \
+   "false" "$(scope push "$BASE" "$PARTIAL")"
+
+is "…and the step reads that decision off GITHUB_OUTPUT, not off stdout" \
+   "affected=false" "$(scope push "$BASE" "$PARTIAL" >/dev/null; cat "$SCRATCH/github-output")"
+
+# The weekly cron is what bounds how long a defect the gate could not see survives, so it never
+# consults a range at all — there is no baseline on a scheduled run, and it must not need one.
+is "a scheduled run is affected with no range whatsoever" \
+   "true" "$(scope schedule "" "")"
+
+is "a hand-started run is too" \
+   "true" "$(scope workflow_dispatch "" "")"
 
 # ── hydration: the bytes of the pushed revision, never of the work tree ──────────────────────────
 

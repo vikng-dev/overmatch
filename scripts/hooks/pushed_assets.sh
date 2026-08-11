@@ -1,9 +1,9 @@
 # pushed_assets.sh — what a push contains, read as ASSETS.
 #
-# Sourced by `scripts/hooks/pre-push` (and by nothing else that ships). Every function here answers
-# a question about a REVISION BEING PUSHED, never about the work tree: the work tree is a different,
-# mutable thing from the bytes the remote is about to receive, and a hook that blesses the former
-# while shipping the latter certifies nothing.
+# Sourced by `scripts/hooks/pre-push` and by CI's assets job, and by nothing else that ships. Every
+# function here answers a question about a REVISION or a RANGE OF REVISIONS, never about the work
+# tree: the work tree is a different, mutable thing from the bytes the remote is about to receive,
+# and a hook that blesses the former while shipping the latter certifies nothing.
 #
 # The vocabulary is one word: a STEM. An asset is a sibling trio in one directory —
 # `<id>.blend`, `<id>.tank.ron`, `<id>.glb` — and the stem is their common path prefix,
@@ -132,6 +132,87 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
                 printf '%s %s %s %s\n' "$_local_ref" "$_local_sha" "$_stem" "$_why"
             done
     done
+}
+
+# ── whether a range of revisions can have moved any verdict ──────────────────────────────────────
+
+# Whether anything an asset verdict is a function of changed between two revisions.
+#
+# The SAME two predicates the pre-push lane selects with — `assets_shared_surface` and the trio
+# rule — asked over a range instead of over one push's refs. What is answered here is only "is this
+# lane's work possibly affected", never "which trios": a lane that runs, runs whole.
+#
+# FAIL TOWARD RUNNING. Every way of not knowing — a head this clone cannot resolve, a baseline that
+# is absent, all zeros (a branch's first push, a tag, a shallow clone) or unrelated to the head
+# after a force-push — answers YES and pays the 35 minutes. The opposite error is a lane that skips
+# the push which broke an asset and reports success, and a lane nobody can trust to have run is not
+# cheaper than one that runs.
+#
+# The baseline is the MERGE BASE, not the raw baseline sha: a pull request's base branch moves under
+# it, and a two-tree diff against a moved base attributes other people's commits to this one. That
+# error is toward running too, but it makes the reason it printed a lie.
+#
+# Prints one line saying which it was and why. Exit 0 = affected, 1 = not.
+assets_range_affected() {   # <base> <head> <scratch-dir>
+    if ! assets_pushed_commit "${2:-}"; then
+        printf 'assets ▸ affected: %s is not a commit this clone holds\n' "${2:-<empty>}"
+        return 0
+    fi
+    if ! assets_pushed_commit "${1:-}"; then
+        printf 'assets ▸ affected: no baseline (%s) — every asset is in range\n' "${1:-<empty>}"
+        return 0
+    fi
+    _base=$(git merge-base "$1" "$2" 2>/dev/null) || _base=
+    if [ -z "$_base" ]; then
+        printf 'assets ▸ affected: %s and %s have no merge base\n' "$1" "$2"
+        return 0
+    fi
+    _changed=$3/range-changed
+    git diff --name-only "$_base" "$2" > "$_changed" || {
+        printf 'assets ▸ affected: %s..%s cannot be diffed\n' "$_base" "$2"
+        return 0
+    }
+    if assets_shared_surface < "$_changed"; then
+        printf 'assets ▸ affected: %s..%s moves the shared surface every verdict is computed from\n' \
+            "$_base" "$2"
+        return 0
+    fi
+    _stems=$(assets_trios "$2" | assets_changed_trios "$_changed")
+    if [ -n "$_stems" ]; then
+        printf 'assets ▸ affected: %s..%s changes %s\n' "$_base" "$2" \
+            "$(printf '%s' "$_stems" | tr '\n' ' ')"
+        return 0
+    fi
+    printf 'assets ▸ unaffected: %s..%s changes no asset trio and no shared surface (%s path(s))\n' \
+        "$_base" "$2" "$(wc -l < "$_changed" | tr -d ' ')"
+    return 1
+}
+
+# The same decision, as the CI lane asks it: off the event, into `$GITHUB_OUTPUT`.
+#
+# A SCHEDULED OR HAND-STARTED RUN IS ALWAYS AFFECTED, and that is what makes the gate safe to have:
+# the weekly cron re-cuts every trio from Blender whatever changed, so a defect a range-gated lane
+# could not see has a bounded life. `GITHUB_EVENT_NAME` is empty outside a runner, where this file
+# is being driven by the suite over ranges it built itself.
+#
+# It writes `affected=true|false` and nothing else, because a workflow step that decides anything is
+# a step no suite can run.
+assets_ci_scope() {   # env: GITHUB_EVENT_NAME, ASSETS_BASE, ASSETS_HEAD, GITHUB_OUTPUT
+    _scratch=$(mktemp -d)
+    case "${GITHUB_EVENT_NAME:-}" in
+        schedule|workflow_dispatch)
+            printf 'assets ▸ affected: a %s run verifies every asset\n' "$GITHUB_EVENT_NAME"
+            _affected=true ;;
+        *)
+            if assets_range_affected "${ASSETS_BASE:-}" "${ASSETS_HEAD:-}" "$_scratch"; then
+                _affected=true
+            else
+                _affected=false
+            fi ;;
+    esac
+    rm -rf "$_scratch"
+    [ -z "${GITHUB_OUTPUT:-}" ] || printf 'affected=%s\n' "$_affected" >> "$GITHUB_OUTPUT"
+    printf '%s\n' "$_affected"
 }
 
 # ── the bytes ────────────────────────────────────────────────────────────────────────────────────
