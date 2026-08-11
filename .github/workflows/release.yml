@@ -1,19 +1,27 @@
 name: Release
 
-# The single build pipeline for the PRODUCT (`overmatch`, the PVP client) and the
-# `overmatch-server` (dedicated server). Two triggers:
+# The single build + deploy + publish pipeline for the PRODUCT (`overmatch`, the PVP client) and
+# the `overmatch-server` (dedicated server).
 #
-#   - A `vX.Y.Z` tag PUBLISHES a GitHub Release with per-platform archives:
+# INVARIANT: the visible latest GitHub Release and the running droplet server are the same build —
+# the Release stays a DRAFT until the server artifact this run built is live on the droplet.
+#
+# Two triggers:
+#
+#   - A `vX.Y.Z` tag runs the whole pipeline from the tag SHA: build the server + all three
+#     clients, deploy the built server artifact to the droplet, then publish the draft Release:
 #       * Windows  `overmatch`        — the PVP client, server address baked to the droplet.
 #       * Linux    `overmatch`        — the PVP client, server address baked to the droplet.
 #       * macOS    `overmatch`        — the client, as a signed + notarized arm64 .dmg (Apple Silicon only).
 #       * Linux    `overmatch-server` — the dedicated server, tar with assets/.
-#     Cut one by bumping `version` through a PR, deploying that merged main SHA, then tagging it.
-#     The create-release gate verifies all three identities before publishing.
+#     Cut one by bumping `version` through a PR, then tagging the merged main SHA. A failed deploy
+#     leaves the draft unpublished, so no new Release becomes visible.
 #
-#   - `workflow_dispatch` builds ONLY the Linux `overmatch-server` and uploads it as a plain
-#     artifact for `scp` redeploys to the test droplet (see DEPLOY.md), even if the dispatch is
-#     launched from a tag ref. This absorbs the old dedicated `server-build.yml`.
+#   - `workflow_dispatch` is BUILD-ONLY SMOKE MODE: the same build matrix (server + all three
+#     clients) from the dispatched ref, with the deploy and publish jobs skipped, so pipeline
+#     changes and pre-flight checks run without cutting a tag. The server tarball is also kept as
+#     a plain artifact for `scp` redeploys to the test droplet (see DEPLOY.md). Nothing here
+#     touches the droplet or any Release, even when the dispatch is launched from a tag ref.
 #
 # Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
@@ -36,13 +44,13 @@ env:
   OVERMATCH_DEFAULT_SERVER: droplet.overmatch.win:5888
 
 jobs:
-  # The GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when it is
-  # launched from a tag ref. The client/macOS jobs `needs` this, so on a dispatch they skip with it;
-  # the server job runs regardless (see its `if`).
+  # The DRAFT GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when
+  # it is launched from a tag ref. The client/macOS jobs `needs` this, so on a dispatch they skip
+  # with it; the server job runs regardless (see its `if`). Every upload job below attaches to this
+  # draft; `publish-release` un-drafts it once the droplet runs this build.
   create-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
-      actions: read
       contents: write
     runs-on: ubuntu-latest
     steps:
@@ -104,13 +112,9 @@ jobs:
             python3 scripts/tank/glb_ktx2.py verify "$stem.glb"
           done
 
-      # A release client must match the server already running on our droplet. Require the tag to
-      # name current main, then require a successful, non-skipped deploy job for that exact SHA.
-      # This turns the README release order into an enforced invariant rather than operator lore.
-      - name: Verify tagged main is deployed
+      # Releases are cut from `main` only.
+      - name: Verify the tag names current main
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           git fetch --depth=1 --no-tags origin +main:refs/remotes/origin/main
@@ -121,35 +125,21 @@ jobs:
             exit 1
           fi
 
-          deploy_run_id="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy.yml/runs" \
-              --method GET -f branch=main -f event=push -f status=success -f per_page=100 \
-              | jq -r --arg sha "${tag_sha}" \
-                '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")][0].id // empty'
-          )"
-          if [[ -z "${deploy_run_id}" ]]; then
-            echo "::error::No successful Deploy to droplet workflow run found for ${tag_sha}"
-            exit 1
-          fi
-
-          deploy_job_conclusion="$(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${deploy_run_id}/jobs" \
-              | jq -r '[.jobs[] | select(.name == "deploy")][0].conclusion // empty'
-          )"
-          if [[ "${deploy_job_conclusion}" != "success" ]]; then
-            echo "::error::Deploy run ${deploy_run_id} did not execute its deploy job successfully (conclusion=${deploy_job_conclusion:-<missing>})"
-            exit 1
-          fi
+      # Draft: the Release is invisible (and is not "latest") until `publish-release` un-drafts it.
       - uses: taiki-e/create-gh-release-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          draft: true
 
-  # Build and package the Windows + Linux PVP clients without a release-write token. Tags only
-  # (skips on dispatch with create-release); the small upload-client job below publishes the sealed
-  # archives. macOS has the equivalent untrusted-build/trusted-sign split further down.
+  # Build and package the Windows + Linux PVP clients without a release-write token; the small
+  # upload-client job below publishes the sealed archives. macOS has the equivalent
+  # untrusted-build/trusted-sign split further down.
   # Linux runtime floor follows the current ubuntu-latest runner glibc and requires a Vulkan driver.
+  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
+  # Release shell on tags, and still runs in dispatch smoke mode where create-release is skipped.
   build-client:
     needs: create-release
+    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
     permissions:
       contents: read
     strategy:
@@ -198,7 +188,9 @@ jobs:
 
       # Build, archive, and checksum without uploading. In dry-run mode the action deliberately
       # withholds github.token from its composite shell, including cargo/build.rs subprocesses.
-      # The workflow-level OVERMATCH_DEFAULT_SERVER is baked in via option_env!.
+      # The workflow-level OVERMATCH_DEFAULT_SERVER is baked in via option_env!. Off a non-tag ref
+      # (dispatch smoke mode) `$tag` resolves to `dry-run`, so the artifact path below reads the
+      # action's `archive` output rather than assuming the tag name.
       - name: Build and package client
         id: package-client
         uses: taiki-e/upload-rust-binary-action@v1
@@ -221,15 +213,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: overmatch-client-${{ matrix.target }}
-          path: overmatch-${{ github.ref_name }}-${{ matrix.target }}.*
+          path: ${{ steps.package-client.outputs.archive }}.*
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
 
-  # Publish only the archives produced above. This job has release-write permission but performs no
-  # checkout, compilation, build script, or proc-macro execution.
+  # Tag pushes only: attach the archives produced above to the draft Release. This job has
+  # release-write permission but performs no checkout, compilation, build script, or proc-macro
+  # execution.
   upload-client:
     needs: [create-release, build-client]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -263,8 +257,10 @@ jobs:
 
   # Build and package the Linux dedicated server without a release-write token. Runs on BOTH
   # triggers and always uploads a plain workflow artifact for scp redeploys (DEPLOY.md).
-  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the release
-  # shell on tags, and still runs when create-release is skipped on a dispatch.
+  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
+  # Release shell on tags, and still runs when create-release is skipped on a dispatch.
+  # This one tarball is the ONLY server build in the run: `deploy-server` ships these exact bytes
+  # to the droplet and `upload-server` attaches them to the Release.
   build-server:
     needs: create-release
     if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
@@ -285,11 +281,14 @@ jobs:
           git lfs pull
 
       # The canonical server build + package recipe (toolchain -> deps -> prune -> cache -> build ->
-      # tar). Shared verbatim with deploy.yml. No DEPLOYED_SHA marker here, so the release/dispatch
-      # artifact is unchanged. Leaves overmatch-server.tar.gz in the workspace root.
+      # tar). deployed-sha: true bakes a DEPLOYED_SHA marker into the tar, so the tarball on the
+      # droplet and the one attached to the Release both name the commit they were built from.
+      # Leaves overmatch-server.tar.gz in the workspace root.
       - uses: ./.github/actions/build-server
+        with:
+          deployed-sha: 'true'
 
-      # Plain artifact for the workflow_dispatch → scp redeploy path.
+      # Plain artifact: the deploy job's input, and the workflow_dispatch → scp redeploy payload.
       - uses: actions/upload-artifact@v4
         with:
           name: overmatch-server-x86_64-linux
@@ -297,8 +296,84 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  # Tag pushes only: publish the sealed server artifact from the read-only build job. This job has
-  # release-write permission but performs no checkout or compilation.
+  # Tag pushes only: put the server artifact built above on the droplet, before any Release becomes
+  # visible. No checkout and no compilation — the deployed bytes are the artifact `build-server`
+  # produced, never a rebuild here or on the droplet. Auth is the `DROPLET_SSH_KEY` repo secret.
+  deploy-server:
+    needs: build-server
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Serialize droplet deploys. `cancel-in-progress: false` (queue, don't cancel): a running job
+    # may be mid-scp / mid-extract / mid-restart on the droplet, and cancelling there could leave a
+    # half-written payload.
+    concurrency:
+      group: deploy-droplet
+      cancel-in-progress: false
+    env:
+      # The DigitalOcean test droplet. Not a secret — it's public in DEPLOY.md and baked into
+      # release clients. Its host key is pinned below; a re-IP updates exactly this one place.
+      DROPLET_HOST: 157.245.48.161
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: .
+
+      # Install the deploy key (0600, in RUNNER_TEMP), pin the droplet's host key, ship the payload,
+      # extract into a fresh staging dir and swap it into /opt/overmatch-server (a clean install, not
+      # a merge over the old tree), restart the unit, and verify (is-active + live SHA).
+      - name: Deploy to droplet
+        env:
+          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          KEY="${RUNNER_TEMP}/deploy_key"
+          KNOWN="${RUNNER_TEMP}/known_hosts"
+
+          # Private key from the secret, readable only by us.
+          install -m 600 /dev/null "$KEY"
+          printf '%s\n' "$DROPLET_SSH_KEY" > "$KEY"
+
+          # Pin the droplet's ed25519 host key (from DEPLOY.md) instead of disabling checking. The
+          # host is `$DROPLET_HOST` (interpolated); only the key material is a literal.
+          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj3I4r44u/XAIAGlqKqGwLPTrXit3dthCHfcBJo390G\n' \
+            "${DROPLET_HOST}" > "$KNOWN"
+
+          SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN")
+
+          # Ship the payload to /opt, then extract into a FRESH staging dir, swap it into place, and
+          # restart + verify on the droplet.
+          scp "${SSH_OPTS[@]}" overmatch-server.tar.gz "root@${DROPLET_HOST}:/opt/"
+          ssh "${SSH_OPTS[@]}" "root@${DROPLET_HOST}" '
+            set -e
+            cd /opt
+            # Extract into a clean staging dir, NOT over the live tree: a plain `tar xzf` over
+            # /opt/overmatch-server leaves files deleted/renamed since the last release lingering on
+            # the droplet forever — an invisible skew vs a clean install. The tar unpacks a
+            # top-level `overmatch-server/`, so stage it aside first.
+            rm -rf overmatch-server.staging
+            mkdir overmatch-server.staging
+            tar xzf overmatch-server.tar.gz -C overmatch-server.staging
+            # Swap the freshly-staged tree into place, THEN restart. The service is still running
+            # from the old dir during extract, so we swap before touching the unit: retire the old
+            # tree and move the new one in, so the restart below launches the clean install.
+            rm -rf overmatch-server.old
+            if [ -d overmatch-server ]; then mv overmatch-server overmatch-server.old; fi
+            mv overmatch-server.staging/overmatch-server overmatch-server
+            rm -rf overmatch-server.staging overmatch-server.old
+            systemctl restart overmatch-server
+            systemctl is-active overmatch-server
+            echo "Deployed SHA on droplet: $(cat /opt/overmatch-server/DEPLOYED_SHA)"
+          '
+          echo "Deployed ${GITHUB_REF_NAME} (${GITHUB_SHA}) to the droplet."
+
+  # Tag pushes only: attach the sealed server artifact from the read-only build job to the draft
+  # Release. This job has release-write permission but performs no checkout or compilation.
   upload-server:
     needs: [create-release, build-server]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
@@ -328,10 +403,12 @@ jobs:
   # notary key. That isolation is the whole point of the split: a compromised transitive crate here
   # cannot reach the Developer ID cert or notary key, because they are never materialized on this
   # runner. It inherits the workflow-level OVERMATCH_DEFAULT_SERVER, baking the droplet address in.
-  # Tags only (skips on dispatch with create-release). If you ever add an Apple secret here, STOP —
-  # it belongs in sign-macos below.
+  # If you ever add an Apple secret here, STOP — it belongs in sign-macos below.
+  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
+  # Release shell on tags, and still runs in dispatch smoke mode where create-release is skipped.
   build-macos:
     needs: create-release
+    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
     permissions:
       contents: read
     runs-on: macos-latest
@@ -357,10 +434,13 @@ jobs:
         with:
           key: macos-aarch64
 
+      # Off a tag the bundle version is the tag; in dispatch smoke mode VERSION stays unset and the
+      # script falls back to the Cargo.toml version.
       - name: Build the unsigned .app (arm64)
         run: |
-          tag="${GITHUB_REF_NAME}"
-          export VERSION="${tag#v}"
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            export VERSION="${GITHUB_REF_NAME#v}"
+          fi
           ./scripts/package-macos.sh --build-only
 
       # actions/upload-artifact zips its input and drops the executable bit + mac metadata, which
@@ -380,9 +460,11 @@ jobs:
   # macOS client, part 2 of 2: the TRUSTED sign. This job holds the Apple signing secrets (Developer
   # ID cert + notary key) but runs NO `cargo build` — it only operates on the pre-built .app from
   # build-macos. It produces the signed + notarized arm64 .dmg (the .app inside is also the future
-  # Steam macOS depot). Tags only (inherits the skip via `needs: build-macos` -> create-release).
+  # Steam macOS depot) and attaches it to the draft Release. Tag pushes only: dispatch smoke mode
+  # builds the .app but never signs it, so no Apple secret is materialized outside a release.
   sign-macos:
     needs: build-macos
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     runs-on: macos-latest
@@ -432,3 +514,20 @@ jobs:
             dist/overmatch-*-aarch64-apple-darwin.dmg \
             dist/overmatch-*-aarch64-apple-darwin.dmg.sha256 \
             --repo "${GITHUB_REPOSITORY}"
+
+  # The invariant's hinge: the draft becomes visible only here, downstream of a live droplet running
+  # this run's server artifact and of every client archive being attached. Any failure upstream
+  # leaves the draft unpublished, so the latest visible Release still matches the droplet.
+  publish-release:
+    needs: [deploy-server, upload-client, upload-server, sign-macos]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --repo "${GITHUB_REPOSITORY}"

@@ -21,10 +21,8 @@ git commit -m "Release vX.Y.Z"
 git push origin HEAD
 ```
 
-Merge that branch through its required PR without `[skip deploy]`. Wait for the **Deploy to
-droplet** workflow to succeed, and verify its logged `Deployed SHA on droplet` equals the merged
-`main` SHA. Only then tag that exact commit; the release gate independently requires the tag to
-name current `main` and a successful, non-skipped deploy job for the same SHA before it publishes:
+Merge that branch through its required PR, then tag that exact commit — the tag is the only thing
+that builds, deploys, and publishes a release:
 
 ```bash
 git switch main
@@ -33,8 +31,10 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
-CI (`.github/workflows/release.yml`) produces Linux x86_64 client and server `.tar.gz` archives,
-a Windows x86_64 client `.zip`, and a signed + notarized Apple-Silicon macOS `.dmg` (binary +
-assets). See `.agents/docs/adr/0009-release-artifacts-and-repo-layout.md` for the full layout, and
-`scripts/` for local builds (`build-linux.sh`, `package-macos.sh`) and icon generation
-(`gen-icons.sh`).
+`.github/workflows/release.yml` then produces Linux x86_64 client and server `.tar.gz` archives, a
+Windows x86_64 client `.zip`, and a signed + notarized Apple-Silicon macOS `.dmg` (binary +
+assets), deploys the built server to the droplet, and only then publishes the GitHub Release. So
+the latest visible release is always the build the droplet is running, and a failed deploy
+publishes nothing. See `.agents/docs/adr/0009-release-artifacts-and-repo-layout.md` for the full
+layout, `DEPLOY.md` for the droplet, and `scripts/` for local builds (`build-linux.sh`,
+`package-macos.sh`) and icon generation (`gen-icons.sh`).
