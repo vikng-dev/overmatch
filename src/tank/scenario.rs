@@ -211,7 +211,7 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// block at 55..99 m can only show the second. This flag is the other placement, and nothing else.
 ///
 /// It moves the WHOLE offline scene, not just the grid, because the camera sits at the duel and the
-/// world is finite (the map declares its side — `terrain_grid::TerrainManifest`): with the duel
+/// world is finite (the map declares its side — `map::MapManifest`): with the duel
 /// where it is, the furthest in-bounds probe on a 1 000 m map is ~490 m away and every shoe is
 /// still the base mesh. So the duel
 /// translates to

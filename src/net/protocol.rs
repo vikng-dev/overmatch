@@ -92,7 +92,7 @@ use crate::{CombatantId, ShotId};
 ///
 /// REV 26 (map2 terrain + 1500 m extent): NO wire-format change. The shipped heightmap and the
 /// square it is hung at both changed — a new 4096² map over 1 500 m spanning 0..50 m, declared by
-/// `assets/terrain/map.ron` instead of the old compile-time 1 000 m / 0..100 m pair. The ground is a
+/// the map's own `level.json` instead of the old compile-time 1 000 m / 0..100 m pair. The ground is a
 /// sim input every peer integrates against (belt contacts, spawn heights, hull collisions), so two
 /// peers on opposite sides of this change simulate different worlds from identical snapshots —
 /// exactly the silent sim skew REV exists to refuse. Surface and type hashes are unchanged; only the

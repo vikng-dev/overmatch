@@ -327,6 +327,9 @@ fn spawn_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
+    // The one parse of the map's manifest (`terrain_grid::decode_height_grid` publishes it), which
+    // the scatter's placement is read out of.
+    manifest: Option<Res<crate::map::MapManifest>>,
     windows: Query<&Window>,
     scale: Option<Res<crate::render_scale::RenderScale>>,
     asset_server: Res<AssetServer>,
@@ -440,11 +443,12 @@ fn spawn_environment(
         // Appended to `blocks` before the resource is inserted, so a building enters the analytic
         // track field through the same list the authored course's cuboids do. The showcase world is
         // excluded for the reason its grid is flat: scenery in front of the thing being looked at.
-        if !crate::lod_showcase::enabled() {
+        if let Some(manifest) = manifest.filter(|_| !crate::lod_showcase::enabled()) {
             crate::scatter::spawn(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &manifest,
                 &grid,
                 &mut blocks,
                 !windows.is_empty(),
@@ -600,7 +604,7 @@ fn spawn_test_course(
 /// Longest CAST any view-layer ground/aim ray needs, metres: no terrain sightline can exceed the
 /// world's full diagonal — `world_size·√2`, 2 121.3 m on the shipped 1 500 m map — from any
 /// in-world origin, and this adds headroom on top. The world's side is the MAP's to declare
-/// (`terrain_grid::TerrainManifest`), so the bound is checked against the decoded grid in
+/// (`map::MapManifest`), so the bound is checked against the decoded grid in
 /// [`spawn_environment`] rather than at compile time.
 /// Purely a parry-traversal cap for the view layer (aim/sight picks, the bore dot, the camera
 /// pull-in): `aim::MAX_RANGE` (10 km) keeps its separate role as the far "sky" FALLBACK distance,

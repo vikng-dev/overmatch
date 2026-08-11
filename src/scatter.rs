@@ -1,5 +1,5 @@
-//! The map's object scatter: the authored placement of buildings and trees
-//! (`assets/terrain/level.json`) spawned as GRAYBOX proxies — a box per building, a trunk cylinder
+//! The map's object scatter: the authored placement of buildings and trees, out of the map's own
+//! manifest ([`crate::map`]), spawned as GRAYBOX proxies — a box per building, a trunk cylinder
 //! plus a canopy cone per fir — with static colliders on every composition, the dedicated server
 //! included.
 //!
@@ -21,17 +21,12 @@
 //! authored course's boxes; a fir is a trunk cylinder collider only, never a block — the belts must
 //! not climb a trunk, and the hull collision is the honest interaction.
 
-use std::path::Path;
-
 use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
 
 use crate::Layer;
+use crate::map::{InstanceRecord, MapManifest};
 use crate::terrain_grid::HeightGrid;
-
-/// The scatter file, relative to the resolved asset root (`crate::assets::asset_root`). Absent =
-/// no scatter (see [`load`]); present and broken = panic.
-const LEVEL_PATH: &str = "terrain/level.json";
 
 /// Fir trunk radius (m) at instance scale 1 — the cylinder collider's radius and the trunk mesh's.
 const TRUNK_RADIUS_M: f32 = 0.4;
@@ -140,41 +135,19 @@ impl Placement {
     }
 }
 
-/// `level.json` as far as this module reads it. Deliberately NOT `deny_unknown_fields`: the file
-/// carries the author's terrain block and prototype registry, and every field of those describes
-/// their shipping state rather than the world we build.
-#[derive(serde::Deserialize)]
-struct LevelFile {
-    instances: Vec<RawInstance>,
-}
-
-/// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
-#[derive(serde::Deserialize)]
-struct RawInstance {
-    prototype: String,
-    translation: [f32; 3],
-    rotation: [f32; 4],
-    scale: [f32; 3],
-    id: String,
-}
-
-/// Parse the scatter file and put it in ITERATION ORDER. Everything past serde's shape check is
-/// ADR-0011 fail-fast: an unknown prototype id, or a pose component that is not finite (a NaN
-/// reaches the solver as a NaN collider), is a broken ship and panics naming the instance.
-fn parse(text: &str, path: &Path) -> Vec<Instance> {
-    let level: LevelFile = serde_json::from_str(text)
-        .unwrap_or_else(|err| panic!("scatter: {} failed to parse: {err}", path.display()));
-    let mut instances: Vec<Instance> = level
-        .instances
-        .into_iter()
+/// Resolve the manifest's instance records against the prototype registry and put them in
+/// ITERATION ORDER. Everything past the manifest's own shape check is ADR-0011 fail-fast: an
+/// unknown prototype id, or a pose component that is not finite (a NaN reaches the solver as a NaN
+/// collider), is a broken ship and panics naming the instance.
+fn resolve(records: &[InstanceRecord]) -> Vec<Instance> {
+    let mut instances: Vec<Instance> = records
+        .iter()
         .map(|raw| {
             let prototype = prototype_index(&raw.prototype).unwrap_or_else(|| {
                 panic!(
-                    "scatter: {} instance {} references prototype {:?}, which the graybox registry \
+                    "scatter: instance {} references prototype {:?}, which the graybox registry \
                      does not carry",
-                    path.display(),
-                    raw.id,
-                    raw.prototype,
+                    raw.id, raw.prototype,
                 )
             });
             let translation = Vec3::from_array(raw.translation);
@@ -187,8 +160,7 @@ fn parse(text: &str, path: &Path) -> Vec<Instance> {
             let scale = Vec3::from_array(raw.scale);
             assert!(
                 translation.is_finite() && rotation.is_finite() && scale.is_finite(),
-                "scatter: {} instance {} has a non-finite pose",
-                path.display(),
+                "scatter: instance {} has a non-finite pose",
                 raw.id,
             );
             Instance {
@@ -197,29 +169,13 @@ fn parse(text: &str, path: &Path) -> Vec<Instance> {
                 xz: translation.xz(),
                 rotation: rotation.normalize(),
                 scale,
-                id: raw.id,
+                id: raw.id.clone(),
             }
         })
         .collect();
     // The file's own ids are the fixed order every peer spawns in.
     instances.sort_by(|a, b| a.id.cmp(&b.id));
     instances
-}
-
-/// Read the scatter file. `None` is "this world has no scatter" — the ONLY tolerated absence, the
-/// same law the terrain manifest follows; a file that exists and does not hold panics ([`parse`]).
-fn load(root: &Path) -> Option<Vec<Instance>> {
-    let path = root.join(LEVEL_PATH);
-    match std::fs::read_to_string(&path) {
-        Ok(text) => Some(parse(&text, &path)),
-        Err(err) => {
-            info!(
-                "scatter: no level file at {} ({err}) — no scatter",
-                path.display()
-            );
-            None
-        }
-    }
 }
 
 /// Project every instance onto `grid`: the authored XZ and rotation kept, the Y taken from the
@@ -290,14 +246,12 @@ pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    manifest: &MapManifest,
     grid: &HeightGrid,
     blocks: &mut Vec<Transform>,
     windowed: bool,
 ) {
-    let Some(instances) = load(&crate::assets::asset_root()) else {
-        return;
-    };
-    let placements = place(&instances, grid);
+    let placements = place(&resolve(&manifest.instances), grid);
     let view = windowed.then(|| ScatterView::new(meshes, materials));
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
     let (mut buildings, mut firs) = (0usize, 0usize);
@@ -369,11 +323,7 @@ pub(crate) fn spawn(
 mod tests {
     use super::*;
 
-    /// The shipped tree's `assets/`, resolved the way `crate::assets::asset_root` resolves it under
-    /// cargo.
-    fn shipped_assets() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
-    }
+    use crate::map::tests::{shipped_assets, shipped_manifest};
 
     /// A tilted fixture surface: height rises with x and z, so a re-projection lands on a different
     /// Y at every XZ (a flat fixture would pass whatever the placement did with the file's Y).
@@ -386,34 +336,30 @@ mod tests {
         HeightGrid::new(samples.into(), size, crate::terrain_grid::FIXTURE_EXTENT)
     }
 
-    /// One instance of `prototype`, posed with a deliberately WRONG Y.
-    fn level_json(prototype: &str, xz: Vec2, stale_y: f32) -> String {
-        format!(
-            r#"{{"prototypes":{{}},"instances":[{{"prototype":"{prototype}","translation":[{},{stale_y},{}],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0],"id":"a"}}]}}"#,
-            xz.x, xz.y,
-        )
+    /// One instance record of `prototype`, posed with a deliberately WRONG Y.
+    fn record(prototype: &str, xz: Vec2, stale_y: f32) -> InstanceRecord {
+        InstanceRecord {
+            prototype: prototype.to_owned(),
+            translation: [xz.x, stale_y, xz.y],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            id: "a".to_owned(),
+        }
     }
 
-    /// THE determinism claim: parsing and placing the SHIPPED file twice yields the same ordered
-    /// list of transforms. Both peers run this derivation instead of replicating the result, so a
-    /// difference here is a desync.
+    /// THE determinism claim: resolving and placing the SHIPPED manifest twice yields the same
+    /// ordered list of transforms. Both peers run this derivation instead of replicating the
+    /// result, so a difference here is a desync.
     #[test]
     fn two_parses_place_the_same_ordered_transforms() {
         let grid = sloped_grid();
-        let root = shipped_assets();
-        let once = place(
-            &load(&root).expect("the shipped tree carries a level file"),
-            &grid,
-        );
-        let twice = place(
-            &load(&root).expect("the shipped tree carries a level file"),
-            &grid,
-        );
+        let records = shipped_manifest().instances;
+        let once = place(&resolve(&records), &grid);
+        let twice = place(&resolve(&records), &grid);
         assert_eq!(once.len(), twice.len());
         assert_eq!(once, twice, "the same file must place the same transforms");
         // Ordered by the file's own ids, not by the file's record order.
-        let ids: Vec<String> = load(&root)
-            .expect("the shipped tree carries a level file")
+        let ids: Vec<String> = resolve(&records)
             .into_iter()
             .map(|instance| instance.id)
             .collect();
@@ -428,10 +374,8 @@ mod tests {
     fn placement_reprojects_onto_the_grid_and_ignores_the_authored_y() {
         let grid = sloped_grid();
         let xz = Vec2::new(37.5, -112.25);
-        let path = Path::new("fixture.json");
-        let placed = |stale_y: f32| {
-            place(&parse(&level_json("house_proxy", xz, stale_y), path), &grid)[0].pose
-        };
+        let placed =
+            |stale_y: f32| place(&resolve(&[record("house_proxy", xz, stale_y)]), &grid)[0].pose;
         let pose = placed(-500.0);
         assert_eq!(pose.translation.x, xz.x);
         assert_eq!(pose.translation.z, xz.y);
@@ -443,17 +387,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "the graybox registry does not carry")]
     fn an_unknown_prototype_panics() {
-        parse(
-            &level_json("barn_proxy", Vec2::ZERO, 0.0),
-            Path::new("fixture.json"),
-        );
+        resolve(&[record("barn_proxy", Vec2::ZERO, 0.0)]);
     }
 
     /// The registry must cover the SHIPPED map — every prototype the file declares, not merely the
     /// ones it happens to instance today (the church has zero instances and still must resolve).
     #[test]
     fn the_registry_covers_every_prototype_the_shipped_map_declares() {
-        let text = std::fs::read_to_string(shipped_assets().join(LEVEL_PATH))
+        let text = std::fs::read_to_string(crate::map::level_path(&shipped_assets()))
             .expect("the shipped tree carries a level file");
         let level: serde_json::Value =
             serde_json::from_str(&text).expect("the shipped level file parses");
@@ -475,10 +416,7 @@ mod tests {
     #[test]
     fn buildings_become_blocks_and_firs_do_not() {
         let grid = sloped_grid();
-        let placements = place(
-            &load(&shipped_assets()).expect("the shipped tree carries a level file"),
-            &grid,
-        );
+        let placements = place(&resolve(&shipped_manifest().instances), &grid);
         let mut buildings = 0usize;
         for placement in &placements {
             match placement.proxy() {
@@ -516,6 +454,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>();
         let grid = sloped_grid();
+        let manifest = shipped_manifest();
         let mut blocks: Vec<Transform> = Vec::new();
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
@@ -526,6 +465,7 @@ mod tests {
                     &mut commands,
                     &mut meshes,
                     &mut materials,
+                    &manifest,
                     &grid,
                     &mut blocks,
                     false,

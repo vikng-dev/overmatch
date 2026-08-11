@@ -45,9 +45,9 @@ pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
     half_extent * SPAWN_LIMIT_FRACTION
 }
 
-/// The map image: an 8-BIT RGB copy of the terrain heightmap, generated from the 16-bit source the
-/// terrain manifest names (python3/PIL: numpy `>> 8` downshift, LANCZOS resize to 1024²,
-/// grayscale → RGB).
+/// The map image, in the selected map's `derived/` folder: an 8-BIT RGB copy of the terrain
+/// heightmap, generated from the 16-bit source the manifest names (python3/PIL: numpy `>> 8`
+/// downshift, LANCZOS resize to 1024², grayscale → RGB).
 ///
 /// The UI must NOT load the 16-bit file directly: bevy decodes a Luma16 PNG into an `R16Uint`
 /// GPU texture, and `Uint` textures are not filterable — `bevy_ui`'s `ui_material_bind_group`
@@ -55,7 +55,7 @@ pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
 /// `Quitting the application due to Validation RenderError`. The 16-bit source stays exclusively
 /// on the CPU-side decode path (`terrain_grid::grid_from_png`); this derived copy is pure view
 /// with no determinism constraints. The `ui_map_is_8_bit_and_square` test pins the format.
-const HEIGHTMAP_PATH: &str = "terrain/terrain_map_ui.png";
+const UI_MAP_FILE: &str = "map_ui.png";
 
 /// Panel edge as a fraction of the smaller window dimension — a centred square that always fits.
 const PANEL_FRACTION: f32 = 0.8;
@@ -313,7 +313,7 @@ fn place_markers(
 /// reconciler owns its visibility and the `on_add` hook stamps its `GlobalZIndex` — this module
 /// never touches either.
 fn spawn_map_overlay(mut commands: Commands, fonts: Res<UiFonts>, assets: Res<AssetServer>) {
-    let heightmap = assets.load(HEIGHTMAP_PATH);
+    let heightmap = assets.load(crate::map::derived_asset(UI_MAP_FILE));
     commands
         .spawn((
             OverlayNode(Overlay::SpawnMap),
@@ -629,11 +629,11 @@ mod tests {
 
     /// The UI map asset must stay 8-bit: a 16-bit grayscale PNG decodes to an `R16Uint` GPU
     /// texture, which `bevy_ui` cannot sample (`Float { filterable: true }` bind group) — the
-    /// exact class of crash the `M` overlay shipped with (see [`HEIGHTMAP_PATH`]). Square, so
+    /// exact class of crash the `M` overlay shipped with (see [`UI_MAP_FILE`]). Square, so
     /// the panel's UV↔world mapping holds without letterboxing.
     #[test]
     fn ui_map_is_8_bit_and_square() {
-        let path = crate::assets::asset_root().join(HEIGHTMAP_PATH);
+        let path = crate::assets::asset_root().join(crate::map::derived_asset(UI_MAP_FILE));
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("UI map missing at {}: {err}", path.display()));
         let image = image::load_from_memory(&bytes).expect("UI map must decode");

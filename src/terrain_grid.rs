@@ -1,6 +1,6 @@
-//! The world height grid: the heightmap `assets/terrain/map.ron` names, decoded synchronously at
-//! startup (ADR-0014 — sim construction never waits on the async asset server) into a shared,
-//! immutable sample slab that every terrain representation derives from:
+//! The world height grid: the heightmap the map's manifest names ([`crate::map`]), decoded
+//! synchronously at startup (ADR-0014 — sim construction never waits on the async asset server)
+//! into a shared, immutable sample slab that every terrain representation derives from:
 //!
 //! * the track oracle's ground term ([`crate::track::oracle::BlockField`] — the surface the
 //!   suspension's `depth_along` probes),
@@ -29,10 +29,10 @@
 //! (oracle vs render): the hull could touch ground the belts never felt. Do not reintroduce a
 //! second resolution anywhere.
 //!
-//! One decode, one mapping, identical bytes on every peer (the manifest and its PNG ship in
-//! `assets/` on the client archives AND the server tar — see `.github/actions/build-server`), so
-//! the deterministic sim reads the same ground everywhere. WHAT the map is — its square, its
-//! vertical range, which file it is — is the map's own declaration ([`TerrainManifest`]), not a
+//! One decode, one mapping, identical bytes on every peer (the map directory ships in `assets/` on
+//! the client archives AND the server tar — see `.github/actions/build-server`), so the
+//! deterministic sim reads the same ground everywhere. WHAT the map is — its square, its vertical
+//! range, which file it is — is the map's own declaration ([`crate::map::MapManifest`]), not a
 //! constant here; when the manifest is absent the resource is simply not inserted and `world`
 //! falls back to the flat slab + authored test course.
 
@@ -45,7 +45,7 @@ use bevy::prelude::*;
 
 /// The square a height grid covers and the metres its samples span — the SCALE a heightmap is hung
 /// at, as opposed to the shape the heightmap itself is. The map declares its own
-/// ([`TerrainManifest`], `assets/terrain/map.ron`); the code never chooses one for it.
+/// ([`crate::map::MapManifest`]); the code never chooses one for it.
 ///
 /// Single home for the world mapping: every grid carries a copy ([`HeightGrid::extent`]), and the
 /// oracle term, collider, render mesh, and spawn queries all read it from there.
@@ -88,62 +88,6 @@ pub(crate) const FIXTURE_EXTENT: TerrainExtent = TerrainExtent {
 /// the spawn map's UV mapping and the authority's spawn clamp — resolve through this.
 pub(crate) fn world_extent(grid: Option<&HeightGrid>) -> TerrainExtent {
     grid.map_or(FIXTURE_EXTENT, HeightGrid::extent)
-}
-
-/// The terrain manifest, relative to the resolved asset root (`crate::assets::asset_root`): the
-/// map's own declaration of which heightmap it is and the extent to hang it at, and THE map's
-/// presence marker — see [`decode_height_grid`] for the failure law.
-const MAP_MANIFEST_PATH: &str = "terrain/map.ron";
-
-/// Directory every manifest-named asset resolves against — the manifest's own.
-const MAP_DIR: &str = "terrain";
-
-/// `assets/terrain/map.ron`, deserialized. Authored values only: the extent is a claim the map's
-/// author makes about their export, never something derived from the pixels.
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TerrainManifest {
-    /// Heightmap file name, resolved against [`MAP_DIR`].
-    pub(crate) heightmap: String,
-    pub(crate) world_size_m: f32,
-    pub(crate) height_offset_m: f32,
-    pub(crate) height_span_m: f32,
-}
-
-impl TerrainManifest {
-    /// The declared extent.
-    pub(crate) fn extent(&self) -> TerrainExtent {
-        TerrainExtent {
-            world_size_m: self.world_size_m,
-            height_offset_m: self.height_offset_m,
-            height_span_m: self.height_span_m,
-        }
-    }
-
-    /// Past serde's shape check: reject values that parse but describe no world (ADR-0011). A
-    /// zero or non-finite side divides by zero in every grid↔world mapping; a non-finite vertical
-    /// pair NaNs every sample. A zero SPAN is legal — that is a deliberately level map.
-    pub(crate) fn validate(&self) -> Result<(), String> {
-        if !(self.world_size_m.is_finite() && self.world_size_m > 0.0) {
-            return Err(format!(
-                "world_size_m must be finite and > 0, got {}",
-                self.world_size_m
-            ));
-        }
-        if !self.height_offset_m.is_finite() {
-            return Err(format!(
-                "height_offset_m must be finite, got {}",
-                self.height_offset_m
-            ));
-        }
-        if !(self.height_span_m.is_finite() && self.height_span_m >= 0.0) {
-            return Err(format!(
-                "height_span_m must be finite and >= 0, got {}",
-                self.height_span_m
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// Import-time Gaussian smoothing width, in source pixels; `0.0` = pass-through (the current
@@ -659,13 +603,16 @@ impl HeightGrid {
 /// Decode the heightmap synchronously at Startup (before `world::spawn_environment`, which is
 /// chained after this in `world::plugin`).
 ///
-/// THE MANIFEST IS THE MAP. `assets/terrain/map.ron` ([`TerrainManifest`]) is the presence marker:
-/// absent → no resource → the flat slab + test course world (deleting it restores the old world).
-/// Present, everything it declares must hold — an unparseable or invalid manifest, a missing
-/// heightmap, or an undecodable/non-square one is a broken ship and panics (ADR-0011 fail-fast),
-/// because a peer silently falling back to flat while others load the map would desync the
-/// deterministic sim. The `shipped_map_ships_a_valid_manifest` test refuses a half-shipped map at
-/// build time rather than at first boot.
+/// THE MANIFEST IS THE MAP. The selected map's `level.json` ([`crate::map::MapManifest`]) is the
+/// presence marker: absent → no resource → the flat slab + test course world (deleting it restores
+/// the old world). Present, everything it declares must hold — an unparseable or invalid manifest,
+/// a missing heightmap, or an undecodable/non-square one is a broken ship and panics (ADR-0011
+/// fail-fast), because a peer silently falling back to flat while others load the map would desync
+/// the deterministic sim. `map::tests::shipped_map_ships_a_valid_manifest` refuses a half-shipped
+/// map at build time rather than at first boot.
+///
+/// THE ONE PARSE. The manifest is read here and published as a resource, so `scatter` places the
+/// author's objects out of the same struct this decode took its extent from.
 pub(crate) fn decode_height_grid(
     mut commands: Commands,
     flat: Option<Res<ForceFlatWorld>>,
@@ -678,6 +625,16 @@ pub(crate) fn decode_height_grid(
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
         return;
     }
+    let root = crate::assets::asset_root();
+    let Some(manifest) = crate::map::load(&root) else {
+        return;
+    };
+    let extent = manifest.extent;
+    let path = manifest.heightmap_path();
+    let heightmap = manifest.heightmap().to_owned();
+    // Published before every early return below: a preset or flattened grid still stands on the
+    // map's objects, which read their placement out of this resource.
+    commands.insert_resource(manifest);
     if let Some(preset) = preset {
         info!(
             "terrain: pre-inserted height grid {size}x{size} — skipping the shipped map decode",
@@ -685,11 +642,6 @@ pub(crate) fn decode_height_grid(
         );
         return;
     }
-    let root = crate::assets::asset_root();
-    let Some(manifest) = load_manifest(&root) else {
-        return;
-    };
-    let extent = manifest.extent();
     if crate::lod_showcase::enabled() {
         // A GRID of zeros, not "no grid": the no-manifest branch above drops the resource, and the
         // world then builds its flat slab AND its authored obstacle course, which is scenery in
@@ -708,12 +660,10 @@ pub(crate) fn decode_height_grid(
         commands.insert_resource(HeightGrid::new(samples.into(), size, extent));
         return;
     }
-    let path = root.join(MAP_DIR).join(&manifest.heightmap);
     let bytes = std::fs::read(&path).unwrap_or_else(|err| {
         panic!(
-            "terrain: {} declares heightmap {} — {}: {err}",
-            root.join(MAP_MANIFEST_PATH).display(),
-            manifest.heightmap,
+            "terrain: {} declares heightmap {heightmap} — {}: {err}",
+            crate::map::level_path(&root).display(),
             path.display(),
         )
     });
@@ -728,28 +678,6 @@ pub(crate) fn decode_height_grid(
         sigma = SMOOTH_SIGMA_PX,
     );
     commands.insert_resource(grid);
-}
-
-/// Read and validate `assets/terrain/map.ron`. `None` is "no map here" — the ONLY tolerated
-/// absence (see [`decode_height_grid`]); a manifest that exists and does not hold panics.
-fn load_manifest(root: &std::path::Path) -> Option<TerrainManifest> {
-    let path = root.join(MAP_MANIFEST_PATH);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(err) => {
-            info!(
-                "terrain: no map manifest at {} ({err}) — flat world",
-                path.display()
-            );
-            return None;
-        }
-    };
-    let manifest: TerrainManifest = ron::de::from_str(&text)
-        .unwrap_or_else(|err| panic!("terrain: {} failed to parse: {err}", path.display()));
-    manifest
-        .validate()
-        .unwrap_or_else(|err| panic!("terrain: {} is invalid: {err}", path.display()));
-    Some(manifest)
 }
 
 /// PNG bytes + the extent the map declares → [`HeightGrid`]: decode, bit-depth-normalize, and
@@ -1019,24 +947,15 @@ pub(crate) fn mesh_tile_node_ranges(grid: &HeightGrid) -> Vec<[usize; 4]> {
 pub(crate) mod tests {
     use super::*;
 
-    /// The repo's `assets/` — what the shipped map is read out of, in tests, without an asset root.
-    pub(crate) fn shipped_assets() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets")
-    }
-
-    /// The shipped terrain manifest, parsed and validated through the real path.
-    pub(crate) fn shipped_manifest() -> TerrainManifest {
-        load_manifest(&shipped_assets()).expect("shipped terrain manifest")
-    }
+    use crate::map::tests::shipped_manifest;
 
     /// The shipped heightmap, decoded through the real path at the extent its manifest declares —
     /// the ground every spawn assertion is made against.
     pub(crate) fn shipped_grid() -> HeightGrid {
         let manifest = shipped_manifest();
-        let path = shipped_assets().join(MAP_DIR).join(&manifest.heightmap);
         grid_from_png(
-            &std::fs::read(path).expect("shipped heightmap"),
-            manifest.extent(),
+            &std::fs::read(manifest.heightmap_path()).expect("shipped heightmap"),
+            manifest.extent,
         )
         .expect("shipped heightmap must decode")
     }
@@ -1482,8 +1401,8 @@ pub(crate) mod tests {
     #[test]
     fn shipped_heightmap_decodes_full_range_through_the_real_path() {
         let manifest = shipped_manifest();
-        let extent = manifest.extent();
-        let path = shipped_assets().join(MAP_DIR).join(&manifest.heightmap);
+        let extent = manifest.extent;
+        let path = manifest.heightmap_path();
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("shipped heightmap missing at {}: {err}", path.display()));
         assert!(
@@ -1527,33 +1446,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// THE MANIFEST IS THE MAP (`decode_height_grid`): the shipped tree must carry one, it must
-    /// parse and validate through the real loader, and the heightmap it names must exist. A map
-    /// half-shipped — PNG without manifest, or a manifest naming a file nobody added — fails here
-    /// in CI rather than dropping one peer onto the flat world and desyncing the sim.
-    #[test]
-    fn shipped_map_ships_a_valid_manifest() {
-        let manifest = shipped_manifest();
-        let heightmap = shipped_assets().join(MAP_DIR).join(&manifest.heightmap);
-        assert!(
-            heightmap.is_file(),
-            "map.ron names {} — no such file at {}",
-            manifest.heightmap,
-            heightmap.display()
-        );
-        manifest.validate().expect("shipped manifest must validate");
-    }
-
-    /// The DECODE LAW, end to end: a full-scale-zero sample lands on the manifest's declared floor
-    /// and a full-scale sample on its ceiling, at the corners of the declared square. Pins the
-    /// arithmetic (`offset + normalized · span`) that every consumer's metres come from.
+    /// The DECODE LAW, end to end: the extent comes out of a `level.json` terrain block through the
+    /// real reader, a full-scale-zero sample lands on the floor that block declares and a full-scale
+    /// sample on its ceiling, at the corners of the declared square. Pins the arithmetic
+    /// (`offset + normalized · span`) that every consumer's metres come from.
     #[test]
     fn manifest_decode_maps_full_scale_onto_the_declared_range() {
-        let extent = TerrainExtent {
-            world_size_m: 1500.0,
-            height_offset_m: -12.5,
-            height_span_m: 50.0,
-        };
+        let extent = crate::map::tests::fixture_manifest(750.0, -12.5, 50.0).extent;
         // 2x2 16-bit PNG: full-scale ZERO down the -X column, FULL SCALE down the +X column.
         let mut source = image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::new(2, 2);
         for y in 0..2 {

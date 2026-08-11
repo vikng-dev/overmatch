@@ -451,11 +451,12 @@ mod tests {
     /// the clamp is enough, for whatever the ladder turns out to be.
     #[test]
     fn no_showcase_tank_stands_off_the_map() {
-        use crate::terrain_grid::{SPAWN_FOOTPRINT_HALF_M, tests::shipped_manifest};
+        use crate::map::tests::shipped_manifest;
+        use crate::terrain_grid::SPAWN_FOOTPRINT_HALF_M;
 
         // The SHIPPED map's square, read off its manifest: the showcase stands on whatever world
         // ships, so a re-scaled map re-asks this question instead of leaving a stale answer.
-        let half = shipped_manifest().extent().half_extent();
+        let half = shipped_manifest().extent.half_extent();
         for tank in layout() {
             let edge = half - SPAWN_FOOTPRINT_HALF_M;
             assert!(
