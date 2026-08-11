@@ -405,15 +405,16 @@ struct SpawnOverrides(bevy::platform::collections::HashMap<Entity, Vec2>);
 
 /// Validate a requested spawn XZ: reject non-finite components outright (a NaN would NaN the solver
 /// the moment the body is inserted), otherwise clamp into the placeable square
-/// ([`spawn_map::SPAWN_LIMIT_M`], inside the terrain edge). Pure, so the bound is unit-testable
+/// ([`spawn_map::spawn_limit`], inside the terrain edge). Pure, so the bound is unit-testable
 /// without a world.
-fn validate_spawn_request(request: SetSpawnPoint) -> Option<Vec2> {
+fn validate_spawn_request(half_extent: f32, request: SetSpawnPoint) -> Option<Vec2> {
     if !request.x.is_finite() || !request.z.is_finite() {
         return None;
     }
-    Some(spawn_map::clamp_to_spawn_limit(Vec2::new(
-        request.x, request.z,
-    )))
+    Some(spawn_map::clamp_to_spawn_limit(
+        half_extent,
+        Vec2::new(request.x, request.z),
+    ))
 }
 
 /// A lane's spawn POINT — horizontal, like every spawn definition. Lane 0 is the base point, so
@@ -447,7 +448,11 @@ fn lane_spawn_pos(
 /// ([`SPAWN_SEARCH_RINGS`], candidates clamped into the placeable
 /// square) — plus whether it was nudged; `None` when everything within ~50 m is occupied (the
 /// caller falls back to the lane spawn). Pure, so the policy is unit-testable without a world.
-fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool)> {
+fn resolve_free_spawn_xz(
+    half_extent: f32,
+    desired: Vec2,
+    occupied: &[Vec2],
+) -> Option<(Vec2, bool)> {
     let free = |candidate: Vec2| {
         occupied.iter().all(|tank| {
             candidate.distance_squared(*tank) >= SPAWN_OCCUPIED_RADIUS_M * SPAWN_OCCUPIED_RADIUS_M
@@ -458,7 +463,7 @@ fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool
     }
     for (radius, dirs) in SPAWN_SEARCH_RINGS {
         for &dir in dirs {
-            let candidate = spawn_map::clamp_to_spawn_limit(desired + dir * radius);
+            let candidate = spawn_map::clamp_to_spawn_limit(half_extent, desired + dir * radius);
             if free(candidate) {
                 return Some((candidate, true));
             }
@@ -474,10 +479,12 @@ fn resolve_free_spawn_xz(desired: Vec2, occupied: &[Vec2]) -> Option<(Vec2, bool
 fn receive_spawn_points(
     mut receivers: Query<(Entity, &mut MessageReceiver<SetSpawnPoint>), With<ClientOf>>,
     mut overrides: ResMut<SpawnOverrides>,
+    height: Option<Res<crate::terrain_grid::HeightGrid>>,
 ) {
+    let half_extent = spawn_map::world_half_extent(height.as_deref());
     for (link, mut receiver) in &mut receivers {
         for request in receiver.receive() {
-            let Some(xz) = validate_spawn_request(request) else {
+            let Some(xz) = validate_spawn_request(half_extent, request) else {
                 warn!("server: rejected non-finite spawn request from link {link}");
                 continue;
             };
@@ -841,7 +848,11 @@ fn respawn_player_tanks(
                     .map(|(_, position)| position.0.xz())
                     .chain(placed_this_pass.iter().copied())
                     .collect();
-                match resolve_free_spawn_xz(xz, &occupied) {
+                match resolve_free_spawn_xz(
+                    spawn_map::world_half_extent(height.as_deref()),
+                    xz,
+                    &occupied,
+                ) {
                     Some((spot, nudged)) => {
                         if nudged {
                             info!(
@@ -958,16 +969,20 @@ mod tests {
     /// playable square rather than refused, so a click near the map edge still places you.
     #[test]
     fn spawn_requests_are_clamped_into_the_world() {
-        let limit = spawn_map::SPAWN_LIMIT_M;
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+        let limit = spawn_map::spawn_limit(half);
         assert_eq!(
-            validate_spawn_request(SetSpawnPoint { x: 40.0, z: -90.0 }),
+            validate_spawn_request(half, SetSpawnPoint { x: 40.0, z: -90.0 }),
             Some(Vec2::new(40.0, -90.0)),
         );
         assert_eq!(
-            validate_spawn_request(SetSpawnPoint {
-                x: 99_000.0,
-                z: -99_000.0,
-            }),
+            validate_spawn_request(
+                half,
+                SetSpawnPoint {
+                    x: 99_000.0,
+                    z: -99_000.0,
+                }
+            ),
             Some(Vec2::new(limit, -limit)),
         );
     }
@@ -976,18 +991,25 @@ mod tests {
     /// body enters the world, and no clamp can repair it.
     #[test]
     fn non_finite_spawn_requests_are_refused() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         assert_eq!(
-            validate_spawn_request(SetSpawnPoint {
-                x: f32::NAN,
-                z: 0.0
-            }),
+            validate_spawn_request(
+                half,
+                SetSpawnPoint {
+                    x: f32::NAN,
+                    z: 0.0
+                }
+            ),
             None,
         );
         assert_eq!(
-            validate_spawn_request(SetSpawnPoint {
-                x: 0.0,
-                z: f32::INFINITY,
-            }),
+            validate_spawn_request(
+                half,
+                SetSpawnPoint {
+                    x: 0.0,
+                    z: f32::INFINITY,
+                }
+            ),
             None,
         );
     }
@@ -1014,7 +1036,7 @@ mod tests {
             );
         }
         // The extremes a spawn-map click can reach, which the authority clamps to before resolving.
-        let limit = spawn_map::SPAWN_LIMIT_M;
+        let limit = spawn_map::spawn_limit(grid.half_extent());
         for (name, xz) in [
             ("spawn-map corner -,-", Vec2::new(-limit, -limit)),
             ("spawn-map corner +,+", Vec2::new(limit, limit)),
@@ -1037,7 +1059,11 @@ mod tests {
         );
         // A world sitting 37.5 m up: the client still only names XZ.
         let n = GRID_RESOLUTION as usize;
-        let hill = HeightGrid::new(vec![37.5f32; n * n].into(), GRID_RESOLUTION);
+        let hill = HeightGrid::new(
+            vec![37.5f32; n * n].into(),
+            GRID_RESOLUTION,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        );
         assert_eq!(
             spawn_pos(Some(&hill), Vec2::new(10.0, -20.0)),
             Vec3::new(10.0, 39.5, -20.0),
@@ -1081,20 +1107,25 @@ mod tests {
     /// crowded neighbourhood returns `None` (lane-spawn fallback).
     #[test]
     fn occupied_spawn_requests_are_nudged_deterministically() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         let desired = Vec2::new(100.0, -50.0);
         // Free field: untouched, not nudged.
-        assert_eq!(resolve_free_spawn_xz(desired, &[]), Some((desired, false)));
+        assert_eq!(
+            resolve_free_spawn_xz(half, desired, &[]),
+            Some((desired, false))
+        );
         // A tank exactly at the radius is NOT blocking (>= is free)…
         let at_radius = desired + Vec2::new(SPAWN_OCCUPIED_RADIUS_M, 0.0);
         assert_eq!(
-            resolve_free_spawn_xz(desired, &[at_radius]),
+            resolve_free_spawn_xz(half, desired, &[at_radius]),
             Some((desired, false)),
         );
         // …but one inside it is, and the search takes candidates in fixed ring order: the
         // occupant at +5.9 m X blocks the request, blocks +X@8 (2.1 m away) and NE@8 (5.66 m
         // away), so the first FREE candidate is +Z@8 — deterministically.
         let blocking = desired + Vec2::new(SPAWN_OCCUPIED_RADIUS_M - 0.1, 0.0);
-        let (spot, nudged) = resolve_free_spawn_xz(desired, &[blocking]).expect("a ring is free");
+        let (spot, nudged) =
+            resolve_free_spawn_xz(half, desired, &[blocking]).expect("a ring is free");
         assert!(nudged);
         assert_eq!(
             spot,
@@ -1102,7 +1133,8 @@ mod tests {
             "first free candidate in fixed ring order"
         );
         // A tank ON the point (opponent parked there): first candidate +X@8 is 8 m away — free.
-        let (spot, nudged) = resolve_free_spawn_xz(desired, &[desired]).expect("a ring is free");
+        let (spot, nudged) =
+            resolve_free_spawn_xz(half, desired, &[desired]).expect("a ring is free");
         assert!(nudged);
         assert_eq!(spot, desired + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0));
         // Every candidate occupied (a tank parked on each): lane fallback.
@@ -1112,11 +1144,12 @@ mod tests {
                 crowd.push(desired + dir * radius);
             }
         }
-        assert_eq!(resolve_free_spawn_xz(desired, &crowd), None);
+        assert_eq!(resolve_free_spawn_xz(half, desired, &crowd), None);
         // Candidates near the map edge clamp into the placeable square.
-        let limit = spawn_map::SPAWN_LIMIT_M;
+        let limit = spawn_map::spawn_limit(half);
         let corner = Vec2::new(limit, limit);
-        let (spot, nudged) = resolve_free_spawn_xz(corner, &[corner]).expect("a ring is free");
+        let (spot, nudged) =
+            resolve_free_spawn_xz(half, corner, &[corner]).expect("a ring is free");
         assert!(nudged);
         assert!(spot.x.abs() <= limit && spot.y.abs() <= limit);
     }
@@ -1157,6 +1190,7 @@ mod tests {
     /// arc away, deterministically.
     #[test]
     fn outer_ring_between_spokes_gap_is_searched() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         let desired = Vec2::new(100.0, -50.0);
         let mut crowd = vec![desired];
         // Every candidate of every ring below 48 m…
@@ -1169,8 +1203,8 @@ mod tests {
         for dir in SPAWN_DIRS_8 {
             crowd.push(desired + dir * 48.0);
         }
-        let (spot, nudged) =
-            resolve_free_spawn_xz(desired, &crowd).expect("a between-spokes candidate is free");
+        let (spot, nudged) = resolve_free_spawn_xz(half, desired, &crowd)
+            .expect("a between-spokes candidate is free");
         assert!(nudged);
         // The first free candidate in fixed order: ring 48's direction 1 (9.47° — 7.93 m of arc
         // from the occupied +X spoke, outside the 6 m occupancy radius).
@@ -1200,7 +1234,11 @@ mod tests {
         let mut samples = vec![0.0f32; n * n];
         let center = n / 2; // node at world 0
         samples[center * n + (center + 1)] = 10.0;
-        let grid = HeightGrid::new(samples.into(), GRID_RESOLUTION);
+        let grid = HeightGrid::new(
+            samples.into(),
+            GRID_RESOLUTION,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        );
         assert_eq!(grid.height_at(0.0, 0.0), 0.0, "center-point height is flat");
         assert_eq!(
             spawn_surface_height(Some(&grid), Vec2::ZERO),

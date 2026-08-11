@@ -38,7 +38,7 @@ pub(crate) mod server;
 #[cfg(test)]
 mod shot_loss;
 mod shot_transport;
-// `pub(crate)` for `SPAWN_LIMIT_M` — the clamp the spawn regression test resolves its corners at.
+// `pub(crate)` for `spawn_limit` — the clamp the spawn regression test resolves its corners at.
 pub(crate) mod spawn_map;
 #[cfg(test)]
 mod test_harness;

@@ -22,24 +22,31 @@ use crate::ui_font::UiFonts;
 /// F3 is the debug panel, Esc is the menu. (The track sandbox's `M` is a different binary.)
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
-/// Half-extent of the terrain square, metres — taken straight from the terrain module's single home
-/// for the world mapping (world XZ ∈ ±`terrain_grid::WORLD_HALF_EXTENT`, centred on the origin), never
-/// re-stated here. Both the server clamp ([`SPAWN_LIMIT_M`]) and the map's UV↔world mapping read it,
+/// Half-extent of the terrain square, metres — the LIVE world's, read off the decoded grid
+/// (`terrain_grid::world_extent`, which answers for the flat-slab fallback world too), never
+/// re-stated here. Both the server clamp ([`spawn_limit`]) and the map's UV↔world mapping take it,
 /// so a re-authored world moves the map and the clamp together.
-pub(super) const WORLD_HALF_EXTENT_M: f32 = crate::terrain_grid::WORLD_HALF_EXTENT;
+pub(super) fn world_half_extent(grid: Option<&crate::terrain_grid::HeightGrid>) -> f32 {
+    crate::terrain_grid::world_extent(grid).half_extent()
+}
 
-/// How far into the terrain a spawn request is clamped: 95 % of the half-extent, so a tank placed at
-/// the limit still has ground under its whole hull.
+/// Fraction of the half-extent a spawn request is clamped to: a tank placed at the limit still has
+/// ground under its whole hull.
+const SPAWN_LIMIT_FRACTION: f32 = 0.95;
+
+/// How far into the terrain a spawn request is clamped, metres.
 ///
 /// ONE home for the bound, read by BOTH ends: the authority clamps every request through it
 /// (`net::server::validate_spawn_request`), and the client applies the SAME clamp before sending
 /// ([`clamp_to_spawn_limit`]). That symmetry is what makes the marker honest — an edge click used to
 /// draw its dot the whole 5 % outside the square the server would actually place the tank in, so the
 /// player was shown one point and respawned at another.
-pub(crate) const SPAWN_LIMIT_M: f32 = WORLD_HALF_EXTENT_M * 0.95;
+pub(crate) fn spawn_limit(half_extent: f32) -> f32 {
+    half_extent * SPAWN_LIMIT_FRACTION
+}
 
-/// The map image: an 8-BIT RGB copy of the terrain heightmap, generated from the 16-bit source
-/// (`terrain/terrain_height.png`, python3/PIL: numpy `>> 8` downshift, LANCZOS resize to 1024²,
+/// The map image: an 8-BIT RGB copy of the terrain heightmap, generated from the 16-bit source the
+/// terrain manifest names (python3/PIL: numpy `>> 8` downshift, LANCZOS resize to 1024²,
 /// grayscale → RGB).
 ///
 /// The UI must NOT load the 16-bit file directly: bevy decodes a Luma16 PNG into an `R16Uint`
@@ -179,6 +186,7 @@ fn click_spawn_map(
     panel: Single<&SpawnMapPanel>,
     mut map: ResMut<SpawnMap>,
     mut senders: Query<&mut MessageSender<SetSpawnPoint>, With<Client>>,
+    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
 ) {
     if !map.open
         || !overlay::draws_scrim(&overlays, Overlay::SpawnMap)
@@ -194,7 +202,8 @@ fn click_spawn_map(
     };
     // Clamp BEFORE recording the marker, so `chosen` is the point the authority will accept rather
     // than the raw pixel: marker = truth.
-    let world = clamp_to_spawn_limit(uv_to_world(uv));
+    let half = world_half_extent(grid.as_deref());
+    let world = clamp_to_spawn_limit(half, uv_to_world(half, uv));
     map.chosen = Some(world);
     let Ok(mut sender) = senders.single_mut() else {
         warn!("client: no server link — spawn point not sent");
@@ -231,28 +240,29 @@ fn panel_uv(panel: &SpawnMapPanel, cursor: Vec2) -> Option<Vec2> {
 /// `z = -HALF + j·step`), so the pixel the player clicks is the pixel whose height the authority
 /// spawns them on. The own-tank marker is the standing empirical check: if the two ever disagreed,
 /// the tank dot would sit mirrored about the panel's horizontal centreline while driving.
-fn uv_to_world(uv: Vec2) -> Vec2 {
+fn uv_to_world(half_extent: f32, uv: Vec2) -> Vec2 {
     Vec2::new(
-        (uv.x * 2.0 - 1.0) * WORLD_HALF_EXTENT_M,
-        (uv.y * 2.0 - 1.0) * WORLD_HALF_EXTENT_M,
+        (uv.x * 2.0 - 1.0) * half_extent,
+        (uv.y * 2.0 - 1.0) * half_extent,
     )
 }
 
-/// Clamp a picked world XZ into the placeable square, applying the SAME [`SPAWN_LIMIT_M`] the
-/// authority applies — one constant, read by both ends, so this is a mirror rather than a guess.
+/// Clamp a picked world XZ into the placeable square, applying the SAME [`spawn_limit`] the
+/// authority applies — one rule, read by both ends, so this is a mirror rather than a guess.
 ///
-/// The map maps clicks across the FULL ±[`WORLD_HALF_EXTENT_M`], but the server only ever places a
-/// tank within ±[`SPAWN_LIMIT_M`]. Before this, an edge click drew its marker on the terrain edge and
+/// The map maps clicks across the FULL ±`half_extent`, but the server only ever places a tank
+/// within ±[`spawn_limit`]. Before this, an edge click drew its marker on the terrain edge and
 /// then respawned the player the 5 % gap inward of it. Clamping here (and marking the clamped point) makes
 /// the server's clamp a no-op on everything the client sends: the dot IS the destination.
-pub(super) fn clamp_to_spawn_limit(world: Vec2) -> Vec2 {
-    world.clamp(Vec2::splat(-SPAWN_LIMIT_M), Vec2::splat(SPAWN_LIMIT_M))
+pub(super) fn clamp_to_spawn_limit(half_extent: f32, world: Vec2) -> Vec2 {
+    let limit = spawn_limit(half_extent);
+    world.clamp(Vec2::splat(-limit), Vec2::splat(limit))
 }
 
 /// World XZ → UV, the exact inverse of [`uv_to_world`] (same convention), clamped to the panel so a
 /// tank outside the terrain square still shows at the edge instead of drawing off-panel.
-fn world_to_uv(world: Vec2) -> Vec2 {
-    ((world / WORLD_HALF_EXTENT_M) * 0.5 + Vec2::splat(0.5)).clamp(Vec2::ZERO, Vec2::ONE)
+fn world_to_uv(half_extent: f32, world: Vec2) -> Vec2 {
+    ((world / half_extent) * 0.5 + Vec2::splat(0.5)).clamp(Vec2::ZERO, Vec2::ONE)
 }
 
 /// Park both dots: the picked point (persistent client memory) and the player's own tank, projected
@@ -264,10 +274,12 @@ fn place_markers(
     own: Query<&GlobalTransform, With<Controlled>>,
     mut chosen: Single<(&mut Node, &mut Visibility), (With<ChosenMarker>, Without<SelfMarker>)>,
     mut own_marker: Single<(&mut Node, &mut Visibility), (With<SelfMarker>, Without<ChosenMarker>)>,
+    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
 ) {
     if !map.open {
         return;
     }
+    let half = world_half_extent(grid.as_deref());
     let edge = panel.edge_px;
     let place = |uv: Vec2, node: &mut Node| {
         node.left = Val::Px(uv.x * edge - MARKER_PX * 0.5);
@@ -275,7 +287,7 @@ fn place_markers(
     };
     match map.chosen {
         Some(world) => {
-            place(world_to_uv(world), &mut chosen.0);
+            place(world_to_uv(half, world), &mut chosen.0);
             chosen.1.set_if_neq(Visibility::Inherited);
         }
         None => {
@@ -285,7 +297,10 @@ fn place_markers(
     match own.iter().next() {
         Some(transform) => {
             let pos = transform.translation();
-            place(world_to_uv(Vec2::new(pos.x, pos.z)), &mut own_marker.0);
+            place(
+                world_to_uv(half, Vec2::new(pos.x, pos.z)),
+                &mut own_marker.0,
+            );
             own_marker.1.set_if_neq(Visibility::Inherited);
         }
         None => {
@@ -396,6 +411,11 @@ fn marker_node() -> Node {
 mod tests {
     use super::*;
 
+    /// The square these pure-mapping pins are made over: the flat-slab fallback world's,
+    /// which `world_half_extent` answers with when no heightmap decoded.
+    const HALF: f32 = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+    const LIMIT: f32 = HALF * SPAWN_LIMIT_FRACTION;
+
     fn panel(edge: f32, origin: Vec2) -> SpawnMapPanel {
         SpawnMapPanel {
             edge_px: edge,
@@ -407,13 +427,13 @@ mod tests {
     /// pinned "-z up" convention: top-left = (-half, -half), bottom-right = (+half, +half).
     #[test]
     fn uv_maps_the_panel_onto_the_terrain_square() {
-        assert_eq!(uv_to_world(Vec2::splat(0.5)), Vec2::ZERO);
+        assert_eq!(uv_to_world(HALF, Vec2::splat(0.5)), Vec2::ZERO);
         assert_eq!(
-            uv_to_world(Vec2::ZERO),
-            Vec2::splat(-WORLD_HALF_EXTENT_M),
+            uv_to_world(HALF, Vec2::ZERO),
+            Vec2::splat(-HALF),
             "the top-left pixel is -x/-z — north (-z) is UP on the map",
         );
-        assert_eq!(uv_to_world(Vec2::ONE), Vec2::splat(WORLD_HALF_EXTENT_M));
+        assert_eq!(uv_to_world(HALF, Vec2::ONE), Vec2::splat(HALF));
     }
 
     /// `world_to_uv` is the exact inverse, so the dot a player clicks and the dot drawn for their
@@ -426,7 +446,7 @@ mod tests {
             Vec2::new(0.5, 0.5),
             Vec2::new(1.0, 1.0),
         ] {
-            let round_trip = world_to_uv(uv_to_world(uv));
+            let round_trip = world_to_uv(HALF, uv_to_world(HALF, uv));
             assert!(
                 (round_trip - uv).length() < 1e-6,
                 "uv {uv:?} round-tripped to {round_trip:?}",
@@ -437,14 +457,8 @@ mod tests {
     /// A tank driven past the terrain edge still shows, pinned to the panel edge.
     #[test]
     fn world_to_uv_clamps_outside_the_square() {
-        assert_eq!(
-            world_to_uv(Vec2::splat(WORLD_HALF_EXTENT_M * 4.0)),
-            Vec2::ONE
-        );
-        assert_eq!(
-            world_to_uv(Vec2::splat(-WORLD_HALF_EXTENT_M * 4.0)),
-            Vec2::ZERO
-        );
+        assert_eq!(world_to_uv(HALF, Vec2::splat(HALF * 4.0)), Vec2::ONE);
+        assert_eq!(world_to_uv(HALF, Vec2::splat(-HALF * 4.0)), Vec2::ZERO);
     }
 
     /// Clicks outside the panel are refused, so the surrounding scrim is dead space rather than a
@@ -465,12 +479,14 @@ mod tests {
         );
     }
 
-    /// The spawn clamp stays inside the terrain square with real margin.
+    /// The spawn clamp stays inside the terrain square with real margin, on whatever square the
+    /// live world turns out to be.
     #[test]
-    #[allow(clippy::assertions_on_constants)] // constant is the point: a compile-time bracket
     fn spawn_limit_is_inside_the_terrain() {
-        assert!(SPAWN_LIMIT_M < WORLD_HALF_EXTENT_M);
-        assert!(SPAWN_LIMIT_M > WORLD_HALF_EXTENT_M * 0.9);
+        for half in [HALF, 750.0, 12.5] {
+            assert!(spawn_limit(half) < half);
+            assert!(spawn_limit(half) > half * 0.9);
+        }
     }
 
     /// An edge click is clamped CLIENT-SIDE to the same square the authority accepts, so the request
@@ -478,20 +494,20 @@ mod tests {
     /// click inside the limit is untouched, so the clamp only ever bites at the margin.
     #[test]
     fn edge_clicks_clamp_to_the_square_the_server_accepts() {
-        let corner = clamp_to_spawn_limit(uv_to_world(Vec2::ONE));
-        assert_eq!(corner, Vec2::splat(SPAWN_LIMIT_M));
+        let corner = clamp_to_spawn_limit(HALF, uv_to_world(HALF, Vec2::ONE));
+        assert_eq!(corner, Vec2::splat(LIMIT));
         assert_eq!(
-            clamp_to_spawn_limit(uv_to_world(Vec2::ZERO)),
-            Vec2::splat(-SPAWN_LIMIT_M),
+            clamp_to_spawn_limit(HALF, uv_to_world(HALF, Vec2::ZERO)),
+            Vec2::splat(-LIMIT),
         );
         assert_eq!(
-            clamp_to_spawn_limit(corner),
+            clamp_to_spawn_limit(HALF, corner),
             corner,
             "the clamp is idempotent — the server re-clamping a sent point is a no-op",
         );
         let inside = Vec2::new(120.0, -400.0);
         assert_eq!(
-            clamp_to_spawn_limit(inside),
+            clamp_to_spawn_limit(HALF, inside),
             inside,
             "an ordinary click is passed through untouched",
         );
@@ -502,13 +518,13 @@ mod tests {
     /// server would place the tank in, promising a spawn that could never happen.
     #[test]
     fn the_marker_shows_the_clamped_point_not_the_raw_click() {
-        let raw = uv_to_world(Vec2::ONE);
-        let clamped = clamp_to_spawn_limit(raw);
+        let raw = uv_to_world(HALF, Vec2::ONE);
+        let clamped = clamp_to_spawn_limit(HALF, raw);
         assert!(
             (raw - clamped).max_element() > 1.0,
             "an edge click really is moved by the clamp ({raw:?} → {clamped:?})",
         );
-        let uv = world_to_uv(clamped);
+        let uv = world_to_uv(HALF, clamped);
         assert!(
             uv.cmplt(Vec2::ONE).all() && uv.cmpgt(Vec2::ZERO).all(),
             "the clamped marker draws strictly inside the panel, at {uv:?}",
