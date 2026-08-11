@@ -597,6 +597,98 @@ do
     says "$path is authoring scratch" yes $?
 done
 
+# ── the hook itself: which lanes a push actually pays for ────────────────────────────────────────
+#
+# The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list — so no
+# revision is examined and no asset is verified, and what is measured is only which lanes ran. That
+# is the claim being made: the default is the cheap set, and the two expensive ones are behind
+# `OVERMATCH_FULL=1` because CI runs them on every push regardless.
+#
+# `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
+# The lanes' CONTENTS are proven elsewhere — by CI, by the door's own suites, by `test_chain.py` —
+# and re-running them here would cost a compile to learn nothing about the hook.
+
+group "the hook — which lanes run by default"
+
+HOOK_BIN=$WORK/bin
+LANE_LOG=$WORK/lanes.log
+export LANE_LOG
+mkdir -p "$HOOK_BIN"
+for _tool in cargo python3 git-lfs; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "$(basename "$0")" "$*" >> "$LANE_LOG"\nexit 0\n' \
+        > "$HOOK_BIN/$_tool"
+    chmod +x "$HOOK_BIN/$_tool"
+done
+# The hook sources this beside itself, out of the work tree it is run in.
+mkdir -p "$REPO/scripts/hooks"
+cp "$_here/pushed_assets.sh" "$REPO/scripts/hooks/pushed_assets.sh"
+
+# One hook run with an empty ref list. Prints every shimmed command it ran, one per line.
+hook() {   # <env assignment>…
+    : > "$LANE_LOG"
+    ( cd "$REPO" && PATH=$HOOK_BIN:$PATH env "$@" sh "$_here/pre-push" origin \
+        </dev/null > "$WORK/hook.out" 2>&1 ) || printf 'HOOK EXITED %s\n' "$?"
+    cut -d' ' -f1-2 < "$LANE_LOG"
+}
+
+is "the default runs lfs, fmt and clippy" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy" "$(hook OVERMATCH_SKIP= )"
+
+# The asset lane runs but examines nothing here: the ref list is empty, so it discovers no revision
+# and verifies no trio. That it ANNOUNCED itself is the whole claim — which trios it then picks is
+# `assets_push_targets`, driven above.
+is "…and the asset door, which this empty push gives no asset to verify" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+
+is "…and not the asset door when it is skipped" \
+   "no" \
+   "$(hook OVERMATCH_SKIP=assets >/dev/null
+      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+
+is "…and it says the two it did not run and where they are" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^2$' && echo yes || echo no)"
+
+is "…and ends green" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -q 'pre-push ▸ ok' "$WORK/hook.out" && echo yes || echo no)"
+
+group "the hook — OVERMATCH_FULL and OVERMATCH_SKIP"
+
+is "OVERMATCH_FULL=1 adds the lod lane and the cargo test lane" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy
+python3 scripts/lod/test_chain.py
+python3 scripts/lod/test_refusals.py
+cargo test" "$(hook OVERMATCH_FULL=1)"
+
+is "a skipped lane is not run" \
+   "git-lfs pre-push
+cargo fmt" "$(hook OVERMATCH_SKIP=clippy,assets)"
+
+is "…and says so loudly" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP=clippy >/dev/null
+      grep -q 'SKIPPED clippy (OVERMATCH_SKIP)' "$WORK/hook.out" && echo yes || echo no)"
+
+is "OVERMATCH_SKIP still names the full lanes when they are the ones running" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy
+cargo test" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=lod)"
+
+# The LFS upload is not a lane: it is the only transport, and naming it must not turn it off.
+is "the lfs upload cannot be skipped" \
+   "git-lfs pre-push" \
+   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,lod,test | head -1)"
+
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 
 printf '\ntest_pushed_assets ▸ %s cases, %s passed, %s failed\n' \
