@@ -14,8 +14,8 @@
   },
   "terrain": {
     "heightmap": {
-      "asset": "terrain_height_1500.png",
-      "included": false,
+      "asset": "terrain_height.png",
+      "included": true,
       "format": "png",
       "bit_depth": 16,
       "channels": "grayscale",
@@ -49,10 +49,10 @@
       },
       "height_decode": {
         "formula": "height_m = (u16 / 65535.0) * scale_m + offset_m",
-        "offset_m": -44.08241272,
-        "scale_m": 113.0102005,
-        "minimum_m": -44.08241272,
-        "maximum_m": 68.92778778
+        "offset_m": 0.0,
+        "scale_m": 50.0,
+        "minimum_m": 0.0,
+        "maximum_m": 50.0
       }
     }
   },
