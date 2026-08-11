@@ -1,8 +1,17 @@
 #!/bin/sh
-# pre-push — mirrors CI's ordinary fmt, clippy, and test lanes. It skips the isolated
-# 30-receiver stress probe, which CI runs separately with resource limits. Compiles, so it is
-# slower than pre-commit (tens of seconds to a couple of minutes on a warm cache); it runs on
-# push, not on every commit.
+# pre-push — the gates worth a solo dev's wall clock, before a push leaves the machine.
+#
+# BY DEFAULT: the git-lfs upload, then fmt, clippy, and the asset door over the trios this push
+# changed. Tens of seconds on a warm cache, plus a Blender launch and a MEASURED minute of texture
+# encode per changed asset — and most pushes change none.
+#
+# BEHIND `OVERMATCH_FULL=1`: the full `cargo test` run and the LOD chain verification. They are not
+# in the default because CI runs both on every push anyway and CI is the ratified backstop — a hook
+# that re-runs them buys minutes of local wall clock for a second opinion arriving ten minutes
+# later. Run them here when the push is the last thing before a release, or when the network is not
+# something you can wait on:
+#
+#     OVERMATCH_FULL=1 git push
 #
 # NEVER BYPASS WITH `git push --no-verify`. This hook is the ONLY git-lfs transport
 # (core.hooksPath replaces .git/hooks, so the hook git-lfs installs there never runs):
@@ -10,10 +19,10 @@
 # `git lfs push --all origin` — the plain per-branch form computes an empty delta and
 # uploads nothing.
 #
-# To skip a failing gate, name it:  OVERMATCH_SKIP=lod git push
-# Comma-separate several: OVERMATCH_SKIP=lod,test — lanes: assets, lod, fmt, clippy, test.
-# The LFS upload is not a lane and cannot be named. CI re-runs skipped lanes on the
-# pushed commit.
+# To skip a failing gate, name it:  OVERMATCH_SKIP=clippy git push
+# Comma-separate several: OVERMATCH_SKIP=assets,clippy — lanes: assets, fmt, clippy, and, under
+# OVERMATCH_FULL, lod and test. The LFS upload is not a lane and cannot be named. CI re-runs
+# skipped lanes on the pushed commit.
 #
 # Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
 # cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
@@ -37,17 +46,35 @@ skipped() {
     esac
 }
 
+# A lane that runs only under OVERMATCH_FULL. It is announced when it does not run, because a gate
+# that is silently absent is one nobody remembers exists.
+full() {
+    [ -n "${OVERMATCH_FULL:-}" ] && return 0
+    printf 'pre-push ▸ %s is behind OVERMATCH_FULL=1 — CI runs it on this push\n' "$1"
+    return 1
+}
+
 # git-lfs upload. `core.hooksPath` REPLACES .git/hooks, so the hook git-lfs installs there
 # never runs — without this line a push ships the pointers but not the objects, and CI dies
 # at "Git LFS pull (R2)" with "object not found" (the alpha.9 outage). First, before the
 # cargo lanes: `git lfs pre-push` reads the ref list from STDIN, which must reach it intact.
-# STDIN carries the ref list and is READ ONCE, then replayed to everything that needs it. Both
-# `git lfs pre-push` and the LOD lane below consume it, and the second reader would otherwise get
-# an empty stream and silently check nothing.
+# STDIN carries the ref list and is READ ONCE, then replayed to everything that needs it. The
+# upload, the assets lane and the LOD lane each consume it, and every reader after the first would
+# otherwise get an empty stream and silently check nothing.
 refs=$(cat)
 
 echo "pre-push ▸ git lfs pre-push"
 printf '%s\n' "$refs" | git lfs pre-push "$@"
+
+if ! skipped fmt; then
+echo "pre-push ▸ cargo fmt --all --check"
+cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
+fi
+
+if ! skipped clippy; then
+echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
+cargo clippy --quiet --locked --all-targets -- -D warnings
+fi
 
 # Tank assets. `asset_door.py verify` re-cuts each asset from its own stored source and proves the
 # tracked model is, section by section, what that source, that spec sheet and the pinned toolchain
@@ -115,9 +142,11 @@ fi
 # bytes, which is the same number the manifest records. No hydration, no checkout, no temp tree.
 #
 # The scripts are taken from the pushed revision too: verifying a commit with a different tree's
-# rules would be the same category of mistake one level up. CI re-runs all of this after LFS
-# hydration, which is the backstop for `--no-verify`.
-if ! skipped lod; then
+# rules would be the same category of mistake one level up.
+#
+# BEHIND OVERMATCH_FULL: CI runs this on every push, after LFS hydration, and a manifest seam that
+# drifted is not a defect the next ten minutes make worse. The lane is unchanged when it does run.
+if full lod && ! skipped lod; then
 echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
 lod_tmp=$(mktemp -d)
 checked=0
@@ -151,17 +180,10 @@ python3 scripts/lod/test_refusals.py >/dev/null 2>&1 ||
     { printf '\033[31m  lod test_refusals failed\033[0m — run: python3 scripts/lod/test_refusals.py\n' >&2; exit 1; }
 fi
 
-if ! skipped fmt; then
-echo "pre-push ▸ cargo fmt --all --check"
-cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
-fi
-
-if ! skipped clippy; then
-echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
-cargo clippy --quiet --locked --all-targets -- -D warnings
-fi
-
-if ! skipped test; then
+# BEHIND OVERMATCH_FULL: the suite CI runs on every push, at the cost this hook is least willing to
+# pay — a full compile and run of everything, on the machine you are trying to leave. Nothing about
+# a push is decided by it that CI does not decide ten minutes later on the same commit.
+if full test && ! skipped test; then
 echo "pre-push ▸ cargo test --locked (skip isolated 30-receiver stress)"
 cargo test --quiet --locked -- \
   --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss

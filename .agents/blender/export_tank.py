@@ -5,7 +5,6 @@ Run by the outer wrapper, never by hand:
     blender --background --factory-startup assets/<id>/<id>.blend \\
       --python .agents/blender/export_tank.py -- \\
       --mode <lint|export|verify> \\
-      --spec assets/<id>/<id>.tank.ron \\
       --glb assets/<id>/<id>.glb \\
       --canon <canon.json>
 
@@ -213,25 +212,12 @@ def check_canon(source: "Source") -> List[Finding]:
 
 # ── L1: scene hygiene and structure ──────────────────────────────────────────────────────────────
 
-#: The door launched Blender ON the stored file, so what this process holds came off that disk and
-#: there is nothing left to compare. `bpy.data.is_dirty` must NOT be read here: Blender sets it
-#: while VERSIONING an older file at load, so a freshly opened, untouched blend reports dirty
-#: (MEASURED, 5.1.2) and no save clears it.
-FRESH = "opened fresh from disk"
-
-#: The caller was already inside Blender with its own unsaved edits and SAVED before invoking the
-#: pass — the GUI adapter, `.agents/blender/addons/overmatch_export.py`. The save is the only thing
-#: making stored and live equal, and a save CLEARS the dirty flag, so a flag still set after one is
-#: an edit the stored file does not hold.
-IN_SESSION = "saved from this session"
-
 SAVED_SOURCE = Check(
     id="L1.SAVED_SOURCE",
     stage=Stage.SOURCE,
     severity=Severity.ERROR,
     law="the live model IS the stored model: a readable assets/<id>/<id>.blend that this Blender "
-        "has open, with a sibling <id>.tank.ron — opened fresh from disk, or saved from this "
-        "session with nothing unsaved left behind",
+        "was opened on, with a sibling <id>.tank.ron",
 )
 
 EXPORT_SCOPE = Check(
@@ -345,17 +331,13 @@ class Source:
     #: `bpy.data.filepath` — empty when the blend has never been saved.
     filepath: str
     scene_name: str
-    #: How this Blender came to hold the model — `FRESH` or `IN_SESSION`, and never inferred.
-    opened: str = FRESH
-    #: `bpy.data.is_dirty`, as it stood when the source was read.
-    dirty: bool = False
     objects: List[object] = field(default_factory=list)
     canon: Optional[Canon] = None
     #: Why there is no canon, when `canon` is None.
     canon_note: str = CANON_ABSENT
 
     @classmethod
-    def live(cls, opened: str, scene=None, canon_path=None) -> "Source":
+    def live(cls, scene=None, canon_path=None) -> "Source":
         """The open blend. `view_layer.update()` first: `matrix_local` is otherwise stale."""
         bpy.context.view_layer.update()
         scene = scene or bpy.context.scene
@@ -363,8 +345,6 @@ class Source:
         return cls(
             filepath=bpy.data.filepath,
             scene_name=scene.name,
-            opened=opened,
-            dirty=bool(bpy.data.is_dirty),
             objects=list(scene.objects),
             canon=canon,
             canon_note=note or CANON_ABSENT,
@@ -374,16 +354,16 @@ class Source:
 def check_saved_source(source: Source) -> List[Finding]:
     """The stored file is the model; the door refuses to certify anything else.
 
-    Every context proves that the path is real and is THIS session's: a file that exists, carries
-    the `.blend` extension, sits at the layout every derived path is cut from, is the file
-    `bpy.data.filepath` names, and has its spec sheet beside it. A path measured against a file
-    that was renamed, deleted or never opened certifies a model nobody can reopen.
+    What is proved is that the path is real and is THIS session's: a file that exists, carries the
+    `.blend` extension, sits at the layout every derived path is cut from, is the file
+    `bpy.data.filepath` names, and has its spec sheet beside it. A path measured against a file that
+    was renamed, deleted or never opened certifies a model nobody can reopen.
 
-    STORED AND LIVE ARE THE SAME BYTES BY DIFFERENT MEANS IN THE TWO CONTEXTS, which is why
-    `Source.opened` is carried rather than guessed (see `FRESH` and `IN_SESSION`). `FRESH` needs
-    nothing further: the process was launched ON the stored file. `IN_SESSION` needs the one thing
-    a save leaves behind — `bpy.data.is_dirty` cleared — because there the two are equal only
-    because the adapter saved, and an edit after that save is a model nobody else can open.
+    STORED AND LIVE ARE THE SAME BYTES BY CONSTRUCTION: this process was launched ON the stored
+    file, and the GUI adapter saves before it invokes the door, which then launches its own Blender
+    the same way. `bpy.data.is_dirty` is deliberately NOT read — Blender sets it while VERSIONING an
+    older file at load, so a freshly opened, untouched blend reports dirty (MEASURED, 5.1.2) and no
+    save clears it.
     """
     findings = []
     if not source.filepath:
@@ -448,15 +428,6 @@ def check_saved_source(source: Source) -> List[Finding]:
             "write the spec sheet at {} — a model with no spec is not a tank".format(spec),
         ))
 
-    if source.opened == IN_SESSION and source.dirty:
-        findings.append(Finding(
-            SAVED_SOURCE,
-            subject,
-            "this session was {} and bpy.data.is_dirty is still True — the model in memory is not "
-            "the model on disk".format(IN_SESSION),
-            "save the blend and run the door again — a save clears the flag, so what is still set "
-            "after one is an edit the stored file does not hold",
-        ))
     return findings
 
 
@@ -2075,33 +2046,6 @@ def export_raw(path: str) -> List[Finding]:
     )]
 
 
-def continuation(raw: str, spec: str, findings: List[Finding]) -> str:
-    """Leave the token beside the candidate that says which pass cut it.
-
-    `asset_door.py --from-raw` continues a chain a caller's own Blender started — the GUI adapter is
-    inside one — and it has no way to look at a file and see the source pass behind it. The token is
-    that evidence: the sha256 of the bytes just written, of the stored blend they were cut from and
-    of the spec sheet they were cut against, the toolchain AS MEASURED in this Blender, and the
-    report they passed, carried whole. Without it, `--from-raw` is an entrance at L2, and a model
-    that is L2-clean but cut from a source violating an L1-only law would replace the tracked glb.
-
-    The blend is `bpy.data.filepath` — the file `L1.SAVED_SOURCE` has just proved this live model
-    IS, which is the only reason its bytes can stand for the model the pass looked at.
-    """
-    build = bpy.app.build_hash
-    return toolchain.write_continuation(
-        raw,
-        bpy.data.filepath,
-        spec,
-        {
-            "blender version": ".".join(str(part) for part in bpy.app.version),
-            "blender build": build.decode() if isinstance(build, bytes) else str(build),
-            "glTF exporter": toolchain.gltf_exporter().measured.get("version", "unknown"),
-        },
-        report.render_json(findings),
-    )
-
-
 def unimplemented(mode: str, missing: str) -> List[Finding]:
     """A mode the caller did not give the inputs of refuses mechanically rather than passing
     silently. `missing` names the one it did not supply."""
@@ -2114,17 +2058,9 @@ def unimplemented(mode: str, missing: str) -> List[Finding]:
     )]
 
 
-def run(mode: str, opened: str, canon: Optional[str] = None, raw: Optional[str] = None,
-        spec: Optional[str] = None) -> List[Finding]:
-    """The Blender half of one mode: the precondition, the source pass, and — for the two modes
-    with a chain behind them — the raw candidate and the token that continues it.
-
-    `opened` is `FRESH` or `IN_SESSION`, and every caller states it: it is the context
-    `L1.SAVED_SOURCE` is split on, and a default would be one caller's context imposed on another's.
-
-    `spec` is the spec sheet this verdict was reached against — the file the canonical lists were
-    cut from — and the token seals its bytes, so a chain continued elsewhere derives against the
-    sheet the source pass actually read.
+def run(mode: str, canon: Optional[str] = None, raw: Optional[str] = None) -> List[Finding]:
+    """The Blender half of one mode: the precondition, the source pass, and — for the two modes with
+    a chain behind them — the raw candidate the wrapper reads.
 
     An L1 ERROR stops before the export: a candidate cut from a refused source is a file nobody may
     consume, and writing one invites it being picked up. Warnings do not stop anything.
@@ -2132,20 +2068,14 @@ def run(mode: str, opened: str, canon: Optional[str] = None, raw: Optional[str] 
     refused = check_exporter() or check_unresolved_library()
     if refused:
         return report.sorted_findings(refused)
-    findings = lint(Source.live(opened, canon_path=canon))
+    findings = lint(Source.live(canon_path=canon))
     if mode == "lint":
         return findings
     if report.has_error(findings):
         return findings
     if not raw:
         return report.sorted_findings(findings + unimplemented(mode, "candidate path"))
-    findings = report.sorted_findings(findings + export_raw(raw))
-    if report.has_error(findings):
-        return findings
-    if not spec:
-        return report.sorted_findings(findings + unimplemented(mode, "spec sheet"))
-    continuation(raw, spec, findings)
-    return findings
+    return report.sorted_findings(findings + export_raw(raw))
 
 
 def _parse(argv: Optional[List[str]] = None):
@@ -2154,10 +2084,6 @@ def _parse(argv: Optional[List[str]] = None):
         argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
     parser = argparse.ArgumentParser(prog="export_tank.py", allow_abbrev=False)
     parser.add_argument("--mode", required=True, choices=("lint", "export", "verify"))
-    parser.add_argument("--spec", help="the tank's spec sheet — the sheet the canonical lists were "
-                                       "cut from, whose bytes the continuation token seals; the "
-                                       "sibling L1.SAVED_SOURCE requires is derived from the "
-                                       "blend stem, never from this path")
     parser.add_argument("--glb", help="the tracked glb the chain writes in export mode and "
                                       "compares against in verify mode")
     parser.add_argument("--canon", help="the canon file `{}` writes: the canonical node-reference "
@@ -2176,14 +2102,10 @@ def _parse(argv: Optional[List[str]] = None):
 def main() -> int:
     arguments = _parse()
     if arguments.census_json:
-        print("{}{}".format(CENSUS_SENTINEL,
-                            json.dumps(census(Source.live(FRESH)), sort_keys=True)),
+        print("{}{}".format(CENSUS_SENTINEL, json.dumps(census(Source.live()), sort_keys=True)),
               flush=True)
         return 0
-    # FRESH by construction: reaching `main` means Blender was launched with `--python` on the
-    # blend the wrapper named, which is a load from disk. A session that had a file open cannot
-    # arrive here — the adapter calls `run` in process, and says IN_SESSION when it does.
-    findings = run(arguments.mode, FRESH, arguments.canon, arguments.raw, arguments.spec)
+    findings = run(arguments.mode, arguments.canon, arguments.raw)
     print(report.render_text(findings), end="", flush=True)
     print("{} ▸ {}".format(arguments.mode.ljust(5), report.summary(findings)), flush=True)
     return report.exit_code(findings)

@@ -26,8 +26,6 @@ red.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import os
 import re
 import shutil
@@ -192,130 +190,6 @@ def basisu(binary: Optional[str] = None) -> Program:
         "basisu", binary, {"version": version.group(1) if version else "unknown"}, expected,
         override=BASISU_ENV,
     )
-
-
-# ── the continuation token ───────────────────────────────────────────────────────────────────────
-
-#: What the source pass leaves beside a raw candidate it cut, and the only thing that tells such a
-#: candidate from any other file of the right shape. `asset_door.py --from-raw` continues a chain
-#: somebody else's Blender started; without this the continuation is an unauthenticated entrance at
-#: L2, and an L2-clean model cut from a source violating an L1-only law could replace the tracked
-#: glb. It lives here because both halves already read this file and neither imports the other.
-CONTINUATION_SUFFIX = ".continuation.json"
-
-#: The pins a candidate is cut under, as the token records them.
-PINNED = {
-    "blender version": BLENDER_VERSION,
-    "blender build": BLENDER_BUILD,
-    "glTF exporter": GLTF_EXPORTER_VERSION,
-}
-
-#: Everything an L1 verdict is a function of, sealed by sha256 in the token and RECOMPUTED from the
-#: files the continuation is handed. Within byte-identical (blend, spec, pins) the source pass is
-#: deterministic, so re-measuring these bytes is what re-running the pass would prove; the report
-#: itself is sealed because the verdict is the thing being carried, and a token minted before a
-#: source edit dies at `blend`.
-_SEALED = ("raw", "blend", "spec", "report")
-
-
-def continuation_path(raw: str) -> str:
-    return raw + CONTINUATION_SUFFIX
-
-
-def _digest(path: str) -> str:
-    """sha256 of a file, read in blocks: a tank glb is tens of megabytes."""
-    hashed = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            hashed.update(block)
-    return hashed.hexdigest()
-
-
-def write_continuation(raw: str, blend: str, spec: str, measured: Dict[str, str],
-                       source_report: str) -> str:
-    """Write the token beside `raw`: the sha256 of every input that decided the verdict — the bytes
-    just written, the source they were cut from, the spec sheet they were cut against — the
-    toolchain that cut them AS MEASURED, and the source report itself, carried whole so a reader can
-    ask what it said rather than take the writer's word for the answer."""
-    document = {
-        "raw_sha256": _digest(raw),
-        "blend_sha256": _digest(blend),
-        "spec_sha256": _digest(spec),
-        "report": source_report,
-        "report_sha256": hashlib.sha256(source_report.encode("utf-8")).hexdigest(),
-        "toolchain": dict(measured),
-    }
-    path = continuation_path(raw)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, sort_keys=True)
-    return path
-
-
-def _sealed_report(text: str) -> List[str]:
-    """Every reason the report the token carries is not a passing one. The token says a source pass
-    succeeded; this READS what it says, because a claim of a verdict is not a verdict."""
-    try:
-        errors = [row for row in json.loads(text)["findings"]
-                  if str(row["severity"]) == Severity.ERROR.label]
-    except (ValueError, KeyError, TypeError, IndexError) as error:
-        return ["the report the token carries is not a report: {}".format(error)]
-    if not errors:
-        return []
-    return ["the report the token carries holds {} error row(s): {}".format(
-        len(errors), ", ".join(sorted({str(row["check"]) for row in errors}))
-    )]
-
-
-def continuation_mismatch(raw: str, blend: str, spec: str) -> List[str]:
-    """Every reason this candidate is not one a passing source pass cut, one phrase each. Empty is
-    the pass. An absent, unreadable or malformed token is a refusal like any other: a continuation
-    that cannot be authenticated is not a continuation.
-
-    EVERY SEALED DIGEST IS RECOMPUTED from the files this invocation was actually handed, and the
-    sealed report is re-read rather than believed. What that buys, stated at its true strength: this
-    is a local pipeline, so a token is only as private as the machine it is written on and nothing
-    here is a signature. It does not have to be. The source pass is a function of the blend, the
-    spec sheet and the pinned toolchain, so a forged token can only certify bytes over which the
-    genuine pass returns the same verdict — and it cannot outlive an edit to either source, because
-    those bytes are hashed here and not there.
-    """
-    path = continuation_path(raw)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            document = json.load(handle)
-        recorded = {name: str(document[name + "_sha256"]) for name in _SEALED}
-        measured = {str(key): str(value) for key, value in dict(document["toolchain"]).items()}
-        carried = str(document["report"])
-    except OSError as error:
-        return ["no continuation token at {}: {}".format(path, error)]
-    except (ValueError, KeyError, TypeError) as error:
-        return ["{} does not hold the continuation token's shape: {}".format(path, error)]
-
-    mismatch = []
-    sealed = {"report": hashlib.sha256(carried.encode("utf-8")).hexdigest()}
-    for name, source in (("raw", raw), ("blend", blend), ("spec", spec)):
-        try:
-            sealed[name] = _digest(source)
-        except OSError as error:
-            mismatch.append("the {} this continuation was handed cannot be read: {}".format(
-                name, error
-            ))
-    mismatch += [
-        "the token was written for {} sha256 {}, and this {} is sha256 {}".format(
-            name, recorded[name], name, sealed[name]
-        )
-        for name in _SEALED
-        if name in sealed and sealed[name] != recorded[name]
-    ]
-    mismatch += _sealed_report(carried)
-    mismatch += [
-        "{} was {!r} when this candidate was cut, pinned to {!r}".format(
-            what, measured.get(what, "unknown"), expected
-        )
-        for what, expected in sorted(PINNED.items())
-        if measured.get(what) != expected
-    ]
-    return mismatch
 
 
 def gltf_exporter() -> Program:

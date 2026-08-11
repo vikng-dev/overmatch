@@ -8,6 +8,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The assets job is path-gated (see below) and therefore skips most pushes. This is what bounds
+  # how long a defect it could not see survives: every Monday it re-cuts every trio from Blender,
+  # whatever changed.
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
 
 # Supersede in-flight runs on the same ref.
 concurrency:
@@ -164,25 +170,51 @@ jobs:
   # Its own job rather than a lane of the matrix above: it installs a foreign toolchain and pays a
   # Blender launch plus a MEASURED minute of texture encode per asset, and none of that belongs in
   # front of clippy.
+  #
+  # PATH-GATED, because that cost — MEASURED ~35 min — was being paid by every netcode push for a
+  # verdict that could not have moved. The first step asks whether anything in the push's range
+  # touches an asset trio or the shared surface, using the SAME two predicates the pre-push lane
+  # selects with, and every step below is conditioned on the answer. It fails toward running: an
+  # unresolvable range, a missing baseline, a force-push and a scheduled run all verify everything.
+  #
+  # The job still RUNS when it skips — it succeeds as a no-op that says why — so the aggregate
+  # `check` context below stays green without learning what the assets lane is.
   assets:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
+      # Full history: the decision below diffs a range, and a depth-1 checkout holds neither the
+      # push's baseline nor a pull request's merge base.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           lfs: false
+          fetch-depth: 0
+
+      # The decision, and the whole of it, in the file the pre-push lane sources — a workflow step
+      # that decides anything is a step no suite can run, which is how a broken one ships green.
+      # `scripts/hooks/test_pushed_assets.sh` drives this over synthetic ranges.
+      - name: Does this range touch an asset verdict
+        id: scope
+        env:
+          ASSETS_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          ASSETS_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: sh -c '. scripts/hooks/pushed_assets.sh; assets_ci_scope'
+
       - name: Git LFS pull (R2)
+        if: steps.scope.outputs.affected == 'true'
         run: |
           git lfs install --local
           git lfs pull
 
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.scope.outputs.affected == 'true'
 
       # `asset_verify` links the whole crate, so this lane carries the same system libs the Linux
       # client build does — plus the runtime libraries Blender's own binary needs. The runner has no
       # GUI and every launch here is `--background`; these are what the linked binary loads anyway.
       - name: Install system dependencies
+        if: steps.scope.outputs.affected == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -192,6 +224,7 @@ jobs:
             cmake ninja-build
 
       - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.affected == 'true'
         with:
           key: assets
 
@@ -200,6 +233,7 @@ jobs:
       # It is RUN rather than quoted into a step, because a step is executable by nothing — no suite
       # can run it, and the one that imported this module from the wrong directory shipped red.
       - name: Resolve the pinned toolchain
+        if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           python3 scripts/toolchain.py --pins >> "${GITHUB_ENV}"
@@ -208,13 +242,14 @@ jobs:
       # cached on the pin itself — a moved pin is a different key and a fresh download.
       - name: Cache the pinned Blender
         id: blender-cache
+        if: steps.scope.outputs.affected == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/overmatch/blender
           key: blender-${{ env.OVERMATCH_BLENDER_VERSION }}-${{ env.OVERMATCH_BLENDER_BUILD }}
 
       - name: Install the pinned Blender
-        if: steps.blender-cache.outputs.cache-hit != 'true'
+        if: steps.scope.outputs.affected == 'true' && steps.blender-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           series="${OVERMATCH_BLENDER_VERSION%.*}"
@@ -230,13 +265,14 @@ jobs:
       # after install proves the built binary prints the pinned version.
       - name: Cache the pinned Basis Universal
         id: basisu-cache
+        if: steps.scope.outputs.affected == 'true'
         uses: actions/cache@v4
         with:
           path: ~/.cache/overmatch/basisu
           key: basisu-${{ env.OVERMATCH_BASISU_VERSION }}-${{ env.OVERMATCH_BASISU_TAG }}-ubuntu-24.04
 
       - name: Build the pinned Basis Universal
-        if: steps.basisu-cache.outputs.cache-hit != 'true'
+        if: steps.scope.outputs.affected == 'true' && steps.basisu-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           git clone --depth 1 --branch "${OVERMATCH_BASISU_TAG}" \
@@ -251,6 +287,7 @@ jobs:
       # The same predicate the door's preflight runs, in the same report shape, before anything long
       # starts. An install that produced another build fails here rather than inside the first asset.
       - name: Assert the toolchain
+        if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           echo "OVERMATCH_BLENDER=${HOME}/.cache/overmatch/blender/blender" >> "${GITHUB_ENV}"
@@ -263,6 +300,7 @@ jobs:
       # The reports are kept whole: warnings never fail this lane, and the artifact is where they
       # are read.
       - name: Verify every asset through the door
+        if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/asset-reports"
@@ -287,6 +325,7 @@ jobs:
           done
 
       - name: The Blender source pass, on its synthetic fixtures
+        if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           "${OVERMATCH_BLENDER}" --background --factory-startup \
@@ -298,6 +337,7 @@ jobs:
       # chain and its refusals; the finding shape; the coverage table; and the assets lane's own
       # discovery, selection and hydration.
       - name: The derivation and door suites
+        if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           python3 scripts/tank/test_report.py
@@ -307,10 +347,11 @@ jobs:
           sh scripts/hooks/test_pushed_assets.sh
 
       - name: The Rust consumer contract
+        if: steps.scope.outputs.affected == 'true'
         run: "cargo test --profile ci --locked --lib bake::"
 
       - name: Asset reports
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.scope.outputs.affected == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: asset-reports

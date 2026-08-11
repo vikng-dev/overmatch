@@ -1,15 +1,15 @@
 """overmatch_export.py — the GUI adapter over the one asset door.
 
 Install this once (Preferences ▸ Add-ons ▸ Install… ▸ pick this file, then tick it) and
-**File ▸ Export ▸ Overmatch Tank (.glb)** runs exactly what
+**File ▸ Export ▸ Overmatch Tank (.glb)** saves the open blend and runs exactly
 
     python3 scripts/tank/asset_door.py export assets/<id>/<id>.blend
 
-runs. This file holds no check, no census, no notice and no export setting of its own. It prepares
-an environment a GUI Blender does not have, shows progress through a call that freezes the window,
-and calls the one implementation. Everything it could ask about a model is a law with a home:
-`.agents/blender/export_tank.py` (the L1 source pass), `src/bake.rs` (the consumer contract),
-`scripts/tank/glb_ktx2.py` (the derivation checks).
+as a subprocess. This file holds no check, no census, no notice and no export setting of its own,
+and it does not enter the chain anywhere except at the top: it prepares an environment a GUI Blender
+does not have, saves, invokes the door, and shows what came back. Everything it could ask about a
+model is a law with a home: `.agents/blender/export_tank.py` (the L1 source pass), `src/bake.rs`
+(the consumer contract), `scripts/tank/glb_ktx2.py` (the derivation checks).
 
 THE SEAM IS STORED TRUTH
 ------------------------
@@ -17,19 +17,12 @@ The door certifies the file on disk, never the session — `L1.SAVED_SOURCE` say
 SAVES the blend first, and every stage after that reads the saved bytes. That single line is why
 the GUI and the headless door cannot certify different models.
 
-WHAT RUNS WHERE, AND WHY IT IS STILL ONE CHAIN
-----------------------------------------------
-The Blender half — the source pass and the raw candidate — has to run in a Blender, and there is
-one open: this one. `export_tank.run()` is invoked in-process, on the file just saved.
-
-Everything after the candidate is a Rust binary and a MEASURED minute of `basisu`, neither of which
-belongs on Blender's main thread by choice. It is handed to the wrapper as
-
-    python3 scripts/tank/asset_door.py export <blend> --from-raw <candidate>
-
-which is the door's own `derive()` — the same stages in the same order the headless chain runs, and
-the reason a GUI export lands the same bytes. `scripts/tank/test_asset_door.py` proves that to the
-sha256.
+ONE ENTRANCE, AND THE LAUNCH IT COSTS
+-------------------------------------
+The door launches its own pinned Blender on the saved file, so a GUI export pays a MEASURED 30-60 s
+more than an in-process source pass would. That is the whole price of there being one entrance: no
+candidate crosses a process boundary, so nothing has to authenticate one, and the bytes a GUI export
+lands are the bytes `asset_door.py export` lands because it IS `asset_door.py export`.
 
 THE STOCK glTF EXPORTER
 -----------------------
@@ -68,21 +61,20 @@ bl_info = {
     "category": "Import-Export",
 }
 
-import hashlib
-import importlib.util
 import os
+import select
 import shutil
+import signal
 import subprocess
-import sys
 import tempfile
+import time
 
 import bpy
 from bpy.types import Operator
 
-#: The one door, and the Blender half it launches. Repo-relative: this add-on is installed into
-#: Blender's own directory and finds the work tree by walking up from the open blend.
+#: The one door. Repo-relative: this add-on is installed into Blender's own directory and finds the
+#: work tree by walking up from the open blend.
 DOOR_RELPATH = os.path.join("scripts", "tank", "asset_door.py")
-SOURCE_PASS_RELPATH = os.path.join(".agents", "blender", "export_tank.py")
 
 #: Searched in order, appended to whatever PATH we inherit. `~/.cargo/bin` carries the consumer
 #: contract's `cargo`; /usr/bin..sbin are re-asserted because a stripped GUI environment is a real
@@ -98,21 +90,33 @@ BREW_PREFIXES = ("/opt/homebrew", "/usr/local", "/home/linuxbrew/.linuxbrew")
 #: Said before the UI goes dark. The console line is the load-bearing half on macOS: a GUI Blender
 #: launched from Finder writes stdout nowhere the user can see, so the notice names the fix.
 FREEZE_NOTICE = (
-    "The asset door is running — this takes a couple of minutes and BLENDER'S WINDOW WILL FREEZE "
+    "The asset door is running — this takes a few minutes (it opens a Blender of its own on the "
+    "file you just saved) and BLENDER'S WINDOW WILL FREEZE "
     "for all of it (no redraw, spinning cursor). That is normal. DO NOT force-quit: quitting "
     "mid-run leaves the previous tracked model in place but wastes the export. The full report "
     "prints to the system console (Window ▸ Toggle System Console on Windows; on macOS relaunch "
     "Blender from a terminal to see it)."
 )
 
+#: The whole run's ceiling, from the moment the door is launched. A full chain is MINUTES — the door
+#: opens a Blender of its own and every image is KTX2-encoded — and Blender's window is frozen for
+#: all of it, so this is generous by construction: what it bounds is the freeze, not the work.
+DOOR_DEADLINE_SECONDS = 30 * 60
+
+#: Said when it expires, in the shape of every other refusal the artist reads: what happened, what
+#: it means for the tracked model, what to do next.
+DOOR_DEADLINE_EXPIRED = (
+    "The asset door did not finish within {:.0f} minutes (DOOR_DEADLINE_SECONDS in this add-on) "
+    "and was killed, along with every process it had launched.\n"
+    "The tracked model is unchanged.\n"
+    "Run the door in a terminal to see where it stopped:\n"
+    "    python3 scripts/tank/asset_door.py export <blend>"
+)
+
 #: Emitted once per encoded image by `scripts/encode-tank-ktx2.sh`, and once up front with the
 #: total. The progress meter is nothing more than counting these off the door's stdout.
 _IMAGE_LINE = "ktx2  ▸"
 _TOTAL_LINE = "images ▸"
-
-#: Set while our own operator drives the door, so the stock-exporter hook does not judge an export
-#: the door is making on purpose.
-_SUPPRESS_HOOK = False
 
 
 # ── environment ──────────────────────────────────────────────────────────────────────────────────
@@ -205,33 +209,6 @@ def tracked_asset(glb):
     return (root, blend)
 
 
-def load(root, relpath, name):
-    """Import one of the repository's own modules by path.
-
-    By path rather than by `sys.path` insertion, under a key that carries the work tree's own
-    digest, so two checkouts open in one Blender never serve each other's door. Re-executed on
-    every call, so an edit to the door is picked up without restarting Blender.
-
-    The module IS entered in `sys.modules` before it executes, and that is not optional:
-    `dataclasses` resolves a field's type through `sys.modules[cls.__module__]`, so a module
-    executed outside it raises `AttributeError: 'NoneType' object has no attribute '__dict__'` on
-    its first `@dataclass` (MEASURED, CPython 3.13).
-    """
-    path = os.path.join(root, relpath)
-    if not os.path.isfile(path):
-        raise RuntimeError("missing {} — is this really the overmatch work tree?".format(path))
-    key = "{}_{}".format(name, hashlib.sha1(os.path.realpath(root).encode()).hexdigest()[:8])
-    spec = importlib.util.spec_from_file_location(key, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[key] = module
-    try:
-        spec.loader.exec_module(module)
-    except BaseException:
-        sys.modules.pop(key, None)
-        raise
-    return module
-
-
 # ── reporting and progress ───────────────────────────────────────────────────────────────────────
 
 def popup(title, message, icon='ERROR'):
@@ -288,14 +265,45 @@ class Progress:
         self.wm = None
 
 
+def _readable(stream, timeout):
+    """Whether `stream` has something to read within `timeout` seconds. A pipe that cannot be waited
+    on says yes and is then read blocking, which checks the deadline between lines only."""
+    try:
+        return bool(select.select([stream], [], [], timeout)[0])
+    except (OSError, ValueError):
+        return True
+
+
+def _kill_group(process):
+    """The door AND the Blender it launched. `start_new_session=True` puts them in a process group
+    of their own, so one signal reaches every one of them and none reaches this Blender."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (AttributeError, OSError):
+        process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_streamed(command, root):
-    """Run the door with its stdout on a pipe, echoing and counting it. Returns the exit code.
+    """Run the door with its stdout on a pipe, echoing, counting and KEEPING it. Returns
+    `(exit code, every line it printed)`.
+
+    A run that outlives `DOOR_DEADLINE_SECONDS` is killed with its process group and raised as a
+    `Refused` at the stage `deadline` — the same path a red door takes to the popup. Blender's main
+    thread is inside this call, so a door that never returns is a Blender that never returns.
 
     The pipe is the entire progress mechanism. `subprocess.run` with an inherited stdout gives the
     user minutes of nothing (the door's lines sit in Blender's console buffer behind a main thread
     that never returns to the event loop); reading it line by line and printing with an explicit
     flush puts each `ktx2  ▸` line on screen the moment the encoder finishes an image, and ticks the
     cursor percentage with it.
+
+    The lines are also RETAINED, because on macOS a Blender launched from Finder writes stdout
+    nowhere a user can read: the popup is then the only rendering of the door's report they get, and
+    it can only show what was kept.
 
     stderr is folded into stdout so a failure keeps its position in the sequence instead of
     surfacing after everything else. PYTHONUNBUFFERED is set because the door's own python stages
@@ -304,13 +312,24 @@ def run_streamed(command, root):
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     progress = Progress()
     total, done = 0, 0
+    printed = []
+    expired = Refused("deadline", DOOR_DEADLINE_EXPIRED.format(DOOR_DEADLINE_SECONDS / 60.0))
+    deadline = time.monotonic() + DOOR_DEADLINE_SECONDS
+    process = None
     try:
         process = subprocess.Popen(
             command, cwd=root, env=env, text=True, bufsize=1,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
         )
-        for line in process.stdout:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not _readable(process.stdout, remaining):
+                raise expired
+            line = process.stdout.readline()
+            if not line:
+                break
             print(line, end="", flush=True)
+            printed.append(line.rstrip("\n"))
             if line.startswith(_TOTAL_LINE):
                 # "images ▸ 9 to encode"
                 field = line[len(_TOTAL_LINE):].strip().split(" ", 1)[0]
@@ -319,32 +338,72 @@ def run_streamed(command, root):
                 done += 1
                 # Unknown total (an older encoder) still moves, it just cannot promise 100%.
                 progress.update(100.0 * done / total if total else min(90.0, 10.0 * done))
-        process.stdout.close()
-        return process.wait()
+        try:
+            return (process.wait(timeout=max(1.0, deadline - time.monotonic())), printed)
+        except subprocess.TimeoutExpired:
+            raise expired
     finally:
         progress.end()
+        if process is not None:
+            if process.poll() is None:
+                _kill_group(process)
+            process.stdout.close()
 
 
 # ── the one call ─────────────────────────────────────────────────────────────────────────────────
 
 class Refused(Exception):
-    """The chain said no. `stage` names where, so the operator can say it without parsing prose."""
+    """The chain said no, or never came back. `stage` names where, so the operator can say it
+    without parsing prose."""
 
     def __init__(self, stage, message):
         super().__init__(message)
         self.stage = stage
 
 
+#: The door's own console protocol: it announces every stage it is about to run on a `door  ▸` line,
+#: and says which one refused on a last one carrying `refused at <stage>`. Read here for the same
+#: reason `_IMAGE_LINE` is — this file reads the door's stdout and holds no vocabulary of its own.
+_DOOR_LINE = "door  ▸ "
+_REFUSED_MARK = "refused at "
+
+#: How many of the refusing stage's lines the popup carries. A popup may summarize; the console and
+#: the door's own stdout hold every row. Findings sort ERRORS FIRST, so a head of the stage's output
+#: is the refusal itself — a tail would be whatever informational census followed it.
+POPUP_LINES = 24
+
+
+def refusal_of(printed):
+    """`(stage, message)` for a door run that exited non-zero: the stage the door named, and what
+    the stage that refused printed.
+
+    NOTHING IS PARSED OUT OF THE REPORT. Its rows are the door's rendering (`scripts/tank/
+    report.py`) and re-deriving them here would be this file holding a second vocabulary. What is
+    read is only the door's own `door  ▸` lines: everything after the LAST stage it announced is
+    what that stage said, and the report is at the head of it because errors sort first. A run that
+    ends some other way — no announcement, no verdict — surfaces whole, under the stage `door`.
+    """
+    end = len(printed)
+    stage = "door"
+    for index in range(len(printed) - 1, -1, -1):
+        if _REFUSED_MARK in printed[index]:
+            stage = printed[index].split(_REFUSED_MARK, 1)[1].split(" ", 1)[0].strip() or stage
+            end = index
+            break
+    announced = [index for index in range(end) if printed[index].startswith(_DOOR_LINE)]
+    said = printed[announced[-1] + 1:end] if announced else printed[:end]
+    return (stage, "\n".join((said[:POPUP_LINES] or ["the door printed nothing at all"]) + [
+        "", "The tracked model is unchanged. The complete report is in the system console.",
+    ]))
+
+
 def export_open_blend(root):
     """Save the open blend and run the door on it. Returns the tracked glb path.
 
-    Every stage below is the door's, called rather than reproduced:
-
-      * `asset_door.preflight` — the pinned programs, before anything long runs.
-      * `asset_door.canon_file` — the canonical node-reference list and substance keys, from the
-        one generator, because the source pass may not maintain a second copy of either.
-      * `export_tank.run` — the L1 source pass and the raw candidate, in THIS Blender.
-      * `asset_door.py export --from-raw` — everything after the candidate, in the wrapper.
+    Two calls, and neither of them is a stage: `wm.save_mainfile`, because the door certifies stored
+    truth, and then the door itself as a subprocess — which launches its own pinned Blender on that
+    saved file and runs every stage there. The adapter never sees a candidate, a canon file or a
+    finding, so there is nothing here that could disagree with a headless export.
     """
     python = _python()
     if not python:
@@ -353,40 +412,12 @@ def export_open_blend(root):
     bpy.ops.wm.save_mainfile()
     blend = bpy.data.filepath
     stem = os.path.splitext(os.path.basename(blend))[0]
-    spec = os.path.join(os.path.dirname(blend), stem + ".tank.ron")
 
-    door = load(root, DOOR_RELPATH, "overmatch_asset_door")
-    findings, _ = door.preflight("export", launches_blender=False)
-    if findings:
-        raise Refused("toolchain", door.report.render_text(door.report.sorted_findings(findings)))
-
-    work = tempfile.mkdtemp(prefix="overmatch-door-")
-    try:
-        try:
-            canon = door.canon_file(spec, root, work, door.registry_of(blend))
-        except door.Refused as refusal:
-            raise Refused(refusal.stage, "the canonical lists could not be written — the spec "
-                                         "sheet's own refusal is in the console") from refusal
-
-        source = load(root, SOURCE_PASS_RELPATH, "overmatch_export_tank")
-        raw = os.path.join(work, stem + ".raw.glb")
-        report = source.report
-        findings = source.run("export", source.IN_SESSION, canon, raw, spec)
-        print(report.render_text(findings), end="", flush=True)
-        print("source ▸ {}".format(report.summary(findings)), flush=True)
-        if report.has_error(findings):
-            raise Refused("source", report.render_text(
-                [finding for finding in findings if finding.check.severity is report.Severity.ERROR]
-            ))
-
-        code = run_streamed(
-            [python, os.path.join(root, DOOR_RELPATH), "export", blend, "--from-raw", raw], root,
-        )
-        if code:
-            raise Refused("door", "the door refused — its report is in the console. The tracked "
-                                  "model is unchanged.")
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+    code, printed = run_streamed(
+        [python, os.path.join(root, DOOR_RELPATH), "export", blend], root,
+    )
+    if code:
+        raise Refused(*refusal_of(printed))
     return os.path.join(os.path.dirname(blend), stem + ".glb")
 
 
@@ -418,8 +449,6 @@ class OVERMATCH_OT_export_tank(Operator):
         return context.window_manager.invoke_confirm(self, event)
 
     def execute(self, context):
-        global _SUPPRESS_HOOK
-
         root = repo_root_for(bpy.data.filepath)
         if root is None:
             self.report({'ERROR'}, "no work tree above the open .blend — cannot find the door.")
@@ -435,7 +464,6 @@ class OVERMATCH_OT_export_tank(Operator):
         self.report({'INFO'}, FREEZE_NOTICE)
         print("\n[overmatch] {}\n".format(FREEZE_NOTICE), flush=True)
         try:
-            _SUPPRESS_HOOK = True
             glb = export_open_blend(root)
         except BaseException as exc:  # noqa: BLE001 — a GUI must survive every failure below
             if isinstance(exc, KeyboardInterrupt):
@@ -445,7 +473,6 @@ class OVERMATCH_OT_export_tank(Operator):
             popup("Overmatch export refused at {}".format(stage), str(exc))
             return {'CANCELLED'}
         finally:
-            _SUPPRESS_HOOK = False
             if window:
                 window.cursor_set('DEFAULT')
 
@@ -475,6 +502,9 @@ class glTF2ExportUserExtension:
 
     Only the two hooks below exist on this class; the exporter's dispatcher `getattr`s each hook
     name and skips what is absent, so this costs nothing on the exports it does not care about.
+
+    It needs no exemption for the door's own export: that runs in a Blender of the door's own,
+    launched `--factory-startup`, where this add-on is not loaded at all.
     """
 
     def __init__(self):
@@ -484,8 +514,6 @@ class glTF2ExportUserExtension:
     def pre_export_hook(self, export_settings):
         self.target = None
         self.stash = None
-        if _SUPPRESS_HOOK:
-            return
         if export_settings.get("gltf_format") != "GLB":
             return
         filepath = export_settings.get("gltf_filepath")

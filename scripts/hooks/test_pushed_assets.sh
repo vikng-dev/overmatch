@@ -130,11 +130,27 @@ SUBSTANCES=$(at HEAD)
 git -C "$REPO" checkout -q -b side "$TWO"
 write src/net.rs "// the sim, edited on a side branch"
 commit "a side branch"
+SIDE=$(at side)
 git -C "$REPO" checkout -q "$MAIN"
 git -C "$REPO" merge -q --no-ff --no-commit side >/dev/null 2>&1
 write assets/tiger_1/tiger_1.tank.ron "TankSpec(mass: 1.5)"   # in neither parent
 git -C "$REPO" add -A && git -C "$REPO" commit -q -m "merge side"
 MERGE=$(at HEAD)
+
+# DELETIONS, on a branch of their own so the revisions the rest of this file reads still hold the
+# trio. Each one removes asset files and nothing puts them back.
+git -C "$REPO" checkout -q -b deletions "$TWO"
+git -C "$REPO" rm -q assets/panther/panther.glb
+commit "delete one file of a trio"
+DELETE_FILE=$(at HEAD)
+git -C "$REPO" rm -q assets/panther/panther.blend assets/panther/panther.tank.ron
+commit "delete the rest of that trio"
+DELETE_TRIO=$(at HEAD)
+git -C "$REPO" rm -q assets/tiger_1/tiger_1.glb
+write src/net.rs "// the sim, edited beside a deletion"
+commit "delete an asset file, and change code no verdict reads"
+DELETE_MIXED=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
 
 # The remote, as this clone knows it: refs only, never a connection.
 git -C "$REPO" update-ref "refs/remotes/origin/$MAIN" "$BASE"
@@ -322,6 +338,112 @@ is "a new ref carries its own local ref name" \
    "refs/heads/topic" \
    "$(targets "refs/heads/topic $PANTHER refs/heads/topic $ZERO" | head -1 | cut -d' ' -f1)"
 
+# ── the CI gate: whether a RANGE can have moved any verdict ──────────────────────────────────────
+#
+# CI's assets lane pays a MEASURED ~35 minutes to re-cut every trio from Blender. This is what tells
+# it not to, and the whole of what it may skip on. Every case below drives the real function over a
+# real range in the scratch repository; nothing about the decision lives in the workflow.
+
+group "the CI gate — assets_range_affected"
+
+affected() { assets_range_affected "$1" "$2" "$SCRATCH" >/dev/null 2>&1; }
+because() { assets_range_affected "$1" "$2" "$SCRATCH" 2>/dev/null; }
+
+affected "$TWO" "$PANTHER"
+says "a range that re-exports a trio is affected" yes $?
+
+affected "$PANTHER" "$SUBSTANCES"
+says "a range that moves the shared surface is affected" yes $?
+
+affected "$BASE" "$PARTIAL"
+says "a range of paths no verdict is computed from is unaffected" no $?
+
+is "…and says so, and says what it looked at" \
+   "yes" \
+   "$(because "$BASE" "$PARTIAL" | grep -q '^assets ▸ unaffected:.*no asset trio and no shared surface' &&
+      echo yes || echo no)"
+
+# DELETION IS A CHANGE, and the head holds none of the evidence for it. A range whose deletion is
+# read off the head's own listing selects nothing, reports unaffected, and the lane that would have
+# refused a tree with no trio left in it never runs.
+affected "$TWO" "$DELETE_FILE"
+says "a range that only deletes one file of a trio is affected" yes $?
+
+affected "$TWO" "$DELETE_TRIO"
+says "a range that deletes a whole trio is affected" yes $?
+
+affected "$DELETE_TRIO" "$DELETE_MIXED"
+says "a range that deletes an asset file beside a code change is affected" yes $?
+
+is "…and a deletion names the trio it removed" \
+   "yes" \
+   "$(because "$TWO" "$DELETE_TRIO" | grep -q 'assets/panther/panther' && echo yes || echo no)"
+
+is "an affected range names what it found" \
+   "yes" \
+   "$(because "$TWO" "$PANTHER" | grep -q 'assets/panther/panther' && echo yes || echo no)"
+
+# EVERY WAY OF NOT KNOWING RUNS THE LANE. A gate that skips when it cannot see is worse than no
+# gate: it reports success over the one push nobody looked at.
+affected "$ZERO" "$PANTHER"
+says "a zero baseline — a branch's first push — is affected" yes $?
+
+affected "" "$PANTHER"
+says "an absent baseline is affected" yes $?
+
+affected "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "$PANTHER"
+says "a baseline this clone cannot resolve is affected" yes $?
+
+affected "$BASE" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+says "a head this clone cannot resolve is affected" yes $?
+
+affected "$BASE" ""
+says "an absent head is affected" yes $?
+
+ORPHAN=$(git commit-tree "$(git hash-object -w -t tree /dev/null)" -m orphan </dev/null)
+affected "$ORPHAN" "$PANTHER"
+says "a baseline with no merge base — a force-push onto another history — is affected" yes $?
+
+# THE BASELINE IS THE MERGE BASE. `$SIDE` branched at `$TWO` and changed only `src/net.rs`; `$PANTHER`
+# re-exported an asset on the main line after it. A two-tree diff of the two tips reports that asset
+# as changed — it differs between them — and would run the lane for somebody else's commit, printing
+# a reason that is not true of this range.
+is "a base branch that moved under the range does not become this range's change" \
+   "no" \
+   "$(affected "$PANTHER" "$SIDE" && echo yes || echo no)"
+
+is "…while the two-tree diff of the same pair does see the asset" \
+   "assets/panther/panther.glb" \
+   "$(git diff --name-only "$PANTHER" "$SIDE" | grep 'panther')"
+
+group "the CI gate — assets_ci_scope"
+
+scope() {   # <event> <base> <head>; prints the decision, writes $SCRATCH/github-output
+    : > "$SCRATCH/github-output"
+    (
+        GITHUB_EVENT_NAME=$1 ASSETS_BASE=$2 ASSETS_HEAD=$3 GITHUB_OUTPUT=$SCRATCH/github-output
+        export GITHUB_EVENT_NAME ASSETS_BASE ASSETS_HEAD GITHUB_OUTPUT
+        assets_ci_scope 2>/dev/null | tail -1
+    )
+}
+
+is "a push whose range moves a trio is affected" \
+   "true" "$(scope push "$TWO" "$PANTHER")"
+
+is "a push whose range moves nothing a verdict reads is not" \
+   "false" "$(scope push "$BASE" "$PARTIAL")"
+
+is "…and the step reads that decision off GITHUB_OUTPUT, not off stdout" \
+   "affected=false" "$(scope push "$BASE" "$PARTIAL" >/dev/null; cat "$SCRATCH/github-output")"
+
+# The weekly cron is what bounds how long a defect the gate could not see survives, so it never
+# consults a range at all — there is no baseline on a scheduled run, and it must not need one.
+is "a scheduled run is affected with no range whatsoever" \
+   "true" "$(scope schedule "" "")"
+
+is "a hand-started run is too" \
+   "true" "$(scope workflow_dispatch "" "")"
+
 # ── hydration: the bytes of the pushed revision, never of the work tree ──────────────────────────
 
 group "hydration — assets_lfs_object, assets_hydrate_file, assets_hydrate"
@@ -505,6 +627,98 @@ do
     ignored "$path"
     says "$path is authoring scratch" yes $?
 done
+
+# ── the hook itself: which lanes a push actually pays for ────────────────────────────────────────
+#
+# The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list — so no
+# revision is examined and no asset is verified, and what is measured is only which lanes ran. That
+# is the claim being made: the default is the cheap set, and the two expensive ones are behind
+# `OVERMATCH_FULL=1` because CI runs them on every push regardless.
+#
+# `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
+# The lanes' CONTENTS are proven elsewhere — by CI, by the door's own suites, by `test_chain.py` —
+# and re-running them here would cost a compile to learn nothing about the hook.
+
+group "the hook — which lanes run by default"
+
+HOOK_BIN=$WORK/bin
+LANE_LOG=$WORK/lanes.log
+export LANE_LOG
+mkdir -p "$HOOK_BIN"
+for _tool in cargo python3 git-lfs; do
+    printf '#!/bin/sh\nprintf "%%s %%s\\n" "$(basename "$0")" "$*" >> "$LANE_LOG"\nexit 0\n' \
+        > "$HOOK_BIN/$_tool"
+    chmod +x "$HOOK_BIN/$_tool"
+done
+# The hook sources this beside itself, out of the work tree it is run in.
+mkdir -p "$REPO/scripts/hooks"
+cp "$_here/pushed_assets.sh" "$REPO/scripts/hooks/pushed_assets.sh"
+
+# One hook run with an empty ref list. Prints every shimmed command it ran, one per line.
+hook() {   # <env assignment>…
+    : > "$LANE_LOG"
+    ( cd "$REPO" && PATH=$HOOK_BIN:$PATH env "$@" sh "$_here/pre-push" origin \
+        </dev/null > "$WORK/hook.out" 2>&1 ) || printf 'HOOK EXITED %s\n' "$?"
+    cut -d' ' -f1-2 < "$LANE_LOG"
+}
+
+is "the default runs lfs, fmt and clippy" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy" "$(hook OVERMATCH_SKIP= )"
+
+# The asset lane runs but examines nothing here: the ref list is empty, so it discovers no revision
+# and verifies no trio. That it ANNOUNCED itself is the whole claim — which trios it then picks is
+# `assets_push_targets`, driven above.
+is "…and the asset door, which this empty push gives no asset to verify" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+
+is "…and not the asset door when it is skipped" \
+   "no" \
+   "$(hook OVERMATCH_SKIP=assets >/dev/null
+      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+
+is "…and it says the two it did not run and where they are" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^2$' && echo yes || echo no)"
+
+is "…and ends green" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP= >/dev/null
+      grep -q 'pre-push ▸ ok' "$WORK/hook.out" && echo yes || echo no)"
+
+group "the hook — OVERMATCH_FULL and OVERMATCH_SKIP"
+
+is "OVERMATCH_FULL=1 adds the lod lane and the cargo test lane" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy
+python3 scripts/lod/test_chain.py
+python3 scripts/lod/test_refusals.py
+cargo test" "$(hook OVERMATCH_FULL=1)"
+
+is "a skipped lane is not run" \
+   "git-lfs pre-push
+cargo fmt" "$(hook OVERMATCH_SKIP=clippy,assets)"
+
+is "…and says so loudly" \
+   "yes" \
+   "$(hook OVERMATCH_SKIP=clippy >/dev/null
+      grep -q 'SKIPPED clippy (OVERMATCH_SKIP)' "$WORK/hook.out" && echo yes || echo no)"
+
+is "OVERMATCH_SKIP still names the full lanes when they are the ones running" \
+   "git-lfs pre-push
+cargo fmt
+cargo clippy
+cargo test" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=lod)"
+
+# The LFS upload is not a lane: it is the only transport, and naming it must not turn it off.
+is "the lfs upload cannot be skipped" \
+   "git-lfs pre-push" \
+   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,lod,test | head -1)"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 
