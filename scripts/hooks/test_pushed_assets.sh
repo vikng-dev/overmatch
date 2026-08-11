@@ -137,6 +137,21 @@ write assets/tiger_1/tiger_1.tank.ron "TankSpec(mass: 1.5)"   # in neither paren
 git -C "$REPO" add -A && git -C "$REPO" commit -q -m "merge side"
 MERGE=$(at HEAD)
 
+# DELETIONS, on a branch of their own so the revisions the rest of this file reads still hold the
+# trio. Each one removes asset files and nothing puts them back.
+git -C "$REPO" checkout -q -b deletions "$TWO"
+git -C "$REPO" rm -q assets/panther/panther.glb
+commit "delete one file of a trio"
+DELETE_FILE=$(at HEAD)
+git -C "$REPO" rm -q assets/panther/panther.blend assets/panther/panther.tank.ron
+commit "delete the rest of that trio"
+DELETE_TRIO=$(at HEAD)
+git -C "$REPO" rm -q assets/tiger_1/tiger_1.glb
+write src/net.rs "// the sim, edited beside a deletion"
+commit "delete an asset file, and change code no verdict reads"
+DELETE_MIXED=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
+
 # The remote, as this clone knows it: refs only, never a connection.
 git -C "$REPO" update-ref "refs/remotes/origin/$MAIN" "$BASE"
 
@@ -347,6 +362,22 @@ is "…and says so, and says what it looked at" \
    "yes" \
    "$(because "$BASE" "$PARTIAL" | grep -q '^assets ▸ unaffected:.*no asset trio and no shared surface' &&
       echo yes || echo no)"
+
+# DELETION IS A CHANGE, and the head holds none of the evidence for it. A range whose deletion is
+# read off the head's own listing selects nothing, reports unaffected, and the lane that would have
+# refused a tree with no trio left in it never runs.
+affected "$TWO" "$DELETE_FILE"
+says "a range that only deletes one file of a trio is affected" yes $?
+
+affected "$TWO" "$DELETE_TRIO"
+says "a range that deletes a whole trio is affected" yes $?
+
+affected "$DELETE_TRIO" "$DELETE_MIXED"
+says "a range that deletes an asset file beside a code change is affected" yes $?
+
+is "…and a deletion names the trio it removed" \
+   "yes" \
+   "$(because "$TWO" "$DELETE_TRIO" | grep -q 'assets/panther/panther' && echo yes || echo no)"
 
 is "an affected range names what it found" \
    "yes" \

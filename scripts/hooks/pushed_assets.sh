@@ -177,7 +177,11 @@ assets_range_affected() {   # <base> <head> <scratch-dir>
             "$_base" "$2"
         return 0
     fi
-    _stems=$(assets_trios "$2" | assets_changed_trios "$_changed")
+    # BOTH ENDPOINTS' trios. A range that DELETES an asset holds it at the baseline and nowhere in
+    # the head, so a head-side listing drops the stem before selection and the lane never runs; the
+    # deleted paths are in the diff, and the trio they belong to is in the baseline's list.
+    _stems=$({ assets_trios "$_base"; assets_trios "$2"; } | LC_ALL=C sort -u |
+             assets_changed_trios "$_changed")
     if [ -n "$_stems" ]; then
         printf 'assets ▸ affected: %s..%s changes %s\n' "$_base" "$2" \
             "$(printf '%s' "$_stems" | tr '\n' ' ')"
