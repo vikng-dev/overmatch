@@ -75,7 +75,7 @@ def pair():
     raw = os.path.join(_WORK, "raw.glb")
     exported = subprocess.run(
         [toolchain.blender().binary, "--background", "--factory-startup", blend,
-         "--python", SOURCE_PASS, "--", "--mode", "export", "--spec", spec,
+         "--python", SOURCE_PASS, "--", "--mode", "export",
          "--glb", os.path.splitext(blend)[0] + ".glb", "--canon", canon, "--raw", raw],
         cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )

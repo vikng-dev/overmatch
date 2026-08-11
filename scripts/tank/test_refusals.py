@@ -104,7 +104,6 @@ COVERAGE = {
     "door.raw-export": (
         LINT, "an_exporter_that_writes_no_candidate_is_one_refusal_of_the_door_s_own"
     ),
-    "door.continuation": (DOOR, "test_an_untrusted_raw_refuses"),
     "door.registry": (CONTRACT, "the_registry_the_door_supplies_is_the_one_the_contract_reads"),
     "door.stage-failed": (DOOR, "test_an_encoder_failure_refuses"),
     "door.candidate-mismatch": (

@@ -3,15 +3,16 @@
     /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \\
       --python .agents/blender/test_addon.py
 
-WHAT THIS CAN AND CANNOT PROVE. The add-on is an adapter: it prepares an environment, shows
-progress, and calls the one implementation. Everything except the drawing is reachable without a
-window, and that is what is measured here — registration, the operator's poll and the reason it
-gives, the scope guard, the PATH preparation, the progress counter, the stock-exporter hook's
-restore, and — the load-bearing one — that every door entry point the adapter calls still exists
-with the shape it calls it in.
+WHAT THIS CAN AND CANNOT PROVE. The add-on is an adapter: it prepares an environment, saves, and
+runs the one door as a subprocess. Everything except the drawing is reachable without a window, and
+that is what is measured here — registration, the operator's poll and the reason it gives, the scope
+guard, the PATH preparation, the progress counter, the stock-exporter hook's restore, and the two
+load-bearing ones: that a GUI export of a clean trio certifies through the REAL door, and that a
+refused one surfaces the door's own report and leaves the tracked model alone.
 
-The chain itself is NOT re-proved here. `scripts/tank/test_asset_door.py` runs it end to end,
-including `--from-raw`, which is the exact path this adapter takes.
+The door is not mocked anywhere here — the two cases above launch it, which launches its own pinned
+Blender, exactly as an artist's click does. The chain's own laws are NOT re-proved: that is
+`scripts/tank/test_asset_door.py`, which drives every stage's refusal.
 
 GUI-ONLY, and left to a human: the popup and the cursor percentage actually appearing on screen,
 and the File ▸ Export menu entry being clickable. Both are drawing.
@@ -140,7 +141,7 @@ def the_tool_directories_are_appended_once_and_only_if_they_exist():
 # ── progress ─────────────────────────────────────────────────────────────────────────────────────
 
 @case
-def the_progress_counter_reads_the_encoder_lines_and_returns_the_exit_code():
+def the_progress_counter_reads_the_encoder_lines_and_keeps_what_it_printed():
     script = (
         "import sys\n"
         "print('images ▸ 2 to encode')\n"
@@ -152,11 +153,44 @@ def the_progress_counter_reads_the_encoder_lines_and_returns_the_exit_code():
     original = addon.Progress.update
     addon.Progress.update = lambda self, percent: ticks.append(percent)
     try:
-        code = addon.run_streamed([sys.executable, "-c", script], _WORK)
+        code, printed = addon.run_streamed([sys.executable, "-c", script], _WORK)
     finally:
         addon.Progress.update = original
     assert code == 3, "the door's exit code was not returned: {}".format(code)
     assert ticks == [50.0, 100.0], ticks
+    # Kept, not merely echoed: on macOS the popup is the only rendering an artist ever sees.
+    assert printed == ["images ▸ 2 to encode", "ktx2  ▸ 0.ktx2", "ktx2  ▸ 1.ktx2"], printed
+
+
+# ── what reaches the artist when the door says no ────────────────────────────────────────────────
+
+@case
+def a_refusal_carries_the_stage_the_door_named_and_what_that_stage_said():
+    """`refusal_of` reads the door's own `door  ▸` protocol and nothing else: the stage off the
+    verdict line, and the lines after the last stage the door announced — which is what the stage
+    that refused printed, errors first."""
+    stage, message = addon.refusal_of([
+        "door  ▸ toolchain: blender 5.1.2 (/usr/bin/blender)",
+        "door  ▸ source: blender --background testbed.blend",
+        "L1.MODIFIER_STACK error: object `Hull`",
+        "  measured: 1 modifier(s)",
+        "export ▸ 1 error, 0 warnings, 7 info",
+        "door  ▸ export refused at source — testbed.glb is unchanged",
+    ])
+    assert stage == "source", stage
+    assert "L1.MODIFIER_STACK" in message, message
+    assert "blender --background" not in message, "the door's own announcements leaked in"
+    assert "system console" in message, message
+
+
+@case
+def a_refusal_with_no_verdict_line_surfaces_whole():
+    """A door that died some other way — a traceback, a killed subprocess — has named no stage and
+    printed no verdict. Everything it did print is the evidence, so none of it is dropped."""
+    stage, message = addon.refusal_of(["Traceback (most recent call last):", "  boom"])
+    assert stage == "door", stage
+    assert "Traceback" in message and "boom" in message, message
+    assert addon.refusal_of([])[1].startswith("the door printed nothing at all")
 
 
 # ── the stock-exporter hook ──────────────────────────────────────────────────────────────────────
@@ -198,67 +232,66 @@ def a_stock_export_anywhere_else_is_untouched():
         "the hook took an export it has no business in"
 
 
-@case
-def the_hook_stands_aside_while_the_door_itself_exports():
-    _root, glb = fake_tree("stock-suppressed")
-    addon._SUPPRESS_HOOK = True
-    try:
-        assert _hook_over(glb) == b"whatever the dialog held", \
-            "the hook judged the door's own export"
-    finally:
-        addon._SUPPRESS_HOOK = False
+# ── the door, run the way the artist runs it ─────────────────────────────────────────────────────
 
-
-# ── the coupling to the one implementation ───────────────────────────────────────────────────────
-
-@case
-def every_door_entry_point_the_adapter_calls_still_exists():
-    """The whole risk of an adapter: the thing it adapts moves and nothing notices until a human
-    exports. Each name below is called by `export_open_blend`."""
-    door = addon.load(_ROOT, addon.DOOR_RELPATH, "test_asset_door_module")
-    findings, blender = door.preflight("lint", launches_blender=False)
-    assert blender is None, "a continuation asked for a Blender it does not launch"
-    assert findings == [], findings
-    assert callable(door.canon_file) and callable(door.derive)
-    assert issubclass(door.Refused, Exception)
-    parsed = door.parse(["export", "x.blend", "--from-raw", "r.glb"])
-    assert parsed.from_raw == "r.glb", parsed
-
-    source = addon.load(_ROOT, addon.SOURCE_PASS_RELPATH, "test_export_tank_module")
-    assert callable(source.run)
-    # The context `L1.SAVED_SOURCE` splits on. The adapter names IN_SESSION at the call, so the
-    # constant disappearing must be a failure here rather than a NameError in front of an artist.
-    assert source.IN_SESSION != source.FRESH, "the two L1.SAVED_SOURCE contexts are one"
-    for name in ("render_text", "sorted_findings", "summary", "has_error", "Severity"):
-        assert hasattr(source.report, name), "report.{} is gone".format(name)
-        assert hasattr(door.report, name), "report.{} is gone".format(name)
-
-
-@case
-def the_adapter_exports_the_open_blend_through_the_door():
-    """The whole adapter, on the synthetic trio, in this Blender — which is what a GUI export is
-    minus the drawing. The fixture is built in-process, so what `export_open_blend` saves and hands
-    over is the file this Blender has open, exactly as it would be for an artist.
-
-    The bytes are the door's own claim and are proved in `scripts/tank/test_asset_door.py`; what is
-    proved here is that the adapter's four calls into it still compose into a certified export.
-    """
+def open_a_trio(name, defect):
+    """Build the synthetic trio IN THIS BLENDER and leave it open, which is the artist's situation:
+    a session holding a model, about to click Export. Returns the tracked glb's path."""
     sys.path.insert(0, _HERE)
-    import fixture_tank  # noqa: PLC0415 — the trio builder, only needed by this case
+    import fixture_tank  # noqa: PLC0415 — the trio builder, only needed by these cases
 
-    directory = os.path.join(_WORK, "adapter-export")
+    directory = os.path.join(_WORK, name)
     library = fixture_tank.write_library(
         os.path.join(directory, "assets", "materials", "materials.blend")
     )
     asset = os.path.join(directory, "assets", "testbed")
     os.makedirs(asset, exist_ok=True)
-    fixture_tank.build(asset, library, "none")
+    fixture_tank.build(asset, library, defect)
     assert bpy.data.filepath.endswith("testbed.blend"), bpy.data.filepath
-
     addon._prepare_env()
-    glb = addon.export_open_blend(_ROOT)
-    assert os.path.isfile(glb), "the door certified but wrote no model at {}".format(glb)
-    assert os.path.getsize(glb) > 0
+    return os.path.join(asset, "testbed.glb")
+
+
+@case
+def the_adapter_exports_the_open_blend_through_the_door():
+    """The whole adapter, on a clean trio, in this Blender — which is what a GUI export is minus the
+    drawing. `export_open_blend` saves the session and runs the REAL door on the file it just wrote;
+    the door launches its own pinned Blender and every stage runs there.
+
+    The bytes are the door's own claim, proved in `scripts/tank/test_asset_door.py`. What is proved
+    here is that the adapter's two calls — save, then the door — still compose into a certified
+    export, and that it is the tracked path they land on.
+    """
+    glb = open_a_trio("adapter-export", "none")
+    landed = addon.export_open_blend(_ROOT)
+    assert os.path.realpath(landed) == os.path.realpath(glb), (landed, glb)
+    assert os.path.isfile(landed), "the door certified but wrote no model at {}".format(landed)
+    assert os.path.getsize(landed) > 0
+
+
+@case
+def a_refused_export_surfaces_the_doors_own_report_and_writes_nothing():
+    """The other half of an adapter: what a refusal looks like from the GUI.
+
+    The trio carries a modifier, so the door's L1 pass refuses it — a real defect refused by the
+    real law, not an injected exit code. What must reach the artist is the door's own report text
+    and the stage it stopped at, and what must NOT happen is a model appearing at the tracked path.
+    """
+    glb = open_a_trio("adapter-refusal", "modifier")
+    assert not os.path.isfile(glb), "the fixture wrote a model before the door ran"
+    try:
+        addon.export_open_blend(_ROOT)
+    except addon.Refused as refusal:
+        assert refusal.stage == "source", "the door's own stage did not reach the popup: {}".format(
+            refusal.stage
+        )
+        message = str(refusal)
+        assert "L1.MODIFIER_STACK" in message, \
+            "the door's report did not reach the popup:\n{}".format(message)
+        assert "system console" in message, "the popup did not point at the complete report"
+    else:
+        raise AssertionError("a source the L1 pass refuses was exported")
+    assert not os.path.isfile(glb), "a refused export wrote the tracked model"
 
 
 # ── runner ───────────────────────────────────────────────────────────────────────────────────────
