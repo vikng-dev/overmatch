@@ -23,7 +23,7 @@ This is an IMAGE swap inside the existing `Mat_Track_Link`, not a re-authoring:
 Old FreePBR image datablocks are removed from the blend so no paid-license content survives in
 either the .blend or the exported .glb.
 
-Export goes through `scripts/tank/asset_door.py`, never `bpy.ops.export_scene.gltf` directly: the
+Export goes through `scripts/tank/build.py`, never `bpy.ops.export_scene.gltf` directly: the
 raw exporter embeds PNG/JPEG, which bevy uploads with ONE mip level, and the door folds the KTX2
 mip bake into the export so a mipless glb cannot reach the tracked path. This script saves and
 hands the stored file over; every export setting is the door's frozen list.
@@ -140,11 +140,11 @@ print(f"OK material={mat.name} uv_layers={len(link.data.uv_layers)} "
 
 bpy.ops.wm.save_mainfile()
 print(f"SAVED {BLEND}")
-# The one door, on the saved file: source pass ▸ raw candidate ▸ consumer contract ▸ KTX2
-# derivation ▸ the tracked glb, which only a chain that passed every stage may replace.
+# The one build, on the saved file: source pass ▸ raw candidate ▸ consumer contract ▸ KTX2
+# derivation ▸ the LOD chains ▸ the trio, which only a chain that passed every stage may replace.
 door = subprocess.run(
-    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "asset_door.py"),
-     "export", BLEND],
+    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "build.py"),
+     "build", BLEND],
     cwd=ROOT,
 )
 if door.returncode:

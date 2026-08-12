@@ -238,6 +238,12 @@ jobs:
           set -euo pipefail
           python3 scripts/toolchain.py --pins >> "${GITHUB_ENV}"
 
+      # The build decodes glb geometry to census it and to strip the sim artifact, and every stage
+      # that measures a surface reads it through numpy.
+      - name: Install numpy
+        if: steps.scope.outputs.affected == 'true'
+        run: python3 -m pip install --quiet --disable-pip-version-check numpy
+
       # Blender is a ~300 MB download and the same bytes on every run of a given pin, so it is
       # cached on the pin itself — a moved pin is a different key and a fresh download.
       - name: Cache the pinned Blender
@@ -296,10 +302,11 @@ jobs:
           export OVERMATCH_BASISU="${HOME}/.cache/overmatch/basisu/basisu"
           python3 scripts/toolchain.py
 
-      # Every discovered trio, re-cut from its own stored source and compared with the tracked glb.
+      # Every discovered trio, re-cut from its own stored source and compared with the tracked
+      # model under its certified rung records (ADR 0035).
       # The reports are kept whole: warnings never fail this lane, and the artifact is where they
       # are read.
-      - name: Verify every asset through the door
+      - name: Verify every asset through the build
         if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
@@ -320,7 +327,7 @@ jobs:
           fi
           printf 'asset: %s\n' "${stems[@]}"
           for stem in "${stems[@]}"; do
-            python3 scripts/tank/asset_door.py verify "${stem}.blend" \
+            python3 scripts/tank/build.py verify "${stem}.blend" \
               2>&1 | tee "${RUNNER_TEMP}/asset-reports/$(basename "${stem}").txt"
           done
 
@@ -334,15 +341,16 @@ jobs:
             --python .agents/blender/test_addon.py
 
       # The derivation's laws, mutated one at a time on a real exported/baked pair; the door's own
-      # chain and its refusals; the finding shape; the coverage table; and the assets lane's own
-      # discovery, selection and hydration.
-      - name: The derivation and door suites
+      # chain and its refusals; the trio the build assembles and takes apart; the finding shape; the
+      # coverage table; and the assets lane's own discovery, selection and hydration.
+      - name: The derivation, door and build suites
         if: steps.scope.outputs.affected == 'true'
         run: |
           set -euo pipefail
           python3 scripts/tank/test_report.py
           python3 scripts/tank/test_refusals.py
           python3 scripts/tank/test_glb_ktx2.py
+          python3 scripts/tank/test_build.py
           python3 scripts/tank/test_asset_door.py
           sh scripts/hooks/test_pushed_assets.sh
 

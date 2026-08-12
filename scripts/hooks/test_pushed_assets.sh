@@ -85,10 +85,13 @@ git -C "$REPO" config user.email door@overmatch.test
 git -C "$REPO" config user.name  door
 git -C "$REPO" config commit.gpgsign false
 
-# BASE — one asset trio, the shared material library, and some code.
+# BASE — one asset trio with the two artifacts the build publishes beside it, the shared material
+# library, and some code.
 pointer assets/tiger_1/tiger_1.blend "tiger blend v1" place
 write   assets/tiger_1/tiger_1.tank.ron "TankSpec(mass: 1.0)"
 pointer assets/tiger_1/tiger_1.glb   "tiger model v1" place
+pointer assets/tiger_1/tiger_1.sim.glb "tiger sim v1" place
+write   assets/tiger_1/tiger_1.lod.json "{}"
 pointer assets/materials/materials.blend "material library v1" place
 write   assets/materials/materials.ron "SubstanceRegistry()"
 write   src/bake.rs "// the consumer contract"
@@ -113,6 +116,8 @@ PARTIAL=$(at HEAD)
 pointer assets/panther/panther.blend "panther blend v1" place
 write   assets/panther/panther.tank.ron "TankSpec(mass: 2.0)"
 pointer assets/panther/panther.glb   "panther model v1" place
+pointer assets/panther/panther.sim.glb "panther sim v1" place
+write   assets/panther/panther.lod.json "{}"
 commit "a second vehicle"
 TWO=$(at HEAD)
 
@@ -191,8 +196,8 @@ is "a revision predating any asset holds none" \
 is "the list is sorted, byte by byte" \
    "$(assets_trios "$TWO")" "$(assets_trios "$TWO" | LC_ALL=C sort)"
 
-is "a stem names the trio and nothing else" \
-   "3" "$(git -C "$REPO" ls-tree -r --name-only "$TWO" | grep -c '^assets/panther/panther\.')"
+is "a stem names the source trio and the two artifacts the build publishes, and nothing else" \
+   "5" "$(git -C "$REPO" ls-tree -r --name-only "$TWO" | grep -c '^assets/panther/panther\.')"
 
 # ── selection: which trios a push must verify ────────────────────────────────────────────────────
 
@@ -234,6 +239,9 @@ for path in \
     scripts/toolchain.py \
     scripts/encode-tank-ktx2.sh \
     scripts/tank/asset_door.py \
+    scripts/tank/build.py \
+    scripts/tank/trio.py \
+    scripts/tank/chains.py \
     scripts/tank/glb_ktx2.py \
     scripts/tank/report.py \
     .agents/blender/export_tank.py \
@@ -503,18 +511,22 @@ is "…beside the shared material library its source links" \
 is "…and the registry half of that library, from the same revision" \
    "SubstanceRegistry()" "$(cat "$SCRATCH/whole/assets/materials/materials.ron" 2>/dev/null)"
 
-is "…with all three siblings, and their real bytes" \
-   "tiger blend v1 TankSpec(mass: 1.0) tiger model v1" \
+is "…with every sibling the build reads and publishes, and their real bytes" \
+   "tiger blend v1 TankSpec(mass: 1.0) tiger model v1 tiger sim v1 {}" \
    "$(cat "$SCRATCH/whole/assets/tiger_1/tiger_1.blend" \
           "$SCRATCH/whole/assets/tiger_1/tiger_1.tank.ron" \
-          "$SCRATCH/whole/assets/tiger_1/tiger_1.glb" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+          "$SCRATCH/whole/assets/tiger_1/tiger_1.glb" \
+          "$SCRATCH/whole/assets/tiger_1/tiger_1.sim.glb" \
+          "$SCRATCH/whole/assets/tiger_1/tiger_1.lod.json" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
 is "a second vehicle hydrates by the same rule" \
-   "panther blend v1 TankSpec(mass: 2.0) panther model v2" \
+   "panther blend v1 TankSpec(mass: 2.0) panther model v2 panther sim v1 {}" \
    "$(assets_hydrate "$PANTHER" assets/panther/panther "$SCRATCH/second" >/dev/null 2>&1
       cat "$SCRATCH/second/assets/panther/panther.blend" \
           "$SCRATCH/second/assets/panther/panther.tank.ron" \
-          "$SCRATCH/second/assets/panther/panther.glb" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+          "$SCRATCH/second/assets/panther/panther.glb" \
+          "$SCRATCH/second/assets/panther/panther.sim.glb" \
+          "$SCRATCH/second/assets/panther/panther.lod.json" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 
 assets_hydrate "$UNFETCHED" assets/tiger_1/tiger_1 "$SCRATCH/broken" >/dev/null 2>&1
 says "an asset with one unfetchable file refuses whole" no $?
@@ -670,15 +682,15 @@ cargo clippy" "$(hook OVERMATCH_SKIP= )"
 # The asset lane runs but examines nothing here: the ref list is empty, so it discovers no revision
 # and verifies no trio. That it ANNOUNCED itself is the whole claim — which trios it then picks is
 # `assets_push_targets`, driven above.
-is "…and the asset door, which this empty push gives no asset to verify" \
+is "…and the tank build, which this empty push gives no asset to verify" \
    "yes" \
    "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+      grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
 
-is "…and not the asset door when it is skipped" \
+is "…and not the tank build when it is skipped" \
    "no" \
    "$(hook OVERMATCH_SKIP=assets >/dev/null
-      grep -q 'pre-push ▸ asset door' "$WORK/hook.out" && echo yes || echo no)"
+      grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
 
 is "…and it says the two it did not run and where they are" \
    "yes" \

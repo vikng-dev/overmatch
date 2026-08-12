@@ -83,7 +83,8 @@ assets_blend_shape() {   # <rev>
 # The stems on stdin whose trio has a file in the changed set.
 assets_changed_trios() {   # <changed-paths-file>; stems on stdin
     while read -r _stem; do
-        if grep -qxF -e "$_stem.blend" -e "$_stem.tank.ron" -e "$_stem.glb" "$1"; then
+        if grep -qxF -e "$_stem.blend" -e "$_stem.tank.ron" -e "$_stem.glb" \
+                     -e "$_stem.sim.glb" -e "$_stem.lod.json" "$1"; then
             printf '%s\n' "$_stem"
         fi
     done
@@ -101,7 +102,7 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 # door now answers differently about bytes that did not move, so every discovered trio is
 # re-verified rather than none of them.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/bin/asset_verify\.rs$|src/lib\.rs$)'
+    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/bin/asset_verify\.rs$|src/lib\.rs$)'
 }
 
 # EVERY (revision, asset) pair a push must verify, one per line:
@@ -267,9 +268,10 @@ assets_hydrate_file() {   # <rev> <path> <dest>
     cp "$_object" "$3"
 }
 
-# One asset's bytes, laid out the way the door and the source pass read them: the trio at
+# One asset's bytes, laid out the way the build and the source pass read them: the source trio at
 # `<dest>/assets/<id>/<id>.{blend,tank.ron,glb}` — `L1.SAVED_SOURCE` measures those two directory
-# names — beside the shared material library, `<dest>/assets/materials/materials.{blend,ron}`. The
+# names — the two artifacts the build publishes beside the model (`.sim.glb` and `.lod.json`, ADR
+# 0035), and the shared material library, `<dest>/assets/materials/materials.{blend,ron}`. The
 # blend is where the tank source's own relative library link resolves to; the RON is the numeric
 # half of the same library, and the door hands it to the consumer contract as `--registry` so the
 # gate reads THIS revision's substance data rather than the work tree's. Both are DATA, and data
@@ -280,7 +282,7 @@ assets_hydrate() {   # <rev> <stem> <dest-root>
     _directory=$3/$(dirname "$2")
     _name=$(basename "$2")
     mkdir -p "$_directory"
-    for _extension in .blend .tank.ron .glb; do
+    for _extension in .blend .tank.ron .glb .sim.glb .lod.json; do
         assets_hydrate_file "$1" "$2$_extension" "$_directory/$_name$_extension" || return 1
     done
     _materials=$(dirname "$(dirname "$2")")/materials

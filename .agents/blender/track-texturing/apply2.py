@@ -60,12 +60,12 @@ print(f"OK unwrap={len(link.data.uv_layers)}L tile={TILE_M}m mat={MAT_NAME} imgs
 
 # Save, then hand the SAVED file to the one door. It opens the blend in its own Blender, runs the
 # L1 source pass, exports the raw candidate, runs the consumer contract and the KTX2 derivation,
-# and only then replaces the tracked glb — `scripts/tank/asset_door.py`. Nothing about the export
+# cuts the LOD chains and publishes the trio — `scripts/tank/build.py`. Nothing about the export
 # is decided here.
 bpy.ops.wm.save_mainfile()
 door = subprocess.run(
-    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "asset_door.py"),
-     "export", bpy.data.filepath],
+    [shutil.which("python3") or "python3", os.path.join(ROOT, "scripts", "tank", "build.py"),
+     "build", bpy.data.filepath],
     cwd=ROOT,
 )
 if door.returncode:
