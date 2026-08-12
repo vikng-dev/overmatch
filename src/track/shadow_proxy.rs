@@ -5,7 +5,7 @@
 //!
 //! A Tiger carries `link_count × 2` real shoes (MEASURED 97 × 2 = 194 entities) at MEASURED 1 661
 //! triangles each — ~322 k triangles per tank, and ~1.08 M before the LOD pipeline re-certified the
-//! shoe (`assets/lod_manifest.json`; the cascade numbers below were MEASURED at the old count and
+//! shoe (the cascade numbers below were MEASURED at the old count and
 //! are therefore the pessimistic end, not a stale claim about the
 //! asset). Every one of them is re-submitted into EVERY shadow
 //! cascade, with no detail reduction: MEASURED 2026-07-27, a tank costs 0.364 ms per cascade

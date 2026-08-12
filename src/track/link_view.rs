@@ -4,8 +4,8 @@
 //! Everything upstream of here draws the track as a LINE — the conformed pin line, the reference
 //! loop, the cast routes. A line is the right thing to reason about and the wrong thing to look at:
 //! you cannot see a shoe overhang a board edge, and you cannot see the belt articulate. This module
-//! lays the real shoe — the authored mesh as the LOD pipeline certifies it, a MEASURED 1 661
-//! triangles (`assets/lod_manifest.json`, level 0) — on the same stations the physics already walks,
+//! lays the real shoe — the authored mesh as the tank build certifies it, rung 0 of the `Link#0`
+//! chain in `assets/tiger_1/tiger_1.lod.json` — on the same stations the physics already walks,
 //! so the model is
 //! judged on actual track. It is the ONE home for that: the game shipped procedural `Cuboid` boxes
 //! until 2026-07-26 while the sandbox instanced the real shoe, which is two answers to "what does
