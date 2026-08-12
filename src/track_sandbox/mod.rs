@@ -308,6 +308,12 @@ pub fn plugin(app: &mut App) {
     // Startup — the vehicle's single source of truth, shared verbatim with the game (which mounts
     // the same pair). Its resource only becomes VISIBLE in `Update`, which is what
     // forces the deferred [`build_rig`] below.
+    // The certificate: the sim artifact `bake` opens is fingerprinted before it is read, and the
+    // shoe's chain is resolved for the link view below.
+    app.add_plugins((
+        crate::geometry_lod::sim_plugin,
+        crate::geometry_lod::view_plugin,
+    ));
     app.add_plugins((crate::spec::plugin, crate::bake::plugin))
         // This is a WINDOWED root on `DefaultPlugins`, so it is on bevy's deadlocking exit path
         // exactly like the game is: without this, quitting the sandbox wedges the process instead

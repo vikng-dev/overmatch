@@ -68,6 +68,11 @@ mod exact;
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
 mod frame_cost;
+/// The tank build's certificate applied at runtime (ADR-0035): `<id>.lod.json` read as data, the
+/// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung. The single
+/// seam between what the build measured and what the renderer selects — no measurement is
+/// transcribed into Rust.
+mod geometry_lod;
 /// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the
 /// tank via `TankCommand` — fails first if sim code grows a hard render dependency.
 #[cfg(test)]
@@ -582,8 +587,11 @@ impl Plugin for SimPlugin {
             // `spec` registers the `.tank.ron` data-asset loader before `tank` spawns the tank
             // and requests one (ADR-0010).
             spec::plugin,
-            // Sim/view split: extract the tank glb as data at startup — the sim skeleton's spawn
-            // source on every composition (SP, net client, net server) — and shadow-verify it
+            // The trio's certificate, and the fingerprint of the ONE artifact both ends walk
+            // (`<id>.sim.glb`). Mounted before `bake`, which opens that artifact.
+            geometry_lod::sim_plugin,
+            // Sim/view split: extract the tank's SIM glb as data at startup — the sim skeleton's
+            // spawn source on every composition (SP, net client, net server) — and shadow-verify it
             // against every instantiated scene.
             bake::plugin,
             tank::sim_plugin,
@@ -661,6 +669,10 @@ impl Plugin for ClientPlugin {
             // pose (view-only, ADR-0014 — the server never mounts this).
             track::view_plugin,
         ));
+        // The render half of the certificate: the view artifact's fingerprint, the chain resolution
+        // and the two range writers. Separate call — the tuple above is at bevy's 15-plugin arity
+        // limit.
+        app.add_plugins(geometry_lod::view_plugin);
         app.add_plugins(drive_hud::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
@@ -729,6 +741,9 @@ impl Plugin for NetClientPlugin {
             // `net::render_error` orders the set after its correction smoothing).
             track::view_plugin,
         ));
+        // The render half of the certificate (see `ClientPlugin`), separate for the same arity
+        // reason as the block below.
+        app.add_plugins(geometry_lod::view_plugin);
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             drive_hud::plugin,

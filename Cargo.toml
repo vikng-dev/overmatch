@@ -30,6 +30,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = { version = "1", optional = true }
 bevy_egui = { version = "0.41", optional = true }
 gltf = "1.4"
+# Already in the tree through the asset stack (same locked version — this adds no compiled crate);
+# named directly only by `geometry_lod::certificate`, which fingerprints the shipped trio's bytes
+# against the `view_glb_sha` / `sim_glb_sha` the tank build recorded (ADR-0035).
+sha2 = "0.10"
 lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
