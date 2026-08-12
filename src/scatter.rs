@@ -28,6 +28,13 @@ use crate::Layer;
 use crate::map::{InstanceRecord, MapManifest};
 use crate::terrain_grid::HeightGrid;
 
+/// Marks a scatter proxy's static collider — every house cuboid and fir trunk, and nothing else
+/// (the canopy cone is view-only geometry and carries no collider). Spawned in every composition,
+/// server included, so the tag rides with the shape rather than with a window; the client's
+/// scatter-hit read ([`crate::vfx`]) filters its casts to entities carrying it.
+#[derive(Component)]
+pub(crate) struct ScatterProxy;
+
 /// Fir trunk radius (m) at instance scale 1 — the cylinder collider's radius and the trunk mesh's.
 const TRUNK_RADIUS_M: f32 = 0.4;
 
@@ -284,6 +291,7 @@ pub(crate) fn spawn(
                     RigidBody::Static,
                     Collider::cuboid(1.0, 1.0, 1.0),
                     statics,
+                    ScatterProxy,
                 ));
                 if let Some(view) = &view {
                     entity.insert((Mesh3d(view.cube.clone()), MeshMaterial3d(view.wall.clone())));
@@ -308,6 +316,7 @@ pub(crate) fn spawn(
                     RigidBody::Static,
                     Collider::cylinder(TRUNK_RADIUS_M, height_m),
                     statics,
+                    ScatterProxy,
                 ));
                 if let Some(view) = &view {
                     let (trunk_mesh, canopy_mesh) = view.fir[placement.prototype]
@@ -526,6 +535,22 @@ mod tests {
             .iter(world)
             .count();
         assert_eq!(colliders, 709, "one static collider per instance");
+        // The view read casts against the marker, not against the terrain layer at large: a
+        // collider without it is invisible to the scatter-hit effect, so the tag must be on ALL of
+        // them and on nothing else.
+        let tagged = world
+            .query_filtered::<Entity, With<ScatterProxy>>()
+            .iter(world)
+            .count();
+        assert_eq!(
+            tagged, colliders,
+            "every scatter collider is a ScatterProxy"
+        );
+        let untagged = world
+            .query_filtered::<Entity, (With<Collider>, Without<ScatterProxy>)>()
+            .iter(world)
+            .count();
+        assert_eq!(untagged, 0, "no scatter collider ships untagged");
         let meshes = world.query::<&Mesh3d>().iter(world).count();
         assert_eq!(meshes, 0, "a windowless composition draws nothing");
     }
