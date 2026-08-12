@@ -600,6 +600,30 @@ pub(crate) struct Projectile {
     disc: walk::DiscFrame,
 }
 
+impl Projectile {
+    /// The round's caliber (m) — the same value [`Impact::caliber`] carries, read by view code that
+    /// sizes an effect off a shell in flight rather than off a landed impact.
+    pub(crate) fn caliber(&self) -> f32 {
+        self.caliber
+    }
+
+    /// A shell of `caliber` at rest, for view-layer tests that need a projectile ENTITY and none of
+    /// the flight state (the view never marches one). Not compiled into a shipped binary.
+    #[cfg(test)]
+    pub(crate) fn view_test_round(caliber: f32) -> Self {
+        Self {
+            velocity: Vec3::ZERO,
+            caliber,
+            mass: 1.0,
+            drag_k: 0.0,
+            disc: walk::DiscFrame {
+                u: Vec3::X,
+                v: Vec3::Y,
+            },
+        }
+    }
+}
+
 /// Per-shell latch: one [`ShellDamage`] report per damaging shot.
 ///
 /// Invariant: created with the projectile, never attached after replication. See ADR-0014.

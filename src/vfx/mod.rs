@@ -10,6 +10,7 @@ mod ember;
 mod impact;
 mod muzzle;
 mod prewarm;
+mod scatter_hit;
 mod tracer;
 mod trail;
 
@@ -30,6 +31,8 @@ pub fn plugin(app: &mut App) {
         trail::plugin,
         ember::plugin,
         tracer::plugin,
+        // The scatter-crossing read: rides `impact`'s terrain effects, so it mounts after it.
+        scatter_hit::plugin,
     ));
     // The prewarm rig wants the OTHER modules' preloaded assets (it warms the exact mesh/material
     // combinations they will draw), so its spawn orders after their Startup setups.
