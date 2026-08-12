@@ -327,7 +327,7 @@ struct ShoeLevel {
 /// skipped for shedding under the 30 % `SKIP_FRACTION` (512 tris at 24.5 %, 186 at 25.0 %), and the
 /// manifest carries both skip records.
 ///
-/// L4's band opens at 1 499.58 m, INSIDE the world: the shipped map is 1 500 m across, so its
+/// L4's band opens at 1 486.36 m, INSIDE the world: the shipped map is 1 500 m across, so its
 /// diagonal — the farthest a camera can be from a surface, and the ladder's right wall — is
 /// 2 121.32 m. The level is reachable, in the far corner, which is what it was generated for.
 ///
@@ -335,8 +335,8 @@ struct ShoeLevel {
 /// and the generator considers every one of them; each answers with the decimator's 140-triangle
 /// topology floor, 4.1 % below L4's 146 and far under `SKIP_FRACTION`. So the chain's depth is set
 /// by how far this shoe can be collapsed, not by how big the map is — and widening the world by
-/// half added no level. `config.RATIFICATION_EVIDENCE["skipped_rungs"]` enumerates all eight skips
-/// and the manifest carries them.
+/// half added no level. The manifest's `skipped_rungs` enumerates all eight skips, with what each
+/// one was lost to; `chain.py --verify` validates those records rather than reading past them.
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung1.glb",
@@ -1754,11 +1754,14 @@ mod tests {
     /// The two assertions on the way past are the premises the bind rests on, and they now point in
     /// OPPOSITE directions:
     ///
-    ///   * TANGENT must be PRESENT. The generator bakes it (`scripts/lod/generate.py`) and the
-    ///     manifest certifies it on the decoded bytes, so a re-export that stopped baking would
-    ///     silently fall back to [`lod_shoe_meshes`]' runtime mikktspace — a safety net, not a plan,
-    ///     and precisely the path that used to produce defaulted tangents on real geometry. Reading
-    ///     the attribute through rather than regenerating it is what makes the gates below charge
+    ///   * TANGENT must be PRESENT. The generator bakes it (`scripts/lod/generate.py` passes
+    ///     `export_tangents`), and NOTHING UPSTREAM CHECKS THAT ANY MORE — ADR 0036 §4 retired the
+    ///     lane's tangent gates along with the rendered-difference gate they served, so schema v2
+    ///     carries no tangent field and `chain.py --verify` has no opinion. That makes this
+    ///     assertion the only remaining guard: a re-export that stopped baking would silently fall
+    ///     back to [`lod_shoe_meshes`]' runtime mikktspace — a safety net, not a plan, and
+    ///     precisely the path that used to produce defaulted tangents on real geometry. Reading the
+    ///     attribute through rather than regenerating it is what makes the gates below charge
     ///     against the BYTES THAT SHIP.
     ///   * MATERIAL must be ABSENT, unchanged: a material-free primitive is what keeps `bevy_gltf`
     ///     from running a mikktspace pass of its own over what the exporter already solved, and it

@@ -89,7 +89,7 @@ def synthetic_manifest():
     dev1, pair1 = 4.0, 5.0
     switch1 = chain.switch_distance_m(max(dev1, pair1), radius, VIEW)
     asset_name = CONFIG.ASSETS[0]["name"]
-    diagonal_mm = math.sqrt(sum(v * v for v in SOURCE_BBOX_MM))
+    diagonal_mm = CONFIG.diagonal_mm_from_bbox(SOURCE_BBOX_MM)
     budget1 = CONFIG.verdict_node_budget(diagonal_mm, 7.78)
     return {
         "schema": "overmatch.lod.manifest",
@@ -124,7 +124,19 @@ def synthetic_manifest():
             "termination": "right_wall",
             "decimations": 12, "verdicts": 9, "verdict_nodes": 4096,
             "undecided_verdicts": 0, "distinct_candidates": 8,
-            "skipped_rungs": [],
+            "skipped_rungs": [
+                # One of each shape the lane can write, so the verifier's checks have something to
+                # be right about: a rung the geometry could not meet, and one the sparse-chain rule
+                # dropped. Both with the counters a clean search produces.
+                {"rung": 1, "e_target_mm": 3.89, "reason": "no structurally valid candidate meets "
+                 "the target", "lost_to": "geometry", "undecided_verdicts": 0,
+                 "verdict_node_budget": CONFIG.verdict_node_budget(diagonal_mm, 3.89),
+                 "floor_tris": 100},
+                {"rung": 3, "e_target_mm": 15.56, "best_tris": 380, "shed_fraction": 0.05,
+                 "reason": "sheds 5.0% of L1, below SKIP_FRACTION 30%", "lost_to": "skip_fraction",
+                 "undecided_verdicts": 0,
+                 "verdict_node_budget": CONFIG.verdict_node_budget(diagonal_mm, 15.56)},
+            ],
             "levels": [
                 {"level": 0, "rung": 0, "role": "source", "tris": 1000, "verts": 2400,
                  "glb": "a/source.glb", "glb_sha256": "a" * 64, "node": "Probe",
@@ -513,28 +525,13 @@ class RederivationSweepTests(unittest.TestCase):
         # turned every level the manifest no longer has into an IndexError — a sweep that errors is
         # a sweep that proves nothing, which is exactly the failure mode this class exists to catch
         # one layer down. So the count comes from the shipped manifest.
-        levels = json.loads(self.text)["assets"][0]["levels"]
-        self.level_count = len(levels)
-        # WHICH level abstains is a property of the corpus, not an index to remember: the gate
-        # abstains below `min_footprint_px`, so it is whichever level got small enough far enough
-        # away. Naming `levels[4]` hardcoded both the ladder's length AND which rung crossed that
-        # line; the re-cut moved it to L3 and three mutation tests turned into IndexErrors, which
-        # assert nothing at all.
-        abstaining = [
-            level["level"] for level in levels
-            if level.get("render_gate", {}).get("abstained")
-        ]
-        self.abstaining = abstaining[0] if abstaining else None
-        # The DEEPEST SCORED level, by list index. The three "cannot buy an abstention" mutations
-        # below have to start from a level the gate actually judged: aimed at one that already
-        # abstains they mutate nothing that matters and assert nothing at all, which is the same
-        # vacuity the hardcoded index above produced by a different route. Deepest, because that is
-        # the one closest to the footprint floor and so the one an abstention is worth buying for.
-        scored = [
-            index for index, level in enumerate(levels)
-            if level.get("render_gate") and not level["render_gate"].get("abstained")
-        ]
-        self.scored_index = scored[-1] if scored else None
+        # The ladder's LENGTH is an OUTPUT of generation, never a constant: `skip_fraction` and the
+        # topology floor decide it, and this corpus has already gone from five levels to four when
+        # the shoe was re-cut from a welded 764-triangle source. A hardcoded `range(1, 5)` here
+        # turned every level the manifest no longer has into an IndexError — a sweep that errors is
+        # a sweep that proves nothing, which is exactly the failure mode this class exists to catch
+        # one layer down. So the count comes from the shipped manifest.
+        self.level_count = len(json.loads(self.text)["assets"][0]["levels"])
 
     def mutated(self, mutate):
         manifest = json.loads(self.text)
@@ -544,9 +541,6 @@ class RederivationSweepTests(unittest.TestCase):
     def assert_caught(self, description, mutate):
         failures = self.mutated(mutate)
         self.assertTrue(failures, f"{description} was not caught by verification")
-
-    def first_gate(self, manifest):
-        return manifest["assets"][0]["levels"][1]["render_gate"]
 
     def test_every_recorded_switch_distance_is_rederived(self):
         for index in range(1, self.level_count):
@@ -690,6 +684,103 @@ class RederivationSweepTests(unittest.TestCase):
                     lambda m, i=index: m["assets"][0]["levels"][i].__setitem__(
                         "verdict_node_budget",
                         m["assets"][0]["levels"][i]["verdict_node_budget"] * 2,
+                    ),
+                )
+
+    def test_a_corrupted_skip_record_cannot_suppress_the_fidelity_warning(self):
+        """MUTANT SWEEP over `skipped_rungs`, which schema v2 recorded and never looked at.
+
+        These records are the manifest's whole account of what the ladder did NOT ship, and one of
+        the three reasons — `verdict_node_budget` — is the only place a corpus admits it traded
+        fidelity for wall time. Left unvalidated, any malformation silently removes that admission:
+        a rung filed under an invented reason, a missing counter, a rung that is not on the grid.
+        """
+        skipped = json.loads(self.text)["assets"][0].get("skipped_rungs") or []
+        if not skipped:
+            self.skipTest("this corpus skipped no rungs")
+
+        def wreck(mutate):
+            return lambda m: mutate(m["assets"][0]["skipped_rungs"][0])
+
+        for description, mutate in (
+            ("an invented lost_to", lambda s: s.__setitem__("lost_to", "vibes")),
+            ("a removed lost_to", lambda s: s.pop("lost_to", None)),
+            ("a removed reason", lambda s: s.__setitem__("reason", "")),
+            ("a removed counter", lambda s: s.pop("undecided_verdicts", None)),
+            ("a negative counter", lambda s: s.__setitem__("undecided_verdicts", -1)),
+            ("a fractional counter", lambda s: s.__setitem__("verdict_node_budget", 1.5)),
+            ("a rung off the grid", lambda s: s.__setitem__("rung", 99)),
+            ("a target off the grid", lambda s: s.__setitem__("e_target_mm", 1.0)),
+        ):
+            with self.subTest(mutation=description):
+                self.assert_caught(description, wreck(mutate))
+
+        with self.subTest(mutation="skipped_rungs replaced by a scalar"):
+            self.assert_caught(
+                "skipped_rungs is not a list",
+                lambda m: m["assets"][0].__setitem__("skipped_rungs", 0),
+            )
+
+    def test_an_undecided_rung_filed_as_an_ordinary_skip_is_refused(self):
+        """THE MISATTRIBUTION, both halves: the writer must not produce it and the verifier must
+        not accept it.
+
+        A rung the search abstained on is lost to the node budget whatever else is also true of it —
+        the candidate it could not decide may have been cheaper than the one it settled on, so the
+        shed fraction that failed `SKIP_FRACTION` was measured against a winner that only won
+        because a rival went unproven. Filing that as `skip_fraction` reads as an ordinary
+        sparse-chain skip and suppresses the warning on exactly the rung that earned one.
+        """
+        skipped = json.loads(self.text)["assets"][0].get("skipped_rungs") or []
+        if not skipped:
+            self.skipTest("this corpus skipped no rungs")
+        for reason in ("skip_fraction", "geometry"):
+            with self.subTest(lost_to=reason):
+                def wreck(m, r=reason):
+                    record = m["assets"][0]["skipped_rungs"][0]
+                    record["undecided_verdicts"] = 3
+                    record["lost_to"] = r
+
+                self.assert_caught(f"an UNDECIDED rung filed as {reason}", wreck)
+
+    def test_a_budget_lost_rung_is_warned_about_rather_than_passed_over(self):
+        """The warning is the whole point of the field, so it is asserted rather than assumed."""
+        skipped = json.loads(self.text)["assets"][0].get("skipped_rungs") or []
+        if not skipped:
+            self.skipTest("this corpus skipped no rungs")
+        manifest = json.loads(self.text)
+        record = manifest["assets"][0]["skipped_rungs"][0]
+        record["undecided_verdicts"] = 2
+        record["lost_to"] = "verdict_node_budget"
+        failures, warnings = chain.verify(manifest, chain.Tree(self.root))
+        self.assertEqual(failures, [], "a correctly filed budget loss is legal, not a failure")
+        self.assertTrue(
+            any("LOST TO THE NODE BUDGET" in w for w in warnings),
+            f"a rung lost to the budget must be said out loud, got {warnings}",
+        )
+
+    def test_a_budget_computed_from_a_fuller_diagonal_than_the_manifest_records_is_refused(self):
+        """MUTANT for the split brain, end to end.
+
+        The generator used to compute this budget from the evaluated source's full-precision
+        diagonal while the verifier recomputed it from the recorded box; the two agreed only because
+        no asset had landed near a truncation boundary. This asserts what the verifier does about a
+        manifest carrying the OTHER reading — it refuses it — which is both the guard and the reason
+        the generator may only ever read the box it records.
+        """
+        shipped = json.loads(self.text)["assets"][0]
+        recorded = shipped["source"]["validity"]["bbox_mm"]
+        fuller = math.sqrt(sum((float(v) + 4.0e-5) ** 2 for v in recorded))
+        for index in range(1, self.level_count):
+            level = shipped["levels"][index]
+            alternative = CONFIG.verdict_node_budget(fuller, level["e_target_mm"])
+            if alternative == level["verdict_node_budget"]:
+                continue        # this rung does not straddle a boundary; the next one may
+            with self.subTest(level=index):
+                self.assert_caught(
+                    f"L{index} budget from an unrounded diagonal",
+                    lambda m, i=index, v=alternative: m["assets"][0]["levels"][i].__setitem__(
+                        "verdict_node_budget", v
                     ),
                 )
 
@@ -1040,7 +1131,13 @@ class ShippedManifestTests(unittest.TestCase):
             + chain.SOURCE_LEVEL_NUMERIC_FIELDS
             + chain.SOURCE_NUMERIC_FIELDS
             + chain.LEVEL_VALIDITY_FIELDS
+            + chain.SKIP_NUMERIC_FIELDS
+            + chain.SKIP_COUNTER_FIELDS
         )
+        # The skip record's own non-numeric evidence, checked by `_check_skipped_rungs`: `lost_to`
+        # against a declared set and against the record's own UNDECIDED count, `reason` for being
+        # said at all.
+        checked |= {"lost_to", "reason"}
         checked |= {field for field, _c, _n in chain.GENERATOR_PINNED_FIELDS}
         checked |= {"schema_version", "version", "topology_floor_tris"}
         checked |= set(CONFIG.GATES)

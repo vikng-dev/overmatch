@@ -84,6 +84,22 @@ LEVEL_VALIDITY_FIELDS = (
 #: could then be bought by shrinking the gate's own copy.
 LEVEL_VALIDITY_VECTORS = ("bbox_mm",)
 
+#: A `skipped_rungs` record's required numerics, and the only three things `lost_to` may say.
+#:
+#: THE SKIP RECORDS ARE EVIDENCE, not commentary, and until now nothing looked at them. They are the
+#: manifest's whole account of what the ladder DID NOT ship and why, and one of the three reasons —
+#: `verdict_node_budget` — is the only place a corpus admits it traded fidelity for wall time. A
+#: record nobody validates is a record that can suppress that admission by being malformed: an
+#: unknown `lost_to`, a missing counter, or a positive `undecided_verdicts` filed under
+#: `skip_fraction` all leave `verify` silently agreeable.
+SKIP_NUMERIC_FIELDS = ("rung", "e_target_mm", "undecided_verdicts", "verdict_node_budget")
+#: Counters inside a skip record that must be non-negative integers wherever they appear.
+SKIP_COUNTER_FIELDS = ("undecided_verdicts", "verdict_node_budget", "floor_tris", "best_tris")
+#: The legal values, READ FROM `measure` rather than spelled again — the same declaration the
+#: generator picks from. Two copies of this tuple is two rules, which is how the writer came to file
+#: an UNDECIDED rung under `skip_fraction` while the verifier's warning only knew about the third.
+SKIP_LOST_TO = M.SKIP_LOST_TO
+
 #: Generator provenance that must be present AND must match this tree.
 GENERATOR_PINNED_FIELDS = (
     ("blender", "EXPECTED_BLENDER", lambda v: v.split()[0]),
@@ -111,11 +127,11 @@ GENERATOR_PINNED_FIELDS = (
 #: neither set, so a field added later cannot quietly become decoration that looks like evidence —
 #: which is what `schema_version`, `defect_fraction` and the whole render record had become.
 INFORMATIONAL_FIELDS = frozenset({
-    "schema", "script", "right_wall_source", "provenance", "name", "note", "reason",
+    "schema", "script", "right_wall_source", "provenance", "name", "note",
     "identity_proof", "termination", "role", "node", "glb",
     "object", "blend", "bbox_mm", "material", "evaluated_digest",
-    "skipped_rungs", "rung", "level", "parent_level", "e_target_mm", "best_tris",
-    "shed_fraction", "floor_tris", "lost_to", "cleanup", "faces_before", "faces_after",
+    "skipped_rungs", "rung", "level", "parent_level", "e_target_mm",
+    "shed_fraction", "cleanup", "faces_before", "faces_after",
     "dissolve_dist_m",
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
     "shipped_matches_source", "decimations", "verdicts", "verdict_nodes", "distinct_candidates",
@@ -271,6 +287,78 @@ def _check_schema(manifest, failures):
                 failures.append(f"{label}: role is {level.get('role')!r}, expected 'generated'")
                 ok = False
             ok = _require_numbers(level, LEVEL_NUMERIC_FIELDS, label, "level", failures) and ok
+        ok = _check_skipped_rungs(asset, failures) and ok
+    return ok
+
+
+def _check_skipped_rungs(asset, failures):
+    """The record of what the ladder did NOT ship, checked as evidence rather than read as prose."""
+    name = asset.get("name")
+    skipped = asset.get("skipped_rungs")
+    if not isinstance(skipped, list):
+        failures.append(f"{name}: skipped_rungs is {skipped!r}, not a list")
+        return False
+
+    ok = True
+    kept = {level.get("rung") for level in asset.get("levels") or []}
+    seen = set()
+    for entry in skipped:
+        if not isinstance(entry, dict):
+            failures.append(f"{name}: a skipped-rung record is {entry!r}, not a record")
+            ok = False
+            continue
+        label = f"{name} skipped rung {entry.get('rung')!r}"
+        if not _require_numbers(entry, SKIP_NUMERIC_FIELDS, label, "skip record", failures):
+            ok = False
+            continue
+        rung = entry["rung"]
+        if not isinstance(rung, int) or isinstance(rung, bool) or not 1 <= rung <= CONFIG.MAX_RUNGS:
+            failures.append(f"{label}: not a rung of the grid (1..{CONFIG.MAX_RUNGS})")
+            ok = False
+            continue
+        if rung in seen:
+            failures.append(f"{label}: recorded twice")
+            ok = False
+        seen.add(rung)
+        if rung in kept:
+            failures.append(f"{label}: this rung also earned a level — it cannot be both")
+            ok = False
+        expected_target = CONFIG.E1_MM * CONFIG.OCTAVE ** (rung - 1)
+        if abs(entry["e_target_mm"] - expected_target) > 1e-3:
+            failures.append(
+                f"{label}: records a {entry['e_target_mm']} mm target, but rung {rung} is "
+                f"{expected_target:.4f} mm on the global grid"
+            )
+            ok = False
+        for key in SKIP_COUNTER_FIELDS:
+            if key not in entry:
+                continue
+            value = entry[key]
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                failures.append(f"{label}: {key} is {value!r}, not a non-negative whole count")
+                ok = False
+        if not str(entry.get("reason") or "").strip():
+            failures.append(f"{label}: skipped without recording why")
+            ok = False
+        if entry.get("lost_to") not in SKIP_LOST_TO:
+            failures.append(
+                f"{label}: lost_to is {entry.get('lost_to')!r}, not one of {list(SKIP_LOST_TO)} — "
+                f"an unknown reason is a reason nothing can act on, and one of these three is the "
+                f"only place a corpus admits it traded fidelity for wall time"
+            )
+            ok = False
+        # THE MISATTRIBUTION THIS EXISTS TO CATCH, enforced rather than trusted to the writer: a
+        # rung the search abstained on is lost to the BUDGET, whatever else is also true of it. A
+        # record filing an UNDECIDED verdict under `skip_fraction` reads as an ordinary sparse-chain
+        # skip and suppresses the fidelity warning on exactly the rung that earned one.
+        expected = M.rung_lost_to(entry.get("undecided_verdicts", 0), entry.get("lost_to"))
+        if entry.get("lost_to") != expected:
+            failures.append(
+                f"{label}: {entry['undecided_verdicts']} verdict(s) went UNDECIDED here but the "
+                f"rung is filed as {entry.get('lost_to')!r} — a rung the search could not decide "
+                f"is lost to {expected!r}, and filing it otherwise hides the trade"
+            )
+            ok = False
     return ok
 
 
@@ -382,7 +470,7 @@ def _check_level_cross_fields(asset, levels, index, row, failures):
     # THE SEARCH'S BUDGET IS ARITHMETIC ON TWO RECORDED NUMBERS, so it re-derives like every other
     # threshold rather than being taken on trust. A manifest claiming a budget this tree's constants
     # would not have granted describes a search that never ran here.
-    diagonal_mm = math.sqrt(sum(float(v) ** 2 for v in asset["source"]["validity"]["bbox_mm"]))
+    diagonal_mm = CONFIG.diagonal_mm_from_bbox(asset["source"]["validity"]["bbox_mm"])
     expected_budget = CONFIG.verdict_node_budget(diagonal_mm, level["e_target_mm"])
     if level["verdict_node_budget"] != expected_budget:
         failures.append(
@@ -539,7 +627,8 @@ def verify(manifest, tree):
                     f"{asset['name']} rung {skip.get('rung')}: LOST TO THE NODE BUDGET, not to the "
                     f"geometry — {skip.get('undecided_verdicts')} verdict(s) spent "
                     f"{skip.get('verdict_node_budget')} nodes without closing a bound. The chain "
-                    f"is coarser here than an unbounded search would have cut it."
+                    f"is coarser here than an unbounded search would have cut it. "
+                    f"({skip.get('reason')})"
                 )
 
     for chain, asset in zip(derive(manifest), manifest["assets"]):
