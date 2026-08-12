@@ -32,11 +32,13 @@ cheap gates whose failures are pure waste to discover remotely. Use
 
 The **asset lane** runs `scripts/tank/build.py verify` — the one tank build, which drives the asset
 door as its certification step — on every asset the push changes, and on every asset it discovers
-when the push changes the shared surface that verdict is computed from (the material library, the
-toolchain pin, the source pass, the build, the door, the encoder, the derivation verifier, the Rust
-consumer contract). `verify` re-cuts the asset from its own stored source and holds the tracked
-model, with its certified rung records stripped, against the result section by section — byte for
-byte wherever the chain is deterministic, and by stated KTX2 header facts over the texture payloads,
+when the push changes the shared surface that verdict is computed from. That surface is the build's
+own declared dependency list (`build.py`'s `PIPELINE_SOURCES`, which `blend_digest` hashes): the
+material library, the toolchain pin, the source pass, the build, the door, the encoder, the
+derivation verifier, the LOD lane's library — plus the Rust consumer contract, and the map the
+ladder's right wall is parsed from. `verify` re-cuts the asset from its own stored source and holds
+the tracked model, with its certified rung records stripped, against the result section by section —
+byte for byte wherever the chain is deterministic, and by stated KTX2 header facts over the payloads,
 whose bytes `basisu` varies with the SIMD it was built for. That subsumes the mip gate this lane
 replaced: a tracked glb the compare law holds against a candidate the derivation verifier passed is
 mipped KTX2 by construction. It also re-derives the sim artifact from the tracked view artifact and
@@ -45,8 +47,8 @@ here, because the certificate is what carries the measurements forward.
 
 Assets are **discovered**, never listed: an asset is a sibling trio `<id>.blend`, `<id>.tank.ron`,
 `<id>.glb` in one directory, hydrated with the two artifacts the build publishes beside the model
-(`<id>.sim.glb`, `<id>.lod.json`). Adding a second vehicle needs no hook edit. Discovery, selection and
-hydration live in `scripts/hooks/pushed_assets.sh`, sourced by the hook — and by CI's assets job,
+(`<id>.sim.glb`, `<id>.lod.json`). Adding a second vehicle needs no hook edit. Discovery, selection
+and hydration live in `scripts/hooks/pushed_assets.sh`, sourced by the hook — and by CI's assets job,
 which asks the same two predicates over the push's whole range to decide whether to run its ~35
 minute re-cut at all. All of it is driven over synthetic revisions, and the hook itself over
 synthetic pushes, by `sh scripts/hooks/test_pushed_assets.sh`.
