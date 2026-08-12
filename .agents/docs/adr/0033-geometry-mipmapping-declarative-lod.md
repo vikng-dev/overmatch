@@ -4,6 +4,8 @@ Status: DRAFT (accepted doctrine 2026-08-01; pipeline v2 in flight — e₁ pend
 collapse-vs-planar measurement, then this ADR finalizes with the ratified number)
 (amended by ADR-0035: packaging, primitive-granularity seam, per-tank certificate,
 transcription deleted)
+(amended by ADR-0036: directed search replaces exhaustive Pareto enumeration; render
+gate retired; validity gates re-scoped to measurement needs)
 
 Terms: `.agents/GLOSSARY.md` § Geometry LOD. This ADR records the decisions and the
 adversarial-review triage that shaped them.
@@ -35,6 +37,8 @@ screen-space error. No manual LOD steps exist for any asset.
 5. **Generation searches unique integer triangle targets** (never a ratio binary-search:
    measured error is not monotone in collapse ratio, and plateaus alias many ratios to one
    mesh). Candidates are cached by output hash; the Pareto-minimal valid candidate wins.
+   — superseded by ADR-0036: the search is directed with budgeted Boolean verdicts;
+   the certificate, not enumeration, carries the guarantee.
 6. **Certification order is sacred**: generate → cleanup → export → decode the shipped GLB →
    measure everything on those bytes. A metric taken before serialization certifies nothing.
 7. **Gates, all numeric, all on the shipped bytes**:
@@ -47,7 +51,8 @@ screen-space error. No manual LOD steps exist for any asset.
      parent level at the switch distance under the shipped materials and lighting, gate on
      image difference. This subsumes normal/UV/tangent thresholds no fixed number can
      honestly claim (specular sensitivity depends on roughness, maps, lighting). Worst
-     normal angle is reported as a diagnostic, not a gate.
+     normal angle is reported as a diagnostic, not a gate. — retired by ADR-0036 (it was
+     disarmed in effect and 41 % of the run); re-arm conditions recorded there.
 8. **A versioned manifest is the single seam**: asset hashes, per-level measured deviations
    (source-relative and pairwise), gate results, generator + Blender version, level list.
    The runtime chain is generated/validated FROM the manifest — hand-written ledgers already
