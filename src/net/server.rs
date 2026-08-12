@@ -26,7 +26,7 @@ use crate::state::GameplaySet;
 // bot and the spawn-map overrides cannot drift apart. Spawn points here are HORIZONTAL (XZ) — Y is
 // sampled at the moment of spawn.
 use crate::tank::{
-    PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_assets, spawn_complete_tank,
+    PendingTankAssets, Rig, TankContent, TankSimSource, load_tank_sim_assets, spawn_complete_tank,
 };
 use crate::terrain_grid::spawn_pos;
 // The spawn selector reads the world's standing geometry through the SAME encoding the analytic
@@ -93,7 +93,10 @@ pub fn run() {
         commands.trigger(Start { entity: server });
         info!("server: starting, listening on 0.0.0.0:{PORT}");
     });
-    app.add_systems(Startup, load_tank_assets);
+    // The SIM load: the spec sheet only. The dedicated server opens no view artifact — no scene,
+    // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
+    // `<id>.sim.glb`.
+    app.add_systems(Startup, load_tank_sim_assets);
     app.init_resource::<PendingClients>();
     app.init_resource::<SpawnLane>();
     app.init_resource::<SpawnOverrides>();

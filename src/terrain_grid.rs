@@ -1818,8 +1818,9 @@ pub(crate) mod tests {
     #[test]
     fn the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band() {
         use crate::camera::ORBIT_FAR;
+        use crate::geometry_lod::{TIGER_ID, ViewProfile, certificate};
         use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
-        use crate::track::link_view::{shoe_lod_levels, shoe_lod_range};
+        use crate::track::link_view::shoe_chain_key;
 
         /// How much room the placement must have on either side of the band edge. A placement that
         /// is inside its band by a metre is one heightmap re-author or one orbit tweak from being
@@ -1832,9 +1833,22 @@ pub(crate) mod tests {
         // outside-to-outside) fits well inside it, so this is a documented over-estimate rather
         // than a measurement of the track — which is what a bound wants to be.
         let shoe_reach = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
+        // The bands the shoe's chain owns, derived off the certificate at the view the corpus was
+        // quoted in — the same derivation the runtime performs, so a re-cut asset re-asks this
+        // question rather than leaving a stale answer.
+        let chain = certificate::load(&crate::assets::asset_root(), TIGER_ID)
+            .chains
+            .remove(&shoe_chain_key())
+            .expect("the shipped certificate names the shoe's chain");
+        let bands = chain.bands(ViewProfile::new(
+            crate::camera::GUNNER_FOV_FALLBACK,
+            2160.0,
+            1.0,
+        ));
         let level_at = |d: f32| {
-            (0..shoe_lod_levels())
-                .find(|&l| shoe_lod_range(l).is_visible_at_all(d))
+            bands
+                .iter()
+                .position(|band| band.is_visible_at_all(d))
                 .unwrap_or_else(|| panic!("the chain tiles [0, inf), so {d} m is owned"))
         };
 
@@ -1870,7 +1884,7 @@ pub(crate) mod tests {
                  LOD{previous} — the block must be ONE level",
             );
 
-            let owned = shoe_lod_range(level);
+            let owned = &bands[level];
             let (near_edge, far_edge) = (owned.start_margin.start, owned.end_margin.end);
             assert!(
                 nearest >= near_edge + BAND_MARGIN_M,

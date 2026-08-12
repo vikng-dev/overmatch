@@ -4,8 +4,8 @@
 //! Everything upstream of here draws the track as a LINE — the conformed pin line, the reference
 //! loop, the cast routes. A line is the right thing to reason about and the wrong thing to look at:
 //! you cannot see a shoe overhang a board edge, and you cannot see the belt articulate. This module
-//! lays the real shoe — the authored mesh as the LOD pipeline certifies it, a MEASURED 1 661
-//! triangles (`assets/lod_manifest.json`, level 0) — on the same stations the physics already walks,
+//! lays the real shoe — the authored mesh as the tank build certifies it, rung 0 of the `Link#0`
+//! chain in `assets/tiger_1/tiger_1.lod.json` — on the same stations the physics already walks,
 //! so the model is
 //! judged on actual track. It is the ONE home for that: the game shipped procedural `Cuboid` boxes
 //! until 2026-07-26 while the sandbox instanced the real shoe, which is two answers to "what does
@@ -106,10 +106,10 @@
 //! The shoes are the largest geometry pool a tank owns — the Tiger's MEASURED 97 links per side ×
 //! 2 sides = 194 shoes, at 1 661 triangles each, is ~322 k triangles per tank, and a 15v15 frame
 //! holds thirty of them. Beyond a few tens of metres none of that detail survives rasterisation, so
-//! every shoe carries a CHAIN of lower-detail siblings ([`SHOE_LOD_CHAIN`]) — machine reductions of
-//! the same authored shoe, generated beside the tank glb by `scripts/lod/generate.py` and certified
-//! into `assets/lod_manifest.json`, in the same mesh-local frame and on the same material. At the
-//! chain's floor (194 triangles) the same belt costs ~38 k per tank.
+//! every shoe carries a CHAIN of lower-detail siblings — machine reductions of the same authored
+//! shoe, cut by `scripts/tank/build.py` into the tank's own view glb as rung mesh records and
+//! certified in `assets/tiger_1/tiger_1.lod.json`, in the same mesh-local frame and on the same
+//! material. At the chain's floor the same belt costs a fraction of that per tank.
 //!
 //! The switch is bevy's own [`VisibilityRange`] — [`VisibilityRange::abrupt`], deliberately, because
 //! a crossfaded range compiles a second dithering permutation of every shoe pipeline for a
@@ -141,8 +141,8 @@
 //! probe scenario can stand its 30-tank block on either side of the swap (`OVERMATCH_PROBE_FAR` —
 //! see [`crate::tank::scenario::probe_far`]), which is what makes both halves of that measurable.
 //! If the near sweep says the walk costs more than the triangles save, the retreat is NOT editing a
-//! number here: it is regenerating the ladder with a coarser `e1_mm` (or a larger `skip_fraction`)
-//! and re-deriving this table from the manifest it writes — see [`SHOE_LOD_CHAIN`].
+//! number here — there is no number here to edit. It is re-cutting the ladder with a coarser
+//! `e1_mm` (or a larger `skip_fraction`) and rebuilding the trio; the bands follow.
 //!
 //! # `OVERMATCH_LOD_SHOWCASE=1`: judging the switches by eye
 //!
@@ -161,6 +161,9 @@
 use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
+
+use crate::geometry_lod::certificate::Rung;
+use crate::geometry_lod::{ChainRef, GeometryLodLevel};
 
 use super::forces::phase_decompose;
 use super::rig_geom::RigGeom;
@@ -202,238 +205,25 @@ const PIN_END_NODE: &str = "Pin_End";
 const LINK_MATERIAL: &str = "Mat_Track_Link";
 
 // ---------------------------------------------------------------------------------------------
-// PER-ASSET NUMBERS — every one of them TRANSCRIBED from `assets/lod_manifest.json`
+// THE CHAIN COMES FROM THE CERTIFICATE
 // ---------------------------------------------------------------------------------------------
 //
-// Nothing in this section is a knob, and nothing in it was chosen. `scripts/lod/generate.py`
-// enumerates the ladder, certifies each rung against the shipped BYTES and writes the manifest;
-// the rows below are that manifest's `assets[tiger_1_link].levels`, retyped as Rust. Regenerating
-// the ladder is therefore a MECHANICAL update here — copy the new `tris`, `deviation_mm` and
-// `switch_m` per level — and `the_wired_thresholds_are_the_manifest_derivation` fails the build if
-// a deviation is updated without its distance, which is the half of the edit that is easy to
-// forget and impossible to see. (ADR 0033 §8: the manifest is the single seam; hand-written
-// ledgers already drifted once.)
+// Nothing in this module is a measurement any more. `assets/tiger_1/tiger_1.lod.json` carries the
+// shoe's bounding radius and its rungs' certified deviations; [`crate::geometry_lod`] derives the
+// metres against the live view profile and owns the one writer that keeps them current. The
+// hand-transcribed chain table this module used to carry — five constants, a projection and four
+// rows of measured millimetres — is deleted with ADR-0035: the certificate is the single seam
+// ADR-0033 §8 demanded.
 
-/// The MEASURED triangle count of the base shoe — the manifest's level 0, which is the tank glb's
-/// own `Link` primitive. Only ever used to report the reductions as a percentage.
-const SHOE_BASE_TRIS: usize = 1520;
+/// The glTF MESH the shoe primitive belongs to. Mesh and node share the name on this model, and
+/// the certificate keys a chain on `<meshName>#<primitiveIndex>`, so the shoe's chain is `Link#0`.
+const LINK_MESH: &str = "Link";
 
-/// The main pass's WORST-CASE height in pixels, which is what the sub-pixel arithmetic below is
-/// indexed to.
-///
-/// 2160 is 4K native, and it is a CEILING rather than a guess. The settings render-scale ladder
-/// ([`crate::settings::RenderScaleLevel`]) tops out at `Percent100` — native — so no setting can
-/// make the main pass TALLER than the display it is presented on, and borderless fullscreen takes
-/// the display's own resolution rather than a capped one. A SHORTER view only makes every threshold
-/// below more conservative: fewer pixels over the same FOV means each pixel subtends more angle, so
-/// a given deviation drops under one sooner. Deriving at 1440 and playing at 2160 would be the
-/// error that actually bites — the same deviation is then 1.5× the pixels it was argued to be.
-///
-/// The manifest's `ladder.reference_view.height_px` is this number; the derivation test is what
-/// says so.
-const LOD_REF_VIEW_HEIGHT_PX: f32 = 2160.0;
-
-/// The camera the distances are chosen for: the gunner optic's authored vertical FOV. Read off
-/// [`crate::camera::GUNNER_FOV_FALLBACK`] rather than retyped, so the two cannot drift — and the
-/// manifest's `ladder.reference_view.vfov_rad` cites that same constant as its provenance.
-const LOD_REF_FOV_RAD: f32 = crate::camera::GUNNER_FOV_FALLBACK;
-
-/// The pixel budget the whole ladder is generated against: a level is admitted at the distance
-/// where its own worst-case deviation covers ONE pixel of the reference view. The manifest's
-/// `ladder.reference_view.budget_px`. Named rather than elided so the derivation below reads as the
-/// formula it is, and so a future pixel-budget SETTING has an obvious thing to displace.
-const LOD_BUDGET_PX: f32 = 1.0;
-
-/// The shoe's bounding radius about its own ORIGIN, metres (the manifest's
-/// `source.validity.origin_radius_m`).
-///
-/// Added to every switch distance, because bevy's [`VisibilityRange`] measures camera-to-ENTITY
-/// ORIGIN while the guarantee is about the SURFACE: the near face of a shoe is up to one origin
-/// radius closer than the point the runtime actually tested. 0.4 m on a track link is nearly
-/// nothing — it is carried anyway because it is the same slack `scripts/lod/config.py` adds, and a
-/// derivation that agreed with the manifest only after dropping a term would not be the manifest's
-/// derivation (ADR 0033 §9).
-const SHOE_ORIGIN_RADIUS_M: f32 = 0.380365;
-
-/// The distance beyond which a worst-case surface deviation of `worst_dev_mm` fits inside the pixel
-/// budget of the reference view — THE derivation behind every threshold in [`SHOE_LOD_CHAIN`],
-/// written once so a test can re-run it against the wired numbers.
-///
-/// ```text
-/// D = dev_m · height_px / (2 · tan(vfov / 2) · budget_px) + origin_radius_m
-/// ```
-///
-/// EXACT, not small-angle. The `D = dev_m / (vfov / height_px)` shortcut this function used to be is
-/// 0.06 % out at the optic and 5.5 % out at the commander FOV, which is precisely the kind of error
-/// that survives review while one narrow view is the only one quoted through it (ADR 0033 §9). It is
-/// the same expression as `scripts/lod/config.py::switch_distance_m`, and the two are held together
-/// by `the_wired_thresholds_are_the_manifest_derivation` re-deriving the manifest's own numbers.
-fn sub_pixel_distance_m(worst_dev_mm: f32) -> f32 {
-    let budget_rad = 2.0 * (LOD_REF_FOV_RAD / 2.0).tan() * LOD_BUDGET_PX;
-    (worst_dev_mm / 1000.0) * LOD_REF_VIEW_HEIGHT_PX / budget_rad + SHOE_ORIGIN_RADIUS_M
-}
-
-/// One reduced level: the glb the bind loads, its MEASURED triangle count, the MEASURED deviation
-/// that mesh carries, and the distance beyond which it takes over from the level above it.
-/// Deviation and distance travel TOGETHER because they are one claim — "this mesh is
-/// indistinguishable from here" — and a row that carried only the distance is a row an asset
-/// regeneration can silently falsify.
-struct ShoeLevel {
-    glb: &'static str,
-    tris: usize,
-    /// The certified UPPER bound on this level's worst-case deviation, millimetres — the larger of
-    /// the manifest's `dev_source_mm_upper` (quality against the source) and `pairwise_mm_upper`
-    /// (the size of the POP against the level it replaces). The pairwise number is the one that
-    /// matters at a switch and it is the larger one at L4, where two levels deviate from the source
-    /// in opposite directions (ADR 0033 §4).
-    worst_dev_mm: f32,
-    from_m: f32,
-}
-
-/// The reduced levels below the base shoe, NEAREST FIRST. The base owns `[0, chain[0].from_m)`,
-/// level `1 + i` owns `[chain[i].from_m, chain[i + 1].from_m)`, and the last owns everything
-/// beyond — see [`shoe_lod_range`], which is the ONE place that arithmetic lives.
-///
-/// A slice rather than a fixed-size array on purpose: the ladder's LENGTH is an output of
-/// generation, so nothing here may name a level count. It has changed three times — four levels
-/// deep from the 1 661-triangle pre-weld shoe, three from the 764-triangle welded one, and FOUR
-/// from the 1 520-triangle rebuilt one.
-///
-/// # What the numbers are
-///
-/// | level | glb | tris | dev (mm) | from (m) |
-/// |---|---|---|---|---|
-/// | L1 | `rung1` | 678 | 3.338 | 60.39 |
-/// | L2 | `rung3` | 390 | 14.955 | 269.24 |
-/// | L3 | `rung4` | 248 | 30.032 | 540.30 |
-/// | L4 | `rung6` | 146 | 82.654 | 1 486.36 |
-///
-/// RE-CUT 2026-08-12 by the directed search (ADR 0036), and the numbers moved for TWO independent
-/// reasons that are worth keeping apart.
-///
-/// The GEOMETRY moved once: L3 is CHEAPER, 248 triangles against 254, and the other three levels
-/// are byte-identical to the chain the exhaustive search cut. The old 254 existed only because the
-/// retired search accepted on a 5 %-tolerance bracket whose upper end could not clear the target
-/// for a candidate whose true deviation did; the directed search asks the rung's actual question
-/// and proves 248 fits.
-///
-/// The DEVIATIONS moved on every level, downward, because the certifying bound got tighter — the
-/// convex acceptance bound of ADR 0036 §6 applies to certification too. Every level is the same
-/// mesh it was, proven to sit CLOSER to the source than the old bound could show, so each takes
-/// over slightly nearer the camera. A tighter proof about unchanged bytes is the one direction this
-/// table is allowed to move without new geometry.
-///
-/// The rung numbers are octave indices, not chain indices, so the gaps are real: rungs 2 and 5 were
-/// skipped for shedding under the 30 % `SKIP_FRACTION` (512 tris at 24.5 %, 186 at 25.0 %), and the
-/// manifest carries both skip records.
-///
-/// L4's band opens at 1 486.36 m, INSIDE the world: the shipped map is 1 500 m across, so its
-/// diagonal — the farthest a camera can be from a surface, and the ladder's right wall — is
-/// 2 121.32 m. The level is reachable, in the far corner, which is what it was generated for.
-///
-/// THE LADDER STOPS HERE FOR A GEOMETRIC REASON, NOT A GEOGRAPHIC ONE. The wall admits rungs 7-12,
-/// and the generator considers every one of them; each answers with the decimator's 140-triangle
-/// topology floor, 4.1 % below L4's 146 and far under `SKIP_FRACTION`. So the chain's depth is set
-/// by how far this shoe can be collapsed, not by how big the map is — and widening the world by
-/// half added no level. The manifest's `skipped_rungs` enumerates all eight skips, with what each
-/// one was lost to; `chain.py --verify` validates those records rather than reading past them.
-const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung1.glb",
-        tris: 678,
-        worst_dev_mm: 3.337_77,
-        from_m: 60.3891,
-    },
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung3.glb",
-        tris: 390,
-        worst_dev_mm: 14.954_733,
-        from_m: 269.2444,
-    },
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 248,
-        // THE PAIRWISE BOUND. L3 sits 30.014 mm from L0 and 30.032 mm from L2, its own parent, and
-        // the switch is the distance at which the step from the level ACTUALLY ON SCREEN goes
-        // sub-pixel — so the larger owns the threshold. The gap is a third of a millimetre here and
-        // it still has to be the pairwise number, because which of the two dominates is an output
-        // of generation and not a property of this row.
-        worst_dev_mm: 30.031_547,
-        from_m: 540.3013,
-    },
-    ShoeLevel {
-        glb: "tiger_1/tiger_1_link.rung6.glb",
-        tris: 146,
-        // The same rule, and here the two are far apart: L4 sits 76.973 mm from L0 but 82.654 mm
-        // from L3, because the two levels deviate from the source in OPPOSITE directions. The
-        // manifest records both (`switch_from_source_dev_m` 1384.23, `switch_from_pairwise_m`
-        // 1486.36) and takes the max; wiring the source-relative number here would switch 100 m too
-        // early against a visible step.
-        worst_dev_mm: 82.653_622,
-        from_m: 1486.3617,
-    },
-];
-
-/// The number of levels the chain has, base INCLUDED — so `0..shoe_lod_levels()` is every index
-/// [`shoe_lod_range`] and [`shoe_lod_tris`] accept. Named so a consumer can walk the ladder without
-/// importing its rows.
-pub(crate) fn shoe_lod_levels() -> usize {
-    SHOE_LOD_CHAIN.len() + 1
-}
-
-/// Level `level`'s MEASURED triangle count — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
-/// The manifest's numbers, so a legend that quotes them quotes the manifest.
-pub(crate) fn shoe_lod_tris(level: usize) -> usize {
-    if level == 0 {
-        SHOE_BASE_TRIS
-    } else {
-        SHOE_LOD_CHAIN[level - 1].tris
-    }
-}
-
-/// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond 56 m,
-/// LOD2 beyond 127 m, ..."`. Lives here so a consumer's rig-bound line reports whatever the chain
-/// currently is, rather than naming one threshold that a regeneration would silently falsify.
-pub(crate) fn lod_chain_summary() -> String {
-    let levels = SHOE_LOD_CHAIN
-        .iter()
-        .enumerate()
-        .map(|(i, level)| format!("LOD{} beyond {:.0} m", i + 1, level.from_m))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "{} reduced {}, {levels}",
-        SHOE_LOD_CHAIN.len(),
-        if SHOE_LOD_CHAIN.len() == 1 {
-            "level"
-        } else {
-            "levels"
-        },
-    )
-}
-
-/// The range level `level` owns — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
-///
-/// Derived from the chain rather than written out per level, which is what makes the levels
-/// COMPLEMENTARY by construction: each range ends exactly where the next begins, and
-/// `VisibilityRange::is_visible_at_all` is `[start, end)` (bevy_camera 0.19
-/// `visibility/range.rs`: `distance >= start_margin.start && distance < end_margin.end`), so every
-/// distance in `[0, ∞)` is owned by exactly one level. A hand-written table could gap or overlap;
-/// this cannot.
-///
-/// `pub(crate)` because the probe placement asserts itself against a BAND rather than against a
-/// threshold constant (`terrain_grid`'s far-probe test): a scenario sited "inside LOD1" has to keep
-/// meaning that when a level is added below or above it.
-pub(crate) fn shoe_lod_range(level: usize) -> VisibilityRange {
-    let start = if level == 0 {
-        0.0
-    } else {
-        SHOE_LOD_CHAIN[level - 1].from_m
-    };
-    let end = SHOE_LOD_CHAIN
-        .get(level)
-        .map_or(f32::INFINITY, |level| level.from_m);
-    VisibilityRange::abrupt(start, end)
+/// The certificate key of the shoe's chain. [`bind_link_template`] resolves the chain from the
+/// bound primitive's MESH ASSET and checks the answer against this, so the name is a claim the
+/// bind verifies rather than a lookup it trusts.
+pub(crate) fn shoe_chain_key() -> String {
+    crate::geometry_lod::chain_key(LINK_MESH, 0)
 }
 
 /// How far the template's composed world scale may sit from 1.0 before the bind refuses. A hair for
@@ -447,11 +237,11 @@ pub(crate) struct LinkTemplate {
     /// Per side: the authored shoe on the right, its genuine mirror on the left (see the module
     /// doc — a negative-X scale would be a winding flip, not a mirror).
     mesh: PerSide<Handle<Mesh>>,
-    /// The reduced levels, in [`SHOE_LOD_CHAIN`] order and always the same length as it (the bind
-    /// refuses rather than binding a short chain, which would leave a distance band with no shoe in
-    /// it). Per side: the same shoe reduced, mirrored by the same construction. ONE handle per side
-    /// per level for the whole session — every link instance clones it, so a Tiger's 194 shoes at a
-    /// given level are 194 references to two mesh assets.
+    /// The reduced levels, in CERTIFICATE order and always the same length as the chain's rungs
+    /// (the bind refuses rather than binding a short chain, which would leave a distance band with
+    /// no shoe in it). Per side: the same shoe reduced, mirrored by the same construction. ONE
+    /// handle per side per level for the whole session — every link instance clones it, so a
+    /// Tiger's 194 shoes at a given level are 194 references to two mesh assets.
     lods: Vec<PerSide<Handle<Mesh>>>,
     /// One material for every link, read off the glb's own shoe primitive — the artist's
     /// [`LINK_MATERIAL`], never a `StandardMaterial` built here. The look is therefore changed by
@@ -459,6 +249,15 @@ pub(crate) struct LinkTemplate {
     material: Handle<StandardMaterial>,
     /// Per side: mesh space → the canonical pin frame.
     frame: PerSide<LinkFrame>,
+    /// The `geometry_lod` chain index every spawned level records, so the adaptive layer rewrites a
+    /// pooled shoe's band by exactly the path it rewrites a scene primitive's — there is no second
+    /// threshold writer for the track. `None` when the certificate names the shoe no chain: there
+    /// is one level, it owns every distance, and nothing has to be rewritten when the view moves.
+    chain: Option<usize>,
+    /// The band each level owns under the view profile AT BIND TIME, rung 0 first. A profile move
+    /// rewrites the live entities through `geometry_lod::adapt_bands`; this is the seed a fresh
+    /// spawn takes.
+    bands: Vec<VisibilityRange>,
 }
 
 impl LinkTemplate {
@@ -466,6 +265,44 @@ impl LinkTemplate {
     /// never touch the template again in its hot loop.
     pub(crate) fn frame(&self, side: Side) -> LinkFrame {
         *self.frame.get(side)
+    }
+
+    /// The number of levels the chain has, base INCLUDED — so `0..levels()` is every index
+    /// [`Self::band`] and [`Self::tris`] accept.
+    pub(crate) fn levels(&self) -> usize {
+        self.lods.len() + 1
+    }
+
+    /// The range level `level` owns: `0` is the base shoe, `1 + i` is the chain's rung `i`.
+    ///
+    /// Derived by `geometry_lod` from the certificate, so the levels are COMPLEMENTARY by
+    /// construction — each range ends exactly where the next begins.
+    pub(crate) fn band(&self, level: usize) -> VisibilityRange {
+        self.bands[level].clone()
+    }
+
+    /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond
+    /// 56 m, LOD2 beyond 127 m, ..."`. Lives here so a consumer's rig-bound line reports whatever
+    /// the chain currently is, rather than naming one threshold a re-cut would silently falsify.
+    pub(crate) fn chain_summary(&self) -> String {
+        let levels = (1..self.levels())
+            .map(|level| {
+                format!(
+                    "LOD{level} beyond {:.0} m",
+                    self.bands[level].start_margin.start
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "{} reduced {}, {levels}",
+            self.lods.len(),
+            if self.lods.len() == 1 {
+                "level"
+            } else {
+                "levels"
+            },
+        )
     }
 }
 
@@ -493,8 +330,8 @@ pub(crate) struct LinkFrame {
 #[derive(Component)]
 pub(crate) struct TrackLink;
 
-/// WHICH level of [`SHOE_LOD_CHAIN`] a shoe entity is — `0` is the base shoe, `1 + i` is
-/// `SHOE_LOD_CHAIN[i]`. The same index [`shoe_lod_range`] and [`shoe_lod_tris`] take.
+/// WHICH level of the shoe's certified chain a shoe entity is — `0` is the base shoe, `1 + i` is
+/// the chain's rung `i`. The same index [`LinkTemplate::band`] and [`LinkTemplate::tris`] take.
 ///
 /// Every level already carries the range that SELECTS it; this says which level it IS. The
 /// distinction matters exactly once — for a consumer that wants to OVERRIDE the selection, which is
@@ -538,12 +375,12 @@ fn bind_link_template(
     meshes_of: Query<&Mesh3d>,
     materials_of: Query<&MeshMaterial3d<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    // The reduced shoes are ASSET LOADS rather than scene reads: each comes from its own glb
-    // ([`SHOE_LOD_CHAIN`]), so there is no node to find and nothing to hide.
-    asset_server: Res<AssetServer>,
-    // Held across the bind's retries — handles dropped and re-taken every frame would keep
-    // cancelling and restarting the loads they are waiting on. One per chain row, same order.
-    mut lod_handles: Local<Vec<Handle<Mesh>>>,
+    // The reduced shoes are RUNG MESH RECORDS in the tank's own view glb, resolved by
+    // `geometry_lod` from the certificate. No sidecar glb, no node to find, nothing to hide — and
+    // no measurement to transcribe: the bands come out of the same derivation every scene
+    // primitive's do.
+    chains: Option<Res<crate::geometry_lod::GeometryLodChains>>,
+    view: Res<crate::geometry_lod::ViewProfile>,
     geom: Res<RigGeom>,
 ) {
     let (mut link_box, mut pin_start, mut pin_end) = (None, None, None);
@@ -642,76 +479,68 @@ fn bind_link_template(
     // be a reflection of the others for the same reason the two sides do, and reusing
     // `mirrored_mesh` is what keeps that true without a second answer to "how is a shoe mirrored".
     //
-    // The whole chain is resolved before ANY of it is bound: a template holding fewer levels than
-    // [`SHOE_LOD_CHAIN`] would leave a distance band with no shoe drawn in it at all, so a level
-    // still loading starves the bind exactly like the base shoe does.
-    if lod_handles.is_empty() {
-        lod_handles.extend(SHOE_LOD_CHAIN.iter().map(|level| {
-            asset_server.load(
-                GltfAssetLabel::Primitive {
-                    mesh: 0,
-                    primitive: 0,
-                }
-                .from_asset(level.glb),
-            )
-        }));
-    }
-    let mut lods = Vec::with_capacity(SHOE_LOD_CHAIN.len());
-    let mut lod_triangles = Vec::with_capacity(SHOE_LOD_CHAIN.len());
-    for (level, handle) in SHOE_LOD_CHAIN.iter().zip(lod_handles.iter()) {
-        let path = level.glb;
-        if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(handle) {
-            // Loud rather than a silent starve: without this the whole track — the base shoe
-            // included — simply never binds and the tank drives on invisible shoes, which reads as
-            // a placement bug.
-            error_once!(
-                "track links: the reduced shoe `{path}` failed to load ({err}) — refusing to bind"
+    // The CHAIN is resolved from the shoe primitive's own MESH ASSET, which is the identity a
+    // certificate chain is per (shared meshes share a chain), and the key the lookup lands on is
+    // checked against [`shoe_chain_key`] — a wrong join would mirror some other part's rungs onto
+    // the belt.
+    //
+    // AN ABSENT CHAIN IS NOT A REFUSAL. A re-cut that earns the shoe no rung is legitimate (the
+    // build's own coverage owns that question), and the law is source detail, silently — so the
+    // template binds with NO reduced levels and the belt draws its base shoe everywhere. Refusing
+    // the bind instead would take the whole track off every tank. A resolved chain, in contrast, is
+    // taken WHOLE: a template holding fewer levels than the certificate names would leave a
+    // distance band with no shoe drawn in it at all, so a rung record still loading starves the
+    // bind exactly like the base shoe does.
+    let Some(chains) = chains else {
+        return;
+    };
+    let chain = chains.of_mesh(source.0.id()).filter(|chain| {
+        let matched = chain.key() == shoe_chain_key();
+        if !matched {
+            warn_once!(
+                "track links: the `{LINK_NODE}` shoe primitive resolves to chain `{}` and the \
+                 shoe's chain is `{}` — binding at source detail rather than wearing another \
+                 part's rungs",
+                chain.key(),
+                shoe_chain_key(),
             );
-            return;
         }
+        matched
+    });
+    let rungs: &[Handle<Mesh>] = chain.map_or(&[], ChainRef::rungs);
+    let mut lods = Vec::with_capacity(rungs.len());
+    let mut tris = vec![triangles];
+    for (index, handle) in rungs.iter().enumerate() {
         let Some(shoe) = meshes.get(handle) else {
             return;
         };
-        let tris = shoe.indices().map_or(0, Indices::len) / 3;
-        if tris != level.tris {
-            // The chain's rows are the MANIFEST's rows (see [`SHOE_LOD_CHAIN`]), and a triangle
-            // count is the cheapest thing on one to check against the bytes that actually loaded.
-            // A regenerated glb dropped in beside a stale table would otherwise switch at the OLD
-            // level's distance — geometry-only, silent, and exactly what ADR 0033 §8 exists to
-            // stop. The deviations cannot be checked this way; the count standing in for them is
-            // the point.
-            error_once!(
-                "track links: `{path}` holds {tris} triangles but SHOE_LOD_CHAIN says {} — the \
-                 wiring is stale against the shipped asset, so its switch distance is a claim \
-                 about a different mesh; re-transcribe the row from assets/lod_manifest.json. \
-                 Refusing to bind",
-                level.tris,
-            );
-            return;
-        }
-        lod_triangles.push(tris);
+        tris.push(shoe.indices().map_or(0, Indices::len) / 3);
         match lod_shoe_meshes(shoe) {
             // BOTH sides are derived assets here, unlike the base shoe (whose right side is the
-            // glTF's own handle): the tangents are built in this process, so neither side is the
-            // loaded primitive any more. The source handles stay alive in the `Local`, which is
-            // what keeps the loads from unloading.
+            // glTF's own handle): the mirror is built in this process, so neither side is the
+            // loaded rung record any more. The rung handles live in `GeometryLodChains`, which is
+            // what keeps the records from unloading.
             Ok(pair) => lods.push(pair.map(|shoe| meshes.add(shoe))),
             Err(err) => {
-                // Same policy as the missing-material refusal above, and for the same reason: a
-                // reduced shoe wears the base shoe's NORMAL-MAPPED material, and bevy's PBR shader
-                // silently skips normal mapping on a mesh with no tangents. Binding an untangented
-                // level would therefore not fail — it would ship a band across the battlefield
-                // where every track flattens out, which is exactly the kind of lighting bug nobody
-                // traces back to a vertex attribute.
+                // Same policy as the missing-material refusal above: a reduced shoe wears the base
+                // shoe's NORMAL-MAPPED material, and bevy's PBR shader silently skips normal
+                // mapping on a mesh with no tangents. Binding an untangented level would ship a
+                // band across the battlefield where every track flattens out.
                 error_once!(
-                    "track links: the reduced shoe `{path}` cannot be given tangents ({err}) — it \
-                     renders under the normal-mapped `{LINK_MATERIAL}` and would light flat \
-                     without them; refusing to bind"
+                    "track links: the shoe's rung {} cannot be given tangents ({err}) — it renders \
+                     under the normal-mapped `{LINK_MATERIAL}` and would light flat without them; \
+                     refusing to bind",
+                    index + 1,
                 );
                 return;
             }
         }
     }
+    // One band, `[0, inf)`, when the shoe earned no rung: the base shoe owns every distance.
+    let bands = chain.map_or_else(
+        || vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
+        |chain| chain.bands(*view),
+    );
 
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
 
@@ -724,51 +553,60 @@ fn bind_link_template(
 
     info!(
         "track links: template bound - pitch {:.5} m, shoe {:.1} mm outboard of the pin plane, {} \
-         triangles/shoe (assets/lod_manifest.json certifies L0 at {SHOE_BASE_TRIS}), {} levels",
+         triangles/shoe, {} level(s) on {}",
         (pin_start - pin_end).with_x(0.0).length(),
         shoe_offset * 1000.0,
         triangles,
-        shoe_lod_levels(),
+        lods.len() + 1,
+        chain.map_or_else(
+            || format!(
+                "no certified chain (`{}` names none — source detail)",
+                shoe_chain_key()
+            ),
+            |chain| format!("chain `{}`", chain.key()),
+        ),
     );
     // The LOD's whole ledger, one line per level: the band it owns, how much geometry it saves
     // against the base shoe, and the two mesh assets every instance of it in the session shares
     // (per side — the left is the mirror).
     //
-    // The band is reported WITH THE ARITHMETIC THAT JUSTIFIES IT — the level's measured deviation
-    // and the distance beyond which that deviation is sub-pixel — so a capture log carries the
-    // claim as well as the number, and a frame stream captured against a regenerated asset says
-    // outright whether its thresholds still follow from its meshes.
-    for (index, ((chain, &tier_triangles), tier)) in SHOE_LOD_CHAIN
-        .iter()
-        .zip(lod_triangles.iter())
-        .zip(lods.iter())
-        .enumerate()
-    {
-        let range = shoe_lod_range(index + 1);
-        let path = chain.glb;
+    // The band is reported WITH THE ARITHMETIC BEHIND IT — the level's certified deviation and the
+    // view profile the metres were derived against — so a capture log carries the claim as well as
+    // the number, and a stream captured against a re-cut asset says outright whether its thresholds
+    // still follow from its meshes.
+    let deviations: &[Rung] = chain.map_or(&[], |chain| &chain.chain().rungs);
+    for (index, (rung, tier)) in deviations.iter().zip(lods.iter()).enumerate() {
+        let band = &bands[index + 1];
         info!(
-            "track links: LOD{} bound - `{path}`, {tier_triangles} triangles/shoe (−{}%) over \
-             [{:.1}, {:.1}) m ({:.3} mm worst deviation, under the {LOD_BUDGET_PX} px budget beyond \
-             {:.1} m at {LOD_REF_VIEW_HEIGHT_PX:.0} px through the {LOD_REF_FOV_RAD} rad optic), \
-             one mesh per side L {:?} R {:?}",
+            "track links: LOD{} bound - `{}`, {} triangles/shoe (−{}%) over [{:.1}, {:.1}) m \
+             ({:.3} mm certified deviation + {:.3} m radius, at {:.0} px through the {:.4} rad \
+             field on a {:.2} px budget), one mesh per side L {:?} R {:?}",
             index + 1,
-            100 - (tier_triangles * 100)
+            rung.mesh,
+            tris[index + 1],
+            100 - (tris[index + 1] * 100)
                 .checked_div(triangles.max(1))
                 .unwrap_or(0),
-            range.start_margin.start,
-            range.end_margin.end,
-            chain.worst_dev_mm,
-            sub_pixel_distance_m(chain.worst_dev_mm),
+            band.start_margin.start,
+            band.end_margin.end,
+            rung.deviation_mm,
+            chain.map_or(f32::NAN, |chain| chain.chain().radius_m),
+            view.height_px,
+            view.vfov_rad,
+            view.budget_px,
             tier.get(Side::Left).id(),
             tier.get(Side::Right).id(),
         );
     }
 
+    let index = chain.map(ChainRef::index);
     commands.insert_resource(LinkTemplate {
         mesh,
         lods,
         material: material.0.clone(),
         frame,
+        chain: index,
+        bands,
     });
 }
 
@@ -968,7 +806,7 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 }
 
 /// One reduced shoe as the two mesh assets the pool binds — `[left, right]` — both carrying
-/// TANGENTS. Serves EVERY row of [`SHOE_LOD_CHAIN`]: the levels differ in triangle count and in
+/// TANGENTS. Serves EVERY certified rung: the levels differ in triangle count and in
 /// nothing else that matters here, so a second copy of this per level would be a second place for
 /// the handedness algebra below to go wrong.
 ///
@@ -989,7 +827,7 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 /// That would be harmless if the shoe were unlit steel, but every reduced instance renders under the
 /// base shoe's [`LINK_MATERIAL`], whose three MEASURED maps include a NORMAL map. bevy's PBR shader
 /// keys normal mapping on the `VERTEX_TANGENTS` shader def and simply drops the map when the mesh
-/// has no tangents — no warning, no error. Every swap in [`SHOE_LOD_CHAIN`] would then change
+/// has no tangents — no warning, no error. Every swap in the chain would then change
 /// the LIGHTING as well as the silhouette, which is not what the distance was argued from. So an
 /// export that stopped baking tangents degrades to a runtime mikktspace pass instead of to flat
 /// lighting, and `no_defaulted_tangent_touches_a_triangle_a_player_can_resolve` is what says the
@@ -1018,7 +856,7 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 // ---------------------------------------------------------------------------------------------
 
 /// Spawn one pooled shoe on `side`, parented to `parent` (a hull-local frame in both consumers),
-/// together with one child per [`SHOE_LOD_CHAIN`] row. The returned entity is the BASE shoe — the
+/// together with one child per certified rung. The returned entity is the BASE shoe — the
 /// one the pool holds and the one [`place_links`] poses.
 ///
 /// Persistent entities whose transforms are rewritten each frame — never rebuilt meshes and never
@@ -1045,19 +883,32 @@ pub(crate) fn spawn_link(
         ShoeLod(0),
         Mesh3d(template.mesh.get(side).clone()),
         MeshMaterial3d(template.material.clone()),
-        shoe_lod_range(0),
+        template.band(0),
         Transform::from_xyz(0.0, -1000.0, 0.0),
         ChildOf(parent),
     ));
+    // The chain tag `geometry_lod`'s adaptive layer rewrites bands through — the pooled shoes ride
+    // the SAME writer as every scene primitive, so the track cannot drift out of step with the rest
+    // of the model when the view profile moves. Absent when the shoe earned no rung: one level owns
+    // every distance and there is nothing to rewrite.
+    if let Some(chain) = template.chain {
+        shoe.insert(GeometryLodLevel { chain, level: 0 });
+    }
     for (level, tier) in template.lods.iter().enumerate() {
         shoe.with_child((
             TrackLink,
             ShoeLod(level + 1),
+            GeometryLodLevel {
+                chain: template
+                    .chain
+                    .expect("a reduced level exists only under a chain"),
+                level: level + 1,
+            },
             Mesh3d(tier.get(side).clone()),
             // The SAME material: the levels differ in triangles and in nothing else, and a second
             // material would put a second batch (and a visible shading seam) on every swap.
             MeshMaterial3d(template.material.clone()),
-            shoe_lod_range(level + 1),
+            template.band(level + 1),
             // IDENTITY, and load-bearing: every reduced mesh is authored in the same mesh-local
             // frame as the full shoe, so riding the parent's transform puts it exactly where the
             // shoe was. It is also what makes the range tests agree — all the levels resolve to the
@@ -1144,10 +995,27 @@ mod tests {
         frames(PIN_START, PIN_END, SHOE_OUTBOARD)
     }
 
+    /// The view every certified distance was quoted in when the corpus was cut: the gunner optic
+    /// at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
+    fn reference_view() -> crate::geometry_lod::ViewProfile {
+        crate::geometry_lod::ViewProfile::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0, 1.0)
+    }
+
+    /// The SHIPPED shoe chain, straight out of the certificate — the same record the bind resolves
+    /// through `geometry_lod`.
+    fn shoe_chain() -> crate::geometry_lod::Chain {
+        let root = crate::assets::asset_root();
+        crate::geometry_lod::certificate::load(&root, crate::geometry_lod::TIGER_ID)
+            .chains
+            .remove(&shoe_chain_key())
+            .expect("the shipped certificate names the shoe's chain")
+    }
+
     /// A template whose mesh handles are ALL DISTINCT — two per side for the base plus two per
-    /// [`SHOE_LOD_CHAIN`] row — so a test can tell which one landed on which entity. Built from a
-    /// bare `Assets<Mesh>` rather than an `AssetPlugin` app: the only thing under test is which
-    /// handle `spawn_link` clones where.
+    /// certified rung — so a test can tell which one landed on which entity. Built from a bare
+    /// `Assets<Mesh>` rather than an `AssetPlugin` app: the only thing under test is which handle
+    /// `spawn_link` clones where. The BANDS are the shipped chain's, derived exactly as the bind
+    /// derives them.
     fn fixture_template(assets: &mut Assets<Mesh>) -> LinkTemplate {
         let mut fresh = || {
             assets.add(Mesh::new(
@@ -1155,8 +1023,10 @@ mod tests {
                 bevy::asset::RenderAssetUsages::default(),
             ))
         };
+        let chain = shoe_chain();
         let mesh = PerSide::new(fresh(), fresh());
-        let lods = SHOE_LOD_CHAIN
+        let lods = chain
+            .rungs
             .iter()
             .map(|_| PerSide::new(fresh(), fresh()))
             .collect();
@@ -1165,6 +1035,8 @@ mod tests {
             lods,
             material: Handle::default(),
             frame: tiger_frames(),
+            chain: Some(0),
+            bands: chain.bands(reference_view()),
         }
     }
 
@@ -1186,8 +1058,8 @@ mod tests {
             .expect("a shoe carries its reduced siblings");
         assert_eq!(
             children.len(),
-            SHOE_LOD_CHAIN.len(),
-            "one child per chain row, never a second pool",
+            template.lods.len(),
+            "one child per chain rung, never a second pool",
         );
         std::iter::once(link).chain(children.iter()).collect()
     }
@@ -1286,22 +1158,27 @@ mod tests {
             // The wired ranges carry the CHAIN's thresholds, in order — driven off the chain rather
             // than off a literal list, so adding or dropping a level is still one row there.
             let thresholds: Vec<f32> = ranges[1..].iter().map(|r| r.start_margin.start).collect();
+            let chain = shoe_chain();
+            let derived: Vec<f32> = chain
+                .bands(reference_view())
+                .into_iter()
+                .skip(1)
+                .map(|band| band.start_margin.start)
+                .collect();
             assert_eq!(
-                thresholds,
-                SHOE_LOD_CHAIN.iter().map(|l| l.from_m).collect::<Vec<_>>(),
-                "the wired thresholds are the chain's, in order",
+                thresholds, derived,
+                "the spawned bands are the certificate's derivation, in order",
             );
-            // ...and the chain as it SHIPS is the manifest's four reductions. Spelled out so a
-            // level added or dropped is a deliberate edit here, not a silent one — the ladder's
-            // LENGTH is an output of generation, so it is exactly the thing a regeneration can
-            // change without anyone noticing. It has changed three times: the 2026-08-07 re-cut
-            // against the welded 764-triangle shoe dropped four reductions to three, the
-            // 2026-08-08 re-cut against the rebuilt 1 520-triangle shoe took it back to four, and
-            // the 2026-08-12 directed-search re-cut (ADR 0036) kept four while moving every
-            // threshold IN — the certifying bound got tighter, so each level is proven closer to
-            // the source than before and earns its band a little sooner. This line is what made
-            // each of them visible rather than silent.
-            assert_eq!(thresholds, vec![60.3891, 269.2444, 540.3013, 1486.3617]);
+            // ...and the chain as it SHIPS is four reductions. Spelled out so a level added or
+            // dropped is a deliberate edit here, not a silent one — the ladder's LENGTH is an
+            // output of generation, so it is exactly the thing a re-cut can change without anyone
+            // noticing. It has changed four times: 2026-08-07 (four reductions to three against
+            // the welded 764-triangle shoe), 2026-08-08 (back to four against the rebuilt
+            // 1 520-triangle shoe), 2026-08-12 (the directed search, ADR 0036) and 2026-08-12
+            // again (the per-primitive build of ADR 0035, whose rungs are octaves 1/3/4/5). The
+            // METRES are not spelled out: they are a function of the view profile now, and the
+            // derivation above is what pins them.
+            assert_eq!(thresholds.len(), 4);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
@@ -1341,143 +1218,148 @@ mod tests {
         }
     }
 
-    /// The wired thresholds ARE the manifest's derivation, re-run in Rust: every level's distance
-    /// must be the one its OWN measured deviation implies, at [`LOD_REF_VIEW_HEIGHT_PX`] through the
-    /// optic, to within transcription slack.
+    /// A SHOE THE CERTIFICATE NAMES NO CHAIN FOR still gets a track.
     ///
-    /// This is the test that makes an LOD asset regeneration safe. The reduced meshes are
-    /// regenerated by `scripts/lod/generate.py`, and a regeneration changes exactly two things this
-    /// module depends on per level: `worst_dev_mm` and `from_m`. Update the first alone and the level
-    /// now switches in CLOSER than its own faceting is invisible — a silent, subtle, geometry-only
-    /// regression that no green suite would ever catch, because everything still binds, tiles and
-    /// draws. Update the second alone and the distance is a claim about a mesh that no longer
-    /// exists. So the DERIVATION is asserted, not the numbers: half a transcription fails here,
-    /// naming the distance to write.
-    ///
-    /// # Why the tolerance is tiny and TWO-SIDED
-    ///
-    /// These rows are not rounded, they are TRANSCRIBED — `assets/lod_manifest.json`'s `switch_m`
-    /// verbatim, because the manifest already applied this formula (ADR 0033 §8/§9: the manifest is
-    /// the seam, and hand-rounded ledgers are what drifted). So the only slack the wiring is allowed
-    /// is what f32 costs on the way through, and the upper bound is as load-bearing as the lower: a
-    /// distance PAST the derivation is the reduction never being reached, and it is what someone
-    /// reaches for to silence the lower bound without re-measuring.
+    /// The law is source detail, silently (ADR-0035): a re-cut that earns the shoe no rung is
+    /// legitimate — the build's own coverage owns that question — and the belt must draw its base
+    /// shoe at every distance rather than vanish. What this pins is the spawn: one entity per link,
+    /// no reduced children, one band owning `[0, inf)`, and NO `GeometryLodLevel`, because there is
+    /// no chain for the adaptive layer to rewrite against.
     #[test]
-    fn the_wired_thresholds_are_the_manifest_derivation() {
-        /// What a verbatim transcription of the manifest, re-derived through `f32`, may differ by.
-        /// The worst level (L4, ~1 050 m) lands well inside a centimetre; anything larger is a
-        /// number that was edited rather than copied.
-        const TRANSCRIPTION_SLACK_M: f32 = 0.01;
+    fn a_shoe_with_no_certified_chain_draws_at_source_detail() {
+        let mut assets = Assets::<Mesh>::default();
+        let mut fresh = || {
+            assets.add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            ))
+        };
+        let template = LinkTemplate {
+            mesh: PerSide::new(fresh(), fresh()),
+            lods: Vec::new(),
+            material: Handle::default(),
+            frame: tiger_frames(),
+            chain: None,
+            bands: vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
+        };
+        let mut world = World::new();
+        let parent = world.spawn_empty().id();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        let link = spawn_link(&mut commands, &template, Side::Right, parent);
+        queue.apply(&mut world);
 
-        for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
-            let derived = sub_pixel_distance_m(level.worst_dev_mm);
-            assert!(
-                (level.from_m - derived).abs() < TRANSCRIPTION_SLACK_M,
-                "LOD{} ({}) is wired to switch in at {:.4} m, but its MEASURED {:.6} mm deviation \
-                 covers the {LOD_BUDGET_PX} px budget only beyond {derived:.4} m at \
-                 {LOD_REF_VIEW_HEIGHT_PX:.0} px through the {LOD_REF_FOV_RAD} rad optic. The row is \
-                 half-transcribed: `from_m` and `worst_dev_mm` are ONE fact from \
-                 assets/lod_manifest.json and must move together — write {derived:.4}.",
-                i + 1,
-                level.glb,
-                level.from_m,
-                level.worst_dev_mm,
-            );
-        }
-
-        // The chain is ORDERED and its distances STRICTLY INCREASE. Falls out of the ladder's
-        // octave grid, and asserting it is what makes `shoe_lod_range`'s tiling meaningful: a
-        // chain whose rows were pasted out of order would still tile, and would show a coarser
-        // mesh nearer than a finer one.
-        for pair in SHOE_LOD_CHAIN.windows(2) {
-            assert!(
-                pair[1].from_m > pair[0].from_m && pair[1].worst_dev_mm > pair[0].worst_dev_mm,
-                "the chain must coarsen with distance, in step",
-            );
-            assert!(pair[1].tris < pair[0].tris, "and shed triangles doing it");
-        }
-        assert!(SHOE_LOD_CHAIN[0].tris < SHOE_BASE_TRIS);
-
-        // The arithmetic itself, worked by hand:
-        // `0.027841808 m × 2160 / (2 × tan(0.06)) + 0.380365 = 500.9314 m`. Without this the loop
-        // above would happily pass a `sub_pixel_distance_m` that had lost its units, as long as the
-        // wired distances had lost them the same way.
-        //
-        // 27.841808 mm was the manifest's L3 deviation when this pin was written. That row is gone
-        // (the 2026-08-08 chain is one level deep), and the value stays anyway BECAUSE it is now a
-        // pure units probe: what it checks is the formula, and a probe tied to a live row would
-        // have to be rewritten every re-cut for no gain. The expected metres moved only by the
-        // 19.8 mm the shoe's origin radius did.
         assert!(
-            (sub_pixel_distance_m(27.841808) - 500.9314).abs() < 0.01,
-            "the derivation is `dev_m × height_px / (2·tan(vfov/2)·budget_px) + radius`, got {}",
-            sub_pixel_distance_m(27.841808),
+            world.entity(link).get::<Children>().is_none(),
+            "a chainless shoe spawns no reduced sibling",
         );
-        // ...and it is EXACT, not small-angle: the shortcut this replaced reads 501.4 m here, which
-        // is the 0.06 % that hid at the optic and is 5.5 % at the commander FOV (ADR 0033 §9).
         assert!(
-            (sub_pixel_distance_m(27.841808)
-                - ((27.841808 / 1000.0) / (LOD_REF_FOV_RAD / LOD_REF_VIEW_HEIGHT_PX)
-                    + SHOE_ORIGIN_RADIUS_M))
-                .abs()
-                > 0.1,
-            "the small-angle shortcut must NOT be what is wired",
+            world.entity(link).get::<GeometryLodLevel>().is_none(),
+            "a chainless shoe carries no chain tag for the adaptive layer to find",
+        );
+        let range = world
+            .entity(link)
+            .get::<VisibilityRange>()
+            .expect("a shoe carries a range");
+        for probe in [0.0_f32, 1.0, 500.0, 5_000.0, 1e6] {
+            assert!(
+                range.is_visible_at_all(probe),
+                "the base shoe must own {probe} m when there is no level below it",
+            );
+        }
+    }
+
+    /// THE TRACK VIEW'S BANDS ARE THE CERTIFICATE'S DERIVATION, pinned against metres worked by
+    /// hand from the certificate's own numbers at a fixed view profile.
+    ///
+    /// This is the test that makes an asset re-cut safe. The rungs are re-cut by
+    /// `scripts/tank/build.py`, and a re-cut changes exactly one thing this module depends on per
+    /// level: the certified `deviation_mm`. Nothing transcribes it any more — the metres are
+    /// derived — so what has to be pinned is the DERIVATION itself, at inputs that do not move.
+    #[test]
+    fn the_shoe_bands_are_the_certificates_derivation() {
+        let chain = shoe_chain();
+        let view = reference_view();
+        let bands = chain.bands(view);
+
+        // The whole ladder, worked by hand off the certificate at the reference view:
+        //
+        //     D = dev_mm/1000 x 2160 / (2 * tan(0.06)) + radius_m
+        //
+        // A derivation that lost its units, dropped the radius slack or took the small-angle
+        // shortcut fails here.
+        let denominator = 2.0 * (crate::camera::GUNNER_FOV_FALLBACK / 2.0).tan();
+        for (level, rung) in chain.rungs.iter().enumerate() {
+            let by_hand = (rung.deviation_mm / 1000.0) * 2160.0 / denominator + chain.radius_m;
+            let derived = bands[level + 1].start_margin.start;
+            assert!(
+                (derived - by_hand).abs() < 1e-2,
+                "LOD{} ({}) opens at {derived:.4} m and its certified {:.6} mm deviation covers \
+                 the 1 px budget only beyond {by_hand:.4} m at 2160 px through the {:.4} rad optic",
+                level + 1,
+                rung.mesh,
+                rung.deviation_mm,
+                crate::camera::GUNNER_FOV_FALLBACK,
+            );
+        }
+
+        // The chain COARSENS with distance, in step: deviations ascend strictly (the certificate's
+        // own law) and so, therefore, do the bands. A chain whose rungs were emitted out of order
+        // would still tile, and would show a coarser mesh nearer than a finer one.
+        for pair in chain.rungs.windows(2) {
+            assert!(
+                pair[1].deviation_mm > pair[0].deviation_mm,
+                "the chain must coarsen with distance",
+            );
+        }
+        for pair in bands.windows(2) {
+            assert!(pair[1].start_margin.start > pair[0].start_margin.start);
+        }
+
+        // ...and the projection is EXACT, not small-angle: the shortcut reads 0.06 % long at the
+        // optic and 5.5 % at the commander field (ADR 0033 section 9).
+        let dev_mm = chain.rungs[0].deviation_mm;
+        let small_angle =
+            (dev_mm / 1000.0) / (crate::camera::GUNNER_FOV_FALLBACK / 2160.0) + chain.radius_m;
+        assert!(
+            (bands[1].start_margin.start - small_angle).abs() > 1e-3,
+            "the small-angle shortcut must NOT be what the bands are derived from",
         );
     }
 
-    /// The shipped corpus was cut for a world at least as large as the one that loads.
+    /// THE BANDS MOVE WITH THE VIEW, and in the conservative direction.
     ///
-    /// The ladder's depth is not a taste call: `scripts/lod/config.py` stops generating rungs once
-    /// a level's switch distance passes the RIGHT WALL — the world's diagonal, `world_size·√2`,
-    /// beyond which no camera can stand and so no coarser level can ever render. The wall is cut
-    /// from the map's own `world_extent_xz`, which is the same declaration `crate::map` builds the
-    /// grid from.
-    ///
-    /// A map that GROWS therefore invalidates the corpus in the one way nothing else notices. Every
-    /// glb still binds, every wired row still re-derives, the manifest still verifies against
-    /// `config.py` — and the chain's last level now owns a band that ends short of the far corner,
-    /// so the shoes past it draw at a detail the ladder never certified for that distance. This is
-    /// the tripwire: the map is data and can change without anyone running the twelve-minute
-    /// generator, so the two are compared where a map edit and the corpus meet.
-    ///
-    /// GENERIC by construction — the wall is a property of the WORLD, and the manifest's ladder
-    /// block is shared by every asset in the corpus. Nothing here names a vehicle.
+    /// The metres are no longer baked at one reference height: a shorter viewport spends fewer
+    /// pixels over the same field, so a given deviation goes sub-pixel SOONER and every level takes
+    /// over nearer the camera. A wider field and a looser budget do the same. This is what the
+    /// deleted transcription could not do, and it is why the certificate ships deviations rather
+    /// than metres.
     #[test]
-    fn the_shipped_corpus_reaches_the_worlds_far_corner() {
-        let root = crate::assets::asset_root();
-        // The extent the game would run at: the map's when there is one, the flat-slab fallback's
-        // otherwise — the same resolution `world::spawn_environment` makes.
-        let extent = crate::map::load(&root)
-            .map(|manifest| manifest.extent)
-            .unwrap_or(crate::terrain_grid::FIXTURE_EXTENT);
-        let diagonal_m = extent.world_size_m * std::f32::consts::SQRT_2;
+    fn a_shorter_view_switches_sooner_than_the_reference_one() {
+        use crate::geometry_lod::ViewProfile;
 
-        let text = std::fs::read_to_string(root.join("lod_manifest.json"))
-            .expect("the shipped manifest is readable");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&text).expect("the shipped manifest is JSON");
-        let right_wall_m = manifest["ladder"]["right_wall_m"]
-            .as_f64()
-            .expect("the manifest's ladder declares the right wall it was cut against")
-            as f32;
-
+        let chain = shoe_chain();
+        let at = |view| chain.bands(view)[1].start_margin.start;
+        let optic = crate::camera::GUNNER_FOV_FALLBACK;
+        let reference = at(reference_view());
         assert!(
-            right_wall_m >= diagonal_m,
-            "assets/lod_manifest.json was cut for a {right_wall_m:.1} m right wall and the world \
-             that loads is {:.1} m across — a {diagonal_m:.1} m diagonal. The ladder stops at the \
-             rung that passes the wall, so every level beyond {right_wall_m:.1} m is one the \
-             corpus never generated: regenerate it with `python3 scripts/lod/generate.py` (the \
-             wall is re-read from the map manifest) and re-transcribe SHOE_LOD_CHAIN. The \
-             manifest's own provenance for that wall: {}",
-            extent.world_size_m,
-            manifest["ladder"]["right_wall_source"],
+            at(ViewProfile::new(optic, 1080.0, 1.0)) < reference,
+            "half the pixels, half the deviation term",
+        );
+        assert!(
+            at(ViewProfile::new(0.785, 2160.0, 1.0)) < reference,
+            "a wider field spends fewer pixels on the same surface",
+        );
+        assert!(
+            at(ViewProfile::new(optic, 2160.0, 2.0)) < reference,
+            "a looser budget admits the reduction sooner",
         );
     }
 
     /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,
     /// `drive_track_views` writes `VisualScope::PROXIED_CASTER` onto the pooled shoe and onto
     /// nothing else; the children must go quiet with it, or a tank past the first threshold in
-    /// [`SHOE_LOD_CHAIN`] would cast its whole belt through the shadow map that the ribbon was
+    /// the chain's first threshold would cast its whole belt through the shadow map the ribbon was
     /// built to replace.
     ///
     /// Asserted through `render_policy`'s own resolver rather than by reading a marker off the
@@ -1770,20 +1652,24 @@ mod tests {
     /// Returns the mesh those accessors describe, ready to push through [`lod_shoe_meshes`] — the
     /// same call `bind_link_template` makes.
     fn shipped_reduced_shoe(glb: &str) -> Mesh {
-        let path = crate::assets::asset_root().join(glb);
+        let path = crate::geometry_lod::certificate::member_path(
+            &crate::assets::asset_root(),
+            crate::geometry_lod::TIGER_ID,
+            crate::geometry_lod::TrioMember::View,
+        );
         let gltf::Gltf { document, mut blob } =
             gltf::Gltf::open(&path).unwrap_or_else(|e| panic!("{glb} must open: {e}"));
         let buffers = [blob.take().expect("the glb carries its binary chunk")];
         let primitive = document
             .meshes()
-            .next()
-            .unwrap_or_else(|| panic!("{glb} carries one mesh"))
+            .find(|mesh| mesh.name() == Some(glb))
+            .unwrap_or_else(|| panic!("the view glb holds the rung record `{glb}`"))
             .primitives()
             .next()
             .unwrap_or_else(|| panic!("{glb}'s mesh carries one primitive"));
         assert!(
             primitive.get(&gltf::Semantic::Tangents).is_some(),
-            "{glb}'s primitive ships NO TANGENT - the export stopped baking them, so the shoe now \
+            "{glb}'s primitive ships NO TANGENT - the build stopped baking them, so the shoe now \
              relies on a runtime mikktspace pass that nothing certified",
         );
         assert!(
@@ -1862,29 +1748,19 @@ mod tests {
         )
     }
 
-    /// EVERY SHIPPED reduced shoe — the whole of [`SHOE_LOD_CHAIN`] — run through the real bind-time
-    /// construction: both final meshes of every level come out carrying one tangent per vertex.
+    /// EVERY SHIPPED rung of the shoe's chain, run through the real bind-time construction: both
+    /// final meshes of every level come out carrying one tangent per vertex.
     ///
-    /// Driven off the chain rather than off one named file, so adding a level cannot ship an
-    /// untangented one: a new row is covered the moment it is added.
+    /// Driven off the CERTIFICATE rather than off one named file, so a re-cut that adds a level
+    /// cannot ship an untangented one: a new rung is covered the moment the certificate names it.
     ///
     /// Whether those tangents are USABLE is the next test's question, not this one's — split so a
     /// red asset names itself as an asset defect instead of hiding inside "the bind works".
     #[test]
     fn every_shipped_reduced_shoe_binds_with_tangents_on_both_sides() {
-        for level in SHOE_LOD_CHAIN {
-            let glb = level.glb;
+        for rung in &shoe_chain().rungs {
+            let glb = rung.mesh.as_str();
             let shoe = shipped_reduced_shoe(glb);
-            // The row is a TRANSCRIPTION of the manifest (see [`SHOE_LOD_CHAIN`]) and this is the
-            // suite's half of the bind's own refusal: the shipped bytes must be the mesh the row
-            // claims. A regenerated glb dropped in beside a stale table would otherwise carry the
-            // OLD level's switch distance.
-            assert_eq!(
-                shoe.indices().map_or(0, Indices::len) / 3,
-                level.tris,
-                "{glb} is not the {} triangles SHOE_LOD_CHAIN transcribes for it",
-                level.tris,
-            );
             let bound =
                 lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
             let vertices = shoe.count_vertices();
@@ -1961,9 +1837,11 @@ mod tests {
         let mut report = String::new();
         let mut failed = false;
 
-        for (index, level) in SHOE_LOD_CHAIN.iter().enumerate() {
-            let glb = level.glb;
-            let from_m = level.from_m;
+        let chain = shoe_chain();
+        let bands = chain.bands(reference_view());
+        for (index, rung) in chain.rungs.iter().enumerate() {
+            let glb = rung.mesh.as_str();
+            let from_m = bands[index + 1].start_margin.start;
             let shoe = shipped_reduced_shoe(glb);
             let bound =
                 lod_shoe_meshes(&shoe).unwrap_or_else(|e| panic!("{glb} must take tangents: {e}"));
@@ -1979,11 +1857,12 @@ mod tests {
                 "{glb}: the bind re-solved tangents the export already baked",
             );
             // What the pixel budget covers, in metres, at the distance this level takes over — the
-            // SAME exact projection [`sub_pixel_distance_m`] inverts, less the origin-radius slack
-            // it adds (which is the conservative direction here: a smaller pixel to clear).
-            let pixel_m = (from_m - SHOE_ORIGIN_RADIUS_M) * 2.0 * (LOD_REF_FOV_RAD / 2.0).tan()
-                / LOD_REF_VIEW_HEIGHT_PX
-                * LOD_BUDGET_PX;
+            // SAME exact projection `ViewProfile::switch_distance_m` inverts, less the bounding
+            // radius slack it adds (the conservative direction here: a smaller pixel to clear).
+            let view = reference_view();
+            let pixel_m = (from_m - chain.radius_m) * 2.0 * (view.vfov_rad / 2.0).tan()
+                / view.height_px
+                * view.budget_px;
             let Some(VertexAttributeValues::Float32x2(uvs)) = shoe.attribute(Mesh::ATTRIBUTE_UV_0)
             else {
                 panic!("{glb} carries TEXCOORD_0")
@@ -2047,10 +1926,11 @@ mod tests {
                 report.push_str(&format!(
                     "  LOD{level} {what}: {defaulted_verts} defaulted verts on {touching} triangles \
                      ({uv_degenerate} of them UV-degenerate by measure.py's own test); worst is \
-                     {tri:?} at {:.2} mm on its longest edge, and one {LOD_BUDGET_PX} px budget at \
+                     {tri:?} at {:.2} mm on its longest edge, and one {:.2} px budget at \
                      the {from_m:.1} m this level takes over is {:.2} mm — {:.2} px of garbage \
                      normal frame; bad tangents {bad:?}\n",
                     extent * 1000.0,
+                    view.budget_px,
                     pixel_m * 1000.0,
                     extent / pixel_m,
                     level = index + 1,
@@ -2064,9 +1944,9 @@ mod tests {
              {LINK_MATERIAL}:\n{report}\nFIX THE ASSET (weld or drop the degenerate sliver in the \
              reduction, and bake the tangents at export), never a budget here. The px figures are \
              how visible it is, not the bar it has to clear — the levels are certified to carry \
-             NONE. Note also that assets/lod_manifest.json's own tangent_default_verts: 0 is not \
-             this claim: it counts faces with zero UV AREA, and a mesh has passed that gate while \
-             still defaulting a vertex here.",
+             NONE. Note also that the build's own UV-area check is not this claim: it counts faces \
+             with zero UV AREA, and a mesh has passed that gate while still defaulting a vertex \
+             here.",
         );
     }
 

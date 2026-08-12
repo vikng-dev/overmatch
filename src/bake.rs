@@ -657,7 +657,12 @@ pub(crate) fn manifold_gate(
 }
 
 pub(crate) fn plugin(app: &mut App) {
-    app.add_systems(Startup, extract_at_startup);
+    // After the certificate: a trio whose bytes do not match their recorded hashes must refuse
+    // before anything is extracted from them.
+    app.add_systems(
+        Startup,
+        extract_at_startup.after(crate::geometry_lod::load_certificate),
+    );
     // Global observer, not per-spawn `.observe()`: fires for every world instance and self-gates
     // on `TankSpecHandle`, so no spawn path can forget to arm the shadow.
     app.add_observer(shadow_compare_on_instance_ready);
@@ -672,7 +677,12 @@ fn extract_at_startup(mut commands: Commands) {
     // (`Contents/MacOS`) in a double-clicked bundle, `+ "assets"` → a directory that does not exist,
     // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
     let root = crate::assets::asset_root();
-    let path = root.join(crate::tank::TIGER_GLB_PATH);
+    // THE SIM ARTIFACT (ADR-0035), not the view glb: a byte-strip of the certified view glb holding
+    // LOD0 geometry and material names — membership is the material, so the walk's substance lookup
+    // travels with it. The server opens this file and no other; the client opens it too, so both
+    // sides walk identical accessor bytes by construction. `geometry_lod` has already fingerprinted
+    // it against the certificate by the time this runs.
+    let path = root.join(crate::tank::TIGER_SIM_GLB_PATH);
     let asset = certify_asset(&path, TIGER_SPEC_RON, &SubstanceRegistry::shipped())
         .unwrap_or_else(|findings| {
         panic!(
@@ -1540,6 +1550,93 @@ mod tests {
 
     /// EVERY SHIPPED ASSET, THROUGH THE REAL GATE. Discovery, not a list: a second vehicle is a
     /// directory, never a line of test code.
+    /// THE WALK IS THE SAME WALK ON BOTH ENDS, and it is the same walk it was before the split.
+    ///
+    /// The dedicated server opens `<id>.sim.glb` and nothing else; the client opens it too, for the
+    /// ballistic/armour walk, while its render path keeps `<id>.glb`. Two claims follow, and this
+    /// is where they are checked on the shipped bytes rather than argued:
+    ///
+    /// 1. SERVER == CLIENT. Both ends call [`extract_at_startup`] on the SAME path constant, so the
+    ///    geometry is one file read twice. What that leaves to prove is that the read is a pure
+    ///    function of the bytes: extracting the sim artifact twice must produce bit-identical
+    ///    positions, indices, substances and composed poses.
+    /// 2. NOTHING MOVED. The sim artifact is a byte-strip of the certified view glb, so extracting
+    ///    the view glb — what the walk used to read — must produce the identical geometry. A
+    ///    ballistics change hiding inside a packaging change would show up here as a moved vertex.
+    #[test]
+    fn the_sim_artifact_walks_the_bytes_the_view_glb_carried() {
+        let root = crate::assets::asset_root();
+        let registry = SubstanceRegistry::shipped();
+        let spec: TankSpec = ron::de::from_str(TIGER_SPEC_RON).expect("the shipped sheet parses");
+        let extract = |path: &Path| {
+            extract_tank_geometry(path, &spec, &registry)
+                .unwrap_or_else(|f| panic!("{} extracts: {}", path.display(), render(&f)))
+        };
+        // Bitwise, on everything the walk consumes: the node's identity and composed pose, and
+        // every captured primitive's positions, indices and substance verdict.
+        let fingerprint = |geometry: &TankGeometry| -> Vec<String> {
+            geometry
+                .nodes
+                .iter()
+                .map(|node| {
+                    let mut row = format!(
+                        "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
+                        node.name,
+                        // The PARENT, by name rather than by index: the sim skeleton is spawned as
+                        // a hierarchy and a re-parented node moves everything under it. By name so
+                        // a reordered node list is not a false positive.
+                        node.parent.map(|p| geometry.nodes[p].name.as_str()),
+                        // The LOCAL transform, which is what the skeleton's entities are spawned
+                        // with — the composed pose below can agree while the chain that produced it
+                        // does not.
+                        node.transform.translation.to_array().map(f32::to_bits),
+                        node.transform.rotation.to_array().map(f32::to_bits),
+                        node.transform.scale.to_array().map(f32::to_bits),
+                        node.root_position.to_array().map(f32::to_bits),
+                        node.root_rotation.to_array().map(f32::to_bits),
+                        node.root_scale.to_array().map(f32::to_bits),
+                    );
+                    for primitive in &node.primitives {
+                        use std::fmt::Write as _;
+                        let _ = write!(
+                            row,
+                            "|{:?}|{:?}|{:?}",
+                            primitive
+                                .positions
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .map(f32::to_bits)
+                                .collect::<Vec<_>>(),
+                            primitive.indices,
+                            primitive
+                                .substance
+                                .as_ref()
+                                .map(|s| (s.name.as_str(), s.factor.to_bits())),
+                        );
+                    }
+                    row
+                })
+                .collect()
+        };
+
+        let sim = root.join(crate::tank::TIGER_SIM_GLB_PATH);
+        let view = root.join(crate::tank::TIGER_GLB_PATH);
+        assert_eq!(
+            fingerprint(&extract(&sim)),
+            fingerprint(&extract(&sim)),
+            "extraction is not a pure function of the sim artifact's bytes, so the server and the \
+             client cannot be relied on to walk the same geometry from the same file",
+        );
+        assert_eq!(
+            fingerprint(&extract(&sim)),
+            fingerprint(&extract(&view)),
+            "the sim artifact and the view glb do not carry the same walked geometry — the sim \
+             artifact is a byte-strip of the certified view glb (ADR-0035), so a difference here \
+             is a ballistics change wearing a packaging change's clothes",
+        );
+    }
+
     #[test]
     fn every_shipped_asset_passes_the_consumer_contract() {
         let shipped = fixture::shipped_assets();

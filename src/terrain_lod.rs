@@ -1013,8 +1013,9 @@ pub(crate) struct TerrainLodLadder(pub(crate) TerrainLod);
 ///
 /// The optic toggle is a 6.5× jump (π/4 → 0.12 rad), so this never gates a real view change; what
 /// it gates is a magnification slider being dragged, where a rewrite per frame would be a per-frame
-/// walk of a few hundred entities for a sub-pixel difference.
-const FOV_HYSTERESIS: f32 = 0.10;
+/// walk of a few hundred entities for a sub-pixel difference. Shared with `geometry_lod`, whose
+/// asset chains are selected against the same live view.
+pub(crate) const FOV_HYSTERESIS: f32 = 0.10;
 
 /// Which level the ladder is currently showing. [`TerrainLodClamp::Adaptive`] is the product
 /// behaviour and the default; every other value pins the whole map to one rung so a human can look

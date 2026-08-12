@@ -84,21 +84,31 @@ LEVEL_VALIDITY_FIELDS = (
 #: could then be bought by shrinking the gate's own copy.
 LEVEL_VALIDITY_VECTORS = ("bbox_mm",)
 
-#: A `skipped_rungs` record's required numerics, and the only three things `lost_to` may say.
+#: A `skipped_rungs` record's required numerics, and the only things `lost_to` may say.
 #:
 #: THE SKIP RECORDS ARE EVIDENCE, not commentary, and until now nothing looked at them. They are the
-#: manifest's whole account of what the ladder DID NOT ship and why, and one of the three reasons —
-#: `verdict_node_budget` — is the only place a corpus admits it traded fidelity for wall time. A
-#: record nobody validates is a record that can suppress that admission by being malformed: an
-#: unknown `lost_to`, a missing counter, or a positive `undecided_verdicts` filed under
-#: `skip_fraction` all leave `verify` silently agreeable.
+#: manifest's whole account of what the ladder DID NOT ship and why, and two of the reasons —
+#: `verdict_node_budget` and `certification_bracket` (`M.SKIP_FIDELITY_LOST_TO`) — are where a
+#: corpus admits it traded fidelity for wall time. A record nobody validates is a record that can
+#: suppress that admission by being malformed: an unknown `lost_to`, a missing counter, or a
+#: positive `undecided_verdicts` filed under `skip_fraction` all leave `verify` silently agreeable.
 SKIP_NUMERIC_FIELDS = ("rung", "e_target_mm", "undecided_verdicts", "verdict_node_budget")
 #: Counters inside a skip record that must be non-negative integers wherever they appear.
 SKIP_COUNTER_FIELDS = ("undecided_verdicts", "verdict_node_budget", "floor_tris", "best_tris")
 #: The legal values, READ FROM `measure` rather than spelled again — the same declaration the
-#: generator picks from. Two copies of this tuple is two rules, which is how the writer came to file
-#: an UNDECIDED rung under `skip_fraction` while the verifier's warning only knew about the third.
-SKIP_LOST_TO = M.SKIP_LOST_TO
+#: generator picks from — plus `certification_bracket`, which only the per-primitive build
+#: (`scripts/tank/chains.py`) can file and which the legacy corpus therefore never carries. Two
+#: copies of the shared tuple is two rules, which is how the writer came to file an UNDECIDED rung
+#: under `skip_fraction` while the verifier's warning only knew about the third.
+SKIP_LOST_TO = M.SKIP_LOST_TO + ("certification_bracket",)
+
+#: The subset of [`SKIP_LOST_TO`] that means "a rung was lost to the RUN, not to the mesh", and is
+#: therefore WARNED about below. `verdict_node_budget` is the search abstaining inside its node
+#: budget (ADR 0036 §1); `certification_bracket` is a winner whose certified UPPER bound missed the
+#: rung on a bracket whose lower end cleared it (ADR 0033 §6, `scripts/tank/chains.py`). Both cost a
+#: rung a longer run would have shipped, so both have to be loud — a fidelity loss is loud whatever
+#: took the rung. Neither fails a build: nothing unproven ships either way.
+SKIP_FIDELITY_LOST_TO = ("verdict_node_budget", "certification_bracket")
 
 #: Generator provenance that must be present AND must match this tree.
 GENERATOR_PINNED_FIELDS = (
@@ -602,10 +612,11 @@ def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
 def verify(manifest, tree):
     """Every drift a manifest can suffer. Returns (failures, warnings); empty failures means clean.
 
-    A WARNING is a recorded fact that is deliberately not enforced — today that is a rung the search
-    lost to its node budget rather than to the geometry (ADR 0036 §1). It is printed every time, so
-    a corpus that traded fidelity for time says so out loud; it does not fail the build, because
-    UNDECIDED counting as FAIL is the design and nothing unproven ships either way.
+    A WARNING is a recorded fact that is deliberately not enforced — a rung lost to the RUN rather
+    than to the geometry: to the search's node budget (ADR 0036 §1), or to a certification bracket
+    whose upper end missed the rung while its lower end cleared it (ADR 0033 §6). Both are printed
+    every time, so a corpus that traded fidelity for time says so out loud; neither fails the build,
+    because nothing unproven ships either way.
     """
     failures = []
     warnings = []
@@ -622,14 +633,24 @@ def verify(manifest, tree):
 
     for asset in manifest["assets"]:
         for skip in asset.get("skipped_rungs", []):
+            if skip.get("lost_to") not in SKIP_FIDELITY_LOST_TO:
+                continue
             if skip.get("lost_to") == "verdict_node_budget":
-                warnings.append(
-                    f"{asset['name']} rung {skip.get('rung')}: LOST TO THE NODE BUDGET, not to the "
-                    f"geometry — {skip.get('undecided_verdicts')} verdict(s) spent "
-                    f"{skip.get('verdict_node_budget')} nodes without closing a bound. The chain "
-                    f"is coarser here than an unbounded search would have cut it. "
-                    f"({skip.get('reason')})"
+                lost = (
+                    f"LOST TO THE NODE BUDGET, not to the geometry — "
+                    f"{skip.get('undecided_verdicts')} verdict(s) spent "
+                    f"{skip.get('verdict_node_budget')} nodes without closing a bound"
                 )
+            else:
+                lost = (
+                    f"LOST TO THE CERTIFICATION BRACKET, not to the geometry — the winner's "
+                    f"certified upper bound {skip.get('dev_mm_upper')} mm missed the rung on a "
+                    f"bracket whose lower end is {skip.get('dev_mm')} mm"
+                )
+            warnings.append(
+                f"{asset['name']} rung {skip.get('rung')}: {lost}. The chain is coarser here than "
+                f"a longer run would have cut it. ({skip.get('reason')})"
+            )
 
     for chain, asset in zip(derive(manifest), manifest["assets"]):
         try:

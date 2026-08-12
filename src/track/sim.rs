@@ -455,7 +455,9 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let sus = spec.suspension.params();
     let geom = super::rig_geom::RigGeom::build(
         &blueprint,
-        &crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH),
+        // The SIM artifact — the same file the ballistic walk is extracted from, so the running
+        // gear and the armour are measured off one set of accessor bytes (ADR-0035).
+        &crate::assets::asset_root().join(crate::tank::TIGER_SIM_GLB_PATH),
         spec.sprocket.teeth,
         spec.link_count,
         &sus,
