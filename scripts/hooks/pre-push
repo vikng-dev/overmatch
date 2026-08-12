@@ -76,13 +76,18 @@ echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
 cargo clippy --quiet --locked --all-targets -- -D warnings
 fi
 
-# Tank assets. `asset_door.py verify` re-cuts each asset from its own stored source and proves the
-# tracked model is, section by section, what that source, that spec sheet and the pinned toolchain
-# produce — byte for byte wherever the chain is deterministic, and by stated KTX2 header facts over
-# the texture payloads, which `basisu` cuts differently on different architectures. That one verdict
-# is why this lane replaces the old mip gate rather than joining it: a tracked glb the compare law
-# holds against a candidate the derivation verifier passed is mipped KTX2 by construction, and it is
-# also L1-clean and L2-certified, which the mip gate never said.
+# Tank assets. `build.py verify` re-cuts each asset from its own stored source through the door and
+# proves the tracked model is, section by section, what that source, that spec sheet and the pinned
+# toolchain produce — byte for byte wherever the chain is deterministic, and by stated KTX2 header
+# facts over the texture payloads, which `basisu` cuts differently on different architectures. That
+# one verdict is why this lane replaces the old mip gate rather than joining it: a tracked glb the
+# compare law holds against a candidate the derivation verifier passed is mipped KTX2 by
+# construction, and it is also L1-clean and L2-certified, which the mip gate never said.
+#
+# IT VERIFIES THE TRIO (ADR 0035): the tracked model with its certified rung records STRIPPED is
+# what the door's comparison runs on, the sim artifact is re-derived from the tracked view artifact
+# and compared byte for byte, and the certificate's three digests are held against the bytes beside
+# it. No search runs here — the certificate is what carries the measurements forward.
 #
 # IT VERIFIES THE PUSHED REVISIONS, not the work tree — the LOD lane's rule, for the LOD lane's
 # reason: a dirty-but-coherent tree blesses a different commit, and pushing a branch that is not
@@ -108,9 +113,9 @@ fi
 # It costs a Blender launch, a full re-export and a MEASURED minute of texture encode per changed
 # asset. `OVERMATCH_SKIP=assets` exists for that, and only because CI re-runs it.
 if ! skipped assets; then
-echo "pre-push ▸ asset door (verify, per pushed revision)"
+echo "pre-push ▸ tank build (verify, per pushed revision)"
 command -v python3 >/dev/null ||
-    { printf '\033[31m  no python3\033[0m — the asset door is a python program\n' >&2; exit 1; }
+    { printf '\033[31m  no python3\033[0m — the tank build is a python program\n' >&2; exit 1; }
 assets_tmp=$(mktemp -d)
 # Before any verdict about a trio: every blend the revision holds is a canonical source. Discovery
 # finds trios, so a blend of any other shape is one nothing would ever look at again.
@@ -124,8 +129,8 @@ printf '%s\n' "$refs" |
     while read -r local_ref local_sha stem why; do
         echo "  ▸ $stem at ${local_sha} ($local_ref, $why)"
         blend=$(assets_hydrate "$local_sha" "$stem" "$assets_tmp/$local_sha") || exit 1
-        python3 scripts/tank/asset_door.py verify "$blend" ||
-            { printf '\033[31m  the asset door refused %s at %s\033[0m\n' "$stem" "$local_sha" >&2
+        python3 scripts/tank/build.py verify "$blend" ||
+            { printf '\033[31m  the tank build refused %s at %s\033[0m\n' "$stem" "$local_sha" >&2
               exit 1; }
     done || exit 1
 fi

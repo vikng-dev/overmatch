@@ -198,7 +198,7 @@
             "radius_m": 0.384491,
             "origin_radius_m": 0.380365
           },
-          "glb_sha256": "ac37e9b0e2e1e12bc84db264b4a6c9fc36384c0b940047cd7daa8efaa9afd013",
+          "glb_sha256": "d5ef224473755d683dcfd096892cf86643d5ada6ac6964752118531a2fccf9f7",
           "blender_source_verts": 744,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,

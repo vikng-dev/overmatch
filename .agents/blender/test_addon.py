@@ -49,7 +49,7 @@ def fake_tree(name, stem="testbed", holder=None, files=("blend", "tank.ron", "gl
     os.makedirs(os.path.join(root, ".git"), exist_ok=True)
     if door:
         os.makedirs(os.path.join(root, "scripts", "tank"), exist_ok=True)
-        open(os.path.join(root, addon.DOOR_RELPATH), "w").close()
+        open(os.path.join(root, addon.BUILD_RELPATH), "w").close()
     directory = os.path.join(root, "assets", holder or stem)
     os.makedirs(directory, exist_ok=True)
     for extension in files:
@@ -235,7 +235,7 @@ def a_refusal_with_no_verdict_line_surfaces_whole():
     stage, message = addon.refusal_of(["Traceback (most recent call last):", "  boom"])
     assert stage == "door", stage
     assert "Traceback" in message and "boom" in message, message
-    assert addon.refusal_of([])[1].startswith("the door printed nothing at all")
+    assert addon.refusal_of([])[1].startswith("the build printed nothing at all")
 
 
 # ── the stock-exporter hook ──────────────────────────────────────────────────────────────────────

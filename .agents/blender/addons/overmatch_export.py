@@ -1,9 +1,9 @@
-"""overmatch_export.py — the GUI adapter over the one asset door.
+"""overmatch_export.py — the GUI adapter over the one tank build.
 
 Install this once (Preferences ▸ Add-ons ▸ Install… ▸ pick this file, then tick it) and
 **File ▸ Export ▸ Overmatch Tank (.glb)** saves the open blend and runs exactly
 
-    python3 scripts/tank/asset_door.py export assets/<id>/<id>.blend
+    python3 scripts/tank/build.py build assets/<id>/<id>.blend
 
 as a subprocess. This file holds no check, no census, no notice and no export setting of its own,
 and it does not enter the chain anywhere except at the top: it prepares an environment a GUI Blender
@@ -22,7 +22,7 @@ ONE ENTRANCE, AND THE LAUNCH IT COSTS
 The door launches its own pinned Blender on the saved file, so a GUI export pays a MEASURED 30-60 s
 more than an in-process source pass would. That is the whole price of there being one entrance: no
 candidate crosses a process boundary, so nothing has to authenticate one, and the bytes a GUI export
-lands are the bytes `asset_door.py export` lands because it IS `asset_door.py export`.
+lands are the bytes `build.py build` lands because it IS `build.py build`.
 
 THE STOCK glTF EXPORTER
 -----------------------
@@ -74,7 +74,7 @@ from bpy.types import Operator
 
 #: The one door. Repo-relative: this add-on is installed into Blender's own directory and finds the
 #: work tree by walking up from the open blend.
-DOOR_RELPATH = os.path.join("scripts", "tank", "asset_door.py")
+BUILD_RELPATH = os.path.join("scripts", "tank", "build.py")
 
 #: Searched in order, appended to whatever PATH we inherit. `~/.cargo/bin` carries the consumer
 #: contract's `cargo`; /usr/bin..sbin are re-asserted because a stripped GUI environment is a real
@@ -98,10 +98,11 @@ FREEZE_NOTICE = (
     "Blender from a terminal to see it)."
 )
 
-#: The whole run's ceiling, from the moment the door is launched. A full chain is MINUTES — the door
-#: opens a Blender of its own and every image is KTX2-encoded — and Blender's window is frozen for
-#: all of it, so this is generous by construction: what it bounds is the freeze, not the work.
-DOOR_DEADLINE_SECONDS = 30 * 60
+#: The whole run's ceiling, from the moment the build is launched. A full chain is TENS OF MINUTES —
+#: the build opens Blenders of its own, every image is KTX2-encoded and every source primitive gets
+#: a certified LOD chain — and Blender's window is frozen for all of it, so this is generous by
+#: construction: what it bounds is the freeze, not the work.
+DOOR_DEADLINE_SECONDS = 120 * 60
 
 #: Said when it expires, in the shape of every other refusal the artist reads: what happened, what
 #: it means for the tracked model, what to do next.
@@ -110,7 +111,7 @@ DOOR_DEADLINE_EXPIRED = (
     "and was killed, along with every process it had launched.\n"
     "The tracked model is unchanged.\n"
     "Run the door in a terminal to see where it stopped:\n"
-    "    python3 scripts/tank/asset_door.py export <blend>"
+    "    python3 scripts/tank/build.py build <blend>"
 )
 
 #: Emitted once per encoded image by `scripts/encode-tank-ktx2.sh`, and once up front with the
@@ -201,7 +202,7 @@ def tracked_asset(glb):
     if os.path.basename(os.path.dirname(directory)) != "assets":
         return None
     root = repo_root_for(path)
-    if not root or not os.path.isfile(os.path.join(root, DOOR_RELPATH)):
+    if not root or not os.path.isfile(os.path.join(root, BUILD_RELPATH)):
         return None
     blend = os.path.join(directory, stem + ".blend")
     if not os.path.isfile(blend) or not os.path.isfile(os.path.join(directory, stem + ".tank.ron")):
@@ -361,10 +362,11 @@ class Refused(Exception):
         self.stage = stage
 
 
-#: The door's own console protocol: it announces every stage it is about to run on a `door  ▸` line,
-#: and says which one refused on a last one carrying `refused at <stage>`. Read here for the same
-#: reason `_IMAGE_LINE` is — this file reads the door's stdout and holds no vocabulary of its own.
-_DOOR_LINE = "door  ▸ "
+#: The chain's own console protocol: every stage it is about to run is announced on a `build ▸` or
+#: `door  ▸` line, and the one that refused is named on a last line carrying `refused at <stage>`.
+#: Read here for the same reason `_IMAGE_LINE` is — this file reads that stdout and holds no
+#: vocabulary of its own.
+_STAGE_LINES = ("build ▸ ", "door  ▸ ")
 _REFUSED_MARK = "refused at "
 
 #: How many of the refusing stage's lines the popup carries. A popup may summarize; the console and
@@ -379,7 +381,7 @@ def refusal_of(printed):
 
     NOTHING IS PARSED OUT OF THE REPORT. Its rows are the door's rendering (`scripts/tank/
     report.py`) and re-deriving them here would be this file holding a second vocabulary. What is
-    read is only the door's own `door  ▸` lines: everything after the LAST stage it announced is
+    read is only the chain's own stage lines: everything after the LAST stage it announced is
     what that stage said, and the report is at the head of it because errors sort first. A run that
     ends some other way — no announcement, no verdict — surfaces whole, under the stage `door`.
     """
@@ -390,9 +392,10 @@ def refusal_of(printed):
             stage = printed[index].split(_REFUSED_MARK, 1)[1].split(" ", 1)[0].strip() or stage
             end = index
             break
-    announced = [index for index in range(end) if printed[index].startswith(_DOOR_LINE)]
+    announced = [index for index in range(end)
+                 if printed[index].startswith(_STAGE_LINES)]
     said = printed[announced[-1] + 1:end] if announced else printed[:end]
-    return (stage, "\n".join((said[:POPUP_LINES] or ["the door printed nothing at all"]) + [
+    return (stage, "\n".join((said[:POPUP_LINES] or ["the build printed nothing at all"]) + [
         "", "The tracked model is unchanged. The complete report is in the system console.",
     ]))
 
@@ -414,7 +417,7 @@ def export_open_blend(root):
     stem = os.path.splitext(os.path.basename(blend))[0]
 
     code, printed = run_streamed(
-        [python, os.path.join(root, DOOR_RELPATH), "export", blend], root,
+        [python, os.path.join(root, BUILD_RELPATH), "build", blend], root,
     )
     if code:
         raise Refused(*refusal_of(printed))
@@ -493,7 +496,7 @@ STOCK_EXPORT_REFUSED = (
     "settings are frozen, and this export ran no source pass at all.\n"
     "The previous model has been put back.\n"
     "Use File ▸ Export ▸ Overmatch Tank (.glb), or run:\n"
-    "    python3 scripts/tank/asset_door.py export {}"
+    "    python3 scripts/tank/build.py build {}"
 )
 
 

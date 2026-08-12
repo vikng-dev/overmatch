@@ -1,0 +1,1021 @@
+{
+  "blend_digest": "2dca1fa3452e479b119aa032ba5677bf37738062fd852ecea6d30c91ac71bda3",
+  "view_glb_sha": "d5ef224473755d683dcfd096892cf86643d5ada6ac6964752118531a2fccf9f7",
+  "sim_glb_sha": "83fcf5b8f32c522e093ea44406da93ee31cb8ce3ad94813cae66219c4f028206",
+  "mesh_count": 58,
+  "chains": {
+    "Ammo_L_0#0": {
+      "radius_m": 0.671427,
+      "rungs": [
+        {
+          "mesh": "Ammo_L_0#0_LOD7",
+          "deviation_mm": 222.807126
+        }
+      ]
+    },
+    "Ammo_L_1#0": {
+      "radius_m": 0.671427,
+      "rungs": [
+        {
+          "mesh": "Ammo_L_0#0_LOD7",
+          "deviation_mm": 222.807126
+        }
+      ]
+    },
+    "Ammo_R_0#0": {
+      "radius_m": 0.671427,
+      "rungs": [
+        {
+          "mesh": "Ammo_R_0#0_LOD7",
+          "deviation_mm": 222.80713
+        }
+      ]
+    },
+    "Ammo_R_1#0": {
+      "radius_m": 0.671427,
+      "rungs": [
+        {
+          "mesh": "Ammo_R_1#0_LOD7",
+          "deviation_mm": 222.807132
+        }
+      ]
+    },
+    "BowGunner#0": {
+      "radius_m": 0.650744,
+      "rungs": [
+        {
+          "mesh": "BowGunner#0_LOD6",
+          "deviation_mm": 110.901982
+        },
+        {
+          "mesh": "BowGunner#0_LOD7",
+          "deviation_mm": 228.569737
+        }
+      ]
+    },
+    "Breech#0": {
+      "radius_m": 0.755527,
+      "rungs": [
+        {
+          "mesh": "Breech#0_LOD5",
+          "deviation_mm": 60.906771
+        },
+        {
+          "mesh": "Breech#0_LOD8",
+          "deviation_mm": 273.856612
+        }
+      ]
+    },
+    "Coax_MG_Barrel#0": {
+      "radius_m": 0.283146,
+      "rungs": [
+        {
+          "mesh": "Coax_MG_Barrel#0_LOD1",
+          "deviation_mm": 2.660065
+        },
+        {
+          "mesh": "Coax_MG_Barrel#0_LOD2",
+          "deviation_mm": 7.059934
+        },
+        {
+          "mesh": "Coax_MG_Barrel#0_LOD4",
+          "deviation_mm": 16.066004
+        }
+      ]
+    },
+    "Coax_MG_Body#0": {
+      "radius_m": 0.739605,
+      "rungs": [
+        {
+          "mesh": "Coax_MG_Body#0_LOD4",
+          "deviation_mm": 28.15568
+        },
+        {
+          "mesh": "Coax_MG_Body#0_LOD5",
+          "deviation_mm": 32.102415
+        }
+      ]
+    },
+    "Commander#0": {
+      "radius_m": 0.650744,
+      "rungs": [
+        {
+          "mesh": "Commander#0_LOD6",
+          "deviation_mm": 109.050853
+        },
+        {
+          "mesh": "Commander#0_LOD7",
+          "deviation_mm": 228.569686
+        }
+      ]
+    },
+    "Commander_Cupola#0": {
+      "radius_m": 0.476929,
+      "rungs": [
+        {
+          "mesh": "Commander_Cupola#0_LOD2",
+          "deviation_mm": 4.741709
+        },
+        {
+          "mesh": "Commander_Cupola#0_LOD3",
+          "deviation_mm": 12.818664
+        },
+        {
+          "mesh": "Commander_Cupola#0_LOD4",
+          "deviation_mm": 29.578954
+        },
+        {
+          "mesh": "Commander_Cupola#0_LOD5",
+          "deviation_mm": 58.893439
+        },
+        {
+          "mesh": "Commander_Cupola#0_LOD7",
+          "deviation_mm": 212.761698
+        }
+      ]
+    },
+    "Driver#0": {
+      "radius_m": 0.650744,
+      "rungs": [
+        {
+          "mesh": "Driver#0_LOD6",
+          "deviation_mm": 109.05081
+        },
+        {
+          "mesh": "Driver#0_LOD7",
+          "deviation_mm": 228.903284
+        }
+      ]
+    },
+    "Engine#0": {
+      "radius_m": 0.957061,
+      "rungs": [
+        {
+          "mesh": "Engine#0_LOD8",
+          "deviation_mm": 454.157174
+        }
+      ]
+    },
+    "Gun_Mantlet#0": {
+      "radius_m": 0.480011,
+      "rungs": [
+        {
+          "mesh": "Gun_Mantlet#0_LOD2",
+          "deviation_mm": 7.350668
+        },
+        {
+          "mesh": "Gun_Mantlet#0_LOD4",
+          "deviation_mm": 27.987844
+        },
+        {
+          "mesh": "Gun_Mantlet#0_LOD6",
+          "deviation_mm": 123.850505
+        }
+      ]
+    },
+    "Gun_Mask#0": {
+      "radius_m": 0.853518,
+      "rungs": [
+        {
+          "mesh": "Gun_Mask#0_LOD1",
+          "deviation_mm": 3.774178
+        },
+        {
+          "mesh": "Gun_Mask#0_LOD4",
+          "deviation_mm": 18.918092
+        },
+        {
+          "mesh": "Gun_Mask#0_LOD5",
+          "deviation_mm": 56.624076
+        },
+        {
+          "mesh": "Gun_Mask#0_LOD6",
+          "deviation_mm": 120.101945
+        }
+      ]
+    },
+    "Gunner#0": {
+      "radius_m": 0.650744,
+      "rungs": [
+        {
+          "mesh": "Gunner#0_LOD6",
+          "deviation_mm": 109.050853
+        },
+        {
+          "mesh": "Gunner#0_LOD7",
+          "deviation_mm": 228.903324
+        }
+      ]
+    },
+    "Hull_Bottom#0": {
+      "radius_m": 2.651937,
+      "rungs": [
+        {
+          "mesh": "Hull_Bottom#0_LOD4",
+          "deviation_mm": 18.983393
+        },
+        {
+          "mesh": "Hull_Bottom#0_LOD9",
+          "deviation_mm": 957.970797
+        }
+      ]
+    },
+    "Hull_Collider#0": {
+      "radius_m": 3.500593,
+      "rungs": [
+        {
+          "mesh": "Hull_Collider#0_LOD3",
+          "deviation_mm": 8.91999
+        },
+        {
+          "mesh": "Hull_Collider#0_LOD5",
+          "deviation_mm": 61.351534
+        },
+        {
+          "mesh": "Hull_Collider#0_LOD7",
+          "deviation_mm": 162.812893
+        }
+      ]
+    },
+    "Hull_Decor#0": {
+      "radius_m": 3.187887,
+      "rungs": [
+        {
+          "mesh": "Hull_Decor#0_LOD4",
+          "deviation_mm": 31.017631
+        },
+        {
+          "mesh": "Hull_Decor#0_LOD6",
+          "deviation_mm": 109.042997
+        },
+        {
+          "mesh": "Hull_Decor#0_LOD7",
+          "deviation_mm": 244.769012
+        }
+      ]
+    },
+    "Hull_Decor#1": {
+      "radius_m": 4.610073,
+      "rungs": [
+        {
+          "mesh": "Hull_Decor#1_LOD2",
+          "deviation_mm": 6.889982
+        },
+        {
+          "mesh": "Hull_Decor#1_LOD3",
+          "deviation_mm": 13.643061
+        }
+      ]
+    },
+    "Hull_LFP_Lower#0": {
+      "radius_m": 1.021359,
+      "rungs": [
+        {
+          "mesh": "Hull_LFP_Lower#0_LOD1",
+          "deviation_mm": 0.416855
+        },
+        {
+          "mesh": "Hull_LFP_Lower#0_LOD5",
+          "deviation_mm": 53.244094
+        }
+      ]
+    },
+    "Hull_LFP_Upper#0": {
+      "radius_m": 2.022662,
+      "rungs": [
+        {
+          "mesh": "Hull_LFP_Upper#0_LOD4",
+          "deviation_mm": 30.000028
+        },
+        {
+          "mesh": "Hull_LFP_Upper#0_LOD8",
+          "deviation_mm": 461.01932
+        }
+      ]
+    },
+    "Hull_MG_Ball#0": {
+      "radius_m": 0.172755,
+      "rungs": [
+        {
+          "mesh": "Hull_MG_Ball#0_LOD1",
+          "deviation_mm": 3.611465
+        },
+        {
+          "mesh": "Hull_MG_Ball#0_LOD2",
+          "deviation_mm": 7.767809
+        },
+        {
+          "mesh": "Hull_MG_Ball#0_LOD3",
+          "deviation_mm": 16.437025
+        },
+        {
+          "mesh": "Hull_MG_Ball#0_LOD4",
+          "deviation_mm": 30.626085
+        },
+        {
+          "mesh": "Hull_MG_Ball#0_LOD5",
+          "deviation_mm": 60.61662
+        },
+        {
+          "mesh": "Hull_MG_Ball#0_LOD6",
+          "deviation_mm": 100.613818
+        }
+      ]
+    },
+    "Hull_MG_Barrel#0": {
+      "radius_m": 0.343192,
+      "rungs": [
+        {
+          "mesh": "Hull_MG_Barrel#0_LOD1",
+          "deviation_mm": 2.660087
+        },
+        {
+          "mesh": "Hull_MG_Barrel#0_LOD3",
+          "deviation_mm": 8.582502
+        },
+        {
+          "mesh": "Hull_MG_Barrel#0_LOD4",
+          "deviation_mm": 16.082544
+        }
+      ]
+    },
+    "Hull_MG_Body#0": {
+      "radius_m": 0.180335,
+      "rungs": [
+        {
+          "mesh": "Hull_MG_Body#0_LOD4",
+          "deviation_mm": 28.155674
+        },
+        {
+          "mesh": "Hull_MG_Body#0_LOD5",
+          "deviation_mm": 32.102407
+        }
+      ]
+    },
+    "Hull_MG_Mantlet#0": {
+      "radius_m": 0.071562,
+      "rungs": [
+        {
+          "mesh": "Hull_MG_Mantlet#0_LOD1",
+          "deviation_mm": 3.553755
+        },
+        {
+          "mesh": "Hull_MG_Mantlet#0_LOD2",
+          "deviation_mm": 6.000031
+        },
+        {
+          "mesh": "Hull_MG_Mantlet#0_LOD3",
+          "deviation_mm": 13.56594
+        },
+        {
+          "mesh": "Hull_MG_Mantlet#0_LOD4",
+          "deviation_mm": 22.875828
+        },
+        {
+          "mesh": "Hull_MG_Mantlet#0_LOD5",
+          "deviation_mm": 43.455917
+        }
+      ]
+    },
+    "Hull_Rear#0": {
+      "radius_m": 1.727721,
+      "rungs": [
+        {
+          "mesh": "Hull_Rear#0_LOD5",
+          "deviation_mm": 57.672086
+        },
+        {
+          "mesh": "Hull_Rear#0_LOD8",
+          "deviation_mm": 438.423455
+        }
+      ]
+    },
+    "Hull_Side_Lower_L#0": {
+      "radius_m": 2.985799,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Lower_L#0_LOD1",
+          "deviation_mm": 2.521591
+        },
+        {
+          "mesh": "Hull_Side_Lower_L#0_LOD4",
+          "deviation_mm": 29.453733
+        },
+        {
+          "mesh": "Hull_Side_Lower_L#0_LOD5",
+          "deviation_mm": 45.305705
+        },
+        {
+          "mesh": "Hull_Side_Lower_L#0_LOD6",
+          "deviation_mm": 91.377834
+        },
+        {
+          "mesh": "Hull_Side_Lower_L#0_LOD8",
+          "deviation_mm": 469.15257
+        }
+      ]
+    },
+    "Hull_Side_Lower_R#0": {
+      "radius_m": 2.985799,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Lower_R#0_LOD1",
+          "deviation_mm": 3.182218
+        },
+        {
+          "mesh": "Hull_Side_Lower_R#0_LOD4",
+          "deviation_mm": 30.278507
+        },
+        {
+          "mesh": "Hull_Side_Lower_R#0_LOD6",
+          "deviation_mm": 91.377835
+        },
+        {
+          "mesh": "Hull_Side_Lower_R#0_LOD8",
+          "deviation_mm": 469.152549
+        }
+      ]
+    },
+    "Hull_Side_Track_L#0": {
+      "radius_m": 2.507089,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Track_L#0_LOD3",
+          "deviation_mm": 12.500022
+        },
+        {
+          "mesh": "Hull_Side_Track_L#0_LOD8",
+          "deviation_mm": 284.86304
+        }
+      ]
+    },
+    "Hull_Side_Track_R#0": {
+      "radius_m": 2.507089,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Track_R#0_LOD3",
+          "deviation_mm": 12.500023
+        },
+        {
+          "mesh": "Hull_Side_Track_R#0_LOD8",
+          "deviation_mm": 284.863039
+        }
+      ]
+    },
+    "Hull_Side_Upper_L#0": {
+      "radius_m": 2.524994,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Upper_L#0_LOD5",
+          "deviation_mm": 40.000022
+        },
+        {
+          "mesh": "Hull_Side_Upper_L#0_LOD7",
+          "deviation_mm": 141.959216
+        }
+      ]
+    },
+    "Hull_Side_Upper_R#0": {
+      "radius_m": 2.524994,
+      "rungs": [
+        {
+          "mesh": "Hull_Side_Upper_R#0_LOD5",
+          "deviation_mm": 40.000022
+        },
+        {
+          "mesh": "Hull_Side_Upper_R#0_LOD7",
+          "deviation_mm": 141.93421
+        }
+      ]
+    },
+    "Hull_Top#0": {
+      "radius_m": 2.86775,
+      "rungs": [
+        {
+          "mesh": "Hull_Top#0_LOD3",
+          "deviation_mm": 14.743944
+        },
+        {
+          "mesh": "Hull_Top#0_LOD4",
+          "deviation_mm": 27.631787
+        },
+        {
+          "mesh": "Hull_Top#0_LOD6",
+          "deviation_mm": 115.069217
+        }
+      ]
+    },
+    "Hull_UFP_Lower#0": {
+      "radius_m": 1.042146,
+      "rungs": [
+        {
+          "mesh": "Hull_UFP_Lower#0_LOD6",
+          "deviation_mm": 70.701884
+        },
+        {
+          "mesh": "Hull_UFP_Lower#0_LOD8",
+          "deviation_mm": 425.307304
+        }
+      ]
+    },
+    "Hull_UFP_Upper#0": {
+      "radius_m": 1.652284,
+      "rungs": [
+        {
+          "mesh": "Hull_UFP_Upper#0_LOD5",
+          "deviation_mm": 52.537866
+        },
+        {
+          "mesh": "Hull_UFP_Upper#0_LOD8",
+          "deviation_mm": 303.813219
+        }
+      ]
+    },
+    "Idler_L#0": {
+      "radius_m": 0.41425,
+      "rungs": [
+        {
+          "mesh": "Idler_L#0_LOD1",
+          "deviation_mm": 3.085388
+        },
+        {
+          "mesh": "Idler_L#0_LOD3",
+          "deviation_mm": 13.218402
+        },
+        {
+          "mesh": "Idler_L#0_LOD4",
+          "deviation_mm": 26.002718
+        }
+      ]
+    },
+    "Idler_R#0": {
+      "radius_m": 0.41425,
+      "rungs": [
+        {
+          "mesh": "Idler_R#0_LOD1",
+          "deviation_mm": 3.084852
+        },
+        {
+          "mesh": "Idler_R#0_LOD3",
+          "deviation_mm": 13.214792
+        },
+        {
+          "mesh": "Idler_R#0_LOD4",
+          "deviation_mm": 27.107554
+        }
+      ]
+    },
+    "Link#0": {
+      "radius_m": 0.381965,
+      "rungs": [
+        {
+          "mesh": "Link#0_LOD1",
+          "deviation_mm": 3.733744
+        },
+        {
+          "mesh": "Link#0_LOD3",
+          "deviation_mm": 15.185007
+        },
+        {
+          "mesh": "Link#0_LOD4",
+          "deviation_mm": 28.413103
+        },
+        {
+          "mesh": "Link#0_LOD5",
+          "deviation_mm": 46.703968
+        }
+      ]
+    },
+    "Link_Box#0": {
+      "radius_m": 3.32834,
+      "rungs": [
+        {
+          "mesh": "Link_Box#0_LOD5",
+          "deviation_mm": 32.716477
+        }
+      ]
+    },
+    "Loader#0": {
+      "radius_m": 0.650744,
+      "rungs": [
+        {
+          "mesh": "Loader#0_LOD6",
+          "deviation_mm": 109.050784
+        },
+        {
+          "mesh": "Loader#0_LOD7",
+          "deviation_mm": 228.569736
+        }
+      ]
+    },
+    "Main_Gun_Barrel#0": {
+      "radius_m": 2.050777,
+      "rungs": [
+        {
+          "mesh": "Main_Gun_Barrel#0_LOD1",
+          "deviation_mm": 3.845324
+        },
+        {
+          "mesh": "Main_Gun_Barrel#0_LOD2",
+          "deviation_mm": 7.817583
+        },
+        {
+          "mesh": "Main_Gun_Barrel#0_LOD3",
+          "deviation_mm": 15.01794
+        },
+        {
+          "mesh": "Main_Gun_Barrel#0_LOD4",
+          "deviation_mm": 35.51827
+        },
+        {
+          "mesh": "Main_Gun_Barrel#0_LOD5",
+          "deviation_mm": 61.963578
+        }
+      ]
+    },
+    "Smoke_Launcher_0#0": {
+      "radius_m": 1.652382,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_0#0_LOD1",
+          "deviation_mm": 3.859133
+        },
+        {
+          "mesh": "Smoke_Launcher_0#0_LOD2",
+          "deviation_mm": 7.334642
+        },
+        {
+          "mesh": "Smoke_Launcher_0#0_LOD3",
+          "deviation_mm": 14.420631
+        },
+        {
+          "mesh": "Smoke_Launcher_0#0_LOD4",
+          "deviation_mm": 24.061075
+        },
+        {
+          "mesh": "Smoke_Launcher_0#0_LOD5",
+          "deviation_mm": 42.797339
+        }
+      ]
+    },
+    "Smoke_Launcher_1#0": {
+      "radius_m": 1.643698,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_1#0_LOD1",
+          "deviation_mm": 3.848183
+        },
+        {
+          "mesh": "Smoke_Launcher_1#0_LOD2",
+          "deviation_mm": 6.306196
+        },
+        {
+          "mesh": "Smoke_Launcher_1#0_LOD3",
+          "deviation_mm": 12.24404
+        },
+        {
+          "mesh": "Smoke_Launcher_1#0_LOD4",
+          "deviation_mm": 29.861629
+        },
+        {
+          "mesh": "Smoke_Launcher_1#0_LOD5",
+          "deviation_mm": 42.619883
+        }
+      ]
+    },
+    "Smoke_Launcher_2#0": {
+      "radius_m": 1.645884,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_2#0_LOD1",
+          "deviation_mm": 3.829787
+        },
+        {
+          "mesh": "Smoke_Launcher_2#0_LOD3",
+          "deviation_mm": 14.296878
+        },
+        {
+          "mesh": "Smoke_Launcher_2#0_LOD4",
+          "deviation_mm": 24.071316
+        },
+        {
+          "mesh": "Smoke_Launcher_2#0_LOD5",
+          "deviation_mm": 43.159335
+        }
+      ]
+    },
+    "Smoke_Launcher_3#0": {
+      "radius_m": 1.645025,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_3#0_LOD1",
+          "deviation_mm": 3.848157
+        },
+        {
+          "mesh": "Smoke_Launcher_3#0_LOD2",
+          "deviation_mm": 7.212847
+        },
+        {
+          "mesh": "Smoke_Launcher_3#0_LOD3",
+          "deviation_mm": 14.301799
+        },
+        {
+          "mesh": "Smoke_Launcher_3#0_LOD4",
+          "deviation_mm": 25.208557
+        },
+        {
+          "mesh": "Smoke_Launcher_3#0_LOD5",
+          "deviation_mm": 42.982973
+        }
+      ]
+    },
+    "Smoke_Launcher_4#0": {
+      "radius_m": 1.638482,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_4#0_LOD1",
+          "deviation_mm": 3.848114
+        },
+        {
+          "mesh": "Smoke_Launcher_4#0_LOD3",
+          "deviation_mm": 14.420696
+        },
+        {
+          "mesh": "Smoke_Launcher_4#0_LOD4",
+          "deviation_mm": 24.805241
+        },
+        {
+          "mesh": "Smoke_Launcher_4#0_LOD5",
+          "deviation_mm": 43.053902
+        }
+      ]
+    },
+    "Smoke_Launcher_5#0": {
+      "radius_m": 1.655721,
+      "rungs": [
+        {
+          "mesh": "Smoke_Launcher_5#0_LOD1",
+          "deviation_mm": 3.859095
+        },
+        {
+          "mesh": "Smoke_Launcher_5#0_LOD3",
+          "deviation_mm": 14.296808
+        },
+        {
+          "mesh": "Smoke_Launcher_5#0_LOD4",
+          "deviation_mm": 24.835499
+        },
+        {
+          "mesh": "Smoke_Launcher_5#0_LOD5",
+          "deviation_mm": 42.97014
+        }
+      ]
+    },
+    "Sprocket_L#0": {
+      "radius_m": 0.67369,
+      "rungs": [
+        {
+          "mesh": "Sprocket_L#0_LOD3",
+          "deviation_mm": 15.391714
+        },
+        {
+          "mesh": "Sprocket_L#0_LOD4",
+          "deviation_mm": 29.194542
+        },
+        {
+          "mesh": "Sprocket_L#0_LOD5",
+          "deviation_mm": 53.312784
+        },
+        {
+          "mesh": "Sprocket_L#0_LOD6",
+          "deviation_mm": 122.41585
+        }
+      ]
+    },
+    "Sprocket_R#0": {
+      "radius_m": 0.67369,
+      "rungs": [
+        {
+          "mesh": "Sprocket_R#0_LOD3",
+          "deviation_mm": 15.391724
+        },
+        {
+          "mesh": "Sprocket_R#0_LOD4",
+          "deviation_mm": 29.164483
+        },
+        {
+          "mesh": "Sprocket_R#0_LOD5",
+          "deviation_mm": 53.32218
+        },
+        {
+          "mesh": "Sprocket_R#0_LOD6",
+          "deviation_mm": 122.41585
+        }
+      ]
+    },
+    "Transmission#0": {
+      "radius_m": 1.261308,
+      "rungs": [
+        {
+          "mesh": "Transmission#0_LOD7",
+          "deviation_mm": 219.373127
+        }
+      ]
+    },
+    "Turret_Bottom#0": {
+      "radius_m": 1.421931,
+      "rungs": [
+        {
+          "mesh": "Turret_Bottom#0_LOD4",
+          "deviation_mm": 26.060957
+        },
+        {
+          "mesh": "Turret_Bottom#0_LOD6",
+          "deviation_mm": 116.45477
+        }
+      ]
+    },
+    "Turret_Collider#0": {
+      "radius_m": 1.588668,
+      "rungs": [
+        {
+          "mesh": "Turret_Collider#0_LOD4",
+          "deviation_mm": 30.284413
+        },
+        {
+          "mesh": "Turret_Collider#0_LOD7",
+          "deviation_mm": 200.468967
+        }
+      ]
+    },
+    "Turret_Decor#0": {
+      "radius_m": 1.888375,
+      "rungs": [
+        {
+          "mesh": "Turret_Decor#0_LOD1",
+          "deviation_mm": 3.79654
+        },
+        {
+          "mesh": "Turret_Decor#0_LOD3",
+          "deviation_mm": 15.435483
+        },
+        {
+          "mesh": "Turret_Decor#0_LOD5",
+          "deviation_mm": 48.455913
+        }
+      ]
+    },
+    "Turret_Decor.001#0": {
+      "radius_m": 1.473881,
+      "rungs": [
+        {
+          "mesh": "Turret_Decor.001#0_LOD2",
+          "deviation_mm": 5.551013
+        },
+        {
+          "mesh": "Turret_Decor.001#0_LOD4",
+          "deviation_mm": 30.636655
+        },
+        {
+          "mesh": "Turret_Decor.001#0_LOD5",
+          "deviation_mm": 58.281818
+        },
+        {
+          "mesh": "Turret_Decor.001#0_LOD6",
+          "deviation_mm": 113.650827
+        }
+      ]
+    },
+    "Turret_Mask#0": {
+      "radius_m": 1.259688,
+      "rungs": [
+        {
+          "mesh": "Turret_Mask#0_LOD4",
+          "deviation_mm": 29.458558
+        },
+        {
+          "mesh": "Turret_Mask#0_LOD6",
+          "deviation_mm": 121.696579
+        }
+      ]
+    },
+    "Turret_Side#0": {
+      "radius_m": 1.648326,
+      "rungs": [
+        {
+          "mesh": "Turret_Side#0_LOD4",
+          "deviation_mm": 25.630175
+        },
+        {
+          "mesh": "Turret_Side#0_LOD5",
+          "deviation_mm": 58.353843
+        },
+        {
+          "mesh": "Turret_Side#0_LOD6",
+          "deviation_mm": 116.468996
+        },
+        {
+          "mesh": "Turret_Side#0_LOD8",
+          "deviation_mm": 450.544796
+        }
+      ]
+    },
+    "Turret_Top#0": {
+      "radius_m": 1.648409,
+      "rungs": [
+        {
+          "mesh": "Turret_Top#0_LOD1",
+          "deviation_mm": 0.953099
+        },
+        {
+          "mesh": "Turret_Top#0_LOD3",
+          "deviation_mm": 12.128005
+        },
+        {
+          "mesh": "Turret_Top#0_LOD4",
+          "deviation_mm": 29.691659
+        },
+        {
+          "mesh": "Turret_Top#0_LOD6",
+          "deviation_mm": 131.679511
+        }
+      ]
+    },
+    "Wheel_L#0": {
+      "radius_m": 0.727982,
+      "rungs": [
+        {
+          "mesh": "Wheel_L#0_LOD2",
+          "deviation_mm": 6.976162
+        },
+        {
+          "mesh": "Wheel_L#0_LOD4",
+          "deviation_mm": 28.648051
+        },
+        {
+          "mesh": "Wheel_L#0_LOD5",
+          "deviation_mm": 53.199199
+        },
+        {
+          "mesh": "Wheel_L#0_LOD6",
+          "deviation_mm": 113.524683
+        }
+      ]
+    },
+    "Wheel_L#1": {
+      "radius_m": 0.500593,
+      "rungs": [
+        {
+          "mesh": "Wheel_L#1_LOD4",
+          "deviation_mm": 18.692315
+        },
+        {
+          "mesh": "Wheel_L#1_LOD5",
+          "deviation_mm": 47.833641
+        },
+        {
+          "mesh": "Wheel_L#1_LOD6",
+          "deviation_mm": 115.366039
+        }
+      ]
+    },
+    "Wheel_R#0": {
+      "radius_m": 0.727982,
+      "rungs": [
+        {
+          "mesh": "Wheel_R#0_LOD2",
+          "deviation_mm": 6.976162
+        },
+        {
+          "mesh": "Wheel_R#0_LOD4",
+          "deviation_mm": 28.690703
+        },
+        {
+          "mesh": "Wheel_R#0_LOD5",
+          "deviation_mm": 53.199199
+        },
+        {
+          "mesh": "Wheel_R#0_LOD6",
+          "deviation_mm": 113.524683
+        }
+      ]
+    },
+    "Wheel_R#1": {
+      "radius_m": 0.500593,
+      "rungs": [
+        {
+          "mesh": "Wheel_R#1_LOD4",
+          "deviation_mm": 18.692315
+        },
+        {
+          "mesh": "Wheel_R#1_LOD5",
+          "deviation_mm": 47.833642
+        },
+        {
+          "mesh": "Wheel_R#1_LOD6",
+          "deviation_mm": 115.366039
+        }
+      ]
+    }
+  }
+}
