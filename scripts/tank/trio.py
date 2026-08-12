@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -349,25 +350,84 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def certificate(blend_digest, view_sha, sim_sha, mesh_count, chains):
-    """The five fields, in a fixed order, with every chain's rungs strictly ascending.
+def _finite(value):
+    """A real number, and not a NaN or an infinity.
 
-    Refuses a chain whose deviations do not ascend: the runtime picks a level by comparing a derived
-    distance against the next one, and an unordered ladder makes that comparison meaningless.
+    NaN is why this is a function rather than a comparison. Every ordering test is False against it
+    — `b <= a` included — so a NaN deviation slides through an ascending check that is written the
+    obvious way, and `json.dumps` then emits a bare `NaN` token no strict reader will parse.
     """
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def chain_failures(name, chain):
+    """Every CONSTRUCTIVE law one chain row must satisfy, as named failures. Empty is the pass.
+
+    ONE IMPLEMENTATION, TWO CALLERS. `certificate` refuses a row that breaks these when the trio is
+    built; `coherence` re-applies them to the certificate ON DISK, because a hand-edited
+    `deviation_mm`, a descending ladder or a bogus radius passes every hash the trio carries — the
+    hashes cover the BINARIES, and the certificate is the file nobody was checking.
+    """
+    failures = []
+    if not isinstance(chain, dict):
+        failures.append(f"chain {name!r} is {type(chain).__name__}, not an object")
+        return failures
+    extra = sorted(set(chain) - {"radius_m", "rungs"})
+    if extra:
+        failures.append(
+            f"chain {name!r} carries {', '.join(extra)}, which a chain row has no field for"
+        )
+    radius = chain.get("radius_m")
+    if not _finite(radius) or radius <= 0.0:
+        failures.append(f"chain {name!r} has radius_m {radius!r}, which is not a positive finite "
+                        f"number of metres")
+    rungs = chain.get("rungs")
+    if not isinstance(rungs, list) or not rungs:
+        failures.append(f"chain {name!r} has no rungs; a chain with none is not a row")
+        return failures
+    previous = None
+    seen = set()
+    for index, rung in enumerate(rungs):
+        if not isinstance(rung, dict) or sorted(rung) != ["deviation_mm", "mesh"]:
+            failures.append(f"chain {name!r} rung {index} is not a {{mesh, deviation_mm}} pair")
+            continue
+        if not isinstance(rung["mesh"], str) or not rung["mesh"]:
+            failures.append(f"chain {name!r} rung {index} names no mesh")
+        elif rung["mesh"] in seen:
+            failures.append(f"chain {name!r} names rung mesh {rung['mesh']!r} twice")
+        else:
+            seen.add(rung["mesh"])
+        deviation = rung["deviation_mm"]
+        if not _finite(deviation) or deviation <= 0.0:
+            failures.append(f"chain {name!r} rung {index} has deviation_mm {deviation!r}, which is "
+                            f"not a positive finite number of millimetres")
+        elif previous is not None and deviation <= previous:
+            failures.append(
+                f"chain {name!r} deviations do not strictly ascend: rung {index} is {deviation} "
+                f"after {previous}. The runtime picks a level by comparing a derived distance "
+                f"against the next one, and an unordered ladder makes that comparison meaningless"
+            )
+        elif previous is None or deviation > previous:
+            previous = deviation
+    return failures
+
+
+def certificate(blend_digest, view_sha, sim_sha, mesh_count, chains):
+    """The five fields, in a fixed order, every chain row satisfying `chain_failures`."""
     ordered = {}
     for name in sorted(chains):
         rungs = chains[name]["rungs"]
-        deviations = [rung["deviation_mm"] for rung in rungs]
-        if any(b <= a for a, b in zip(deviations, deviations[1:])):
-            raise TrioError(f"chain {name!r} deviations are not strictly ascending: {deviations}")
         if not rungs:
             continue
-        ordered[name] = {
+        row = {
             "radius_m": chains[name]["radius_m"],
             "rungs": [{"mesh": rung["mesh"], "deviation_mm": rung["deviation_mm"]}
                       for rung in rungs],
         }
+        failures = chain_failures(name, row)
+        if failures:
+            raise TrioError("; ".join(failures))
+        ordered[name] = row
     return {
         "blend_digest": blend_digest,
         "view_glb_sha": view_sha,
@@ -378,7 +438,10 @@ def certificate(blend_digest, view_sha, sim_sha, mesh_count, chains):
 
 
 def certificate_bytes(cert):
-    return (json.dumps(cert, indent=2, sort_keys=False) + "\n").encode()
+    """The certificate's one serialization. `allow_nan=False` refuses to WRITE a bare `NaN` or
+    `Infinity` token, which is JavaScript and not JSON — a reader that rejects it would be right,
+    and one that accepts it would read a distance nothing can compare."""
+    return (json.dumps(cert, indent=2, sort_keys=False, allow_nan=False) + "\n").encode()
 
 
 def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=None):
@@ -387,6 +450,12 @@ def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=No
     HASH-LOUD, and that is what makes the staged publish safe: binaries land first and the
     certificate last, so an interrupted publish leaves a certificate whose `view_glb_sha` names
     bytes that are no longer there, and this says so.
+
+    AND THE CERTIFICATE'S OWN BODY, which the hashes do not reach: they cover the two BINARIES, so
+    an edited `deviation_mm`, a ladder that descends, a radius that is not a number, or a chain key
+    naming a primitive the scene does not hold all read as a certified trio. What is re-applied here
+    is every CONSTRUCTIVE law — shape, ordering, key form, coverage — and none of the measurements:
+    re-deriving a deviation needs the search, which is the build's job and not a verifier's.
     """
     failures = []
     missing = [field for field in CERTIFICATE_FIELDS if field not in cert]
@@ -421,14 +490,58 @@ def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=No
     except SystemExit as error:
         failures.append(f"the view artifact cannot be read: {error}")
         return failures
-    names = {mesh.get("name") for mesh in view_js.get("meshes", [])[cert["mesh_count"]:]}
-    for name, chain in cert["chains"].items():
-        for rung in chain["rungs"]:
-            if rung["mesh"] not in names:
-                failures.append(
-                    f"chain {name!r} names rung mesh {rung['mesh']!r}, which the view artifact "
-                    f"does not hold"
-                )
+    if not isinstance(cert["mesh_count"], int) or isinstance(cert["mesh_count"], bool) \
+            or not 0 <= cert["mesh_count"] <= len(view_js.get("meshes", [])):
+        failures.append(
+            f"mesh_count is {cert['mesh_count']!r} and the view artifact holds "
+            f"{len(view_js.get('meshes', []))} mesh(es)"
+        )
+        return failures
+    if not isinstance(cert["chains"], dict):
+        failures.append("chains is not an object")
+        return failures
+
+    # THE CERTIFICATE'S OWN BODY. Its two hashes cover the BINARIES; nothing covered the file they
+    # sit in, so an edited deviation, a descending ladder or a chain key naming no primitive read
+    # as a certified trio. Re-deriving a MEASUREMENT needs the search and belongs to the build;
+    # shape, ordering and coverage are free and are asked here.
+    for name in sorted(cert["chains"]):
+        failures.extend(chain_failures(name, cert["chains"][name]))
+
+    source = {mesh.get("name"): mesh for mesh in view_js.get("meshes", [])[:cert["mesh_count"]]}
+    for name in sorted(cert["chains"]):
+        mesh_name, _, index = name.rpartition("#")
+        if not mesh_name or not index.isdigit():
+            failures.append(
+                f"chain key {name!r} is not `<meshName>#<primitiveIndex>`, which is the only form "
+                f"a consumer can resolve against the scene"
+            )
+        elif mesh_name not in source:
+            failures.append(
+                f"chain key {name!r} names mesh {mesh_name!r}, which is not one of the "
+                f"{cert['mesh_count']} the certificate declares are the source's"
+            )
+        elif int(index) >= len(source[mesh_name]["primitives"]):
+            failures.append(
+                f"chain key {name!r} names primitive {index} of a mesh that has "
+                f"{len(source[mesh_name]['primitives'])}"
+            )
+
+    # COVERAGE, BOTH WAYS. A rung record no chain names is geometry that ships and is never
+    # selected; a chain naming a record the file does not hold is a ladder with a hole in it.
+    # Several chains may name ONE record — that is the source-geometry dedup ADR 0035 asks for.
+    held = {mesh.get("name") for mesh in view_js.get("meshes", [])[cert["mesh_count"]:]}
+    named = {rung["mesh"] for chain in cert["chains"].values()
+             for rung in chain.get("rungs", []) if isinstance(rung, dict) and "mesh" in rung}
+    for missing_name in sorted(named - held):
+        failures.append(
+            f"a chain names rung mesh {missing_name!r}, which the view artifact does not hold"
+        )
+    for orphan in sorted(name for name in held - named if name is not None):
+        failures.append(
+            f"the view artifact holds rung mesh {orphan!r}, which no chain names — it ships and "
+            f"nothing can select it"
+        )
     for node in view_js.get("nodes", []):
         if node.get("mesh", 0) >= cert["mesh_count"]:
             failures.append(
@@ -436,6 +549,46 @@ def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=No
                 f"{cert['mesh_count']} the certificate declares are the source's"
             )
     return failures
+
+
+# ── what a certify miss means ────────────────────────────────────────────────────────────────────
+
+#: The three verdicts a certified rung can carry.
+ACCEPT = "accept"
+LOST_TO_BRACKET = "certification_bracket"
+FAILS_THE_RUN = "fails"
+
+
+def rung_certification(deviation, structural, target_mm):
+    """Which of the two causes a certify miss has. `deviation` is `measure.certified_deviation`'s.
+
+    THE SEARCH AND THE CERTIFICATE ASK DIFFERENT QUESTIONS. The directed search answers a budgeted
+    BOOLEAN (ADR 0036 §1); certification BRACKETS the number to `deviation_rel_tol_certify` and
+    gates on the UPPER end. So a candidate the search proved under a rung can carry a certified
+    upper bound just above it while every point sampled on the shipped bytes is under — the bracket
+    did not close, which ADR 0033 §6 prices in triangles and never in honesty. MEASURED on the
+    tiger: 7.7909 mm against a 7.7800 mm rung, a 0.14 % bracket, on three rungs of 180.
+
+    A SAMPLED WITNESS OVER THE TARGET is the other cause, and it is not the same fact: the shipped
+    bytes deviate, so they are not the surface the search measured, and that fails the run
+    (ADR 0033 §10). Any structural failure fails the run for the same reason. The two are separated
+    by the LOWER end of the one bracket.
+
+    A NON-FINITE bound fails the run: `NaN > target` is False, so an unguarded comparison reads an
+    unanswerable measurement as a pass.
+
+    It lives here, away from `bpy`, so BOTH sides of the boundary can be driven by a test.
+    """
+    if structural:
+        return FAILS_THE_RUN
+    lower, upper = deviation.get("mm"), deviation.get("mm_upper")
+    if not _finite(lower) or not _finite(upper) or not _finite(target_mm):
+        return FAILS_THE_RUN
+    if lower > target_mm:
+        return FAILS_THE_RUN
+    if upper > target_mm:
+        return LOST_TO_BRACKET
+    return ACCEPT
 
 
 # ── the staged publish ───────────────────────────────────────────────────────────────────────────

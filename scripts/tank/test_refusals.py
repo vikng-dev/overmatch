@@ -124,6 +124,9 @@ COVERAGE = {
     "build.sim-not-derived": (
         BUILD, "test_a_sim_artifact_that_hashes_right_and_is_not_the_strip_refuses"
     ),
+    "build.cache-corrupt": (
+        BUILD, "test_a_rung_whose_bytes_are_not_the_ones_the_record_measured_is_refused"
+    ),
 }
 
 #: `id: "L2.SOMETHING"` in a Rust `Check { … }` initialiser.

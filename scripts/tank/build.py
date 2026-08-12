@@ -24,11 +24,13 @@ WHAT `build` DOES, IN ORDER
 7. a STAGED publish: both binaries land, and the certificate last, so an interruption leaves a
    certificate naming bytes that are not there and every reader says so.
 
-WHAT `verify` DOES. The same door chain, and then: the tracked trio's own coherence, the tracked
-view glb with its certified rung records STRIPPED held against the rebuilt candidate by the door's
-own section-by-section comparison, the sim artifact re-derived from the tracked view glb and
+WHAT `verify` DOES. The same door chain, and then: the tracked trio's own coherence — its two
+hashes, its staleness field, AND every constructive law its certificate body must satisfy — the
+tracked view glb with its certified rung records STRIPPED held against the rebuilt candidate by the
+door's own section-by-section comparison, the sim artifact re-derived from the tracked view glb and
 compared byte for byte, and `mesh_count` against the meshes the source actually produces. It writes
-nothing and it runs no search — the certificate is what carries the measurements forward.
+nothing and it runs no search: a MEASUREMENT is re-derived by rebuilding, and what a verifier can
+hold a certificate to for free is its shape, its ordering and its coverage.
 
 Exit is non-zero exactly when a stage refused.
 """
@@ -51,6 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
 
 import asset_door  # noqa: E402  — the paths above are what make these importable
+import config as CONFIG  # noqa: E402
 import glb_ktx2  # noqa: E402
 import measure  # noqa: E402
 import report  # noqa: E402
@@ -65,8 +68,8 @@ MODES = ("build", "verify", "lint")
 CHAINS = os.path.join("scripts", "tank", "chains.py")
 
 #: What can move a RUNG'S BYTES given a source geometry. The per-mesh cache is keyed by
-#: (source-geometry digest, this digest), so an unchanged mesh cut by an unchanged search is never
-#: searched again.
+#: (source-geometry digest, `search_digest`), so an unchanged mesh cut by an unchanged search is
+#: never searched again. The SOURCES are half of that digest; `resolved_ladder` is the other half.
 #:
 #: `trio.py` is deliberately not in it: the only thing it decides here is what the source SURFACE
 #: is, and the digest that keys the cache is taken over that surface — a decode that changed would
@@ -81,6 +84,10 @@ PIPELINE_SOURCES = SEARCH_SOURCES + (
     "build.py", "trio.py", "asset_door.py", "glb_ktx2.py", "../encode-tank-ktx2.sh",
     "../../.agents/blender/export_tank.py",
 )
+
+#: What a cut chain's record is called inside its own cache directory — `chains.RECORD`, restated
+#: here because this half never imports that one (it holds `bpy`).
+RECORD = "chain.json"
 
 #: Where a cut chain is kept between builds. Under `target/`, which is not tracked.
 CACHE_RELPATH = os.path.join("target", "tank-build")
@@ -107,6 +114,14 @@ TRIO_INCOHERENT = Check(
         "binaries, blend_digest is this source and this pipeline, mesh_count is the number of "
         "meshes the source produces, and every rung a chain names is a mesh record in the view "
         "artifact no scene node references",
+)
+
+CACHE_CORRUPT = Check(
+    id="build.cache-corrupt",
+    stage=Stage.DERIVATION,
+    severity=Severity.ERROR,
+    law="every chain this build reads out of its cache is a record it can parse and a set of rung "
+        "glbs whose bytes hash to what that record recorded",
 )
 
 SIM_NOT_DERIVED = Check(
@@ -140,11 +155,57 @@ def sources_digest(names) -> str:
     return digest.hexdigest()
 
 
+def resolved_ladder() -> dict:
+    """Every value the search actually runs under, RESOLVED — not the files that spell them.
+
+    `scripts/lod/config.py` is hashed by `sources_digest`, and hashing it is not enough: the file
+    READS `src/map.rs` for the map id and that map's `level.json` for the world's extent, and the
+    right wall it derives from them is where every chain terminates. A map whose extent grows moves
+    `RIGHT_WALL_M` without touching one byte of config.py, so a fingerprint over the file alone
+    would reuse a cached ladder cut for a smaller world and leave `blend_digest` saying the trio is
+    current.
+
+    So the fingerprint takes the VALUES. Every constant here is one the ladder, the stop rules or
+    the gates consume, and this dict changes exactly when the search's inputs do.
+    """
+    return {
+        "map_id": CONFIG.MAP_ID,
+        "world_size_m": CONFIG.WORLD_SIZE_M,
+        "right_wall_m": CONFIG.RIGHT_WALL_M,
+        "e1_mm": CONFIG.E1_MM,
+        "octave": CONFIG.OCTAVE,
+        "skip_fraction": CONFIG.SKIP_FRACTION,
+        "max_rungs": CONFIG.MAX_RUNGS,
+        "reference_view": {key: CONFIG.REFERENCE_VIEW[key]
+                           for key in ("vfov_rad", "height_px", "budget_px")},
+        "gates": dict(CONFIG.GATES),
+        "normal_diagnostic_samples": CONFIG.NORMAL_DIAGNOSTIC_SAMPLES,
+        "verdict_nodes_per_square": CONFIG.VERDICT_NODES_PER_SQUARE,
+        "verdict_nodes_cap": CONFIG.VERDICT_NODES_CAP,
+    }
+
+
+def ladder_digest() -> str:
+    """sha256 over `resolved_ladder`, canonically encoded. Refuses a non-finite constant."""
+    return hashlib.sha256(
+        json.dumps(resolved_ladder(), sort_keys=True, allow_nan=False).encode()
+    ).hexdigest()
+
+
+def search_digest() -> str:
+    """What keys the per-mesh cache: the search's own sources AND the values it runs under."""
+    return hashlib.sha256(
+        (sources_digest(SEARCH_SOURCES) + ladder_digest()).encode()
+    ).hexdigest()
+
+
 def blend_digest(blend: str, spec: str) -> str:
-    """The staleness field: the source, the spec sheet, and every source that can move an artifact.
+    """The staleness field: the source, the spec sheet, and every input that can move an artifact.
 
     A tank rebuilt from an unchanged blend under a changed pipeline is a different tank, and a
-    certificate that only hashed the blend would call it current.
+    certificate that only hashed the blend would call it current. `ladder_digest` is in it for the
+    same reason it keys the cache — a world that grew moves the right wall and therefore the chains,
+    while every file this hashes is unchanged.
     """
     digest = hashlib.sha256()
     for path in (blend, spec):
@@ -152,6 +213,7 @@ def blend_digest(blend: str, spec: str) -> str:
             for block in iter(lambda: handle.read(1 << 20), b""):
                 digest.update(block)
     digest.update(sources_digest(PIPELINE_SOURCES).encode())
+    digest.update(ladder_digest().encode())
     for _key, value in toolchain.ENVIRONMENT:
         digest.update(value.encode())
     return digest.hexdigest()
@@ -214,18 +276,55 @@ def partition(digests: List[str], sizes: Dict[str, int], jobs: int) -> List[List
 
 
 def harvest(out: str, cache: str) -> None:
-    """Move one worker's COMPLETE chains into the cache, as it exits.
+    """Move one worker's COMPLETE chains into the cache, as it exits — one rename per chain.
 
-    A chain's record is written after its last rung glb, so a digest with no record is a chain the
-    worker did not finish — its rung files are left in the work directory and the next build cuts
-    it again, rather than the cache holding half a ladder nothing will ever notice.
+    A chain is a DIRECTORY holding its rung glbs and, written last and atomically, its record. So a
+    chain the worker did not finish has no record and is left where it lies, and a chain it did
+    finish crosses into the cache in a single `os.replace` of the directory: there is no moment at
+    which the cache holds some of a ladder. The worker's own output lives under the cache root, so
+    that rename is within one filesystem — across two it is a copy, and a copy can be observed
+    half-done.
+
+    A destination that already exists is another build that won the race with an identical chain;
+    the loser drops its copy rather than replacing bytes someone may be reading.
     """
     if not os.path.isdir(out):
         return
-    complete = {name[:-len(".json")] for name in os.listdir(out) if name.endswith(".json")}
     for name in sorted(os.listdir(out)):
-        if name.split(".", 1)[0] in complete:
-            shutil.move(os.path.join(out, name), os.path.join(cache, name))
+        source = os.path.join(out, name)
+        if not os.path.isdir(source) or not os.path.isfile(os.path.join(source, RECORD)):
+            continue
+        destination = os.path.join(cache, name)
+        if os.path.exists(destination):
+            shutil.rmtree(source, ignore_errors=True)
+            continue
+        os.replace(source, destination)
+
+
+def cached_record(cache: str, digest: str) -> dict:
+    """One chain's record, or a loud refusal naming the file that cannot be read.
+
+    A cache entry is written by a program that can be killed. An unreadable one is a bug in this
+    build's own scratch, and it must say WHICH file and how to be rid of it — an uncaught
+    `JSONDecodeError` names a line and column of a path nobody printed.
+    """
+    path = os.path.join(cache, digest, RECORD)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError) as error:
+        raise Refused("chains", [finding(
+            CACHE_CORRUPT, Subject(SubjectKind.FILE, path), str(error),
+            "delete {} and build again — the cache is scratch, and a chain that cannot be read is "
+            "one that has to be cut again".format(os.path.join(cache, digest)),
+        )]) from error
+    if not isinstance(record, dict) or not isinstance(record.get("rungs"), list):
+        raise Refused("chains", [finding(
+            CACHE_CORRUPT, Subject(SubjectKind.FILE, path),
+            "the record is not a chain: {}".format(type(record).__name__),
+            "delete {} and build again".format(os.path.join(cache, digest)),
+        )])
+    return record
 
 
 def cut_chains(root: str, blender: str, candidate: str, digests: List[str],
@@ -238,11 +337,11 @@ def cut_chains(root: str, blender: str, candidate: str, digests: List[str],
     finished is a chain that never has to be cut again, and one that did not leaves nothing behind.
     """
     os.makedirs(cache, exist_ok=True)
-    missing = [d for d in digests if not os.path.isfile(os.path.join(cache, d + ".json"))]
+    missing = [d for d in digests if not os.path.isfile(os.path.join(cache, d, RECORD))]
     print("build ▸ chains: {} unique source geometries, {} cached, {} to cut".format(
         len(digests), len(digests) - len(missing), len(missing)), flush=True)
     if missing:
-        work = tempfile.mkdtemp(prefix="tank-chains-")
+        work = tempfile.mkdtemp(prefix=".cutting-", dir=cache)
         try:
             buckets = partition(missing, sizes, jobs)
             running = []
@@ -277,11 +376,7 @@ def cut_chains(root: str, blender: str, candidate: str, digests: List[str],
                 raise Refused("chains")
         finally:
             shutil.rmtree(work, ignore_errors=True)
-    records = {}
-    for digest in digests:
-        with open(os.path.join(cache, digest + ".json"), encoding="utf-8") as handle:
-            records[digest] = json.load(handle)
-    return records
+    return {digest: cached_record(cache, digest) for digest in digests}
 
 
 # ── assembling the trio ──────────────────────────────────────────────────────────────────────────
@@ -292,6 +387,11 @@ def assemble(candidate_blob: bytes, rows: List[dict], records: Dict[str, dict], 
     THE PACKING ORDER IS THE REPRESENTATIVE'S NAME, THEN THE RUNG. It reads nothing about how the
     chains were cut, in what order, or by how many workers, which is what makes two cold builds one
     set of bytes.
+
+    EVERY RUNG'S BYTES ARE HELD AGAINST THE RECORD THAT MEASURED THEM. The record carries the
+    sha256 the cutting worker took of the file it had just certified; a cache that has been edited,
+    half-written or mixed across generations would otherwise pair one rung's `deviation_mm` with
+    another rung's geometry, and every hash downstream would faithfully certify the pair.
     """
     groups = TRIO.chains_by_digest(rows)
     representative = {digest: keys[0] for digest, keys in groups.items()}
@@ -302,8 +402,26 @@ def assemble(candidate_blob: bytes, rows: List[dict], records: Dict[str, dict], 
         rungs = []
         for rung in records[digest]["rungs"]:
             name = "{}_LOD{}".format(representative[digest], rung["rung"])
-            with open(os.path.join(cache, rung["glb"]), "rb") as handle:
-                embedded.append((name, handle.read()))
+            path = os.path.join(cache, digest, rung["glb"])
+            try:
+                with open(path, "rb") as handle:
+                    blob = handle.read()
+            except OSError as error:
+                raise Refused("chains", [finding(
+                    CACHE_CORRUPT, Subject(SubjectKind.FILE, path), str(error),
+                    "delete {} and build again".format(os.path.join(cache, digest)),
+                )]) from error
+            landed = TRIO.sha256_bytes(blob)
+            if landed != rung.get("sha256"):
+                raise Refused("chains", [finding(
+                    CACHE_CORRUPT, Subject(SubjectKind.FILE, path),
+                    "the record measured sha256 {} and these bytes are {}".format(
+                        rung.get("sha256"), landed),
+                    "delete {} and build again — a rung's certified deviation belongs to the bytes "
+                    "the cut measured, and these are different bytes".format(
+                        os.path.join(cache, digest)),
+                )])
+            embedded.append((name, blob))
             rungs.append({"mesh": name, "deviation_mm": rung["deviation_mm"]})
         mesh_names[digest] = rungs
 
@@ -360,7 +478,7 @@ def build(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
                                     sum(sizes.values())), flush=True)
 
     with timeline.stage("chains (directed search)"):
-        cache = os.path.join(cache_root(root), sources_digest(SEARCH_SOURCES)[:16])
+        cache = os.path.join(cache_root(root), search_digest()[:16])
         records = cut_chains(root, blender, candidate, sorted(groups), sizes, cache, jobs)
 
     with timeline.stage("assemble"):

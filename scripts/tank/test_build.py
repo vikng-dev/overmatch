@@ -147,6 +147,30 @@ def parsed(blob):
     return glb_ktx2.parse_glb(blob, "<test>")
 
 
+def cut_corpus():
+    """A cache the way a worker leaves one: a directory per chain, its record beside its rungs.
+
+    Returns `(census rows, records, cache directory)`.
+    """
+    rows = TRIO.census(*parsed(document()))
+    groups = TRIO.chains_by_digest(rows)
+    directory = tempfile.mkdtemp(prefix="trio-assemble-")
+    records = {}
+    for index, digest in enumerate(sorted(groups)):
+        blob = rung(0.9 - 0.01 * index)
+        os.makedirs(os.path.join(directory, digest), exist_ok=True)
+        with open(os.path.join(directory, digest, "rung1.glb"), "wb") as handle:
+            handle.write(blob)
+        records[digest] = {
+            "source": {"origin_radius_m": 1.0 + index},
+            "rungs": [{"rung": 1, "glb": "rung1.glb", "sha256": TRIO.sha256_bytes(blob),
+                       "deviation_mm": 3.9, "origin_radius_m": 1.0 + index}],
+        }
+        with open(os.path.join(directory, digest, build.RECORD), "w", encoding="utf-8") as handle:
+            json.dump(records[digest], handle)
+    return rows, records, directory
+
+
 def certificate_over(view_blob, rungs, chains=None):
     """A coherent trio built from a candidate and a rung list, for a case that then breaks one."""
     embedded, mesh_count = TRIO.embed_rungs(view_blob, rungs)
@@ -382,6 +406,167 @@ class CertificateLaw(unittest.TestCase):
         self.assertTrue(any("the certificate declares" in text for text in failures), failures)
 
 
+# ── the certificate's own body, on the verifying side ────────────────────────────────────────────
+
+class CertificateBodyLaw(unittest.TestCase):
+    """What `coherence` says about the certificate FILE, not about the binaries it hashes.
+
+    The two artifact hashes cover the bytes beside the certificate; nothing covered the certificate
+    itself, so an edited deviation, a descending ladder or a chain key naming no primitive read as a
+    certified trio. Every case here tampers with exactly one of those and demands it be seen.
+    """
+
+    def setUp(self):
+        self.rungs = [("Hull#0_LOD1", rung(0.9)), ("Hull#0_LOD2", rung(0.8))]
+        self.view, self.sim, self.cert = certificate_over(document(), self.rungs)
+
+    def failures(self, mutate):
+        cert = json.loads(json.dumps(self.cert))
+        mutate(cert)
+        return TRIO.coherence(cert, self.view, self.sim)
+
+    def test_the_untampered_certificate_passes(self):
+        self.assertEqual(TRIO.coherence(self.cert, self.view, self.sim), [])
+
+    def test_an_edited_deviation_that_breaks_the_order_is_seen(self):
+        found = self.failures(
+            lambda cert: cert["chains"]["Hull#0"]["rungs"][1].__setitem__("deviation_mm", 1.0)
+        )
+        self.assertTrue(any("strictly ascend" in text for text in found), found)
+
+    def test_two_equal_deviations_are_not_ascending(self):
+        first = self.cert["chains"]["Hull#0"]["rungs"][0]["deviation_mm"]
+        found = self.failures(
+            lambda cert: cert["chains"]["Hull#0"]["rungs"][1].__setitem__("deviation_mm", first)
+        )
+        self.assertTrue(any("strictly ascend" in text for text in found), found)
+
+    def test_a_non_finite_deviation_is_seen_rather_than_slipping_past_the_order_test(self):
+        for value in (float("nan"), float("inf"), -1.0, 0.0, "3.9", None):
+            with self.subTest(value=value):
+                found = self.failures(
+                    lambda cert, v=value: cert["chains"]["Hull#0"]["rungs"][0].__setitem__(
+                        "deviation_mm", v)
+                )
+                self.assertTrue(any("deviation_mm" in text for text in found), (value, found))
+
+    def test_a_radius_that_is_not_a_positive_finite_number_is_seen(self):
+        for value in (0.0, -1.0, float("nan"), float("inf"), "2.0", None):
+            with self.subTest(value=value):
+                found = self.failures(
+                    lambda cert, v=value: cert["chains"]["Hull#0"].__setitem__("radius_m", v)
+                )
+                self.assertTrue(any("radius_m" in text for text in found), (value, found))
+
+    def test_a_chain_key_that_is_not_meshname_hash_index_is_seen(self):
+        for key in ("Hull", "Hull#", "#0", "Hull#x", "Hull#-1"):
+            with self.subTest(key=key):
+                found = self.failures(
+                    lambda cert, k=key: cert["chains"].__setitem__(k, cert["chains"].pop("Hull#0"))
+                )
+                self.assertTrue(any("chain key" in text for text in found), (key, found))
+
+    def test_a_chain_key_naming_a_mesh_the_source_does_not_hold_is_seen(self):
+        found = self.failures(
+            lambda cert: cert["chains"].__setitem__("Turret#0", cert["chains"].pop("Hull#0"))
+        )
+        self.assertTrue(any("Turret" in text for text in found), found)
+
+    def test_a_chain_key_naming_a_primitive_past_the_meshs_own_is_seen(self):
+        found = self.failures(
+            lambda cert: cert["chains"].__setitem__("Wheel_L#3", cert["chains"].pop("Hull#0"))
+        )
+        self.assertTrue(any("primitive 3" in text for text in found), found)
+
+    def test_a_rung_record_no_chain_names_is_seen(self):
+        found = self.failures(lambda cert: cert["chains"]["Hull#0"]["rungs"].pop())
+        self.assertTrue(any("no chain names" in text for text in found), found)
+
+    def test_a_chain_naming_one_rung_twice_is_seen(self):
+        found = self.failures(
+            lambda cert: cert["chains"]["Hull#0"]["rungs"].__setitem__(
+                1, dict(cert["chains"]["Hull#0"]["rungs"][0]))
+        )
+        self.assertTrue(any("twice" in text for text in found), found)
+
+    def test_a_chain_row_with_a_field_it_has_no_place_for_is_seen(self):
+        found = self.failures(
+            lambda cert: cert["chains"]["Hull#0"].__setitem__("switch_m", 60.4)
+        )
+        self.assertTrue(any("switch_m" in text for text in found), found)
+
+    def test_several_chains_may_name_one_rung_record(self):
+        # Source-geometry dedup (ADR 0035): `Ammo_0#0` and `Ammo_1#0` share geometry, so they share
+        # rung records. Coverage is a SET equality, never a one-chain-per-record rule.
+        view, sim, cert = certificate_over(document(), [("Ammo_0#0_LOD1", rung(0.5))], chains={
+            "Ammo_0#0": {"radius_m": 1.0,
+                         "rungs": [{"mesh": "Ammo_0#0_LOD1", "deviation_mm": 3.9}]},
+            "Ammo_1#0": {"radius_m": 1.0,
+                         "rungs": [{"mesh": "Ammo_0#0_LOD1", "deviation_mm": 3.9}]},
+        })
+        self.assertEqual(TRIO.coherence(cert, view, sim), [])
+
+    def test_a_non_finite_deviation_cannot_be_written_at_all(self):
+        cert = json.loads(json.dumps(self.cert))
+        cert["chains"]["Hull#0"]["rungs"][0]["deviation_mm"] = float("nan")
+        with self.assertRaises(ValueError):
+            TRIO.certificate_bytes(cert)
+
+    def test_construction_refuses_what_verification_refuses(self):
+        with self.assertRaises(TRIO.TrioError):
+            TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": [
+                {"mesh": "a", "deviation_mm": 4.0}, {"mesh": "b", "deviation_mm": float("nan")},
+            ]}})
+        with self.assertRaises(TRIO.TrioError):
+            TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": -1.0, "rungs": [
+                {"mesh": "a", "deviation_mm": 4.0},
+            ]}})
+
+
+# ── which of the two causes a certify miss has ───────────────────────────────────────────────────
+
+class CertificationBoundary(unittest.TestCase):
+    """Both sides of `rung_certification`, which no corpus is guaranteed to contain."""
+
+    def bracket(self, lower, upper):
+        return {"mm": lower, "mm_upper": upper, "bracket_mm": upper - lower}
+
+    def test_a_closed_bracket_under_the_rung_is_accepted(self):
+        self.assertEqual(TRIO.rung_certification(self.bracket(7.72, 7.77), [], 7.78), TRIO.ACCEPT)
+
+    def test_an_upper_bound_over_the_rung_costs_the_rung_and_not_the_run(self):
+        # MEASURED on the tiger: 7.7909 mm upper against a 7.7800 mm rung, lower end 7.7272 mm.
+        self.assertEqual(
+            TRIO.rung_certification(self.bracket(7.7272, 7.7909), [], 7.78), TRIO.LOST_TO_BRACKET
+        )
+
+    def test_a_sampled_witness_over_the_rung_fails_the_run(self):
+        self.assertEqual(
+            TRIO.rung_certification(self.bracket(7.7901, 7.7909), [], 7.78), TRIO.FAILS_THE_RUN
+        )
+
+    def test_the_boundary_is_the_lower_end_of_one_bracket(self):
+        target = 7.78
+        just_under = TRIO.rung_certification(self.bracket(target - 1e-9, target + 1.0), [], target)
+        just_over = TRIO.rung_certification(self.bracket(target + 1e-9, target + 1.0), [], target)
+        self.assertEqual((just_under, just_over), (TRIO.LOST_TO_BRACKET, TRIO.FAILS_THE_RUN))
+
+    def test_a_structural_failure_fails_the_run_however_small_the_deviation(self):
+        self.assertEqual(
+            TRIO.rung_certification(self.bracket(0.0, 0.0), ["a part vanished"], 7.78),
+            TRIO.FAILS_THE_RUN,
+        )
+
+    def test_a_non_finite_bound_fails_the_run_rather_than_reading_as_a_pass(self):
+        nan = float("nan")
+        for deviation in (self.bracket(nan, nan), {"mm": nan, "mm_upper": 1.0, "bracket_mm": 0.0},
+                          {"mm": 1.0, "mm_upper": nan, "bracket_mm": 0.0}, {}):
+            with self.subTest(deviation=deviation):
+                self.assertEqual(
+                    TRIO.rung_certification(deviation, [], 7.78), TRIO.FAILS_THE_RUN
+                )
+
+
 # ── the staged publish ───────────────────────────────────────────────────────────────────────────
 
 class PublishLaw(unittest.TestCase):
@@ -543,22 +728,7 @@ class PartitionLaw(unittest.TestCase):
                          build.partition(self.digests[::-1], self.sizes, 4))
 
     def test_assembly_reads_the_representative_name_and_never_the_split(self):
-        rows = TRIO.census(*parsed(document()))
-        groups = TRIO.chains_by_digest(rows)
-        cache = {}
-        records = {}
-        for index, digest in enumerate(sorted(groups)):
-            records[digest] = {
-                "source": {"origin_radius_m": 1.0 + index},
-                "rungs": [{"rung": 1, "glb": digest + ".rung1.glb", "deviation_mm": 3.9,
-                           "origin_radius_m": 1.0 + index}],
-            }
-            cache[digest + ".rung1.glb"] = rung(0.9 - 0.01 * index)
-
-        directory = tempfile.mkdtemp(prefix="trio-assemble-")
-        for name, blob in cache.items():
-            with open(os.path.join(directory, name), "wb") as handle:
-                handle.write(blob)
+        rows, records, directory = cut_corpus()
         first = TRIO.embed_rungs(document(), [])[0]
         view_a, count_a, chains_a = build.assemble(first, rows, records, directory)
         view_b, count_b, chains_b = build.assemble(first, rows[::-1], records, directory)
@@ -567,6 +737,171 @@ class PartitionLaw(unittest.TestCase):
         self.assertEqual(chains_a, chains_b)
         self.assertEqual(chains_a["Ammo_0#0"]["rungs"], chains_a["Ammo_1#0"]["rungs"],
                          "shared geometry names the same rung records")
+
+
+# ── the fingerprint the cache and the staleness field are cut from ───────────────────────────────
+
+class FingerprintLaw(unittest.TestCase):
+    """The fingerprint must move exactly when the search's inputs do.
+
+    `scripts/lod/config.py` is a file this hashes; the RIGHT WALL is a value that file reads out of
+    `src/map.rs` and the map's own `level.json`. A world that grows moves every chain's termination
+    without moving one byte of any file in `SEARCH_SOURCES`, so a fingerprint over the files alone
+    would hand back a cached ladder cut for a smaller world and call the trio current.
+    """
+
+    def setUp(self):
+        self.blend = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.blend")
+        self.spec = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.tank.ron")
+        if not os.path.isfile(self.blend):
+            self.skipTest("the tiger source is not hydrated")
+
+    def moved(self, name, value):
+        """`(search digest, blend digest)` with one resolved constant replaced."""
+        before = getattr(build.CONFIG, name)
+        setattr(build.CONFIG, name, value)
+        try:
+            return build.search_digest(), build.blend_digest(self.blend, self.spec)
+        finally:
+            setattr(build.CONFIG, name, before)
+
+    def test_the_right_wall_moves_both_the_cache_key_and_the_staleness_field(self):
+        base = (build.search_digest(), build.blend_digest(self.blend, self.spec))
+        grown = self.moved("RIGHT_WALL_M", build.CONFIG.RIGHT_WALL_M * 2.0)
+        self.assertNotEqual(base[0], grown[0], "a grown world must MISS the cache")
+        self.assertNotEqual(base[1], grown[1], "a grown world must make the trio stale")
+
+    def test_every_live_input_the_ladder_reads_is_in_the_fingerprint(self):
+        base = build.search_digest()
+        for name, value in (
+            ("MAP_ID", "another_map"),
+            ("WORLD_SIZE_M", build.CONFIG.WORLD_SIZE_M + 1.0),
+            ("RIGHT_WALL_M", build.CONFIG.RIGHT_WALL_M + 1.0),
+            ("E1_MM", build.CONFIG.E1_MM + 0.01),
+            ("OCTAVE", 3.0),
+            ("SKIP_FRACTION", 0.31),
+            ("MAX_RUNGS", 13),
+            ("VERDICT_NODES_PER_SQUARE", 10.4),
+            ("VERDICT_NODES_CAP", 2_000_001),
+            ("NORMAL_DIAGNOSTIC_SAMPLES", 20_001),
+        ):
+            with self.subTest(constant=name):
+                self.assertNotEqual(base, self.moved(name, value)[0])
+
+    def test_a_moved_gate_threshold_moves_the_fingerprint(self):
+        base = build.search_digest()
+        gates = dict(build.CONFIG.GATES)
+        gates["deviation_rel_tol_certify"] = gates["deviation_rel_tol_certify"] * 2.0
+        self.assertNotEqual(base, self.moved("GATES", gates)[0])
+
+    def test_a_moved_reference_view_moves_the_fingerprint(self):
+        base = build.search_digest()
+        view = dict(build.CONFIG.REFERENCE_VIEW)
+        view["vfov_rad"] = view["vfov_rad"] * 2.0
+        self.assertNotEqual(base, self.moved("REFERENCE_VIEW", view)[0])
+
+    def test_the_fingerprint_is_stable_when_nothing_moves(self):
+        self.assertEqual(build.search_digest(), build.search_digest())
+        self.assertEqual(build.blend_digest(self.blend, self.spec),
+                         build.blend_digest(self.blend, self.spec))
+
+    def test_a_non_finite_constant_cannot_be_fingerprinted_silently(self):
+        with self.assertRaises(ValueError):
+            self.moved("RIGHT_WALL_M", float("nan"))
+
+
+# ── the cache, which is written by a program that can be killed ──────────────────────────────────
+
+class CacheIntegrity(unittest.TestCase):
+    """What the build reads out of its own scratch, and what it refuses to read."""
+
+    def setUp(self):
+        self.rows, self.records, self.cache = cut_corpus()
+        self.digest = sorted(self.records)[0]
+        self.candidate = TRIO.embed_rungs(document(), [])[0]
+
+    def assemble(self):
+        return build.assemble(self.candidate, self.rows, self.records, self.cache)
+
+    def rung_path(self, name="rung1.glb"):
+        return os.path.join(self.cache, self.digest, name)
+
+    def test_a_clean_cache_assembles(self):
+        self.assertTrue(self.assemble()[0])
+
+    def test_a_rung_whose_bytes_are_not_the_ones_the_record_measured_is_refused(self):
+        # A mixed-generation cache: the record's deviation_mm belongs to the bytes the cut
+        # measured, and this slot now holds different geometry.
+        with open(self.rung_path(), "wb") as handle:
+            handle.write(rung(0.5))
+        with self.assertRaises(build.Refused) as raised:
+            self.assemble()
+        self.assertEqual({row.check.id for row in raised.exception.findings},
+                         {"build.cache-corrupt"})
+        self.assertTrue(any("sha256" in row.evidence for row in raised.exception.findings))
+
+    def test_one_flipped_byte_in_a_rung_is_refused(self):
+        with open(self.rung_path(), "rb") as handle:
+            blob = bytearray(handle.read())
+        blob[-1] = (blob[-1] + 1) % 256
+        with open(self.rung_path(), "wb") as handle:
+            handle.write(bytes(blob))
+        with self.assertRaises(build.Refused):
+            self.assemble()
+
+    def test_a_missing_rung_is_refused_by_name(self):
+        os.remove(self.rung_path())
+        with self.assertRaises(build.Refused) as raised:
+            self.assemble()
+        self.assertTrue(any(self.digest in row.subject.name
+                            for row in raised.exception.findings))
+
+    def test_a_record_a_worker_was_killed_mid_write_is_refused_loudly(self):
+        path = os.path.join(self.cache, self.digest, build.RECORD)
+        with open(path, encoding="utf-8") as handle:
+            whole = handle.read()
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(whole[: len(whole) // 2])
+        with self.assertRaises(build.Refused) as raised:
+            build.cached_record(self.cache, self.digest)
+        self.assertEqual({row.check.id for row in raised.exception.findings},
+                         {"build.cache-corrupt"})
+        self.assertIn(path, raised.exception.findings[0].subject.name)
+
+    def test_a_record_that_is_not_a_chain_is_refused(self):
+        path = os.path.join(self.cache, self.digest, build.RECORD)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("[]\n")
+        with self.assertRaises(build.Refused):
+            build.cached_record(self.cache, self.digest)
+
+    def test_harvest_moves_a_finished_chain_and_leaves_an_unfinished_one(self):
+        out = tempfile.mkdtemp(prefix="trio-harvest-out-", dir=self.cache)
+        cache = tempfile.mkdtemp(prefix="trio-harvest-cache-", dir=self.cache)
+        for name, finished in (("done", True), ("halfway", False)):
+            os.makedirs(os.path.join(out, name))
+            with open(os.path.join(out, name, "rung1.glb"), "wb") as handle:
+                handle.write(rung())
+            if finished:
+                with open(os.path.join(out, name, build.RECORD), "w", encoding="utf-8") as handle:
+                    handle.write("{}")
+        build.harvest(out, cache)
+        self.assertEqual(sorted(os.listdir(cache)), ["done"])
+        self.assertEqual(sorted(os.listdir(out)), ["halfway"])
+
+    def test_harvest_does_not_replace_a_chain_another_build_already_landed(self):
+        out = tempfile.mkdtemp(prefix="trio-harvest-out-", dir=self.cache)
+        cache = tempfile.mkdtemp(prefix="trio-harvest-cache-", dir=self.cache)
+        os.makedirs(os.path.join(out, "shared"))
+        with open(os.path.join(out, "shared", build.RECORD), "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        os.makedirs(os.path.join(cache, "shared"))
+        with open(os.path.join(cache, "shared", build.RECORD), "w", encoding="utf-8") as handle:
+            handle.write('{"first": true}')
+        build.harvest(out, cache)
+        with open(os.path.join(cache, "shared", build.RECORD), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), '{"first": true}')
+        self.assertEqual(os.listdir(out), [])
 
 
 # ── the shipped trio ─────────────────────────────────────────────────────────────────────────────

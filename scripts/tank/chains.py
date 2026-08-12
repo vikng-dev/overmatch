@@ -110,6 +110,28 @@ def topology_floor(obj):
 
 # ── one chain ────────────────────────────────────────────────────────────────────────────────────
 
+#: What a cut chain is called inside its own directory. Its PRESENCE is what the build reads as
+#: "this chain is cached", so it is written last and it is written atomically.
+RECORD = "chain.json"
+
+
+def write_record(path, record):
+    """The chain's record, landed by a rename inside its own directory.
+
+    A worker killed between `open` and the last byte leaves a truncated file at the name the next
+    build treats as a complete chain. A rename cannot be observed half-done, so the name either does
+    not exist or names every byte. `allow_nan=False` refuses to write a token no strict reader
+    parses — a deviation that is not a number is not a measurement.
+    """
+    staging = path + ".partial"
+    with open(staging, "w", encoding="utf-8") as handle:
+        json.dump(record, handle, indent=2, sort_keys=False, allow_nan=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(staging, path)
+
+
 def rung_node_name(digest, rung):
     """What a rung glb calls its one node. A function of the GEOMETRY and the rung, so a cached
     rung is valid however the meshes that share it are named."""
@@ -160,7 +182,7 @@ def cut_chain(digest, surface, out_dir):
             continue
 
         node_name = rung_node_name(digest, rung)
-        staged = os.path.join(out_dir, f"{digest}.rung{rung}.glb")
+        staged = os.path.join(out_dir, f"rung{rung}.glb")
         mesh, _reached = GEN.candidate_mesh(obj, best["budget"], surface.diagonal)
         if mesh is None:
             raise ChainError("generate", f"rung {rung}: the chosen budget went below the floor")
@@ -170,7 +192,7 @@ def cut_chain(digest, surface, out_dir):
 
         repeat_mesh, _ = GEN.candidate_mesh(obj, best["budget"], surface.diagonal)
         GEN.cleanup(repeat_mesh, surface.diagonal)
-        repeat_path = os.path.join(out_dir, f"repeat_{digest}.rung{rung}.glb")
+        repeat_path = os.path.join(out_dir, f"repeat.rung{rung}.glb")
         GEN.write_level_glb(repeat_mesh, node_name, repeat_path)
         bpy.data.meshes.remove(repeat_mesh)
         first, second = GEN.sha256_file(staged), GEN.sha256_file(repeat_path)
@@ -184,28 +206,22 @@ def cut_chain(digest, surface, out_dir):
 
         shipped = M.from_glb(staged, None, f"rung{rung}")
         report, failures = GEN.certify(surface, shipped, target_mm, CONFIG.GATES, source_validity)
-        # A CERTIFY MISS HAS TWO CAUSES AND THEY ARE NOT THE SAME FACT. The search asks a budgeted
-        # BOOLEAN (ADR 0036 §1); certification BRACKETS the number to `deviation_rel_tol_certify`
-        # and gates on the upper end. So a candidate the search proved under the target can carry a
-        # certified upper bound above it while every point sampled on the shipped bytes is under —
-        # the bracket did not close, which ADR 0033 §6 says costs triangles and never honesty.
-        # MEASURED here: 7.7909 mm against a 7.7800 mm rung, a 0.14 % bracket.
-        #
-        # A SAMPLED WITNESS OVER THE TARGET, or any structural failure, is the other cause: the
-        # shipped bytes are not the surface the search measured, and that fails the run (ADR 0033
-        # §10). The two are separated by the LOWER end of the same bracket.
+        # WHICH OF THE TWO CAUSES A MISS HAS is `trio.rung_certification` — one law, away from
+        # `bpy`, so both sides of the boundary are driven by a test rather than by the corpus
+        # happening to contain one.
         structural = M.validity_gate_failures(report["validity"], source_validity, CONFIG.GATES)
-        if structural or report["deviation"]["mm"] > target_mm:
+        verdict = TRIO.rung_certification(report["deviation"], structural, target_mm)
+        if verdict == TRIO.FAILS_THE_RUN:
             raise ChainError(
                 "certify",
                 f"{digest[:12]} rung {rung} failed on the shipped bytes:\n    - "
-                + "\n    - ".join(failures),
+                + "\n    - ".join(failures or ["the certified deviation is not a finite number"]),
             )
-        if failures:
+        if verdict == TRIO.LOST_TO_BRACKET:
             os.remove(staged)
             skipped.append({
                 "rung": rung, "e_target_mm": round(target_mm, 4), "best_tris": best["tris"],
-                "lost_to": "certification_bracket",
+                "lost_to": TRIO.LOST_TO_BRACKET,
                 "dev_mm": round(report["deviation"]["mm"], 6),
                 "dev_mm_upper": round(report["deviation"]["mm_upper"], 6),
                 "bracket_mm": round(report["deviation"]["bracket_mm"], 6),
@@ -312,11 +328,10 @@ def main(argv):
                                    f"{', '.join(sorted(missing))}")
     os.makedirs(arguments.out, exist_ok=True)
     for digest in sorted(by_digest):
-        record = cut_chain(digest, by_digest[digest], arguments.out)
-        path = os.path.join(arguments.out, f"{digest}.json")
-        with open(path, "w", encoding="utf-8") as handle:
-            json.dump(record, handle, indent=2, sort_keys=False)
-            handle.write("\n")
+        directory = os.path.join(arguments.out, digest)
+        os.makedirs(directory, exist_ok=True)
+        record = cut_chain(digest, by_digest[digest], directory)
+        write_record(os.path.join(directory, RECORD), record)
     return 0
 
 
