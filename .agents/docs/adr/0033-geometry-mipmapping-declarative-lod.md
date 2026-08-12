@@ -2,6 +2,8 @@
 
 Status: DRAFT (accepted doctrine 2026-08-01; pipeline v2 in flight — e₁ pending the
 collapse-vs-planar measurement, then this ADR finalizes with the ratified number)
+(amended by ADR-0035: packaging, primitive-granularity seam, per-tank certificate,
+transcription deleted)
 
 Terms: `.agents/GLOSSARY.md` § Geometry LOD. This ADR records the decisions and the
 adversarial-review triage that shaped them.
@@ -57,7 +59,8 @@ screen-space error. No manual LOD steps exist for any asset.
    negligible for a 13 cm link, added as conservative slack (+r) for larger assets.
 10. **Explicit refusals (fail loud, not degrade)**: skinned/morph meshes (bind-pose metrics
     do not bound deformed error), multi-material/multi-primitive meshes (the chain loader
-    enforces one primitive; lifting this waits for an HLOD tier). The exporter names the
+    enforces one primitive; lifting this waits for an HLOD tier) — retired by ADR-0035:
+    chains key on the primitive, matching the render atom. The exporter names the
     refusal; nothing silently passes through.
 11. **Runtime selection stays discrete**: stepped threshold profiles recomputed on
     HUMAN-RATE events (optic toggle, settings change, resolution change) with hysteresis —

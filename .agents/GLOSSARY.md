@@ -125,6 +125,18 @@ What happens closer than a level's band, including closer than the source's own 
 **What sub-pixel does NOT cover**:
 The guarantee is positional only. Silhouette IS covered (silhouette error is surface deviation). Separately gated because deviation cannot see them: normal deviation, UV drift, defaulted tangents, degenerate faces, holes. The red-test class lived here and is now CLOSED — the shipped shoe's one defaulted-tangent vertex sat on a 50.16 mm edge drawing 16.2 budget pixels of wrong shading at L1's own 55.9 m switch, while passing every positional check AND the manifest's own `tangent_default_verts: 0` (which counts zero-UV-AREA faces, and that face was not one: a source-data gate is not a gate on what the runtime's solver returns). Fixed by BOTH halves at once — needle cleanup removed the sliver (855/581/315 -> 854/580/314) and the exporter now BAKES tangents, so the runtime generates none and the certified bytes are the rendered bytes. The test stays, green, as the standing regression gate.
 
+**Build** (the one command):
+`scripts/tank/build.py` — one command per tank, a `.blend` in and three shipped artifacts out (view glb, sim artifact, certificate); the asset door is its certification step.
+_Avoid_: export, generate (those are stages inside it, not the command)
+
+**Certificate** (`<id>.lod.json`):
+The per-tank record of what was measured — `blend_digest`, `view_glb_sha` + `sim_glb_sha`, `mesh_count`, and per source primitive a bounding `radius_m` with ordered `rungs[{mesh, deviation_mm}]`. Carries no metre distances: the runtime derives those from certified deviation and the active view profile.
+_Avoid_: manifest (the retired global `lod_manifest.json` was one; a certificate is per tank)
+
+**Sim artifact** (`<id>.sim.glb`):
+A byte-strip of the certified view glb — LOD0 geometry and material names, no textures, no UVs, no rungs — so server and client walk identical accessor bytes by construction.
+_Avoid_: collision mesh, physics glb (it is the same bytes as the view artifact's LOD0, not a second authoring)
+
 ## Gunnery
 
 **Servo**:
