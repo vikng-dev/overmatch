@@ -583,7 +583,12 @@ def branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
     tags = (np.zeros(distances.shape, dtype=np.int64) if tags is None
             else np.asarray(tags, dtype=np.int64))
 
-    best = float(distances.max()) if distances.size else 0.0
+    # THE LOWER END IS A WITNESS AND ONLY MEASUREMENTS ARE WITNESSES. A corner the probe could not
+    # answer for carries `UNKNOWN_DISTANCE`; it belongs in the bound, which the heap keeps open on
+    # it, and nowhere near `best`, which the stopping rule closes against.
+    finite = distances[np.isfinite(distances)]
+    best = float(finite.max()) if finite.size else 0.0
+    observed = bool(finite.size)
     bounds = bound_of(corners, distances, tags, best)
     heap = []
     counter = 0
@@ -600,6 +605,17 @@ def branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
             break
         if target is not None and (live <= target or best > target):
             break
+        # A DEAD QUERY CANNOT BE SUBDIVIDED INTO A LIVE ONE. When nothing has answered yet — an
+        # empty destination tree, or one built from non-finite coordinates, both of which Blender
+        # reports as "no hit" at EVERY point (measured) — every child of every patch is unknown too,
+        # and expanding them would spend the whole node budget growing a heap of infinities. Stop
+        # and hand back the infinite upper bound the caller must refuse anyway.
+        #
+        # The test is "nothing has answered YET", not "this patch is unknown", because one usable
+        # corner anywhere is enough for subdivision to recover: the covering bound holds for each
+        # corner independently, so a live tree resolves an unknown patch at its midpoints.
+        if not observed and not math.isfinite(live):
+            break
         _, _, patch, patch_d, patch_t = heapq.heappop(heap)
         nodes += 1
         a, b, c = patch
@@ -607,7 +623,8 @@ def branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
         d_ab, t_ab = probe(("m", tuple(ab)), ab)
         d_bc, t_bc = probe(("m", tuple(bc)), bc)
         d_ca, t_ca = probe(("m", tuple(ca)), ca)
-        best = max(best, d_ab, d_bc, d_ca)
+        best = sampled_max(best, d_ab, d_bc, d_ca)
+        observed = observed or any(math.isfinite(d) for d in (d_ab, d_bc, d_ca))
         slack = max(tol, rel_tol * best)
         children = np.array([(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)])
         child_d = np.array([
@@ -633,8 +650,36 @@ def branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
     return best, max(best, pruned, live)
 
 
+#: What a probe answers when it CANNOT answer. Infinity, never zero, and the difference is the whole
+#: of this constant's reason to exist.
+#:
+#: A `find_nearest` that returns no hit, or a hit whose distance is NaN, is not the statement "this
+#: point is on the surface" — it is "this query failed". Mapping it to 0.0 said the first, and a
+#: zero is the most TIGHTENING value there is: it drives the covering bound down, it can become the
+#: `best` a bracket closes against, and `NaN > target` is False so it silently passes an acceptance
+#: check. Infinity says the second, and every consumer already handles it correctly by construction
+#: — `min_k` over the corners ignores it (each corner bounds the patch on its own, so one usable
+#: corner is enough), the live heap can never close on it, and a sampled value that is not a number
+#: is not a sample.
+UNKNOWN_DISTANCE = math.inf
+
+
 def bvh_probe(dst):
-    """`(distance, nearest triangle index)` against `dst`, memoized. Blender-only (mathutils)."""
+    """`(distance, nearest triangle index)` against `dst`, memoized. Blender-only (mathutils).
+
+    FAIL-CLOSED, the same law `point_triangle_distances` follows: an answer that is not a finite
+    distance becomes `UNKNOWN_DISTANCE` with no triangle, so it can only ever force subdivision or
+    refusal. It can never tighten a bound and it can never be mistaken for a measurement.
+
+    REACHABILITY, stated because a guard nobody can trigger reads as superstition. The no-hit branch
+    is effectively unreachable against a NON-EMPTY tree at finite coordinates: Blender's default
+    search radius is ~1.8e19, so something is always inside it. It IS reachable two ways — a
+    destination surface with no triangles at all (a collapse that reached zero, which the
+    `max_empty_surfaces` gate refuses immediately AFTER the deviation is measured, not before), and
+    a NON-FINITE coordinate in either surface, which reaches this through `certify` because
+    `certified_deviation` runs before `max_nonfinite` looks at the shipped bytes. Both are real
+    orderings in the lane today, and both now end in a refusal rather than in a number.
+    """
     from mathutils import Vector
 
     find = dst.bvh.find_nearest
@@ -644,11 +689,29 @@ def bvh_probe(dst):
         value = cache.get(key)
         if value is None:
             hit = find(Vector(point))
-            value = (hit[3], int(hit[2])) if hit[0] is not None else (0.0, -1)
+            distance = hit[3] if hit[0] is not None else None
+            if distance is None or not math.isfinite(distance):
+                value = (UNKNOWN_DISTANCE, -1)
+            else:
+                value = (float(distance), int(hit[2]))
             cache[key] = value
         return value
 
     return probe
+
+
+def sampled_max(current, *values):
+    """The largest value ACTUALLY MEASURED, ignoring the ones that are not measurements.
+
+    A lower bound is a witness — "the surface attains at least this" — and `UNKNOWN_DISTANCE` is
+    the absence of a witness rather than an enormous one. Folding it in would report an infinite
+    deviation as if it had been observed; dropping it leaves the lower end honest while the bound
+    side, which is where the infinity belongs, keeps the bracket open.
+    """
+    for value in values:
+        if math.isfinite(value) and value > current:
+            current = value
+    return current
 
 
 def seed_patches(src, probe):
@@ -741,6 +804,13 @@ def one_way_fits(src, dst, target_m, node_budget):
         distance, tag = probe(int(index), src.verts[index])
         corner_d[index] = distance
         corner_t[index] = tag
+        # UNMEASURABLE IS UNACCEPTABLE, and it is checked before the comparison rather than through
+        # it: `UNKNOWN_DISTANCE > target` happens to be True, but the NaN it stands in for is not,
+        # and a predicate that only works because of which sentinel was picked is a predicate
+        # waiting to be silently inverted. A candidate whose distance to the source cannot be
+        # measured cannot be proven inside a rung, so it fails.
+        if not math.isfinite(distance):
+            return PROVEN_FAIL, witness, 0
         if distance > witness:
             witness = distance
         if distance > target_m:
@@ -771,7 +841,9 @@ def one_way_fits(src, dst, target_m, node_budget):
         d_ab, t_ab = probe(("m", tuple(ab)), ab)
         d_bc, t_bc = probe(("m", tuple(bc)), bc)
         d_ca, t_ca = probe(("m", tuple(ca)), ca)
-        witness = max(witness, d_ab, d_bc, d_ca)
+        if not all(math.isfinite(d) for d in (d_ab, d_bc, d_ca)):
+            return PROVEN_FAIL, witness, nodes
+        witness = sampled_max(witness, d_ab, d_bc, d_ca)
         if witness > target_m:
             return PROVEN_FAIL, witness, nodes
         children = np.array([
@@ -825,6 +897,28 @@ def fits_target(source, candidate, target_mm, node_budget):
     if UNDECIDED in (verdict_a, verdict_b):
         return {"verdict": UNDECIDED, "witness_mm": witness, "nodes": nodes}
     return {"verdict": PROVEN_PASS, "witness_mm": witness, "nodes": nodes}
+
+
+#: The only three things a rung can be lost to, in the order they outrank each other.
+SKIP_LOST_TO = ("verdict_node_budget", "geometry", "skip_fraction")
+
+
+def rung_lost_to(undecided, otherwise):
+    """What a lost rung is lost TO. Any UNDECIDED verdict outranks every other explanation.
+
+    ONE DECLARATION, TWO CALLERS, for the same reason the gate list has one: generation writes this
+    field and verification validates it, and when the rule lived in both places they disagreed. The
+    writer filed a rung under `skip_fraction` whenever the sparse-chain rule had fired, even if the
+    search had abstained on a candidate at that rung — and the verifier's fidelity warning, which
+    only fires on `verdict_node_budget`, went quiet on exactly the rungs that earned one.
+
+    THE PRECEDENCE IS NOT A PREFERENCE. If the search could not decide a candidate, the winner it
+    settled on won partly by default, so the shed fraction that failed `SKIP_FRACTION` was measured
+    against a field that was never fully judged. "Lost to the budget" is the true statement; "lost
+    to the skip rule" is a true statement about a comparison that should not have been the last
+    word. Nothing unproven ships either way — what is at stake is whether the trade is legible.
+    """
+    return "verdict_node_budget" if undecided else otherwise
 
 
 def directed_rung_search(floor_tris, ceiling_tris, probe):
@@ -1095,6 +1189,26 @@ def validity_gate_failures(validity, source_validity, gates):
         failures.append(
             f"component count {validity['components']} != source {source_validity['components']} "
             f"— a part vanished, and a vanished part has near-zero Hausdorff distance"
+        )
+    # NON-DEGENERATE, which the gate list has claimed since ADR 0036 §4 re-scoped it and which
+    # nothing enforced: the smallest triangle area was measured, recorded, compared against nothing.
+    #
+    # THE THRESHOLD IS NOT A NEW NUMBER. It is the cleanup pass's own coincidence distance, squared:
+    # a face whose area is at or below `(cleanup_dissolve_frac_of_diag * diagonal)**2` has BOTH its
+    # extents at the scale this lane already treats as one point, so it has no meaningful normal.
+    # Scale-free, and derived rather than declared twice.
+    #
+    # IT IS DELIBERATELY NOT THE SLIVER TEST. A needle — 50 mm long, microns thick, real area — is
+    # far above this floor, and it is `generate.cleanup` that dissolves that class, before export
+    # and by construction. Setting the floor high enough to catch slivers would refuse geometry the
+    # decimator legitimately produces. This gate names exact degeneracy and says so.
+    floor_mm2 = (gates["cleanup_dissolve_frac_of_diag"]
+                 * math.sqrt(sum(float(v) * float(v) for v in validity["bbox_mm"]))) ** 2
+    if validity["min_tri_area_mm2"] <= floor_mm2:
+        failures.append(
+            f"smallest triangle is {validity['min_tri_area_mm2']:.6g} mm^2, at or under the "
+            f"{floor_mm2:.6g} mm^2 degeneracy floor for a mesh this size — a face that small has "
+            f"no consistent normal, and every quantity derived from one is noise"
         )
     for key, limit_key, description in STRUCTURAL_GATES:
         if validity[key] > gates[limit_key]:

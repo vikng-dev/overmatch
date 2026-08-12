@@ -579,7 +579,10 @@ def build_chain(asset, root, out_dir):
     }
 
     directed = Directed(obj, source, CONFIG.GATES, source_validity)
-    diagonal_mm = source.diagonal * 1000.0
+    # FROM THE BOX AS IT WILL BE RECORDED, not from the fuller-precision diagonal beside it — the
+    # verifier re-derives this budget from the manifest and compares it exactly, so the two must be
+    # reading the same number rather than two roundings of one. See `config.diagonal_mm_from_bbox`.
+    diagonal_mm = CONFIG.diagonal_mm_from_bbox(source_validity["bbox_mm"])
     levels = [l0]
     skipped = []
     previous = {"tris": l0["tris"], "surface": shipped_l0, "label": "L0",
@@ -590,26 +593,40 @@ def build_chain(asset, root, out_dir):
         node_budget = CONFIG.verdict_node_budget(diagonal_mm, target_mm)
         log(f"  rung {rung} e={target_mm:.3f} mm  node budget {node_budget}/direction")
         best, undecided = directed.search(target_mm, floor_tris, source.tri_count, node_budget)
+        # ANY UNDECIDED VERDICT AT THIS RUNG OUTRANKS EVERY OTHER EXPLANATION FOR LOSING IT.
+        #
+        # A rung is lost to the budget whenever the search abstained on a candidate, and that is
+        # true even when the rung ALSO looks like an ordinary sparse-chain skip: the candidate the
+        # search could not decide may have been cheaper than the one it settled on, so the shed
+        # fraction that failed `SKIP_FRACTION` is a fraction measured against a winner that only won
+        # because a rival went unproven. Recording `skip_fraction` there would suppress the
+        # verifier's fidelity warning on exactly the rungs where fidelity was actually traded, which
+        # is the one thing this field exists to prevent. Nothing unproven ships either way; what is
+        # at stake is whether the trade is legible.
+        budget_note = (
+            f"; {undecided} verdict(s) at this rung spent the whole {node_budget}-node budget "
+            f"and were counted as failures, so a cheaper candidate may have gone unproven"
+            if undecided else ""
+        )
         if best is None:
             # BUDGET-EXHAUSTED IS NOT STRUCTURALLY INFEASIBLE. A rung lost to a spent node budget is
             # a rung an unbounded search might have kept: nothing unproven ships either way, but the
             # chain is coarser for a reason that is about cost rather than about the geometry, and
             # the manifest has to say which.
-            budget_bound = undecided > 0
             skipped.append({
                 "rung": rung, "e_target_mm": round(target_mm, 4),
                 "reason": (
                     f"{undecided} verdict(s) spent the whole {node_budget}-node budget without "
                     f"closing a bound; UNDECIDED counts as FAIL, so this rung is lost to the "
                     f"budget rather than to the geometry"
-                ) if budget_bound else "no structurally valid candidate meets the target",
-                "lost_to": "verdict_node_budget" if budget_bound else "geometry",
+                ) if undecided else "no structurally valid candidate meets the target",
+                "lost_to": M.rung_lost_to(undecided, "geometry"),
                 "undecided_verdicts": undecided,
                 "verdict_node_budget": node_budget,
                 "floor_tris": floor_tris,
             })
             log(f"  rung {rung} e={target_mm:.3f} mm: no candidate clears it — skipped "
-                f"({'BUDGET-EXHAUSTED' if budget_bound else 'structurally infeasible'})")
+                f"({'BUDGET-EXHAUSTED' if undecided else 'structurally infeasible'})")
             continue
         shed = 1.0 - best["tris"] / previous["tris"]
         if shed < CONFIG.SKIP_FRACTION:
@@ -617,8 +634,8 @@ def build_chain(asset, root, out_dir):
                 "rung": rung, "e_target_mm": round(target_mm, 4), "best_tris": best["tris"],
                 "shed_fraction": round(shed, 4),
                 "reason": f"sheds {shed:.1%} of {previous['label']}, below SKIP_FRACTION "
-                          f"{CONFIG.SKIP_FRACTION:.0%}",
-                "lost_to": "skip_fraction",
+                          f"{CONFIG.SKIP_FRACTION:.0%}{budget_note}",
+                "lost_to": M.rung_lost_to(undecided, "skip_fraction"),
                 "undecided_verdicts": undecided,
                 "verdict_node_budget": node_budget,
             })

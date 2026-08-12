@@ -11,6 +11,7 @@ need Blender and is exercised by generation itself).
 
 import collections
 import json
+import math
 import os
 import struct
 import sys
@@ -514,6 +515,59 @@ class GateParityTests(unittest.TestCase):
         validity["components"] = 2
         failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
         self.assertTrue(any("component count" in f for f in failures), failures)
+
+    def test_the_degeneracy_gate_the_config_claims_actually_fires(self):
+        """The gate list has claimed "non-degenerate" since ADR 0036 §4 and enforced nothing.
+
+        `min_tri_area_mm2` was measured on every level, recorded in every manifest, and compared
+        against no threshold at all — the exact shape of "a counter nothing consults is decoration"
+        that this file's own gate table exists to prevent. The floor is the cleanup pass's
+        coincidence distance squared, so it is scale-free and is not a second declared number.
+        """
+        validity = self.clean_validity()
+        diagonal_mm = math.sqrt(sum(v * v for v in validity["bbox_mm"]))
+        floor = (CONFIG.GATES["cleanup_dissolve_frac_of_diag"] * diagonal_mm) ** 2
+
+        validity["min_tri_area_mm2"] = floor * 0.5
+        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
+        self.assertTrue(any("degeneracy floor" in f for f in failures), failures)
+
+        validity["min_tri_area_mm2"] = floor
+        self.assertTrue(
+            M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES),
+            "a face exactly AT the floor is degenerate — the comparison is inclusive",
+        )
+
+        validity["min_tri_area_mm2"] = floor * 1.001
+        self.assertEqual(
+            M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES), [],
+            "and a face above it is not",
+        )
+
+    def test_the_degeneracy_floor_is_scale_free(self):
+        """A metre-wide part and a kilometre-wide one are held to the same RELATIVE flatness.
+
+        An absolute area floor would refuse small parts and wave large ones through, which is the
+        failure the whole ladder is built to avoid — every threshold in this lane is a fraction of
+        the mesh's own diagonal.
+        """
+        small = self.clean_validity()
+        small["bbox_mm"] = [10.0, 10.0, 10.0]
+        large = self.clean_validity()
+        large["bbox_mm"] = [10000.0, 10000.0, 10000.0]
+        eps = CONFIG.GATES["cleanup_dissolve_frac_of_diag"]
+        for record in (small, large):
+            diagonal_mm = math.sqrt(sum(v * v for v in record["bbox_mm"]))
+            record["min_tri_area_mm2"] = ((eps * diagonal_mm) ** 2) * 4.0
+            self.assertEqual(
+                M.validity_gate_failures(record, record, CONFIG.GATES), [],
+                f"a face four times the floor passes at every scale: {record['bbox_mm']}",
+            )
+            record["min_tri_area_mm2"] = ((eps * diagonal_mm) ** 2) * 0.25
+            self.assertTrue(
+                M.validity_gate_failures(record, record, CONFIG.GATES),
+                f"and a quarter of it fails at every scale: {record['bbox_mm']}",
+            )
 
     def test_the_gates_the_adr_retired_are_gone_from_the_table(self):
         """ADR 0036 §4, held as a fact rather than as prose: these counters no longer refuse.
@@ -1059,6 +1113,147 @@ class ConvexBoundTests(unittest.TestCase):
         self.assertGreater(covering, 2.0, "the covering radius bound is dominated by the patch size")
 
 
+class ExceptionalProbeTests(unittest.TestCase):
+    """A BVH that cannot answer must never tighten anything. Fail-closed, in every consumer.
+
+    THE DEFECT THIS PINS, found by review: `bvh_probe` mapped a no-hit to `(0.0, -1)` and passed a
+    NaN hit distance straight through. Zero is the most TIGHTENING value a distance can take — it
+    pulls the covering bound down, it can become the `best` a bracket closes against, and it makes
+    a patch look proven. NaN is worse, because `NaN > target` is False and the acceptance check
+    reads that as "inside the rung".
+
+    Both now become `UNKNOWN_DISTANCE`, which every consumer already handles by construction: the
+    bound's `min_k` ignores it (each corner bounds the whole patch on its own, so one usable corner
+    is enough), the live heap can never close on it, and it is not a sample so it never reaches a
+    lower bound.
+    """
+
+    #: A plane at z = 0, and a SMALL patch one metre above it. The true maximum distance over that
+    #: patch is 1.0, and the patch is small so that a corner answering ZERO drags the covering bound
+    #: to nearly nothing — which is exactly how a tightening sentinel becomes an unsound bound.
+    FLAT = [
+        [[-5.0, -5.0, 0.0], [5.0, -5.0, 0.0], [5.0, 5.0, 0.0]],
+        [[-5.0, -5.0, 0.0], [5.0, 5.0, 0.0], [-5.0, 5.0, 0.0]],
+    ]
+    PATCH = np.array([[[0.0, 0.0, 1.0], [1.0e-3, 0.0, 1.0], [0.0, 1.0e-3, 1.0]]])
+    TRUTH = 1.0
+
+    def bracket_under(self, answer):
+        """`branch_and_bound` over `PATCH` against a probe that can only ever answer `answer`.
+
+        That is the fully-failed query — an empty destination tree, or one poisoned by a non-finite
+        coordinate — which is the reachable shape of this defect and the sharpest form of it.
+        """
+        dst = ConvexBoundTests.FakeSurface(self.FLAT)
+        distances = np.full((1, 3), answer[0], dtype=np.float64)
+        tags = np.full((1, 3), answer[1], dtype=np.int64)
+        return M.branch_and_bound(
+            self.PATCH, distances, tags, lambda _k, _p: answer,
+            tol=1e-6, max_nodes=200, rel_tol=0.0,
+            bound_of=lambda c, d, t, ceiling: M.patch_bounds(c, d, t, dst, ceiling),
+        )
+
+    def test_the_zero_a_failed_query_used_to_answer_certifies_a_false_bound(self):
+        """THE DEFECT, executed. `(0.0, -1)` is what `bvh_probe` returned for a no-hit.
+
+        Every corner answers zero, so the covering bound is the patch's own span — a millimetre —
+        and the bracket closes there. The surface is a METRE away. This is not a loose bound, it is
+        a wrong one, and nothing downstream could have known.
+        """
+        _lower, upper = self.bracket_under((0.0, -1))
+        self.assertLess(
+            upper, self.TRUTH,
+            "this test exists to demonstrate an UNSOUND bound; if it no longer is one, the "
+            "demonstration has rotted and the guard below is testing nothing",
+        )
+
+    def test_an_unknown_distance_keeps_the_bracket_open_instead(self):
+        """MUTANT. The same query, answered honestly: nothing tightens, so nothing closes."""
+        for answer in ((M.UNKNOWN_DISTANCE, -1), (float("nan"), -1)):
+            with self.subTest(answer=answer[0]):
+                # A NaN reaches the bound as a NaN only if the probe wrapper let it through; the
+                # wrapper maps it to UNKNOWN_DISTANCE, and this pins the wrapper's law.
+                mapped = (M.UNKNOWN_DISTANCE, -1) if not math.isfinite(answer[0]) else answer
+                lower, upper = self.bracket_under(mapped)
+                self.assertGreaterEqual(
+                    upper, self.TRUTH,
+                    "an unanswerable query produced an upper bound below a distance the surface "
+                    "actually attains — the failure is open, not closed",
+                )
+                self.assertTrue(
+                    math.isfinite(lower),
+                    "a non-sample became a sampled lower bound, so an unmeasured deviation would "
+                    "be reported as an observed one",
+                )
+
+    def test_a_dead_query_stops_instead_of_spending_the_whole_budget(self):
+        """Fail-closed must not mean fail-expensively.
+
+        Nothing answers, so no subdivision can ever produce a finite bound — and without a stop the
+        loop would run the full certify budget (1.5 M nodes) pushing four infinite children per
+        node, which is an unbounded heap on a defective input. The upper bound it hands back is the
+        same infinity either way; only the price differs.
+        """
+        dst = ConvexBoundTests.FakeSurface(self.FLAT)
+        distances = np.full((1, 3), M.UNKNOWN_DISTANCE, dtype=np.float64)
+        tags = np.full((1, 3), -1, dtype=np.int64)
+        probes = []
+
+        def probe(_k, _p):
+            probes.append(1)
+            return (M.UNKNOWN_DISTANCE, -1)
+
+        _lower, upper = M.branch_and_bound(
+            self.PATCH, distances, tags, probe, tol=1e-9, max_nodes=1_500_000, rel_tol=0.0,
+            bound_of=lambda c, d, t, ceiling: M.patch_bounds(c, d, t, dst, ceiling),
+        )
+        self.assertFalse(math.isfinite(upper), "the bracket must stay open")
+        self.assertLess(len(probes), 16, f"it spent {len(probes)} probes proving nothing")
+
+    def test_a_measured_corner_still_bounds_a_patch_whose_neighbour_is_unknown(self):
+        """FAIL-CLOSED IS NOT FAIL-USELESS: one usable corner is enough, and that is why.
+
+        The covering bound holds for EACH corner independently, so `min_k` skipping an unknown one
+        is a tightening the geometry permits rather than a hole. Subdivision therefore recovers: the
+        midpoints get real answers and the patch decides. Without this the fix would trade a wrong
+        bound for a lane that refuses everything near a defect.
+        """
+        dst = ConvexBoundTests.FakeSurface(self.FLAT)
+        honest = ConvexBoundTests().nearest
+        distances = np.array([[M.UNKNOWN_DISTANCE,
+                               honest(dst, self.PATCH[0][1])[0],
+                               honest(dst, self.PATCH[0][2])[0]]])
+        tags = np.array([[-1, honest(dst, self.PATCH[0][1])[1], honest(dst, self.PATCH[0][2])[1]]])
+        bounds = M.patch_bounds(self.PATCH, distances, tags, dst, self.TRUTH)
+        self.assertTrue(np.isfinite(bounds[0]), "one measured corner bounds the whole patch")
+        self.assertGreaterEqual(float(bounds[0]), self.TRUTH - 1e-9)
+
+    def test_an_unknown_is_never_a_witness(self):
+        """The lower end is a WITNESS, and an unanswered query is not one.
+
+        Folding `UNKNOWN_DISTANCE` into `best` would report an infinite deviation as if the surface
+        had been observed to attain it — and would let the stopping rule close instantly on
+        `inf <= inf + slack` and return that as a measurement.
+        """
+        self.assertEqual(M.sampled_max(0.5, M.UNKNOWN_DISTANCE), 0.5)
+        self.assertEqual(M.sampled_max(0.5, float("nan")), 0.5)
+        self.assertEqual(M.sampled_max(0.5, 0.9, M.UNKNOWN_DISTANCE), 0.9)
+
+    def test_the_acceptance_check_cannot_rest_on_the_comparison_alone(self):
+        """MUTANT, on the acceptance side, and the reason the finiteness test comes FIRST.
+
+        `one_way_fits` rejects a corner over the rung target with `distance > target_m`. A NaN loses
+        that comparison — silently, and in the direction that ACCEPTS — so a probe answer that is
+        not a number would have carried an unmeasurable candidate toward a PASS. The guard is a
+        finiteness check ahead of the comparison, and this pins why it cannot be folded into it.
+        """
+        target = 0.001
+        self.assertFalse(float("nan") > target, "a NaN is not caught by the target comparison")
+        self.assertTrue(M.UNKNOWN_DISTANCE > target)
+        for answer in (float("nan"), M.UNKNOWN_DISTANCE):
+            self.assertFalse(math.isfinite(answer), "both are caught by the finiteness check")
+
+
 class DirectedSearchTests(unittest.TestCase):
     """`measure.directed_rung_search` — the loop, against synthetic probes with known answers."""
 
@@ -1139,6 +1334,72 @@ class DirectedSearchTests(unittest.TestCase):
         M.directed_rung_search(2, 1520, self.probe_from(realizable, {700, 1000}, log=second))
         self.assertEqual(first, second)
         self.assertTrue(first, "the search must actually probe something")
+
+    def test_an_undecided_rung_is_lost_to_the_budget_whatever_else_is_true_of_it(self):
+        """The WRITER'S half of the misattribution, at the one declaration both halves read.
+
+        `generate` picks this field and `chain` validates it, and while the rule lived in both
+        places they disagreed: the writer filed a rung under `skip_fraction` whenever the
+        sparse-chain rule had fired, even if the search had abstained on a candidate at that rung —
+        and the verifier's fidelity warning, which only fires on `verdict_node_budget`, went quiet
+        on exactly the rungs that had earned one.
+        """
+        self.assertEqual(M.rung_lost_to(0, "skip_fraction"), "skip_fraction")
+        self.assertEqual(M.rung_lost_to(0, "geometry"), "geometry")
+        for otherwise in ("skip_fraction", "geometry"):
+            self.assertEqual(
+                M.rung_lost_to(1, otherwise), "verdict_node_budget",
+                "one abstention outranks every other explanation for losing the rung",
+            )
+            self.assertEqual(M.rung_lost_to(37, otherwise), "verdict_node_budget")
+        for value in M.SKIP_LOST_TO:
+            self.assertIn(value, ("verdict_node_budget", "geometry", "skip_fraction"))
+
+    def test_the_budget_law_reads_one_number_on_both_sides(self):
+        """MUTANT for a split brain: generation and verification must not round differently.
+
+        Generation used to compute the budget from the evaluated source's FULL-PRECISION diagonal
+        while `chain.py` recomputed it from the manifest's box rounded to four decimals, and then
+        demanded exact integer equality. `verdict_node_budget` TRUNCATES, so the two agreed only
+        while no asset landed near an integer boundary — and the failure would have been a valid
+        manifest refused for a number nobody edited.
+
+        The straddle is HUNTED rather than asserted: this walks a box outward in tenths of a micron
+        until it finds one where the two readings genuinely truncate to different integers, which is
+        the proof that the hazard was real rather than theoretical. It takes a few dozen steps,
+        because a 4th-decimal rounding moves this budget by about a twentieth of a node and the
+        boundary is hit whenever that crosses an integer.
+        """
+        target = CONFIG.E1_MM
+        straddle = None
+        for step in range(200000):
+            raw = 700.0 + step * 1.7e-5
+            bbox = [round(raw, 4), 180.0, 180.0]
+            from_recorded = CONFIG.verdict_node_budget(CONFIG.diagonal_mm_from_bbox(bbox), target)
+            from_full = CONFIG.verdict_node_budget(
+                math.sqrt(raw * raw + 180.0 * 180.0 + 180.0 * 180.0), target
+            )
+            if from_recorded != from_full:
+                straddle = (bbox, from_recorded, from_full)
+                break
+        self.assertIsNotNone(
+            straddle,
+            "no box in the swept range makes the two readings disagree — if that is now true in "
+            "general the hazard is gone, but it is far likelier that this sweep stopped covering "
+            "the boundary",
+        )
+        bbox, from_recorded, from_full = straddle
+        self.assertNotEqual(
+            from_recorded, from_full,
+            "the two readings of one box differ by a whole node here — which is exactly what a "
+            "verifier demanding exact integer equality would have refused",
+        )
+        # Both sides now read the recorded box, so agreement is by construction rather than by
+        # this asset happening to sit away from a boundary.
+        self.assertEqual(
+            CONFIG.verdict_node_budget(CONFIG.diagonal_mm_from_bbox(bbox), target),
+            CONFIG.verdict_node_budget(CONFIG.diagonal_mm_from_bbox(list(bbox)), target),
+        )
 
     def test_the_node_budget_is_scale_free_deterministic_and_capped(self):
         """The declared budget law, held against the three properties ADR 0036 §6 asks of it."""

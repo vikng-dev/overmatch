@@ -219,9 +219,16 @@ GATES = {
     # and well clear of the next-thinnest features at 21 um. Three orders of magnitude below e1, so
     # it cannot move a level's deviation anywhere the ladder can express — and the deviation is
     # re-certified afterwards regardless.
+    #
+    # IT IS ALSO THE DEGENERACY FLOOR, squared. `measure.validity_gate_failures` refuses a face
+    # whose area is at or under `(this * diagonal)**2` — both extents at the scale the lane already
+    # treats as one point, so no consistent normal. One declaration, two consequences, rather than a
+    # second number that would drift from this one. On the reference shoe that floor is 5.9e-5 mm^2
+    # against a shipped minimum of 1.425 mm^2, which is the clearance a gate on EXACT degeneracy
+    # should have — slivers are cleanup's business, not this gate's.
     "cleanup_dissolve_frac_of_diag": 1.0e-5,
-    # Non-degenerate and finite, on the decoded bytes: a face listed twice, a NaN, and an edge its
-    # two faces traverse the same way (an inconsistent winding, which has no outside).
+    # Finite, and non-degenerate in topology: a face listed twice, a NaN, and an edge its two faces
+    # traverse the same way (an inconsistent winding, which has no outside).
     "max_duplicate_faces": 0,
     "max_nonfinite": 0,
     "max_orientation_flips": 0,
@@ -370,11 +377,29 @@ VERDICT_NODES_PER_SQUARE = 10.3
 VERDICT_NODES_CAP = 2_000_000
 
 
+def diagonal_mm_from_bbox(bbox_mm):
+    """The bounding diagonal the node budget is computed from — from the RECORDED box.
+
+    ONE SOURCE OF THE NUMBER, and the reason is a split brain that was live: generation computed the
+    budget from the evaluated source's full-precision diagonal, verification recomputed it from the
+    manifest's box rounded to four decimals, and then demanded exact integer equality. The two agree
+    on this asset by luck. `verdict_node_budget` truncates, so a mesh whose budget landed a
+    hair under an integer would be granted N by one side and N-1 by the other, and a perfectly valid
+    manifest would fail verification on a number nobody had touched.
+
+    So both sides compute from the box AS RECORDED. The rounding is then part of the declared law
+    rather than a difference between two readings of it, and equality holds by construction instead
+    of by coincidence.
+    """
+    return math.sqrt(sum(float(value) * float(value) for value in bbox_mm))
+
+
 def verdict_node_budget(diagonal_mm, e_target_mm):
     """The node budget for one direction of one verdict, from the mesh's size and the rung.
 
     Integer and deterministic: the same asset gives the same budget on any machine, which is what
-    lets two runs be compared field-for-field.
+    lets two runs be compared field-for-field. Feed it `diagonal_mm_from_bbox` of the geometry the
+    MANIFEST records, never a fuller-precision diagonal beside it.
     """
     ratio = float(diagonal_mm) / float(e_target_mm)
     return int(min(VERDICT_NODES_CAP, VERDICT_NODES_PER_SQUARE * ratio * ratio))
