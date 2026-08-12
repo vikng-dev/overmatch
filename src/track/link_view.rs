@@ -146,13 +146,17 @@
 //!
 //! # `OVERMATCH_LOD_SHOWCASE=1`: judging the switches by eye
 //!
-//! The pipeline's rendered-difference gate scores each switch numerically, and one of them (L2→L3 at
-//! 501 m, score 1.674) is over the gate's own 0.5. A number that says "this looks wrong" still has
-//! to be looked at, so the showcase lever ([`crate::lod_showcase`]) flattens the world and stands one
-//! PAIR of tanks at each switch distance with their shoes CLAMPED to the two levels the gate
-//! compared. That clamp is the only thing in the game that overrides a shoe's range, it is written by
-//! a system that does not run unless the variable is set, and it takes the ranges it writes from
-//! [`shoe_lod_range`] — so it cannot drift from the chain it is showing off.
+//! The pipeline no longer scores a switch by rendering it: ADR 0036 §3 deleted the
+//! rendered-difference gate, which had been comparing the shipped meshes under the wrong textures
+//! since the corpus was cut. What certifies a level now is purely geometric — a proven bound on its
+//! worst-case deviation at the distance it takes over — and the one thing that bound cannot tell
+//! anybody is whether a swap LOOKS like a swap. So the eye is the only remaining audit, and the
+//! showcase lever ([`crate::lod_showcase`]) is the instrument for it: it flattens the world and
+//! stands one PAIR of tanks at each switch distance with their shoes CLAMPED to the two levels that
+//! switch is between. That clamp is the only thing in the game that overrides a shoe's range, it is
+//! written by a system that does not run unless the variable is set, and it takes the ranges it
+//! writes from [`shoe_lod_range`] — so it cannot drift from the chain it is showing off. A swap
+//! seen to pop here is the named trigger for re-arming a rendered gate (ADR 0036 §3).
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
@@ -284,18 +288,6 @@ struct ShoeLevel {
     /// in opposite directions (ADR 0033 §4).
     worst_dev_mm: f32,
     from_m: f32,
-    /// Did the manifest's rendered-difference gate ABSTAIN on this level (`render_gate.abstained`)?
-    ///
-    /// True means the level's screen footprint at its own switch distance fell under the ratified
-    /// 20 px floor, so the gate declined to have an opinion — at that size the defect reference
-    /// collapses and any score would be a ratio of two nothings. It is NOT a failure; it is the
-    /// gate saying the difference is too small to be measured, which is also the honest statement
-    /// that it is too small for a HUMAN to judge.
-    ///
-    /// Carried here because the showcase harness stages only the switches a person can actually
-    /// look at ([`crate::lod_showcase`]). A level that abstains is one nobody can eyeball, so
-    /// standing two tanks a kilometre away to compare them shows an empty pair of dots.
-    render_gate_abstained: bool,
 }
 
 /// The reduced levels below the base shoe, NEAREST FIRST. The base owns `[0, chain[0].from_m)`,
@@ -313,13 +305,16 @@ struct ShoeLevel {
 /// |---|---|---|---|---|
 /// | L1 | `rung1` | 678 | 3.339 | 60.40 |
 /// | L2 | `rung3` | 390 | 14.962 | 269.38 |
-/// | L3 | `rung4` | 254 | 29.344 | 527.94 |
-/// | L4 | `rung6` | 146 | 77.741 | 1 499.58 |
+/// | L3 | `rung4` | 248 | 30.145 | 542.34 |
+/// | L4 | `rung6` | 146 | 83.389 | 1 499.58 |
 ///
-/// RE-CUT 2026-08-08 against Yan's rebuilt shoe. L0 is 1 520 triangles, so every previous rung was
-/// a reduction of a surface that no longer ships and the ladder is REBASED, not edited. The rung
+/// RE-CUT 2026-08-12 by the directed search (ADR 0036). Three of the four levels are byte-identical
+/// to the chain the exhaustive search cut; L3 is CHEAPER — 248 triangles against 254 — and switches
+/// 14 m later for it. That is not a loosening: 248 is certified at 30.145 mm against a 31.120 mm
+/// rung, and the old 254 existed because the retired search accepted on a 5 %-tolerance bracket
+/// whose upper end could not clear the target for a candidate whose true deviation did. The rung
 /// numbers are octave indices, not chain indices, so the gaps are real: rungs 2 and 5 were skipped
-/// for shedding under the 30 % `SKIP_FRACTION` (536 tris at 20.9 %, 186 at 26.8 %), and the
+/// for shedding under the 30 % `SKIP_FRACTION` (512 tris at 24.5 %, 186 at 25.0 %), and the
 /// manifest carries both skip records.
 ///
 /// L4's band opens at 1 499.58 m, INSIDE the world: the shipped map is 1 500 m across, so its
@@ -338,43 +333,31 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
         tris: 678,
         worst_dev_mm: 3.338514,
         from_m: 60.4024,
-        // 229.1 px at 60 m — judged, not abstained, and PASSED. All three views cleared the
-        // ABSOLUTE FLOOR (worst mean |dI| 0.0048 against the ratified 0.02, worst frac-over 0.0126
-        // against 0.02), which is the path that admits them: edge-on's relative score is 4.88
-        // against the 2.0 fraction. At this deviation the absolute difference is negligible while
-        // the noise-to-defect span the ratio is taken over is narrow.
-        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung3.glb",
         tris: 390,
         worst_dev_mm: 14.962055,
         from_m: 269.376,
-        // 51.4 px at 269 m — judged, and PASSED at 1.000 against the ratified limit of 2.0.
-        render_gate_abstained: false,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
-        tris: 254,
-        worst_dev_mm: 29.343982,
-        from_m: 527.94,
-        // 26.3 px at 528 m — judged, and PASSED at 1.000.
-        render_gate_abstained: false,
+        tris: 248,
+        worst_dev_mm: 30.144_895,
+        from_m: 542.3391,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung6.glb",
         tris: 146,
-        // THE PAIRWISE BOUND, not the source-relative one, and this is the first level in the
-        // chain's history where the two differ. L4 sits 77.741 mm from L0 but 83.389 mm from L3,
-        // its own parent — and the switch is the distance at which the step from the level ACTUALLY
-        // ON SCREEN becomes sub-pixel, so the larger of the two is what owns the threshold. The
-        // manifest records both (`switch_from_source_dev_m` 1398.03, `switch_from_pairwise_m`
-        // 1499.58) and takes the max; wiring the source-relative number here would switch 100 m too
-        // early against a visible step.
+        // THE PAIRWISE BOUND, not the source-relative one, and this is the only level in the chain
+        // where the two differ. L4 sits 77.741 mm from L0 but 83.389 mm from L3, its own parent —
+        // and the switch is the distance at which the step from the level ACTUALLY ON SCREEN
+        // becomes sub-pixel, so the larger of the two is what owns the threshold. The manifest
+        // records both (`switch_from_source_dev_m` 1398.03, `switch_from_pairwise_m` 1499.58) and
+        // takes the max; wiring the source-relative number here would switch 100 m too early
+        // against a visible step.
         worst_dev_mm: 83.388_74,
         from_m: 1499.578,
-        // 8.7 px at 1500 m — UNDER the ratified 20 px floor, so the gate abstained.
-        render_gate_abstained: true,
     },
 ];
 
@@ -383,20 +366,6 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
 /// importing its rows.
 pub(crate) fn shoe_lod_levels() -> usize {
     SHOE_LOD_CHAIN.len() + 1
-}
-
-/// Can a human judge the switch INTO `level` — i.e. did the rendered-difference gate have an
-/// opinion about it? `level` is 1-based over [`SHOE_LOD_CHAIN`]; level 0 is the base and is never a
-/// switch target.
-///
-/// The gate abstains below the ratified 20 px footprint floor, and that abstention is exactly the
-/// statement "there is nothing here an eye could resolve". Consumers that ask a person to compare
-/// two meshes should ask this first — see [`crate::lod_showcase::staged_pairs`].
-pub(crate) fn shoe_lod_switch_is_judgeable(level: usize) -> bool {
-    level
-        .checked_sub(1)
-        .and_then(|i| SHOE_LOD_CHAIN.get(i))
-        .is_some_and(|l| !l.render_gate_abstained)
 }
 
 /// Level `level`'s MEASURED triangle count — `0` is the base shoe, `1 + i` is `SHOE_LOD_CHAIN[i]`.
@@ -1312,11 +1281,13 @@ mod tests {
             // ...and the chain as it SHIPS is the manifest's four reductions. Spelled out so a
             // level added or dropped is a deliberate edit here, not a silent one — the ladder's
             // LENGTH is an output of generation, so it is exactly the thing a regeneration can
-            // change without anyone noticing. It has changed twice: the 2026-08-07 re-cut against
-            // the welded 764-triangle shoe dropped four reductions to three, and the 2026-08-08
-            // re-cut against the rebuilt 1 520-triangle shoe took it back to four. This line is
-            // what made both visible rather than silent.
-            assert_eq!(thresholds, vec![60.4024, 269.376, 527.94, 1499.578]);
+            // change without anyone noticing. It has changed three times: the 2026-08-07 re-cut
+            // against the welded 764-triangle shoe dropped four reductions to three, the
+            // 2026-08-08 re-cut against the rebuilt 1 520-triangle shoe took it back to four, and
+            // the 2026-08-12 directed-search re-cut (ADR 0036) moved L3 out from 527.94 m to
+            // 542.3391 m on a level that is 6 triangles CHEAPER. This line is what made each of
+            // them visible rather than silent.
+            assert_eq!(thresholds, vec![60.4024, 269.376, 542.3391, 1499.578]);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
@@ -1438,58 +1409,6 @@ mod tests {
                 > 0.1,
             "the small-angle shortcut must NOT be what is wired",
         );
-    }
-
-    /// The one row-field arithmetic CANNOT re-derive: the render gate's verdict.
-    ///
-    /// `from_m` and `worst_dev_mm` are held together by the derivation above, and a stale `tris`
-    /// shows up the moment the glb is loaded. `render_gate_abstained` is a bare transcribed bool —
-    /// nothing about it is recomputable from the other columns — so it is read straight out of
-    /// `assets/lod_manifest.json` and compared. It decides which switches the showcase asks a human
-    /// to judge ([`crate::lod_showcase::staged_pairs`]), and a stale `true` here would silently
-    /// delete a pair the gate can now see.
-    #[test]
-    fn the_render_gate_verdicts_are_the_manifests() {
-        let path = crate::assets::asset_root().join("lod_manifest.json");
-        let text = std::fs::read_to_string(&path).expect("the shipped manifest is readable");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&text).expect("the shipped manifest is JSON");
-        let levels = manifest["assets"][0]["levels"]
-            .as_array()
-            .expect("the manifest's first asset has levels");
-        assert_eq!(
-            levels.len(),
-            SHOE_LOD_CHAIN.len() + 1,
-            "the wired chain has {} reduced levels and the manifest ships {} levels including L0 — \
-             one of them was regenerated without the other",
-            SHOE_LOD_CHAIN.len(),
-            levels.len(),
-        );
-        for (i, level) in SHOE_LOD_CHAIN.iter().enumerate() {
-            let abstained = levels[i + 1]["render_gate"]["abstained"]
-                .as_bool()
-                .expect("every reduced level carries a render-gate verdict");
-            assert_eq!(
-                level.render_gate_abstained,
-                abstained,
-                "LOD{} ({}) is wired as {} but the manifest's render gate says {} ({:.1} px against \
-                 the {:.0} px floor) — re-transcribe the row",
-                i + 1,
-                level.glb,
-                if level.render_gate_abstained {
-                    "ABSTAINED"
-                } else {
-                    "judged"
-                },
-                if abstained { "ABSTAINED" } else { "judged" },
-                levels[i + 1]["render_gate"]["screen_footprint_px"]
-                    .as_f64()
-                    .unwrap_or(f64::NAN),
-                levels[i + 1]["render_gate"]["min_footprint_px"]
-                    .as_f64()
-                    .unwrap_or(f64::NAN),
-            );
-        }
     }
 
     /// The shipped corpus was cut for a world at least as large as the one that loads.

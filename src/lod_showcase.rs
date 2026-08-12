@@ -1,21 +1,22 @@
 //! `OVERMATCH_LOD_SHOWCASE=1`: the shoe LOD ladder laid out on the ground, PAIRED, so a human can
-//! judge the switches the pipeline scored.
+//! judge every switch the pipeline cut.
 //!
 //! # Why this exists
 //!
-//! `scripts/lod/generate.py` gates every level with a RENDERED-DIFFERENCE score — candidate against
-//! parent, at the switch distance, under the shipped material and lighting, normalised so 0 is
-//! "same image" and 1 is "as wrong as 20°-broken normals". The ladder ships with three of four
-//! switches comfortably under the 0.5 the gate allows and one that is not: **L2→L3 at 501 m scores
-//! 1.674**. That is a number saying the swap is visibly wrong, and a number saying that is still
-//! only a number. Someone has to look.
+//! `scripts/lod/generate.py` certifies every level with a PROVEN BOUND on its worst-case surface
+//! deviation at the distance it takes over. That bound is the whole guarantee, and there is exactly
+//! one question it cannot answer: whether the swap LOOKS like a swap. The pipeline used to answer
+//! that with a rendered-difference score; ADR 0036 §3 deleted the gate, because it had been
+//! comparing the shipped meshes under fallback textures since the corpus was cut — running, and
+//! testing nothing. So the eye is now the only audit of appearance, and re-arming a rendered gate
+//! has a named trigger: a switch seen to pop, here.
 //!
 //! Looking is harder than it sounds, which is the actual reason this file exists rather than a note
-//! telling a human to drive around. To see the L2→L3 switch you have to be at 501 m from a tank, on
-//! ground flat enough that the tank is not half-buried, holding the optic steady, and — the part no
-//! amount of driving gets you — seeing BOTH meshes at once. A switch judged by driving toward a
-//! tank is judged from memory: the coarse mesh, then a blink, then the fine one, seconds apart.
-//! Every rendered-difference gate in the pipeline compares them SIDE BY SIDE, and so does this.
+//! telling a human to drive around. To see a switch you have to be at its exact distance from a
+//! tank, on ground flat enough that the tank is not half-buried, holding the optic steady, and —
+//! the part no amount of driving gets you — seeing BOTH meshes at once. A switch judged by driving
+//! toward a tank is judged from memory: the coarse mesh, then a blink, then the fine one, seconds
+//! apart. This stands them SIDE BY SIDE instead.
 //!
 //! # What it does
 //!
@@ -30,8 +31,8 @@
 //!   2. The player spawns at one edge of the 1 000 m map facing down-range.
 //!   3. At every switch distance in `SHOE_LOD_CHAIN`, a PAIR of stationary Tigers stands broadside
 //!      to the sight line: the LEFT one clamped to the finer level, the RIGHT one to the coarser.
-//!      So at each range the two tanks in frame are exactly the two meshes the gate compared, at
-//!      exactly the distance it compared them.
+//!      So at each range the two tanks in frame are exactly the two meshes that switch is between,
+//!      at exactly the distance the runtime swaps them.
 //!   4. A legend goes to the log: one line per pair, with the levels and their triangle counts.
 //!
 //! Nothing here is mounted, spawned or ticked when the variable is unset — [`plugin`] adds no
@@ -54,9 +55,7 @@
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 
-use crate::track::link_view::{
-    ShoeLod, shoe_lod_levels, shoe_lod_range, shoe_lod_switch_is_judgeable, shoe_lod_tris,
-};
+use crate::track::link_view::{ShoeLod, shoe_lod_levels, shoe_lod_range, shoe_lod_tris};
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
 ///
@@ -144,39 +143,43 @@ pub(crate) struct ShowcaseTank {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct LodClamp(pub(crate) usize);
 
-/// The down-range distance each PAIR stands at, and whether that is the switch's true distance.
+/// The down-range distance pair `pair` happens at: where level `pair + 1` takes over.
 ///
-/// Pair `i` compares level `i` against level `i + 1`, so it belongs at the distance level `i + 1`
-/// takes over — read off [`shoe_lod_range`] rather than from any table here, because the ladder is
-/// regenerated and this file must not become a second copy of it.
-fn pair_range_m(pair: usize) -> (f32, Option<f32>) {
-    let switch = shoe_lod_range(pair + 1).start_margin.start;
-    if switch <= MAX_RANGE_M {
-        (switch, None)
-    } else {
-        (MAX_RANGE_M, Some(switch))
-    }
+/// Read off [`shoe_lod_range`] rather than from any table here, because the ladder is regenerated
+/// and this file must not become a second copy of it.
+fn pair_switch_m(pair: usize) -> f32 {
+    shoe_lod_range(pair + 1).start_margin.start
 }
 
-/// The switches this harness stages: those a human can actually judge.
+/// The switches this harness stages: the ones that FIT ON THE MAP, at their own distance.
 ///
-/// DERIVED FROM THE MANIFEST, never listed (Yan ruling, 2026-08-07). Pair `p` compares level `p`
-/// against level `p + 1`, so it is the switch INTO `p + 1`; it is staged iff the rendered-difference
-/// gate had an OPINION about that level ([`shoe_lod_switch_is_judgeable`]). Where the gate abstained
-/// — the asset is under the ratified 20 px floor at its own switch distance — there is by
-/// construction nothing an eye could resolve, and parking two tanks out there to compare them shows
-/// a person two identical specks and asks them to prefer one.
+/// It used to stage the switches the rendered-difference gate had an opinion about, dropping the
+/// ones where the asset fell under a 20-pixel footprint floor. ADR 0036 §3 deleted that gate, and
+/// inventing a replacement threshold here would be a taste call nobody made wearing the retired
+/// gate's numbers. The rule that replaces it is not about how small a thing is, it is about whether
+/// this harness can show the comparison AT ALL: a pair belongs at the distance its switch happens,
+/// and a switch past [`MAX_RANGE_M`] cannot be stood at on this map. Parking those two tanks at the
+/// map edge instead would ask a person to judge a swap at a distance the runtime never performs it,
+/// which is a different comparison wearing this one's label.
 ///
-/// On today's four-rung ladder that drops exactly the L3|L4 pair — 8.7 px at its 1 499.58 m switch,
-/// under the ratified 20 px floor — and stages three. A ladder of any other depth stages whatever
-/// subset of ITS switches clears the floor, with no edit here: the rule is a property of the gate's
-/// verdicts, not a count.
+/// On today's four-rung ladder that stages three and drops the L3|L4 pair, whose switch is 1 499.6 m
+/// against a 950 m reach. A wider map stages it with no edit here, and a ladder of any other depth
+/// stages whatever subset of ITS switches the map can reach.
 ///
-/// However many that leaves, the alternating lanes are what keep them clear of each other — see
-/// [`LANE_OFFSET_M`] and `no_pair_stands_in_front_of_another_from_the_player_spawn`.
+/// The alternating lanes are what keep the staged pairs clear of each other — see [`LANE_OFFSET_M`]
+/// and `no_pair_stands_in_front_of_another_from_the_player_spawn`.
 pub(crate) fn staged_pairs() -> Vec<usize> {
     (0..shoe_lod_levels() - 1)
-        .filter(|&pair| shoe_lod_switch_is_judgeable(pair + 1))
+        .filter(|&pair| pair_switch_m(pair) <= MAX_RANGE_M)
+        .collect()
+}
+
+/// The switches this map cannot reach, with the distance they happen at — so the legend says what
+/// is missing rather than leaving a person to notice a gap in the ladder they were shown.
+fn unstageable_pairs() -> Vec<(usize, f32)> {
+    (0..shoe_lod_levels() - 1)
+        .map(|pair| (pair, pair_switch_m(pair)))
+        .filter(|&(_, switch)| switch > MAX_RANGE_M)
         .collect()
 }
 
@@ -211,7 +214,7 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
     // put two consecutive staged pairs in the SAME lane the moment a skipped switch fell between
     // them, which is the occlusion the alternation exists to prevent.
     for (slot, pair) in staged_pairs().into_iter().enumerate() {
-        let (range, _) = pair_range_m(pair);
+        let range = pair_switch_m(pair);
         let lane = pair_lane_z(slot);
         // LEFT is the FINER level, and left is −Z: with +X forward and +Y up, `left = up × forward`
         // = Y × X = −Z. Fine on the left every time, so a sweep down the range is read the same way
@@ -234,16 +237,13 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
 /// Written as text rather than logged here so the spawn can emit it beside the tanks it describes —
 /// a legend in a different part of the log from the scene it labels is a legend nobody reads.
 pub(crate) fn legend() -> Vec<String> {
-    staged_pairs()
+    let mut lines: Vec<String> = staged_pairs()
         .into_iter()
         .enumerate()
         .map(|(slot, pair)| {
-            let (range, beyond) = pair_range_m(pair);
-            let note = beyond.map_or(String::new(), |switch| {
-                format!(" (true switch {switch:.1} m is beyond the map edge)")
-            });
+            let range = pair_switch_m(pair);
             format!(
-                "lod showcase: L{pair}|L{} pair at {range:.1} m{note}, {} of the sight line — \
+                "lod showcase: L{pair}|L{} pair at {range:.1} m, {} of the sight line — \
                  LEFT L{pair} ({} tris), RIGHT L{} ({} tris)",
                 pair + 1,
                 if pair_lane_z(slot) < 0.0 {
@@ -256,7 +256,15 @@ pub(crate) fn legend() -> Vec<String> {
                 shoe_lod_tris(pair + 1),
             )
         })
-        .collect()
+        .collect();
+    lines.extend(unstageable_pairs().into_iter().map(|(pair, switch)| {
+        format!(
+            "lod showcase: L{pair}|L{} switches at {switch:.1} m, past this map's {MAX_RANGE_M:.0} m \
+             reach — NOT staged, because standing it at the edge would be a different comparison",
+            pair + 1,
+        )
+    }));
+    lines
 }
 
 /// Pin the shoes of every clamped tank to their tank's level, as they appear.
@@ -363,27 +371,34 @@ mod tests {
         }
     }
 
-    /// The staging RULE, stated against the gate's verdicts rather than against a count — so this
+    /// The staging RULE, stated against the CHAIN and the MAP rather than against a count — so this
     /// keeps meaning the same thing when the ladder is next re-cut.
     ///
-    /// Every staged pair is a switch the rendered-difference gate had an opinion about, every
-    /// skipped one is a switch it abstained on, and the harness is not empty. On today's ladder
-    /// that is pairs 0 and 1 staged and the L2|L3 pair dropped (13.1 px at 1 017 m).
+    /// A pair is staged iff its switch fits inside this map's reach. Nothing in the tree decides a
+    /// switch is too SMALL to look at any more: the rendered-difference gate that used to abstain
+    /// below a 20-pixel footprint is deleted (ADR 0036 §3), and inventing a replacement threshold
+    /// here would be a taste call nobody made. What survives is a geometric fact about the map.
     #[test]
-    fn the_harness_stages_exactly_the_switches_the_gate_could_judge() {
+    fn the_harness_stages_exactly_the_switches_the_map_can_reach() {
         let staged = staged_pairs();
         for pair in 0..shoe_lod_levels() - 1 {
             assert_eq!(
                 staged.contains(&pair),
-                shoe_lod_switch_is_judgeable(pair + 1),
-                "pair {pair} (the switch into L{}) is staged iff the render gate judged it",
+                pair_switch_m(pair) <= MAX_RANGE_M,
+                "pair {pair} (the switch into L{}) is staged iff it happens within {MAX_RANGE_M} m",
                 pair + 1,
             );
         }
+        assert_eq!(
+            staged.len() + unstageable_pairs().len(),
+            shoe_lod_levels() - 1,
+            "every switch is either staged or named in the legend as out of reach",
+        );
         assert!(
             !staged.is_empty(),
-            "a showcase that stages nothing is a showcase nobody can use — if a re-cut ladder \
-             ever abstains on every switch, the harness needs a new idea, not a silent empty scene",
+            "a showcase that stages nothing is a showcase nobody can use — if a re-cut ladder ever \
+             put every switch past the map edge, the harness needs a bigger map, not a silent \
+             empty scene",
         );
     }
 
@@ -548,9 +563,10 @@ mod tests {
     fn the_legend_describes_the_tanks_that_are_spawned() {
         let lines = legend();
         let tanks = layout();
-        assert_eq!(lines.len(), staged_pairs().len());
+        let staged = staged_pairs().len();
+        assert_eq!(lines.len(), staged + unstageable_pairs().len());
 
-        for (slot, line) in lines.iter().enumerate() {
+        for (slot, line) in lines.iter().take(staged).enumerate() {
             let (left, right) = (&tanks[1 + 2 * slot], &tanks[2 + 2 * slot]);
             let range = left.xz.x - START_XZ.x;
             assert!(
@@ -565,19 +581,15 @@ mod tests {
                 );
             }
         }
-        // The one line that has to explain itself: the switch the map cannot stage.
-        let beyond: Vec<_> = lines
-            .iter()
-            .filter(|l| l.contains("beyond the map edge"))
-            .collect();
-        let expected = staged_pairs()
-            .into_iter()
-            .filter(|&p| shoe_lod_range(p + 1).start_margin.start > MAX_RANGE_M)
-            .count();
+        // The lines that have to explain themselves: the switches the map cannot stage at all.
+        // A ladder whose deepest level opens past the map's reach is the ordinary case, and a
+        // legend that simply omitted it would show a person three pairs and let them believe that
+        // is the whole chain.
+        let out_of_reach = lines.iter().filter(|l| l.contains("NOT staged")).count();
         assert_eq!(
-            beyond.len(),
-            expected,
-            "a pair standing short of its switch must say so, and one standing at it must not",
+            out_of_reach,
+            unstageable_pairs().len(),
+            "every switch past the map's reach is named, and no staged one claims to be",
         );
     }
 }

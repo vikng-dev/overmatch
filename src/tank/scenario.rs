@@ -54,18 +54,23 @@ const PROBE_FAR_DUEL_XZ: Vec2 = Vec2::new(-410.0, -440.0);
 /// Where the FAR grid's near edge sits, world z. Same units and same meaning as
 /// [`PROBE_GRID_NEAR_Z`]: an absolute world coordinate, not an offset from the duel.
 ///
-/// Paired with [`PROBE_FAR_DUEL_XZ`] so the whole grid lands 588..633 m from the controlled tank's
-/// spawn — squarely inside ONE of the shoe chain's coarse bands (L3's `[501, 1050)` m as the ladder
-/// currently certifies), and every probe inside the camera's 1 000 m far plane with room to spare.
-/// Its footprint relief is 0.24..2.45 m per tank, comparable to the near band's valley floor.
+/// Paired with [`PROBE_FAR_DUEL_XZ`] so the whole grid lands 600..645 m from the controlled tank's
+/// spawn — squarely inside ONE of the shoe chain's coarse bands (L3's `[542.3, 1499.6)` m as the
+/// ladder currently certifies), and every probe inside the camera's 1 000 m far plane with room to
+/// spare.
+///
+/// IT MOVED OUT 12 m ON 2026-08-12, and by the mechanism this comment says it should. The directed
+/// search (ADR 0036) re-cut the ladder and L3's band opened 14 m later, at 542.3 m instead of
+/// 527.9 m — which left the grid's nearest shoe 3 m inside the declared margin. The placement
+/// tracks the band; the band is an output of generation.
 ///
 /// The band claim is asserted against the distance BEVY measures — camera to shoe, orbit radius and
 /// hull extent taken off the near end — by `terrain_grid`'s
 /// `the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band`, which is where the margin
 /// arithmetic lives, and which reads the band off the chain rather than naming a level. Nothing here
-/// should be re-derived by hand: the ladder is regenerated, and WHICH level owns 588..633 m is an
+/// should be re-derived by hand: the ladder is regenerated, and WHICH level owns 600..645 m is an
 /// output of that regeneration.
-const PROBE_FAR_NEAR_Z: f32 = 148.0;
+const PROBE_FAR_NEAR_Z: f32 = 160.0;
 
 /// Is this process running the FAR probe placement?
 ///
