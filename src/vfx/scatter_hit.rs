@@ -91,7 +91,9 @@ fn read_scatter_crossings(
     for (shell, transform, projectile, probe) in &mut shells {
         let current = transform.translation;
         let Some(mut probe) = probe else {
-            // First sight of this shell: no segment yet, so nothing to cross.
+            // First sight of this shell: no segment yet, so nothing to cross. A reconstructed
+            // shell's catch-up flight is spent before the entity exists here, so its crossings are
+            // behind the probe and never read.
             commands.entity(shell).insert(ScatterProbe {
                 previous: current,
                 inside: None,
