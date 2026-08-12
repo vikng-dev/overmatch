@@ -162,7 +162,8 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
-use crate::geometry_lod::GeometryLodLevel;
+use crate::geometry_lod::certificate::Rung;
+use crate::geometry_lod::{ChainRef, GeometryLodLevel};
 
 use super::forces::phase_decompose;
 use super::rig_geom::RigGeom;
@@ -250,8 +251,9 @@ pub(crate) struct LinkTemplate {
     frame: PerSide<LinkFrame>,
     /// The `geometry_lod` chain index every spawned level records, so the adaptive layer rewrites a
     /// pooled shoe's band by exactly the path it rewrites a scene primitive's — there is no second
-    /// threshold writer for the track.
-    chain: usize,
+    /// threshold writer for the track. `None` when the certificate names the shoe no chain: there
+    /// is one level, it owns every distance, and nothing has to be rewritten when the view moves.
+    chain: Option<usize>,
     /// The band each level owns under the view profile AT BIND TIME, rung 0 first. A profile move
     /// rewrites the live entities through `geometry_lod::adapt_bands`; this is the seed a fresh
     /// spawn takes.
@@ -479,33 +481,36 @@ fn bind_link_template(
     //
     // The CHAIN is resolved from the shoe primitive's own MESH ASSET, which is the identity a
     // certificate chain is per (shared meshes share a chain), and the key the lookup lands on is
-    // checked against [`shoe_chain_key`] — a wrong join would otherwise mirror some other part's
-    // rungs onto the belt. The whole chain is resolved before ANY of it is bound: a template
-    // holding fewer levels than the certificate names would leave a distance band with no shoe
-    // drawn in it at all.
+    // checked against [`shoe_chain_key`] — a wrong join would mirror some other part's rungs onto
+    // the belt.
+    //
+    // AN ABSENT CHAIN IS NOT A REFUSAL. A re-cut that earns the shoe no rung is legitimate (the
+    // build's own coverage owns that question), and the law is source detail, silently — so the
+    // template binds with NO reduced levels and the belt draws its base shoe everywhere. Refusing
+    // the bind instead would take the whole track off every tank. A resolved chain, in contrast, is
+    // taken WHOLE: a template holding fewer levels than the certificate names would leave a
+    // distance band with no shoe drawn in it at all, so a rung record still loading starves the
+    // bind exactly like the base shoe does.
     let Some(chains) = chains else {
         return;
     };
-    let Some(chain) = chains.of_mesh(source.0.id()) else {
-        error_once!(
-            "track links: the `{LINK_NODE}` shoe primitive belongs to no certified chain — the \
-             certificate names `{}`; refusing to bind",
-            shoe_chain_key(),
-        );
-        return;
-    };
-    if chain.key() != shoe_chain_key() {
-        error_once!(
-            "track links: the `{LINK_NODE}` shoe primitive resolves to chain `{}` and the shoe's \
-             chain is `{}` — the rungs on the belt would be another part's; refusing to bind",
-            chain.key(),
-            shoe_chain_key(),
-        );
-        return;
-    }
-    let mut lods = Vec::with_capacity(chain.rungs().len());
+    let chain = chains.of_mesh(source.0.id()).filter(|chain| {
+        let matched = chain.key() == shoe_chain_key();
+        if !matched {
+            warn_once!(
+                "track links: the `{LINK_NODE}` shoe primitive resolves to chain `{}` and the \
+                 shoe's chain is `{}` — binding at source detail rather than wearing another \
+                 part's rungs",
+                chain.key(),
+                shoe_chain_key(),
+            );
+        }
+        matched
+    });
+    let rungs: &[Handle<Mesh>] = chain.map_or(&[], ChainRef::rungs);
+    let mut lods = Vec::with_capacity(rungs.len());
     let mut tris = vec![triangles];
-    for (rung, handle) in chain.chain().rungs.iter().zip(chain.rungs()) {
+    for (index, handle) in rungs.iter().enumerate() {
         let Some(shoe) = meshes.get(handle) else {
             return;
         };
@@ -522,16 +527,20 @@ fn bind_link_template(
                 // mapping on a mesh with no tangents. Binding an untangented level would ship a
                 // band across the battlefield where every track flattens out.
                 error_once!(
-                    "track links: the rung `{}` cannot be given tangents ({err}) — it renders \
+                    "track links: the shoe's rung {} cannot be given tangents ({err}) — it renders \
                      under the normal-mapped `{LINK_MATERIAL}` and would light flat without them; \
                      refusing to bind",
-                    rung.mesh,
+                    index + 1,
                 );
                 return;
             }
         }
     }
-    let bands = chain.bands(*view);
+    // One band, `[0, inf)`, when the shoe earned no rung: the base shoe owns every distance.
+    let bands = chain.map_or_else(
+        || vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
+        |chain| chain.bands(*view),
+    );
 
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
 
@@ -544,12 +553,18 @@ fn bind_link_template(
 
     info!(
         "track links: template bound - pitch {:.5} m, shoe {:.1} mm outboard of the pin plane, {} \
-         triangles/shoe, {} levels on chain `{}`",
+         triangles/shoe, {} level(s) on {}",
         (pin_start - pin_end).with_x(0.0).length(),
         shoe_offset * 1000.0,
         triangles,
         lods.len() + 1,
-        chain.key(),
+        chain.map_or_else(
+            || format!(
+                "no certified chain (`{}` names none — source detail)",
+                shoe_chain_key()
+            ),
+            |chain| format!("chain `{}`", chain.key()),
+        ),
     );
     // The LOD's whole ledger, one line per level: the band it owns, how much geometry it saves
     // against the base shoe, and the two mesh assets every instance of it in the session shares
@@ -559,7 +574,8 @@ fn bind_link_template(
     // view profile the metres were derived against — so a capture log carries the claim as well as
     // the number, and a stream captured against a re-cut asset says outright whether its thresholds
     // still follow from its meshes.
-    for (index, (rung, tier)) in chain.chain().rungs.iter().zip(lods.iter()).enumerate() {
+    let deviations: &[Rung] = chain.map_or(&[], |chain| &chain.chain().rungs);
+    for (index, (rung, tier)) in deviations.iter().zip(lods.iter()).enumerate() {
         let band = &bands[index + 1];
         info!(
             "track links: LOD{} bound - `{}`, {} triangles/shoe (−{}%) over [{:.1}, {:.1}) m \
@@ -574,7 +590,7 @@ fn bind_link_template(
             band.start_margin.start,
             band.end_margin.end,
             rung.deviation_mm,
-            chain.chain().radius_m,
+            chain.map_or(f32::NAN, |chain| chain.chain().radius_m),
             view.height_px,
             view.vfov_rad,
             view.budget_px,
@@ -583,7 +599,7 @@ fn bind_link_template(
         );
     }
 
-    let index = chain.index();
+    let index = chain.map(ChainRef::index);
     commands.insert_resource(LinkTemplate {
         mesh,
         lods,
@@ -865,25 +881,27 @@ pub(crate) fn spawn_link(
     let mut shoe = commands.spawn((
         TrackLink,
         ShoeLod(0),
-        // The chain tag `geometry_lod`'s adaptive layer rewrites bands through — the pooled shoes
-        // ride the SAME writer as every scene primitive, so the track cannot drift out of step with
-        // the rest of the model when the view profile moves.
-        GeometryLodLevel {
-            chain: template.chain,
-            level: 0,
-        },
         Mesh3d(template.mesh.get(side).clone()),
         MeshMaterial3d(template.material.clone()),
         template.band(0),
         Transform::from_xyz(0.0, -1000.0, 0.0),
         ChildOf(parent),
     ));
+    // The chain tag `geometry_lod`'s adaptive layer rewrites bands through — the pooled shoes ride
+    // the SAME writer as every scene primitive, so the track cannot drift out of step with the rest
+    // of the model when the view profile moves. Absent when the shoe earned no rung: one level owns
+    // every distance and there is nothing to rewrite.
+    if let Some(chain) = template.chain {
+        shoe.insert(GeometryLodLevel { chain, level: 0 });
+    }
     for (level, tier) in template.lods.iter().enumerate() {
         shoe.with_child((
             TrackLink,
             ShoeLod(level + 1),
             GeometryLodLevel {
-                chain: template.chain,
+                chain: template
+                    .chain
+                    .expect("a reduced level exists only under a chain"),
                 level: level + 1,
             },
             Mesh3d(tier.get(side).clone()),
@@ -1017,7 +1035,7 @@ mod tests {
             lods,
             material: Handle::default(),
             frame: tiger_frames(),
-            chain: 0,
+            chain: Some(0),
             bands: chain.bands(reference_view()),
         }
     }
@@ -1197,6 +1215,57 @@ mod tests {
                     "at exactly {t} m the level below must take over",
                 );
             }
+        }
+    }
+
+    /// A SHOE THE CERTIFICATE NAMES NO CHAIN FOR still gets a track.
+    ///
+    /// The law is source detail, silently (ADR-0035): a re-cut that earns the shoe no rung is
+    /// legitimate — the build's own coverage owns that question — and the belt must draw its base
+    /// shoe at every distance rather than vanish. What this pins is the spawn: one entity per link,
+    /// no reduced children, one band owning `[0, inf)`, and NO `GeometryLodLevel`, because there is
+    /// no chain for the adaptive layer to rewrite against.
+    #[test]
+    fn a_shoe_with_no_certified_chain_draws_at_source_detail() {
+        let mut assets = Assets::<Mesh>::default();
+        let mut fresh = || {
+            assets.add(Mesh::new(
+                PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            ))
+        };
+        let template = LinkTemplate {
+            mesh: PerSide::new(fresh(), fresh()),
+            lods: Vec::new(),
+            material: Handle::default(),
+            frame: tiger_frames(),
+            chain: None,
+            bands: vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
+        };
+        let mut world = World::new();
+        let parent = world.spawn_empty().id();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        let link = spawn_link(&mut commands, &template, Side::Right, parent);
+        queue.apply(&mut world);
+
+        assert!(
+            world.entity(link).get::<Children>().is_none(),
+            "a chainless shoe spawns no reduced sibling",
+        );
+        assert!(
+            world.entity(link).get::<GeometryLodLevel>().is_none(),
+            "a chainless shoe carries no chain tag for the adaptive layer to find",
+        );
+        let range = world
+            .entity(link)
+            .get::<VisibilityRange>()
+            .expect("a shoe carries a range");
+        for probe in [0.0_f32, 1.0, 500.0, 5_000.0, 1e6] {
+            assert!(
+                range.is_visible_at_all(probe),
+                "the base shoe must own {probe} m when there is no level below it",
+            );
         }
     }
 
