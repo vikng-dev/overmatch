@@ -13,21 +13,19 @@ generated or checked here, and a hand-edited constant fails `--verify` rather th
 
 WHAT `--verify` PROVES, with no Blender and no cargo:
   * the manifest has the SHAPE it claims — exactly the configured assets, L0 plus at least one
-    generated level, indices in order, and a hash, a validity record and a render-gate record on
-    every level. Absence is a failure, because "no measurement" and "measured zero defects" are
-    different statements and only the second is evidence,
+    generated level, indices in order, and a hash and a validity record on every level. Absence is
+    a failure, because "no measurement" and "measured zero defects" are different statements and
+    only the second is evidence,
   * every number is FINITE. NaN fails every `>` and every `!=` quietly, so a poisoned manifest used
     to verify clean,
   * every level's glb exists and still hashes to what the manifest recorded (an asset edited by
     hand, or an LFS pointer that never got smudged, fails here),
   * the manifest was cut by the generator version, the generator SOURCES, and the whole gate and
-    ladder configuration now in `config.py` — including the render gate's blocking flag, which is
-    read from the tree and never from the manifest, so ratifying the threshold invalidates every
-    chain cut before the ruling instead of leaving its failures as warnings for ever,
+    ladder configuration now in `config.py`,
   * every recorded defect counter is inside its declared limit,
   * the manifest's own arithmetic is self-consistent: switch distances re-derive from the recorded
-    deviations, the chain is monotone in triangles and in distance, and every level's deviation
-    really is inside its rung,
+    deviations, every rung's node budget re-derives from the source's own bounding box, the chain is
+    monotone in triangles and in distance, and every level's deviation really is inside its rung,
   * the source .blend still hashes to what generation read, when the (untracked) .blend is present.
 
 FOUR MUTANTS MOTIVATED MOST OF THAT LIST. An adversarial review deleted every asset, every glb
@@ -49,8 +47,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config as CONFIG  # noqa: E402
 import measure as M  # noqa: E402
 from manifest import (  # noqa: E402
-    Tree, derive, load, merge_asset_entries, sha256_file, screen_footprint_px,
-    switch_distance_m, tile_vfov_rad,
+    Tree, derive, load, merge_asset_entries, sha256_file, switch_distance_m,
 )
 
 
@@ -59,6 +56,7 @@ LEVEL_NUMERIC_FIELDS = (
     "pairwise_mm", "pairwise_mm_upper", "switch_m", "shed_fraction_vs_parent",
     "switch_from_source_dev_m", "switch_from_pairwise_m", "dev_source_bracket_mm",
     "dev_source_to_level_mm", "dev_level_to_source_mm", "glb_bytes",
+    "verdict_node_budget", "undecided_verdicts",
 )
 
 #: The same, for the SOURCE level. It has its own shape, and leaving it out meant L0 could carry a
@@ -77,41 +75,14 @@ SOURCE_NUMERIC_FIELDS = ("tris", "verts", "radius_m")
 #: second one is evidence.
 LEVEL_VALIDITY_FIELDS = (
     "tris", "verts", "components", "duplicate_faces", "nonfinite_attrs", "orientation_flips",
-    "nonmanifold_edges", "tangent_default_faces", "tangent_default_verts",
-    "origin_radius_m", "min_tri_area_mm2",
-    "boundary_edges", "baked_tangents", "degenerate_tangents", "min_tangent_length",
-    "radius_m",
+    "empty_surfaces", "nonmanifold_edges", "boundary_edges",
+    "origin_radius_m", "min_tri_area_mm2", "radius_m",
 )
 
 #: Validity fields that are LISTS rather than numbers, and are re-derived from the bytes like the
 #: rest. `bbox_mm` was optional, so removing it removed the comparison with it — and an abstention
 #: could then be bought by shrinking the gate's own copy.
 LEVEL_VALIDITY_VECTORS = ("bbox_mm",)
-
-#: Recorded per level and CHECKED: whether the level's tangents ship in its bytes. False is legal
-#: only for L0, which lives inside a host glb this pipeline does not export.
-TANGENT_PRESENCE_FIELDS = ("tangents_are_baked",)
-
-#: Render-gate fields required on every generated level, and which of them must be finite numbers.
-GATE_FIELDS = (
-    "pass", "worst_defect_score", "worst_mean_abs_diff", "worst_frac_over", "views", "thresholds",
-    "distance_m", "material_source", "tile_px", "supersample", "samples", "tile_vfov_rad",
-)
-GATE_NUMERIC_FIELDS = (
-    "worst_defect_score", "worst_mean_abs_diff", "worst_frac_over", "distance_m",
-    "tile_px", "supersample", "samples", "tile_vfov_rad",
-)
-
-#: Per-view statistics inside a gate record, and the numerics inside those.
-GATE_VIEW_FIELDS = ("signal", "noise_floor", "defect_floor", "defect_score", "pass")
-GATE_VIEW_NUMERIC_FIELDS = (
-    "footprint_px", "mean_abs_diff", "p99_abs_diff", "max_abs_diff", "frac_over",
-    "silhouette_band_px", "silhouette_band_frac",
-)
-
-#: Fields pinned by `config.RATIFICATION_EVIDENCE` and compared against it by the test suite, so
-#: the decision evidence quoted beside an unratified threshold cannot go stale a third time.
-PINNED_EVIDENCE_FIELDS = ("enumerated_outputs",)
 
 #: Generator provenance that must be present AND must match this tree.
 GENERATOR_PINNED_FIELDS = (
@@ -141,45 +112,23 @@ GENERATOR_PINNED_FIELDS = (
 #: which is what `schema_version`, `defect_fraction` and the whole render record had become.
 INFORMATIONAL_FIELDS = frozenset({
     "schema", "script", "right_wall_source", "provenance", "name", "note", "reason",
-    "render_gate_unratified_note", "identity_proof", "termination", "role", "node", "glb",
-    "object", "blend", "bbox_mm", "material", "render_material_source", "evaluated_digest",
+    "identity_proof", "termination", "role", "node", "glb",
+    "object", "blend", "bbox_mm", "material", "evaluated_digest",
     "skipped_rungs", "rung", "level", "parent_level", "e_target_mm", "best_tris",
-    "shed_fraction", "floor_tris", "cleanup", "faces_before", "faces_after", "dissolve_dist_m",
+    "shed_fraction", "floor_tris", "lost_to", "cleanup", "faces_before", "faces_after",
+    "dissolve_dist_m",
     "normal_diagnostic_deg", "max_deg", "p99_deg", "p95_deg", "backface_corr_frac", "samples",
-    "shipped_matches_source", "deviation_evaluations", "decimations", "reproducible",
-    "under_absolute_floor", "label", "topology_floor_tris",
-    "blend_sha256", "sources_sha256", "glb_sha256", "welded_digest", "right_wall_m", "reference_view",
+    "shipped_matches_source", "decimations", "verdicts", "verdict_nodes", "distinct_candidates",
+    "reproducible", "label", "topology_floor_tris",
+    "blend_sha256", "sources_sha256", "glb_sha256", "welded_digest", "right_wall_m",
+    "reference_view",
     "vfov_rad", "height_px", "budget_px", "e1_mm", "octave", "skip_fraction", "max_rungs",
-    "numeric", "render", "render_views", "render_gate_blocking", "generator", "ladder", "gates",
-    "assets", "levels", "source", "validity", "render_gate", "views", "thresholds", "signal",
-    "noise_floor", "defect_floor", "search_limits",
+    "numeric", "generator", "ladder", "gates", "assets", "levels", "source", "validity",
 })
 
 
 def _finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def effective_render_blocking(manifest):
-    """Is the rendered-difference gate ARMED? Returns (armed, reason).
-
-    RATIFIED is not ARMED. Yan ruled the threshold, so `config.RENDER_GATE_BLOCKING` is True; but a
-    verdict measured under a FALLBACK material was measured with the wrong textures, and blocking on
-    it would be a gate certifying the wrong thing. So the flag arms itself the moment the material
-    path is honest, with no second decision for anyone to remember — and until then the failures are
-    recorded and shouted about rather than enforced.
-    """
-    if not CONFIG.RENDER_GATE_BLOCKING:
-        return False, "config.RENDER_GATE_BLOCKING is False"
-    for asset in manifest.get("assets", []):
-        for level in asset.get("levels", []):
-            gate = level.get("render_gate") or {}
-            if str(gate.get("material_source", "")).startswith("FELL BACK"):
-                return False, (
-                    f"{asset.get('name')} L{level.get('level')} was judged under a fallback "
-                    f"material ({gate.get('material_source')})"
-                )
-    return True, "ratified and rendering the shipped material"
 
 
 def _nonfinite_paths(node, path=()):
@@ -205,233 +154,6 @@ def _require_numbers(record, fields, label, what, failures):
             failures.append(f"{label}: {what} {key!r} is {record[key]!r}, not a finite number")
             ok = False
     return ok
-
-
-def _check_gate_record(gate, label, failures, level_bbox_mm=None):
-    """A render-gate record, checked as EVIDENCE rather than as a field list.
-
-    Presence was not enough and the mutants proved it: a record whose every metric was NaN, or whose
-    per-level `defect_fraction` had been rewritten to 999, still carried `pass: true` and verified
-    clean. So the thresholds must match the tree, every metric must be a real number, and the
-    verdict must RE-DERIVE from the metrics — a recorded pass that the recorded numbers do not
-    support is a contradiction, and contradictions are exactly what a manifest is for catching.
-    """
-    ok = True
-    for key in ("abstained", "screen_footprint_px", "min_footprint_px", "bbox_mm", "distance_m",
-                "material_source"):
-        if key not in gate:
-            failures.append(f"{label}: render-gate record has no {key!r}")
-            ok = False
-    if not ok:
-        return False
-
-    # ABSTENTION IS RE-DERIVED FROM GEOMETRY, never trusted. It is the one verdict claimable
-    # without rendering anything, so it is the one most worth recomputing: the asset's projected
-    # diameter at the evaluation distance against the ratified minimum.
-    #
-    # AND THE GEOMETRY IS BOUND TO THE LEVEL'S OWN, which is what made the re-derivation worth
-    # anything. Recomputing from the gate record's own bounding box only proves the record is
-    # self-consistent: shrinking one level's gate bbox tenfold and setting `abstained` accordingly
-    # verified clean, while the bytes that ship derive 27.6 px and should have been scored.
-    if level_bbox_mm is not None and [round(float(v), 4) for v in gate["bbox_mm"]] != [
-        round(float(v), 4) for v in level_bbox_mm
-    ]:
-        failures.append(
-            f"{label}: the render gate measured a {gate['bbox_mm']} mm box, but this level's "
-            f"decoded bytes are {level_bbox_mm} mm — it judged something else"
-        )
-        return False
-    expected_footprint = screen_footprint_px(
-        gate["bbox_mm"], gate["distance_m"], CONFIG.REFERENCE_VIEW
-    )
-    # 1e-2 px: the bounding box is recorded rounded to 0.1 um, so the re-derivation carries a
-    # little rounding of its own before anything is actually wrong.
-    if abs(gate["screen_footprint_px"] - expected_footprint) > 1e-2:
-        failures.append(
-            f"{label}: records a {gate['screen_footprint_px']} px footprint but its bounding box "
-            f"at {gate['distance_m']} m gives {expected_footprint:.4f} px"
-        )
-        return False
-    if gate["min_footprint_px"] != CONFIG.RENDER_GATE["min_footprint_px"]:
-        failures.append(
-            f"{label}: abstention was judged against {gate['min_footprint_px']} px, the tree "
-            f"declares {CONFIG.RENDER_GATE['min_footprint_px']}"
-        )
-        return False
-    should_abstain = expected_footprint < CONFIG.RENDER_GATE["min_footprint_px"]
-    if bool(gate["abstained"]) != should_abstain:
-        failures.append(
-            f"{label}: records abstained={gate['abstained']} but a {expected_footprint:.1f} px "
-            f"footprint against a {CONFIG.RENDER_GATE['min_footprint_px']:.0f} px minimum means "
-            f"{should_abstain}"
-        )
-        return False
-    if gate["abstained"]:
-        # Nothing was scored, so nothing may be recorded as if it had been.
-        if gate.get("pass") is not None:
-            failures.append(
-                f"{label}: abstained, but records a verdict {gate['pass']!r} — an abstention is "
-                f"not a pass"
-            )
-            return False
-        if not gate.get("reason"):
-            failures.append(f"{label}: abstained without recording why")
-            return False
-        return True
-
-    for key in GATE_FIELDS:
-        if key not in gate:
-            failures.append(f"{label}: render-gate record has no {key!r}")
-            ok = False
-    if not ok:
-        return False
-    if not isinstance(gate["pass"], bool):
-        failures.append(f"{label}: render-gate 'pass' is {gate['pass']!r}, not a boolean")
-        ok = False
-    ok = _require_numbers(gate, GATE_NUMERIC_FIELDS, label, "render gate", failures) and ok
-
-    # EVERY recorded threshold, not a chosen four: a record naming `defect_normal_deg = 999` was
-    # describing a gate run against a defect nobody declared, and nothing looked.
-    thresholds = gate.get("thresholds") or {}
-    for key in CONFIG.RECORDED_GATE_THRESHOLDS:
-        if key not in thresholds:
-            failures.append(f"{label}: render-gate thresholds have no {key!r}")
-            ok = False
-    for key, recorded in thresholds.items():
-        if key not in CONFIG.RENDER_GATE:
-            failures.append(f"{label}: render gate records an unknown threshold {key!r}")
-            ok = False
-        elif recorded != CONFIG.RENDER_GATE[key]:
-            failures.append(
-                f"{label}: render gate was judged against {key}={recorded!r}, the tree "
-                f"declares {CONFIG.RENDER_GATE[key]!r}"
-            )
-            ok = False
-
-    # The RENDER PARAMETERS are config, and a record claiming otherwise describes a run this tree
-    # cannot reproduce.
-    for key in ("tile_px", "supersample", "samples"):
-        if gate[key] != CONFIG.RENDER_GATE[key]:
-            failures.append(
-                f"{label}: render gate ran at {key}={gate[key]!r}, the tree declares "
-                f"{CONFIG.RENDER_GATE[key]!r}"
-            )
-            ok = False
-    expected_fov = tile_vfov_rad(CONFIG.RENDER_GATE, CONFIG.REFERENCE_VIEW)
-    if abs(gate["tile_vfov_rad"] - expected_fov) > 1e-7:
-        failures.append(
-            f"{label}: the gate tile's FOV is recorded as {gate['tile_vfov_rad']} but the tile size "
-            f"and reference view give {expected_fov:.8f} — it did not preserve the reference "
-            f"view's pixels-per-radian, so its pixels are not the player's"
-        )
-        ok = False
-
-    views = gate.get("views") or {}
-    if not views:
-        failures.append(f"{label}: render gate recorded no views")
-        return False
-    expected_views = {name for name, _e, _a in CONFIG.RENDER_GATE["views"]}
-    if set(views) != expected_views:
-        failures.append(
-            f"{label}: render gate covered {sorted(views)}, config declares "
-            f"{sorted(expected_views)}"
-        )
-        ok = False
-    for view_name, view in views.items():
-        view_label = f"{label} [{view_name}]"
-        for key in GATE_VIEW_FIELDS:
-            if key not in view:
-                failures.append(f"{view_label}: view record has no {key!r}")
-                ok = False
-        if not ok:
-            continue
-        if not _finite(view.get("defect_score")):
-            failures.append(f"{view_label}: defect_score is not a finite number")
-            ok = False
-        for part in ("signal", "noise_floor", "defect_floor"):
-            ok = _require_numbers(
-                view.get(part) or {}, GATE_VIEW_NUMERIC_FIELDS, view_label, part, failures
-            ) and ok
-        if ok and view["signal"]["footprint_px"] <= 0:
-            failures.append(
-                f"{view_label}: an empty footprint — the gate never saw the asset, which is a "
-                f"failure and not a pass"
-            )
-            ok = False
-
-    if not ok:
-        return False
-
-    # EVERYTHING BELOW IS RE-DERIVED FROM THE PER-VIEW METRICS AND COMPARED.
-    #
-    # Presence and finiteness are not checking. An adversarial review set all three `worst_*`
-    # summaries to -999 and inverted a per-view verdict, and verification returned zero failures:
-    # every field was there, every number was finite, and not one of them had to agree with
-    # anything. A summary nobody recomputes is a claim, and a claim recorded next to its own
-    # evidence is exactly what a manifest exists to stop.
-    limit = CONFIG.RENDER_GATE["defect_fraction"]
-    tolerance = 1.5e-6  # the records are rounded to six decimal places
-    derived_pass = True
-    worst = {"mean": 0.0, "frac": 0.0, "score": 0.0}
-    for view_name, view in sorted(views.items()):
-        view_label = f"{label} [{view_name}]"
-        signal, noise, defect = view["signal"], view["noise_floor"], view["defect_floor"]
-
-        span = defect["mean_abs_diff"] - noise["mean_abs_diff"]
-        score = (signal["mean_abs_diff"] - noise["mean_abs_diff"]) / span if span > 1e-9 else 1.0
-        score = max(0.0, score)
-        if abs(score - view["defect_score"]) > max(tolerance, abs(score) * 1e-5):
-            failures.append(
-                f"{view_label}: defect_score is recorded as {view['defect_score']} but its own "
-                f"signal/noise/defect means re-derive to {score:.6f}"
-            )
-            return False
-
-        floor_ok = (
-            signal["mean_abs_diff"] <= CONFIG.RENDER_GATE["max_mean_abs_diff"]
-            and signal["frac_over"] <= CONFIG.RENDER_GATE["max_footprint_frac_over"]
-        )
-        view_pass = signal["footprint_px"] > 0 and (view["defect_score"] <= limit or floor_ok)
-        if view_pass != view["pass"]:
-            failures.append(
-                f"{view_label}: records pass={view['pass']} but its own metrics re-derive to "
-                f"{view_pass} against the declared threshold {limit}"
-            )
-            return False
-        if view["under_absolute_floor"] != floor_ok:
-            failures.append(
-                f"{view_label}: records under_absolute_floor={view['under_absolute_floor']} but "
-                f"its metrics re-derive to {floor_ok}"
-            )
-            return False
-        derived_pass = derived_pass and view_pass
-        worst["mean"] = max(worst["mean"], signal["mean_abs_diff"])
-        worst["frac"] = max(worst["frac"], signal["frac_over"])
-        worst["score"] = max(worst["score"], view["defect_score"])
-
-    for key, recorded, recomputed in (
-        ("worst_mean_abs_diff", gate["worst_mean_abs_diff"], worst["mean"]),
-        ("worst_frac_over", gate["worst_frac_over"], worst["frac"]),
-        ("worst_defect_score", gate["worst_defect_score"], worst["score"]),
-    ):
-        if abs(recorded - recomputed) > tolerance:
-            failures.append(
-                f"{label}: {key} is recorded as {recorded} but the per-view records it summarises "
-                f"give {recomputed:.6f}"
-            )
-            return False
-
-    if derived_pass != gate["pass"]:
-        failures.append(
-            f"{label}: render gate records pass={gate['pass']} but its own numbers re-derive to "
-            f"{derived_pass} — the verdict does not follow from the evidence beside it"
-        )
-        return False
-
-    # The fallback-material precondition is NOT a failure here any more: it disarms the gate rather
-    # than condemning the manifest. `effective_render_blocking` owns that decision once, for the
-    # whole corpus, and says so loudly — see `RENDER_GATE_BLOCKING`.
-    return True
 
 
 def _check_schema(manifest, failures):
@@ -549,26 +271,14 @@ def _check_schema(manifest, failures):
                 failures.append(f"{label}: role is {level.get('role')!r}, expected 'generated'")
                 ok = False
             ok = _require_numbers(level, LEVEL_NUMERIC_FIELDS, label, "level", failures) and ok
-            gate = level.get("render_gate")
-            if gate is None:
-                failures.append(
-                    f"{label}: no render-gate record — this manifest was cut with "
-                    f"--no-render-gate and is not shippable; re-run generation"
-                )
-                ok = False
-            else:
-                ok = _check_gate_record(
-                    gate, label, failures, (level.get("validity") or {}).get("bbox_mm")
-                ) and ok
     return ok
 
 
 def _check_config_match(manifest, failures):
     """The manifest must have been cut by the configuration THIS TREE holds, all of it.
 
-    Not a sample of it. The blocking flag is included deliberately: reading it out of the manifest
-    and trusting it means flipping `RENDER_GATE_BLOCKING` to True leaves an old manifest's recorded
-    failures as warnings forever, which is the ratification quietly failing to take effect.
+    Not a sample of it, and never read back out of the manifest and trusted: a corpus cut before a
+    constant moved is stale, and the only honest answer to that is a regeneration.
     """
     generator = manifest.get("generator") or {}
     if generator.get("version") != CONFIG.GENERATOR_VERSION:
@@ -607,13 +317,6 @@ def _check_config_match(manifest, failures):
         value = ladder.get(key)
         if not _finite(value) or abs(float(value) - float(declared)) > 1e-6:
             failures.append(f"ladder {key}: manifest {value!r} != config {declared}")
-    ruling = ladder.get("ratification") or {}
-    if ruling != dict(CONFIG.RATIFICATION_EVIDENCE["ruling"]):
-        failures.append(
-            "the manifest's ratification provenance differs from config.RATIFICATION_EVIDENCE — "
-            "the threshold this corpus was judged against is not the one the tree records a ruling "
-            "for"
-        )
     view = ladder.get("reference_view") or {}
     for key in ("vfov_rad", "height_px", "budget_px"):
         if not _finite(view.get(key)) or abs(
@@ -631,28 +334,17 @@ def _check_config_match(manifest, failures):
             failures.append(f"gate {key!r} is not recorded in the manifest")
         elif numeric[key] != declared:
             failures.append(f"gate {key}: manifest {numeric[key]!r} != config {declared!r}")
-    render = gates.get("render") or {}
-    for key, declared in CONFIG.RENDER_GATE.items():
-        if key == "views":
-            continue
-        if key not in render:
-            failures.append(f"render-gate setting {key!r} is not recorded in the manifest")
-        elif render[key] != declared:
-            failures.append(f"render {key}: manifest {render[key]!r} != config {declared!r}")
-    recorded_views = [tuple(v) for v in (gates.get("render_views") or [])]
-    if recorded_views != [tuple(v) for v in CONFIG.RENDER_GATE["views"]]:
-        failures.append("render-gate viewpoints differ from config")
-    limits = gates.get("search_limits") or {}
-    for key, declared in CONFIG.SEARCH_LIMITS.items():
-        if key not in limits:
-            failures.append(f"search limit {key!r} is not recorded in the manifest")
-        elif limits[key] != declared:
-            failures.append(f"search limit {key}: manifest {limits[key]!r} != config {declared!r}")
-    if gates.get("render_gate_blocking") != CONFIG.RENDER_GATE_BLOCKING:
-        failures.append(
-            f"render_gate_blocking: manifest {gates.get('render_gate_blocking')!r} != config "
-            f"{CONFIG.RENDER_GATE_BLOCKING!r} — regenerate so the ruling takes effect"
-        )
+    # The SEARCH's declared budget, which decides which rungs a chain could even keep — so a corpus
+    # cut under a different coefficient or cap is a corpus that answers a different question.
+    for key, declared in (
+        ("normal_diagnostic_samples", CONFIG.NORMAL_DIAGNOSTIC_SAMPLES),
+        ("verdict_nodes_per_square", CONFIG.VERDICT_NODES_PER_SQUARE),
+        ("verdict_nodes_cap", CONFIG.VERDICT_NODES_CAP),
+    ):
+        if key not in gates:
+            failures.append(f"search setting {key!r} is not recorded in the manifest")
+        elif gates[key] != declared:
+            failures.append(f"search {key}: manifest {gates[key]!r} != config {declared!r}")
 
 
 def _check_level_cross_fields(asset, levels, index, row, failures):
@@ -685,6 +377,18 @@ def _check_level_cross_fields(asset, levels, index, row, failures):
         failures.append(
             f"{label}: rung {level['rung']} is {expected_target:.6f} mm on the global grid, but "
             f"this level records a target of {level['e_target_mm']} mm"
+        )
+
+    # THE SEARCH'S BUDGET IS ARITHMETIC ON TWO RECORDED NUMBERS, so it re-derives like every other
+    # threshold rather than being taken on trust. A manifest claiming a budget this tree's constants
+    # would not have granted describes a search that never ran here.
+    diagonal_mm = math.sqrt(sum(float(v) ** 2 for v in asset["source"]["validity"]["bbox_mm"]))
+    expected_budget = CONFIG.verdict_node_budget(diagonal_mm, level["e_target_mm"])
+    if level["verdict_node_budget"] != expected_budget:
+        failures.append(
+            f"{label}: records a {level['verdict_node_budget']}-node verdict budget, but a "
+            f"{diagonal_mm:.1f} mm diagonal at a {level['e_target_mm']} mm target gives "
+            f"{expected_budget}"
         )
 
     # The shed fraction is arithmetic on two triangle counts that are both right here.
@@ -759,12 +463,10 @@ def _decode_level(tree, level, label, failures):
 def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
     """Re-derive the level's whole validity record FROM THE SHIPPED BYTES and compare it.
 
-    THIS IS THE ROOT FIX FOR TWO SEPARATE BYPASSES, and both worked the same way: verification
-    compared a recorded number against another recorded number, which proves the manifest agrees
-    with itself and says nothing about the asset. Stripping a level's TANGENT attribute and updating
-    its hash left the stale validity record describing tangents that were no longer there, and
-    verification passed. Shrinking the gate's bounding box AND the validity record's copy of it
-    bought an abstention on a level that should have been scored, and verification passed.
+    THIS IS THE ROOT FIX FOR A WHOLE BYPASS CLASS: verification compared a recorded number against
+    another recorded number, which proves the manifest agrees with itself and says nothing about the
+    asset. Editing a level's attributes and updating its hash left the stale validity record
+    describing a mesh that was no longer in the file, and verification passed.
 
     So the bytes are decoded — the verifier already reads them to hash them — and every counter is
     recomputed. A record can no longer describe a mesh that is not in the file, because the file is
@@ -776,7 +478,7 @@ def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
         return
 
     recorded = level["validity"]
-    derived = surface.validity(CONFIG.GATES)
+    derived = surface.validity()
     for key in LEVEL_VALIDITY_FIELDS:
         if key in VALIDITY_NOT_FROM_OWN_BYTES:
             continue
@@ -800,20 +502,6 @@ def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
                 f"{derived[key]}"
             )
 
-    # The two counts the whole tangent guarantee rests on, taken from the accessor itself.
-    # EVERY level, L0 included — the host glb bakes its tangents now, so there is no exemption
-    # left to make. The two counts the whole tangent guarantee rests on, taken from the accessor.
-    if surface.tangents is None:
-        failures.append(
-            f"{label}: the shipped bytes carry NO TANGENT attribute — bevy would generate tangents "
-            f"at load and nothing here certified what renders"
-        )
-    elif len(surface.tangents) != surface.vert_count:
-        failures.append(
-            f"{label}: {len(surface.tangents)} tangents for {surface.vert_count} vertices in the "
-            f"shipped bytes"
-        )
-
     # THE SAME GATE LIST GENERATION USES, against values re-derived from the bytes — including
     # `source_validity`, which is decoded L0 rather than a number the manifest asserted. This is
     # where `components_must_match` finally applies at verification: it was compared when a level
@@ -822,22 +510,14 @@ def _check_decoded_bytes(asset, level, tree, failures, l0_derived=None):
         for failure in M.validity_gate_failures(derived, l0_derived, CONFIG.GATES):
             failures.append(f"{label}: {failure}")
 
-    gate = level.get("render_gate") or {}
-    if "bbox_mm" in gate and [round(float(v), 4) for v in gate["bbox_mm"]] != [
-        round(float(v), 4) for v in derived["bbox_mm"]
-    ]:
-        failures.append(
-            f"{label}: the render gate measured a {gate['bbox_mm']} mm box; the shipped bytes are "
-            f"{derived['bbox_mm']} mm"
-        )
-
 
 def verify(manifest, tree):
     """Every drift a manifest can suffer. Returns (failures, warnings); empty failures means clean.
 
-    A WARNING is a recorded verdict that is deliberately not enforced yet — today that is only the
-    rendered-difference gate, whose threshold is unratified. It is printed every time, so nothing is
-    hidden; it just does not fail the build until someone rules on the number.
+    A WARNING is a recorded fact that is deliberately not enforced — today that is a rung the search
+    lost to its node budget rather than to the geometry (ADR 0036 §1). It is printed every time, so
+    a corpus that traded fidelity for time says so out loud; it does not fail the build, because
+    UNDECIDED counting as FAIL is the design and nothing unproven ships either way.
     """
     failures = []
     warnings = []
@@ -851,12 +531,16 @@ def verify(manifest, tree):
         # so a poisoned `vfov_rad` turned a verifier that should say "this manifest is wrong" into
         # a traceback. A refusal has to look like a refusal.
         return failures, warnings
-    armed, arming_reason = effective_render_blocking(manifest)
-    if not armed and CONFIG.RENDER_GATE_BLOCKING:
-        warnings.append(
-            f"the rendered-difference gate is RATIFIED but NOT ARMED: {arming_reason}. It arms "
-            f"itself once that is fixed — no second decision to remember."
-        )
+
+    for asset in manifest["assets"]:
+        for skip in asset.get("skipped_rungs", []):
+            if skip.get("lost_to") == "verdict_node_budget":
+                warnings.append(
+                    f"{asset['name']} rung {skip.get('rung')}: LOST TO THE NODE BUDGET, not to the "
+                    f"geometry — {skip.get('undecided_verdicts')} verdict(s) spent "
+                    f"{skip.get('verdict_node_budget')} nodes without closing a bound. The chain "
+                    f"is coarser here than an unbounded search would have cut it."
+                )
 
     for chain, asset in zip(derive(manifest), manifest["assets"]):
         try:
@@ -903,7 +587,7 @@ def verify(manifest, tree):
                     f"fingerprint. L0 sets the component count for the whole corpus, so a "
                     f"changed baseline silently re-judges every level."
                 )
-            l0_derived = l0_surface.validity(CONFIG.GATES)
+            l0_derived = l0_surface.validity()
 
         previous = None
         for index, (row, level) in enumerate(zip(chain["levels"], asset["levels"])):
@@ -920,11 +604,6 @@ def verify(manifest, tree):
             # to sit here, comparing the RECORDED numbers — which is both weaker (a record can lie)
             # and exactly the two-lists-that-must-agree arrangement whose drift produced two of this
             # week's findings. The claim "one list" is only true if this is not here.
-            #
-            # `tangents_are_baked` stays: it is a manifest ASSERTION rather than a byte measurement,
-            # so nothing in the decoder can check it and it belongs on this side.
-            if not level.get("tangents_are_baked"):
-                failures.append(f"{label}: does not record baked tangents")
             if l0_derived is not None:
                 _check_decoded_bytes(
                     asset, level, tree, failures, l0_derived
@@ -975,30 +654,13 @@ def verify(manifest, tree):
                     f"{label}: switch {row['switch_m']:.1f} m is not beyond L{previous['level']}'s "
                     f"{previous['switch_m']:.1f} m"
                 )
-            gate = level["render_gate"]
-            if gate.get("abstained"):
+            if level["undecided_verdicts"]:
                 warnings.append(
-                    f"{label}: render gate ABSTAINED — {gate['screen_footprint_px']:.1f} px across "
-                    f"at {gate['distance_m']:.0f} m, under the ratified "
-                    f"{gate['min_footprint_px']:.0f} px (Yan, 2026-08-02)"
+                    f"{label}: {level['undecided_verdicts']} verdict(s) at this rung spent the "
+                    f"whole {level['verdict_node_budget']}-node budget and were counted as "
+                    f"failures — the level that shipped is certified, and it may carry more "
+                    f"triangles than an unbounded search would have found"
                 )
-                previous = row
-                continue
-            if abs(gate["distance_m"] - level["switch_m"]) > 1e-3:
-                failures.append(
-                    f"{label}: the render gate was run at {gate['distance_m']} m but this level "
-                    f"switches at {level['switch_m']} m — it judged the pop at the wrong distance"
-                )
-            if not gate.get("pass", False):
-                verdict = (
-                    f"{label}: render gate recorded a FAIL (defect score "
-                    f"{gate.get('worst_defect_score')} against a limit of "
-                    f"{gate.get('thresholds', {}).get('defect_fraction')})"
-                )
-                if armed:
-                    failures.append(verdict)
-                else:
-                    warnings.append(f"{verdict} — NOT enforced: {arming_reason}")
             previous = row
     return failures, warnings
 
