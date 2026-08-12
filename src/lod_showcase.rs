@@ -167,12 +167,12 @@ fn pair_range_m(pair: usize) -> (f32, Option<f32>) {
 /// construction nothing an eye could resolve, and parking two tanks out there to compare them shows
 /// a person two identical specks and asks them to prefer one.
 ///
-/// On today's three-rung ladder that drops exactly the L2|L3 pair (13.1 px at 1 017 m, on a 1 000 m
-/// map it could not even be reached) and stages two. A future five-rung ladder stages whatever
+/// On today's four-rung ladder that drops exactly the L3|L4 pair — 8.7 px at its 1 499.58 m switch,
+/// under the ratified 20 px floor — and stages three. A ladder of any other depth stages whatever
 /// subset of ITS switches clears the floor, with no edit here: the rule is a property of the gate's
 /// verdicts, not a count.
 ///
-/// The two-pair result is also what buys the alternating lanes their clearance — see
+/// However many that leaves, the alternating lanes are what keep them clear of each other — see
 /// [`LANE_OFFSET_M`] and `no_pair_stands_in_front_of_another_from_the_player_spawn`.
 pub(crate) fn staged_pairs() -> Vec<usize> {
     (0..shoe_lod_levels() - 1)

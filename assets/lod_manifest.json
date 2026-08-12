@@ -4,7 +4,7 @@
   "generator": {
     "script": "scripts/lod/generate.py",
     "version": "2.2.0",
-    "sources_sha256": "5a2831beaafce1f163fe2340a65c847d8764011580999a7bf9028021ce578c83",
+    "sources_sha256": "32984b0828c0d61c81dedde5c82b58dc7066ac8529fff5aa4d8366440e728fc4",
     "blender": "5.1.2",
     "blender_build": "ec6e62d40fa9",
     "gltf_exporter": "5.1.20"
@@ -14,8 +14,8 @@
     "octave": 2.0,
     "skip_fraction": 0.3,
     "max_rungs": 12,
-    "right_wall_m": 1414.213562,
-    "right_wall_source": "map diagonal: WORLD_SIZE = 1000.0 m (src/terrain_grid.rs:53) x sqrt(2). No far-plane, fog or streaming-distance constant exists in src/ as of this generation.",
+    "right_wall_m": 2121.320344,
+    "right_wall_source": "map diagonal: assets/maps/kalinovo/level.json declares terrain.heightmap.world_extent_xz spanning 1500 m (the map is crate::map::DEFAULT_MAP_ID, src/map.rs) x sqrt(2). No far-plane, fog or streaming-distance constant exists in src/ as of this generation.",
     "reference_view": {
       "name": "gunner optic",
       "vfov_rad": 0.12,
@@ -95,7 +95,7 @@
       "name": "tiger_1_link",
       "source": {
         "blend": "assets/tiger_1/tiger_1.blend",
-        "blend_sha256": "095aabeae1239236ce838ab89dc359875fe5a522f3f7633d5a0ff5210e9ff661",
+        "blend_sha256": "8622cc57532f8f9c47dee258c92d526c2ab39762226d93082c620e5c124b4fec",
         "object": "Link",
         "evaluated_digest": "07b5686ef77712df3dcf0d8dc401a4dd06c4dfc379ce455927fe281e97f0401b",
         "tris": 1520,
@@ -131,8 +131,8 @@
         }
       },
       "topology_floor_tris": 140,
-      "termination": "right_wall",
-      "deviation_evaluations": 327,
+      "termination": "max_rungs",
+      "deviation_evaluations": 328,
       "enumerated_outputs": 691,
       "decimations": 1430,
       "skipped_rungs": [
@@ -149,6 +149,48 @@
           "best_tris": 186,
           "shed_fraction": 0.2677,
           "reason": "sheds 26.8% of L3, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 7,
+          "e_target_mm": 248.96,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 8,
+          "e_target_mm": 497.92,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 9,
+          "e_target_mm": 995.84,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 10,
+          "e_target_mm": 1991.68,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 11,
+          "e_target_mm": 3983.36,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
+        },
+        {
+          "rung": 12,
+          "e_target_mm": 7966.72,
+          "best_tris": 140,
+          "shed_fraction": 0.0411,
+          "reason": "sheds 4.1% of L4, below SKIP_FRACTION 30%"
         }
       ],
       "levels": [
@@ -188,7 +230,7 @@
             "radius_m": 0.384491,
             "origin_radius_m": 0.380365
           },
-          "glb_sha256": "39e6fb1c8a42fdb67810c9bb89601ae334f6b5c78eb7338238a2fd045a41e8a3",
+          "glb_sha256": "ac37e9b0e2e1e12bc84db264b4a6c9fc36384c0b940047cd7daa8efaa9afd013",
           "blender_source_verts": 744,
           "shipped_dev_from_source_mm": 0.0,
           "shipped_matches_source": true,

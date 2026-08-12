@@ -34,7 +34,6 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
 
 import asset_door  # noqa: E402
 import glb_ktx2  # noqa: E402
@@ -963,16 +962,6 @@ class DoorMechanics(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 1, result.stdout)
             self.assertIn("door.mode-unimplemented", result.stdout)
-
-    def test_the_lod_lane_and_the_door_pin_the_same_toolchain(self):
-        """`scripts/lod/config.py` still carries its own copy of the pins: its bytes are hashed into
-        every shipped manifest, so the re-export lands with a corpus regeneration. Until then the
-        two declarations are held equal here, mechanically."""
-        import config as lod  # noqa: PLC0415 — the LOD lane's config, only needed for this claim
-
-        self.assertEqual(lod.EXPECTED_BLENDER, toolchain.BLENDER_VERSION)
-        self.assertEqual(lod.EXPECTED_BLENDER_BUILD, toolchain.BLENDER_BUILD)
-        self.assertEqual(lod.EXPECTED_GLTF_EXPORTER, toolchain.GLTF_EXPORTER_VERSION)
 
 
 class ToolchainProgram(unittest.TestCase):

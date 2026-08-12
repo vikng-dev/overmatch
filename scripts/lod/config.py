@@ -8,8 +8,15 @@ chain says which constants produced it.
 WHY A CONFIG AND NOT CONSTANTS AT THE POINT OF USE. The right wall is the example that forced it.
 It is a property of the WORLD (how far a camera can be from a surface), it will move when maps grow
 toward 5 km, and the moment it is spelled twice the two copies disagree. One declaration, read by
-generation, recorded in the manifest, re-derived by `chain.py` — a map change is a one-line edit
-followed by a regeneration, and the manifest proves which wall the shipped levels were cut for.
+generation, recorded in the manifest, re-derived by `chain.py` — and the manifest proves which wall
+the shipped levels were cut for. The wall itself is not even declared here any more: it is PARSED
+from the map manifest the game builds its grid from, so a map change is a regeneration and nothing
+else, and `src/track/link_view.rs` fails the build if the two ever come apart.
+
+NOTHING IN THIS FILE IS A SECOND COPY OF SOMETHING. The pins come from `scripts/toolchain.py`, the
+world's size from `assets/maps/<id>/level.json`, and the map's id from `src/map.rs` — each read
+where it lives rather than retyped here, because a config that mirrors other files is a config that
+silently describes a tree that no longer exists.
 
 THE LADDER IS GLOBAL, THE CHAINS ARE SPARSE. `E1_MM` and `OCTAVE` define one grid for the whole
 game: e_N = E1_MM * OCTAVE^(N-1). A per-asset chain is a SUBSET of that grid — a rung whose best
@@ -19,8 +26,28 @@ That is the whole of "no per-asset tuning": the targets are global, the triangle
 outputs, and the only per-asset freedom is WHICH rungs earned a level.
 """
 
+import json
 import math
 import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import toolchain  # noqa: E402  — the path above is what makes this importable
+
+# ── the tree ─────────────────────────────────────────────────────────────────────────────────────
+
+
+def repo_root(start=None):
+    """The git work-tree root, walked up from this file (or `start`)."""
+    directory = os.path.dirname(os.path.abspath(start or __file__))
+    while directory != os.path.dirname(directory):
+        if os.path.exists(os.path.join(directory, ".git")):
+            return directory
+        directory = os.path.dirname(directory)
+    raise RuntimeError("scripts/lod: not inside a git work tree")
+
 
 # ── the ladder ───────────────────────────────────────────────────────────────────────────────────
 
@@ -49,6 +76,53 @@ MAX_RUNGS = 12
 
 # ── the right wall ───────────────────────────────────────────────────────────────────────────────
 
+#: `DEFAULT_MAP_ID` as `src/map.rs` declares it — READ, not copied. The world this ladder is cut for
+#: has to be the world the game loads, and a second spelling of the id here would pick a different
+#: one in silence the day a map is renamed. A pattern that stops matching is a named refusal.
+_DEFAULT_MAP_ID = re.compile(r'DEFAULT_MAP_ID:\s*&str\s*=\s*"([^"]+)"')
+
+
+def default_map_id(root=None):
+    """The map the game resolves when `OVERMATCH_MAP` names none — `crate::map::DEFAULT_MAP_ID`."""
+    path = os.path.join(root or repo_root(), "src", "map.rs")
+    with open(path, encoding="utf-8") as handle:
+        found = _DEFAULT_MAP_ID.search(handle.read())
+    if found is None:
+        raise RuntimeError(
+            f"scripts/lod: {path} declares no `DEFAULT_MAP_ID: &str = \"...\"` — the right wall is "
+            f"cut from the map the game loads, and this is where that id lives"
+        )
+    return found.group(1)
+
+
+def map_world_size_m(map_id=None, root=None):
+    """The side of the square world `assets/maps/<id>/level.json` declares, in metres.
+
+    The manifest is the SINGLE truth about a map's scale — `crate::map::parse` reads this same
+    `terrain.heightmap.world_extent_xz` and hands its side to `TerrainExtent::world_size_m`, so a
+    number derived here is the number the grid is built at rather than a claim about it. Square and
+    origin-centred are the manifest's own requirements (`map::ExtentXz::side_m`), re-stated because
+    a diagonal means nothing without them.
+    """
+    root = root or repo_root()
+    path = os.path.join(root, "assets", "maps", map_id or default_map_id(root), "level.json")
+    with open(path, encoding="utf-8") as handle:
+        extent = json.load(handle)["terrain"]["heightmap"]["world_extent_xz"]
+    (min_x, min_z), (max_x, max_z) = extent["minimum"], extent["maximum"]
+    side = max_x - min_x
+    if max_z - min_z != side or min_x != -max_x or min_z != -max_z or not side > 0.0:
+        raise RuntimeError(
+            f"scripts/lod: {path} declares world_extent_xz {min_x}..{max_x} by {min_z}..{max_z} — "
+            f"the world is a positive square centred on the origin (map::ExtentXz::side_m)"
+        )
+    return float(side)
+
+
+#: The id and the side the wall is cut from, resolved once at import so everything downstream reads
+#: one answer and the manifest records which map produced it.
+MAP_ID = default_map_id()
+WORLD_SIZE_M = map_world_size_m(MAP_ID)
+
 #: The maximum renderable camera-to-surface distance, in metres. Past it a level never renders, so
 #: no rung beyond it is generated.
 #:
@@ -56,18 +130,24 @@ MAX_RUNGS = 12
 #: streaming-distance constant. `grep -rn "far\s*[:=]\|PerspectiveProjection\|DistanceFog" src/`
 #: finds only cascade bounds and unrelated locals, and the camera never overrides bevy's default
 #: projection. So the bound is the map's own geometry: the world is a square of side
-#: `WORLD_SIZE = 1000.0` m (`src/terrain_grid.rs:53`), and the farthest two points in it are the
-#: corners of that square — the DIAGONAL, not the radius (ADR 0033 §3).
+#: `WORLD_SIZE_M`, and the farthest two points in it are the corners of that square — the DIAGONAL,
+#: not the radius (ADR 0033 §3).
 #:
-#: NORTH STAR: maps grow toward 5 km. When `WORLD_SIZE` moves, edit these two lines and regenerate;
-#: the deeper rungs appear on their own because the stop rule reads this number. If a far plane or a
-#: fog cut-off is ever introduced it becomes the wall instead, and `RIGHT_WALL_SOURCE` says so.
-WORLD_SIZE_M = 1000.0
+#: NORTH STAR: maps grow toward 5 km, and this file no longer has to be edited when one does. The
+#: side is PARSED from the shipped map manifest, which is what `crate::map` parses to build the
+#: grid, so a map that grows moves this wall by itself and the deeper rungs appear on the next
+#: regeneration because the stop rule reads this number. What still has to happen deliberately is
+#: the regeneration: `chain.py` compares the manifest's `right_wall_m` against this value, so a
+#: grown map fails verification until the corpus is re-cut, and `link_view`'s
+#: `the_shipped_corpus_reaches_the_worlds_far_corner` fails the build against the live grid. If a
+#: far plane or a fog cut-off is ever introduced it becomes the wall instead, and
+#: `RIGHT_WALL_SOURCE` says so.
 RIGHT_WALL_M = WORLD_SIZE_M * 2.0 ** 0.5
 RIGHT_WALL_SOURCE = (
-    "map diagonal: WORLD_SIZE = 1000.0 m (src/terrain_grid.rs:53) x sqrt(2). "
+    "map diagonal: assets/maps/{}/level.json declares terrain.heightmap.world_extent_xz spanning "
+    "{:g} m (the map is crate::map::DEFAULT_MAP_ID, src/map.rs) x sqrt(2). "
     "No far-plane, fog or streaming-distance constant exists in src/ as of this generation."
-)
+).format(MAP_ID, WORLD_SIZE_M)
 
 
 # ── the reference view ───────────────────────────────────────────────────────────────────────────
@@ -347,9 +427,24 @@ RATIFICATION_EVIDENCE = {
     # one: the old corpus happened to skip exactly one rung, and the single-entry shape carried an
     # `incumbent` field that only meant anything because that skip happened to sit above L2. So the
     # evidence enumerates them and the coupling to a particular chain index is gone.
+    #
+    # RUNGS 7-12 ARE THE TAIL PAST THE DECIMATOR'S FLOOR, and they appeared when the right wall
+    # moved out to the shipped map's 2 121 m diagonal. Before that the ladder stopped at rung 6 —
+    # its 1 499.6 m switch cleared the old 1 414 m wall — and rungs 7-12 were never considered.
+    # They are now, and every one of them answers with the same mesh: 140 triangles is the topology
+    # floor, 4.1 % below L4's 146, so nothing further earns a file. The ladder's DEPTH is therefore
+    # set by the geometry and not by the wall, which is why widening the world by half added no
+    # level. Six near-identical rows rather than a summary, because the list is what the test
+    # compares and a summarised skip is a skip nobody would notice going missing.
     "skipped_rungs": (
         (2, 536, 0.2094),
         (5, 186, 0.2677),
+        (7, 140, 0.0411),
+        (8, 140, 0.0411),
+        (9, 140, 0.0411),
+        (10, 140, 0.0411),
+        (11, 140, 0.0411),
+        (12, 140, 0.0411),
     ),
 }
 
@@ -393,9 +488,13 @@ GENERATOR_VERSION = "2.2.0"
 #: report 5.1.2 and be different builds; the glTF exporter is an add-on that moves on its own
 #: schedule and decides the bytes; and double generation inside ONE process cannot see either kind
 #: of difference, which is precisely the gap it looks like it closes.
-EXPECTED_BLENDER = "5.1.2"
-EXPECTED_BLENDER_BUILD = "ec6e62d40fa9"
-EXPECTED_GLTF_EXPORTER = "5.1.20"
+#:
+#: THE VALUES ARE `scripts/toolchain.py`'S — this lane names them, it does not declare them. Two
+#: copies of a pin is two pins, and the equality between them was held by a test whose only job was
+#: to notice them drifting; a reference cannot drift, so that test is gone.
+EXPECTED_BLENDER = toolchain.BLENDER_VERSION
+EXPECTED_BLENDER_BUILD = toolchain.BLENDER_BUILD
+EXPECTED_GLTF_EXPORTER = toolchain.GLTF_EXPORTER_VERSION
 BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
 #: The sources that PRODUCE a corpus, hashed into the manifest. `GENERATOR_VERSION` is a promise a
@@ -411,7 +510,15 @@ BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 #: That line was drawn in the wrong place once: chain.py was excluded while the generator imported
 #: it and called its merge, so verifier logic really was participating in production and the
 #: exclusion was unsound. The fix was to split the module, not to keep arguing for the exclusion.
-GENERATOR_SOURCES = ("config.py", "measure.py", "generate.py", "render_gate.py", "manifest.py")
+#:
+#: `../toolchain.py` is in the list for exactly that rule, and it joined it the moment the pins
+#: stopped being copied into this file: `EXPECTED_BLENDER`, `EXPECTED_BLENDER_BUILD` and
+#: `EXPECTED_GLTF_EXPORTER` are recorded in every manifest's `generator` block, so the file that
+#: declares them can change what a manifest says. Names are relative to THIS directory and are
+#: hashed alongside the bytes, so the path is part of the digest.
+GENERATOR_SOURCES = (
+    "config.py", "measure.py", "generate.py", "render_gate.py", "manifest.py", "../toolchain.py",
+)
 
 
 def generator_digest():
@@ -454,16 +561,6 @@ SEARCH_LIMITS = {
     "max_enumeration_spot_checks": 48,
     "spot_check_seed": 20260802,
 }
-
-
-def repo_root(start=None):
-    """The git work-tree root, walked up from this file (or `start`)."""
-    directory = os.path.dirname(os.path.abspath(start or __file__))
-    while directory != os.path.dirname(directory):
-        if os.path.exists(os.path.join(directory, ".git")):
-            return directory
-        directory = os.path.dirname(directory)
-    raise RuntimeError("scripts/lod: not inside a git work tree")
 
 
 def resolve_source(root, relpath):
