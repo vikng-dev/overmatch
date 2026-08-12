@@ -187,64 +187,64 @@ class ValidityTests(unittest.TestCase):
         return M.from_glb(build_glb(os.path.join(self.dir, name), positions, indices, uvs=uvs))
 
     def test_a_clean_square_passes_everything(self):
-        report = self.surface("clean.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV).validity(self.gates)
+        report = self.surface("clean.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV).validity()
         self.assertEqual(report["duplicate_faces"], 0)
         self.assertEqual(report["orientation_flips"], 0)
-        self.assertEqual(report["tangent_default_faces"], 0)
         self.assertEqual(report["nonfinite_attrs"], 0)
+        self.assertEqual(report["empty_surfaces"], 0)
         self.assertEqual(report["components"], 1)
 
     def test_a_duplicate_face_is_counted(self):
         report = self.surface(
             "dup.glb", SQUARE_POS, SQUARE_IDX + [0, 1, 2], SQUARE_UV
-        ).validity(self.gates)
+        ).validity()
         self.assertEqual(report["duplicate_faces"], 1)
 
     def test_a_flipped_winding_is_counted(self):
         """The two triangles share edge 0-2; reversing one makes both traverse it the same way."""
         report = self.surface(
             "flip.glb", SQUARE_POS, [0, 1, 2, 2, 0, 3][:3] + [0, 3, 2], SQUARE_UV
-        ).validity(self.gates)
+        ).validity()
         self.assertEqual(report["orientation_flips"], 1)
-
-    def test_a_zero_uv_face_is_counted_as_a_defaulted_tangent(self):
-        """One triangle whose UV corners coincide; mikktspace divides by that area and defaults.
-
-        Two disjoint triangles rather than a shared-edge pair, because any two triangles sharing a
-        vertex whose UV is collapsed drag each other into the count — which is correct behaviour and
-        makes a poor demonstration of counting ONE.
-        """
-        positions = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [5, 0, 0], [6, 0, 0], [5, 1, 0]]
-        uvs = [[0, 0], [0, 0], [0, 0], [0, 0], [1, 0], [0, 1]]
-        report = self.surface("uv0.glb", positions, [0, 1, 2, 3, 4, 5], uvs).validity(self.gates)
-        self.assertEqual(report["tangent_default_faces"], 1)
-        self.assertEqual(report["tangent_default_verts"], 3)
 
     def test_two_disjoint_squares_count_as_two_components(self):
         positions = SQUARE_POS + [[10, 0, 0], [11, 0, 0], [11, 1, 0], [10, 1, 0]]
         indices = SQUARE_IDX + [4, 5, 6, 4, 6, 7]
         uvs = SQUARE_UV + SQUARE_UV
         self.assertEqual(
-            self.surface("two.glb", positions, indices, uvs).validity(self.gates)["components"], 2
+            self.surface("two.glb", positions, indices, uvs).validity()["components"], 2
         )
 
     def test_a_nonfinite_position_is_counted(self):
         positions = [[0, 0, 0], [1, 0, 0], [float("nan"), 1, 0], [0, 1, 0]]
-        report = self.surface("nan.glb", positions, SQUARE_IDX, SQUARE_UV).validity(self.gates)
+        report = self.surface("nan.glb", positions, SQUARE_IDX, SQUARE_UV).validity()
         self.assertGreater(report["nonfinite_attrs"], 0)
 
-    def test_three_faces_on_one_edge_are_counted_as_non_manifold(self):
-        """A T-junction of three faces: no consistent normal or tangent frame along that edge.
+    def test_three_faces_on_one_edge_are_counted_but_no_longer_gated(self):
+        """A T-junction of three faces, counted as a DIAGNOSTIC (ADR 0036 §4).
 
-        Reported but never gated for a while, which is its own lesson — a counter nothing compares
-        against is decoration. A non-watertight volume also bakes to ZERO armour, silently.
+        Manifoldness is the armour pipeline's law, not this lane's: here the deviation bound polices
+        the decimator by construction. The counter stays because the armour lane cares and because a
+        regression should be legible; what left is the refusal built on it.
         """
         positions = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1]]
         indices = [0, 1, 2, 0, 1, 3, 0, 1, 4]
         uvs = [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5]]
-        report = self.surface("nonmanifold.glb", positions, indices, uvs).validity(self.gates)
+        surface = self.surface("nonmanifold.glb", positions, indices, uvs)
+        report = surface.validity()
         self.assertEqual(report["nonmanifold_edges"], 1)
-        self.assertGreater(report["nonmanifold_edges"], self.gates["max_nonmanifold_edges"])
+        self.assertNotIn("max_nonmanifold_edges", self.gates)
+        self.assertEqual(
+            M.validity_gate_failures(report, report, self.gates), [],
+            "a non-manifold edge is recorded and no longer refuses a level",
+        )
+
+    def test_an_empty_surface_is_refused(self):
+        """Non-empty is the one gate ADR 0036 §4 ADDED: a collapse to nothing is not a level."""
+        report = dict(self.surface("clean.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV).validity())
+        report["empty_surfaces"] = 1
+        failures = M.validity_gate_failures(report, report, self.gates)
+        self.assertTrue(any("empty surface" in f for f in failures), failures)
 
     def test_the_origin_radius_is_measured_from_the_origin_not_the_box_centre(self):
         """The runtime slack the switch distances use — and the two are genuinely different points.
@@ -264,30 +264,28 @@ class ValidityTests(unittest.TestCase):
             "an off-centre asset is farther from its origin than from its own box centre",
         )
         self.assertAlmostEqual(
-            surface.validity(self.gates)["origin_radius_m"], 5.0, places=6
+            surface.validity()["origin_radius_m"], 5.0, places=6
         )
 
     def test_the_digest_separates_meshes_that_differ_only_in_uv(self):
         """Codex's counterexample: same positions and topology, one with a collapsed UV.
 
-        Their validity differs — `tangent_default_faces` 0 against 2 — so treating them as one
-        candidate can discard the good one and keep the broken one, or the reverse. Identity has to
-        cover every attribute the gates measure.
+        The candidate key must be at least as sharp as every test that could be applied to what it
+        keys, INCLUDING tests not yet written — which is why nothing in it is quantised. Two meshes
+        that differ only in a UV are two meshes; keying them together discards one arbitrarily.
         """
         good = self.surface("uv_good.glb", SQUARE_POS, SQUARE_IDX, SQUARE_UV)
         collapsed = self.surface(
             "uv_collapsed.glb", SQUARE_POS, SQUARE_IDX, [[0, 0], [0, 0], [0, 0], [0, 0]]
         )
-        self.assertEqual(good.validity(self.gates)["tangent_default_faces"], 0)
-        self.assertEqual(collapsed.validity(self.gates)["tangent_default_faces"], 2)
         self.assertNotEqual(good.digest(), collapsed.digest())
 
     def test_the_digest_separates_meshes_that_differ_only_in_winding(self):
         """Same points, one triangle wound the other way: `orientation_flips` 0 against 1."""
         good = self.surface("wind_good.glb", SQUARE_POS, [0, 1, 2, 0, 2, 3], SQUARE_UV)
         flipped = self.surface("wind_flipped.glb", SQUARE_POS, [0, 1, 2, 0, 3, 2], SQUARE_UV)
-        self.assertEqual(good.validity(self.gates)["orientation_flips"], 0)
-        self.assertEqual(flipped.validity(self.gates)["orientation_flips"], 1)
+        self.assertEqual(good.validity()["orientation_flips"], 0)
+        self.assertEqual(flipped.validity()["orientation_flips"], 1)
         self.assertNotEqual(good.digest(), flipped.digest())
 
     def test_the_digest_separates_meshes_that_differ_only_in_normals(self):
@@ -299,22 +297,20 @@ class ValidityTests(unittest.TestCase):
                                  normals=tilted, uvs=SQUARE_UV))
         self.assertNotEqual(a.digest(), b.digest())
 
-    def test_the_digest_separates_uv_areas_either_side_of_the_gate_epsilon(self):
-        """The key must be at least as sharp as the finest test applied to what it keys.
+    def test_the_digest_is_not_quantised_below_any_epsilon_a_gate_could_use(self):
+        """UVs a picometre apart are two candidates, and the key has to say so.
 
-        Executed counterexample: UV areas of 5e-13 and 1.5e-12 straddle `uv_area_eps = 1e-12`, so
-        they differ in `tangent_default_faces` — and the digest, which rounded UVs to 1e-7, gave
-        them the same key. One of the two was then discarded as a duplicate, arbitrarily.
+        Executed counterexample from when the digest rounded UVs to 1e-7: two meshes whose UV areas
+        were 5e-13 and 1.5e-12 hashed identically, and one was discarded as a duplicate. Keeping the
+        bits is the cheapest way to stay sharper than gates nobody has written yet.
         """
-        below = [[0, 0], [1e-6, 0], [0, 1e-6]]        # uv area 5e-13
-        above = [[0, 0], [3e-6, 0], [0, 1e-6]]        # uv area 1.5e-12
+        below = [[0, 0], [1e-6, 0], [0, 1e-6]]
+        above = [[0, 0], [3e-6, 0], [0, 1e-6]]
         positions = [[0, 0, 0], [1, 0, 0], [0, 1, 0]]
         a = M.from_glb(build_glb(os.path.join(self.dir, "uv_below.glb"), positions, [0, 1, 2],
                                  uvs=below))
         b = M.from_glb(build_glb(os.path.join(self.dir, "uv_above.glb"), positions, [0, 1, 2],
                                  uvs=above))
-        self.assertEqual(a.validity(self.gates)["tangent_default_faces"], 1)
-        self.assertEqual(b.validity(self.gates)["tangent_default_faces"], 0)
         self.assertNotEqual(a.digest(), b.digest())
 
     def test_the_digest_ignores_index_order_but_not_geometry(self):
@@ -481,10 +477,9 @@ class GateParityTests(unittest.TestCase):
     def clean_validity():
         return {
             "tris": 10, "verts": 30, "components": 1, "duplicate_faces": 0, "nonfinite_attrs": 0,
-            "orientation_flips": 0, "nonmanifold_edges": 0, "boundary_edges": 0,
-            "tangent_default_faces": 0, "tangent_default_verts": 0, "min_tri_area_mm2": 1.0,
-            "origin_radius_m": 0.4, "bbox_mm": [1.0, 1.0, 1.0],
-            "baked_tangents": 30, "degenerate_tangents": 0, "min_tangent_length": 1.0,
+            "orientation_flips": 0, "empty_surfaces": 0, "nonmanifold_edges": 0,
+            "boundary_edges": 0, "min_tri_area_mm2": 1.0,
+            "origin_radius_m": 0.4, "radius_m": 0.4, "bbox_mm": [1.0, 1.0, 1.0],
         }
 
     def test_every_declared_limit_gates_something(self):
@@ -510,11 +505,21 @@ class GateParityTests(unittest.TestCase):
         failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
         self.assertTrue(any("component count" in f for f in failures), failures)
 
-    def test_the_tangent_presence_gate_fires(self):
-        validity = self.clean_validity()
-        validity["baked_tangents"] = 0
-        failures = M.validity_gate_failures(validity, self.clean_validity(), CONFIG.GATES)
-        self.assertTrue(any("baked tangents" in f for f in failures), failures)
+    def test_the_gates_the_adr_retired_are_gone_from_the_table(self):
+        """ADR 0036 §4, held as a fact rather than as prose: these counters no longer refuse.
+
+        A deleted gate that quietly comes back is the same class of drift as a gate that quietly
+        goes away — both change what the corpus means without anyone deciding. The counters
+        themselves are still measured, which is why this asserts against the GATE table.
+        """
+        consulted = {counter for counter, _limit, _description in M.STRUCTURAL_GATES}
+        for retired in ("nonmanifold_edges", "tangent_default_faces", "tangent_default_verts",
+                        "degenerate_tangents", "baked_tangents"):
+            self.assertNotIn(retired, consulted)
+        for retired in ("max_nonmanifold_edges", "max_tangent_default_faces",
+                        "max_tangent_default_verts", "max_degenerate_tangents",
+                        "tangent_min_length", "uv_area_eps"):
+            self.assertNotIn(retired, CONFIG.GATES)
 
     def test_verification_routes_its_structural_gates_through_the_shared_list(self):
         """OBSERVED, not grepped: the shared function is REPLACED and every call it gets is counted.
@@ -647,7 +652,7 @@ class DecoderCoverageTests(unittest.TestCase):
             os.path.join(self.dir, "probe.glb"), SQUARE_POS, SQUARE_IDX, uvs=SQUARE_UV,
             tangents=[[1, 0, 0, 1]] * 4,
         ))
-        produced = set(surface.validity(CONFIG.GATES))
+        produced = set(surface.validity())
         verified = set(chain.LEVEL_VALIDITY_FIELDS) | set(chain.LEVEL_VALIDITY_VECTORS)
         classified = self.VALIDITY_INFORMATIONAL
         self.assertLessEqual(
@@ -666,12 +671,13 @@ class DecoderCoverageTests(unittest.TestCase):
 
 
 class BisectionTests(unittest.TestCase):
-    """WHERE THE ENUMERATION'S CONTRACT IS ACTUALLY ESTABLISHED.
+    """WHERE THE DECIMATOR'S CONTRACT IS ACTUALLY ESTABLISHED.
 
-    The enumeration cannot prove its oracle honest — it can only ask it, and a consistently wrong
-    oracle answers consistently. So the property "returns the greatest realizable count at or below
-    the budget" is proven HERE, where it is arithmetic rather than a conversation: over synthetic
-    staircases whose answer is computed independently from the staircase's own definition.
+    A search cannot prove its oracle honest — it can only ask it, and a consistently wrong oracle
+    answers consistently. So the property "returns the greatest realizable count at or below the
+    budget" is proven HERE, where it is arithmetic rather than a conversation: over synthetic
+    staircases whose answer is computed independently from the staircase's own definition. The
+    directed search's `reached - 1` step is only sound because of it.
     """
 
     @staticmethod
@@ -821,208 +827,246 @@ class BisectionTests(unittest.TestCase):
             )
 
 
-class StaircaseEnumerationTests(unittest.TestCase):
-    """The enumeration walk, against synthetic decimators whose realizable set is known.
+class ConvexBoundTests(unittest.TestCase):
+    """The acceptance bound ADR 0036 §6 adds, and the two properties everything downstream needs.
 
-    THE WALK IS THE PART THAT WAS WRONG, twice. First the oracle under it stopped within 1 % of its
-    budget, so the `reached - 1` jump stepped over outputs. Then the guard meant to catch that was
-    itself unsound: it accepted any count already in the output set, which `f(B) = B - 1` satisfies
-    while enumerating half the staircase. The oracle is injected here so both the walk and its
-    guard are driven directly, with no Blender.
+    SOUND: it never claims a patch is closer to the target surface than it is, so a certificate can
+    never be bought with it. TIGHTER: it is never LOOSER than the covering-radius bound on the same
+    inputs, because the caller takes the minimum of the two — which is what makes it a wall-time
+    change and not a corpus change.
     """
 
     @staticmethod
-    def exact(realizable, calls=None, cleaned=None):
-        """The contract: the greatest realizable count at or below the budget.
+    def brute_force_max(corners, dst_p0, dst_p1, dst_p2, samples=60):
+        """max over the patch of the true distance to the destination surface, densely sampled.
 
-        Returns `(step_count, shipped_key)`. `cleaned` maps a step count to what would ship after
-        the cleanup pass, so the two-domain handling can be exercised.
+        A LOWER bound on the truth (a finite sample can only miss the maximum), which is exactly the
+        direction that makes it useful here: anything the bound returns must be at least this.
         """
-        ordered = sorted(realizable)
+        weights = []
+        for i in range(samples + 1):
+            for j in range(samples + 1 - i):
+                weights.append((i / samples, j / samples))
+        weights = np.array(weights)
+        bary = np.stack([1.0 - weights[:, 0] - weights[:, 1], weights[:, 0], weights[:, 1]], axis=1)
+        points = bary @ np.asarray(corners)
+        best = np.full(len(points), np.inf)
+        for t in range(len(dst_p0)):
+            best = np.minimum(best, M.point_triangle_distances(
+                points,
+                np.tile(dst_p0[t], (len(points), 1)),
+                np.tile(dst_p1[t], (len(points), 1)),
+                np.tile(dst_p2[t], (len(points), 1)),
+            ))
+        return float(best.max())
 
+    class FakeSurface:
+        def __init__(self, triangles):
+            triangles = np.asarray(triangles, dtype=np.float64)
+            self.p0, self.p1, self.p2 = triangles[:, 0], triangles[:, 1], triangles[:, 2]
+
+    def nearest(self, dst, point):
+        """(distance, triangle index) — the BVH's answer, computed by exhaustion here."""
+        point = np.asarray(point, dtype=np.float64)[None, :]
+        distances = [
+            float(M.point_triangle_distances(point, dst.p0[t:t + 1], dst.p1[t:t + 1],
+                                             dst.p2[t:t + 1])[0])
+            for t in range(len(dst.p0))
+        ]
+        index = int(np.argmin(distances))
+        return distances[index], index
+
+    def test_the_point_triangle_distance_is_exact(self):
+        """Against a dense barycentric sweep of the triangle, over random configurations.
+
+        The sweep can only OVER-report (it samples), so `computed <= sampled` everywhere is the
+        soundness half and closeness is the tightness half.
+        """
+        rng = np.random.default_rng(20260812)
+        count = 500
+        a, b, c = (rng.normal(size=(count, 3)) for _ in range(3))
+        points = rng.normal(size=(count, 3)) * 2.0
+        computed = M.point_triangle_distances(points, a, b, c)
+        step = 0.02
+        grid = np.array([
+            (i * step, j * step)
+            for i in range(int(1 / step) + 1)
+            for j in range(int(1 / step) + 1 - i)
+        ])
+        bary = np.stack([1.0 - grid[:, 0] - grid[:, 1], grid[:, 0], grid[:, 1]], axis=1)
+        sampled = np.full(count, np.inf)
+        for row in bary:
+            candidate = row[0] * a + row[1] * b + row[2] * c
+            sampled = np.minimum(sampled, np.linalg.norm(candidate - points, axis=1))
+        self.assertTrue(np.all(computed <= sampled + 1e-12), "it under-reports nothing")
+        self.assertLess(float((sampled - computed).max()), 0.02, "and it is the real minimum")
+
+    def test_a_degenerate_triangle_never_under_reports(self):
+        """A needle and a point-triangle: the barycentric denominators go to zero here.
+
+        The fail-closed rule is what makes this safe — a non-finite result becomes infinity, so the
+        convex bound is discarded and the covering-radius subdivision decides the patch.
+        """
+        points = np.array([[0.0, 0.0, 1.0], [5.0, 5.0, 5.0]])
+        needle_a = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        needle_b = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]])
+        needle_c = np.array([[1.0, 1e-18, 0.0], [0.0, 0.0, 0.0]])
+        got = M.point_triangle_distances(points, needle_a, needle_b, needle_c)
+        self.assertTrue(np.all(np.isfinite(got) | np.isinf(got)))
+        self.assertGreaterEqual(float(got[0]), 1.0 - 1e-9)
+        self.assertGreaterEqual(float(got[1]), float(np.sqrt(75.0)) - 1e-9)
+
+    def test_the_bound_holds_over_the_whole_patch(self):
+        """Random patches against a random two-triangle surface: the bound is never under the truth."""
+        rng = np.random.default_rng(7)
+        for _ in range(200):
+            dst = self.FakeSurface(rng.normal(size=(3, 3, 3)))
+            corners = rng.normal(size=(3, 3)) + np.array([0.0, 0.0, 2.0])
+            hits = [self.nearest(dst, corner) for corner in corners]
+            bound = float(M.convex_patch_bounds(
+                corners[None, :, :], np.array([[h[1] for h in hits]]), dst
+            )[0])
+            truth = self.brute_force_max(corners, dst.p0, dst.p1, dst.p2, samples=24)
+            self.assertGreaterEqual(
+                bound, truth - 1e-9,
+                "the convex bound must never be below a distance the surface actually attains",
+            )
+
+    def test_the_convex_bound_never_certifies_looser_than_the_subdivision_bound(self):
+        """THE MUTANT THE BRIEF ASKS FOR, and it is a property of the combination rather than luck.
+
+        `patch_bounds` returns `min(covering, convex)`, so the answer is at most the covering-radius
+        bound on identical inputs — the bound the shipped corpus was cut with. A convex bound that
+        came out LARGER cannot loosen anything; one that comes out smaller only saves nodes.
+        """
+        rng = np.random.default_rng(99)
+        for _ in range(200):
+            dst = self.FakeSurface(rng.normal(size=(2, 3, 3)))
+            corners = rng.normal(size=(1, 3, 3))
+            hits = np.array([[self.nearest(dst, corner)[1] for corner in corners[0]]])
+            distances = np.array([[self.nearest(dst, corner)[0] for corner in corners[0]]])
+            covering = float(M.covering_patch_bounds(corners, distances)[0])
+            combined = float(M.patch_bounds(corners, distances, hits, dst, target=-1.0)[0])
+            self.assertLessEqual(combined, covering + 1e-12)
+
+    def test_a_coplanar_patch_is_proven_with_no_subdivision(self):
+        """The mechanism the ADR bought: on a flat region the bound collapses to the corner maximum.
+
+        The covering-radius bound cannot do this — it adds a whole covering radius to every corner
+        distance, so proving a maximum under `e` forces every patch below `e`'s length scale. That
+        is the target^-2 acceptance cost the rebuild exists to attack.
+        """
+        dst = self.FakeSurface([
+            [[-10.0, -10.0, 0.0], [10.0, -10.0, 0.0], [10.0, 10.0, 0.0]],
+            [[-10.0, -10.0, 0.0], [10.0, 10.0, 0.0], [-10.0, 10.0, 0.0]],
+        ])
+        # Wholly inside the first triangle (the half-plane y <= x), so all three corners see the
+        # same plane — which is the case the bound exists for.
+        corners = np.array([[[5.0, 0.0, 0.1], [7.0, 0.0, 0.1], [6.0, -2.0, 0.1]]])
+        hits = np.array([[self.nearest(dst, corner)[1] for corner in corners[0]]])
+        distances = np.array([[self.nearest(dst, corner)[0] for corner in corners[0]]])
+        covering = float(M.covering_patch_bounds(corners, distances)[0])
+        convex = float(M.convex_patch_bounds(corners, hits, dst)[0])
+        self.assertAlmostEqual(convex, 0.1, places=9)
+        self.assertGreater(covering, 2.0, "the covering radius bound is dominated by the patch size")
+
+
+class DirectedSearchTests(unittest.TestCase):
+    """`measure.directed_rung_search` — the loop, against synthetic probes with known answers."""
+
+    @staticmethod
+    def probe_from(realizable, feasible, log=None):
+        """A probe over a declared staircase, with a declared feasibility set.
+
+        `realizable` is the sorted list of counts the decimator can produce; the greatest one at or
+        below the budget is what a probe returns, which is `bisect_to_budget`'s contract.
+        """
         def probe(budget):
-            if calls is not None:
-                calls.append(budget)
-            under = [value for value in ordered if value <= budget]
-            if not under:
-                return None
-            step = under[-1]
-            return step, (cleaned or {}).get(step, step)
+            if log is not None:
+                log.append(budget)
+            reached = [r for r in realizable if r <= budget]
+            if not reached:
+                return None, M.PROVEN_FAIL
+            count = reached[-1]
+            return count, (M.PROVEN_PASS if count in feasible else M.PROVEN_FAIL)
 
         return probe
 
-    def test_every_realizable_output_is_found(self):
-        realizable = {194, 200, 231, 316, 400, 583, 700, 855, 1000, 1661}
-        outputs = sorted(M.enumerate_staircase(194, 1661, self.exact(realizable)))
-        self.assertEqual(outputs, sorted(realizable))
+    def test_it_finds_a_feasible_candidate_and_returns_a_realizing_budget(self):
+        realizable = [10, 40, 90, 140, 200]
+        probe = self.probe_from(realizable, feasible={140, 200})
+        budget = M.directed_rung_search(10, 200, probe)
+        self.assertIsNotNone(budget)
+        reached = [r for r in realizable if r <= budget][-1]
+        self.assertEqual(reached, 140, "the cheapest feasible count the bisection reaches")
 
-    def test_one_decimation_per_output_plus_the_contract_checks(self):
-        """The `reached - 1` jump is what makes exhaustive affordable; hold it to that."""
-        realizable = {100, 250, 400, 620, 900, 1500}
-        calls = []
-        outputs = sorted(M.enumerate_staircase(100, 1500, self.exact(realizable, calls)))
-        self.assertEqual(outputs, sorted(realizable))
-        # One call per output for the walk, plus one per output for the idempotence check.
-        self.assertEqual(len(calls), 2 * len(realizable))
+    def test_no_feasible_candidate_returns_nothing(self):
+        probe = self.probe_from([10, 40, 90], feasible=set())
+        self.assertIsNone(M.directed_rung_search(10, 90, probe))
 
-    def test_the_off_by_one_oracle_is_caught(self):
-        """Codex's counterexample: `f(B) = max(1, B-1)` over 1..10 enumerated only [1,3,5,7,9].
+    def test_an_undecided_verdict_never_selects_a_candidate(self):
+        """MUTANT. UNDECIDED is FAIL at the search, or the ladder ships an unproven level.
 
-        Every answer it gives IS in the set it built, so a membership guard passes it. Asking
-        `probe(9) == 9` — the idempotence the contract implies for any realizable value — refuses
-        it immediately.
+        Every probe here is undecidable — the pathology `Turret_Decor`'s two finest rungs hit — and
+        the only acceptable outcome is an empty rung. A search that treated UNDECIDED as anything
+        but a failure would select the first candidate it could not decide.
         """
-        def off_by_one(budget):
-            step = max(1, budget - 1)
-            return step, step
+        def probe(budget):
+            return min(budget, 200), M.UNDECIDED
 
-        with self.assertRaises(M.EnumerationError) as caught:
-            M.enumerate_staircase(1, 10, off_by_one, spot_checks=48, seed=1)
-        self.assertIn("asked for a budget of exactly", str(caught.exception))
+        self.assertIsNone(M.directed_rung_search(10, 200, probe))
 
-    def test_a_one_percent_stop_is_caught(self):
-        """The original bug: a bisection that lands NEAR the greatest realizable count."""
-        realizable = sorted({100, 300, 305, 310, 500, 505, 900, 1500})
-
-        def sloppy(budget):
-            under = [value for value in realizable if value <= budget]
-            if not under:
-                return None
-            step = under[0] if len(under) > 1 and budget > 400 else under[-1]
-            return step, step
-
-        with self.assertRaises(M.EnumerationError):
-            M.enumerate_staircase(100, 1500, sloppy, spot_checks=64, seed=7)
-
-    def test_an_oracle_that_overshoots_its_budget_is_refused(self):
-        with self.assertRaises(M.EnumerationError):
-            M.enumerate_staircase(100, 500, lambda budget: (budget + 10, budget + 10))
-
-    def test_the_output_limit_refuses_rather_than_filling_memory(self):
-        realizable = set(range(100, 900))
-        with self.assertRaises(M.EnumerationError) as caught:
-            M.enumerate_staircase(100, 899, self.exact(realizable), max_outputs=50)
-        message = str(caught.exception)
-        self.assertIn("refusing to hold them all", message)
-        # The remediation must name a setting that EXISTS.
-        # The remediation must name a setting that EXISTS — it named `config.MAX_ENUMERATED_OUTPUTS`,
-        # which never has.
-        self.assertIn("max_enumerated_outputs", message)
-        self.assertIn("SEARCH_LIMITS", message)
-        self.assertNotIn("config.MAX_ENUMERATED_OUTPUTS", message)
-        self.assertIn("max_enumerated_outputs", CONFIG.SEARCH_LIMITS)
-
-    def test_a_floor_only_staircase_terminates(self):
-        outputs = sorted(M.enumerate_staircase(194, 1661, self.exact({194})))
-        self.assertEqual(outputs, [194])
-
-    def test_a_consistently_capped_oracle_is_NOT_detected(self):
-        """THE TRUST BOUNDARY, pinned as a test so nobody re-derives a stronger claim from green.
-
-        `lambda b: (min(b, 5), min(b, 5))` answers every question this enumeration can ask, exactly
-        as the contract requires, while concealing everything above 5. It passes — and it SHOULD
-        pass here, because an enumeration interrogating its own oracle is circular and no amount of
-        probing changes that. The contract is established in `BisectionTests`, over staircases whose
-        answers are known independently; the spot checks below only catch an oracle contradicting
-        ITSELF. If this test ever starts failing, the claim has quietly grown and the docstrings
-        need re-reading.
-        """
-        capped = M.enumerate_staircase(
-            1, 10, lambda b: (min(b, 5), min(b, 5)), spot_checks=48, seed=20260802
-        )
-        self.assertEqual(sorted(capped), [1, 2, 3, 4, 5])
-
-    def test_two_meshes_with_the_same_triangle_count_are_both_kept(self):
-        """Candidates are keyed by GEOMETRY, not by triangle count.
-
-        Keying by count assumed one mesh per count. Two cleaned meshes can carry the same count and
-        different geometry, and the loser was dropped silently — possibly the only one that met a
-        rung. Here two decimator steps clean down to the same 400 triangles with different shapes.
-        """
-        realizable = sorted({100, 402, 405, 900})
-        # Both 402 and 405 clean to 400 triangles, but they are different meshes.
-        keys = {100: "d-100", 402: "d-400-a", 405: "d-400-b", 900: "d-900"}
+    def test_a_mixture_of_undecided_and_pass_takes_only_the_proven_one(self):
+        """The undecidable band is stepped over, richer — it can cost triangles, never honesty."""
+        realizable = [10, 40, 90, 140, 200]
 
         def probe(budget):
-            under = [value for value in realizable if value <= budget]
-            if not under:
-                return None
-            step = under[-1]
-            return step, keys[step]
+            reached = [r for r in realizable if r <= budget]
+            if not reached:
+                return None, M.PROVEN_FAIL
+            count = reached[-1]
+            if count in (40, 90):
+                return count, M.UNDECIDED
+            return count, (M.PROVEN_PASS if count >= 140 else M.PROVEN_FAIL)
 
-        by_key = M.enumerate_staircase(100, 900, probe, spot_checks=16, seed=11)
-        self.assertEqual(sorted(by_key), ["d-100", "d-400-a", "d-400-b", "d-900"])
-        self.assertEqual(len(by_key), 4, "neither same-sized mesh may be discarded")
+        budget = M.directed_rung_search(10, 200, probe)
+        reached = [r for r in realizable if r <= budget][-1]
+        self.assertEqual(reached, 140)
 
-    def test_cleanup_that_removes_a_face_does_not_lose_the_candidate(self):
-        """The two count domains, kept apart.
+    def test_below_the_floor_moves_the_search_richer_rather_than_ending_it(self):
+        probe = self.probe_from([120, 300], feasible={120, 300})
+        budget = M.directed_rung_search(1, 300, probe)
+        self.assertIsNotNone(budget)
+        self.assertGreaterEqual(budget, 120)
 
-        The walk steps on the DECIMATOR's count; the cache is keyed by what SHIPS after cleanup.
-        They differ the moment cleanup dissolves a degenerate face, and the earlier code stepped on
-        one while looking candidates up by the other — a `KeyError`, or a silently dropped
-        candidate, on that day. Here cleanup takes a face off two of the four outputs.
+    def test_the_probe_order_is_identical_across_two_runs(self):
+        """MUTANT. The corpus is a function of the geometry, so the SEARCH must be too.
+
+        Integer midpoints, no clock and no randomness — the same asset asks the same questions on
+        any machine, which is what makes two runs comparable field for field.
         """
-        realizable = {100, 250, 400, 900}
-        cleaned = {250: 249, 900: 898}
-        by_key = M.enumerate_staircase(
-            100, 900, self.exact(realizable, cleaned=cleaned), spot_checks=16, seed=5
+        realizable = list(range(2, 1521, 3))
+        first, second = [], []
+        M.directed_rung_search(2, 1520, self.probe_from(realizable, {700, 1000}, log=first))
+        M.directed_rung_search(2, 1520, self.probe_from(realizable, {700, 1000}, log=second))
+        self.assertEqual(first, second)
+        self.assertTrue(first, "the search must actually probe something")
+
+    def test_the_node_budget_is_scale_free_deterministic_and_capped(self):
+        """The declared budget law, held against the three properties ADR 0036 §6 asks of it."""
+        # Scale-free: four times the target is sixteen times cheaper.
+        fine = CONFIG.verdict_node_budget(769.0, 3.89)
+        coarse = CONFIG.verdict_node_budget(769.0, 4 * 3.89)
+        self.assertAlmostEqual(fine / coarse, 16.0, delta=0.1)
+        # A bigger mesh at the same rung gets a bigger budget, until the cap.
+        self.assertGreater(
+            CONFIG.verdict_node_budget(1600.0, 15.56),
+            CONFIG.verdict_node_budget(769.0, 15.56),
         )
-        outputs = sorted(by_key)
-        self.assertEqual(outputs, [100, 249, 400, 898])
-        # Every key the search will index by must resolve — this is the KeyError, caught.
-        for key in outputs:
-            self.assertIn(key, by_key)
-        table = {key: 1.0 for key in outputs}
-        best = M.pareto_minimal(outputs, lambda tris, _t: {"lo_mm": table[tris],
-                                                          "up_mm": table[tris]}, 2.0)
-        self.assertEqual(best["up_mm"], 1.0)
-
-
-class ParetoSearchTests(unittest.TestCase):
-    """The search, against a feasibility curve with a hole in it."""
-
-    @staticmethod
-    def brackets(table):
-        def deviation_for(tris, _target_mm):
-            value = table[tris]
-            return {"lo_mm": value, "up_mm": value}
-
-        return deviation_for
-
-    def test_a_lower_feasible_island_is_found_through_the_real_enumeration(self):
-        """End to end: the walk discovers the outputs, the scan picks the minimum.
-
-        Non-monotone by construction — 300 clears the target, 400 and 500 do not, 600 does. A
-        bisection lands on 600, walks down, fails at 500 and stops, shipping 600 triangles and
-        comparing the WRONG incumbent against the sparse-chain shed threshold. Nothing here is
-        pre-supplied: the output set comes out of `enumerate_staircase` driving a synthetic
-        decimator, which is the seam the first version of this test skipped over.
-        """
-        table = {300: 5.0, 400: 12.0, 500: 11.0, 600: 6.0, 800: 4.0}
-        outputs = sorted(M.enumerate_staircase(
-            300, 800, StaircaseEnumerationTests.exact(set(table)), spot_checks=32, seed=3
-        ))
-        self.assertEqual(outputs, [300, 400, 500, 600, 800])
-        best = M.pareto_minimal(outputs, self.brackets(table), 8.0)
-        self.assertIsNotNone(best)
-        self.assertEqual(best["up_mm"], 5.0)
-
-    def test_the_minimum_is_returned_when_the_curve_is_ordinary(self):
-        table = {200: 40.0, 400: 20.0, 800: 5.0, 1600: 1.0}
-        best = M.pareto_minimal(sorted(table), self.brackets(table), 6.0)
-        self.assertEqual(best["up_mm"], 5.0)
-
-    def test_no_feasible_output_returns_none(self):
-        table = {200: 40.0, 400: 20.0}
-        self.assertIsNone(M.pareto_minimal(sorted(table), self.brackets(table), 1.0))
-
-    def test_acceptance_is_on_the_upper_bound_not_the_sample(self):
-        """A candidate whose lower bound clears the rung but whose bracket does not is refused."""
-        def deviation_for(tris, _target):
-            return {200: {"lo_mm": 3.0, "up_mm": 9.0}, 400: {"lo_mm": 2.0, "up_mm": 5.0}}[tris]
-
-        best = M.pareto_minimal([200, 400], deviation_for, 6.0)
-        self.assertEqual(best["up_mm"], 5.0)
+        self.assertEqual(CONFIG.verdict_node_budget(100000.0, 3.89), CONFIG.VERDICT_NODES_CAP)
+        # Deterministic and integral.
+        self.assertEqual(fine, CONFIG.verdict_node_budget(769.0, 3.89))
+        self.assertIsInstance(fine, int)
 
 
 if __name__ == "__main__":

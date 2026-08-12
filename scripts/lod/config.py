@@ -1,9 +1,10 @@
 """The declared inputs of the LOD ladder — every number the generator is allowed to read.
 
-ADR 0033 (`.agents/docs/adr/0033-geometry-mipmapping-declarative-lod.md`) is the doctrine; this
-file is its machine-readable half. Nothing downstream may hardcode a threshold: `generate.py`,
-`chain.py` and the gates all read from here, and every value lands in the manifest so a shipped
-chain says which constants produced it.
+ADR 0033 (`.agents/docs/adr/0033-geometry-mipmapping-declarative-lod.md`) is the doctrine, as
+amended by ADR 0036 (`0036-the-generator-proves-less.md`); this file is their machine-readable
+half. Nothing downstream may hardcode a threshold: `generate.py`, `chain.py` and the gates all read
+from here, and every value lands in the manifest so a shipped chain says which constants produced
+it.
 
 WHY A CONFIG AND NOT CONSTANTS AT THE POINT OF USE. The right wall is the example that forced it.
 It is a property of the WORLD (how far a camera can be from a surface), it will move when maps grow
@@ -190,264 +191,52 @@ def switch_distance_m(deviation_mm, radius_m=0.0, view=None):
 
 # ── the gates ────────────────────────────────────────────────────────────────────────────────────
 
-#: Every gate is numeric and every one runs on the DECODED SHIPPED GLB (ADR 0033 §6/§7).
+#: Every gate is numeric and every one runs on the DECODED SHIPPED GLB (ADR 0033 §6, ADR 0036 §4).
+#:
+#: THE LIST IS WHAT THE MEASUREMENT NEEDS AND NOTHING ELSE. ADR 0036 §4 re-scoped it: finite
+#: attributes, non-degenerate, non-empty, plus the component-survival gate that deviation cannot
+#: see. The UV-area and tangent counters served the rendered-difference gate, which is deleted, and
+#: manifoldness is the armour pipeline's law rather than this lane's — the deviation bound polices
+#: decimator misbehaviour by construction, because a mangled region deviates and fails while an
+#: undeviating one is invisible by definition. Every counter below is still MEASURED and recorded
+#: per level (and re-derived from the shipped bytes by `chain.py --verify`); what changed is which
+#: of them refuse a level.
 GATES = {
     # Branch-and-bound bracket on the certified worst-case deviation. Acceptance is always on the
     # UPPER bound, so a loose bracket costs triangles and never honesty. `tol_m` is the absolute floor
-    # of the bracket; the RELATIVE tolerances are what make it affordable, because the cost of
+    # of the bracket; the RELATIVE tolerance is what makes it affordable, because the cost of
     # closing an absolute bracket scales inversely with the answer (proving 0.05 mm +/- 0.02 mm
     # needs a quarter-million patches; proving 3.9 mm +/- 0.04 mm needs a few thousand).
     #
-    # The search additionally stops the moment the rung's question is answered — upper bound under
-    # the target accepts, a sampled point over it rejects — so its brackets are decisive rather
-    # than tight. Certification re-runs at the tighter tolerance, because THAT number is what the
-    # manifest records and what the switch distance is derived from.
+    # THERE IS NO SEARCH TOLERANCE ANY MORE. The search asks a BOOLEAN (`measure.fits_target`) with
+    # a node budget instead of bracketing a number nobody reads; only certification runs a bracket,
+    # because THAT number is what the manifest records and what the switch distance is derived from.
     "deviation_tol_m": 2.0e-5,
-    "deviation_rel_tol_search": 0.05,
     "deviation_rel_tol_certify": 0.01,
-    "deviation_max_nodes_search": 400_000,
     "deviation_max_nodes_certify": 1_500_000,
-    # A face whose UV triangle has (near) zero area cannot produce a tangent: mikktspace divides by
-    # that area and bevy hands the shader a defaulted one. ZERO tolerated, on the shipped bytes.
-    "uv_area_eps": 1.0e-12,
-    "max_tangent_default_faces": 0,
-    "max_tangent_default_verts": 0,
-    # THE TANGENTS THAT SHIP, not a proxy for them. The UV-area test above is a necessary condition
-    # and it is NOT the loader's: bevy runs mikktspace, which declines a corner for reasons that
-    # test cannot see. Measured on this corpus — every level had zero UV-degenerate faces and three
-    # of them still contained one corner mikktspace gives up on. So the levels now BAKE their
-    # tangents at export and this gates the baked values, which is what the loader will use
-    # verbatim (`bevy_gltf` generates tangents only when the attribute is absent).
-    "max_degenerate_tangents": 0,
-    "tangent_min_length": 1.0e-6,
     # What the cleanup pass dissolves, as a fraction of the mesh's bounding diagonal. 7.7 um on the
-    # reference shoe: enough to take out the 4.7 um NEEDLE the decimator inherits from the source
-    # (the one corner mikktspace declines a tangent for), and well clear of the next-thinnest
-    # features at 21 um. Three orders of magnitude below e1, so it cannot move a level's deviation
-    # anywhere the ladder can express — and the deviation is re-certified afterwards regardless.
+    # reference shoe: enough to take out the 4.7 um NEEDLE the decimator inherits from the source,
+    # and well clear of the next-thinnest features at 21 um. Three orders of magnitude below e1, so
+    # it cannot move a level's deviation anywhere the ladder can express — and the deviation is
+    # re-certified afterwards regardless.
     "cleanup_dissolve_frac_of_diag": 1.0e-5,
-    # Structural: duplicate faces, non-finite attributes, orientation flips across a shared edge,
-    # and edges with more than two faces on them. The last one was measured and REPORTED for a
-    # while before it was enforced, which is its own lesson: a counter nothing compares against is
-    # decoration. A non-manifold edge has no consistent normal or tangent frame, and the ballistics
-    # bake treats a non-watertight volume as zero armour, silently.
+    # Non-degenerate and finite, on the decoded bytes: a face listed twice, a NaN, and an edge its
+    # two faces traverse the same way (an inconsistent winding, which has no outside).
     "max_duplicate_faces": 0,
     "max_nonfinite": 0,
     "max_orientation_flips": 0,
-    "max_nonmanifold_edges": 0,
+    # Non-empty. A collapse that reaches zero triangles is not a level, and every counter below it
+    # would be a statement about nothing.
+    "max_empty_surfaces": 0,
     # A vanished small part has a near-zero Hausdorff distance, so deviation cannot see it. Counted
     # by connected component after welding coincident positions.
     "components_must_match": True,
 }
 
-#: The rendered-difference gate — the authoritative attribute check (ADR 0033 §7).
-#:
-#: Each kept level is rendered against its PARENT at the parent->child switch distance, under the
-#: asset's material, and the two images are differenced. (The material is taken from the shipped
-#: glb when it can be read back, and from the .blend when it cannot — see `RENDER_GATE_BLOCKING`;
-#: which one was used is recorded per level as `material_source` and is checked by verification.)
-#: Pixels are counted over the
-#: FOOTPRINT (the union of the two silhouettes plus a dilation), never over the whole frame: at
-#: 300 m a track shoe is 40 pixels across and a frame-wide mean would divide every difference by
-#: four thousand empty pixels and pass anything.
-#:
-#: The camera preserves the reference view's ANGULAR resolution (pixels per radian) rather than its
-#: pixel count, so a 512-pixel tile carries exactly the same detail per steradian as the 2160-pixel
-#: reference display — the difference measured is the difference a player's pixel sees.
-RENDER_GATE = {
-    "tile_px": 512,
-    # Render at `tile_px * supersample` and box-average down to `tile_px` before differencing.
-    #
-    # A PLAYER'S PIXEL INTEGRATES; SO MUST THE GATE. One render sample-pixel per player pixel makes
-    # the comparison an aliasing contest — a coarse level's edges land on a different side of the
-    # sample grid and the difference reports geometry that both meshes agree about. Averaging 4x4
-    # sub-pixels reproduces what the display actually shows, and it does two other useful things: it
-    # divides the Monte-Carlo noise floor by 4, and it gives a small far-distance asset (13 pixels
-    # across at the last switch) an interior to measure shading in at all.
-    "supersample": 4,
-    "samples": 64,  # x16 sub-pixels = 1024 effective samples per player pixel
-    "seed": 20260801,
-    # Views, as (name, elevation_deg, azimuth_deg). Three-quarter and grazing at minimum: grazing is
-    # where a collapsed silhouette shows and where specular skims a wrongly-oriented facet.
-    "views": (
-        ("three_quarter", 28.0, 52.0),
-        ("grazing", 9.0, 118.0),
-        ("edge_on", 2.0, 200.0),
-    ),
-    # THE VERDICT IS A POSITION BETWEEN TWO MEASURED REFERENCES, not an absolute pixel number.
-    #
-    # Three runs of this gate were needed to learn why. An absolute budget ("at most 2 % of pixels
-    # may change by 0.1") failed every level of a chain whose positional deviation was PROVEN
-    # sub-pixel — because merging flat-shaded facets changes their shading, which is the mechanism
-    # working, not failing, and because nobody can say what the right absolute number is anyway.
-    #
-    # So each pair is bracketed. The NOISE FLOOR is the renderer disagreeing with itself on
-    # identical geometry (two seeds). The DEFECT FLOOR is the same level with every shading normal
-    # rotated by `defect_normal_deg` — positionally perfect, lit wrong, which is precisely the
-    # red-test class this gate exists to catch (a defaulted tangent draws exactly that). The score
-    #
-    #     (signal - noise) / (defect - noise)
-    #
-    # is 0 when a switch is as invisible as re-rendering the same frame and 1 when it looks as wrong
-    # as broken normals. `defect_fraction` is how far along that line a switch may land. Being
-    # dimensionless, it does not drift when the sample count, tile size or machine changes.
-    #
-    # 20 deg is chosen as the defect because it is the scale at which a wrong normal is unarguably
-    # a bug rather than a shading nuance, and it is well inside what a dropped custom-normal layer
-    # produces.
-    #
-    # `defect_fraction` = 2.0 is RATIFIED (Yan, 2026-08-02) after an in-game eyeball on the showcase
-    # branch: the worst score this corpus produces, 1.674 at the L2|L3 switch, is imperceptible
-    # through the optic. So a switch may look up to twice as different as broken normals do and
-    # still ship — which sounds loose until you remember what the denominator is measuring, and that
-    # every level under it is ALSO proven sub-pixel in position. The provenance of that ruling is in
-    # `RATIFICATION_EVIDENCE`, and a test holds it against the shipped manifest so it cannot rot.
-    "defect_normal_deg": 20.0,
-    "defect_fraction": 2.00,
-    # Below this on-screen size the gate ABSTAINS instead of scoring (Yan, 2026-08-02).
-    #
-    # PICKED FROM THE DEEPEST LEVEL'S GEOMETRY, which is the class it exists to kill. That level
-    # switches in far enough away that a 20-degree normal tilt is invisible, so the defect reference
-    # collapses and the score becomes a ratio of two nothings — the level that motivated this scored
-    # 7.68 in one round and 0.73 in the next off the same geometry. One level nearer, the bracket is
-    # meaningful. 20 px sits between them, and still does on the 2026-08-08 corpus: L4 is 8.7 px
-    # across at its 1499.6 m switch and abstains, L3 is 26.3 px at 527.9 m and is scored.
-    #
-    # The measure is the asset's PROJECTED DIAMETER, not the renderer's pixel count: it is a
-    # property of the geometry and the distance, so the verifier re-derives it from the recorded
-    # bounding box rather than trusting a number the renderer reported about itself.
-    "min_footprint_px": 20.0,
-    # Absolute floors, kept only as an escape hatch: a pair whose difference is under these passes
-    # regardless of the bracket, so a degenerate defect reference cannot fail an invisible switch.
-    "max_mean_abs_diff": 0.020,        # mean |dI| over the interior, 0..1
-    "max_footprint_frac_over": 0.020,  # fraction of interior pixels differing by more than...
-    "over_threshold": 0.100,           # ...this, 0..1
-    # Diagnostic only, never a gate (ADR 0033 §7): worst shading-normal angle.
-    "normal_samples": 20_000,
-}
-
-
-#: Does a failing rendered-difference gate BLOCK publication, or only report?
-#:
-#: False until `RENDER_GATE["defect_fraction"]` is ratified. The gate always runs, always measures,
-#: always records every number per level in the manifest, and always prints its verdict; what this
-#: switch changes is whether a verdict of FAIL aborts generation. It is a deliberate, named,
-#: one-line piece of state rather than a threshold quietly loosened until the corpus went green —
-#: which is the exact failure mode this whole file exists to prevent. Every other gate here blocks
-#: unconditionally, because every other gate is measured or structural.
-#:
-#: RATIFIED TRUE (Yan, 2026-08-02) — but REQUESTED is not ARMED, and the difference is mechanical
-#: rather than remembered.
-#:
-#: Blocking arms only when the gate renders the SHIPPED material. It does not today: the gate
-#: re-imports the L0 glb and every texture comes back empty, because the mip bake writes KTX2 via
-#: `KHR_texture_basisu` and Blender's importer cannot read it, so it falls back to the .blend
-#: material and records that per level. Blocking on a number measured under the wrong textures would
-#: be a gate certifying the wrong thing — the failure this file exists to prevent.
-#:
-#: So the effective flag is `RENDER_GATE_BLOCKING and no level fell back` (`chain.effective_render_
-#: blocking`), the manifest records both halves, and the moment the material path is honest the
-#: enforcement arms itself with no second decision to remember. The route to that: decode the KTX2
-#: to PNG with `basisu` and rebuild the material, or render through the runtime instead of Blender.
-RENDER_GATE_BLOCKING = True
-
-#: The thresholds a render-gate record must carry — DECLARED ONCE, read by the renderer that writes
-#: them and by the verifier that requires them. A hand-counted list on the verifier's side required
-#: four of the five the renderer wrote, so DELETING `defect_normal_deg` from a level verified clean.
-#: Nothing here is counted by hand any more: both sides iterate this tuple.
-RECORDED_GATE_THRESHOLDS = (
-    "defect_fraction", "defect_normal_deg", "max_mean_abs_diff", "max_footprint_frac_over",
-    "over_threshold", "min_footprint_px",
-)
-
-#: The measurements that would inform that ruling, from the reference asset — worst of three
-#: viewpoints, so each is the least favourable angle.
-#:
-#: A CONSTANT, NOT A COMMENT, because as prose it went stale twice: it kept quoting scores from a
-#: superseded defect reference and triangle counts from before a regeneration, sitting next to the
-#: decision it exists to inform and reading as current the whole time. Stale evidence beside a
-#: pending decision is worse than no evidence. `test_chain.py` compares every number here against
-#: the shipped manifest, so a regeneration that moves any of them fails until this is refreshed.
-#:
-#: L3 is the one to look at: at 501 m the switch changes the image MORE than 20-degree broken
-#: normals do on the same geometry. Beyond a few hundred metres shading stops being what changes and
-#: silhouette — already proven sub-pixel — is the whole story, so a ratified rule probably wants a
-#: minimum resolvable footprint below which this gate abstains and says so.
-#:
-#: REFRESHED 2026-08-08 for the re-cut corpus, and the refresh is exactly what this constant is for.
-#: Yan rebuilt the shoe, so L0 rose 764 -> 1 520 triangles and the ladder rebased again, to four
-#: reductions. The `ruling` below is left VERBATIM: it is Yan's, made on a corpus that is now two
-#: generations old, and rewriting a person's finding to match new numbers would destroy the
-#: provenance the block exists to carry. The `levels` under it ARE the new corpus, because those are
-#: measurements and measurements go stale.
-#:
-#: REFRESHED AGAIN 2026-08-09, after the shipped L0's shading was corrected at source. `Link` used
-#: to carry its `Smooth by Angle` as a modifier, and `export_scene.gltf` does not apply modifiers,
-#: so the tank glb shipped the mesh's unevaluated all-smooth normals while the chain was cut from
-#: the evaluated ones. The .blend now holds that smoothing as `sharp_edge` data, so both sides read
-#: the same surface. Every scored level measures 1.000 against the ratified 2.0; the corpus cut
-#: before the correction scored 4.877 at the L0|L1 switch, where the gate was comparing L1 against
-#: an L0 that rendered differently from the surface L1 was reduced from.
-RATIFICATION_EVIDENCE = {
-    # WHO RULED, ON WHAT, AND FROM WHAT. Recorded here and copied into the manifest, because the
-    # threshold it settles is a taste call, and a taste call without its provenance is just a number.
-    "ruling": {
-        "by": "Yan",
-        "date": "2026-08-02",
-        "method": "in-game eyeball on the showcase branch, through the gunner optic",
-        "finding": "the worst score this corpus produces (1.674, at the L2|L3 switch distance) is "
-                   "imperceptible through the optic",
-        "decided": "defect_fraction = 2.0; abstain below min_footprint_px = 20 px; blocking arms "
-                   "when the render uses the shipped material",
-        # THE FINDING ABOVE IS A HISTORICAL RECORD AND ITS NUMBER HAS MOVED. It is left verbatim
-        # because it is what Yan saw and decided on; it is annotated here because the corpus it
-        # describes is gone. Re-cut 2026-08-09 from the rebuilt 1520-triangle shoe with the shipped
-        # L0's shading corrected, the worst score is 1.000, not 1.674 — under the ratified 2.0 at
-        # every scored level, and no level reaching the absolute floors. The perceptual judgement
-        # has not been retaken; the thresholds it set hold a fortiori on this corpus. Blocking is
-        # still disarmed (the render falls back to the .blend material), so nothing rides on it yet.
-    },
-    "levels": (
-        # (level, tris, switch_m, defect_score, verdict)
-        #
-        # RESTATED 2026-08-09 against the corpus cut from Yan's rebuilt 1520-triangle shoe with its
-        # shading corrected at source. These are what is measured and shipped now; the numbers Yan
-        # ruled on in August 2026 described a 764-triangle source that no longer exists. THE RULING
-        # ITSELF IS UNCHANGED — the thresholds above are what he decided, and this block is the
-        # evidence they were decided against, re-measured so it describes the corpus in the tree
-        # rather than a retired one. Only L1's score moved in this refresh; the triangle counts and
-        # switch distances are the 2026-08-08 ladder unchanged.
-        (1, 678, 60.4, 1.000000, "PASS"),
-        (2, 390, 269.4, 1.000000, "PASS"),
-        (3, 254, 527.9, 1.000000, "PASS"),
-        (4, 146, 1499.6, None, "ABSTAIN"),
-    ),
-    "enumerated_outputs": 691,
-    # (rung, best tris, shed fraction) for EVERY rung the skip rule dropped. A tuple of them, not
-    # one: the old corpus happened to skip exactly one rung, and the single-entry shape carried an
-    # `incumbent` field that only meant anything because that skip happened to sit above L2. So the
-    # evidence enumerates them and the coupling to a particular chain index is gone.
-    #
-    # RUNGS 7-12 ARE THE TAIL PAST THE DECIMATOR'S FLOOR, and they appeared when the right wall
-    # moved out to the shipped map's 2 121 m diagonal. Before that the ladder stopped at rung 6 —
-    # its 1 499.6 m switch cleared the old 1 414 m wall — and rungs 7-12 were never considered.
-    # They are now, and every one of them answers with the same mesh: 140 triangles is the topology
-    # floor, 4.1 % below L4's 146, so nothing further earns a file. The ladder's DEPTH is therefore
-    # set by the geometry and not by the wall, which is why widening the world by half added no
-    # level. Six near-identical rows rather than a summary, because the list is what the test
-    # compares and a summarised skip is a skip nobody would notice going missing.
-    "skipped_rungs": (
-        (2, 536, 0.2094),
-        (5, 186, 0.2677),
-        (7, 140, 0.0411),
-        (8, 140, 0.0411),
-        (9, 140, 0.0411),
-        (10, 140, 0.0411),
-        (11, 140, 0.0411),
-        (12, 140, 0.0411),
-    ),
-}
-
+#: Samples for the shading-normal-angle DIAGNOSTIC, which is recorded per level and gates nothing
+#: (ADR 0033 §7, ADR 0036 §3). It used to live inside the render gate's config block; the gate is
+#: gone and the diagnostic outlived it.
+NORMAL_DIAGNOSTIC_SAMPLES = 20_000
 
 # ── the assets ───────────────────────────────────────────────────────────────────────────────────
 
@@ -475,7 +264,7 @@ ASSETS = (
 #: Bumped whenever the generation ALGORITHM changes in a way that can move a shipped level. The
 #: manifest records it; a mismatch between a committed manifest and this constant means the chain
 #: was cut by a different pipeline than the one in the tree.
-GENERATOR_VERSION = "2.2.0"
+GENERATOR_VERSION = "3.0.0"
 
 #: The toolchain the corpus was cut with, ASSERTED before generation rather than merely recorded.
 #:
@@ -517,7 +306,7 @@ BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 #: declares them can change what a manifest says. Names are relative to THIS directory and are
 #: hashed alongside the bytes, so the path is part of the digest.
 GENERATOR_SOURCES = (
-    "config.py", "measure.py", "generate.py", "render_gate.py", "manifest.py", "../toolchain.py",
+    "config.py", "measure.py", "generate.py", "manifest.py", "../toolchain.py",
 )
 
 
@@ -537,30 +326,58 @@ def generator_digest():
 MANIFEST_RELPATH = "assets/lod_manifest.json"
 
 #: The manifest format this tree reads and writes. Bumped when the SHAPE changes, not the contents.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-#: What the exhaustive search is allowed to spend before it refuses.
+
+# ── the search's budget ──────────────────────────────────────────────────────────────────────────
+
+#: What ONE direction of one rung verdict may spend, as a node count. NEVER a clock: the corpus is
+#: a function of the geometry, and a wall-clock budget would make it a function of the machine.
 #:
-#: EXHAUSTIVE IS A PROMISE ABOUT COMPLETENESS, NOT ABOUT COST. Every enumerated output stays
-#: resident for the whole chain so that a plateau costs one certification rather than many, which
-#: means geometry storage grows with the number of distinct outputs — and that grows with the
-#: asset. A 1 661-triangle shoe enumerates ~700 outputs; something twenty times larger would not
-#: merely be slower, it would be quadratically hungrier, and the first anyone would know is a
-#: machine swapping. So the limits are declared, and passing one is a NAMED REFUSAL rather than a
-#: slow death: raising them is a decision someone makes on purpose, having read this.
-SEARCH_LIMITS = {
-    "max_enumerated_outputs": 4_000,
-    "max_retained_tris": 4_000_000,
-    "max_enumeration_seconds": 900.0,
-    # Random budgets drawn from the intervals the walk jumped over, each of which must return THAT
-    # INTERVAL'S incumbent. Together with the idempotence check over every enumerated output (see
-    # `measure._verify_oracle`) this is what holds the decimator to its contract on real geometry.
-    # Accepting mere membership in the output set — the first version of this guard — is unsound:
-    # an oracle that answers B-1 to everything passes any number of such probes while enumerating
-    # only half the staircase.
-    "max_enumeration_spot_checks": 48,
-    "spot_check_seed": 20260802,
-}
+#: SCALE-FREE, and the shape is measured rather than chosen (ADR 0036 §6 and its recorded fork).
+#: `.agents/scratch/lod-directed-prototype-2026-08-12.md` §2 timed what a PROVEN_PASS costs on the
+#: shipped levels, whose verdicts are known-good by construction, and the cost falls as the SQUARE
+#: of the target: 308 111 nodes at e = 3.89 mm, 19 683 at 15.56 mm, 4 772 at 31.12 mm, 83 at
+#: 124.48 mm. That is the covering-radius bound's own geometry — proving a maximum is under `e`
+#: forces every patch on the WHOLE SURFACE below `e`'s length scale — so the price of an acceptance
+#: is a property of the mesh and the rung, not of the candidate:
+#:
+#:     nodes_to_accept ~= 7.9 * (bbox_diagonal_mm / e_target_mm) ** 2
+#:
+#: A FLAT budget therefore makes fine-rung availability a function of mesh SIZE: measured, the
+#: 769 mm link kept all its rungs at 400 000 while the 3 817 mm `Turret_Decor` lost its two finest,
+#: because it needs ~7.6 M for the same proof. The constraint this coefficient has to satisfy is
+#: that a rung an unbounded search would accept is not lost for want of budget; 10.3 is the fitted
+#: 7.9 with the 30 % headroom the prototype's own budget carried, and it reproduces 400 000 for the
+#: link at rung 1 (769.0 / 3.890 = 197.7; 197.7^2 * 10.3 = 402 600).
+VERDICT_NODES_PER_SQUARE = 10.3
+
+#: The hard cap, per direction. An UNDECIDED verdict costs the FULL budget in both directions and
+#: buys nothing — it is the old frozen bracket, bounded — so an uncapped scale-free budget lets one
+#: pathological mesh spend the corpus's whole time allowance proving nothing.
+#:
+#: THE CONSTRAINT: a full-tank cold build stays inside the minutes budget ADR 0036 §6 gates on. At
+#: the MEASURED ~50 us a node, 2 000 000 nodes is ~100 s of worst-case burn per direction, and the
+#: census (58 unique meshes) cannot afford many of those. A rung whose acceptance needs more than
+#: this is LOST, honestly: UNDECIDED counts as FAIL, so the chain is coarser and nothing shipped is
+#: unproven. Raising it buys fine rungs on large meshes at a linear price in wall time.
+#:
+#: IT IS NEVER LOWERED TO MAKE A TIME GATE GREEN. A low cap drops fine rungs while every remaining
+#: level stays honestly certified, so the corpus quietly loses fidelity and every check still
+#: passes — the one failure mode this file exists to prevent. A projection that misses the ruling
+#: is a stop-and-raise, not a smaller number here. Every rung lost this way is recorded in the
+#: manifest as `lost_to: verdict_node_budget`, so the trade is legible rather than inferred.
+VERDICT_NODES_CAP = 2_000_000
+
+
+def verdict_node_budget(diagonal_mm, e_target_mm):
+    """The node budget for one direction of one verdict, from the mesh's size and the rung.
+
+    Integer and deterministic: the same asset gives the same budget on any machine, which is what
+    lets two runs be compared field-for-field.
+    """
+    ratio = float(diagonal_mm) / float(e_target_mm)
+    return int(min(VERDICT_NODES_CAP, VERDICT_NODES_PER_SQUARE * ratio * ratio))
 
 
 def resolve_source(root, relpath):

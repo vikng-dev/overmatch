@@ -1,19 +1,27 @@
 """Cut every asset's error-ladder chain and write the manifest. The one entry point.
 
     /Applications/Blender.app/Contents/MacOS/Blender -b --factory-startup \
-        --python scripts/lod/generate.py -- [--asset NAME] [--no-render-gate]
+        --python scripts/lod/generate.py -- [--asset NAME]
 
-WHAT THIS IS. ADR 0033's generation stage: one global octave grid of deviation targets, a per-asset
-SPARSE subset of it, triangle counts as outputs. Nothing in this file knows what a track shoe is —
-the assets are rows in `config.ASSETS`, and every threshold is a constant in `config.py`.
+WHAT THIS IS. ADR 0033's generation stage as amended by ADR 0036: one global octave grid of
+deviation targets, a per-asset SPARSE subset of it, triangle counts as outputs. Nothing in this
+file knows what a track shoe is — the assets are rows in `config.ASSETS`, and every threshold is a
+constant in `config.py`.
 
-THE SEARCH IS OVER UNIQUE INTEGER TRIANGLE TARGETS, NOT OVER RATIOS (ADR 0033 §5), and it is
-EXHAUSTIVE rather than a bisection. Measured error is not monotone in collapse ratio, so a
-bisection assumes exactly the property the doctrine denies and can step straight over a lower
-feasible island. Instead every mesh the decimator can produce is enumerated once (see
-`Candidates.enumerate_outputs`, which costs one decimation per distinct output), and each rung
-scans them in ASCENDING triangle order and takes the first that clears its target — so everything
-smaller has been measured and rejected, and the winner is minimal by exhaustion.
+THE SEARCH IS DIRECTED, AND ITS PREDICATE IS A BUDGETED BOOLEAN (ADR 0036 §1). Per rung, a
+bisection over integer triangle BUDGETS, each probe realized by the same Blender collapse as
+before and decided by `measure.fits_target` — PROVEN_FAIL at the first sampled witness over the
+target, PROVEN_PASS when every live bound closes under it, UNDECIDED when the node budget runs out.
+UNDECIDED, an invalid candidate and a budget below the topology floor are all treated as FAIL, so
+they can cost triangles and never honesty.
+
+WHAT THAT GIVES UP, ON THE RECORD. The exhaustive staircase this replaced proved the winner was the
+FEWEST-triangle valid output meeting the rung. ADR 0036 §2 retires that claim deliberately: 85 % of
+a reference run was measurement, the enforcement was the difference between unfinishable and
+minutes, and the 5 % search bracket leaked minimality anyway — the directed search found a CHEAPER
+answer at two rungs of the reference asset. The contract is now "deterministically found,
+certified", and what the player depends on — the certified bound at the switch distance — is
+untouched.
 
 THE ORDER IS SACRED (ADR 0033 §6). Per level: decimate -> cleanup -> export -> decode the written
 glb -> measure everything on those bytes. The search itself measures pre-export candidates, because
@@ -25,11 +33,9 @@ rather than inherited from the Blender mesh that produced them.
 
 WHAT FAILS THE RUN, LOUDLY (ADR 0033 §10): an unexpected Blender build; a skinned or morph-target
 source; a multi-material or multi-primitive source; a shipped L0 that is not the source; a level
-whose certified upper bound misses its rung after export; a level that lost a component; a
-defaulted tangent; a duplicate face; a non-manifold edge; a
-non-finite attribute; a flipped winding; a level that does not reproduce byte-for-byte when built
-twice; and — once its threshold is ratified — a rendered difference over budget. Nothing degrades
-silently.
+whose certified upper bound misses its rung after export; a level that lost a component; an empty
+surface; a duplicate face; a non-finite attribute; a flipped winding; and a level that does not
+reproduce byte-for-byte when built twice. Nothing degrades silently.
 """
 
 import hashlib
@@ -49,7 +55,6 @@ import bpy  # noqa: E402
 import config as CONFIG  # noqa: E402
 import manifest as MANIFEST  # noqa: E402
 import measure as M  # noqa: E402
-import render_gate  # noqa: E402
 
 
 class GenerationError(SystemExit):
@@ -154,54 +159,6 @@ def refuse_unsupported(obj):
     return materials[0]
 
 
-def shipped_material(l0_path, node_name):
-    """The material as it SHIPS: imported back out of the L0 glb. Returns (material, provenance).
-
-    The gate is supposed to render the bytes, materials included — taking the material from the
-    .blend renders the artist's inputs, not the asset. So the shipped glb is re-imported and its
-    material used instead.
-
-    IT CAN LEGITIMATELY FAIL, and then it says so instead of pretending. The tank glb's textures are
-    baked to KTX2 (`scripts/encode-tank-ktx2.sh`, via `KHR_texture_basisu`) because bevy needs mips;
-    Blender's glTF importer does not read that extension, so the images can come back empty. A
-    material with no image data would render a flat grey asset and the gate would go on producing
-    confident numbers about a shading comparison it was no longer making. So every image node is
-    checked for actual pixels, and on failure the caller is told which material it is getting.
-    """
-    before = set(bpy.data.objects)
-    try:
-        bpy.ops.import_scene.gltf(filepath=l0_path)
-    except (RuntimeError, TypeError) as exc:
-        return None, f"glb import failed: {exc}"
-    imported = [ob for ob in bpy.data.objects if ob not in before]
-    material, reason = None, "node not found in the imported glb"
-    for ob in imported:
-        if ob.name.split(".")[0] == node_name and ob.type == "MESH" and ob.data.materials:
-            material = ob.data.materials[0]
-            break
-    if material is not None:
-        # `node.image.name` on a node whose image is None crashes — which is the SECOND thing that
-        # would go wrong on an asset whose textures the importer cannot read, right after the thing
-        # this list exists to detect. The name has to come from the node when there is no image.
-        empty = [
-            node.image.name if node.image is not None else f"<{node.name}: no image>"
-            for node in material.node_tree.nodes
-            if node.type == "TEX_IMAGE" and (node.image is None or not node.image.has_data)
-        ]
-        if empty:
-            reason = (
-                f"imported material {material.name!r} has {len(empty)} texture(s) with no pixel "
-                f"data ({', '.join(empty[:3])}) — Blender cannot read the KHR_texture_basisu KTX2 "
-                f"images the bake writes"
-            )
-            material = None
-        else:
-            reason = f"decoded from {os.path.basename(l0_path)} (material {material.name!r})"
-    for ob in imported:
-        bpy.data.objects.remove(ob, do_unlink=True)
-    return material, reason
-
-
 def evaluated_source(obj):
     """L0: the EVALUATED RENDER SNAPSHOT of the artist's object (ADR 0033 §1).
 
@@ -251,14 +208,14 @@ def _fit_collapse(obj, budget):
 
     THE CONTRACT IS "GREATEST", AND IT USED TO BE "WITHIN 1 %". The bisection stopped as soon as it
     landed inside a percent of the budget, which is fine if you only want a mesh of roughly that
-    size and fatal for the enumeration built on top of it: `enumerate_staircase` steps from one
-    output to `reached - 1`, and that step is only sound when `reached` is the greatest realizable
-    count at or below the budget. An early stop meant outputs in `(reached, budget]` were never
-    visited, so the "exhaustive" search could miss a level outright.
+    size and fatal for the search built on top of it: `measure.directed_rung_search` steps from an
+    accepted candidate to `reached - 1`, and that step is only sound when `reached` is the greatest
+    realizable count at or below the budget. An early stop meant outputs in `(reached, budget]` were
+    never visited, so the search could step over the answer.
 
     The bisection itself is `measure.bisect_to_budget`, kept as a pure function of an injected
     evaluator so the property can be PROVEN on synthetic staircases whose answer is known
-    independently. That separation is the point: the enumeration built on top cannot establish this
+    independently. That separation is the point: a search built on top cannot establish this
     contract by asking about it, so it has to be established here, where it is arithmetic.
 
     Returns `(reached, ratio)`, or `(None, None)` below the mesh's topology floor.
@@ -341,9 +298,9 @@ def candidate_mesh(source_obj, budget, scale_m):
     """One candidate: collapse to `budget` triangles, then the cleanup pass.
 
     Returns `(mesh, reached)` or `(None, None)`, where `reached` is the count the DECIMATOR landed
-    on, before cleanup. The enumeration walks the budget axis by `reached - 1`, and that step is
-    only sound against the decimator's own staircase: cleanup can dissolve a degenerate afterwards
-    and lower the count, and stepping from the lowered number would jump over realizable outputs.
+    on, before cleanup. The search steps the budget axis by `reached - 1`, and that step is only
+    sound against the decimator's own staircase: cleanup can dissolve a degenerate afterwards and
+    lower the count, and stepping from the lowered number would jump over realizable outputs.
     """
     work = _fresh_copy(source_obj, f"cand_{budget}")
     try:
@@ -357,188 +314,119 @@ def candidate_mesh(source_obj, budget, scale_m):
     return mesh, reached
 
 
-class Candidates:
-    """Every mesh the decimator can actually produce, and the deviation of the ones worth measuring.
+class Directed:
+    """Candidates realized ON DEMAND, and the rung predicate decided over integer budgets.
 
-    ENUMERATION, NOT BISECTION. The previous version bisected feasible/infeasible budgets and then
-    walked down in 2 % steps until the first failure — which assumes the very monotonicity this
-    pipeline's own design doc says does not hold. A lower feasible ISLAND below an infeasible step
-    is invisible to that search, so its winner was not proven minimal and a sparse-chain skip
-    decision could be made against the wrong incumbent.
+    THE CANDIDATE FAMILY IS UNCHANGED. `candidate_mesh` — the same Blender collapse, the same
+    `bisect_to_budget` contract, the same cleanup — realizes every probe, and the same structural
+    pre-filter admits it. What is gone is the promise to realize ALL of them: the exhaustive
+    staircase cost 27x the decimations for a minimality claim ADR 0036 §2 retires.
 
-    The realized outputs are enumerated exactly instead, and cheaply. `_fit_collapse(B)` returns the
-    largest realizable triangle count <= B; call it R. Then for every budget in [R, B] the answer is
-    also R, because R is realizable and nothing realizable lies in (R, B]. So the next distinct
-    output is at budget R-1, and walking `B <- R-1` from the ceiling to the floor visits EVERY
-    realizable output exactly once, at one decimation each. Roughly two hundred on the reference
-    asset, and the enumeration is shared by every rung of the chain.
+    VALIDITY FIRST, THEN THE VERDICT. A candidate is admitted only if it already passes the
+    structural gates; an invalid one never costs a verdict. This is a PRUNE, not a new gate — the
+    checks are `measure.validity_gate_failures`, the same list the final certification calls — and
+    every level that ships is still certified on its DECODED SHIPPED BYTES afterwards.
 
-    Deviation is then certified in increasing triangle order and the FIRST feasible output is the
-    Pareto minimum, with no monotonicity assumed anywhere: everything smaller has been measured and
-    rejected. Rejections are nearly free — a single sampled point above the target ends the proof —
-    which is what makes an exhaustive scan affordable.
-
-    VALIDITY FIRST, THEN DEVIATION. A candidate is admitted to the search only if it already passes
-    the structural gates; an invalid one is discarded the moment it is built and never costs a
-    deviation measurement. This is a PRUNE, not a new gate: the checks are
-    `measure.validity_gate_failures` — the same list, the same thresholds, the same shared function
-    the final certification calls — and every level that ships is still certified on its DECODED
-    SHIPPED BYTES afterwards, in the order ADR 0033 ratifies. Nothing here can admit something
-    certification would refuse; it can only stop the search from proposing it.
-
-    WHY IT MATTERS, MEASURED. The rung is a triangle BUDGET question, and the decimator's output at
-    a given count is not guaranteed clean: cutting the rebuilt 1520-triangle shoe, the first count
-    that met the 15.560 mm target (390) carried one triangle 0.079 mm tall against a 0.147 mm floor.
-    Searching deviation-first found it, certified it, and failed the whole chain — with no way to
-    reach the valid candidate a few counts away, because the search had already committed. Filtering
-    first, the scan simply steps past that count and settles on a neighbouring one that is both
-    valid and inside the target. An invalid candidate ends nothing: the walk continues to its
-    neighbours, because "no valid candidate at exactly N triangles" is not "no valid candidate".
+    THE TWO MEMOS ARE SOUND AND FREE. A candidate PROVEN under a target is proven under every LARGER
+    target; a sampled witness over a target is a witness against every SMALLER one. Rung targets
+    ascend, so the first is the one that fires — measured on the reference asset, rungs 8-12 cost
+    zero verdicts because every candidate they ask about was already proven at a finer target.
     """
 
-    def __init__(self, source_obj, source_surface, gates, source_validity):
-        self.source_obj = source_obj
-        self.source = source_surface
+    def __init__(self, source_obj, source, gates, source_validity):
+        self.obj = source_obj
+        self.source = source
         self.gates = gates
-        # The pre-filter's input, identical to the one `certify` will use on the shipped bytes.
         self.source_validity = source_validity
-        self.entries = {}
-        self.outputs = []          # candidate KEYS (geometry digests), ascending by triangles
-        self.rejected = {}         # digest -> the failures that kept it out of the search
-        self.evaluations = 0
+        self.by_budget = {}          # budget -> digest, or None below the topology floor
+        self.by_digest = {}          # digest -> entry
         self.decimations = 0
+        self.verdicts = 0
+        self.verdict_nodes = 0
+        self.undecided = 0
 
-    def enumerate_outputs(self, floor_tris, ceiling_tris):
-        """Every realizable output in [floor, ceiling], ascending. One decimation per output.
+    def realize(self, budget):
+        """The candidate at this budget, memoized by budget AND by geometry. None below the floor.
 
-        The walk itself lives in `measure.enumerate_staircase` — away from `bpy`, so it can be
-        tested against synthetic staircases — and this method supplies the oracle plus the declared
-        refusal limits.
-
-        WHAT IS PROVEN AND WHERE. The walk is exhaustive GIVEN an oracle returning the greatest
-        realizable count at or below its budget. That contract is established in
-        `measure.bisect_to_budget`, which runs to convergence over a monotone evaluator and is
-        proven on synthetic staircases whose answers are known independently — NOT here, and not by
-        the spot checks, which can only ask the same oracle they are trying to audit. The spot
-        checks catch an oracle that contradicts ITSELF (the 1 %-early-stop and `B - 1` shapes, both
-        of which this pipeline actually shipped); they cannot catch one that is wrong consistently.
-        `measure.enumerate_staircase` states that boundary in full.
+        KEYED BY GEOMETRY, NOT BY TRIANGLE COUNT. Two different cleaned meshes can carry the same
+        count, and keying by the count discards one of them arbitrarily — possibly the only one that
+        meets a rung. The digest is the identity; the count is an attribute.
         """
-        started = time.time()
-        limits = CONFIG.SEARCH_LIMITS
-        retained_tris = 0
+        if budget in self.by_budget:
+            key = self.by_budget[budget]
+            return None if key is None else self.by_digest[key]
+        mesh, reached = candidate_mesh(self.obj, budget, self.source.diagonal)
+        self.decimations += 1
+        if mesh is None:
+            self.by_budget[budget] = None
+            return None
+        surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
+        bpy.data.meshes.remove(mesh)
+        key = surface.digest()
+        if key in self.by_digest:
+            self.by_budget[budget] = key
+            return self.by_digest[key]
+        failures = M.validity_gate_failures(surface.validity(), self.source_validity, self.gates)
+        # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level means
+        # re-running the decimator, and its input is a BUDGET; feeding back the post-cleanup
+        # triangle count would ask for a different mesh than the one the verdict was about.
+        entry = {
+            "digest": key, "tris": surface.tri_count, "budget": budget, "reached": reached,
+            "surface": surface, "valid": not failures,
+            "failure": failures[0] if failures else None,
+            "proven_le_mm": None, "witness_mm": 0.0,
+        }
+        self.by_digest[key] = entry
+        self.by_budget[budget] = key
+        return entry
+
+    def verdict(self, entry, target_mm, node_budget):
+        """The three-valued rung predicate for one candidate, with both memos applied."""
+        if not entry["valid"]:
+            return M.PROVEN_FAIL, 0, "invalid"
+        if entry["proven_le_mm"] is not None and entry["proven_le_mm"] <= target_mm:
+            return M.PROVEN_PASS, 0, "memo-pass"
+        if entry["witness_mm"] > target_mm:
+            return M.PROVEN_FAIL, 0, "memo-witness"
+        result = M.fits_target(self.source, entry["surface"], target_mm, node_budget)
+        self.verdicts += 1
+        self.verdict_nodes += result["nodes"]
+        entry["witness_mm"] = max(entry["witness_mm"], result["witness_mm"])
+        if result["verdict"] == M.PROVEN_PASS:
+            entry["proven_le_mm"] = (
+                target_mm if entry["proven_le_mm"] is None
+                else min(entry["proven_le_mm"], target_mm)
+            )
+        if result["verdict"] == M.UNDECIDED:
+            self.undecided += 1
+        return result["verdict"], result["nodes"], "measured"
+
+    def search(self, target_mm, floor_tris, ceiling_tris, node_budget):
+        """The winning entry for one rung and this rung's UNDECIDED count. `entry` may be None.
+
+        THE UNDECIDED COUNT IS RETURNED SEPARATELY BECAUSE A LOST RUNG HAS TWO CAUSES AND THEY ARE
+        NOT THE SAME FACT. "No structurally valid collapse output is inside this target" is the
+        geometry answering; "the node budget ran out before a bound closed" is FIDELITY TRADED FOR
+        TIME, and it must be loud in the manifest rather than indistinguishable from the first.
+        """
+        undecided = [0]
 
         def probe(budget):
-            """(step_count, shipped_key) — the decimator's count, and the count that would SHIP.
+            entry = self.realize(budget)
+            if entry is None:
+                log(f"    probe budget {budget:>6} -> below the topology floor")
+                return None, M.PROVEN_FAIL
+            verdict, nodes, how = self.verdict(entry, target_mm, node_budget)
+            if verdict == M.UNDECIDED:
+                undecided[0] += 1
+            log(f"    probe budget {budget:>6} -> {entry['tris']:>6} tris  {verdict:<12} "
+                f"{nodes:>8} nodes  ({how})")
+            return entry["reached"], verdict
 
-            Two numbers on purpose: the walk steps on the decimator's staircase, the cache is keyed
-            by the mesh that ships after cleanup. They are equal until the day cleanup dissolves a
-            face, and on that day interchanging them loses a candidate or raises `KeyError`.
-            """
-            nonlocal retained_tris
-            elapsed = time.time() - started
-            if elapsed > limits["max_enumeration_seconds"]:
-                raise M.EnumerationError(
-                    f"enumeration passed {elapsed:.0f}s (limit "
-                    f"{limits['max_enumeration_seconds']}s) after {self.decimations} decimations — "
-                    f"refusing rather than running unbounded. Raise the limit deliberately."
-                )
-            mesh, reached = candidate_mesh(self.source_obj, budget, self.source.diagonal)
-            self.decimations += 1
-            if mesh is None:
-                return None
-            surface = M.from_bpy_mesh(mesh, None, f"cand{budget}")
-            bpy.data.meshes.remove(mesh)
-            # KEYED BY GEOMETRY, NOT BY TRIANGLE COUNT. Two different cleaned meshes can carry the
-            # same count, and keying by the count discarded one of them arbitrarily — possibly the
-            # only one that met a rung. The digest is the identity; the count is an attribute.
-            key = surface.digest()
-            # THE PRUNE. Structural validity is decided here, before the candidate can cost a
-            # deviation measurement — and a rejection is remembered by digest, because the same
-            # mesh is reachable from several budgets and re-measuring it would pay for the check
-            # once per budget. Returning normally (rather than raising or returning None) is what
-            # keeps the staircase walking: this budget yields nothing, its neighbours may.
-            if key in self.rejected:
-                return reached, key
-            if key not in self.entries:
-                validity = surface.validity(self.gates)
-                # `require_baked_tangents=False`: tangents are baked by the EXPORTER, so a Blender
-                # candidate legitimately carries none yet. Every other gate in the shared list
-                # applies, and the baked-tangent gate is still enforced at certification, on the
-                # bytes where it is a real question.
-                failures = M.validity_gate_failures(
-                    validity, self.source_validity, self.gates, require_baked_tangents=False
-                )
-                if failures:
-                    self.rejected[key] = failures
-                    log(f"    reject {surface.tri_count:>5} tris  {failures[0]}")
-                    return reached, key
-                # THE BUDGET IS KEPT, not just the count it produced. Rebuilding a chosen level
-                # means re-running the decimator, and its input is a BUDGET; feeding back the
-                # post-cleanup triangle count would ask for a different mesh than the one certified.
-                self.entries[key] = {
-                    "tris": surface.tri_count, "budget": budget, "surface": surface,
-                    "lo_mm": None, "up_mm": None,
-                }
-                retained_tris += surface.tri_count
-                if retained_tris > limits["max_retained_tris"]:
-                    raise M.EnumerationError(
-                        f"holding {retained_tris} triangles of candidate geometry (limit "
-                        f"{limits['max_retained_tris']}) — every enumerated output stays resident "
-                        f"for the whole chain, so this grows with the square of an asset's size. "
-                        f"Refusing rather than swapping."
-                    )
-            return reached, key
+        budget = M.directed_rung_search(floor_tris, ceiling_tris, probe)
+        return (None if budget is None else self.realize(budget)), undecided[0]
 
-        try:
-            M.enumerate_staircase(
-                floor_tris, ceiling_tris, probe,
-                spot_checks=limits["max_enumeration_spot_checks"],
-                seed=limits["spot_check_seed"],
-                max_outputs=limits["max_enumerated_outputs"],
-            )
-            # Ascending by triangle count, which is the order the Pareto scan needs; the KEY stays
-            # the geometry digest, so two distinct meshes of equal size are both candidates.
-            self.outputs = sorted(self.entries, key=lambda k: self.entries[k]["tris"])
-        except M.EnumerationError as exc:
-            raise GenerationError("enumeration", str(exc)) from exc
-        log(f"  enumerated {len(self.outputs)} realizable outputs in [{floor_tris}, "
-            f"{ceiling_tris}] from {self.decimations} decimations "
-            f"({len(self.rejected)} discarded as structurally invalid before any deviation "
-            f"measurement, {limits['max_enumeration_spot_checks']} spot checks passed, "
-            f"{time.time() - started:.0f}s)")
-        return self.outputs
 
-    def deviation(self, key, target_mm):
-        """Certified deviation for the candidate `key`, decisive for `target_mm`.
-
-        Cached by GEOMETRY DIGEST. It was cached by triangle count, which assumed one mesh per
-        count — true of the reference asset and not true in general, and the day it broke the loser
-        would have been dropped without a word.
-
-        A cached bracket is REUSED ONLY WHEN IT DECIDES the new target — an upper bound under it
-        accepts, a sampled lower bound over it rejects — because the search stops as soon as the
-        current rung's question is answered, and a bracket measured against a coarse rung can be far
-        too loose to answer a fine one.
-        """
-        entry = self.entries[key]
-        if entry["up_mm"] is not None and (
-            entry["up_mm"] <= target_mm or entry["lo_mm"] > target_mm
-        ):
-            return entry
-        started = time.time()
-        result = M.certified_deviation(
-            self.source, entry["surface"],
-            self.gates["deviation_tol_m"], self.gates["deviation_max_nodes_search"],
-            target_mm=target_mm, rel_tol=self.gates["deviation_rel_tol_search"],
-        )
-        self.evaluations += 1
-        entry["lo_mm"] = result["mm"]
-        entry["up_mm"] = result["mm_upper"]
-        log(f"    probe {entry['tris']:>5} tris  dev in [{result['mm']:.3f}, "
-            f"{result['mm_upper']:.3f}] mm vs target {target_mm:.3f}  "
-            f"{time.time() - started:.1f}s")
-        return entry
 
 
 # ── export ───────────────────────────────────────────────────────────────────────────────────────
@@ -605,7 +493,7 @@ def certify(source, shipped, target_mm, gates, source_validity):
         source, shipped, gates["deviation_tol_m"], gates["deviation_max_nodes_certify"],
         rel_tol=gates["deviation_rel_tol_certify"],
     )
-    validity = shipped.validity(gates)
+    validity = shipped.validity()
     failures = M.validity_gate_failures(validity, source_validity, gates)
     if deviation["mm_upper"] > target_mm:
         failures.insert(0, (
@@ -617,7 +505,7 @@ def certify(source, shipped, target_mm, gates, source_validity):
 
 # ── the chain ────────────────────────────────────────────────────────────────────────────────────
 
-def build_chain(asset, root, run_render_gate, out_dir):
+def build_chain(asset, root, out_dir):
     """Cut one asset's chain end to end and return its manifest entry."""
     try:
         blend = CONFIG.resolve_source(root, asset["blend"])
@@ -629,11 +517,10 @@ def build_chain(asset, root, run_render_gate, out_dir):
     obj = bpy.data.objects.get(asset["object"])
     material = refuse_unsupported(obj)
     source = evaluated_source(obj)
-    source_validity = source.validity(CONFIG.GATES)
+    source_validity = source.validity()
     log(f"  source {source.tri_count} tris  {source.vert_count} verts  "
         f"components={source_validity['components']}  "
-        f"tangent_default_faces={source_validity['tangent_default_faces']}  "
-        f"radius={source.radius:.4f} m")
+        f"diagonal={source.diagonal * 1000.0:.1f} mm  radius={source.radius:.4f} m")
 
     probe = _fresh_copy(obj, "FloorProbe")
     modifier = probe.modifiers.new("C", "DECIMATE")
@@ -656,9 +543,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
     shipped_l0 = M.from_glb(l0_path, asset["l0_node"], "L0")
     identical, identity_reason = M.same_surface(source, shipped_l0)
     l0_dev_mm = M.vertex_deviation(source, shipped_l0)
-    l0_validity = shipped_l0.validity(CONFIG.GATES)
-    # L0 bakes its tangents too now (Yan ratified the host re-export), so it is held to exactly
-    # the same rule as every generated level: one tangent per vertex, and none degenerate.
+    l0_validity = shipped_l0.validity()
     l0_failures = M.validity_gate_failures(l0_validity, source_validity, CONFIG.GATES)
     log(f"  L0     shipped in {asset['l0_glb']} :: {asset['l0_node']} — "
         f"{shipped_l0.tri_count} tris / {shipped_l0.vert_count} decoded verts, "
@@ -691,12 +576,10 @@ def build_chain(asset, root, run_render_gate, out_dir):
         # L0 has just been proven identical to the evaluated .blend source, so the number carries
         # that proof forward to a verifier that cannot run Blender.
         "welded_digest": shipped_l0.welded_digest(),
-        "tangents_are_baked": True,
     }
 
-    candidates = Candidates(obj, source, CONFIG.GATES, source_validity)
-    # Once per asset, shared by every rung: the complete set of meshes this decimator can produce.
-    candidates.enumerate_outputs(floor_tris, source.tri_count)
+    directed = Directed(obj, source, CONFIG.GATES, source_validity)
+    diagonal_mm = source.diagonal * 1000.0
     levels = [l0]
     skipped = []
     previous = {"tris": l0["tris"], "surface": shipped_l0, "label": "L0",
@@ -704,12 +587,29 @@ def build_chain(asset, root, run_render_gate, out_dir):
     termination = "right_wall"
 
     for rung, target_mm in CONFIG.rungs():
-        best = M.pareto_minimal(candidates.outputs, candidates.deviation, target_mm)
+        node_budget = CONFIG.verdict_node_budget(diagonal_mm, target_mm)
+        log(f"  rung {rung} e={target_mm:.3f} mm  node budget {node_budget}/direction")
+        best, undecided = directed.search(target_mm, floor_tris, source.tri_count, node_budget)
         if best is None:
-            skipped.append({"rung": rung, "e_target_mm": round(target_mm, 4),
-                            "reason": "no candidate meets the target",
-                            "floor_tris": floor_tris})
-            log(f"  rung {rung} e={target_mm:.3f} mm: no candidate clears it — skipped")
+            # BUDGET-EXHAUSTED IS NOT STRUCTURALLY INFEASIBLE. A rung lost to a spent node budget is
+            # a rung an unbounded search might have kept: nothing unproven ships either way, but the
+            # chain is coarser for a reason that is about cost rather than about the geometry, and
+            # the manifest has to say which.
+            budget_bound = undecided > 0
+            skipped.append({
+                "rung": rung, "e_target_mm": round(target_mm, 4),
+                "reason": (
+                    f"{undecided} verdict(s) spent the whole {node_budget}-node budget without "
+                    f"closing a bound; UNDECIDED counts as FAIL, so this rung is lost to the "
+                    f"budget rather than to the geometry"
+                ) if budget_bound else "no structurally valid candidate meets the target",
+                "lost_to": "verdict_node_budget" if budget_bound else "geometry",
+                "undecided_verdicts": undecided,
+                "verdict_node_budget": node_budget,
+                "floor_tris": floor_tris,
+            })
+            log(f"  rung {rung} e={target_mm:.3f} mm: no candidate clears it — skipped "
+                f"({'BUDGET-EXHAUSTED' if budget_bound else 'structurally infeasible'})")
             continue
         shed = 1.0 - best["tris"] / previous["tris"]
         if shed < CONFIG.SKIP_FRACTION:
@@ -718,6 +618,9 @@ def build_chain(asset, root, run_render_gate, out_dir):
                 "shed_fraction": round(shed, 4),
                 "reason": f"sheds {shed:.1%} of {previous['label']}, below SKIP_FRACTION "
                           f"{CONFIG.SKIP_FRACTION:.0%}",
+                "lost_to": "skip_fraction",
+                "undecided_verdicts": undecided,
+                "verdict_node_budget": node_budget,
             })
             log(f"  rung {rung} e={target_mm:.3f} mm: best {best['tris']} tris sheds "
                 f"{shed:.1%} of {previous['label']} ({previous['tris']}) — SKIPPED (sparse chain)")
@@ -785,7 +688,7 @@ def build_chain(asset, root, run_render_gate, out_dir):
         switch_from_pairwise = CONFIG.switch_distance_m(pairwise["mm_upper"], slack)
         switch = max(switch_from_source, switch_from_pairwise)
         diagnostic = M.normal_angle_diagnostic(
-            source, shipped, CONFIG.RENDER_GATE["normal_samples"]
+            source, shipped, CONFIG.NORMAL_DIAGNOSTIC_SAMPLES
         )
         log(f"         certified dev={report['deviation']['mm']:.3f} mm "
             f"(ub {report['deviation']['mm_upper']:.3f})  "
@@ -815,10 +718,14 @@ def build_chain(asset, root, run_render_gate, out_dir):
             "switch_m": round(switch, 4),
             "switch_from_source_dev_m": round(switch_from_source, 4),
             "switch_from_pairwise_m": round(switch_from_pairwise, 4),
+            # The budget the rung's verdicts ran under. Re-derived by the verifier from the source's
+            # bounding box and the rung target, so a manifest cannot claim a search that this tree's
+            # constants would not have run.
+            "verdict_node_budget": node_budget,
+            "undecided_verdicts": undecided,
             "validity": report["validity"],
             "cleanup": cleanup_report,
             "reproducible": True,
-            "tangents_are_baked": True,
             "normal_diagnostic_deg": diagnostic,
         })
         previous = {"tris": shipped.tri_count, "surface": shipped,
@@ -844,69 +751,6 @@ def build_chain(asset, root, run_render_gate, out_dir):
             f"rendering, which costs nothing extra and is the honest thing to record. The named "
             f"successor when this starts mattering is meshoptimizer (ADR 0033, Simplifier choice).")
 
-    render_reports = []
-    render_material_source = "not run"
-    if run_render_gate and len(levels) > 1:
-        pairs = []
-        # L0's parent is the DECODED SHIPPED L0, not the Blender source surface: the gate renders
-        # what ships, at every level of the chain including the top one.
-        parents = [shipped_l0] + [
-            M.from_glb(level["staged"], None, f"L{level['level']}") for level in levels[1:-1]
-        ]
-        for level, parent in zip(levels[1:], parents):
-            child = M.from_glb(level["staged"], None, f"L{level['level']}")
-            pairs.append((f"{asset['name']}_L{level['level']}", parent, child, level["switch_m"]))
-        gate_material, render_material_source = shipped_material(l0_path, asset["l0_node"])
-        if gate_material is None:
-            render_material_source = (
-                f"FELL BACK to the .blend material {material.name!r} — {render_material_source}"
-            )
-            gate_material = material
-        log(f"  render gate material: {render_material_source}")
-        log(f"  render gate: {len(pairs)} pair(s) x {len(CONFIG.RENDER_GATE['views'])} view(s), "
-            f"Cycles {CONFIG.RENDER_GATE['samples']} spp at "
-            f"{CONFIG.RENDER_GATE['tile_px']}x{CONFIG.RENDER_GATE['supersample']} px")
-        render_reports = render_gate.compare(
-            pairs, gate_material, CONFIG.RENDER_GATE, CONFIG.REFERENCE_VIEW,
-            os.path.join(out_dir, "renders"),
-        )
-        for report in render_reports:
-            report["material_source"] = render_material_source
-        for level, report in zip(levels[1:], render_reports):
-            level["render_gate"] = report
-            if report["abstained"]:
-                log(f"         render L{level['level']} vs {level['parent_level']} at "
-                    f"{report['distance_m']:.0f} m: ABSTAINS — "
-                    f"{report['screen_footprint_px']:.1f} px across, under the ratified "
-                    f"{report['min_footprint_px']:.0f} px")
-                continue
-            log(f"         render L{level['level']} vs {level['parent_level']} at "
-                f"{report['distance_m']:.0f} m: worst mean |dI|={report['worst_mean_abs_diff']:.4f} "
-                f"frac>{CONFIG.RENDER_GATE['over_threshold']}={report['worst_frac_over']:.4f}  "
-                f"defect score={report['worst_defect_score']:.3f} "
-                f"(0=render noise, 1={CONFIG.RENDER_GATE['defect_normal_deg']:g}deg broken "
-                f"normals, limit {CONFIG.RENDER_GATE['defect_fraction']:g}) -> "
-                f"{'PASS' if report['pass'] else 'FAIL'}")
-        bad = [r for r in render_reports if not r["abstained"] and not r["pass"]]
-        armed = CONFIG.RENDER_GATE_BLOCKING and not str(
-            render_material_source
-        ).startswith("FELL BACK")
-        if bad and armed:
-            raise GenerationError(
-                "render-gate",
-                "the rendered difference exceeded the declared thresholds for: "
-                + ", ".join(r["label"] for r in bad),
-            )
-        if bad:
-            log("  ***********************************************************************")
-            log(f"  RENDER GATE FAILED for {', '.join(r['label'] for r in bad)} — and did NOT")
-            log("  block. Blocking is RATIFIED but not ARMED: this run judged the levels under a")
-            log("  FALLBACK material, because Blender cannot read the KTX2 textures the mip bake")
-            log("  writes, and blocking on a number measured with the wrong textures would")
-            log("  certify the wrong thing. Every number is recorded per level and this warning is")
-            log("  repeated by `chain.py --verify`. Fix the material path and it arms itself.")
-            log("  ***********************************************************************")
-
     return {
         "name": asset["name"],
         "source": {
@@ -922,13 +766,17 @@ def build_chain(asset, root, run_render_gate, out_dir):
         },
         "topology_floor_tris": floor_tris,
         "termination": termination,
-        "deviation_evaluations": candidates.evaluations,
-        "enumerated_outputs": len(candidates.outputs),
-        "decimations": candidates.decimations,
+        # The directed search's own run counters. `undecided` is the one to watch: it is the number
+        # of verdicts that spent their whole budget and were treated as failures, so a non-zero
+        # value means the chain is coarser than an unbounded search would have found it.
+        "decimations": directed.decimations,
+        "verdicts": directed.verdicts,
+        "verdict_nodes": directed.verdict_nodes,
+        "undecided_verdicts": directed.undecided,
+        "distinct_candidates": len(directed.by_digest),
         "skipped_rungs": skipped,
         "levels": levels,
         "material": material.name,
-        "render_material_source": render_material_source,
     }, levels
 
 
@@ -968,11 +816,8 @@ def merge_targeted(regenerated, root, only, generator):
 def main(argv):
     root = CONFIG.repo_root()
     only = None
-    run_render_gate = True
     if "--asset" in argv:
         only = argv[argv.index("--asset") + 1]
-    if "--no-render-gate" in argv:
-        run_render_gate = False
 
     assert_toolchain()
     work = tempfile.mkdtemp(prefix="lod-chain-")
@@ -995,20 +840,12 @@ def main(argv):
             "right_wall_m": round(CONFIG.RIGHT_WALL_M, 6),
             "right_wall_source": CONFIG.RIGHT_WALL_SOURCE,
             "reference_view": CONFIG.REFERENCE_VIEW,
-            # The ruling travels WITH the corpus, not just beside it in a source file: a threshold
-            # someone ratified by eye is only meaningful next to who ruled and on what.
-            "ratification": dict(CONFIG.RATIFICATION_EVIDENCE["ruling"]),
         },
         "gates": {
             "numeric": {k: v for k, v in CONFIG.GATES.items()},
-            "render": {k: v for k, v in CONFIG.RENDER_GATE.items() if k != "views"},
-            "render_views": [list(v) for v in CONFIG.RENDER_GATE["views"]],
-            "search_limits": dict(CONFIG.SEARCH_LIMITS),
-            "render_gate_blocking": CONFIG.RENDER_GATE_BLOCKING,
-            "render_gate_unratified_note": (
-                "defect_fraction is not ratified; a failing rendered-difference gate is RECORDED "
-                "and reported, not enforced. Every other gate blocks unconditionally."
-            ) if not CONFIG.RENDER_GATE_BLOCKING else "",
+            "normal_diagnostic_samples": CONFIG.NORMAL_DIAGNOSTIC_SAMPLES,
+            "verdict_nodes_per_square": CONFIG.VERDICT_NODES_PER_SQUARE,
+            "verdict_nodes_cap": CONFIG.VERDICT_NODES_CAP,
         },
         "assets": [],
     }
@@ -1018,7 +855,7 @@ def main(argv):
         for asset in CONFIG.ASSETS:
             if only and asset["name"] != only:
                 continue
-            entry, levels = build_chain(asset, root, run_render_gate, work)
+            entry, levels = build_chain(asset, root, work)
             for level in levels[1:]:
                 published.append((level["staged"], level["glb"], level))
             manifest["assets"].append(entry)

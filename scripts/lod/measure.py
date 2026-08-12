@@ -17,12 +17,19 @@ bound is within `tol` of the best sample seen, which BRACKETS the true worst cas
 on the UPPER end, so a bracket that failed to close costs triangles and never honesty. Sampling, at
 any density anyone can afford, proves nothing about the spike that pops.
 
+TWO CONSUMERS, TWO QUESTIONS (ADR 0036 §1). CERTIFICATION wants the number, and runs the bracket
+above. The SEARCH only ever wanted a Boolean — "is this candidate inside this rung?" — and paying
+for a bracket to answer it is what froze the old rung scan on a 2 784-triangle mesh. `fits_target`
+answers the Boolean directly, with a declared node budget and three values: PROVEN_FAIL at the
+first sampled witness over the target, PROVEN_PASS when every live bound is under it, UNDECIDED
+when the budget runs out. UNDECIDED counts as FAIL at every caller: it may cost triangles, never
+honesty.
+
 WHAT DEVIATION CANNOT SEE, and therefore what else lives here: a vanished component (near-zero
-Hausdorff), a needle triangle whose interpolated normal is noise, a duplicated face, a NaN, a
-flipped winding, and a UV-degenerate face whose tangent bevy will default. Those are counted, not
-estimated.
+Hausdorff), a duplicated face, a NaN and a flipped winding. Those are counted, not estimated.
 """
 
+import heapq
 import json
 import math
 import struct
@@ -157,16 +164,7 @@ def surface_from_bytes(blob, node_name=None, name=None):
     positions = gltf_to_blender(_accessor(gltf, binary, attributes["POSITION"]).astype(np.float64))
     normals = gltf_to_blender(_accessor(gltf, binary, attributes["NORMAL"]).astype(np.float64))
     uvs = _accessor(gltf, binary, attributes["TEXCOORD_0"]).astype(np.float64)
-    # TANGENT is vec4: xyz is the tangent, w the bitangent sign. Decoded when present because the
-    # loader USES it verbatim rather than generating one — so it is part of what ships, and the
-    # gate measures it rather than a proxy for it.
-    tangents = None
-    if "TANGENT" in attributes:
-        raw = _accessor(gltf, binary, attributes["TANGENT"]).astype(np.float64)
-        tangents = np.concatenate(
-            [gltf_to_blender(raw[:, :3]), raw[:, 3:4]], axis=1
-        )
-    return Surface(positions, indices, normals[indices], uvs[indices], name, tangents)
+    return Surface(positions, indices, normals[indices], uvs[indices], name)
 
 
 def from_bpy_mesh(mesh, matrix=None, name="source"):
@@ -210,11 +208,8 @@ def from_bpy_mesh(mesh, matrix=None, name="source"):
 class Surface:
     """Positions, triangles, per-corner normals and UVs, plus every derived quality counter."""
 
-    def __init__(self, verts, tri_v, corner_n, corner_uv, name, tangents=None):
+    def __init__(self, verts, tri_v, corner_n, corner_uv, name):
         self.name = name
-        #: Per-vertex vec4 tangents AS SHIPPED, or None when the file carries none (in which
-        #: case the loader generates them and this pipeline can only gate a proxy).
-        self.tangents = None if tangents is None else np.ascontiguousarray(tangents)
         self.verts = np.ascontiguousarray(verts, dtype=np.float64)
         self.tri_v = np.ascontiguousarray(tri_v, dtype=np.int64)
         self.corner_n = np.ascontiguousarray(corner_n, dtype=np.float64)
@@ -227,10 +222,6 @@ class Surface:
         self.tri_area = 0.5 * np.linalg.norm(cross, axis=1)
         self.tri_count = int(len(self.tri_v))
         self.vert_count = int(len(self.verts))
-
-        uv0, uv1, uv2 = self.corner_uv[:, 0], self.corner_uv[:, 1], self.corner_uv[:, 2]
-        a, b = uv1 - uv0, uv2 - uv0
-        self.uv_area = 0.5 * np.abs(a[:, 0] * b[:, 1] - a[:, 1] * b[:, 0])
 
         lo, hi = self.verts.min(axis=0), self.verts.max(axis=0)
         self.bbox_min, self.bbox_max = lo, hi
@@ -359,7 +350,7 @@ class Surface:
         return len({find(int(v)) for v in used})
 
     # -- the validity gates ----------------------------------------------------------------------
-    def validity(self, gates):
+    def validity(self):
         """Every structural check, as plain counts. The caller compares them with the thresholds."""
         weld = self.welded()
         faces = np.sort(weld[self.tri_v], axis=1)
@@ -390,46 +381,24 @@ class Surface:
         pairs = forward[interior][order].reshape(-1, 2)
         flips = int((pairs[:, 0] == pairs[:, 1]).sum())
 
-        bad_uv = self.uv_area < gates["uv_area_eps"]
-        touched = np.zeros(self.vert_count, dtype=np.int64)
-        bad_touched = np.zeros(self.vert_count, dtype=np.int64)
-        np.add.at(touched, self.tri_v.reshape(-1), 1)
-        np.add.at(bad_touched, self.tri_v[bad_uv].reshape(-1), 1)
-
-        # THE TANGENTS THAT SHIP. `tangent_default_faces` above is a necessary condition on the
-        # UVs; this is the thing itself. mikktspace declines a corner for reasons a UV-area test
-        # cannot see — measured on this corpus, three levels had zero UV-degenerate faces and one
-        # give-up tangent each.
-        if self.tangents is None:
-            # Absent is not clean. The caller decides whether a level is allowed to lack them;
-            # this only reports what is there, and zero baked tangents is a fact, not a pass.
-            baked, degenerate, worst = 0, 0, 0.0
-        else:
-            lengths = np.linalg.norm(self.tangents[:, :3], axis=1)
-            signs = np.abs(self.tangents[:, 3])
-            bad = (
-                (lengths < gates["tangent_min_length"])
-                | (~np.isfinite(self.tangents).all(axis=1))
-                | (np.abs(signs - 1.0) > 1e-3)
-            )
-            baked, degenerate = int(len(lengths)), int(bad.sum())
-            worst = float(lengths.min())
-
         return {
             "tris": self.tri_count,
             "verts": self.vert_count,
-            "baked_tangents": baked,
-            "degenerate_tangents": degenerate,
-            "min_tangent_length": round(worst, 9),
             "components": self.components(),
             "duplicate_faces": duplicates,
             "nonfinite_attrs": nonfinite,
             "orientation_flips": flips,
+            # NON-EMPTY, as a counter so it sits in the same table as every other gate. A collapse
+            # that reached zero triangles is not a level, and every number beside it would be a
+            # statement about nothing.
+            "empty_surfaces": 0 if self.tri_count else 1,
+            # DIAGNOSTICS, gated by nothing here (ADR 0036 §4): manifoldness is the armour
+            # pipeline's law, and the deviation bound is what polices decimator misbehaviour in
+            # this lane. Recorded per level and re-derived from the shipped bytes by the verifier,
+            # so a regression is legible.
             "boundary_edges": int((edge_counts == 1).sum()),
             "nonmanifold_edges": int((edge_counts > 2).sum()),
             "min_tri_area_mm2": float(self.tri_area.min() * 1e6) if self.tri_count else 0.0,
-            "tangent_default_faces": int(bad_uv.sum()),
-            "tangent_default_verts": int(((touched > 0) & (touched == bad_touched)).sum()),
             "bbox_mm": [round(float(v) * 1000.0, 4) for v in (self.bbox_max - self.bbox_min)],
             "radius_m": round(self.radius, 6),
             "origin_radius_m": round(self.origin_radius, 6),
@@ -470,9 +439,11 @@ def branch_and_bound(seeds, distance_at, tol, max_nodes, target=None, rel_tol=0.
     question is decided — upper already under it (accept) or a SAMPLED point already over it
     (reject). Both are sound one-directional facts, which is why a caller may apply them per
     direction of a two-way measurement.
-    """
-    import heapq
 
+    THE CONVEX BOUND IS NOT APPLIED HERE, and that is deliberate. This function's job is to CLOSE a
+    bracket, not to accept, and ADR 0036 leaves winner certification untouched: a tighter upper
+    bound would move every shipped certificate for a reason unrelated to the search rebuild.
+    """
     best = 0.0
     pruned = 0.0
     heap = []
@@ -541,8 +512,309 @@ def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
     return branch_and_bound(seeds, distance_at, tol, max_nodes, target, rel_tol)
 
 
-class EnumerationError(Exception):
-    """The decimator's realizable outputs could not be enumerated completely. Never degrade."""
+# ── the budgeted Boolean verdict (ADR 0036 §1) ───────────────────────────────────────────────────
+
+PROVEN_PASS = "PROVEN_PASS"
+PROVEN_FAIL = "PROVEN_FAIL"
+UNDECIDED = "UNDECIDED"
+
+
+def point_triangle_distances(points, a, b, c):
+    """Distance from each of `points` to the triangle (a, b, c), elementwise. Shapes (N, 3).
+
+    Ericson's region test, written branchlessly so a whole seed pass is one numpy call. The regions
+    are applied in REVERSE priority order (interior, BC, AC, C, AB, B, A) because the reference
+    algorithm returns from the first region that matches, and a later `where` would otherwise
+    overwrite an earlier decision.
+
+    SOUNDNESS DOES NOT DEPEND ON THE REGION LOGIC BEING RIGHT, only on the point being ON the
+    triangle. Every branch returns |p - q| for some q in the convex hull of a, b, c, so the answer
+    is never BELOW the true point-triangle distance — and `convex_patch_bounds` only ever needs an
+    upper bound. A region bug would cost tightness, never a false certificate. `test_refusals`
+    pins the tightness against a brute-force reference anyway.
+
+    IT FAILS CLOSED. A needle triangle can drive the barycentric denominators to zero and produce a
+    non-finite closest point, which would be an UNDER-report — the one direction that is not safe.
+    Any non-finite answer becomes infinity, so the caller's `min` discards the convex bound and the
+    covering-radius subdivision decides the patch.
+    """
+    ab, ac = b - a, c - a
+    ap = points - a
+    d1 = (ab * ap).sum(-1)
+    d2 = (ac * ap).sum(-1)
+    bp = points - b
+    d3 = (ab * bp).sum(-1)
+    d4 = (ac * bp).sum(-1)
+    cp = points - c
+    d5 = (ab * cp).sum(-1)
+    d6 = (ac * cp).sum(-1)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+
+    def _ratio(numerator, denominator):
+        safe = np.where(denominator == 0.0, 1.0, denominator)
+        return np.clip(numerator / safe, 0.0, 1.0)
+
+    # Interior of the face.
+    denominator = va + vb + vc
+    v = _ratio(vb, denominator)
+    w = _ratio(vc, denominator)
+    closest = a + v[..., None] * ab + w[..., None] * ac
+    # Edge BC, then AC, then C, then AB, then B, then A — increasing priority.
+    mask = (va <= 0) & ((d4 - d3) >= 0) & ((d5 - d6) >= 0)
+    t = _ratio(d4 - d3, (d4 - d3) + (d5 - d6))
+    closest = np.where(mask[..., None], b + t[..., None] * (c - b), closest)
+    mask = (vb <= 0) & (d2 >= 0) & (d6 <= 0)
+    t = _ratio(d2, d2 - d6)
+    closest = np.where(mask[..., None], a + t[..., None] * ac, closest)
+    mask = (d6 >= 0) & (d5 <= d6)
+    closest = np.where(mask[..., None], c, closest)
+    mask = (vc <= 0) & (d1 >= 0) & (d3 <= 0)
+    t = _ratio(d1, d1 - d3)
+    closest = np.where(mask[..., None], a + t[..., None] * ab, closest)
+    mask = (d3 >= 0) & (d4 <= d3)
+    closest = np.where(mask[..., None], b, closest)
+    mask = (d1 <= 0) & (d2 <= 0)
+    closest = np.where(mask[..., None], a, closest)
+    out = np.linalg.norm(points - closest, axis=-1)
+    return np.where(np.isfinite(out), out, np.inf)
+
+
+def covering_patch_bounds(corners, distances):
+    """The covering-radius bound over N patches at once. `corners` (N, 3, 3), `distances` (N, 3).
+
+    The vectorised twin of `_patch_bound`, which the certifying branch-and-bound still calls one
+    patch at a time. Same expression, same proof.
+    """
+    spans = np.linalg.norm(corners[:, :, None, :] - corners[:, None, :, :], axis=-1)
+    return (distances + spans.max(axis=2)).min(axis=1)
+
+
+def convex_patch_bounds(corners, hits, dst):
+    """THE CONVEX BOUND (ADR 0036 §6): min_k max_j dist(v_j, tri_k), over N patches at once.
+
+    `hits[n][k]` is the index of the triangle of `dst` that the BVH returned as NEAREST to corner k
+    of patch n, or -1 when the query hit nothing.
+
+    WHY IT IS AN UPPER BOUND. For a FIXED triangle T, p -> dist(p, T) is convex, so its maximum over
+    a patch — the convex hull of three corners — is attained at a corner. And dist(p, dst) <=
+    dist(p, T) for every T in dst. So for each corner's nearest triangle tri_k,
+
+        max_{p in S} dist(p, dst) <= max_{p in S} dist(p, tri_k) = max_j dist(v_j, tri_k)
+
+    and the minimum over k of those three numbers is the tightest of three valid bounds. Nine
+    point-triangle distances, no BVH query, and no subdivision.
+
+    WHY IT MATTERS, MEASURED. The covering-radius bound prices an ACCEPTANCE at target^-2 — proving
+    a maximum is under `e` forces every patch on the whole surface below `e`'s length scale, whether
+    or not the surfaces are anywhere near each other there. This one does not: on a near-coplanar
+    region all three corners see the same plane, `max_j dist(v_j, tri_k)` collapses to the largest
+    corner distance, and the patch is proven with zero subdivision. The caller takes the MINIMUM of
+    the two, so it can only ever tighten.
+    """
+    count = len(corners)
+    best = np.full(count, np.inf)
+    for k in range(3):
+        index = hits[:, k]
+        present = index >= 0
+        safe = np.where(present, index, 0)
+        a, b, c = dst.p0[safe], dst.p1[safe], dst.p2[safe]
+        worst = np.zeros(count)
+        for j in range(3):
+            worst = np.maximum(worst, point_triangle_distances(corners[:, j], a, b, c))
+        best = np.minimum(best, np.where(present, worst, np.inf))
+    return best
+
+
+def patch_bounds(corners, distances, hits, dst, target):
+    """Both bounds, minimised — and the expensive one skipped where the cheap one already closed."""
+    bounds = covering_patch_bounds(corners, distances)
+    open_patches = np.flatnonzero(bounds > target)
+    if len(open_patches):
+        bounds[open_patches] = np.minimum(
+            bounds[open_patches],
+            convex_patch_bounds(corners[open_patches], hits[open_patches], dst),
+        )
+    return bounds
+
+
+def one_way_fits(src, dst, target_m, node_budget):
+    """Does every point of `src` lie within `target_m` of `dst`? Returns (verdict, witness, nodes).
+
+    THREE DIFFERENCES FROM `_one_way`, all of them about answering the caller's actual question
+    instead of bracketing a number nobody reads.
+
+    WITNESS FIRST. The corner distances are swept in ascending vertex index and the FIRST one over
+    the target returns immediately. A rejection is one BVH query deep in the good case and never
+    builds a heap at all. (Only vertices a triangle references are swept: an unreferenced vertex is
+    not on the surface, and rejecting on one would be a lie.)
+
+    LAZY SEED CONSTRUCTION. Every source triangle's bound is computed in one vectorised pass off the
+    corner distances already in hand, and the heap receives ONLY the triangles whose bound exceeds
+    the target. Every other triangle is already decided — its whole patch is proven under the target
+    — so it is not a node, not a heap entry and not a memory cost. When the live set is empty the
+    answer is PROVEN_PASS before a single subdivision.
+
+    TARGET-ONLY PRUNING. `branch_and_bound` subdivides until a bracket closes to `rel_tol`, which is
+    the mechanism that froze on a 2 784-triangle mesh: the bracket had to shrink by ~58 % to answer
+    a question a single sample could have answered. Here a child is queued only if its bound is over
+    the target, and the loop ends when the heap empties (PASS), a sample exceeds the target (FAIL),
+    or the node budget is spent (UNDECIDED).
+
+    SOUNDNESS is the same as the bracket's: every live bound under the target proves the maximum is
+    under it, and a SAMPLED point over the target is a witness that it is not. Neither statement
+    needs the bracket to close.
+    """
+    from mathutils import Vector
+
+    find = dst.bvh.find_nearest
+    cache = {}
+
+    def probe(key, point):
+        """(distance, nearest triangle index). The triangle is what the convex bound needs."""
+        value = cache.get(key)
+        if value is None:
+            hit = find(Vector(point))
+            value = (hit[3], int(hit[2])) if hit[0] is not None else (0.0, -1)
+            cache[key] = value
+        return value
+
+    witness = 0.0
+    corner_d = np.zeros(src.vert_count, dtype=np.float64)
+    corner_t = np.full(src.vert_count, -1, dtype=np.int64)
+    for index in np.unique(src.tri_v):
+        distance, triangle = probe(int(index), src.verts[index])
+        corner_d[index] = distance
+        corner_t[index] = triangle
+        if distance > witness:
+            witness = distance
+        if distance > target_m:
+            return PROVEN_FAIL, witness, 0
+
+    corners = np.stack([src.p0, src.p1, src.p2], axis=1)
+    distances = corner_d[src.tri_v]
+    hits = corner_t[src.tri_v]
+    bounds = patch_bounds(corners, distances, hits, dst, target_m)
+    live = np.flatnonzero(bounds > target_m)
+    if not len(live):
+        return PROVEN_PASS, witness, 0
+
+    heap = []
+    counter = 0
+    for t in live:
+        counter += 1
+        heapq.heappush(heap, (-float(bounds[t]), counter, corners[t], distances[t], hits[t]))
+
+    nodes = 0
+    while heap:
+        if nodes >= node_budget:
+            return UNDECIDED, witness, nodes
+        _, _, patch, patch_d, patch_h = heapq.heappop(heap)
+        nodes += 1
+        a, b, c = patch
+        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
+        d_ab, t_ab = probe(("m", tuple(ab)), ab)
+        d_bc, t_bc = probe(("m", tuple(bc)), bc)
+        d_ca, t_ca = probe(("m", tuple(ca)), ca)
+        witness = max(witness, d_ab, d_bc, d_ca)
+        if witness > target_m:
+            return PROVEN_FAIL, witness, nodes
+        children = np.array([
+            (a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca),
+        ])
+        child_d = np.array([
+            (patch_d[0], d_ab, d_ca), (d_ab, patch_d[1], d_bc),
+            (d_ca, d_bc, patch_d[2]), (d_ab, d_bc, d_ca),
+        ])
+        child_h = np.array([
+            (patch_h[0], t_ab, t_ca), (t_ab, patch_h[1], t_bc),
+            (t_ca, t_bc, patch_h[2]), (t_ab, t_bc, t_ca),
+        ])
+        child_bounds = patch_bounds(children, child_d, child_h, dst, target_m)
+        for index in range(4):
+            if child_bounds[index] > target_m:
+                counter += 1
+                heapq.heappush(heap, (
+                    -float(child_bounds[index]), counter,
+                    children[index], child_d[index], child_h[index],
+                ))
+    return PROVEN_PASS, witness, nodes
+
+
+def fits_target(source, candidate, target_mm, node_budget):
+    """TWO-WAY budgeted verdict: is the deviation between these surfaces within `target_mm`?
+
+    Both directions, because one-way misses a hole — the same reason `certified_deviation` runs
+    both. The source->candidate direction runs first (a deleted boss is visible only from it, and it
+    is the cheaper rejection in practice). A FAIL in either direction is a FAIL; UNDECIDED in
+    either, with no FAIL, is UNDECIDED. The budget is PER DIRECTION, so a verdict costs at most
+    `2 * node_budget` nodes.
+
+    THE WITNESS IS THE DEVIATION. Measured on the shipped corpus, the largest sampled point of a
+    PROVEN_PASS reproduces the certified `dev_source_mm` to four decimals — the Boolean recovers the
+    number as a by-product, without ever bracketing it. It is returned for logging and never gated
+    on: the shipped bound comes from `certify`, on the decoded bytes, at the certification
+    tolerance.
+    """
+    if source.digest() == candidate.digest():
+        return {"verdict": PROVEN_PASS, "witness_mm": 0.0, "nodes": 0}
+    target_m = target_mm / 1000.0
+    verdict_a, witness_a, nodes_a = one_way_fits(source, candidate, target_m, node_budget)
+    if verdict_a == PROVEN_FAIL:
+        return {"verdict": PROVEN_FAIL, "witness_mm": witness_a * 1000.0, "nodes": nodes_a}
+    verdict_b, witness_b, nodes_b = one_way_fits(candidate, source, target_m, node_budget)
+    witness = max(witness_a, witness_b) * 1000.0
+    nodes = nodes_a + nodes_b
+    if verdict_b == PROVEN_FAIL:
+        return {"verdict": PROVEN_FAIL, "witness_mm": witness, "nodes": nodes}
+    if UNDECIDED in (verdict_a, verdict_b):
+        return {"verdict": UNDECIDED, "witness_mm": witness, "nodes": nodes}
+    return {"verdict": PROVEN_PASS, "witness_mm": witness, "nodes": nodes}
+
+
+def directed_rung_search(floor_tris, ceiling_tris, probe):
+    """The cheapest candidate a rung can find, by bisection over integer triangle BUDGETS.
+
+    `probe(budget) -> (reached, verdict)`, where `reached` is the count the DECIMATOR landed on
+    (None below the topology floor) and `verdict` is one of the three above. Returns the winning
+    budget, or None.
+
+    THE PROBE ORDER IS FIXED AND INTEGER. `mid = (lo + hi) // 2`, no floats, no randomness, no
+    clock — the same asset gives the same probes on any machine, which is what makes two runs
+    comparable field for field. On PROVEN_PASS the search moves below the count the decimator
+    REACHED rather than below the budget it was asked for: every budget in [reached, mid] realizes
+    the same mesh, so `reached - 1` is the next distinct question (`bisect_to_budget` is where that
+    step's soundness is established).
+
+    UNDECIDED IS TREATED AS FAIL, and so is a structurally invalid candidate and a budget below the
+    floor: all four move the search RICHER. An undecidable candidate may cost triangles; it may
+    never cost honesty (ADR 0036 §1).
+
+    WHAT THIS GIVES UP, DELIBERATELY. The exhaustive staircase proved "no valid output with fewer
+    triangles meets this rung". A bisection over a predicate that is not monotone cannot prove that
+    — it finds a low-triangle valid candidate deterministically. ADR 0036 §2 retires the minimality
+    claim on the record: what the player depends on is the certified bound at the switch distance,
+    which is untouched.
+
+    It lives here, away from `bpy`, so the loop can be tested against a synthetic probe — including
+    the one that says UNDECIDED to everything, which must select nothing.
+    """
+    low, high = floor_tris, ceiling_tris
+    best = None
+    while low <= high:
+        middle = (low + high) // 2
+        reached, verdict = probe(middle)
+        if verdict == PROVEN_PASS:
+            best = middle
+            high = reached - 1
+        else:
+            low = middle + 1
+    return best
+
+
+class DecimatorContractError(Exception):
+    """The decimation oracle did not behave like the monotone step function it is taken to be."""
 
 
 #: Hard cap on bisection steps. The ordinary case exhausts its bracket in ~60; the worst case
@@ -565,10 +837,12 @@ def bisect_to_budget(evaluate, budget, max_steps=BISECTION_MAX_STEPS):
     32 can. Rather than assume Blender's ratio quantisation is coarse enough (it may well be; nobody
     measured it), the loop now exhausts the bracket and the precondition disappears.
 
-    THIS IS WHERE THE ENUMERATION'S CONTRACT IS ESTABLISHED, and it is deliberately a pure function
-    of an injected `evaluate` so it can be checked against synthetic staircases whose answer is
-    known independently — see `test_refusals.BisectionTests`. That matters because the enumeration
-    built on top cannot establish it: an enumerator can only ask the oracle, and an oracle that lies
+    THIS IS WHERE THE DECIMATOR'S CONTRACT IS ESTABLISHED, and it is deliberately a pure function of
+    an injected `evaluate` so it can be checked against synthetic staircases whose answer is known
+    independently — see `test_refusals.BisectionTests`. It matters to `directed_rung_search`, whose
+    step from an accepted candidate to the next distinct question is `reached - 1`: that step is
+    sound only if `reached` really is the greatest realizable count at or below the budget. A search
+    built on top cannot establish it — it can only ask the oracle, and an oracle that lies
     consistently answers every question consistently. The honesty has to come from here.
     """
     # BOTH ENDPOINTS ARE EVALUATED, and neither is reachable by halving an open interval.
@@ -599,137 +873,10 @@ def bisect_to_budget(evaluate, budget, max_steps=BISECTION_MAX_STEPS):
             low = middle
         else:
             high = middle
-    raise EnumerationError(
+    raise DecimatorContractError(
         f"the budget bisection did not exhaust its bracket in {max_steps} steps — the evaluator "
         f"is not behaving like a monotone step function"
     )
-
-
-def enumerate_staircase(floor_tris, ceiling_tris, probe, spot_checks=0, seed=0, max_outputs=None):
-    """Every mesh the decimator realizes in [floor, ceiling]. Returns `{key: step_count}`.
-
-    `probe(budget)` returns `(step_count, key)` or `None`:
-
-      * `step_count` is what the DECIMATOR produced, and it is the domain the walk steps in.
-      * `key` identifies the mesh that would actually SHIP — a GEOMETRY HASH, not a triangle count.
-        Two different cleaned meshes can carry the same count, and keying by count silently threw
-        one of them away, possibly the only one that met a rung.
-
-    THE TWO ARE DIFFERENT THINGS AND MUST NOT BE INTERCHANGED. An earlier version stepped on the raw
-    count, cached candidates under the cleaned count, and looked candidates up by the raw one:
-    correct only until cleanup dissolved a face, then a `KeyError` or a lost candidate.
-
-    ── WHAT THIS FUNCTION PROVES, AND WHAT IT TAKES ON TRUST ────────────────────────────────────
-
-    IT IS EXHAUSTIVE **GIVEN** AN ORACLE THAT MEETS ITS CONTRACT — `probe(B)` returning the greatest
-    realizable count at or below `B`. Given that, walking `budget <- step_count - 1` from the ceiling
-    visits every realizable output exactly once, because nothing realizable lies in the interval the
-    jump skips.
-
-    IT CANNOT VERIFY THAT CONTRACT, and does not claim to. An enumeration interrogating its own
-    oracle is circular: `lambda b: (min(b, 5), min(b, 5))` answers every question this function can
-    ask, perfectly consistently, while concealing everything above 5. No number of probes finds
-    that, because the probes are addressed to the liar. `test_refusals` pins this as a KNOWN,
-    UNDETECTABLE case so nobody re-derives a stronger claim from a green suite.
-
-    The contract is established instead where it is a mathematical property rather than a
-    conversation: `bisect_to_budget` runs to convergence over a monotone evaluator, and is proven
-    on synthetic staircases whose answers are known by construction.
-
-    THE SPOT CHECKS ARE REGRESSION DEFENCE, NOT PROOF. They catch an oracle that becomes internally
-    INCONSISTENT — the 1 %-early-stop class, where `probe(r)` stops agreeing with `r` for a value
-    the walk itself found realizable, and the `f(B) = B - 1` class. That is the failure this
-    pipeline actually shipped once, so it is worth catching cheaply. It is not the same as proof.
-    """
-    rng = np.random.default_rng(seed)
-    by_key = {}
-    incumbents = {}
-    skipped = []
-    budget = ceiling_tris
-    while budget >= floor_tris:
-        answer = probe(budget)
-        if answer is None:
-            break
-        step_count, key = answer
-        if step_count > budget:
-            raise EnumerationError(
-                f"the decimation oracle returned {step_count} for a budget of {budget} — it must "
-                f"return the greatest realizable count AT OR BELOW the budget"
-            )
-        by_key.setdefault(key, step_count)
-        incumbents.setdefault(step_count, step_count)
-        if max_outputs is not None and len(by_key) > max_outputs:
-            raise EnumerationError(
-                f"more than {max_outputs} realizable outputs below {ceiling_tris} triangles; "
-                f"refusing to hold them all. Raise "
-                f"config.SEARCH_LIMITS['max_enumerated_outputs'] deliberately, having thought "
-                f"about the memory and the certification time it buys"
-            )
-        if step_count + 1 <= budget:
-            skipped.append((step_count + 1, budget, step_count))
-        if step_count <= floor_tris:
-            break
-        budget = step_count - 1
-
-    _check_oracle_consistency(probe, sorted(incumbents), skipped, spot_checks, rng)
-    return by_key
-
-
-def _check_oracle_consistency(probe, realizable, skipped, spot_checks, rng):
-    """Catch an oracle that contradicts ITSELF. Not a proof of honesty — see `enumerate_staircase`.
-
-    Both checks below are implications of the contract, so a violation is decisive: the oracle is
-    broken. Neither can detect an oracle that is wrong CONSISTENTLY, because both ask that same
-    oracle. They exist because the two failures this pipeline actually had — a bisection stopping
-    within 1 % of its budget, and the `B - 1` shape — are both self-contradictory, and cheap to
-    catch on real geometry every run.
-    """
-    for value in realizable:
-        answer = probe(value)
-        if answer is None or answer[0] != value:
-            got = "nothing" if answer is None else answer[0]
-            raise EnumerationError(
-                f"the oracle realizes {value} triangles, but asked for a budget of exactly {value} "
-                f"it returns {got} — it contradicts itself, so the walk's jumps stepped over "
-                f"outputs and the candidate set is incomplete"
-            )
-    for _ in range(spot_checks):
-        if not skipped:
-            break
-        low, high, incumbent = skipped[int(rng.integers(0, len(skipped)))]
-        budget = int(rng.integers(low, high + 1))
-        answer = probe(budget)
-        got = None if answer is None else answer[0]
-        if got != incumbent:
-            raise EnumerationError(
-                f"budget {budget} realizes {got} triangles, but the walk skipped that interval "
-                f"having been told its incumbent was {incumbent} — the enumeration is missing "
-                f"whatever lies between them"
-            )
-
-
-def pareto_minimal(outputs, deviation_for, target_mm):
-    """The FEWEST-triangle realized output whose certified upper bound clears `target_mm`.
-
-    `outputs` is every candidate the decimator can produce, ASCENDING BY TRIANGLE COUNT and
-    identified by an opaque key (a geometry digest — two distinct meshes can share a count);
-    `deviation_for(key, target_mm)` returns that candidate's bracket as `{"lo_mm", "up_mm"}`.
-
-    PROVEN MINIMAL BY EXHAUSTION, which is the whole point. The previous search bisected
-    feasible/infeasible budgets and walked down until the first failure — assuming the monotonicity
-    this pipeline's own doctrine says does not hold, so a lower feasible ISLAND below an infeasible
-    step was invisible and the winner was not minimal. Scanning ascending and returning the first
-    feasible output means everything smaller has been measured and rejected, with no assumption
-    about the shape of the curve at all.
-
-    It lives here, away from `bpy`, so the logic can be tested against a synthetic non-monotone
-    feasibility function without Blender.
-    """
-    for key in outputs:
-        entry = deviation_for(key, target_mm)
-        if entry is not None and entry["up_mm"] <= target_mm:
-            return entry
-    return None
 
 
 def same_surface(a, b, tol=1e-9):
@@ -820,8 +967,9 @@ def normal_angle_diagnostic(source, level, samples, seed=12345):
     """Worst / p99 shading-normal angle between the pair, in degrees. DIAGNOSTIC ONLY (ADR 0033 §7).
 
     No fixed angle can honestly gate shading: how visible a normal error is depends on roughness,
-    the normal map and the lighting, which is exactly what the rendered-difference gate measures
-    instead. This number is reported so a regression is legible, never so a build fails on it.
+    the normal map and the lighting, none of which this lane measures — the rendered comparison
+    that once did is deleted (ADR 0036 §3) and the eye is what judges appearance now. This number
+    is reported so a regression is legible, never so a build fails on it.
 
     READ IT WITH ITS COMPANION `backface_corr_frac`. The correspondence is the nearest point, and on
     a shoe with 3 mm walls the nearest point routinely lands on the FAR side of a wall — a surface
@@ -873,7 +1021,7 @@ def normal_angle_diagnostic(source, level, samples, seed=12345):
     }
 
 
-def validity_gate_failures(validity, source_validity, gates, require_baked_tangents=True):
+def validity_gate_failures(validity, source_validity, gates):
     """The structural gates, as a list of named failures. Empty means clean.
 
     ONE IMPLEMENTATION, TWO CALLERS — generation and verification — and that is the point of it
@@ -894,16 +1042,6 @@ def validity_gate_failures(validity, source_validity, gates, require_baked_tange
             f"component count {validity['components']} != source {source_validity['components']} "
             f"— a part vanished, and a vanished part has near-zero Hausdorff distance"
         )
-    # PRESENCE FIRST. `degenerate_tangents` counts bad tangents among those that EXIST, so a level
-    # that shipped none at all scored a clean zero and passed — and would have gone back to
-    # loader-generated, uncertified tangents without a word. A generated level carries one tangent
-    # per vertex or it does not ship.
-    if require_baked_tangents and validity["baked_tangents"] != validity["verts"]:
-        failures.append(
-            f"{validity['baked_tangents']} baked tangents for {validity['verts']} vertices — a "
-            f"generated level must BAKE a tangent per vertex, or bevy generates them at load and "
-            f"nothing here certified what renders"
-        )
     for key, limit_key, description in STRUCTURAL_GATES:
         if validity[key] > gates[limit_key]:
             failures.append(f"{validity[key]} {description}")
@@ -917,20 +1055,15 @@ def validity_gate_failures(validity, source_validity, gates, require_baked_tange
 #: that reads as protection and is not. And because generation and verification both call the one
 #: function above, a gate added here is enforced on both sides at once; parity is by construction
 #: rather than by a test that has to be remembered.
+#: RE-SCOPED BY ADR 0036 §4. What left: the UV-area and baked-tangent counters (they served the
+#: deleted rendered-difference gate, and untextured physics-vocabulary meshes are legal), and the
+#: non-manifold-edge gate (manifoldness is the armour pipeline's law; here the deviation bound
+#: polices the decimator by construction — a mangled region deviates and fails, an undeviating one
+#: is invisible by definition). Both counters are still measured and recorded per level.
 STRUCTURAL_GATES = (
+        ("empty_surfaces", "max_empty_surfaces", "empty surface(s) — no triangles at all"),
         ("duplicate_faces", "max_duplicate_faces", "duplicate face(s)"),
         ("nonfinite_attrs", "max_nonfinite", "non-finite attribute component(s)"),
         ("orientation_flips", "max_orientation_flips",
          "edge(s) traversed the same way by both their faces — inconsistent winding"),
-        ("nonmanifold_edges", "max_nonmanifold_edges",
-         "edge(s) shared by more than two faces — no consistent normal or tangent frame there, "
-         "and a non-watertight volume bakes to zero armour silently"),
-        ("tangent_default_faces", "max_tangent_default_faces",
-         "face(s) with degenerate UV area would take a DEFAULTED tangent at bind"),
-        ("tangent_default_verts", "max_tangent_default_verts",
-         "vertex/vertices whose every incident face has degenerate UV area"),
-        ("degenerate_tangents", "max_degenerate_tangents",
-         "BAKED tangent(s) the loader would use verbatim that are zero-length, non-finite, or "
-         "carry a bitangent sign that is not +/-1 — mikktspace gave up on them, and unlike the UV "
-         "test above this is the thing itself rather than a necessary condition on it"),
 )
