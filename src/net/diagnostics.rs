@@ -1,7 +1,7 @@
 //! Passive network diagnostics. No system here mutates simulation state.
 
 use avian3d::prelude::{
-    AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, Rotation,
+    AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, RigidBody, Rotation,
 };
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
@@ -162,7 +162,7 @@ pub(crate) fn log_sim_evidence(
         ),
         With<Tank>,
     >,
-    tracks: Query<&TrackContacts>,
+    tracks: Query<(&TrackContacts, &RigidBody)>,
     mut timer: Local<f32>,
     time: Res<Time>,
 ) {
@@ -171,12 +171,25 @@ pub(crate) fn log_sim_evidence(
         return;
     }
     *timer = 0.0;
-    let grounded: usize = tracks
+    // SIMULATED tanks only. `TrackContacts` is required by `Tank`, so every tank carries one — but
+    // the belt sim skips any body that is not `Dynamic` (`track::sim`), and a client's remote tanks
+    // are driven by interpolation, never simulated. Counting them left two permanently empty sides
+    // in the denominator, so a perfectly grounded 2-client session read `2/4` and looked like half
+    // the running gear had fallen through the map.
+    let (grounded, simulated) = tracks
         .iter()
-        .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
-        .sum();
-    let total = tracks.iter().count() * 2;
-    info!("net: SIM-EVIDENCE track_sides_grounded={grounded}/{total} (all tanks)");
+        .filter(|(_, body)| matches!(**body, RigidBody::Dynamic))
+        .fold((0usize, 0usize), |(grounded, tanks), (contacts, _)| {
+            (
+                grounded + contacts.0.iter().filter(|side| !side.is_empty()).count(),
+                tanks + 1,
+            )
+        });
+    let observed = tracks.iter().count();
+    info!(
+        "net: SIM-EVIDENCE track_sides_grounded={grounded}/{} ({simulated} simulated of {observed} tanks)",
+        simulated * 2,
+    );
     for (root, servos, remote_servos, gate) in &sims {
         // `TankRoot` owns the turret-to-simulation join.
         let turret = turrets

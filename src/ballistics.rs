@@ -390,9 +390,14 @@ fn cast_disc_segment(
         world.spatial.aabb_intersections_with_aabb_callback(
             collect::swept_aabb(origin, Vec3::from(dir), max, radius),
             |entity| {
-                near_armor = hit_ancestor(entity, &world.volumes, &world.parents).is_some()
+                // ACCUMULATE, never assign. Avian 0.7 walks its collider trees with `for_each`, so a
+                // `false` return ends only the CURRENT tree's traversal — the remaining trees are
+                // walked regardless. An assignment therefore lets whatever is visited after the
+                // armour candidate overwrite the answer, and the static tree's terrain heightfield,
+                // whose AABB is the whole world box, is in every corridor there is.
+                near_armor |= hit_ancestor(entity, &world.volumes, &world.parents).is_some()
                     && not_own(entity);
-                // Stop at the first candidate: this asks IF, not WHICH.
+                // Stop this tree at the first candidate: this asks IF, not WHICH.
                 !near_armor
             },
         );
