@@ -29,11 +29,13 @@
 //!      would put the tanks on invisible hills. The map's object scatter is skipped with it: 709
 //!      houses and firs are scenery standing in front of the thing being looked at.
 //!   2. The player spawns at one edge of the 1 000 m map facing down-range.
-//!   3. At every switch distance in `SHOE_LOD_CHAIN`, a PAIR of stationary Tigers stands broadside
+//!   3. At every switch distance the shoe's certified chain derives, a PAIR of stationary Tigers
+//!      stands broadside
 //!      to the sight line: the LEFT one clamped to the finer level, the RIGHT one to the coarser.
 //!      So at each range the two tanks in frame are exactly the two meshes that switch is between,
 //!      at exactly the distance the runtime swaps them.
-//!   4. A legend goes to the log: one line per pair, with the levels and their triangle counts.
+//!   4. A legend goes to the log: one line per pair, with the levels and the coarser one's
+//!      certified deviation.
 //!
 //! Nothing here is mounted, spawned or ticked when the variable is unset — [`plugin`] adds no
 //! systems at all, [`crate::tank::scenario`] takes its ordinary path, and the heightmap decodes
@@ -48,14 +50,17 @@
 //! (`distance >= 0 && distance < 0` is false everywhere). It is written by
 //! [`clamp_showcase_shoes`], which does not exist in a process without the variable, onto entities
 //! found through [`crate::track::link_view::ShoeLod`], which is a tag and not a knob. No production
-//! code branches on any of it, and `link_view` still owns every range it writes — the clamp asks
-//! [`shoe_lod_range`] for nothing, it writes the two degenerate ranges directly, because "always"
-//! and "never" are not points on the ladder.
+//! code branches on any of it, and `geometry_lod` still owns every range it derives — the clamp
+//! asks the chain for nothing, it writes the two degenerate ranges directly, because "always" and
+//! "never" are not points on the ladder. A clamped entity carries
+//! [`crate::geometry_lod::LodPinned`], so the adaptive layer leaves it alone rather than fighting
+//! it for the component a frame at a time.
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 
-use crate::track::link_view::{ShoeLod, shoe_lod_levels, shoe_lod_range, shoe_lod_tris};
+use crate::geometry_lod::{LodPinned, TankCertificate, ViewProfile};
+use crate::track::link_view::{ShoeLod, shoe_chain_key};
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
 ///
@@ -106,9 +111,9 @@ const LATERAL_HALF_M: f32 = 6.0;
 /// pair occupies 0.010..0.050 rad while everything nearer on its side is beyond 0.086, and the 950 m
 /// pair sits at −0.026..−0.004 against a nearest neighbour on its side at −0.198..−0.038.
 ///
-/// 15 m is also small enough that a pair is never a hunt: the furthest is 0.05 rad off the axis,
-/// inside the gunner optic's own 0.12 rad frame, so panning to a pair costs a nudge rather than a
-/// search.
+/// It is the FARTHEST pair's offset; nearer pairs stand proportionally further out (see
+/// [`pair_lane_z`]), which is what keeps a deep chain's pairs angularly disjoint rather than merely
+/// alternating.
 const LANE_OFFSET_M: f32 = 15.0;
 
 /// The furthest down-range a pair may stand, metres from [`START_XZ`].
@@ -143,12 +148,34 @@ pub(crate) struct ShowcaseTank {
 #[derive(Component, Clone, Copy)]
 pub(crate) struct LodClamp(pub(crate) usize);
 
-/// The down-range distance pair `pair` happens at: where level `pair + 1` takes over.
+/// The shoe chain's switch distances under `view`, nearest first — `switches[i]` is where level
+/// `i + 1` takes over from level `i`.
 ///
-/// Read off [`shoe_lod_range`] rather than from any table here, because the ladder is regenerated
-/// and this file must not become a second copy of it.
-fn pair_switch_m(pair: usize) -> f32 {
-    shoe_lod_range(pair + 1).start_margin.start
+/// Derived from the certificate through `geometry_lod`'s own projection, so this file is not a
+/// second copy of a ladder: a re-cut asset or a moved view profile stages a different scene with no
+/// edit here. An absent chain stages nothing.
+pub(crate) fn shoe_switches(certificate: &TankCertificate, view: ViewProfile) -> Vec<f32> {
+    certificate
+        .chain(&shoe_chain_key())
+        .map(|chain| {
+            chain
+                .bands(view)
+                .into_iter()
+                .skip(1)
+                .map(|band| band.start_margin.start)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The certified deviation each rung carries, millimetres, nearest first — what the legend quotes
+/// in place of a triangle count (the certificate carries deviations; triangles are an output of
+/// generation and are never certified).
+pub(crate) fn shoe_deviations(certificate: &TankCertificate) -> Vec<f32> {
+    certificate
+        .chain(&shoe_chain_key())
+        .map(|chain| chain.rungs.iter().map(|rung| rung.deviation_mm).collect())
+        .unwrap_or_default()
 }
 
 /// The switches this harness stages: the ones that FIT ON THE MAP, at their own distance.
@@ -168,27 +195,35 @@ fn pair_switch_m(pair: usize) -> f32 {
 ///
 /// The alternating lanes are what keep the staged pairs clear of each other — see [`LANE_OFFSET_M`]
 /// and `no_pair_stands_in_front_of_another_from_the_player_spawn`.
-pub(crate) fn staged_pairs() -> Vec<usize> {
-    (0..shoe_lod_levels() - 1)
-        .filter(|&pair| pair_switch_m(pair) <= MAX_RANGE_M)
+pub(crate) fn staged_pairs(switches: &[f32]) -> Vec<usize> {
+    (0..switches.len())
+        .filter(|&pair| switches[pair] <= MAX_RANGE_M)
         .collect()
 }
 
 /// The switches this map cannot reach, with the distance they happen at — so the legend says what
 /// is missing rather than leaving a person to notice a gap in the ladder they were shown.
-fn unstageable_pairs() -> Vec<(usize, f32)> {
-    (0..shoe_lod_levels() - 1)
-        .map(|pair| (pair, pair_switch_m(pair)))
+fn unstageable_pairs(switches: &[f32]) -> Vec<(usize, f32)> {
+    (0..switches.len())
+        .map(|pair| (pair, switches[pair]))
         .filter(|&(_, switch)| switch > MAX_RANGE_M)
         .collect()
 }
 
-/// Which lane pair `pair` stands in: the world Z its two tanks straddle. See [`LANE_OFFSET_M`].
-fn pair_lane_z(pair: usize) -> f32 {
-    if pair.is_multiple_of(2) {
-        LANE_OFFSET_M
+/// Which lane the `slot`-th staged pair stands in, out of `staged`: the world Z its two tanks
+/// straddle. See [`LANE_OFFSET_M`].
+///
+/// The sign ALTERNATES and the magnitude FALLS OFF with the slot, and both halves are load-bearing.
+/// Occlusion is angular: a pair at range R covers `atan((z ± h) / R)` about the sight line, and that
+/// span shrinks as R grows — so two pairs at the same lateral offset on the same side always overlap,
+/// the far one hiding inside the near one's span. Standing the NEAREST pair furthest off the line and
+/// each following one nearer to it is what keeps the intervals disjoint for a chain of any depth.
+fn pair_lane_z(slot: usize, staged: usize) -> f32 {
+    let magnitude = 2.0 * LANE_OFFSET_M * (staged - slot) as f32 / staged.max(1) as f32;
+    if slot.is_multiple_of(2) {
+        magnitude
     } else {
-        -LANE_OFFSET_M
+        -magnitude
     }
 }
 
@@ -196,7 +231,7 @@ fn pair_lane_z(pair: usize) -> f32 {
 ///
 /// A pure function of the chain, so the layout is a thing a test can check without a window, a
 /// world or an asset load.
-pub(crate) fn layout() -> Vec<ShowcaseTank> {
+pub(crate) fn layout(switches: &[f32]) -> Vec<ShowcaseTank> {
     // Down-range is +X and the camera looks along it, so the hull (whose forward is its local −Z,
     // bevy's convention) has to be yawed a quarter turn. The PAIRS keep the identity rotation on
     // purpose: it leaves their longitudinal axis on Z, broadside to the sight line, which is the
@@ -213,9 +248,11 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
     // must alternate over the pairs that are actually laid out. Keying the lane off `pair` would
     // put two consecutive staged pairs in the SAME lane the moment a skipped switch fell between
     // them, which is the occlusion the alternation exists to prevent.
-    for (slot, pair) in staged_pairs().into_iter().enumerate() {
-        let range = pair_switch_m(pair);
-        let lane = pair_lane_z(slot);
+    let pairs = staged_pairs(switches);
+    let staged = pairs.len();
+    for (slot, pair) in pairs.into_iter().enumerate() {
+        let range = switches[pair];
+        let lane = pair_lane_z(slot, staged);
         // LEFT is the FINER level, and left is −Z: with +X forward and +Y up, `left = up × forward`
         // = Y × X = −Z. Fine on the left every time, so a sweep down the range is read the same way
         // at every pair rather than remembered per pair.
@@ -236,28 +273,28 @@ pub(crate) fn layout() -> Vec<ShowcaseTank> {
 ///
 /// Written as text rather than logged here so the spawn can emit it beside the tanks it describes —
 /// a legend in a different part of the log from the scene it labels is a legend nobody reads.
-pub(crate) fn legend() -> Vec<String> {
-    let mut lines: Vec<String> = staged_pairs()
+pub(crate) fn legend(switches: &[f32], deviations: &[f32]) -> Vec<String> {
+    let staged = staged_pairs(switches).len();
+    let mut lines: Vec<String> = staged_pairs(switches)
         .into_iter()
         .enumerate()
         .map(|(slot, pair)| {
-            let range = pair_switch_m(pair);
+            let range = switches[pair];
             format!(
                 "lod showcase: L{pair}|L{} pair at {range:.1} m, {} of the sight line — \
-                 LEFT L{pair} ({} tris), RIGHT L{} ({} tris)",
+                 LEFT L{pair}, RIGHT L{} ({:.3} mm certified deviation)",
                 pair + 1,
-                if pair_lane_z(slot) < 0.0 {
+                if pair_lane_z(slot, staged) < 0.0 {
                     "left"
                 } else {
                     "right"
                 },
-                shoe_lod_tris(pair),
                 pair + 1,
-                shoe_lod_tris(pair + 1),
+                deviations.get(pair).copied().unwrap_or(f32::NAN),
             )
         })
         .collect();
-    lines.extend(unstageable_pairs().into_iter().map(|(pair, switch)| {
+    lines.extend(unstageable_pairs(switches).into_iter().map(|(pair, switch)| {
         format!(
             "lod showcase: L{pair}|L{} switches at {switch:.1} m, past this map's {MAX_RANGE_M:.0} m \
              reach — NOT staged, because standing it at the edge would be a different comparison",
@@ -298,11 +335,14 @@ fn clamp_showcase_shoes(
         // `[0, ∞)` and `[0, 0)`: bevy reads a range as `distance >= start && distance < end`, so the
         // second is EMPTY at every distance including zero. Abrupt in both cases — a crossfade
         // between "always" and "never" would dither the very silhouette being compared.
-        commands.entity(entity).insert(if lod.0 == clamp {
-            VisibilityRange::abrupt(0.0, f32::INFINITY)
-        } else {
-            VisibilityRange::abrupt(0.0, 0.0)
-        });
+        commands.entity(entity).insert((
+            if lod.0 == clamp {
+                VisibilityRange::abrupt(0.0, f32::INFINITY)
+            } else {
+                VisibilityRange::abrupt(0.0, 0.0)
+            },
+            LodPinned,
+        ));
     }
 }
 
@@ -329,16 +369,41 @@ fn aim_camera_down_range(mut done: Local<bool>, mut camera: Query<&mut Transform
 mod tests {
     use super::*;
 
+    /// The shipped shoe chain's switch distances at the view the corpus was quoted in — the gunner
+    /// optic at 4K native, one pixel of budget.
+    fn shipped_switches() -> Vec<f32> {
+        let certificate =
+            TankCertificate(std::sync::Arc::new(crate::geometry_lod::certificate::load(
+                &crate::assets::asset_root(),
+                crate::geometry_lod::TIGER_ID,
+            )));
+        shoe_switches(
+            &certificate,
+            ViewProfile::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0, 1.0),
+        )
+    }
+
+    /// The shipped shoe chain's certified deviations, nearest first.
+    fn shipped_deviations() -> Vec<f32> {
+        shoe_deviations(&TankCertificate(std::sync::Arc::new(
+            crate::geometry_lod::certificate::load(
+                &crate::assets::asset_root(),
+                crate::geometry_lod::TIGER_ID,
+            ),
+        )))
+    }
+
     /// The layout is the CHAIN's, not a table: one pair per JUDGEABLE switch, standing at the
     /// distance that switch happens, with the finer level on the left.
     ///
-    /// Driven off `shoe_lod_range`/`staged_pairs` so a regenerated ladder re-lays itself out —
+    /// Driven off the CERTIFICATE's own switch distances so a re-cut ladder re-lays itself out —
     /// which is the property that makes this harness worth keeping rather than re-writing each time
     /// the meshes change.
     #[test]
     fn every_judgeable_switch_gets_a_pair_at_its_own_distance() {
-        let tanks = layout();
-        let staged = staged_pairs();
+        let switches = shipped_switches();
+        let tanks = layout(&switches);
+        let staged = staged_pairs(&switches);
         assert_eq!(
             tanks.len(),
             1 + 2 * staged.len(),
@@ -361,11 +426,11 @@ mod tests {
             // of slack because the spawn point is an ABSOLUTE world coordinate: 55.9124 added to
             // −480 and taken back off is 55.912415, and a harness whose pairs stand a hundredth of a
             // millimetre out is not a defect worth a red suite.
-            let switch = shoe_lod_range(pair + 1).start_margin.start;
+            let switch = switches[pair];
             let expected = switch.min(MAX_RANGE_M);
             assert!((left.xz.x - START_XZ.x - expected).abs() < 1e-3);
             assert!((right.xz.x - START_XZ.x - expected).abs() < 1e-3);
-            let lane = START_XZ.y + pair_lane_z(slot);
+            let lane = START_XZ.y + pair_lane_z(slot, staged.len());
             assert_eq!(left.xz.y, lane - LATERAL_HALF_M, "left is −Z");
             assert_eq!(right.xz.y, lane + LATERAL_HALF_M);
         }
@@ -380,18 +445,19 @@ mod tests {
     /// here would be a taste call nobody made. What survives is a geometric fact about the map.
     #[test]
     fn the_harness_stages_exactly_the_switches_the_map_can_reach() {
-        let staged = staged_pairs();
-        for pair in 0..shoe_lod_levels() - 1 {
+        let switches = shipped_switches();
+        let staged = staged_pairs(&switches);
+        for (pair, &switch) in switches.iter().enumerate() {
             assert_eq!(
                 staged.contains(&pair),
-                pair_switch_m(pair) <= MAX_RANGE_M,
+                switch <= MAX_RANGE_M,
                 "pair {pair} (the switch into L{}) is staged iff it happens within {MAX_RANGE_M} m",
                 pair + 1,
             );
         }
         assert_eq!(
-            staged.len() + unstageable_pairs().len(),
-            shoe_lod_levels() - 1,
+            staged.len() + unstageable_pairs(&switches).len(),
+            switches.len(),
             "every switch is either staged or named in the legend as out of reach",
         );
         assert!(
@@ -427,7 +493,7 @@ mod tests {
 
         // Every tank's angular interval about the sight line, paired with its range, ordered near to
         // far — so "nearer" is "earlier".
-        let mut spans: Vec<(f32, f32, f32, String)> = layout()[1..]
+        let mut spans: Vec<(f32, f32, f32, String)> = layout(&shipped_switches())[1..]
             .iter()
             .map(|tank| {
                 let range = tank.xz.x - START_XZ.x;
@@ -472,7 +538,7 @@ mod tests {
         // The SHIPPED map's square, read off its manifest: the showcase stands on whatever world
         // ships, so a re-scaled map re-asks this question instead of leaving a stale answer.
         let half = shipped_manifest().extent.half_extent();
-        for tank in layout() {
+        for tank in layout(&shipped_switches()) {
             let edge = half - SPAWN_FOOTPRINT_HALF_M;
             assert!(
                 tank.xz.x.abs() <= edge && tank.xz.y.abs() <= edge,
@@ -561,10 +627,12 @@ mod tests {
     /// something other than what was spawned.
     #[test]
     fn the_legend_describes_the_tanks_that_are_spawned() {
-        let lines = legend();
-        let tanks = layout();
-        let staged = staged_pairs().len();
-        assert_eq!(lines.len(), staged + unstageable_pairs().len());
+        let switches = shipped_switches();
+        let deviations = shipped_deviations();
+        let lines = legend(&switches, &deviations);
+        let tanks = layout(&switches);
+        let staged = staged_pairs(&switches).len();
+        assert_eq!(lines.len(), staged + unstageable_pairs(&switches).len());
 
         for (slot, line) in lines.iter().take(staged).enumerate() {
             let (left, right) = (&tanks[1 + 2 * slot], &tanks[2 + 2 * slot]);
@@ -576,10 +644,15 @@ mod tests {
             for level in [left.clamp, right.clamp] {
                 let level = level.expect("a pair member is clamped");
                 assert!(
-                    line.contains(&format!("L{level} ({} tris)", shoe_lod_tris(level))),
-                    "the legend must quote each level's own triangle count: {line}",
+                    line.contains(&format!("L{level}")),
+                    "the legend must name both levels of the pair: {line}",
                 );
             }
+            assert!(
+                line.contains(&format!("{:.3} mm", deviations[slot])),
+                "the legend must quote the coarser level's CERTIFIED deviation — the certificate \
+                 carries no triangle count: {line}",
+            );
         }
         // The lines that have to explain themselves: the switches the map cannot stage at all.
         // A ladder whose deepest level opens past the map's reach is the ordinary case, and a
@@ -588,7 +661,7 @@ mod tests {
         let out_of_reach = lines.iter().filter(|l| l.contains("NOT staged")).count();
         assert_eq!(
             out_of_reach,
-            unstageable_pairs().len(),
+            unstageable_pairs(&switches).len(),
             "every switch past the map's reach is named, and no staged one claims to be",
         );
     }

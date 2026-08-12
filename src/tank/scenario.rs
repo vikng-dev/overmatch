@@ -118,12 +118,16 @@ fn spawn_tank_when_loaded(
     pending: Option<Res<PendingTankAssets>>,
     source: TankSimSource,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
+    certificate: Res<crate::geometry_lod::TankCertificate>,
+    view: Option<Res<crate::geometry_lod::ViewProfile>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
         return;
     };
-    for handle in [pending.spec.id().untyped(), pending.scene.id().untyped()] {
+    let handles = std::iter::once(pending.spec.id().untyped())
+        .chain(pending.scene.as_ref().map(|scene| scene.id().untyped()));
+    for handle in handles {
         if let LoadState::Failed(err) = asset_server.load_state(handle) {
             error!("required tank asset failed to load: {err}");
             panic!("required tank asset failed to load: {err}");
@@ -141,7 +145,14 @@ fn spawn_tank_when_loaded(
     // this build actually has: heightmap, flat slab, or a re-authored map later.
     let grid = height.as_deref();
     if crate::lod_showcase::enabled() {
-        spawn_lod_showcase(&mut commands, content, pending.presentation(), grid);
+        spawn_lod_showcase(
+            &mut commands,
+            content,
+            pending.presentation(),
+            grid,
+            &certificate,
+            view.map_or_else(Default::default, |view| *view),
+        );
         commands.remove_resource::<PendingTankAssets>();
         next.set(AppState::Playing);
         return;
@@ -207,8 +218,8 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe down a ladder of reductions (`SHOE_LOD_CHAIN`, 854 → 194 triangles against a
-/// 1 661-triangle base), and that costs ONE extra entity per shoe PER LEVEL — at 194 shoes per tank,
+/// every shoe down a ladder of certified reductions, and that costs ONE extra entity per shoe PER
+/// LEVEL — at 194 shoes per tank,
 /// four reduced levels and 30 tanks, 23 280 more walked by `check_visibility_ranges` every frame,
 /// whether or not any of them is far enough to matter. So the LOD has two frames to answer for: the
 /// FAR one, where the triangle win is real and the walk is paid for, and the NEAR one, where the
@@ -293,11 +304,17 @@ fn spawn_lod_showcase(
     content: TankContent,
     presentation: TankPresentation,
     grid: Option<&crate::terrain_grid::HeightGrid>,
+    certificate: &crate::geometry_lod::TankCertificate,
+    view: crate::geometry_lod::ViewProfile,
 ) {
-    for line in crate::lod_showcase::legend() {
+    // The staging distances are derived at the LIVE profile, which by now has seen the real window:
+    // a pair belongs where its switch actually happens in the session it is being judged in.
+    let switches = crate::lod_showcase::shoe_switches(certificate, view);
+    let deviations = crate::lod_showcase::shoe_deviations(certificate);
+    for line in crate::lod_showcase::legend(&switches, &deviations) {
         info!("{line}");
     }
-    for tank in crate::lod_showcase::layout() {
+    for tank in crate::lod_showcase::layout(&switches) {
         let root = spawn_complete_tank(
             commands,
             content,
