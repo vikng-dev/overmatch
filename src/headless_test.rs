@@ -4601,3 +4601,149 @@ fn track_sandbox_boots_headless() {
          past the plugin build was actually exercised",
     );
 }
+
+/// THE SHIPPED MAP, END TO END: a main-gun round fired between two tanks standing on the real
+/// kalinovo terrain must reach the target's armour and take HP off it.
+///
+/// Every other ballistics gate in the tree runs on a FIXTURE world — a synthetic plate, a flat
+/// slab, an analytic ramp. None of those carries the one thing the shipped map has: a heightfield
+/// terrain collider whose AABB is the entire world box, and which therefore sits in the broad-phase
+/// candidate set of every corridor a shell ever flies. That difference alone silently disarmed the
+/// main gun on the real map while the whole fixture suite stayed green (`cast_disc_segment`'s
+/// broad-phase gate was ASSIGNED per candidate instead of accumulated, and avian walks its collider
+/// trees with `for_each` — so the terrain tree, visited after the armour tree, overwrote every
+/// armour candidate back to "no armour near this corridor"). Two tanks on the map, unable to
+/// scratch each other, for a whole session.
+///
+/// So this test is deliberately the SLOW, WHOLE one: the shipped heightmap, the real Tiger
+/// geometry, the live march, the real damage deposit. The claim it makes cannot be made anywhere
+/// cheaper, because the thing that broke was exactly the gap between a fixture world and the
+/// shipped one.
+#[test]
+fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
+    use crate::ballistics::{ComponentHealth, FireShell, FireShellOrigin, Impact, ShotSource};
+    use crate::damage::VolumeOf;
+    use avian3d::prelude::{Collider, Position, Rotation, SimpleCollider};
+
+    /// Every armour impact the round produced.
+    #[derive(Resource, Default)]
+    struct ArmorImpacts(Vec<bool>);
+
+    let mut app = {
+        let grid = crate::terrain_grid::tests::shipped_grid();
+        let mut sim = booted_sim_on(Some(grid));
+        start_fixed_clock(&mut sim);
+        // Let both tanks settle onto the terrain before anything is fired at them.
+        for _ in 0..30 {
+            sim.update();
+        }
+        sim
+    };
+    app.init_resource::<ArmorImpacts>();
+    app.add_observer(|impact: On<Impact>, mut log: ResMut<ArmorImpacts>| {
+        if impact.surface == crate::ballistics::ImpactSurface::Armor {
+            log.0.push(impact.penetrated);
+        }
+    });
+
+    let world = app.world_mut();
+    let tanks: Vec<(Entity, Vec3)> = world
+        .query_filtered::<(Entity, &Position), With<Tank>>()
+        .iter(world)
+        .map(|(tank, pos)| (tank, pos.0))
+        .collect();
+    assert_eq!(tanks.len(), 2, "the duel scenario spawns two tanks");
+    let (shooter, shooter_pos) = tanks[0];
+    let (target, _) = tanks[1];
+
+    // Aim at the target's OWN armour, read off its bound colliders rather than guessed from the
+    // hull origin: a hand-picked offset drifts the moment the rig or the spawn pose changes, and a
+    // shot that sails over the turret roof would pass this test for the wrong reason.
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let world = app.world_mut();
+    for (owner, pos, rot, collider) in world
+        .query::<(&VolumeOf, &Position, &Rotation, &Collider)>()
+        .iter(world)
+    {
+        if owner.tank() == target {
+            let aabb = collider.aabb(pos.0, rot.0);
+            lo = lo.min(aabb.min);
+            hi = hi.max(aabb.max);
+        }
+    }
+    assert!(
+        lo.x.is_finite(),
+        "the target tank bound no armour colliders"
+    );
+    let aim = (lo + hi) * 0.5;
+
+    let total_hp = |app: &mut App| -> f32 {
+        let world = app.world_mut();
+        world
+            .query::<&ComponentHealth>()
+            .iter(world)
+            .map(|health| health.current)
+            .sum()
+    };
+    let before = total_hp(&mut app);
+    assert!(before > 0.0, "the target carries no HP pools to lower");
+
+    // Above the shooter's own hull, so the round leaves its own geometry the way a bore round does.
+    let origin = shooter_pos + Vec3::Y * 1.2;
+    let direction = Dir3::new(aim - origin).expect("the two tanks are not co-located");
+    // The terrain between them is not in the way — asserted, so a later spawn move that DOES put a
+    // ridge on the sight line fails here saying so, instead of failing the damage claim below.
+    {
+        let grid = app.world().resource::<crate::terrain_grid::HeightGrid>();
+        assert!(
+            grid.cast_ray(origin, Vec3::from(direction), (aim - origin).length())
+                .is_none(),
+            "the shipped terrain crosses the sight line between the two duel spawns — this test \
+             can no longer say anything about armour",
+        );
+    }
+
+    app.world_mut().trigger(FireShell {
+        origin,
+        direction,
+        speed: 755.0,
+        caliber: 0.088,
+        mass: 10.2,
+        mechanism: crate::spec::FireMechanism::Single,
+        shooter: Some(ShotSource {
+            tank: shooter,
+            weapon: 0,
+        }),
+        tracer: false,
+        shot_origin: FireShellOrigin::Local,
+        catch_up_ticks: 0,
+        shot: None,
+    });
+    // Generous: the round covers the ~17 m gap inside one 64 Hz tick, and the interior march and
+    // spall resolve within a few more.
+    for _ in 0..20 {
+        app.update();
+    }
+
+    let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ArmorImpacts>().0);
+    assert!(
+        !impacts.is_empty(),
+        "the round produced NO armour impact on the shipped map — it flew through the target and \
+         went on to the ground, exactly as it did in the live session. The corridor's broad-phase \
+         armour gate is being masked by the world-spanning terrain collider again \
+         (`ballistics::cast_disc_segment`).",
+    );
+    assert!(
+        impacts.iter().any(|penetrated| *penetrated),
+        "the round reached the target's armour but never penetrated it — {} impact(s), all \
+         defeated. A point-blank 88 mm round into a Tiger's side must get through.",
+        impacts.len(),
+    );
+    let after = total_hp(&mut app);
+    assert!(
+        after < before,
+        "armour was penetrated but no HP pool moved: {before} before, {after} after. The march \
+         resolved geometry without depositing damage.",
+    );
+}
