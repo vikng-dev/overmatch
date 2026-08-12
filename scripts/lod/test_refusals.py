@@ -385,25 +385,35 @@ class BranchAndBoundTests(unittest.TestCase):
 
     @staticmethod
     def cone(peak, height):
-        """d(p) = max(0, height - |p - peak|). 1-Lipschitz, maximum `height`, attained only at peak."""
+        """d(p) = max(0, height - |p - peak|). 1-Lipschitz, maximum `height`, attained only at peak.
+
+        Returns the loop's `(distance, tag)` pair. The tag is what a BVH probe would answer with the
+        triangle it hit; a synthetic field has no triangles, so it answers -1 and the default
+        covering-radius bound is the only one available — which is exactly the configuration that
+        makes this test a test OF THE LOOP rather than of the bound beside it.
+        """
         peak = np.asarray(peak, dtype=np.float64)
 
-        def distance_at(_key, point):
-            return max(0.0, height - float(np.linalg.norm(np.asarray(point) - peak)))
+        def probe(_key, point):
+            return max(0.0, height - float(np.linalg.norm(np.asarray(point) - peak))), -1
 
-        return distance_at
+        return probe
 
-    def seeds_for(self, corners, distance_at):
-        return [(corners, tuple(distance_at(i, corners[i]) for i in range(3)))]
+    def seeds_for(self, corners, probe):
+        return (
+            np.array([corners]),
+            np.array([[probe(i, corners[i])[0] for i in range(3)]]),
+            np.array([[-1, -1, -1]]),
+        )
 
     def test_the_upper_bound_brackets_an_interior_maximum(self):
         corners = (
             np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
         )
         truth = 0.4
-        distance_at = self.cone((0.3, 0.3, 0.0), truth)
+        probe = self.cone((0.3, 0.3, 0.0), truth)
         lower, upper = M.branch_and_bound(
-            self.seeds_for(corners, distance_at), distance_at,
+            *self.seeds_for(corners, probe), probe,
             tol=1e-4, max_nodes=20000, rel_tol=0.0,
         )
         self.assertLessEqual(lower, truth + 1e-9, "the sampled lower bound cannot exceed the truth")
@@ -418,9 +428,9 @@ class BranchAndBoundTests(unittest.TestCase):
             np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
         )
         truth = 0.4
-        distance_at = self.cone((0.3, 0.3, 0.0), truth)
+        probe = self.cone((0.3, 0.3, 0.0), truth)
         lower, upper = M.branch_and_bound(
-            self.seeds_for(corners, distance_at), distance_at,
+            *self.seeds_for(corners, probe), probe,
             tol=1e-4, max_nodes=1, rel_tol=0.0,
         )
         self.assertLessEqual(lower, truth)
@@ -437,9 +447,9 @@ class BranchAndBoundTests(unittest.TestCase):
             np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
         )
         truth = 0.4
-        distance_at = self.cone((0.3, 0.3, 0.0), truth)
+        probe = self.cone((0.3, 0.3, 0.0), truth)
         lower, upper = M.branch_and_bound(
-            self.seeds_for(corners, distance_at), distance_at,
+            *self.seeds_for(corners, probe), probe,
             tol=1.0, max_nodes=20000, rel_tol=0.0,
         )
         self.assertGreaterEqual(upper, truth)
@@ -450,9 +460,9 @@ class BranchAndBoundTests(unittest.TestCase):
             np.array([0.0, 0.0, 0.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])
         )
         truth = 0.4
-        distance_at = self.cone((0.3, 0.3, 0.0), truth)
+        probe = self.cone((0.3, 0.3, 0.0), truth)
         lower, upper = M.branch_and_bound(
-            self.seeds_for(corners, distance_at), distance_at,
+            *self.seeds_for(corners, probe), probe,
             tol=1e-3, max_nodes=200000, rel_tol=0.0,
         )
         self.assertAlmostEqual(lower, truth, places=2)
@@ -948,6 +958,84 @@ class ConvexBoundTests(unittest.TestCase):
             covering = float(M.covering_patch_bounds(corners, distances)[0])
             combined = float(M.patch_bounds(corners, distances, hits, dst, target=-1.0)[0])
             self.assertLessEqual(combined, covering + 1e-12)
+
+    def certify_both_ways(self, dst, triangles, tol=1e-4, max_nodes=250, rel_tol=0.0):
+        """The CERTIFY path — `branch_and_bound` — run with each bound over identical inputs.
+
+        Same seeds, same probe, same stopping rule; only `bound_of` differs. That is the whole of
+        what the fix changed, so it is the whole of what these compare.
+        """
+        cache = {}
+
+        def probe(key, point):
+            if key not in cache:
+                cache[key] = self.nearest(dst, point)
+            return cache[key]
+
+        corners = np.asarray(triangles, dtype=np.float64)
+        answers = [[probe(("v", index, j), corners[index][j]) for j in range(3)]
+                   for index in range(len(corners))]
+        distances = np.array([[a[0] for a in row] for row in answers])
+        tags = np.array([[a[1] for a in row] for row in answers])
+        subdivision = M.branch_and_bound(
+            corners, distances, tags, probe, tol, max_nodes, None, rel_tol,
+        )
+        convex = M.branch_and_bound(
+            corners, distances, tags, probe, tol, max_nodes, None, rel_tol,
+            bound_of=lambda c, d, t, ceiling: M.patch_bounds(c, d, t, dst, ceiling),
+        )
+        return subdivision, convex
+
+    def test_the_certified_bound_never_loosens_when_the_convex_bound_is_added(self):
+        """MUTANT, on the CERTIFY path: the fix may only move a certificate DOWN.
+
+        ADR 0036 §6's bound went into acceptance first and certification second, and the second half
+        is the one that touches shipped numbers — every recorded `dev_source_mm_upper` and every
+        switch distance derived from it. So the property is asserted where it matters: over identical
+        seeds and an identical stopping rule, the convex-bounded bracket's UPPER end is never above
+        the subdivision-only one's.
+
+        THE LOWER END MAY MOVE DOWN, and that is the tightening working rather than a regression. It
+        is the largest point SAMPLED, so a bracket that closes in fewer nodes has sampled fewer
+        points and carries a weaker witness. The guarantee the corpus rests on is the upper end, and
+        a witness is sound at any density; what is asserted here is that the pair is still a
+        bracket.
+        """
+        rng = np.random.default_rng(4242)
+        for _ in range(25):
+            dst = self.FakeSurface(rng.normal(size=(3, 3, 3)))
+            triangles = rng.normal(size=(2, 3, 3)) + np.array([0.0, 0.0, 1.5])
+            (_lo_a, up_a), (lo_b, up_b) = self.certify_both_ways(dst, triangles)
+            self.assertLessEqual(
+                up_b, up_a + 1e-12,
+                "the convex bound certified LOOSER than the subdivision it is minimised against",
+            )
+            self.assertLessEqual(lo_b, up_b + 1e-12, "a lower end above its own upper end")
+
+    def test_a_starved_certification_is_still_above_every_attained_distance(self):
+        """MUTANT, at certification tolerance: a tighter bound must still BE a bound.
+
+        Deliberately node-starved, because that is the mode the shipped corpus meets — the certify
+        bracket is capped at 1.5 M nodes and a large mesh spends it. A starved bracket must be wide
+        and honest, never narrow and wrong, and the tightening must not have cost that.
+        """
+        rng = np.random.default_rng(31337)
+        for _ in range(25):
+            dst = self.FakeSurface(rng.normal(size=(3, 3, 3)))
+            triangles = rng.normal(size=(2, 3, 3)) + np.array([0.0, 0.0, 1.5])
+            _subdivision, (_lower, upper) = self.certify_both_ways(
+                dst, triangles, tol=1e-6, max_nodes=8,
+            )
+            attained = max(
+                self.brute_force_max(patch, dst.p0, dst.p1, dst.p2, samples=20)
+                for patch in triangles
+            )
+            self.assertGreaterEqual(
+                upper, attained - 1e-9,
+                "a certified upper bound below a distance the surface actually attains is not a "
+                "bound at all — this is the exact defect that survived before the loop was made "
+                "testable without a BVH",
+            )
 
     def test_a_coplanar_patch_is_proven_with_no_subdivision(self):
         """The mechanism the ADR bought: on a flat region the bound collapses to the corner maximum.

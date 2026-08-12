@@ -17,6 +17,18 @@ bound is within `tol` of the best sample seen, which BRACKETS the true worst cas
 on the UPPER end, so a bracket that failed to close costs triangles and never honesty. Sampling, at
 any density anyone can afford, proves nothing about the spike that pops.
 
+THE SECOND BOUND, AND IT IS THE ONE THAT MADE THIS AFFORDABLE (ADR 0036 §6). The covering radius
+prices a proof at target^-2 — showing a maximum is under `e` forces every patch on the whole surface
+below `e`'s length scale, whether or not the two surfaces are anywhere near each other there. But
+distance to a FIXED triangle is convex, so over a patch its maximum sits at a corner, and the BVH
+already returns WHICH triangle it hit:
+
+    max_{p in S} d(p) <= min_k max_j dist(v_j, tri_k)
+
+Nine point-triangle distances, no query, no subdivision — and on a near-coplanar region it collapses
+to the largest corner distance and proves the patch outright. `patch_bounds` takes the minimum of
+the two, so it can only tighten, and BOTH consumers below use it.
+
 TWO CONSUMERS, TWO QUESTIONS (ADR 0036 §1). CERTIFICATION wants the number, and runs the bracket
 above. The SEARCH only ever wanted a Boolean — "is this candidate inside this rung?" — and paying
 for a bracket to answer it is what froze the old rung scan on a 2 784-triangle mesh. `fits_target`
@@ -405,119 +417,7 @@ class Surface:
         }
 
 
-# ── the certified deviation ──────────────────────────────────────────────────────────────────────
-
-def _patch_bound(corners, distances):
-    """The covering-radius bound over one sub-triangle: min_k ( d(v_k) + max_j |v_k - v_j| ).
-
-    Valid because d is 1-Lipschitz and |p - v_k| is convex, so its maximum over the triangle is
-    attained at another CORNER — a triangle being the convex hull of its three vertices.
-    """
-    return min(
-        distances[k] + max(float(np.linalg.norm(corners[k] - corners[j])) for j in range(3))
-        for k in range(3)
-    )
-
-
-def branch_and_bound(seeds, distance_at, tol, max_nodes, target=None, rel_tol=0.0):
-    """Bracket max over the seed patches of a 1-Lipschitz `distance_at`. Returns (lower, upper).
-
-    `distance_at(key, point) -> float` is injected rather than reached for, so the bound itself can
-    be regression-tested against a synthetic field with a KNOWN interior maximum, without Blender
-    and without a BVH. That is not a convenience: the previous version of this function returned an
-    "upper bound" that was not one, and no test could have caught it because the only way to call
-    it was through a mesh whose true worst case nobody knew independently.
-
-    THE PRUNED PATCHES ARE PART OF THE ANSWER. A child whose bound is already within tolerance is
-    not queued — expanding it cannot improve the lower bound enough to matter — but its bound still
-    BOUNDS a region of the surface, and that region may hold a maximum above every point sampled so
-    far. Dropping it on the floor and then reporting `max(best, live_heap_top)` reports a number
-    that is not an upper bound at all. Every pruned bound is folded into `pruned` and into the
-    returned upper endpoint, which is what makes the endpoint's name true.
-
-    STOPPING. `tol`/`rel_tol` close the bracket; `target` stops as soon as the caller's actual
-    question is decided — upper already under it (accept) or a SAMPLED point already over it
-    (reject). Both are sound one-directional facts, which is why a caller may apply them per
-    direction of a two-way measurement.
-
-    THE CONVEX BOUND IS NOT APPLIED HERE, and that is deliberate. This function's job is to CLOSE a
-    bracket, not to accept, and ADR 0036 leaves winner certification untouched: a tighter upper
-    bound would move every shipped certificate for a reason unrelated to the search rebuild.
-    """
-    best = 0.0
-    pruned = 0.0
-    heap = []
-    counter = 0
-    for corners, distances in seeds:
-        best = max(best, max(distances))
-        counter += 1
-        heapq.heappush(heap, (-_patch_bound(corners, distances), counter, corners, distances))
-
-    nodes = 0
-    while heap:
-        live = -heap[0][0]
-        slack = max(tol, rel_tol * best)
-        if live <= best + slack or nodes >= max_nodes:
-            break
-        if target is not None and (live <= target or best > target):
-            break
-        _, _, corners, distances = heapq.heappop(heap)
-        nodes += 1
-        a, b, c = corners
-        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
-        d_ab = distance_at(("m", tuple(ab)), ab)
-        d_bc = distance_at(("m", tuple(bc)), bc)
-        d_ca = distance_at(("m", tuple(ca)), ca)
-        best = max(best, d_ab, d_bc, d_ca)
-        slack = max(tol, rel_tol * best)
-        for patch, patch_d in (
-            ((a, ab, ca), (distances[0], d_ab, d_ca)),
-            ((ab, b, bc), (d_ab, distances[1], d_bc)),
-            ((ca, bc, c), (d_ca, d_bc, distances[2])),
-            ((ab, bc, ca), (d_ab, d_bc, d_ca)),
-        ):
-            sub = _patch_bound(patch, patch_d)
-            if sub > best + slack:
-                counter += 1
-                heapq.heappush(heap, (-sub, counter, patch, patch_d))
-            else:
-                pruned = max(pruned, sub)
-
-    live = -heap[0][0] if heap else 0.0
-    return best, max(best, pruned, live)
-
-
-def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
-    """Certified max over `src`'s surface of the distance to `dst`. Returns (lower, upper) metres."""
-    from mathutils import Vector
-
-    find = dst.bvh.find_nearest
-    cache = {}
-
-    def distance_at(key, point):
-        value = cache.get(key)
-        if value is None:
-            hit = find(Vector(point))
-            value = hit[3] if hit[0] is not None else 0.0
-            cache[key] = value
-        return value
-
-    seeds = []
-    for t in range(src.tri_count):
-        corners = (src.p0[t], src.p1[t], src.p2[t])
-        ids = src.tri_v[t]
-        seeds.append(
-            (corners, tuple(distance_at(int(ids[k]), corners[k]) for k in range(3)))
-        )
-    return branch_and_bound(seeds, distance_at, tol, max_nodes, target, rel_tol)
-
-
-# ── the budgeted Boolean verdict (ADR 0036 §1) ───────────────────────────────────────────────────
-
-PROVEN_PASS = "PROVEN_PASS"
-PROVEN_FAIL = "PROVEN_FAIL"
-UNDECIDED = "UNDECIDED"
-
+# ── the patch bounds, shared by the certificate and the verdict ──────────────────────────────────
 
 def point_triangle_distances(points, a, b, c):
     """Distance from each of `points` to the triangle (a, b, c), elementwise. Shapes (N, 3).
@@ -582,10 +482,12 @@ def point_triangle_distances(points, a, b, c):
 
 
 def covering_patch_bounds(corners, distances):
-    """The covering-radius bound over N patches at once. `corners` (N, 3, 3), `distances` (N, 3).
+    """The covering-radius bound over N patches at once: min_k ( d(v_k) + max_j |v_k - v_j| ).
 
-    The vectorised twin of `_patch_bound`, which the certifying branch-and-bound still calls one
-    patch at a time. Same expression, same proof.
+    Valid because d is 1-Lipschitz and |p - v_k| is convex, so its maximum over the triangle is
+    attained at another CORNER — a triangle being the convex hull of its three vertices. Batched
+    because it is priced four children at a time inside the loop and a whole surface at a time at
+    the seeds.
     """
     spans = np.linalg.norm(corners[:, :, None, :] - corners[:, None, :, :], axis=-1)
     return (distances + spans.max(axis=2)).min(axis=1)
@@ -639,6 +541,165 @@ def patch_bounds(corners, distances, hits, dst, target):
     return bounds
 
 
+# ── the certified deviation ──────────────────────────────────────────────────────────────────────
+
+def branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
+                     target=None, rel_tol=0.0, bound_of=None):
+    """Bracket max over the seed patches of a 1-Lipschitz distance field. Returns (lower, upper).
+
+    `probe(key, point) -> (distance, tag)` is injected rather than reached for, so the loop can be
+    regression-tested against a synthetic field with a KNOWN interior maximum, without Blender and
+    without a BVH. That is not a convenience: an earlier version of this function returned an "upper
+    bound" that was not one, and no test could have caught it because the only way to call it was
+    through a mesh whose true worst case nobody knew independently.
+
+    THE TAG IS WHATEVER THE BOUND NEEDS, and the loop never reads it — it only carries it from the
+    probe that produced a corner to the `bound_of` that consumes it. For a BVH probe it is the index
+    of the nearest triangle, which is what the convex bound is computed from.
+
+    `bound_of(corners, distances, tags, ceiling) -> bounds` prices a BATCH of patches; the default
+    is the covering-radius bound alone, which needs nothing but the patch. `ceiling` is the value
+    the caller is about to compare against, so a bound function may skip its expensive half where
+    the cheap half has already closed.
+
+    THE PRUNED PATCHES ARE PART OF THE ANSWER. A child whose bound is already within tolerance is
+    not queued — expanding it cannot improve the lower bound enough to matter — but its bound still
+    BOUNDS a region of the surface, and that region may hold a maximum above every point sampled so
+    far. Dropping it on the floor and then reporting `max(best, live_heap_top)` reports a number
+    that is not an upper bound at all. Every pruned bound is folded into `pruned` and into the
+    returned upper endpoint, which is what makes the endpoint's name true.
+
+    STOPPING. `tol`/`rel_tol` close the bracket; `target` stops as soon as the caller's actual
+    question is decided — upper already under it (accept) or a SAMPLED point already over it
+    (reject). Both are sound one-directional facts, which is why a caller may apply them per
+    direction of a two-way measurement.
+    """
+    if bound_of is None:
+        def bound_of(patch_corners, patch_distances, _tags, _ceiling):
+            return covering_patch_bounds(patch_corners, patch_distances)
+
+    corners = np.asarray(corners, dtype=np.float64)
+    distances = np.asarray(distances, dtype=np.float64)
+    tags = (np.zeros(distances.shape, dtype=np.int64) if tags is None
+            else np.asarray(tags, dtype=np.int64))
+
+    best = float(distances.max()) if distances.size else 0.0
+    bounds = bound_of(corners, distances, tags, best)
+    heap = []
+    counter = 0
+    for t in range(len(corners)):
+        counter += 1
+        heapq.heappush(heap, (-float(bounds[t]), counter, corners[t], distances[t], tags[t]))
+
+    pruned = 0.0
+    nodes = 0
+    while heap:
+        live = -heap[0][0]
+        slack = max(tol, rel_tol * best)
+        if live <= best + slack or nodes >= max_nodes:
+            break
+        if target is not None and (live <= target or best > target):
+            break
+        _, _, patch, patch_d, patch_t = heapq.heappop(heap)
+        nodes += 1
+        a, b, c = patch
+        ab, bc, ca = 0.5 * (a + b), 0.5 * (b + c), 0.5 * (c + a)
+        d_ab, t_ab = probe(("m", tuple(ab)), ab)
+        d_bc, t_bc = probe(("m", tuple(bc)), bc)
+        d_ca, t_ca = probe(("m", tuple(ca)), ca)
+        best = max(best, d_ab, d_bc, d_ca)
+        slack = max(tol, rel_tol * best)
+        children = np.array([(a, ab, ca), (ab, b, bc), (ca, bc, c), (ab, bc, ca)])
+        child_d = np.array([
+            (patch_d[0], d_ab, d_ca), (d_ab, patch_d[1], d_bc),
+            (d_ca, d_bc, patch_d[2]), (d_ab, d_bc, d_ca),
+        ])
+        child_t = np.array([
+            (patch_t[0], t_ab, t_ca), (t_ab, patch_t[1], t_bc),
+            (t_ca, t_bc, patch_t[2]), (t_ab, t_bc, t_ca),
+        ])
+        child_bounds = bound_of(children, child_d, child_t, best + slack)
+        for index in range(4):
+            sub = float(child_bounds[index])
+            if sub > best + slack:
+                counter += 1
+                heapq.heappush(heap, (
+                    -sub, counter, children[index], child_d[index], child_t[index],
+                ))
+            else:
+                pruned = max(pruned, sub)
+
+    live = -heap[0][0] if heap else 0.0
+    return best, max(best, pruned, live)
+
+
+def bvh_probe(dst):
+    """`(distance, nearest triangle index)` against `dst`, memoized. Blender-only (mathutils)."""
+    from mathutils import Vector
+
+    find = dst.bvh.find_nearest
+    cache = {}
+
+    def probe(key, point):
+        value = cache.get(key)
+        if value is None:
+            hit = find(Vector(point))
+            value = (hit[3], int(hit[2])) if hit[0] is not None else (0.0, -1)
+            cache[key] = value
+        return value
+
+    return probe
+
+
+def seed_patches(src, probe):
+    """Every triangle of `src` as a seed patch: (corners, corner distances, corner tags).
+
+    One probe per REFERENCED vertex — an unreferenced vertex is not on the surface, and a bound or a
+    witness taken from one would be a statement about a point the mesh does not have.
+    """
+    corner_d = np.zeros(src.vert_count, dtype=np.float64)
+    corner_t = np.full(src.vert_count, -1, dtype=np.int64)
+    for index in np.unique(src.tri_v):
+        distance, tag = probe(int(index), src.verts[index])
+        corner_d[index] = distance
+        corner_t[index] = tag
+    corners = np.stack([src.p0, src.p1, src.p2], axis=1)
+    return corners, corner_d[src.tri_v], corner_t[src.tri_v]
+
+
+def _one_way(src, dst, tol, max_nodes, target=None, rel_tol=0.0):
+    """Certified max over `src`'s surface of the distance to `dst`. Returns (lower, upper) metres.
+
+    THE CONVEX BOUND IS APPLIED HERE TOO, on the same law as the search side (ADR 0036 §6), and it
+    was the rebuild's hard success gate that forced it. Leaving certification on the covering-radius
+    bound alone left the lane INTERNALLY INCONSISTENT: on `Turret_Decor` the directed search proved
+    a 1 330-triangle candidate inside the 3.890 mm rung and this function, node-capped at 1.5 M,
+    returned 4.8383 mm and refused the level it had just been handed. Measured, the tightened bound
+    turns that refusal into a complete three-level chain and takes the full-tank projection from
+    71+ minutes to inside the ruling.
+
+    WHAT DID NOT CHANGE, and it is the part that matters: this still measures the DECODED SHIPPED
+    BYTES, still returns a sound two-way bracket at the certification tolerance, and the caller
+    still gates on the UPPER end. Only the bound got tighter, and a tighter upper bound can move a
+    certificate one way — down. Nothing is admitted that was not admissible before.
+    """
+    probe = bvh_probe(dst)
+    corners, distances, tags = seed_patches(src, probe)
+
+    def bound_of(patch_corners, patch_distances, patch_tags, ceiling):
+        return patch_bounds(patch_corners, patch_distances, patch_tags, dst, ceiling)
+
+    return branch_and_bound(corners, distances, tags, probe, tol, max_nodes,
+                            target, rel_tol, bound_of)
+
+
+# ── the budgeted Boolean verdict (ADR 0036 §1) ───────────────────────────────────────────────────
+
+PROVEN_PASS = "PROVEN_PASS"
+PROVEN_FAIL = "PROVEN_FAIL"
+UNDECIDED = "UNDECIDED"
+
+
 def one_way_fits(src, dst, target_m, node_budget):
     """Does every point of `src` lie within `target_m` of `dst`? Returns (verdict, witness, nodes).
 
@@ -665,28 +726,21 @@ def one_way_fits(src, dst, target_m, node_budget):
     SOUNDNESS is the same as the bracket's: every live bound under the target proves the maximum is
     under it, and a SAMPLED point over the target is a witness that it is not. Neither statement
     needs the bracket to close.
+
+    THE BOUND IS THE ONE `_one_way` CERTIFIES WITH — `patch_bounds`, both halves, one expression.
+    What differs between the two callers is only the question and the stopping rule.
     """
-    from mathutils import Vector
+    probe = bvh_probe(dst)
 
-    find = dst.bvh.find_nearest
-    cache = {}
-
-    def probe(key, point):
-        """(distance, nearest triangle index). The triangle is what the convex bound needs."""
-        value = cache.get(key)
-        if value is None:
-            hit = find(Vector(point))
-            value = (hit[3], int(hit[2])) if hit[0] is not None else (0.0, -1)
-            cache[key] = value
-        return value
-
+    # WITNESS FIRST, and it is why the corner sweep is not `seed_patches`: a rejection must return
+    # at the first sample over the target rather than after probing the whole surface.
     witness = 0.0
     corner_d = np.zeros(src.vert_count, dtype=np.float64)
     corner_t = np.full(src.vert_count, -1, dtype=np.int64)
     for index in np.unique(src.tri_v):
-        distance, triangle = probe(int(index), src.verts[index])
+        distance, tag = probe(int(index), src.verts[index])
         corner_d[index] = distance
-        corner_t[index] = triangle
+        corner_t[index] = tag
         if distance > witness:
             witness = distance
         if distance > target_m:

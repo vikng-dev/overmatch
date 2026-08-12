@@ -303,18 +303,28 @@ struct ShoeLevel {
 ///
 /// | level | glb | tris | dev (mm) | from (m) |
 /// |---|---|---|---|---|
-/// | L1 | `rung1` | 678 | 3.339 | 60.40 |
-/// | L2 | `rung3` | 390 | 14.962 | 269.38 |
-/// | L3 | `rung4` | 248 | 30.145 | 542.34 |
-/// | L4 | `rung6` | 146 | 83.389 | 1 499.58 |
+/// | L1 | `rung1` | 678 | 3.338 | 60.39 |
+/// | L2 | `rung3` | 390 | 14.955 | 269.24 |
+/// | L3 | `rung4` | 248 | 30.032 | 540.30 |
+/// | L4 | `rung6` | 146 | 82.654 | 1 486.36 |
 ///
-/// RE-CUT 2026-08-12 by the directed search (ADR 0036). Three of the four levels are byte-identical
-/// to the chain the exhaustive search cut; L3 is CHEAPER — 248 triangles against 254 — and switches
-/// 14 m later for it. That is not a loosening: 248 is certified at 30.145 mm against a 31.120 mm
-/// rung, and the old 254 existed because the retired search accepted on a 5 %-tolerance bracket
-/// whose upper end could not clear the target for a candidate whose true deviation did. The rung
-/// numbers are octave indices, not chain indices, so the gaps are real: rungs 2 and 5 were skipped
-/// for shedding under the 30 % `SKIP_FRACTION` (512 tris at 24.5 %, 186 at 25.0 %), and the
+/// RE-CUT 2026-08-12 by the directed search (ADR 0036), and the numbers moved for TWO independent
+/// reasons that are worth keeping apart.
+///
+/// The GEOMETRY moved once: L3 is CHEAPER, 248 triangles against 254, and the other three levels
+/// are byte-identical to the chain the exhaustive search cut. The old 254 existed only because the
+/// retired search accepted on a 5 %-tolerance bracket whose upper end could not clear the target
+/// for a candidate whose true deviation did; the directed search asks the rung's actual question
+/// and proves 248 fits.
+///
+/// The DEVIATIONS moved on every level, downward, because the certifying bound got tighter — the
+/// convex acceptance bound of ADR 0036 §6 applies to certification too. Every level is the same
+/// mesh it was, proven to sit CLOSER to the source than the old bound could show, so each takes
+/// over slightly nearer the camera. A tighter proof about unchanged bytes is the one direction this
+/// table is allowed to move without new geometry.
+///
+/// The rung numbers are octave indices, not chain indices, so the gaps are real: rungs 2 and 5 were
+/// skipped for shedding under the 30 % `SKIP_FRACTION` (512 tris at 24.5 %, 186 at 25.0 %), and the
 /// manifest carries both skip records.
 ///
 /// L4's band opens at 1 499.58 m, INSIDE the world: the shipped map is 1 500 m across, so its
@@ -331,33 +341,36 @@ const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung1.glb",
         tris: 678,
-        worst_dev_mm: 3.338514,
-        from_m: 60.4024,
+        worst_dev_mm: 3.337_77,
+        from_m: 60.3891,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung3.glb",
         tris: 390,
-        worst_dev_mm: 14.962055,
-        from_m: 269.376,
+        worst_dev_mm: 14.954_733,
+        from_m: 269.2444,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung4.glb",
         tris: 248,
-        worst_dev_mm: 30.144_895,
-        from_m: 542.3391,
+        // THE PAIRWISE BOUND. L3 sits 30.014 mm from L0 and 30.032 mm from L2, its own parent, and
+        // the switch is the distance at which the step from the level ACTUALLY ON SCREEN goes
+        // sub-pixel — so the larger owns the threshold. The gap is a third of a millimetre here and
+        // it still has to be the pairwise number, because which of the two dominates is an output
+        // of generation and not a property of this row.
+        worst_dev_mm: 30.031_547,
+        from_m: 540.3013,
     },
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung6.glb",
         tris: 146,
-        // THE PAIRWISE BOUND, not the source-relative one, and this is the only level in the chain
-        // where the two differ. L4 sits 77.741 mm from L0 but 83.389 mm from L3, its own parent —
-        // and the switch is the distance at which the step from the level ACTUALLY ON SCREEN
-        // becomes sub-pixel, so the larger of the two is what owns the threshold. The manifest
-        // records both (`switch_from_source_dev_m` 1398.03, `switch_from_pairwise_m` 1499.58) and
-        // takes the max; wiring the source-relative number here would switch 100 m too early
-        // against a visible step.
-        worst_dev_mm: 83.388_74,
-        from_m: 1499.578,
+        // The same rule, and here the two are far apart: L4 sits 76.973 mm from L0 but 82.654 mm
+        // from L3, because the two levels deviate from the source in OPPOSITE directions. The
+        // manifest records both (`switch_from_source_dev_m` 1384.23, `switch_from_pairwise_m`
+        // 1486.36) and takes the max; wiring the source-relative number here would switch 100 m too
+        // early against a visible step.
+        worst_dev_mm: 82.653_622,
+        from_m: 1486.3617,
     },
 ];
 
@@ -1284,10 +1297,11 @@ mod tests {
             // change without anyone noticing. It has changed three times: the 2026-08-07 re-cut
             // against the welded 764-triangle shoe dropped four reductions to three, the
             // 2026-08-08 re-cut against the rebuilt 1 520-triangle shoe took it back to four, and
-            // the 2026-08-12 directed-search re-cut (ADR 0036) moved L3 out from 527.94 m to
-            // 542.3391 m on a level that is 6 triangles CHEAPER. This line is what made each of
-            // them visible rather than silent.
-            assert_eq!(thresholds, vec![60.4024, 269.376, 542.3391, 1499.578]);
+            // the 2026-08-12 directed-search re-cut (ADR 0036) kept four while moving every
+            // threshold IN — the certifying bound got tighter, so each level is proven closer to
+            // the source than before and earns its band a little sooner. This line is what made
+            // each of them visible rather than silent.
+            assert_eq!(thresholds, vec![60.3891, 269.2444, 540.3013, 1486.3617]);
 
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
