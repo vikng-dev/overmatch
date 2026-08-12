@@ -2,8 +2,9 @@ name: Build overmatch-server
 description: >-
   The single canonical build + package recipe for the Linux `overmatch-server`
   dedicated server. Runs as steps inside the caller's job: toolchain -> apt deps
-  -> asset prune -> rust-cache -> cargo build -> tar. release.yml's `build-server`
-  is the only caller; its one tarball is both deployed and released.
+  -> rust-cache -> cargo build -> tar over the server's own asset allowlist.
+  release.yml's `build-server` is the only caller; its one tarball is both
+  deployed and released.
 
 # CONTRACT (the seam):
 #   * The CALLER checks out the repo FIRST, fetches LFS via committed `.lfsconfig`
@@ -43,14 +44,6 @@ runs:
           pkg-config libasound2-dev libudev-dev \
           libwayland-dev libxkbcommon-dev libx11-dev
 
-    # Drop the build-time Blender sources and the stale asset backups under assets/**/backup/ so
-    # neither rides along in the server bundle.
-    - name: Prune non-runtime assets
-      shell: bash
-      run: |
-        find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
-        find assets -type d -name backup -prune -exec rm -rf {} +
-
     # Shared server build cache (key: server-net) — release, dispatch, and deploy all warm the
     # same cache on purpose.
     - uses: Swatinem/rust-cache@v2
@@ -63,19 +56,81 @@ runs:
       shell: bash
       run: cargo build --release --locked --bin overmatch-server
 
-    # Stage a self-contained folder: the binary alongside assets/, so on the droplet
-    # `BEVY_ASSET_ROOT=<extracted dir>` finds the meshes and `./overmatch-server` just runs. With
+    # Stage a self-contained folder: the binary alongside the assets it opens, so on the droplet
+    # `BEVY_ASSET_ROOT=<extracted dir>` finds them and `./overmatch-server` just runs. With
     # deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before packing.
+    #
+    # THE ASSET SET IS AN ALLOWLIST, stated POSITIVELY: these are the paths `overmatch-server`
+    # OPENS, not `assets/` minus whatever seemed heavy. The server mounts `SimPlugin` and no client
+    # plugin, so it is a short list — and it is not derivable from the client's, which is why it is
+    # written down here with what opens each one:
+    #
+    #   maps/*/level.json, maps/*/*.png  crate::map::parse and terrain_grid's height decode
+    #                                    (src/world.rs, src/terrain_grid.rs), plus the handshake
+    #                                    content digest. EVERY map, not the default one: the map is
+    #                                    an $OVERMATCH_MAP runtime choice and the heightmap's file
+    #                                    name is read OUT of level.json, so neither can be resolved
+    #                                    at packaging time. `derived/` is excluded — `map_ui.png` is
+    #                                    loaded only by `net::spawn_map`, a client plugin.
+    #   shell/shell.glb                  ballistics::setup_assets, a Startup system inside
+    #                                    SimPlugin with no window gate (src/ballistics.rs)
+    #   <id>/<id>.sim.glb                the bake's consumer contract, the geometry_lod trio
+    #                                    fingerprint, and the track rig's marker read — the ONE
+    #                                    geometry artifact the server opens (ADR 0035)
+    #   <id>/<id>.lod.json               geometry_lod::load_certificate, which panics without it
+    #   <id>/<id>.tank.ron               the spec sheet, loaded through the AssetServer
+    #
+    # WHAT IS DELIBERATELY ABSENT, each proven client-only by the plugin that loads it: `<id>.glb`,
+    # the 64 MB view artifact (geometry_lod::view_plugin, mounted only by the client roots); the
+    # terrain KTX2 (behind `!windows.is_empty()`, and the server builds no primary window); the vfx
+    # atlases, the shaders and the fonts (vfx/render_scale/ui_font plugins, client roots only); and
+    # `materials/materials.ron`, which is `include_str!`d into the binary rather than read.
+    #
+    # The vehicles are DISCOVERED by the same trio rule the door and the hook use, so a second
+    # vehicle ships without a line here. A named path that is missing is a FAILURE, not a smaller
+    # tarball: the server would boot and panic on the droplet.
     - name: Package
       shell: bash
       env:
         DEPLOYED_SHA: ${{ inputs.deployed-sha }}
       run: |
+        set -euo pipefail
         mkdir -p stage/overmatch-server
         cp target/release/overmatch-server stage/overmatch-server/
-        cp -r assets stage/overmatch-server/
-        if [ "$DEPLOYED_SHA" = "true" ]; then
+        stems=()
+        while IFS= read -r stem; do stems+=("$stem"); done < <(
+          git ls-files |
+          awk '
+            /\.blend$/     { blend[substr($0, 1, length($0) - 6)] = 1; next }
+            /\.tank\.ron$/ { sheet[substr($0, 1, length($0) - 9)] = 1; next }
+            /\.glb$/       { model[substr($0, 1, length($0) - 4)] = 1 }
+            END { for (stem in blend) if (stem in sheet && stem in model) print stem }
+          ' | LC_ALL=C sort
+        )
+        if [[ ${#stems[@]} -eq 0 ]]; then
+          echo "::error::No asset trio found — the server tarball would carry no vehicle"
+          exit 1
+        fi
+        paths=("assets/shell/shell.glb")
+        for stem in "${stems[@]}"; do
+          paths+=("${stem}.sim.glb" "${stem}.lod.json" "${stem}.tank.ron")
+        done
+        while IFS= read -r path; do paths+=("$path"); done < <(
+          find assets/maps -type f \( -name '*.json' -o -name '*.png' \) \
+            -not -path 'assets/maps/*/derived/*' | LC_ALL=C sort
+        )
+        for path in "${paths[@]}"; do
+          if [[ ! -f "${path}" ]]; then
+            echo "::error::${path} is on the server's allowlist and is not in this checkout"
+            exit 1
+          fi
+          mkdir -p "stage/overmatch-server/$(dirname "${path}")"
+          cp "${path}" "stage/overmatch-server/${path}"
+        done
+        printf 'server asset: %s\n' "${paths[@]}"
+        if [ "${DEPLOYED_SHA}" = "true" ]; then
           printf '%s\n' "${GITHUB_SHA}" > stage/overmatch-server/DEPLOYED_SHA
         fi
         tar -C stage -czf overmatch-server.tar.gz overmatch-server
+        du -sh stage/overmatch-server
         ls -lh overmatch-server.tar.gz

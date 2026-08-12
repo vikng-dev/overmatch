@@ -37,7 +37,21 @@ Restart=on-failure
 RestartSec=3
 ```
 
-Payload on the droplet: `/opt/overmatch-server/{overmatch-server,assets/}`.
+Payload on the droplet: `/opt/overmatch-server/{overmatch-server,assets/}` — and `assets/` there is
+**only what the server opens**, an allowlist stated in `.github/actions/build-server/action.yml`
+rather than the client's whole tree:
+
+| Path | Opened by |
+|---|---|
+| `assets/maps/*/level.json`, `assets/maps/*/*.png` | `crate::map::parse`, the terrain height decode, and the handshake content digest. Every map: `$OVERMATCH_MAP` picks one at runtime, and the heightmap's file name is inside `level.json`. |
+| `assets/shell/shell.glb` | `ballistics::setup_assets`, a `Startup` system in `SimPlugin` |
+| `assets/<id>/<id>.sim.glb` | the bake's consumer contract, the `geometry_lod` trio fingerprint, and the track rig — the one geometry artifact the server reads (ADR-0035) |
+| `assets/<id>/<id>.lod.json` | `geometry_lod::load_certificate` (panics without it) |
+| `assets/<id>/<id>.tank.ron` | the spec sheet, through the `AssetServer` |
+
+The 64 MB view glb, the terrain KTX2, the vfx atlases, the shaders and the fonts stay out: every one
+is loaded by a plugin the server does not mount, or behind the `!windows.is_empty()` branch a
+window-less server never takes. `materials/materials.ron` is `include_str!`d into the binary.
 
 Common ops:
 
@@ -109,5 +123,5 @@ ssh -i ~/.ssh/do-vikng-dev root@157.245.48.161 '
 
 - **Dev auth token is hardcoded** (fine for a friends playtest; not for anything public).
 - **`SPIKE_PERTURB=0`** is baked into the unit — the server runs the deterministic path.
-- The full 160 MB `overmatch-server.tar.gz` is left in `/opt` after extraction; harmless, delete
-  if disk gets tight.
+- The `overmatch-server.tar.gz` is left in `/opt` after extraction; harmless, delete if disk gets
+  tight. It carries the server's asset allowlist (~13 MB of assets), not the client's tree.
