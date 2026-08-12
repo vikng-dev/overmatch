@@ -200,6 +200,27 @@ pub(super) struct ImpactAssets {
     hot_lut: Handle<Image>,
 }
 
+#[cfg(test)]
+impl ImpactAssets {
+    /// Every handle default: the tests spawn real billboards and clone real material assets, but no
+    /// render app samples the textures behind the handles. Shared with [`super::scatter_hit`]'s
+    /// harness, which drives the same read from a crossing instead of from an [`Impact`].
+    pub(super) fn test_stub() -> Self {
+        Self {
+            quad: Handle::default(),
+            dust_atlas: Handle::default(),
+            dust_lut: Handle::default(),
+            ping_atlas: Handle::default(),
+            spark_atlas: Handle::default(),
+            spark_lut: Handle::default(),
+            dirt_lut: Handle::default(),
+            scar_lut: Handle::default(),
+            spall_lut: Handle::default(),
+            hot_lut: Handle::default(),
+        }
+    }
+}
+
 impl ImpactAssets {
     /// The dust-billow material template: alpha-blend mass (glow.y = 0 — the occluding contract),
     /// its own earthy LUT, soft erosion edges. Its 2×2 atlas frame lanes are set on spawn.
@@ -440,7 +461,7 @@ pub(super) fn setup_impact_assets(
 
 /// Drop the layered read at each shell impact — branching on BOTH the round's physical caliber and
 /// the `surface` it struck. At/above [`TRACER_MAX_CALIBER`] the 88 lands either the big terrain
-/// splash ([`spawn_big_splash`]) or the armor read ([`spawn_big_armor`]); below it, the MG's compact
+/// splash ([`spawn_terrain_read`]) or the armor read ([`spawn_big_armor`]); below it, the MG's compact
 /// dust-ping-spark read ([`spawn_small_impact`], which recolors its billow gray on armor but keeps
 /// the terrain path byte-for-byte). `normal`/`to_camera` are resolved once, before any path draws
 /// RNG, so the small path's RNG sequence is unchanged and the surface pick costs no RNG.
@@ -459,43 +480,90 @@ fn spawn_impact_read(
         .single()
         .map(|cam| cam.translation() - impact.position)
         .unwrap_or(Vec3::Z);
-    if impact.caliber >= TRACER_MAX_CALIBER {
-        match impact.surface {
-            ImpactSurface::Terrain => spawn_big_splash(
-                impact.position,
-                normal,
-                to_camera,
-                &assets,
-                &mut materials,
-                &mut ring,
-                &mut ground_ring,
-                &mut rng,
-                &mut commands,
-            ),
-            ImpactSurface::Armor => spawn_big_armor(
-                impact.position,
-                normal,
-                to_camera,
-                impact.penetrated,
-                impact.deflection,
-                &assets,
-                &mut materials,
-                &mut ring,
-                &mut rng,
-                &mut commands,
-            ),
-        }
-    } else {
-        spawn_small_impact(
+    match impact.surface {
+        ImpactSurface::Terrain => spawn_terrain_read(
             impact.position,
             normal,
             to_camera,
-            impact.surface,
+            impact.caliber,
             &assets,
             &mut materials,
             &mut ring,
+            &mut ground_ring,
             &mut rng,
             &mut commands,
+        ),
+        ImpactSurface::Armor => {
+            if impact.caliber >= TRACER_MAX_CALIBER {
+                spawn_big_armor(
+                    impact.position,
+                    normal,
+                    to_camera,
+                    impact.penetrated,
+                    impact.deflection,
+                    &assets,
+                    &mut materials,
+                    &mut ring,
+                    &mut rng,
+                    &mut commands,
+                );
+            } else {
+                spawn_small_impact(
+                    impact.position,
+                    normal,
+                    to_camera,
+                    ImpactSurface::Armor,
+                    &assets,
+                    &mut materials,
+                    &mut ring,
+                    &mut rng,
+                    &mut commands,
+                );
+            }
+        }
+    }
+}
+
+/// The TERRAIN half of the read above, as a callable: the 88's big splash at/above
+/// [`TRACER_MAX_CALIBER`], the MG's compact dust-ping-spark read below it. `normal` must be unit;
+/// `to_camera` need not be. Shared with [`super::scatter_hit`], whose crossings are terrain-class
+/// surfaces and so take this exact dispatch rather than a read of their own.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_terrain_read(
+    position: Vec3,
+    normal: Vec3,
+    to_camera: Vec3,
+    caliber: f32,
+    assets: &ImpactAssets,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    ground_ring: &mut GroundMarkRing,
+    rng: &mut ViewRng,
+    commands: &mut Commands,
+) {
+    if caliber >= TRACER_MAX_CALIBER {
+        spawn_big_splash(
+            position,
+            normal,
+            to_camera,
+            assets,
+            materials,
+            ring,
+            ground_ring,
+            rng,
+            commands,
+        );
+    } else {
+        spawn_small_impact(
+            position,
+            normal,
+            to_camera,
+            ImpactSurface::Terrain,
+            assets,
+            materials,
+            ring,
+            rng,
+            commands,
         );
     }
 }
@@ -991,18 +1059,7 @@ mod tests {
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(42))
             .add_observer(spawn_impact_read);
-        app.insert_resource(ImpactAssets {
-            quad: Handle::default(),
-            dust_atlas: Handle::default(),
-            dust_lut: Handle::default(),
-            ping_atlas: Handle::default(),
-            spark_atlas: Handle::default(),
-            spark_lut: Handle::default(),
-            dirt_lut: Handle::default(),
-            scar_lut: Handle::default(),
-            spall_lut: Handle::default(),
-            hot_lut: Handle::default(),
-        });
+        app.insert_resource(ImpactAssets::test_stub());
         app
     }
 
