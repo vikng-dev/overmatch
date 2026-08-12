@@ -35,7 +35,9 @@ while a valid 248-triangle candidate existed and passes.
    toolchain change that touches attribute handling with nothing else covering it — then a
    rendered comparison returns as a deliberate ratification audit, decoding shipped bytes.
 4. **Lane validity gates re-scope to what the measurement needs**: finite attributes,
-   non-degenerate, non-empty. Manifoldness is the armor pipeline's law, not this lane's —
+   non-degenerate, non-empty, and component-count survival (a vanished small part has
+   near-zero Hausdorff distance, so the deviation bound alone cannot see it — ADR-0033 §7).
+   Manifoldness is the armor pipeline's law, not this lane's —
    the deviation bound polices decimator misbehavior by construction (a mangled region
    deviates and fails; an undeviating one is invisible by definition). The UV/tangent checks
    served the deleted render gate; untextured physics-vocabulary meshes are legal. With
@@ -60,6 +62,10 @@ while a valid 248-triangle candidate existed and passes.
 
 - **Node budget shape:** flat (one constant) vs scale-free (∝ (diagonal/e)², capped) — flat
   makes fine-rung availability depend on mesh size. Recommendation on record: scale-free.
+  Constraint either way (review finding): the cap is a pinned constant, never a lever for
+  the wall-clock gate — a budget-exhausted verdict may cost a rung, and that loss is
+  recorded in the report distinctly from structural infeasibility, so fidelity traded for
+  time is always loud.
 - **The oracle self-consistency audit dies with the staircase** it re-probed. Its two real
   catches were decimator nondeterminism — still covered where it matters: winners are
   generated twice and must reproduce byte-identically at export.
