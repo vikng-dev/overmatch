@@ -1,18 +1,16 @@
 """The declared inputs of the LOD ladder — every number the generator is allowed to read.
 
 ADR 0033 (`.agents/docs/adr/0033-geometry-mipmapping-declarative-lod.md`) is the doctrine, as
-amended by ADR 0036 (`0036-the-generator-proves-less.md`); this file is their machine-readable
-half. Nothing downstream may hardcode a threshold: `generate.py`, `chain.py` and the gates all read
-from here, and every value lands in the manifest so a shipped chain says which constants produced
-it.
+amended by ADR 0035 and ADR 0036; this file is their machine-readable half. Nothing downstream may
+hardcode a threshold: `generate.py`, `scripts/tank/chains.py` and the gates all read from here, and
+these bytes are hashed into the tank build's `blend_digest` (`scripts/tank/build.py`), so a chain
+cut under different constants is a stale trio rather than a silent one.
 
 WHY A CONFIG AND NOT CONSTANTS AT THE POINT OF USE. The right wall is the example that forced it.
 It is a property of the WORLD (how far a camera can be from a surface), it will move when maps grow
 toward 5 km, and the moment it is spelled twice the two copies disagree. One declaration, read by
-generation, recorded in the manifest, re-derived by `chain.py` — and the manifest proves which wall
-the shipped levels were cut for. The wall itself is not even declared here any more: it is PARSED
-from the map manifest the game builds its grid from, so a map change is a regeneration and nothing
-else, and `src/track/link_view.rs` fails the build if the two ever come apart.
+generation — and the wall itself is not even declared here: it is PARSED from the map manifest the
+game builds its grid from, so a map change is a rebuild and nothing else.
 
 NOTHING IN THIS FILE IS A SECOND COPY OF SOMETHING. The pins come from `scripts/toolchain.py`, the
 world's size from `assets/maps/<id>/level.json`, and the map's id from `src/map.rs` — each read
@@ -65,9 +63,9 @@ E1_MM = 3.89
 OCTAVE = 2.0
 
 #: A rung earns a level only if its best candidate sheds at least this fraction of the PREVIOUS KEPT
-#: level's triangles. 0.30 is the declared floor: below it the new level costs a file, an LFS object,
-#: a manifest row and a runtime switch to save less than a third of the geometry it replaces, and the
-#: switch itself (a pop, however small) is not free. Measured on the reference asset this is what
+#: level's triangles. 0.30 is the declared floor: below it the new level costs a mesh record, a
+#: certificate row and a runtime switch to save less than a third of the geometry it replaces, and
+#: the switch itself (a pop, however small) is not free. Measured on the reference asset this is what
 #: drops rung 3 — 533 triangles against rung 2's 585 is an 8.9 % shed.
 SKIP_FRACTION = 0.30
 
@@ -127,28 +125,20 @@ WORLD_SIZE_M = map_world_size_m(MAP_ID)
 #: The maximum renderable camera-to-surface distance, in metres. Past it a level never renders, so
 #: no rung beyond it is generated.
 #:
-#: PROVENANCE, and it is deliberately recorded in the manifest: this repo has NO far-plane, fog or
-#: streaming-distance constant. `grep -rn "far\s*[:=]\|PerspectiveProjection\|DistanceFog" src/`
-#: finds only cascade bounds and unrelated locals, and the camera never overrides bevy's default
-#: projection. So the bound is the map's own geometry: the world is a square of side
-#: `WORLD_SIZE_M`, and the farthest two points in it are the corners of that square — the DIAGONAL,
-#: not the radius (ADR 0033 §3).
+#: PROVENANCE: this repo has NO far-plane, fog or streaming-distance constant.
+#: `grep -rn "far\s*[:=]\|PerspectiveProjection\|DistanceFog" src/` finds only cascade bounds and
+#: unrelated locals, and the camera never overrides bevy's default projection. So the bound is the
+#: map's own geometry: the world is a square of side `WORLD_SIZE_M`, and the farthest two points in
+#: it are the corners of that square — the DIAGONAL, not the radius (ADR 0033 §3).
 #:
 #: NORTH STAR: maps grow toward 5 km, and this file no longer has to be edited when one does. The
 #: side is PARSED from the shipped map manifest, which is what `crate::map` parses to build the
 #: grid, so a map that grows moves this wall by itself and the deeper rungs appear on the next
-#: regeneration because the stop rule reads this number. What still has to happen deliberately is
-#: the regeneration: `chain.py` compares the manifest's `right_wall_m` against this value, so a
-#: grown map fails verification until the corpus is re-cut, and `link_view`'s
-#: `the_shipped_corpus_reaches_the_worlds_far_corner` fails the build against the live grid. If a
-#: far plane or a fog cut-off is ever introduced it becomes the wall instead, and
-#: `RIGHT_WALL_SOURCE` says so.
+#: build because the stop rule reads this number. The rebuild still has to happen deliberately, and
+#: two things force it: this file's bytes are inside the tank build's `blend_digest`, and
+#: `link_view`'s `the_shipped_corpus_reaches_the_worlds_far_corner` fails the build against the live
+#: grid. If a far plane or a fog cut-off is ever introduced it becomes the wall instead.
 RIGHT_WALL_M = WORLD_SIZE_M * 2.0 ** 0.5
-RIGHT_WALL_SOURCE = (
-    "map diagonal: assets/maps/{}/level.json declares terrain.heightmap.world_extent_xz spanning "
-    "{:g} m (the map is crate::map::DEFAULT_MAP_ID, src/map.rs) x sqrt(2). "
-    "No far-plane, fog or streaming-distance constant exists in src/ as of this generation."
-).format(MAP_ID, WORLD_SIZE_M)
 
 
 # ── the reference view ───────────────────────────────────────────────────────────────────────────
@@ -198,9 +188,8 @@ def switch_distance_m(deviation_mm, radius_m=0.0, view=None):
 #: see. The UV-area and tangent counters served the rendered-difference gate, which is deleted, and
 #: manifoldness is the armour pipeline's law rather than this lane's — the deviation bound polices
 #: decimator misbehaviour by construction, because a mangled region deviates and fails while an
-#: undeviating one is invisible by definition. Every counter below is still MEASURED and recorded
-#: per level (and re-derived from the shipped bytes by `chain.py --verify`); what changed is which
-#: of them refuse a level.
+#: undeviating one is invisible by definition. Every counter below is still MEASURED on each level's
+#: decoded shipped bytes; what changed is which of them refuse a level.
 GATES = {
     # Branch-and-bound bracket on the certified worst-case deviation. Acceptance is always on the
     # UPPER bound, so a loose bracket costs triangles and never honesty. `tol_m` is the absolute floor
@@ -210,7 +199,8 @@ GATES = {
     #
     # THERE IS NO SEARCH TOLERANCE ANY MORE. The search asks a BOOLEAN (`measure.fits_target`) with
     # a node budget instead of bracketing a number nobody reads; only certification runs a bracket,
-    # because THAT number is what the manifest records and what the switch distance is derived from.
+    # because THAT number is what the certificate records and what the switch distance is derived
+    # from.
     "deviation_tol_m": 2.0e-5,
     "deviation_rel_tol_certify": 0.01,
     "deviation_max_nodes_certify": 1_500_000,
@@ -245,33 +235,7 @@ GATES = {
 #: gone and the diagnostic outlived it.
 NORMAL_DIAGNOSTIC_SAMPLES = 20_000
 
-# ── the assets ───────────────────────────────────────────────────────────────────────────────────
-
-#: One row per source mesh that gets a chain. `blend` is READ-ONLY input and is never saved.
-#:
-#: `l0_glb` / `l0_node` name where the SOURCE ships — L0 is not generated, it is the artist's mesh,
-#: and for the track shoe that is the `Link` node inside the tank glb. The generator certifies those
-#: bytes against the evaluated source too, which is how "the surface that ships is the surface that
-#: anchors deviation" stops being a claim.
-#:
-#: `stem` names the generated files: `<stem>.rung<N>.glb`, N being the OCTAVE RUNG, not a chain
-#: index — so a level's filename says what lie it tells, and a chain that gains a rung does not
-#: renumber the ones beside it.
-ASSETS = (
-    {
-        "name": "tiger_1_link",
-        "blend": "assets/tiger_1/tiger_1.blend",
-        "object": "Link",
-        "l0_glb": "assets/tiger_1/tiger_1.glb",
-        "l0_node": "Link",
-        "stem": "assets/tiger_1/tiger_1_link",
-    },
-)
-
-#: Bumped whenever the generation ALGORITHM changes in a way that can move a shipped level. The
-#: manifest records it; a mismatch between a committed manifest and this constant means the chain
-#: was cut by a different pipeline than the one in the tree.
-GENERATOR_VERSION = "3.0.0"
+# ── the toolchain ────────────────────────────────────────────────────────────────────────────────
 
 #: The toolchain the corpus was cut with, ASSERTED before generation rather than merely recorded.
 #:
@@ -293,47 +257,12 @@ EXPECTED_BLENDER_BUILD = toolchain.BLENDER_BUILD
 EXPECTED_GLTF_EXPORTER = toolchain.GLTF_EXPORTER_VERSION
 BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
-#: The sources that PRODUCE a corpus, hashed into the manifest. `GENERATOR_VERSION` is a promise a
-#: human remembers to keep; this is the thing that actually changed. A manifest whose source digest
-#: does not match the tree was cut by code that is no longer here, whatever the version string says.
-#:
-#: THE LINE IS "CAN THIS CHANGE WHAT A MANIFEST SAYS", not "is this the generator". `manifest.py`
-#: is in the list because it derives every switch distance and merges targeted regenerations — the
-#: generator calls into it. `chain.py` is out because it can only change how a manifest is CHECKED,
-#: and forcing a twelve-minute Blender run to reword a failure message is the kind of friction that
-#: gets a check switched off rather than kept.
-#:
-#: That line was drawn in the wrong place once: chain.py was excluded while the generator imported
-#: it and called its merge, so verifier logic really was participating in production and the
-#: exclusion was unsound. The fix was to split the module, not to keep arguing for the exclusion.
-#:
-#: `../toolchain.py` is in the list for exactly that rule, and it joined it the moment the pins
-#: stopped being copied into this file: `EXPECTED_BLENDER`, `EXPECTED_BLENDER_BUILD` and
-#: `EXPECTED_GLTF_EXPORTER` are recorded in every manifest's `generator` block, so the file that
-#: declares them can change what a manifest says. Names are relative to THIS directory and are
-#: hashed alongside the bytes, so the path is part of the digest.
-GENERATOR_SOURCES = (
-    "config.py", "measure.py", "generate.py", "manifest.py", "../toolchain.py",
-)
-
-
-def generator_digest():
-    """sha256 over the generator's sources, in a fixed order."""
-    import hashlib
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    digest = hashlib.sha256()
-    for name in GENERATOR_SOURCES:
-        with open(os.path.join(here, name), "rb") as handle:
-            digest.update(name.encode())
-            digest.update(handle.read())
-    return digest.hexdigest()
-
-#: Where the manifest lands. Committed; the single seam between generation and runtime.
-MANIFEST_RELPATH = "assets/lod_manifest.json"
-
-#: The manifest format this tree reads and writes. Bumped when the SHAPE changes, not the contents.
-SCHEMA_VERSION = 2
+#: WHAT HASHES THESE SOURCES NOW: `scripts/tank/build.py`. Its `SEARCH_SOURCES` names
+#: `../lod/config.py`, `../lod/measure.py` and `../lod/generate.py` — this lane's whole production
+#: half — and keys the per-mesh chain cache on their digest; `PIPELINE_SOURCES` folds the same
+#: digest into every certificate's `blend_digest`. So the rule "a corpus cut by code that is no
+#: longer here is stale" is enforced from there rather than restated here, and the second copy this
+#: file used to keep (`GENERATOR_SOURCES`, hashed into the retired global manifest) is gone.
 
 
 # ── the search's budget ──────────────────────────────────────────────────────────────────────────
@@ -373,23 +302,16 @@ VERDICT_NODES_PER_SQUARE = 10.3
 #: level stays honestly certified, so the corpus quietly loses fidelity and every check still
 #: passes — the one failure mode this file exists to prevent. A projection that misses the ruling
 #: is a stop-and-raise, not a smaller number here. Every rung lost this way is recorded in the
-#: manifest as `lost_to: verdict_node_budget`, so the trade is legible rather than inferred.
+#: chain record as `lost_to: verdict_node_budget`, so the trade is legible rather than inferred.
 VERDICT_NODES_CAP = 2_000_000
 
 
 def diagonal_mm_from_bbox(bbox_mm):
-    """The bounding diagonal the node budget is computed from — from the RECORDED box.
+    """The bounding diagonal of a RECORDED box, in millimetres.
 
-    ONE SOURCE OF THE NUMBER, and the reason is a split brain that was live: generation computed the
-    budget from the evaluated source's full-precision diagonal, verification recomputed it from the
-    manifest's box rounded to four decimals, and then demanded exact integer equality. The two agree
-    on this asset by luck. `verdict_node_budget` truncates, so a mesh whose budget landed a
-    hair under an integer would be granted N by one side and N-1 by the other, and a perfectly valid
-    manifest would fail verification on a number nobody had touched.
-
-    So both sides compute from the box AS RECORDED. The rounding is then part of the declared law
-    rather than a difference between two readings of it, and equality holds by construction instead
-    of by coincidence.
+    `verdict_node_budget` truncates, so a mesh whose budget lands a hair under an integer is granted
+    N by a reader computing from a rounded box and N-1 by one computing from full precision. Two
+    readers of one budget must therefore start from the same rounding of the box.
     """
     return math.sqrt(sum(float(value) * float(value) for value in bbox_mm))
 
@@ -397,47 +319,11 @@ def diagonal_mm_from_bbox(bbox_mm):
 def verdict_node_budget(diagonal_mm, e_target_mm):
     """The node budget for one direction of one verdict, from the mesh's size and the rung.
 
-    Integer and deterministic: the same asset gives the same budget on any machine, which is what
-    lets two runs be compared field-for-field. Feed it `diagonal_mm_from_bbox` of the geometry the
-    MANIFEST records, never a fuller-precision diagonal beside it.
+    Integer and deterministic: the same geometry gives the same budget on any machine, which is what
+    lets two runs be compared field-for-field.
     """
     ratio = float(diagonal_mm) / float(e_target_mm)
     return int(min(VERDICT_NODES_CAP, VERDICT_NODES_PER_SQUARE * ratio * ratio))
-
-
-def resolve_source(root, relpath):
-    """Where the source .blend actually is, given a work tree that may not hold its bytes.
-
-    The .blend is tracked through LFS, so an ordinary checkout has it; a tree whose LFS objects
-    were never fetched has a pointer file instead, and generation run from one would otherwise fail
-    with "the .blend does not exist", which is true and useless.
-
-    The order is: this work tree, then the MAIN work tree (read out of the `gitdir:` pointer a
-    linked worktree's `.git` file carries), then `$OVERMATCH_ASSET_ROOT`. Read-only in every case,
-    and the path RECORDED in the manifest is always the repo-relative one, so a manifest cut in a
-    worktree is identical to one cut in the main checkout.
-    """
-    candidates = [os.path.join(root, relpath)]
-    marker = os.path.join(root, ".git")
-    if os.path.isfile(marker):
-        with open(marker, encoding="utf-8") as handle:
-            pointer = handle.read().strip()
-        if pointer.startswith("gitdir:"):
-            gitdir = pointer.split(":", 1)[1].strip()
-            # .../<main>/.git/worktrees/<name> -> <main>
-            main = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(gitdir))))
-            candidates.append(os.path.join(main, relpath))
-    override = os.environ.get("OVERMATCH_ASSET_ROOT")
-    if override:
-        candidates.append(os.path.join(override, relpath))
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    raise FileNotFoundError(
-        f"scripts/lod: {relpath} is untracked and was not found in any of: "
-        + ", ".join(candidates)
-        + ". Set OVERMATCH_ASSET_ROOT to the checkout that holds it."
-    )
 
 
 def rungs():

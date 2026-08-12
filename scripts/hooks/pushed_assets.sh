@@ -43,7 +43,7 @@ assets_pushed_paths() {   # <local_sha> <remote_sha> <remote>
 
 # Every asset in one revision, as stems, sorted. The rule IS the trio: a `.blend` whose sibling
 # `.tank.ron` and `.glb` are both there too. A blend with no spec sheet (`assets/shell/`) is not an
-# asset, a generated `<id>_link.rung3.glb` has no blend, and neither is discovered.
+# asset, and a glb with no blend beside it is not one either; neither is discovered.
 assets_trios() {   # <rev>
     git ls-tree -r --name-only "$1" | awk '
         /\.blend$/     { blend[substr($0, 1, length($0) - 6)] = 1; next }

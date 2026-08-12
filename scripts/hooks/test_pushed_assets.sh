@@ -107,8 +107,8 @@ write assets/proto/proto.blend "a source with no model yet"
 write assets/proto/proto.tank.ron "TankSpec(mass: 3.0)"
 write assets/derived/derived.tank.ron "TankSpec(mass: 4.0)"
 write assets/derived/derived.glb "a model with no source"
-write assets/lod/tiger_1_link.rung3.glb "a generated rung"
-write assets/lod/tiger_1_link.rung3.ron "not a tank sheet"
+write assets/staging/candidate.glb "a model nothing sourced"
+write assets/staging/candidate.ron "not a tank sheet"
 commit "partial assets"
 PARTIAL=$(at HEAD)
 
@@ -184,11 +184,11 @@ is "a blend and a sheet with no model is not an asset" \
 is "a sheet and a model with no blend is not an asset" \
    "" "$(assets_trios "$PARTIAL" | grep 'derived')"
 
-is "a generated model with no blend is not an asset" \
-   "" "$(assets_trios "$PARTIAL" | grep 'rung3')"
+is "a model with no blend and no sheet is not an asset" \
+   "" "$(assets_trios "$PARTIAL" | grep 'candidate')"
 
 is "a .ron that is not a .tank.ron is not a spec sheet" \
-   "" "$(assets_trios "$PARTIAL" | grep 'assets/lod')"
+   "" "$(assets_trios "$PARTIAL" | grep 'assets/staging')"
 
 is "a revision predating any asset holds none" \
    "" "$(git -C "$REPO" hash-object -t tree /dev/null >/dev/null; assets_trios "$(git -C "$REPO" commit-tree "$(git -C "$REPO" hash-object -w -t tree /dev/null)" -m empty </dev/null)")"
@@ -262,7 +262,7 @@ for path in \
     assets/tiger_1/tiger_1.blend \
     src/net.rs \
     scripts/tank/test_asset_door.py \
-    scripts/lod/chain.py \
+    scripts/lod/test_refusals.py \
     README.md
 do
     surface "$path"
@@ -644,12 +644,12 @@ done
 #
 # The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list — so no
 # revision is examined and no asset is verified, and what is measured is only which lanes ran. That
-# is the claim being made: the default is the cheap set, and the two expensive ones are behind
-# `OVERMATCH_FULL=1` because CI runs them on every push regardless.
+# is the claim being made: the default is the cheap set, and the expensive one is behind
+# `OVERMATCH_FULL=1` because CI runs it on every push regardless.
 #
 # `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
-# The lanes' CONTENTS are proven elsewhere — by CI, by the door's own suites, by `test_chain.py` —
-# and re-running them here would cost a compile to learn nothing about the hook.
+# The lanes' CONTENTS are proven elsewhere — by CI and by the door's own suites — and re-running them
+# here would cost a compile to learn nothing about the hook.
 
 group "the hook — which lanes run by default"
 
@@ -692,10 +692,10 @@ is "…and not the tank build when it is skipped" \
    "$(hook OVERMATCH_SKIP=assets >/dev/null
       grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
 
-is "…and it says the two it did not run and where they are" \
+is "…and it says the one it did not run and where it is" \
    "yes" \
    "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^2$' && echo yes || echo no)"
+      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^1$' && echo yes || echo no)"
 
 is "…and ends green" \
    "yes" \
@@ -704,12 +704,10 @@ is "…and ends green" \
 
 group "the hook — OVERMATCH_FULL and OVERMATCH_SKIP"
 
-is "OVERMATCH_FULL=1 adds the lod lane and the cargo test lane" \
+is "OVERMATCH_FULL=1 adds the cargo test lane" \
    "git-lfs pre-push
 cargo fmt
 cargo clippy
-python3 scripts/lod/test_chain.py
-python3 scripts/lod/test_refusals.py
 cargo test" "$(hook OVERMATCH_FULL=1)"
 
 is "a skipped lane is not run" \
@@ -721,16 +719,15 @@ is "…and says so loudly" \
    "$(hook OVERMATCH_SKIP=clippy >/dev/null
       grep -q 'SKIPPED clippy (OVERMATCH_SKIP)' "$WORK/hook.out" && echo yes || echo no)"
 
-is "OVERMATCH_SKIP still names the full lanes when they are the ones running" \
+is "OVERMATCH_SKIP names the full lane too, when it is the one running" \
    "git-lfs pre-push
 cargo fmt
-cargo clippy
-cargo test" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=lod)"
+cargo clippy" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=test)"
 
 # The LFS upload is not a lane: it is the only transport, and naming it must not turn it off.
 is "the lfs upload cannot be skipped" \
    "git-lfs pre-push" \
-   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,lod,test | head -1)"
+   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,test | head -1)"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 

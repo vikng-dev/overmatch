@@ -5,11 +5,10 @@
 # changed. Tens of seconds on a warm cache, plus a Blender launch and a MEASURED minute of texture
 # encode per changed asset — and most pushes change none.
 #
-# BEHIND `OVERMATCH_FULL=1`: the full `cargo test` run and the LOD chain verification. They are not
-# in the default because CI runs both on every push anyway and CI is the ratified backstop — a hook
-# that re-runs them buys minutes of local wall clock for a second opinion arriving ten minutes
-# later. Run them here when the push is the last thing before a release, or when the network is not
-# something you can wait on:
+# BEHIND `OVERMATCH_FULL=1`: the full `cargo test` run. It is not in the default because CI runs it
+# on every push anyway and CI is the ratified backstop — a hook that re-runs it buys minutes of
+# local wall clock for a second opinion arriving ten minutes later. Run it here when the push is the
+# last thing before a release, or when the network is not something you can wait on:
 #
 #     OVERMATCH_FULL=1 git push
 #
@@ -21,8 +20,8 @@
 #
 # To skip a failing gate, name it:  OVERMATCH_SKIP=clippy git push
 # Comma-separate several: OVERMATCH_SKIP=assets,clippy — lanes: assets, fmt, clippy, and, under
-# OVERMATCH_FULL, lod and test. The LFS upload is not a lane and cannot be named. CI re-runs
-# skipped lanes on the pushed commit.
+# OVERMATCH_FULL, test. The LFS upload is not a lane and cannot be named. CI re-runs skipped lanes
+# on the pushed commit.
 #
 # Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
 # cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
@@ -36,7 +35,7 @@ cd "$(git rev-parse --show-toplevel)"
 
 # `trap ... EXIT` is ONE slot: a second lane registering its own silently unregisters the first's,
 # so every lane's scratch is torn down from here.
-trap 'rm -rf ${assets_tmp:-} ${lod_tmp:-}' EXIT
+trap 'rm -rf ${assets_tmp:-}' EXIT
 
 # A lane is skipped iff its name appears in comma-separated $OVERMATCH_SKIP.
 skipped() {
@@ -59,8 +58,8 @@ full() {
 # at "Git LFS pull (R2)" with "object not found" (the alpha.9 outage). First, before the
 # cargo lanes: `git lfs pre-push` reads the ref list from STDIN, which must reach it intact.
 # STDIN carries the ref list and is READ ONCE, then replayed to everything that needs it. The
-# upload, the assets lane and the LOD lane each consume it, and every reader after the first would
-# otherwise get an empty stream and silently check nothing.
+# upload and the assets lane each consume it, and every reader after the first would otherwise get
+# an empty stream and silently check nothing.
 refs=$(cat)
 
 echo "pre-push ▸ git lfs pre-push"
@@ -89,21 +88,21 @@ fi
 # and compared byte for byte, and the certificate's three digests are held against the bytes beside
 # it. No search runs here — the certificate is what carries the measurements forward.
 #
-# IT VERIFIES THE PUSHED REVISIONS, not the work tree — the LOD lane's rule, for the LOD lane's
-# reason: a dirty-but-coherent tree blesses a different commit, and pushing a branch that is not
-# HEAD, a tag, or several refs at once was not covered at all by the HEAD-shaped gate this replaces.
-# The assets are DISCOVERED there too, as sibling trios (`scripts/hooks/pushed_assets.sh`), so a
-# second vehicle is gated by the rule that found the first and no path is written down here.
+# IT VERIFIES THE PUSHED REVISIONS, not the work tree: a dirty-but-coherent tree blesses a different
+# commit, and pushing a branch that is not HEAD, a tag, or several refs at once was not covered at
+# all by the HEAD-shaped gate this replaces. The assets are DISCOVERED there too, as sibling trios
+# (`scripts/hooks/pushed_assets.sh`), so a second vehicle is gated by the rule that found the first
+# and no path is written down here.
 #
 # WHAT IT VERIFIES: the trios the push CHANGED. Change the shared surface instead — the material
 # library, the toolchain pin, the source pass, the door, the encoder, the derivation verifier, the
-# Rust contract — and every discovered trio is verified, because the door now answers differently
-# about bytes that did not move.
+# LOD lane's library, the map the right wall is cut from, the Rust contract — and every discovered
+# trio is verified, because the build now answers differently about bytes that did not move.
 #
-# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION, unlike the LOD lane: the CODE. The consumer
-# contract is a binary compiled from THIS work tree and the encoder resolves its paths against it,
-# so the lane runs this tree's door over the pushed revision's bytes; CI, which checks the commit
-# out, is where a revision's own rules meet its own bytes.
+# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION: the CODE. The consumer contract is a binary compiled
+# from THIS work tree and the encoder resolves its paths against it, so the lane runs this tree's
+# door over the pushed revision's bytes; CI, which checks the commit out, is where a revision's own
+# rules meet its own bytes.
 #
 # The DATA is a different question and is not conceded: the trio, the material library and the
 # substance registry are all hydrated out of the pushed revision, and the door hands the registry to
@@ -133,56 +132,6 @@ printf '%s\n' "$refs" |
             { printf '\033[31m  the tank build refused %s at %s\033[0m\n' "$stem" "$local_sha" >&2
               exit 1; }
     done || exit 1
-fi
-
-# LOD chain. The manifest is the SINGLE SEAM between the generated geometry chain and the runtime
-# that selects from it, and a seam nobody checks is a ledger — the last hand-written one drifted by
-# 112 m before anyone noticed.
-#
-# IT VERIFIES THE COMMITS BEING PUSHED, not the work tree. Verifying the work tree answers a
-# question nobody asked: a dirty-but-coherent tree blesses a different commit, and pushing a branch
-# that is not HEAD, a tag, or several refs at once was not covered at all. `chain.py --rev` reads
-# the manifest and the assets out of each pushed revision instead — and it costs nothing extra,
-# because a tracked glb in a commit is an LFS pointer whose `oid sha256:` IS the sha256 of the real
-# bytes, which is the same number the manifest records. No hydration, no checkout, no temp tree.
-#
-# The scripts are taken from the pushed revision too: verifying a commit with a different tree's
-# rules would be the same category of mistake one level up.
-#
-# BEHIND OVERMATCH_FULL: CI runs this on every push, after LFS hydration, and a manifest seam that
-# drifted is not a defect the next ten minutes make worse. The lane is unchanged when it does run.
-if full lod && ! skipped lod; then
-echo "pre-push ▸ lod chain manifest (verifier, per pushed revision)"
-lod_tmp=$(mktemp -d)
-checked=0
-printf '%s\n' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
-    [ -n "$local_sha" ] || continue
-    case "$local_sha" in
-        *[!0]*) ;;                       # a real object
-        *) continue ;;                   # all zeros: this ref is being deleted
-    esac
-    git cat-file -e "$local_sha^{commit}" 2>/dev/null || continue
-    if ! git cat-file -e "$local_sha:assets/lod_manifest.json" 2>/dev/null; then
-        continue                         # a revision predating the LOD pipeline
-    fi
-    rm -rf "$lod_tmp/scripts"
-    mkdir -p "$lod_tmp/scripts"
-    git archive "$local_sha" scripts/lod | tar -x -C "$lod_tmp" ||
-        { printf '\033[31m  cannot extract scripts/lod from %s\033[0m\n' "$local_sha" >&2; exit 1; }
-    echo "  ▸ $local_ref -> ${local_sha}"
-    python3 "$lod_tmp/scripts/lod/chain.py" --verify --rev "$local_sha" --repo "$(pwd)" ||
-        { printf '\033[31m  LOD verification failed for %s\033[0m\n' "$local_sha" >&2; exit 1; }
-    checked=$((checked + 1))
-done || exit 1
-# The unit suites run ONCE, from the WORK TREE, and that is the honest scope of them: they are
-# tests of the code in front of you, not of each pushed revision. Running them per-revision would
-# mean the shipped-manifest cases checking this tree's manifest with another revision's verifier —
-# a comparison of two unrelated things. CI runs both suites on the checked-out commit, which is the
-# pushed one, and that is where per-revision test coverage actually lives.
-python3 scripts/lod/test_chain.py >/dev/null 2>&1 ||
-    { printf '\033[31m  lod test_chain failed\033[0m — run: python3 scripts/lod/test_chain.py\n' >&2; exit 1; }
-python3 scripts/lod/test_refusals.py >/dev/null 2>&1 ||
-    { printf '\033[31m  lod test_refusals failed\033[0m — run: python3 scripts/lod/test_refusals.py\n' >&2; exit 1; }
 fi
 
 # BEHIND OVERMATCH_FULL: the suite CI runs on every push, at the cost this hook is least willing to

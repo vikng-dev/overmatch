@@ -1638,8 +1638,8 @@ mod tests {
     ///
     ///   * TANGENT must be PRESENT. The generator bakes it (`scripts/lod/generate.py` passes
     ///     `export_tangents`), and NOTHING UPSTREAM CHECKS THAT ANY MORE — ADR 0036 §4 retired the
-    ///     lane's tangent gates along with the rendered-difference gate they served, so schema v2
-    ///     carries no tangent field and `chain.py --verify` has no opinion. That makes this
+    ///     lane's tangent gates along with the rendered-difference gate they served, and the
+    ///     certificate ADR 0035 ships records no tangent field at all. That makes this
     ///     assertion the only remaining guard: a re-export that stopped baking would silently fall
     ///     back to [`lod_shoe_meshes`]' runtime mikktspace — a safety net, not a plan, and
     ///     precisely the path that used to produce defaulted tangents on real geometry. Reading the
