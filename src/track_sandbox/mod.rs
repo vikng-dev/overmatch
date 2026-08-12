@@ -1096,13 +1096,16 @@ fn rig_unbuilt(geom: Option<Res<RigGeom>>, blueprint: Option<Res<TankBlueprint>>
     geom.is_none() && blueprint.is_some()
 }
 
-/// Path to the Tiger glb, resolved through the shared asset root — the same file the bake opens.
+/// Path to the Tiger's SIM artifact, resolved through the shared asset root — the same file the
+/// bake opens and `track::sim::init_track_gear` measures the game's running gear from (ADR-0035).
 /// `RigGeom::build` re-reads it directly for the MARKER measurements (pin pitch, surface offsets,
 /// sprocket/idler mesh centroids), which the baked node list cannot express: the markers hang under
 /// a scaled ancestor and the drive wheels carry identity transforms with their geometry baked into
-/// the vertices.
-fn tiger_glb() -> std::path::PathBuf {
-    crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH)
+/// the vertices. The strip keeps the whole node graph and every rung-0 position, so it answers
+/// every question the view glb did — and this tool exists to reproduce the sim, so it must read
+/// what the sim reads.
+fn tiger_sim_glb() -> std::path::PathBuf {
+    crate::assets::asset_root().join(crate::tank::TIGER_SIM_GLB_PATH)
 }
 
 /// Build the whole rig, ONCE, the frame the blueprint becomes visible: derive [`RigGeom`], spawn the
@@ -1131,7 +1134,7 @@ fn build_rig(
     // them. `teeth` sets the chord-exact sprocket pitch circle, `link_count` IS the material loop.
     let geom = RigGeom::build(
         &blueprint,
-        &tiger_glb(),
+        &tiger_sim_glb(),
         track.sprocket.teeth,
         track.link_count,
         &suspension.0,

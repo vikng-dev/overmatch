@@ -1580,8 +1580,18 @@ mod tests {
                 .iter()
                 .map(|node| {
                     let mut row = format!(
-                        "{}|{:?}|{:?}|{:?}",
+                        "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
                         node.name,
+                        // The PARENT, by name rather than by index: the sim skeleton is spawned as
+                        // a hierarchy and a re-parented node moves everything under it. By name so
+                        // a reordered node list is not a false positive.
+                        node.parent.map(|p| geometry.nodes[p].name.as_str()),
+                        // The LOCAL transform, which is what the skeleton's entities are spawned
+                        // with — the composed pose below can agree while the chain that produced it
+                        // does not.
+                        node.transform.translation.to_array().map(f32::to_bits),
+                        node.transform.rotation.to_array().map(f32::to_bits),
+                        node.transform.scale.to_array().map(f32::to_bits),
                         node.root_position.to_array().map(f32::to_bits),
                         node.root_rotation.to_array().map(f32::to_bits),
                         node.root_scale.to_array().map(f32::to_bits),
