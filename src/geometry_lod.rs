@@ -248,9 +248,20 @@ fn resolve_chains(
     mut commands: Commands,
     certificate: Res<TankCertificate>,
     handle: Res<TankGltf>,
+    asset_server: Res<AssetServer>,
     gltfs: Res<Assets<Gltf>>,
     gltf_meshes: Res<Assets<GltfMesh>>,
 ) {
+    // A LOAD THAT FAILED IS NOT A LOAD STILL IN FLIGHT. The bytes already reproduced the recorded
+    // sha256, so a refusal here is the loader refusing the artifact itself — and a retry loop would
+    // spend the session waiting for a file that will never arrive, with every chained primitive
+    // silently at source detail. Same law as the certificate (ADR-0011).
+    if let bevy::asset::LoadState::Failed(err) = asset_server.load_state(&handle.0) {
+        panic!(
+            "geometry_lod: {} matched the certificate's view_glb_sha and then failed to load              ({err}) — the file is the certified one and the loader cannot read it",
+            certificate_glb_path(TrioMember::View),
+        );
+    }
     let Some(gltf) = gltfs.get(&handle.0) else {
         return;
     };

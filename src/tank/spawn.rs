@@ -40,12 +40,25 @@ pub(crate) struct PendingTankAssets {
 
 impl PendingTankAssets {
     /// Every presentation asset this composition asked for has resolved.
+    ///
+    /// THE ONE READINESS PREDICATE — single player, net client and net server all gate admission on
+    /// it — so it is also the one place a FAILED load has to be caught. `LoadState::Failed` is not
+    /// `Loaded`, and read as "not yet" it parks the app in `AppState::Loading` for the rest of the
+    /// session: no tank, no error, no exit. Required data, so it panics in every build naming the
+    /// asset (ADR-0011).
     pub(crate) fn loaded(&self, asset_server: &AssetServer) -> bool {
-        matches!(asset_server.load_state(&self.spec), LoadState::Loaded)
+        let resolved = |what: &str, state: LoadState| match state {
+            LoadState::Loaded => true,
+            LoadState::Failed(err) => panic!(
+                "required tank asset `{what}` failed to load: {err}. The tank's spec sheet and its                  view artifact are required data — there is no default tank and no detail level to                  fall back to"
+            ),
+            _ => false,
+        };
+        resolved(TIGER_SPEC_PATH, asset_server.load_state(&self.spec))
             && self
                 .scene
                 .as_ref()
-                .is_none_or(|scene| matches!(asset_server.load_state(scene), LoadState::Loaded))
+                .is_none_or(|scene| resolved(TIGER_GLB_PATH, asset_server.load_state(scene)))
     }
 
     /// Clone handles for a root; the spec handle remains available to presentation validation.

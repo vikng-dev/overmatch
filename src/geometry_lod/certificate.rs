@@ -132,14 +132,64 @@ pub(crate) fn load(root: &Path, id: &str) -> Certificate {
 
 /// The pure half of [`load`]: text in, certificate out, panic naming the file on anything else.
 pub(crate) fn parse(text: &str, path: &Path) -> Certificate {
-    serde_json::from_str(text).unwrap_or_else(|err| {
+    let certificate: Certificate = serde_json::from_str(text).unwrap_or_else(|err| {
         panic!(
             "geometry_lod: the certificate {} is malformed ({err}). It carries exactly \
              blend_digest, view_glb_sha, sim_glb_sha, mesh_count and chains — rebuild the trio \
              rather than editing it",
             path.display(),
         )
-    })
+    });
+    validate(&certificate, path);
+    certificate
+}
+
+/// The shape [`Chain::bands`] is only meaningful over: every number finite and positive, every
+/// chain carrying at least one rung, and deviations STRICTLY ASCENDING.
+///
+/// Parsing is not enough. A document can deserialize, reproduce both recorded hashes and still be
+/// nonsense — descending deviations produce a band that ends before it starts, a repeated deviation
+/// produces an empty one, a negative radius pulls a switch inside the camera. Bevy reads a range as
+/// `distance >= start && distance < end`, so those are not loud failures at the seam: they are a
+/// level that never draws, or two that draw at once, discovered by eye. The certificate is required
+/// data (ADR-0011), so a violated invariant here is a panic in every build.
+fn validate(certificate: &Certificate, path: &Path) {
+    let refuse = |what: String| -> ! {
+        panic!(
+            "geometry_lod: the certificate {} is malformed — {what}. Rebuild the trio rather than \
+             editing it",
+            path.display(),
+        )
+    };
+    for (key, chain) in &certificate.chains {
+        if !chain.radius_m.is_finite() || chain.radius_m <= 0.0 {
+            refuse(format!(
+                "chain `{key}` carries radius_m {} and a bounding radius is a positive length",
+                chain.radius_m
+            ));
+        }
+        if chain.rungs.is_empty() {
+            refuse(format!(
+                "chain `{key}` carries no rung; a chain with nothing under it is an ABSENT chain, \
+                 which the certificate records by not naming the primitive at all"
+            ));
+        }
+        let mut previous = 0.0_f32;
+        for rung in &chain.rungs {
+            if rung.mesh.is_empty() {
+                refuse(format!("chain `{key}` carries a rung with no mesh name"));
+            }
+            if !rung.deviation_mm.is_finite() || rung.deviation_mm <= previous {
+                refuse(format!(
+                    "chain `{key}` rung `{}` carries deviation_mm {} against the {previous} before \
+                     it; deviations are finite, positive and strictly ascending, or the bands they \
+                     derive gap and overlap",
+                    rung.mesh, rung.deviation_mm,
+                ));
+            }
+            previous = rung.deviation_mm;
+        }
+    }
 }
 
 /// Fingerprint one trio member against the certificate, or abort naming both.
@@ -337,11 +387,17 @@ mod tests {
         }
 
         fn certificate_text(&self) -> String {
+            self.certificate_with(
+                r#"{"radius_m": 0.5, "rungs": [{"mesh": "M#0_LOD1", "deviation_mm": 4.0}]}"#,
+            )
+        }
+
+        /// The same coherent document around a chosen `M#0` chain body — the hashes stay right, so
+        /// only the semantics are under test.
+        fn certificate_with(&self, chain: &str) -> String {
             format!(
                 r#"{{"blend_digest": "b", "view_glb_sha": "{}", "sim_glb_sha": "{}",
-                    "mesh_count": 1,
-                    "chains": {{"M#0": {{"radius_m": 0.5,
-                                         "rungs": [{{"mesh": "M#0_LOD1", "deviation_mm": 4.0}}]}}}}}}"#,
+                    "mesh_count": 1, "chains": {{"M#0": {chain}}}}}"#,
                 sha256_file(&member_path(&self.root, "t", TrioMember::View)).unwrap(),
                 sha256_file(&member_path(&self.root, "t", TrioMember::Sim)).unwrap(),
             )
@@ -416,6 +472,67 @@ mod tests {
         let trio = Trio::new("no-sim");
         std::fs::remove_file(member_path(&trio.root, "t", TrioMember::Sim)).unwrap();
         trio.read();
+    }
+
+    /// A CHAIN THAT PARSES AND MEANS NOTHING. Every one of these reproduces both recorded hashes
+    /// and deserializes cleanly; what they violate is the shape [`Chain::bands`] is defined over.
+    /// Descending or repeated deviations put a band's end before (or on) its start, which bevy
+    /// reads as never-visible; a non-positive radius pulls a switch inside the camera. None of that
+    /// is loud at the seam — it is a level that stops drawing, found by eye — so the loader is where
+    /// it has to refuse, in every build.
+    #[test]
+    fn a_chain_whose_numbers_are_nonsense_aborts() {
+        for (label, chain, expected) in [
+            (
+                "descending",
+                r#"{"radius_m": 0.5, "rungs": [{"mesh": "a", "deviation_mm": 9.0},
+                                               {"mesh": "b", "deviation_mm": 4.0}]}"#,
+                "strictly ascending",
+            ),
+            (
+                "repeated",
+                r#"{"radius_m": 0.5, "rungs": [{"mesh": "a", "deviation_mm": 4.0},
+                                               {"mesh": "b", "deviation_mm": 4.0}]}"#,
+                "strictly ascending",
+            ),
+            (
+                "negative deviation",
+                r#"{"radius_m": 0.5, "rungs": [{"mesh": "a", "deviation_mm": -4.0}]}"#,
+                "strictly ascending",
+            ),
+            (
+                "negative radius",
+                r#"{"radius_m": -0.5, "rungs": [{"mesh": "a", "deviation_mm": 4.0}]}"#,
+                "positive length",
+            ),
+            (
+                "zero radius",
+                r#"{"radius_m": 0.0, "rungs": [{"mesh": "a", "deviation_mm": 4.0}]}"#,
+                "positive length",
+            ),
+            (
+                "no rung",
+                r#"{"radius_m": 0.5, "rungs": []}"#,
+                "carries no rung",
+            ),
+            (
+                "unnamed rung",
+                r#"{"radius_m": 0.5, "rungs": [{"mesh": "", "deviation_mm": 4.0}]}"#,
+                "no mesh name",
+            ),
+        ] {
+            let trio = Trio::new("nonsense");
+            trio.write_certificate(&trio.certificate_with(chain));
+            let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| trio.read()))
+                .expect_err(&format!("a {label} chain must be refused, not accepted"));
+            let text = refusal
+                .downcast_ref::<String>()
+                .map_or_else(String::new, Clone::clone);
+            assert!(
+                text.contains("is malformed") && text.contains(expected),
+                "a {label} chain must be refused NAMING what is wrong with it, got: {text}",
+            );
+        }
     }
 
     /// A CHAIN ABSENT FROM THE CERTIFICATE is silence, not a refusal — that primitive renders at

@@ -1,5 +1,4 @@
 use avian3d::prelude::RigidBody;
-use bevy::asset::LoadState;
 use bevy::prelude::*;
 
 use super::model::{Controlled, Tank};
@@ -125,14 +124,7 @@ fn spawn_tank_when_loaded(
     let Some(pending) = pending else {
         return;
     };
-    let handles = std::iter::once(pending.spec.id().untyped())
-        .chain(pending.scene.as_ref().map(|scene| scene.id().untyped()));
-    for handle in handles {
-        if let LoadState::Failed(err) = asset_server.load_state(handle) {
-            error!("required tank asset failed to load: {err}");
-            panic!("required tank asset failed to load: {err}");
-        }
-    }
+    // `loaded` is where a FAILED load aborts, for every composition at once — see it.
     if !pending.loaded(&asset_server) {
         return;
     }
