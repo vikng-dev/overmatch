@@ -899,8 +899,13 @@ def fits_target(source, candidate, target_mm, node_budget):
     return {"verdict": PROVEN_PASS, "witness_mm": witness, "nodes": nodes}
 
 
+#: A rung the SEARCH could not decide inside its node budget. Named because two files act on it —
+#: `rung_lost_to` writes it and `scripts/tank/chains.py` announces it — and a string spelled twice is
+#: a vocabulary that drifts. Its sibling is `trio.LOST_TO_BRACKET`.
+LOST_TO_BUDGET = "verdict_node_budget"
+
 #: The only three things a rung can be lost to, in the order they outrank each other.
-SKIP_LOST_TO = ("verdict_node_budget", "geometry", "skip_fraction")
+SKIP_LOST_TO = (LOST_TO_BUDGET, "geometry", "skip_fraction")
 
 
 def rung_lost_to(undecided, otherwise):
@@ -918,7 +923,7 @@ def rung_lost_to(undecided, otherwise):
     to the skip rule" is a true statement about a comparison that should not have been the last
     word. Nothing unproven ships either way — what is at stake is whether the trade is legible.
     """
-    return "verdict_node_budget" if undecided else otherwise
+    return LOST_TO_BUDGET if undecided else otherwise
 
 
 def directed_rung_search(floor_tris, ceiling_tris, probe):

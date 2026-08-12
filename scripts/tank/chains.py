@@ -5,7 +5,8 @@
 
 NOT AN ENTRY POINT ANYONE RUNS. `scripts/tank/build.py` drives it: it decodes the candidate, groups
 its primitives by source-geometry digest, and hands each worker the digests it owns. A worker writes
-`<digest>.json` and `<digest>.rung<N>.glb` into `--out`, and nothing else.
+one directory per chain into `--out` — `rung<N>.glb` beside the `chain.json` that is landed last —
+and nothing else.
 
 THE SEAM IS THE PRIMITIVE (ADR 0035). ADR 0033 §10's multi-primitive refusal is retired here: a
 mesh's primitives are addressed one at a time, so a multi-material object is several chains rather
@@ -132,6 +133,25 @@ def write_record(path, record):
     os.replace(staging, path)
 
 
+def log_fidelity_loss(digest, rung, target_mm, lost_to, undecided, node_budget):
+    """Announce a rung the RUN lost, at the volume the certification bracket already gets.
+
+    THE TWO FIDELITY LOSSES ARE ONE CLASS: a rung lost to the node budget (`M.LOST_TO_BUDGET`) and
+    one lost to a certification bracket (`TRIO.LOST_TO_BRACKET`) both cost a level that a longer run
+    would have shipped. Only the bracket said so out loud, so a build that traded fidelity for wall
+    time on the budget was silent about it at the one moment a human is watching. The record carries
+    the trade either way — what a build-time silence changes is whether anyone NOTICES. Neither
+    fails a build: nothing unproven ships.
+
+    A rung lost to the GEOMETRY is not this class and is not logged — no run length recovers it.
+    """
+    if lost_to != M.LOST_TO_BUDGET:
+        return
+    log(f"  {digest[:12]} rung {rung} e={target_mm:.3f} mm: {undecided} verdict(s) spent the whole "
+        f"{node_budget}-node budget without closing a bound — rung LOST to the node budget, not to "
+        f"the geometry")
+
+
 def rung_node_name(digest, rung):
     """What a rung glb calls its one node. A function of the GEOMETRY and the rung, so a cached
     rung is valid however the meshes that share it are named."""
@@ -165,20 +185,29 @@ def cut_chain(digest, surface, out_dir):
     for rung, target_mm in CONFIG.rungs():
         node_budget = CONFIG.verdict_node_budget(diagonal_mm, target_mm)
         best, undecided = directed.search(target_mm, floor_tris, surface.tri_count, node_budget)
+        # WHAT A LOST RUNG IS LOST TO IS `M.rung_lost_to`'S ANSWER, on BOTH paths. Any UNDECIDED
+        # verdict outranks every other explanation: the winner the search settled on won partly by
+        # default, so a shed fraction measured against it is a comparison that should not have been
+        # the last word. Spelling the precedence here — or, as the sparse-chain path did, not
+        # spelling it at all — is how the writer came to file a budget-lost rung as an ordinary skip
+        # and silence the loss it should have announced.
         if best is None:
+            lost_to = M.rung_lost_to(undecided, "geometry")
             skipped.append({
-                "rung": rung, "e_target_mm": round(target_mm, 4),
-                "lost_to": "verdict_node_budget" if undecided else "geometry",
+                "rung": rung, "e_target_mm": round(target_mm, 4), "lost_to": lost_to,
                 "undecided_verdicts": undecided, "verdict_node_budget": node_budget,
             })
+            log_fidelity_loss(digest, rung, target_mm, lost_to, undecided, node_budget)
             continue
         shed = 1.0 - best["tris"] / previous["tris"]
         if shed < CONFIG.SKIP_FRACTION:
+            lost_to = M.rung_lost_to(undecided, "skip_fraction")
             skipped.append({
                 "rung": rung, "e_target_mm": round(target_mm, 4), "best_tris": best["tris"],
-                "shed_fraction": round(shed, 4), "lost_to": "skip_fraction",
+                "shed_fraction": round(shed, 4), "lost_to": lost_to,
                 "undecided_verdicts": undecided, "verdict_node_budget": node_budget,
             })
+            log_fidelity_loss(digest, rung, target_mm, lost_to, undecided, node_budget)
             continue
 
         node_name = rung_node_name(digest, rung)

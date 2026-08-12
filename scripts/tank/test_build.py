@@ -12,10 +12,13 @@ tank-shaped scene with a multi-primitive mesh, a mesh eight nodes share, and two
 geometry. A law proven on a document only this suite can make is a law about nothing.
 """
 
+import ast
+import io
 import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 import numpy as np
@@ -32,6 +35,14 @@ import trio as TRIO  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TIGER = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.glb")
+
+#: `chains.py` runs INSIDE Blender, so importing it here needs the two modules only Blender
+#: provides. Both are imported at its top and used only inside functions, so an empty stand-in is
+#: enough to reach the parts that are ordinary Python — which is the half this suite tests.
+for _blender_only in ("bpy", "bmesh"):
+    sys.modules.setdefault(_blender_only, types.ModuleType(_blender_only))
+
+import chains  # noqa: E402
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────────────────────────
@@ -905,6 +916,135 @@ class CacheIntegrity(unittest.TestCase):
 
 
 # ── the shipped trio ─────────────────────────────────────────────────────────────────────────────
+
+class ChainSkipAttribution(unittest.TestCase):
+    """What a lost rung is filed as, and whether the build says so out loud.
+
+    Both halves are about a rung the RUN lost rather than the geometry — the one thing a corpus can
+    quietly trade for wall time. `cut_chain` itself needs Blender, so what is driven here is the
+    rule it applies (`measure.rung_lost_to`) and the announcement it makes, plus a reading of the
+    two skip paths proving they route through that rule instead of spelling an answer.
+    """
+
+    def cut_chain(self):
+        """`cut_chain`'s AST, read out of the file the build actually runs."""
+        with open(chains.__file__, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        return next(
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "cut_chain"
+        )
+
+    def test_every_search_skip_takes_its_reason_from_the_shared_rule(self):
+        """THE MISATTRIBUTION THIS CATCHES, read rather than guessed at: the sparse-chain path used
+        to write `"skip_fraction"` outright, so a rung the search had ABSTAINED on was filed as an
+        ordinary skip whenever the shed rule also fired — and the fidelity loss went unannounced on
+        exactly the rungs that earned one. `measure.rung_lost_to` is the precedence, and a path that
+        decides for itself is a second opinion about it.
+
+        IT READS THE ASSIGNMENT, NOT THE RECORD. A record that stores a variable called `lost_to`
+        says nothing about where that variable came from — checking only the record passes a mutant
+        that assigns the literal one line above, which is the exact defect being fixed.
+
+        The certification-bracket path is excluded: it is a verdict on SHIPPED bytes, reached after
+        the search is over, and `trio.LOST_TO_BRACKET` is its own answer.
+        """
+        sources = []
+        for node in ast.walk(self.cut_chain()):
+            if not isinstance(node, ast.Assign):
+                continue
+            if not any(getattr(t, "id", None) == "lost_to" for t in node.targets):
+                continue
+            sources.append(ast.unparse(node.value))
+        self.assertEqual(
+            len(sources), 2,
+            "cut_chain has two search paths that lose a rung — no candidate, and one that sheds "
+            "too little — and each must decide `lost_to` once: found {}".format(sources),
+        )
+        for expression in sources:
+            self.assertTrue(
+                expression.startswith("M.rung_lost_to("),
+                "a search path decides `lost_to` itself ({}) — the precedence lives in "
+                "measure.rung_lost_to, or it is spelled twice and the two will disagree".format(
+                    expression
+                ),
+            )
+        self.assertIn(
+            'M.rung_lost_to(undecided, \'skip_fraction\')', sources,
+            "the SPARSE-CHAIN path is the one that was wrong: a rung that also sheds too little "
+            "must still be filed as budget-lost when the search abstained",
+        )
+
+    def test_every_skip_record_files_the_reason_it_was_handed(self):
+        """The other half: having computed it, each path must RECORD it."""
+        filed = []
+        for node in ast.walk(self.cut_chain()):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "append"
+                    and getattr(node.func.value, "id", None) == "skipped"):
+                continue
+            value = next(
+                (v for k, v in zip(node.args[0].keys, node.args[0].values)
+                 if isinstance(k, ast.Constant) and k.value == "lost_to"),
+                None,
+            )
+            self.assertIsNotNone(value, "a skip record files no `lost_to` at all")
+            filed.append(ast.unparse(value))
+        self.assertEqual(
+            sorted(filed), ["TRIO.LOST_TO_BRACKET", "lost_to", "lost_to"],
+            "every skip record carries either the shared rule's answer or the bracket's own",
+        )
+
+    def test_both_search_paths_announce_the_loss_they_recorded(self):
+        """Recording the trade and SAYING it are two acts, and only the first is in the record.
+
+        A path that files `verdict_node_budget` and prints nothing leaves the loss discoverable only
+        by reading a JSON file after the fact — which is what the sparse-chain path did, and what
+        the certification bracket never did. Both search paths announce through one helper, so the
+        volume cannot drift between them.
+        """
+        calls = [
+            node for node in ast.walk(self.cut_chain())
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "log_fidelity_loss"
+        ]
+        self.assertEqual(
+            len(calls), 2,
+            "each of cut_chain's two search paths announces the rung it lost — found {} call(s) to "
+            "log_fidelity_loss".format(len(calls)),
+        )
+
+    def test_an_undecided_rung_is_lost_to_the_budget_even_when_it_also_sheds_too_little(self):
+        """The rule itself, at the value the sparse-chain path hands it."""
+        self.assertEqual(measure.rung_lost_to(1, "skip_fraction"), measure.LOST_TO_BUDGET)
+        self.assertEqual(measure.rung_lost_to(7, "geometry"), measure.LOST_TO_BUDGET)
+        self.assertEqual(measure.rung_lost_to(0, "skip_fraction"), "skip_fraction")
+        self.assertEqual(measure.rung_lost_to(0, "geometry"), "geometry")
+
+    def announced(self, lost_to, undecided=3):
+        captured, real = io.StringIO(), sys.stdout
+        sys.stdout = captured
+        try:
+            chains.log_fidelity_loss("d0e2beef1234", 5, 62.24, lost_to, undecided, 400000)
+        finally:
+            sys.stdout = real
+        return captured.getvalue()
+
+    def test_a_budget_lost_rung_is_announced_as_loudly_as_a_bracket_lost_one(self):
+        """A fidelity loss is loud whatever took the rung. The bracket already said so at build
+        time; the node budget was silent, so a run that traded fidelity for wall time said nothing
+        at the one moment a human is watching."""
+        printed = self.announced(measure.LOST_TO_BUDGET)
+        self.assertIn("rung 5", printed)
+        self.assertIn("400000-node budget", printed)
+        self.assertIn("LOST", printed)
+        self.assertIn("not to the geometry", printed)
+
+    def test_a_rung_lost_to_the_geometry_is_not_announced(self):
+        """No run length recovers it, so it is not a trade and saying so every time is noise."""
+        self.assertEqual(self.announced("geometry", undecided=0), "")
+        self.assertEqual(self.announced("skip_fraction", undecided=0), "")
+
 
 class ShippedTrio(unittest.TestCase):
     """What is in the tree, if a trio has been published into it."""
