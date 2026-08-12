@@ -42,8 +42,9 @@ MirrorX variants). `SHOE_LOD_CHAIN` and every hand-transcribed measurement in Ru
 DELETED — the certificate is the single seam ADR-0033 §8 demanded. Failure law mirrors map
 loading (ADR-0011): missing, malformed, or hash-mismatched trio → panic in every build; a
 chain absent from the certificate renders at source detail (benign; the build's own tests
-own coverage). Scale is 1 by lint (UNAPPLIED_SCALE is an error), so the projection carries
-no scale term. Shadows inherit observer-based range selection plus the caster-proxy policy;
+own coverage). Authored scale is a lint error (float-dust in composed matrices stays a
+warning; the exporter ships translation-only nodes), so the projection carries no scale
+term. Shadows inherit observer-based range selection plus the caster-proxy policy;
 no shadow-specific derivation exists.
 
 ## Locality and the source/product boundary

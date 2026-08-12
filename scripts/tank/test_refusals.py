@@ -62,7 +62,12 @@ COVERAGE = {
     "L1.ANIMATION": (LINT, "animation_object_action"),
     "L1.TRANSFORM_FINITE": (LINT, "transform_finite_nan_translation"),
     "L1.HANDEDNESS": (LINT, "handedness_mirrored_node"),
-    "L1.UNAPPLIED_SCALE": (LINT, "unapplied_scale_is_a_warning_that_does_not_fail"),
+    "L1.AUTHORED_SCALE": (
+        LINT, "authored_scale_is_an_error_and_the_composition_it_lands_in_is_a_warning"
+    ),
+    "L1.UNAPPLIED_SCALE": (
+        LINT, "authored_scale_is_an_error_and_the_composition_it_lands_in_is_a_warning"
+    ),
     "L1.COMPENSATED_SCALE": (LINT, "compensated_scale_channels_that_undo_each_other"),
     "L1.UNIQUE_NAMES": (LINT, "unique_names_duplicate_across_a_library"),
     "L1.DEFAULT_NAMES": (LINT, "default_names_object"),
