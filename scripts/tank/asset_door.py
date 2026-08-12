@@ -1,7 +1,6 @@
-"""asset_door.py — the one asset door, and the only thing anyone runs.
+"""asset_door.py — the asset laws, and the chain that runs them.
 
     python3 scripts/tank/asset_door.py lint   assets/<id>/<id>.blend
-    python3 scripts/tank/asset_door.py export assets/<id>/<id>.blend
     python3 scripts/tank/asset_door.py verify assets/<id>/<id>.blend
 
 The spec sheet and the model derive from the blend's stem: an asset is the sibling trio
@@ -11,21 +10,24 @@ WHAT EACH MODE IS
 -----------------
 `lint` runs the L1 source pass over the stored blend and prints one report.
 
-`export` runs the whole chain — source pass, raw candidate, the consumer contract on it, the KTX2
-texture derivation, the derivation verifier, the consumer contract again on the baked bytes — and
-replaces the tracked glb only after every error-producing stage has passed. Any failure leaves the
-tracked glb untouched, because the tracked path is written by one `os.replace` of a file that
-already passed everything.
+`verify` runs the whole chain — source pass, raw candidate, the consumer contract on it, the KTX2
+texture derivation, the derivation verifier, the consumer contract again on the baked bytes — into
+a temporary directory, ending in a section-by-section comparison with the tracked glb: byte-exact
+wherever the pipeline is deterministic, by stated KTX2 header facts over the texture payloads,
+which the encoder cuts differently on different architectures (`compare`). It writes nothing.
 
-`verify` is the same chain into a temporary directory, ending in a section-by-section comparison
-with the tracked glb — byte-exact wherever the pipeline is deterministic, by stated KTX2 header
-facts over the texture payloads, which the encoder cuts differently on different architectures
-(`compare`). It writes nothing.
+The third mode, `export`, is the same chain ending in a CERTIFIED CANDIDATE staged where the caller
+asks (`chain(..., stage_to=)`), and it has no command line. That is ADR 0035's one-entrance law
+made mechanical: a tank is three artifacts, and a program that replaced only `<id>.glb` left
+`<id>.sim.glb` and `<id>.lod.json` describing bytes that were no longer there. `scripts/tank/build.py`
+is the one writer — it drives this chain, appends the certified rung records and publishes all
+three as one staged set — so THIS FILE PUBLISHES NOTHING. The laws are unchanged and still stated
+here; only the side door is closed.
 
-THERE IS ONE ENTRANCE, and it is the top of this chain. The GUI adapter
-(`.agents/blender/addons/overmatch_export.py`) saves the blend and runs `export` as a subprocess
-like anyone else, paying its own Blender launch — so there is no seam to authenticate, and no
-machinery defending one.
+THERE IS ONE ENTRANCE, and it is `build.py`. The GUI adapter
+(`.agents/blender/addons/overmatch_export.py`) saves the blend and runs `build.py build` as a
+subprocess like anyone else, paying its own Blender launch — so there is no seam to authenticate,
+and no machinery defending one.
 
 WHY THE DOOR IS THE ORCHESTRATOR AND NOT A BLENDER SCRIPT
 ---------------------------------------------------------
@@ -65,7 +67,20 @@ import report  # noqa: E402
 import toolchain  # noqa: E402
 from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa: E402
 
-MODES = ("lint", "export", "verify")
+#: What the COMMAND LINE offers. The chain understands a third mode, `export`, which stages a
+#: certified candidate and is reachable only through `chain(..., stage_to=)` — `build.py`'s call.
+MODES = ("lint", "verify")
+
+#: The refusal the retired entrance answers with. It names the successor rather than the law,
+#: because the caller's next move is a command and not a reading.
+RETIRED_ENTRANCE = (
+    "door  ▸ `asset_door.py export` is retired. A tank is three artifacts and this door writes "
+    "none of them:\n"
+    "        python3 scripts/tank/build.py build <blend>\n"
+    "        The build drives this same chain, then publishes <id>.glb, <id>.sim.glb and "
+    "<id>.lod.json\n"
+    "        as one staged set (ADR 0035). Nothing has been written."
+)
 
 #: The Blender half, run once per invocation.
 SOURCE_PASS = os.path.join(".agents", "blender", "export_tank.py")
@@ -198,49 +213,6 @@ def candidate(work: str, name: str, stem: str, spec: str) -> str:
     return os.path.join(directory, stem + ".glb")
 
 
-def replace(baked: str, glb: str) -> str:
-    """Put the certified candidate at the tracked path, atomically. Returns its sha256.
-
-    THE STAGING NAME IS UNIQUE PER INVOCATION, from `mkstemp`, and it is created in the tracked
-    file's own directory so the rename is within one filesystem — which is what makes it atomic. A
-    fixed staging name is not merely untidy: two exports running at once open and truncate the same
-    file, and the one that renames first leaves the other writing through the renamed inode, now at
-    the tracked path. The first would then report success over bytes still being written. With a
-    name nobody else can hold, that finding cannot be constructed.
-
-    The digest is of the bytes actually written, taken as they are copied, so the line the door
-    prints names the file it landed rather than whatever a second read of that path would find.
-    """
-    directory = os.path.dirname(glb) or "."
-    handle, staging = tempfile.mkstemp(
-        prefix="." + os.path.basename(glb) + ".", suffix=".door", dir=directory,
-    )
-    try:
-        hashed = hashlib.sha256()
-        with os.fdopen(handle, "wb") as target, open(baked, "rb") as candidate:
-            for block in iter(lambda: candidate.read(1 << 20), b""):
-                hashed.update(block)
-                target.write(block)
-        # `mkstemp` creates 0600. A tracked model is an ordinary file, so it gets the mode an
-        # ordinary write would have given it.
-        mask = os.umask(0)
-        os.umask(mask)
-        os.chmod(staging, 0o666 & ~mask)
-        os.replace(staging, glb)
-        return hashed.hexdigest()
-    except OSError as error:
-        if os.path.exists(staging):
-            os.remove(staging)
-        raise Refused("replace", [Finding(
-            STAGE_FAILED,
-            Subject(SubjectKind.DOOR, "replace", glb),
-            str(error),
-            "free the space or fix the permissions on {} — the tracked glb is unchanged".format(
-                directory
-            ),
-        )]) from error
-
-
 def identity(status) -> tuple:
     """Which file a stat is about, and which version of it: device and inode name the file, size and
     modification time name its content's generation. Two stats that agree here are of one file that
@@ -296,8 +268,8 @@ def ktx2_facts(parsed) -> dict:
     }
 
 
-REBUILD = ("run `asset_door.py export` and commit the result — the tracked model is not what this "
-           "source, this spec sheet and this toolchain produce")
+REBUILD = ("run `scripts/tank/build.py build` and commit the trio — the tracked model is not what "
+           "this source, this spec sheet and this toolchain produce")
 
 
 def mismatch(subject: Subject, evidence: str) -> Finding:
@@ -463,9 +435,9 @@ def compare(baked: str, glb: str) -> None:
     headers declare. Nothing here has a tolerance: a section is either identical or equal in stated
     facts. This is one law with no environment in it, and it runs the same everywhere.
 
-    WHERE THE PIXEL BYTES ARE CERTIFIED, then: at export, by the machine that ran the encoder. That
-    machine wrote the tracked path with bytes its own chain had just produced and verified
-    (`derive`), and the byte-stable double export proves an encoder is deterministic with itself.
+    WHERE THE PIXEL BYTES ARE CERTIFIED, then: at build time, by the machine that ran the encoder.
+    That machine staged bytes its own chain had just produced and verified (`derive`), the build
+    published them, and the byte-stable double run proves an encoder is deterministic with itself.
     What travels to another machine is the claim that the tracked payloads are a KTX2 of the same
     image, which is what this comparison re-establishes there.
 
@@ -492,8 +464,8 @@ def compare(baked: str, glb: str) -> None:
             "the tracked glb cannot be read ({}); the rebuilt candidate is {}".format(
                 error, digest(baked)
             ),
-            "run `asset_door.py export` — verify compares against a tracked model, and there is "
-            "none here",
+            "run `scripts/tank/build.py build` — verify compares against a tracked model, and "
+            "there is none here",
         )]) from error
     with tracked_file:
         raw = tracked_file.read()
@@ -588,11 +560,12 @@ def source_pass(mode: str, blend: str, glb: str, canon: str, raw: Optional[str],
 def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work: str,
            registry: str, stage_to: Optional[str] = None) -> None:
     """Everything after the raw candidate: the consumer contract on it, the texture derivation, the
-    derivation verifier, the contract again on the baked bytes, and the tracked path.
+    derivation verifier, the contract again on the baked bytes, and — for `verify` — the comparison.
 
-    `stage_to` MOVES THE CERTIFIED CANDIDATE THERE INSTEAD OF LANDING IT. Every check above has run;
-    what has not happened is the replacement of the tracked model, which `scripts/tank/build.py`
-    owns — it appends the LOD rung records and publishes the three artifacts as one staged set.
+    `stage_to` IS WHERE THE CERTIFIED CANDIDATE GOES, and there is no other destination. Every check
+    above has run; what has not happened is the replacement of the tracked model, which
+    `scripts/tank/build.py` owns — it appends the LOD rung records and publishes the three artifacts
+    as one staged set.
     """
     run_stage("consumer (raw)", contract(registry, raw), root)
 
@@ -609,15 +582,20 @@ def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work:
     if mode == "verify":
         compare(baked, glb)
         return
-    if stage_to is not None:
-        shutil.move(baked, stage_to)
-        print("door  ▸ stage: {} — {:.1f} MB, sha256 {}".format(
-            stage_to, os.path.getsize(stage_to) / 1e6, digest(stage_to)
-        ), flush=True)
-        return
-    landed = replace(baked, glb)
-    print("door  ▸ export: {} — {:.1f} MB, sha256 {}".format(
-        glb, os.path.getsize(baked) / 1e6, landed
+    # THE END OF THE CHAIN IS A STAGED CANDIDATE, never a tracked path. `stage_to` is not optional:
+    # a caller that reached here without one is asking this file to publish, which is the thing
+    # ADR 0035 gave to `build.py` alone.
+    if stage_to is None:
+        raise Refused("stage", [Finding(
+            STAGE_FAILED,
+            Subject(SubjectKind.DOOR, "stage"),
+            "the export chain was driven with no path to stage the certified candidate to",
+            "call `chain(..., stage_to=<path>)` — publishing a tank is "
+            "`scripts/tank/build.py build`, which lands all three artifacts as one set",
+        )])
+    shutil.move(baked, stage_to)
+    print("door  ▸ stage: {} — {:.1f} MB, sha256 {}".format(
+        stage_to, os.path.getsize(stage_to) / 1e6, digest(stage_to)
     ), flush=True)
 
 
@@ -643,7 +621,10 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
 
 def parse(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(prog="asset_door.py", allow_abbrev=False)
-    parser.add_argument("mode", choices=MODES)
+    # `export` is accepted and then REFUSED by name (`door`), rather than dropped from `choices`:
+    # argparse would answer "invalid choice", which tells a reader what is not there and not what
+    # replaced it.
+    parser.add_argument("mode", choices=MODES + ("export",))
     parser.add_argument("blend", help="assets/<id>/<id>.blend — the sole model truth")
     parser.add_argument("--spec", help="TEST ONLY: the spec sheet, which otherwise derives from "
                                        "the blend's stem")
@@ -654,7 +635,15 @@ def parse(argv: Optional[List[str]] = None):
 
 def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None,
          stage_to: Optional[str] = None) -> int:
-    """One invocation. Returns the exit code: non-zero exactly when a stage refused."""
+    """One invocation. Returns the exit code: non-zero exactly when a stage refused.
+
+    `export` WITHOUT `stage_to` is the retired entrance and is refused HERE, before the toolchain
+    preflight and before any Blender launch — so it costs nothing and, more to the point, writes
+    nothing. `build.py` reaches the same chain with a `stage_to` and is unaffected.
+    """
+    if mode == "export" and stage_to is None:
+        print(RETIRED_ENTRANCE, file=sys.stderr, flush=True)
+        return 1
     blend = os.path.abspath(blend)
     stem = os.path.splitext(blend)[0]
     spec = os.path.abspath(spec or stem + ".tank.ron")
@@ -674,10 +663,7 @@ def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] =
             return 0
 
     print(report.render_text(report.sorted_findings(findings)), end="", flush=True)
-    print("door  ▸ {} refused at {}{}".format(
-        "stage" if stage_to else mode, stage,
-        " — {} is unchanged".format(glb) if mode == "export" and not stage_to else "",
-    ), flush=True)
+    print("door  ▸ {} refused at {}".format("stage" if stage_to else mode, stage), flush=True)
     return 1
 
 
