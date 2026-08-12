@@ -804,7 +804,7 @@ pub(crate) fn tiger_spec() -> crate::spec::TankSpec {
 /// helpers would be two things to keep in step.
 #[cfg(test)]
 pub(crate) fn tiger_rig() -> RigGeom {
-    let glb = crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH);
+    let glb = crate::assets::asset_root().join(crate::tank::TIGER_SIM_GLB_PATH);
     let spec = tiger_spec();
     let geometry = crate::bake::extract_tank_geometry(
         &glb,

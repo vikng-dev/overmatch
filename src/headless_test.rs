@@ -195,7 +195,10 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
     let (spec_state, scene_state, spec_parsed) = match world.get_resource::<PendingTankAssets>() {
         Some(p) => (
             format!("{:?}", assets.load_state(&p.spec)),
-            format!("{:?}", assets.load_state(&p.scene)),
+            p.scene.as_ref().map_or_else(
+                || "absent (sim-only composition)".to_string(),
+                |scene| format!("{:?}", assets.load_state(scene)),
+            ),
             specs.get(&p.spec).is_some(),
         ),
         // Removed only by the spawn itself, which sets `Playing` in the same run — so if it is gone

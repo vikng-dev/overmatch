@@ -27,17 +27,25 @@ use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, Weapo
 use crate::track::sim::{TankTransmission, TrackGripElements, TrackGripWake};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
+///
+/// `scene` is `None` on the DEDICATED SERVER, which opens no view artifact at all (ADR-0035): the
+/// glb is scene, textures and every rung, and nothing the server simulates reads any of it. The
+/// walk's geometry comes from `bake`'s extraction of `<id>.sim.glb`, which is not an asset-server
+/// load at all.
 #[derive(Resource, Clone)]
 pub(crate) struct PendingTankAssets {
     pub spec: Handle<TankSpec>,
-    pub scene: Handle<bevy::world_serialization::WorldAsset>,
+    pub scene: Option<Handle<bevy::world_serialization::WorldAsset>>,
 }
 
 impl PendingTankAssets {
-    /// Both presentation assets have resolved.
+    /// Every presentation asset this composition asked for has resolved.
     pub(crate) fn loaded(&self, asset_server: &AssetServer) -> bool {
         matches!(asset_server.load_state(&self.spec), LoadState::Loaded)
-            && matches!(asset_server.load_state(&self.scene), LoadState::Loaded)
+            && self
+                .scene
+                .as_ref()
+                .is_none_or(|scene| matches!(asset_server.load_state(scene), LoadState::Loaded))
     }
 
     /// Clone handles for a root; the spec handle remains available to presentation validation.
@@ -49,21 +57,26 @@ impl PendingTankAssets {
 /// Presentation-only root handles, deliberately separate from [`TankContent`].
 #[derive(Clone)]
 pub(crate) struct TankPresentation {
-    scene: Handle<bevy::world_serialization::WorldAsset>,
+    scene: Option<Handle<bevy::world_serialization::WorldAsset>>,
     spec: Handle<TankSpec>,
 }
 
 impl TankPresentation {
     pub(crate) fn new(
-        scene: Handle<bevy::world_serialization::WorldAsset>,
+        scene: Option<Handle<bevy::world_serialization::WorldAsset>>,
         spec: Handle<TankSpec>,
     ) -> Self {
         Self { scene, spec }
     }
 
+    /// The view artifact's scene root, ABSENT on the dedicated server: no scene to instantiate,
+    /// and therefore no view bind, no shadow compare and no textures.
+    pub(super) fn scene_root(&self) -> Option<WorldAssetRoot> {
+        self.scene.clone().map(WorldAssetRoot)
+    }
+
     pub(super) fn root_bundle(&self) -> impl Bundle {
         (
-            WorldAssetRoot(self.scene.clone()),
             TankSpecHandle(self.spec.clone()),
             Tank,
             // The ROOT of this body's rendering policy: the glb lands asynchronously over many
@@ -76,8 +89,17 @@ impl TankPresentation {
     }
 }
 
-/// Shared source path for the presentation loader and geometry extractor.
+/// The VIEW artifact — scene, textures and every certified rung. The presentation loader's file,
+/// and no simulation's (ADR-0035).
 pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
+
+/// The SIM artifact — rung-0 geometry and material names, no textures, no UVs, no rungs. The ONE
+/// file the ballistic/armour walk is extracted from, on the dedicated server and on the client
+/// alike, so both sides walk identical accessor bytes by construction rather than by convention.
+pub(crate) const TIGER_SIM_GLB_PATH: &str = "tiger_1/tiger_1.sim.glb";
+
+/// The spec sheet beside them.
+const TIGER_SPEC_PATH: &str = "tiger_1/tiger_1.tank.ron";
 
 /// Synchronous construction data. This source never reads Bevy asset readiness.
 #[derive(SystemParam)]
@@ -112,10 +134,20 @@ impl<'a> TankContent<'a> {
     }
 }
 
+/// The windowed compositions' load: the spec sheet and the view artifact's scene.
 pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankAssets {
-        spec: asset_server.load("tiger_1/tiger_1.tank.ron"),
-        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset(TIGER_GLB_PATH)),
+        spec: asset_server.load(TIGER_SPEC_PATH),
+        scene: Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(TIGER_GLB_PATH))),
+    });
+}
+
+/// The dedicated server's load: the spec sheet, and nothing else. The sim artifact reaches the
+/// server through `bake`'s startup extraction, not through the asset server.
+pub(crate) fn load_tank_sim_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(PendingTankAssets {
+        spec: asset_server.load(TIGER_SPEC_PATH),
+        scene: None,
     });
 }
 
@@ -180,6 +212,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         tank_servos(content.spec()),
         root_bundle,
     ));
+    if let Some(scene) = presentation.scene_root() {
+        root.insert(scene);
+    }
     root.observe(bind_tank_view);
     let entity = root.id();
     assemble_tank_body(commands, entity, content);
@@ -227,6 +262,9 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_bundle: B,
 ) {
     let mut root_commands = commands.entity(root);
+    if let Some(scene) = presentation.scene_root() {
+        root_commands.insert(scene);
+    }
     root_commands
         .insert((
             presentation.root_bundle(),

@@ -259,6 +259,10 @@ pub fn plugin(app: &mut App) {
         damage::plugin,
         // `spec` registers the `.tank.ron` loader so the target tank's volumes bind with their data.
         spec::plugin,
+        // The certificate: the sim artifact `bake` opens is fingerprinted before it is read, and
+        // the tank's scene primitives get their certified rungs.
+        crate::geometry_lod::sim_plugin,
+        crate::geometry_lod::view_plugin,
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
         // `TankBlueprint`, exactly like the game's tanks; the shadow harness rides along.
         bake::plugin,
@@ -476,7 +480,7 @@ struct PendingTarget(TankPresentation);
 
 fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTarget(TankPresentation::new(
-        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH))),
         asset_server.load("tiger_1/tiger_1.tank.ron"),
     )));
 }
@@ -930,7 +934,7 @@ fn reset_world(
         commands.entity(entity).despawn();
     }
     commands.insert_resource(PendingTarget(TankPresentation::new(
-        asset_server.load(GltfAssetLabel::Scene(0).from_asset("tiger_1/tiger_1.glb")),
+        Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH))),
         asset_server.load("tiger_1/tiger_1.tank.ron"),
     )));
 }
