@@ -271,12 +271,21 @@ HANDEDNESS = Check(
     law="every export-bound local transform has a strictly positive 3x3 determinant",
 )
 
+#: The LOD projection carries no scale term: a rung's certified deviation is the deviation of the
+#: node as it renders, which a scaled node's is not.
+AUTHORED_SCALE = Check(
+    id="L1.AUTHORED_SCALE",
+    stage=Stage.SOURCE,
+    severity=Severity.ERROR,
+    law="every export-bound scale a transform STORES is bit-exact (1,1,1): the two authored "
+        "channels, and the parent-inverse matrix Blender writes",
+)
+
 UNAPPLIED_SCALE = Check(
     id="L1.UNAPPLIED_SCALE",
     stage=Stage.SOURCE,
     severity=Severity.WARNING,
-    law="every export-bound local scale is bit-exact (1,1,1), in the authored channels and in the "
-        "parent-inverse matrix the local transform is composed with",
+    law="the composed local transform an export-bound node ships with is scale-free",
 )
 
 COMPENSATED_SCALE = Check(
@@ -660,8 +669,9 @@ def _scale_gram(matrix):
 
     The price of that exactness, stated rather than softened: a rotation by an angle floats cannot
     hold — a quarter turn built from `cos(pi/2)` — stores columns 1.0000000000000058 long, and this
-    reports it. The row is a WARNING that never fails a build and it prints the Gram it measured,
-    which is the true thing to say about a stored basis that is not unit.
+    reports it. Which tier that lands in is the split in `check_unapplied_scale`: a stored slot is
+    an error, their composition is a warning that never fails a build. Either row prints the Gram it
+    measured, which is the true thing to say about a stored basis that is not unit.
     """
     columns = [[matrix[row][index] for row in range(3)] for index in range(3)]
     gram = tuple(
@@ -688,6 +698,13 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
     scale survives into `matrix_local`, so `L2.UNIT_SCALE` refuses it on any sim-consumed node; a
     scale one channel undoes reaches no later stage at all, and either channel moving alone moves
     the model with nothing measuring it.
+
+    TWO TIERS, SPLIT ON WHAT THE MEASUREMENT CAN PROVE. A stored slot — either channel, or the
+    parent inverse — is `L1.AUTHORED_SCALE`, an ERROR: something put a scale there. The composition
+    of them is `L1.UNAPPLIED_SCALE`, a WARNING, because composing an honest rotation in float
+    produces basis columns that are not unit and no exact measurement separates that from a scale.
+    Softening the composed row with a tolerance is the one repair not available: there is no scale
+    that is almost 1.
     """
     findings = []
     unit = (1.0, 1.0, 1.0)
@@ -696,7 +713,7 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
         delta = tuple(obj.delta_scale)
         if scale != unit or delta != unit:
             findings.append(Finding(
-                UNAPPLIED_SCALE,
+                AUTHORED_SCALE,
                 Subject(SubjectKind.OBJECT, obj.name),
                 "scale {}, delta scale {}".format(scale, delta),
                 "apply the scale (Ctrl+A → Scale) — bit-exact, not near: there is no scale that is "
@@ -718,7 +735,7 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
         gram = _scale_gram(obj.matrix_parent_inverse)
         if gram is not None:
             findings.append(Finding(
-                UNAPPLIED_SCALE,
+                AUTHORED_SCALE,
                 Subject(SubjectKind.OBJECT, obj.name, "parent inverse"),
                 "the parent-inverse matrix is not scale-free: its basis columns dotted with each "
                 "other are {}, not the identity".format(gram),
@@ -734,8 +751,9 @@ def check_unapplied_scale(source: Source) -> List[Finding]:
                 "the composed local transform is not scale-free: its basis columns dotted with "
                 "each other are {}, not the identity".format(gram),
                 "apply the scale (Ctrl+A → Scale) and clear the parent inverse — this is the "
-                "matrix the exporter writes, and whatever the two rows above say, this is the "
-                "scale the model ships with",
+                "matrix the exporter writes. With no error beside it the composition is the only "
+                "thing carrying this, which a rotation floats cannot hold also does: apply the "
+                "rotation (Ctrl+A → Rotation) to clear that one",
             ))
     return findings
 

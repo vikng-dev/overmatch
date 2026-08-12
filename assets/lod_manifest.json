@@ -95,7 +95,7 @@
       "name": "tiger_1_link",
       "source": {
         "blend": "assets/tiger_1/tiger_1.blend",
-        "blend_sha256": "8622cc57532f8f9c47dee258c92d526c2ab39762226d93082c620e5c124b4fec",
+        "blend_sha256": "b97db2e2d693730518ff497e37c9a679055a563fb6fe973a9c09bc7fbde57515",
         "object": "Link",
         "evaluated_digest": "07b5686ef77712df3dcf0d8dc401a4dd06c4dfc379ce455927fe281e97f0401b",
         "tris": 1520,

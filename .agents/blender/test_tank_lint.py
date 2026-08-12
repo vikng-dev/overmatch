@@ -781,48 +781,64 @@ def handedness_collapsed_node():
     ), "the fixture is not the zero-determinant case"
 
 
-# ── L1.UNAPPLIED_SCALE ───────────────────────────────────────────────────────────────────────────
+# ── L1.AUTHORED_SCALE / L1.UNAPPLIED_SCALE ───────────────────────────────────────────────────────
 
 @case
-def unapplied_scale_is_a_warning_that_does_not_fail():
+def authored_scale_is_an_error_and_the_composition_it_lands_in_is_a_warning():
+    """The split, on the one fixture that drives both tiers. A channel is a slot something PUT a
+    scale in, measured bit-exactly against (1,1,1) — an error. The composition it lands in cannot
+    tell that scale from the dust an honest rotation leaves — a warning. The report exits non-zero
+    on the error's account, never the warning's."""
     scene = clean_scene()
-    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    findings = export_tank.lint(source_of(scene))
+    assert_silent(findings, "L1.AUTHORED_SCALE")
+    assert_silent(findings, "L1.UNAPPLIED_SCALE")
     bpy.data.objects["Turret"].scale = (2.0, 2.0, 2.0)
     findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.AUTHORED_SCALE", Severity.ERROR)
     assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
-    assert_exit(findings, 0)
+    assert [hit.subject.element for hit in of(findings, "L1.AUTHORED_SCALE")] == [None], [
+        (finding.subject.element, finding.evidence) for finding in of(findings, "L1.AUTHORED_SCALE")
+    ]
+    assert [hit.subject.element for hit in of(findings, "L1.UNAPPLIED_SCALE")] == ["local matrix"]
+    assert_exit(findings, 1)
 
 
 @case
-def unapplied_scale_reads_delta_scale():
+def authored_scale_reads_delta_scale():
     scene = clean_scene()
-    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    assert_silent(export_tank.lint(source_of(scene)), "L1.AUTHORED_SCALE")
     bpy.data.objects["Turret"].delta_scale = (1.0, 1.0, 2.0)
-    assert_fires(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE", Severity.WARNING)
+    findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.AUTHORED_SCALE", Severity.ERROR)
+    assert_exit(findings, 1)
 
 
 @case
-def unapplied_scale_reads_the_parent_inverse_matrix():
+def authored_scale_reads_the_parent_inverse_matrix():
     """The scale both channels miss. Blender writes the inverse of the parent's world matrix into
     `matrix_parent_inverse` when a child is parented, so a parent that was scaled at that moment
     leaves its scale composed into every descendant's local transform with `scale` and
-    `delta_scale` both reading (1,1,1)."""
+    `delta_scale` both reading (1,1,1). The parent inverse is a stored slot, so it is an error."""
     scene = clean_scene()
     turret = bpy.data.objects["Turret"]
-    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    findings = export_tank.lint(source_of(scene))
+    assert_silent(findings, "L1.AUTHORED_SCALE")
+    assert_silent(findings, "L1.UNAPPLIED_SCALE")
     turret.matrix_parent_inverse = mathutils.Matrix.Diagonal((2.0, 1.0, 1.0, 1.0))
     assert tuple(turret.scale) == (1.0, 1.0, 1.0) and tuple(turret.delta_scale) == (1.0, 1.0, 1.0), (
         "the fixture moved a scale channel, which is the clause above"
     )
     findings = export_tank.lint(source_of(scene))
-    assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
-    hits = of(findings, "L1.UNAPPLIED_SCALE")
-    # Both the matrix that carries it and the composition it lands in — no channel row, because no
-    # channel moved.
-    assert sorted(hit.subject.element for hit in hits) == ["local matrix", "parent inverse"], [
-        (finding.subject.element, finding.evidence) for finding in hits
+    # The slot that carries it is the error; the composition it lands in is the warning. No channel
+    # row, because no channel moved.
+    assert_fires(findings, "L1.AUTHORED_SCALE", Severity.ERROR)
+    assert [hit.subject.element for hit in of(findings, "L1.AUTHORED_SCALE")] == ["parent inverse"], [
+        (finding.subject.element, finding.evidence) for finding in of(findings, "L1.AUTHORED_SCALE")
     ]
-    assert_exit(findings, 0)
+    assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
+    assert [hit.subject.element for hit in of(findings, "L1.UNAPPLIED_SCALE")] == ["local matrix"]
+    assert_exit(findings, 1)
 
 
 @case
@@ -838,10 +854,12 @@ def unapplied_scale_reads_the_composed_local_transform():
     turret.scale = (2.0, 1.0, 1.0)
     turret.delta_scale = (0.5, 1.0, 1.0)
     findings = export_tank.lint(source_of(scene))
-    hits = of(findings, "L1.UNAPPLIED_SCALE")
+    # The channel row is the error; the composition is exactly scale-free, so the warning is silent.
+    hits = of(findings, "L1.AUTHORED_SCALE")
     assert [hit.subject.element for hit in hits] == [None], [
         (finding.subject.element, finding.evidence) for finding in hits
     ]
+    assert_silent(findings, "L1.UNAPPLIED_SCALE")
     assert tuple(turret.matrix_local.to_scale()) == (1.0, 1.0, 1.0), (
         "the fixture does not compose to unit: {}".format(tuple(turret.matrix_local.to_scale()))
     )
@@ -889,25 +907,30 @@ def compensated_scale_a_channel_the_parent_inverse_takes_back():
 def compensated_scale_leaves_a_scale_that_survives_into_the_model_alone():
     """The negative half, and the whole reason this is a second check: a scale that reaches
     `matrix_local` is in the exported node, where `L2.UNIT_SCALE` refuses it on every sim-consumed
-    node. Here it stays the generic warning it was, and the report still exits zero."""
+    node. It is not COMPOSED away, so this check stays silent — the channel it sits in is refused by
+    `L1.AUTHORED_SCALE` instead, and the composition it reaches is the generic warning."""
     scene = clean_scene()
     bpy.data.objects["Turret"].scale = (2.0, 2.0, 2.0)
     findings = export_tank.lint(source_of(scene))
+    assert_fires(findings, "L1.AUTHORED_SCALE", Severity.ERROR)
     assert_fires(findings, "L1.UNAPPLIED_SCALE", Severity.WARNING)
     assert_silent(findings, "L1.COMPENSATED_SCALE")
-    assert_exit(findings, 0)
+    assert_exit(findings, 1)
 
 
 @case
 def unapplied_scale_leaves_a_parent_inverse_that_only_offsets_alone():
     """The shape the live tank is in: MEASURED, 37 of the tiger's 86 objects carry a non-identity
-    parent inverse and every one of them is a pure translation. Translation is not scale, and a
-    warning that fires on all of them is noise."""
+    parent inverse and every one of them is a pure translation. Translation is not scale, and a row
+    that fires on all of them is noise — now a refusal on all of them, so silence is load-bearing."""
     scene = clean_scene()
     bpy.data.objects["Turret"].matrix_parent_inverse = mathutils.Matrix.Translation(
         (0.5, -1.25, 3.0)
     )
-    assert_silent(export_tank.lint(source_of(scene)), "L1.UNAPPLIED_SCALE")
+    findings = export_tank.lint(source_of(scene))
+    assert_silent(findings, "L1.AUTHORED_SCALE")
+    assert_silent(findings, "L1.UNAPPLIED_SCALE")
+    assert_exit(findings, 0)
 
 
 @case
