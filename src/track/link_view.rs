@@ -322,10 +322,16 @@ struct ShoeLevel {
 /// for shedding under the 30 % `SKIP_FRACTION` (536 tris at 20.9 %, 186 at 26.8 %), and the
 /// manifest carries both skip records.
 ///
-/// L4's band opens BEYOND THE MAP: 1 499.58 m on a 1 000 m world means nothing is ever far enough
-/// to draw it today. It is wired regardless — it costs one entity per shoe and no triangles (an
-/// out-of-range entity is walked, never submitted), and the alternative makes L3 own `[528, ∞)`,
-/// which is a DIFFERENT claim about a map that grows.
+/// L4's band opens at 1 499.58 m, INSIDE the world: the shipped map is 1 500 m across, so its
+/// diagonal — the farthest a camera can be from a surface, and the ladder's right wall — is
+/// 2 121.32 m. The level is reachable, in the far corner, which is what it was generated for.
+///
+/// THE LADDER STOPS HERE FOR A GEOMETRIC REASON, NOT A GEOGRAPHIC ONE. The wall admits rungs 7-12,
+/// and the generator considers every one of them; each answers with the decimator's 140-triangle
+/// topology floor, 4.1 % below L4's 146 and far under `SKIP_FRACTION`. So the chain's depth is set
+/// by how far this shoe can be collapsed, not by how big the map is — and widening the world by
+/// half added no level. `config.RATIFICATION_EVIDENCE["skipped_rungs"]` enumerates all eight skips
+/// and the manifest carries them.
 const SHOE_LOD_CHAIN: &[ShoeLevel] = &[
     ShoeLevel {
         glb: "tiger_1/tiger_1_link.rung1.glb",
@@ -1484,6 +1490,55 @@ mod tests {
                     .unwrap_or(f64::NAN),
             );
         }
+    }
+
+    /// The shipped corpus was cut for a world at least as large as the one that loads.
+    ///
+    /// The ladder's depth is not a taste call: `scripts/lod/config.py` stops generating rungs once
+    /// a level's switch distance passes the RIGHT WALL — the world's diagonal, `world_size·√2`,
+    /// beyond which no camera can stand and so no coarser level can ever render. The wall is cut
+    /// from the map's own `world_extent_xz`, which is the same declaration `crate::map` builds the
+    /// grid from.
+    ///
+    /// A map that GROWS therefore invalidates the corpus in the one way nothing else notices. Every
+    /// glb still binds, every wired row still re-derives, the manifest still verifies against
+    /// `config.py` — and the chain's last level now owns a band that ends short of the far corner,
+    /// so the shoes past it draw at a detail the ladder never certified for that distance. This is
+    /// the tripwire: the map is data and can change without anyone running the twelve-minute
+    /// generator, so the two are compared where a map edit and the corpus meet.
+    ///
+    /// GENERIC by construction — the wall is a property of the WORLD, and the manifest's ladder
+    /// block is shared by every asset in the corpus. Nothing here names a vehicle.
+    #[test]
+    fn the_shipped_corpus_reaches_the_worlds_far_corner() {
+        let root = crate::assets::asset_root();
+        // The extent the game would run at: the map's when there is one, the flat-slab fallback's
+        // otherwise — the same resolution `world::spawn_environment` makes.
+        let extent = crate::map::load(&root)
+            .map(|manifest| manifest.extent)
+            .unwrap_or(crate::terrain_grid::FIXTURE_EXTENT);
+        let diagonal_m = extent.world_size_m * std::f32::consts::SQRT_2;
+
+        let text = std::fs::read_to_string(root.join("lod_manifest.json"))
+            .expect("the shipped manifest is readable");
+        let manifest: serde_json::Value =
+            serde_json::from_str(&text).expect("the shipped manifest is JSON");
+        let right_wall_m = manifest["ladder"]["right_wall_m"]
+            .as_f64()
+            .expect("the manifest's ladder declares the right wall it was cut against")
+            as f32;
+
+        assert!(
+            right_wall_m >= diagonal_m,
+            "assets/lod_manifest.json was cut for a {right_wall_m:.1} m right wall and the world \
+             that loads is {:.1} m across — a {diagonal_m:.1} m diagonal. The ladder stops at the \
+             rung that passes the wall, so every level beyond {right_wall_m:.1} m is one the \
+             corpus never generated: regenerate it with `python3 scripts/lod/generate.py` (the \
+             wall is re-read from the map manifest) and re-transcribe SHOE_LOD_CHAIN. The \
+             manifest's own provenance for that wall: {}",
+            extent.world_size_m,
+            manifest["ladder"]["right_wall_source"],
+        );
     }
 
     /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,

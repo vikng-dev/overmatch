@@ -1581,9 +1581,34 @@ class ProjectionSanityTests(unittest.TestCase):
         """The optic reference the doctrine quotes, re-derived rather than remembered."""
         self.assertAlmostEqual(chain.switch_distance_m(1.0, 0.0, VIEW), 17.98, places=1)
 
-    def test_the_right_wall_is_the_map_diagonal(self):
-        self.assertAlmostEqual(CONFIG.RIGHT_WALL_M, 1000.0 * math.sqrt(2.0), places=6)
+    def test_the_right_wall_is_the_default_maps_diagonal(self):
+        """The wall against the SHIPPED manifest, read here independently of `config`'s own parse.
+
+        The number this asserts is not written down anywhere in this file: it comes out of
+        `assets/maps/<id>/level.json`, which is the file `crate::map` builds the grid from. So a map
+        that grows moves both sides of this equality together and the test keeps passing — what it
+        catches is `config` deriving the wall from something OTHER than the world the game loads.
+        """
+        root = CONFIG.repo_root()
+        level = os.path.join(root, "assets", "maps", CONFIG.default_map_id(root), "level.json")
+        with open(level, encoding="utf-8") as handle:
+            extent = json.load(handle)["terrain"]["heightmap"]["world_extent_xz"]
+        side = extent["maximum"][0] - extent["minimum"][0]
+        self.assertAlmostEqual(CONFIG.WORLD_SIZE_M, side, places=6)
+        self.assertAlmostEqual(CONFIG.RIGHT_WALL_M, side * math.sqrt(2.0), places=6)
         self.assertIn("diagonal", CONFIG.RIGHT_WALL_SOURCE)
+        self.assertIn(CONFIG.MAP_ID, CONFIG.RIGHT_WALL_SOURCE)
+
+    def test_the_pins_are_the_toolchains(self):
+        """One home per pin: `config` names `scripts/toolchain.py`'s values rather than copying
+        them, and `toolchain.py`'s bytes are hashed into the manifest for saying so."""
+        sys.path.insert(0, os.path.join(CONFIG.repo_root(), "scripts"))
+        import toolchain  # noqa: PLC0415 — the pins' one home, only needed for this claim
+
+        self.assertIs(CONFIG.EXPECTED_BLENDER, toolchain.BLENDER_VERSION)
+        self.assertIs(CONFIG.EXPECTED_BLENDER_BUILD, toolchain.BLENDER_BUILD)
+        self.assertIs(CONFIG.EXPECTED_GLTF_EXPORTER, toolchain.GLTF_EXPORTER_VERSION)
+        self.assertIn("../toolchain.py", CONFIG.GENERATOR_SOURCES)
 
 
 if __name__ == "__main__":
