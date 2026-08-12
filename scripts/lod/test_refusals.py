@@ -1,15 +1,18 @@
-"""Proof that every named refusal fires, and that the byte-level gates count what they claim.
+"""The lane's math and its refusals: every named refusal fires, and every declared number holds.
 
     python3 scripts/lod/test_refusals.py
 
 "Nothing silently passes" (ADR 0033 §10) is a claim about code that almost never runs — the refusal
 paths only fire on an asset nobody has authored yet. So they are exercised here against synthetic
 GLBs built byte by byte, rather than trusted because they are written down. numpy only; no Blender,
-which is why these can run in a hook alongside `test_chain.py` (the BVH-backed deviation search does
-need Blender and is exercised by generation itself).
+which is why this suite runs on every push (the BVH-backed deviation search does need Blender and is
+exercised by the tank build itself).
+
+THE SUITE THAT USED TO SIT BESIDE IT — `test_chain.py` — retired with the global
+`assets/lod_manifest.json` it certified (ADR 0035). What it proved about the LADDER rather than
+about that document lives on here: `ProjectionTests` at the end of this file.
 """
 
-import collections
 import json
 import math
 import os
@@ -471,17 +474,17 @@ class BranchAndBoundTests(unittest.TestCase):
 
 
 class GateParityTests(unittest.TestCase):
-    """Generation and verification enforce the SAME gates, and every declared limit gates something.
+    """Every caller enforces the SAME gates, and every declared limit gates something.
 
-    Twice a gate existed at generation and was simply absent from the verifier — `components_must_
-    match` was compared when a level was cut and never again, and the checks were re-derived
-    against a threshold the manifest supplied for itself. Both are the same bug: two lists that were
-    supposed to agree.
+    Twice a gate existed at one caller and was simply absent from another — `components_must_match`
+    was compared when a level was cut and never again, and the checks were re-derived against a
+    threshold the corpus supplied for itself. Both are the same bug: two lists that were supposed to
+    agree.
 
-    There is one list now. `measure.validity_gate_failures` is what generation calls and what
-    verification calls, so parity holds by construction; these tests hold the remaining edge — that
-    the list actually consults every limit the configuration declares, and that both callers really
-    are calling it.
+    There is one list now. `measure.validity_gate_failures` is what the search's pre-filter calls
+    and what certification calls, so parity holds by construction; these tests hold the remaining
+    edge — that the list actually consults every limit the configuration declares, and that every
+    caller really is calling it.
     """
 
     @staticmethod
@@ -585,85 +588,30 @@ class GateParityTests(unittest.TestCase):
                         "tangent_min_length", "uv_area_eps"):
             self.assertNotIn(retired, CONFIG.GATES)
 
-    def test_verification_routes_its_structural_gates_through_the_shared_list(self):
-        """OBSERVED, not grepped: the shared function is REPLACED and every call it gets is counted.
-
-        WHAT THIS ESTABLISHES: a whole `chain.verify` of the shipped manifest reaches
-        `measure.validity_gate_failures` once per level and once for nothing else. Each call is
-        identified by the (tris, verts) of the record it was handed rather than merely tallied, so
-        five calls that all re-checked L0, or four calls that skipped a level, fail here just as
-        loudly as a missing call would. The structural gates verification applies are therefore the
-        ones in the shared list, for every level, and not a second copy beside it.
-
-        WHAT IT DOES NOT ESTABLISH, in two parts, because the honest version is not one sentence:
-
-          1. It cannot prove that no OTHER check anywhere duplicates a gate. Nothing short of
-             reading the source does, and `test_neither_caller_keeps_a_private_gate_list` is that
-             reading — kept for the one thing a text scan is actually good at.
-          2. THERE IS NO NEUTER-AND-EXPECT-SILENCE HALF, and that is a decision rather than an
-             omission. Replacing the shared list with a function that returns no failures does NOT
-             make a mutated counter stop being refused: `chain._check_decoded_bytes` compares every
-             recorded counter against the decoded bytes and SHOULD catch it there too. So the
-             failure would not vanish — and if it did, that would still not be evidence about a
-             second gate list. An experiment whose outcome means the same thing either way is not
-             evidence, and asserting it would have made this test read stronger than it is.
-        """
-        import json
-
-        import chain
-
-        root = CONFIG.repo_root()
-        manifest_path = os.path.join(root, CONFIG.MANIFEST_RELPATH)
-        if not os.path.isfile(manifest_path):
-            self.skipTest("no manifest generated yet")
-        manifest = json.load(open(manifest_path, encoding="utf-8"))
-
-        calls = []
-        original = M.validity_gate_failures
-
-        def counting(validity, source_validity, gates, **kwargs):
-            calls.append((validity.get("tris"), validity.get("verts")))
-            return original(validity, source_validity, gates, **kwargs)
-
-        M.validity_gate_failures = counting
-        try:
-            chain.verify(manifest, chain.Tree(root))
-        finally:
-            M.validity_gate_failures = original
-
-        levels = manifest["assets"][0]["levels"]
-        expected = collections.Counter((level["tris"], level["verts"]) for level in levels)
-        self.assertEqual(
-            len(expected), len(levels),
-            "this test identifies a level by its (tris, verts); a corpus where two levels share "
-            "both would need a different identifier before the count below means anything",
-        )
-        self.assertEqual(
-            collections.Counter(calls), expected,
-            f"every level must go through the shared gate list EXACTLY ONCE, identified by the "
-            f"record it was handed: expected {sorted(expected)}, saw {sorted(calls)}",
-        )
-
-    def test_neither_caller_keeps_a_private_gate_list(self):
+    def test_no_caller_keeps_a_private_gate_list(self):
         """A TEXT TRIPWIRE, said plainly — the name is a claim this mechanism cannot prove alone.
 
-        WHAT IT CHECKS: both callers really do call the shared function, generation keeps no
-        `validity_failures` of its own, and NEITHER FILE SPELLS a `max_*` limit's name at all, in
-        either quote style. Quoting the key is how every ordinary reading is written: `GATES["x"]`,
+        WHAT IT CHECKS: every caller really does call the shared function, generation keeps no
+        `validity_failures` of its own, and NO FILE SPELLS a `max_*` limit's name at all, in either
+        quote style. Quoting the key is how every ordinary reading is written: `GATES["x"]`,
         `GATES['x']`, `.get("x")`, `CONFIG.GATES["x"]`, an alias `g["x"]` — so refusing the name
         outright covers all of them at once, and the reading it enforces is that a limit is only
         ever consulted inside `measure.validity_gate_failures`, which is handed the whole dict.
 
+        THE CALLERS ARE THE TWO HALVES OF ONE SEARCH: `generate.py`'s pre-filter, which admits a
+        candidate before it can cost a verdict, and `scripts/tank/chains.py`'s certification of the
+        decoded shipped bytes. They were `generate.py` and the retired `chain.py` when the corpus
+        was a global manifest.
+
         WHAT EVADES IT, stated because a heuristic that hides its holes reads as a proof: a key
         assembled at runtime (`GATES["max_" + name]`), a name held in a variable or built by an
         f-string, or a second gate table constructed from `CONFIG.GATES` without spelling any key.
-        A text scan cannot decide those. The half of this pair that OBSERVES rather than reads is
-        `test_verification_routes_its_structural_gates_through_the_shared_list`.
+        A text scan cannot decide those.
         """
         directory = os.path.dirname(os.path.abspath(M.__file__))
         sources = {
             name: open(os.path.join(directory, name), encoding="utf-8").read()
-            for name in ("generate.py", "chain.py")
+            for name in ("generate.py", os.path.join("..", "tank", "chains.py"))
         }
         for name, source in sources.items():
             self.assertIn(
@@ -678,60 +626,6 @@ class GateParityTests(unittest.TestCase):
                         f"{name} names the limit {limit} directly ({spelling}) — the shared gate "
                         f"list is the only place a limit may be read, or there are two lists again",
                     )
-
-
-class DecoderCoverageTests(unittest.TestCase):
-    """Everything the decoder can compute is either VERIFIED or explicitly classified — as a
-    VALIDITY record, which is the part that took a second look to get right.
-
-    A property the decoder produces but the verifier never compares is invisible: the manifest can
-    say anything about it and nothing looks. `radius_m` was exactly that — measured from the bytes,
-    recorded in every level, and compared against nothing. This test is the standing form of that
-    audit, so the next field someone adds to `validity()` has to be classified before it can ship.
-
-    SCOPED TO THE RECORD TYPE. `chain.INFORMATIONAL_FIELDS` is one flat set covering every record in
-    the manifest — level rows, gate records, the asset header, the ladder — so excusing a DECODED
-    property against it means a future `validity()` field named `samples`, `level`, `material` or
-    `bbox_mm` would be waved through by a decision made about a different record entirely. The
-    allowance used here is `VALIDITY_INFORMATIONAL` below, which is about validity records only.
-    """
-
-    #: Names a decoded VALIDITY record may carry WITHOUT being compared against the bytes.
-    #:
-    #: EMPTY, and that is the current truth: every field `Surface.validity` produces is re-derived at
-    #: verification and compared. It exists so that the first exception has to be a deliberate line
-    #: here with a reason beside it, rather than a name that happens to collide with something
-    #: declared informational for another record. Anything listed must ALSO be declared informational
-    #: in `chain.py` — the assertion below holds that, so this set cannot quietly become a second,
-    #: laxer classification of the same field.
-    VALIDITY_INFORMATIONAL = frozenset()
-
-    def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="lod-coverage-")
-
-    def test_every_decoded_property_is_verified_or_classified(self):
-        import chain
-
-        surface = M.from_glb(build_glb(
-            os.path.join(self.dir, "probe.glb"), SQUARE_POS, SQUARE_IDX, uvs=SQUARE_UV,
-            tangents=[[1, 0, 0, 1]] * 4,
-        ))
-        produced = set(surface.validity())
-        verified = set(chain.LEVEL_VALIDITY_FIELDS) | set(chain.LEVEL_VALIDITY_VECTORS)
-        classified = self.VALIDITY_INFORMATIONAL
-        self.assertLessEqual(
-            classified, chain.INFORMATIONAL_FIELDS,
-            "a validity field excused here must also be declared informational in chain.py, or the "
-            "manifest walk and this test disagree about the same name",
-        )
-        unaccounted = produced - verified - classified
-        self.assertEqual(
-            unaccounted, set(),
-            f"these decoded properties are neither verified nor classified: {sorted(unaccounted)}. "
-            f"Add each to chain.LEVEL_VALIDITY_FIELDS or LEVEL_VALIDITY_VECTORS (if it should be "
-            f"compared against the bytes) or to this class's VALIDITY_INFORMATIONAL, with a reason "
-            f"(and to chain.INFORMATIONAL_FIELDS, which the manifest walk reads).",
-        )
 
 
 class BisectionTests(unittest.TestCase):
@@ -1356,13 +1250,13 @@ class DirectedSearchTests(unittest.TestCase):
             self.assertIn(value, ("verdict_node_budget", "geometry", "skip_fraction"))
 
     def test_the_budget_law_reads_one_number_on_both_sides(self):
-        """MUTANT for a split brain: generation and verification must not round differently.
+        """MUTANT for a split brain: two readers of one budget must not round differently.
 
         Generation used to compute the budget from the evaluated source's FULL-PRECISION diagonal
-        while `chain.py` recomputed it from the manifest's box rounded to four decimals, and then
+        while the verifier recomputed it from the recorded box rounded to four decimals, and then
         demanded exact integer equality. `verdict_node_budget` TRUNCATES, so the two agreed only
         while no asset landed near an integer boundary — and the failure would have been a valid
-        manifest refused for a number nobody edited.
+        corpus refused for a number nobody edited.
 
         The straddle is HUNTED rather than asserted: this walks a box outward in tenths of a micron
         until it finds one where the two readings genuinely truncate to different integers, which is
@@ -1416,6 +1310,89 @@ class DirectedSearchTests(unittest.TestCase):
         # Deterministic and integral.
         self.assertEqual(fine, CONFIG.verdict_node_budget(769.0, 3.89))
         self.assertIsInstance(fine, int)
+
+
+class ProjectionTests(unittest.TestCase):
+    """The one projection, and the world it is quoted in — carried over from `test_chain.py`.
+
+    THE REGRESSION THESE EXIST FOR: an exporter comment narrated 223.7 m for a level whose runtime
+    derivation said 335.5 m. Both were "measured"; the comment had frozen a stale deviation and used
+    the small-angle projection besides. Nobody writes a switch distance down now — the runtime
+    derives it from the certificate's deviations and the active view — but the ladder still reads
+    this projection to decide where a chain STOPS (`RIGHT_WALL_M`), so the arithmetic is still load
+    bearing and is still held here.
+    """
+
+    #: The reference view the doctrine quotes, spelled out so a `config` that moved is a failure
+    #: rather than a silently different question.
+    VIEW = {"name": "gunner optic", "vfov_rad": 0.12, "height_px": 2160.0, "budget_px": 1.0}
+
+    def test_the_projection_is_exact_not_small_angle(self):
+        """The shortcut the drifted ledger used differs measurably at a wide FOV."""
+        dev_mm = 18.641  # the deviation the drifted ledger was quoting
+        view = self.VIEW
+        exact = CONFIG.switch_distance_m(dev_mm, 0.0, view)
+        shortcut = (dev_mm / 1000.0) * view["height_px"] / (view["vfov_rad"] * view["budget_px"])
+        # 335.1 exact against 335.5 small-angle: the historic "335.5 m derived" was the shortcut,
+        # and at the optic the two are close enough that nobody would have noticed.
+        self.assertAlmostEqual(exact, 335.135, places=2)
+        self.assertAlmostEqual(shortcut, 335.538, places=2)
+        self.assertLess(abs(exact - shortcut) / exact, 0.002, "optic hides the error")
+
+        wide = dict(view, vfov_rad=0.785)
+        exact_wide = CONFIG.switch_distance_m(dev_mm, 0.0, wide)
+        shortcut_wide = (dev_mm / 1000.0) * wide["height_px"] / (wide["vfov_rad"] * 1.0)
+        self.assertGreater(
+            abs(exact_wide - shortcut_wide) / exact_wide, 0.03,
+            "the small-angle shortcut must be visibly wrong at the commander FOV",
+        )
+
+    def test_the_declared_reference_view_is_the_one_quoted_here(self):
+        """`config.REFERENCE_VIEW` is what every number above was computed in."""
+        for key, value in self.VIEW.items():
+            self.assertEqual(CONFIG.REFERENCE_VIEW[key], value)
+
+    def test_the_octave_grid_doubles_the_switch_distance(self):
+        base = CONFIG.switch_distance_m(CONFIG.E1_MM, 0.0, self.VIEW)
+        for rung, target in CONFIG.rungs()[:5]:
+            self.assertAlmostEqual(
+                CONFIG.switch_distance_m(target, 0.0, self.VIEW), base * 2 ** (rung - 1), places=6
+            )
+
+    def test_the_bounding_radius_slack_is_conservative(self):
+        near = CONFIG.switch_distance_m(10.0, 0.0, self.VIEW)
+        with_radius = CONFIG.switch_distance_m(10.0, 0.383, self.VIEW)
+        self.assertAlmostEqual(with_radius - near, 0.383, places=9)
+
+    def test_one_millimetre_goes_subpixel_at_eighteen_metres(self):
+        """The optic reference the doctrine quotes, re-derived rather than remembered."""
+        self.assertAlmostEqual(CONFIG.switch_distance_m(1.0, 0.0, self.VIEW), 17.98, places=1)
+
+    def test_the_right_wall_is_the_default_maps_diagonal(self):
+        """The wall read here independently of `config`'s own parse.
+
+        The number this asserts is not written down anywhere in this file: it comes out of
+        `assets/maps/<id>/level.json`, which is the file `crate::map` builds the grid from. So a map
+        that grows moves both sides of this equality together and the test keeps passing — what it
+        catches is `config` deriving the wall from something OTHER than the world the game loads.
+        """
+        root = CONFIG.repo_root()
+        level = os.path.join(root, "assets", "maps", CONFIG.default_map_id(root), "level.json")
+        with open(level, encoding="utf-8") as handle:
+            extent = json.load(handle)["terrain"]["heightmap"]["world_extent_xz"]
+        side = extent["maximum"][0] - extent["minimum"][0]
+        self.assertAlmostEqual(CONFIG.WORLD_SIZE_M, side, places=6)
+        self.assertAlmostEqual(CONFIG.RIGHT_WALL_M, side * math.sqrt(2.0), places=6)
+
+    def test_the_pins_are_the_toolchains(self):
+        """One home per pin: `config` names `scripts/toolchain.py`'s values rather than copying
+        them, and the tank build hashes `toolchain.py`'s bytes into every certificate."""
+        sys.path.insert(0, os.path.join(CONFIG.repo_root(), "scripts"))
+        import toolchain  # noqa: PLC0415 — the pins' one home, only needed for this claim
+
+        self.assertIs(CONFIG.EXPECTED_BLENDER, toolchain.BLENDER_VERSION)
+        self.assertIs(CONFIG.EXPECTED_BLENDER_BUILD, toolchain.BLENDER_BUILD)
+        self.assertIs(CONFIG.EXPECTED_GLTF_EXPORTER, toolchain.GLTF_EXPORTER_VERSION)
 
 
 if __name__ == "__main__":

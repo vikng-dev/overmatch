@@ -1,11 +1,14 @@
 # 0033 — Geometry mipmapping: the declarative LOD ladder
 
-Status: DRAFT (accepted doctrine 2026-08-01; pipeline v2 in flight — e₁ pending the
-collapse-vs-planar measurement, then this ADR finalizes with the ratified number)
+Status: ACCEPTED 2026-08-13. Doctrine accepted 2026-08-01; e₁ = 3.89 mm ratified from the
+collapse-vs-planar measurement (`scripts/lod/config.py`), and the pipeline this waited on
+shipped: `scripts/tank/build.py` cuts every chain, the certificate is what carries the
+measurements, and the global manifest and its sidecars are retired.
 (amended by ADR-0035: packaging, primitive-granularity seam, per-tank certificate,
 transcription deleted)
 (amended by ADR-0036: directed search replaces exhaustive Pareto enumeration; render
 gate retired; validity gates re-scoped to measurement needs)
+Both amendments stand: where this ADR and one of them differ, the amendment is the law.
 
 Terms: `.agents/GLOSSARY.md` § Geometry LOD. This ADR records the decisions and the
 adversarial-review triage that shaped them.

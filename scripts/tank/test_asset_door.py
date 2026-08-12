@@ -7,12 +7,16 @@ against the tank `.agents/blender/fixture_tank.py` builds in a temporary directo
 `assets/` is read or written, and the fixture is a second vehicle rather than a copy of the first:
 a door that only works on the Tiger is not a door.
 
-Three classes of claim are proven here. That the chain CERTIFIES: lint is clean, export writes a
-mip-baked glb, a second export is byte-identical, and verify accepts what export just wrote. That
-every refusal LEAVES THE TRACKED GLB ALONE — one case per stage, each proving the model on disk is
-the byte-for-byte file it was before the door ran. And what verify's own comparison says about a
-tracked model, clause by clause (`ComparisonLaw`), including the one section it does not compare
-byte for byte.
+Three classes of claim are proven here. That the chain CERTIFIES: lint is clean, the chain stages a
+mip-baked candidate, a second run is byte-identical, and verify accepts what was staged and landed.
+That every refusal LEAVES THE TRACKED GLB ALONE and stages nothing — one case per stage, each
+proving the model on disk is the byte-for-byte file it was before the door ran. And what verify's
+own comparison says about a tracked model, clause by clause (`ComparisonLaw`), including the one
+section it does not compare byte for byte.
+
+THE DOOR PUBLISHES NOTHING (ADR 0035): the export chain ends at a staged candidate, and a case that
+needs a tracked model lands one itself with `land` — which is the build's own second step, split so
+a case can assert between them. `TheSideDoorIsClosed` is that law held as a fact.
 
 The two stages with no defect a fixture can carry — an encoder that fails, and a consumer contract
 that refuses the BAKED bytes after the raw ones passed — are reached by putting a stub earlier on
@@ -28,8 +32,6 @@ import struct
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -83,6 +85,44 @@ def door(mode, blend, env=None, *extra):
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, **(env or {})),
     )
     return (result.returncode, result.stdout)
+
+
+def stage(blend, env=None):
+    """The export chain, ending where `scripts/tank/build.py` drives it to: a staged candidate.
+
+    THE DOOR HAS NO EXPORT COMMAND. It publishes nothing (ADR 0035 gives all three artifacts to the
+    build), so a case that needs a tracked model asks for the same `chain(..., stage_to=)` the build
+    asks for, and lands the result itself with `land`. That is not a test seam: it is the build's
+    own two steps, split so a case can assert between them.
+
+    Returns `(exit code, everything printed, the staged path)`.
+    """
+    # ONE staging path, cleared first: every fixture blend is `testbed.blend`, the cases run in one
+    # thread, and each reads its candidate before the next stages one.
+    staged = os.path.join(_WORK, "staged", os.path.basename(os.path.splitext(blend)[0]) + ".glb")
+    os.makedirs(os.path.dirname(staged), exist_ok=True)
+    if os.path.exists(staged):
+        os.remove(staged)
+    driver = (
+        "import sys; sys.path.insert(0, {!r}); import asset_door; "
+        "sys.exit(asset_door.door('export', {!r}, stage_to={!r}))"
+    ).format(os.path.dirname(DOOR), blend, staged)
+    result = subprocess.run(
+        [sys.executable, "-c", driver], cwd=ROOT, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, **(env or {})),
+    )
+    return (result.returncode, result.stdout, staged)
+
+
+def land(blend, env=None):
+    """A certified candidate on the tracked path, as the build's publish puts it there.
+
+    Returns what the chain printed. Asserts nothing: a case that wants the refusal calls `stage`.
+    """
+    code, printed, staged = stage(blend, env)
+    assert code == 0, "the chain this case builds on refused:\n{}".format(printed)
+    shutil.move(staged, os.path.splitext(blend)[0] + ".glb")
+    return printed
 
 
 def digest(path):
@@ -215,45 +255,47 @@ class ExportChain(unittest.TestCase):
         self.assertIn("lint certified", printed)
         self.assertNotIn("error:", printed)
 
-    def test_export_bakes_the_textures_and_is_byte_stable(self):
+    def test_the_chain_bakes_the_textures_and_is_byte_stable(self):
         blend = trio("byte-stable")
         glb = os.path.splitext(blend)[0] + ".glb"
 
-        code, printed = door("export", blend)
+        code, printed, staged = stage(blend)
         self.assertEqual(code, 0, printed)
-        self.assertTrue(os.path.isfile(glb), printed)
-        # Every stage ran, in the order that makes the door cheap to fail and the tracked path the
-        # last thing written. A certified export is the only place this can be asserted: a chain
+        self.assertTrue(os.path.isfile(staged), printed)
+        self.assertFalse(os.path.isfile(glb), "the chain wrote the tracked path")
+        # Every stage ran, in the order that makes the door cheap to fail and the staged candidate
+        # the last thing written. A certified run is the only place this can be asserted: a chain
         # missing a stage still certifies everything the stages it kept could see.
         marks = ["canon:", "source:", "consumer (raw):", "ktx2:", "derivation:",
-                 "consumer (baked):", "export:"]
+                 "consumer (baked):", "stage:"]
         found = [printed.find("door  ▸ " + mark) for mark in marks]
         self.assertNotIn(-1, found, "a stage of the chain did not run: {}".format(
             [mark for mark, at in zip(marks, found) if at < 0]
         ))
         self.assertEqual(found, sorted(found), "the stages ran out of order: {}".format(marks))
-        # The derivation happened: the tracked model carries mipped KTX2, not the exporter's PNG.
-        # Asserted through the verifier the release workflow and the pre-push hook run, on the
-        # TRACKED path — `scripts/tank/test_glb_ktx2.py` is where its laws are mutated one by one.
+        # The derivation happened: the candidate carries mipped KTX2, not the exporter's PNG.
+        # Asserted through the verifier the release workflow and the pre-push hook run —
+        # `scripts/tank/test_glb_ktx2.py` is where its laws are mutated one by one.
         verified = subprocess.run(
-            [sys.executable, os.path.join(ROOT, asset_door.DERIVATION_VERIFIER), "verify", glb],
+            [sys.executable, os.path.join(ROOT, asset_door.DERIVATION_VERIFIER), "verify", staged],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         )
         self.assertEqual(verified.returncode, 0, verified.stdout)
         self.assertIn("0 errors", verified.stdout)
 
-        first = digest(glb)
-        code, printed = door("export", blend)
+        first = digest(staged)
+        shutil.move(staged, glb)
+        code, printed, staged = stage(blend)
         self.assertEqual(code, 0, printed)
         self.assertEqual(
-            digest(glb), first,
-            "a second export of an unchanged source produced different bytes — a re-export would "
+            digest(staged), first,
+            "a second run over an unchanged source produced different bytes — a re-export would "
             "be a diff for git-lfs to store every time",
         )
 
-    def test_verify_certifies_what_export_wrote(self):
+    def test_verify_certifies_what_the_chain_staged(self):
         blend = trio("verify-clean")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         code, printed = door("verify", blend)
         self.assertEqual(code, 0, printed)
         self.assertIn("verify certified", printed)
@@ -275,7 +317,7 @@ class VerifyComparison(unittest.TestCase):
         which is exactly what the other machine's repack wrote.
         """
         blend = trio("re-encoded-images")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         glb = os.path.splitext(blend)[0] + ".glb"
         before = digest(glb)
         re_encode(glb)
@@ -287,7 +329,7 @@ class VerifyComparison(unittest.TestCase):
 
     def test_a_mesh_bufferview_byte_flip_is_a_mismatch_naming_the_section(self):
         blend = trio("flipped-byte")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         glb = os.path.splitext(blend)[0] + ".glb"
         index = flip_in_a_mesh_view(glb)
 
@@ -302,7 +344,7 @@ class VerifyComparison(unittest.TestCase):
         """OVERMATCH_DOOR_KEEP receives the refused candidate — the temporary directory it was cut
         in is gone with the refusal, and on a CI runner so is the machine that could diff it."""
         blend = trio("kept-candidate")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         glb = os.path.splitext(blend)[0] + ".glb"
         flip_in_a_mesh_view(glb)
 
@@ -323,7 +365,7 @@ class VerifyComparison(unittest.TestCase):
 
     def test_verify_writes_nothing(self):
         blend = trio("verify-writes-nothing")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         directory = os.path.dirname(blend)
         before = {
             name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
@@ -372,9 +414,7 @@ class ComparisonLaw(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         blend = trio("comparison-law")
-        code, printed = door("export", blend)
-        assert code == 0, "the certified model this class compares against failed to build:\n{}" \
-            .format(printed)
+        land(blend)
         cls.candidate = os.path.splitext(blend)[0] + ".glb"
 
     def tracked(self, name):
@@ -479,8 +519,8 @@ class ComparisonLaw(unittest.TestCase):
         compared at all. A payload of a different length whose header facts are the tracked one's
         passes — including one whose pixels would decode differently, which is the price of a law
         that must accept `basisu`'s SIMD-dependent output. The pixels are certified where the
-        encoder ran: `export` writes the tracked path with payloads its own chain cut and verified,
-        and a second export on that machine is byte-identical.
+        encoder ran: the chain stages payloads it cut and verified itself, the build publishes
+        them, and a second run on that machine is byte-identical.
         """
         tracked = self.tracked("re-encoded")
         model = Model(tracked)
@@ -633,15 +673,20 @@ class ComparisonLaw(unittest.TestCase):
 
 class RefusalsLeaveTheModelAlone(unittest.TestCase):
     """One case per stage that can refuse. Each asserts the same thing: the tracked glb is the file
-    it was."""
+    it was, and no candidate was staged."""
 
-    def refuses(self, blend, expect, env=None, mode="export"):
-        """Export against a tracked model that already exists, and prove the refusal changed
-        nothing. Returns what the door printed."""
+    def refuses(self, blend, expect, env=None, mode=None):
+        """Run the chain against a tracked model that already exists, and prove the refusal changed
+        nothing. `mode` names a CLI mode; the default is the staging chain the build drives.
+        Returns what the door printed."""
         glb = os.path.splitext(blend)[0] + ".glb"
         before = digest(glb)
         self.assertIsNotNone(before, "the case has no tracked model to leave alone")
-        code, printed = door(mode, blend, env)
+        if mode is None:
+            code, printed, staged = stage(blend, env)
+            self.assertFalse(os.path.exists(staged), "the refused chain staged a candidate")
+        else:
+            code, printed = door(mode, blend, env)
         self.assertEqual(code, 1, printed)
         self.assertIn(expect, printed)
         self.assertEqual(digest(glb), before, "the refused chain wrote the tracked glb")
@@ -650,7 +695,7 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
     def exported(self, name, defect="none"):
         """A trio with a certified tracked model already in place, then rebuilt with `defect`."""
         blend = trio(name)
-        self.assertEqual(door("export", blend)[0], 0, "the clean export this case builds on failed")
+        land(blend)
         if defect != "none":
             shutil.copyfile(build(defect), blend)
         return blend
@@ -685,7 +730,7 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
         self.assertIn("refused at ktx2", printed)
 
     def test_a_consumer_refusal_on_the_baked_candidate_refuses_after_the_encode(self):
-        """The last stage before the tracked path is written. Injected through a `cargo` that
+        """The last stage before the candidate is staged. Injected through a `cargo` that
         refuses its third call — canon, raw candidate, baked candidate."""
         counter = os.path.join(_WORK, "cargo-calls")
         if os.path.exists(counter):
@@ -709,12 +754,12 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
         """The door's precondition. Blender substitutes a placeholder for a datablock whose library
         it cannot read, so there is nothing here worth measuring — in any mode."""
         blend = trio("unresolved-library")
-        self.assertEqual(door("export", blend)[0], 0)
+        land(blend)
         library = os.path.join(
             os.path.dirname(os.path.dirname(blend)), "materials", "materials.blend"
         )
         os.remove(library)
-        for mode in ("lint", "export", "verify"):
+        for mode in ("lint", "verify", None):
             printed = self.refuses(blend, "door.unresolved-library", mode=mode)
             self.assertIn("MildSteel", printed, "the missing datablock is unnamed")
 
@@ -759,9 +804,13 @@ class RefusalsLeaveTheModelAlone(unittest.TestCase):
 
 
 class TrackedPath(unittest.TestCase):
-    """The two things the door does to a path it does not hold alone — stage and rename, read and
-    compare — driven directly, because what is under test is what a SECOND door doing the same
-    thing at the same moment can make of them."""
+    """What the door does to a path it does not hold alone: READ AND COMPARE, driven directly,
+    because what is under test is what a second writer doing its own thing at the same moment can
+    make of it.
+
+    The other half of this class was stage-and-rename, and it went with `asset_door.replace`: the
+    door lands no bytes any more, and the trio's one writer is `scripts/tank/trio.py`.
+    """
 
     def candidates(self, name, count=2):
         """Distinct candidates, big enough that copying one is not instantaneous."""
@@ -774,56 +823,6 @@ class TrackedPath(unittest.TestCase):
                 handle.write(bytes([index + 1]) * (8 << 20))
             paths.append(path)
         return (directory, paths)
-
-    def test_an_export_renames_the_file_it_wrote(self):
-        """The staging name is unique to the invocation, so no second export can be writing through
-        the file this one is about to rename. With a name every export shares, the rename is of
-        whatever the last writer left there — under the first writer's verdict.
-
-        Deterministic rather than lucky: the first export is held AT its rename until the second has
-        finished staging its own bytes, which is exactly the window the defect lives in. The claim
-        is then simply that what each export renamed is what that export reported.
-        """
-        directory, (first, second) = self.candidates("renames-its-own")
-        tracked = os.path.join(directory, "tracked.glb")
-        shutil.copyfile(first, tracked)
-
-        staged = threading.Event()
-        held = []
-        renamed = []
-        real_replace = os.replace
-
-        def observed(staging, target):
-            if not held:                       # the first export through waits here
-                held.append(True)
-                staged.wait(30)
-            renamed.append(digest(staging))
-            real_replace(staging, target)
-
-        landed = {}
-        os.replace = observed
-        try:
-            thread = threading.Thread(
-                target=lambda: landed.__setitem__("first", asset_door.replace(first, tracked))
-            )
-            thread.start()
-            while not held:
-                time.sleep(0.01)
-            landed["second"] = asset_door.replace(second, tracked)
-            staged.set()
-            thread.join(30)
-        finally:
-            os.replace = real_replace
-
-        self.assertEqual(len(landed), 2, "an export did not complete: {}".format(landed))
-        self.assertEqual(sorted(renamed), sorted(landed.values()),
-                         "an export renamed a file it did not write")
-        self.assertEqual(digest(tracked), landed["first"],
-                         "the last export to rename did not land its own bytes")
-        self.assertEqual(
-            [name for name in sorted(os.listdir(directory)) if ".door" in name], [],
-            "a staging file outlived the export that made it",
-        )
 
     def interrupted(self, name, writer):
         """A comparison that would otherwise CERTIFY — the tracked file starts as a byte-for-byte
@@ -937,6 +936,62 @@ class TrackedPath(unittest.TestCase):
         findings = refusal.exception.findings
         self.assertEqual([finding.check.id for finding in findings], ["door.candidate-mismatch"])
         self.assertIn("cannot be read", findings[0].evidence)
+
+
+class TheSideDoorIsClosed(unittest.TestCase):
+    """`asset_door.py export` was a second public writer of a tracked model.
+
+    It replaced `<id>.glb` and only that, leaving `<id>.sim.glb` and `<id>.lod.json` describing
+    bytes that were gone — an incoherent trio that `build.py verify` would catch afterwards, which
+    is one refusal too late. ADR 0035 gives all three artifacts to one writer, so the entrance is
+    gone; the chain behind it is not, and `build.py` still drives it through `stage_to`.
+    """
+
+    def test_the_retired_entrance_writes_nothing_and_names_the_successor(self):
+        blend = trio("retired-entrance")
+        directory = os.path.dirname(blend)
+        before = {
+            name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
+        }
+        code, printed = door("export", blend)
+        self.assertEqual(code, 1, printed)
+        self.assertIn("scripts/tank/build.py build", printed)
+        after = {
+            name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
+        }
+        self.assertEqual(before, after, "the retired entrance wrote something")
+
+    def test_the_chain_refuses_to_publish_when_asked_for_no_staging_path(self):
+        """The API half of the same law: `derive` has no landing branch left to reach."""
+        blend = trio("no-staging-path")
+        driver = (
+            "import sys; sys.path.insert(0, {!r}); import asset_door; "
+            "asset_door.chain('export', {!r}, {!r}, {!r}, asset_door.repo_root(), {!r}, 'blender')"
+        ).format(
+            os.path.dirname(DOOR), blend, os.path.splitext(blend)[0] + ".tank.ron",
+            os.path.splitext(blend)[0] + ".glb", _WORK,
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", driver], cwd=ROOT, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_the_door_holds_no_writer_of_a_tracked_path(self):
+        """A TEXT TRIPWIRE over the door's own source: no `os.replace` and no `os.rename`.
+
+        The atomic landing this file used to own now lives in `scripts/tank/trio.py`, which is what
+        `build.py` publishes through. Two implementations of "put bytes at a tracked path" is how
+        one of them comes to be reachable again.
+        """
+        source = open(DOOR, encoding="utf-8").read()
+        for spelling in ("os.replace(", "os.rename(", "def replace("):
+            self.assertNotIn(
+                spelling, source,
+                "{} is back in the door — the trio's one writer is scripts/tank/trio.py".format(
+                    spelling
+                ),
+            )
 
 
 class DoorMechanics(unittest.TestCase):

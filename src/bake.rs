@@ -732,7 +732,7 @@ pub(crate) fn certify_asset(
     spec_ron: &str,
     registry: &SubstanceRegistry,
 ) -> Result<CertifiedAsset, Vec<Finding>> {
-    let spec_subject = || Subject::spec(Path::new(&spec_ron_name(glb)));
+    let spec_subject = || spec_subject_for(glb);
     let spec: TankSpec = ron::de::from_str(spec_ron).map_err(|err| {
         vec![Finding::new(
             &L2_SPEC,
@@ -781,6 +781,26 @@ fn registry_at(path: Option<&Path>) -> Result<SubstanceRegistry, Vec<Finding>> {
 /// The sibling spec sheet of a model, by the mechanical `<id>.glb` → `<id>.tank.ron` rule.
 fn spec_ron_name(glb: &Path) -> String {
     glb.with_extension("").to_string_lossy().into_owned() + ".tank.ron"
+}
+
+/// What a spec finding NAMES, given the model the sheet was certified against.
+///
+/// The sibling rule only holds for the TRACKED model, `assets/<id>/<id>.glb`, whose stem is the
+/// asset id — and an id is a directory name, so it carries no dot. A derived artifact does:
+/// the runtime bake certifies `<id>.sim.glb` (ADR-0035) against a sheet compiled into the binary,
+/// and stripping one extension off that path yields `<id>.sim.tank.ron`, a file that does not exist
+/// and never will, offered to the reader as the thing to go and fix. So a model whose stem is not
+/// an id names ITSELF: the finding points at the pair that refused, and the sim artifact is the
+/// half of that pair which is on disk.
+fn spec_subject_for(glb: &Path) -> Subject {
+    let derived = glb
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().contains('.'));
+    if derived {
+        Subject::document(glb)
+    } else {
+        Subject::spec(Path::new(&spec_ron_name(glb)))
+    }
 }
 
 /// Verify one asset pair and return the whole report, in order. Empty means certified.
@@ -1536,6 +1556,31 @@ mod tests {
             ["door.registry"],
             "{}",
             render(&refused)
+        );
+    }
+
+    /// A SPEC FINDING NAMES SOMETHING THAT EXISTS. The sibling `<id>.glb` → `<id>.tank.ron` rule
+    /// holds for the tracked model and for nothing else, and the runtime bake certifies the SIM
+    /// artifact (ADR-0035) against a sheet compiled into the binary — so deriving a path from
+    /// `tiger_1.sim.glb` invents `tiger_1.sim.tank.ron` and hands the reader a file to go and fix
+    /// that has never existed. The pair that refused is what a finding may name.
+    #[test]
+    fn a_finding_against_the_sim_artifact_names_the_sim_artifact() {
+        let tracked = Path::new("assets/tiger_1/tiger_1.glb");
+        assert_eq!(
+            spec_subject_for(tracked),
+            Subject::spec(Path::new("assets/tiger_1/tiger_1.tank.ron")),
+            "the tracked model's sheet really is its sibling, and must still be named as one",
+        );
+        let sim = Path::new("assets/tiger_1/tiger_1.sim.glb");
+        assert_eq!(
+            spec_subject_for(sim),
+            Subject::document(sim),
+            "a derived artifact has no sibling sheet, so the finding names the artifact itself",
+        );
+        assert!(
+            !format!("{}", spec_subject_for(sim)).contains("tank.ron"),
+            "no finding may name a spec sheet that was never a file",
         );
     }
 

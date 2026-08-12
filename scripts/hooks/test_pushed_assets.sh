@@ -11,11 +11,15 @@
 # same file, the same shell — because a copy of the discovery rule tested here would be a second
 # rule, and the one that ships would be the untested one.
 #
-# HERMETIC. Every run builds its own git repository under `mktemp -d` and deletes it: no network, no
-# remote, no LFS daemon, and nothing read out of this work tree. Remote-tracking refs are written
-# with `git update-ref`, and a git-lfs pointer is a few lines of text beside a file placed by hand
-# in the scratch repo's own object store — which is exactly what a clone that committed an asset
-# holds, and the only thing `assets_hydrate_file` ever reads.
+# HERMETIC, with ONE named exception. Every run builds its own git repository under `mktemp -d` and
+# deletes it: no network, no remote, no LFS daemon, and nothing read out of this work tree.
+# Remote-tracking refs are written with `git update-ref`, and a git-lfs pointer is a few lines of
+# text beside a file placed by hand in the scratch repo's own object store — which is exactly what a
+# clone that committed an asset holds, and the only thing `assets_hydrate_file` ever reads.
+#
+# The exception is the shared-surface coverage case, which reads `scripts/tank/build.py`'s declared
+# `PIPELINE_SOURCES` out of this tree. It has to: the thing it proves is that the two lists agree,
+# and a synthetic copy of one of them would prove nothing about the pair that ships.
 
 set -u
 
@@ -107,8 +111,8 @@ write assets/proto/proto.blend "a source with no model yet"
 write assets/proto/proto.tank.ron "TankSpec(mass: 3.0)"
 write assets/derived/derived.tank.ron "TankSpec(mass: 4.0)"
 write assets/derived/derived.glb "a model with no source"
-write assets/lod/tiger_1_link.rung3.glb "a generated rung"
-write assets/lod/tiger_1_link.rung3.ron "not a tank sheet"
+write assets/staging/candidate.glb "a model nothing sourced"
+write assets/staging/candidate.ron "not a tank sheet"
 commit "partial assets"
 PARTIAL=$(at HEAD)
 
@@ -141,6 +145,15 @@ git -C "$REPO" merge -q --no-ff --no-commit side >/dev/null 2>&1
 write assets/tiger_1/tiger_1.tank.ron "TankSpec(mass: 1.5)"   # in neither parent
 git -C "$REPO" add -A && git -C "$REPO" commit -q -m "merge side"
 MERGE=$(at HEAD)
+
+# THE LOD LANE'S LIBRARY MOVES, and no asset does — on a branch of its own so the revisions the rest
+# of this file reads are untouched. `scripts/lod/config.py` is inside `build.py`'s `PIPELINE_SOURCES`
+# and therefore inside every certificate's `blend_digest`: moving it stales every trio in the tree.
+git -C "$REPO" checkout -q -b lodlane "$TWO"
+write scripts/lod/config.py "# the ladder's constants"
+commit "the ladder's constants move"
+LOD_LANE=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
 
 # DELETIONS, on a branch of their own so the revisions the rest of this file reads still hold the
 # trio. Each one removes asset files and nothing puts them back.
@@ -184,11 +197,11 @@ is "a blend and a sheet with no model is not an asset" \
 is "a sheet and a model with no blend is not an asset" \
    "" "$(assets_trios "$PARTIAL" | grep 'derived')"
 
-is "a generated model with no blend is not an asset" \
-   "" "$(assets_trios "$PARTIAL" | grep 'rung3')"
+is "a model with no blend and no sheet is not an asset" \
+   "" "$(assets_trios "$PARTIAL" | grep 'candidate')"
 
 is "a .ron that is not a .tank.ron is not a spec sheet" \
-   "" "$(assets_trios "$PARTIAL" | grep 'assets/lod')"
+   "" "$(assets_trios "$PARTIAL" | grep 'assets/staging')"
 
 is "a revision predating any asset holds none" \
    "" "$(git -C "$REPO" hash-object -t tree /dev/null >/dev/null; assets_trios "$(git -C "$REPO" commit-tree "$(git -C "$REPO" hash-object -w -t tree /dev/null)" -m empty </dev/null)")"
@@ -244,6 +257,11 @@ for path in \
     scripts/tank/chains.py \
     scripts/tank/glb_ktx2.py \
     scripts/tank/report.py \
+    scripts/lod/config.py \
+    scripts/lod/measure.py \
+    scripts/lod/generate.py \
+    assets/maps/kalinovo/level.json \
+    src/map.rs \
     .agents/blender/export_tank.py \
     src/bake.rs \
     src/bake/embedding.rs \
@@ -257,12 +275,33 @@ do
     says "$path moves every verdict" yes $?
 done
 
+# EVERY SOURCE THE BUILD DECLARES, READ OUT OF THE BUILD AND FED TO THE REAL PREDICATE. The one case
+# in this file that reads THIS work tree rather than the scratch repository, and it has to: a list of
+# shared-surface paths kept by hand beside `build.py`'s own `PIPELINE_SOURCES` is a second list, and
+# the drift it had was real — the three `scripts/lod` sources `blend_digest` hashes were absent from
+# the pattern, so a push moving one of them staled every certificate and skipped every
+# `build.py verify`.
+#
+# The names come out of `build.py` by TEXT rather than by import: importing it drags in numpy and the
+# whole door, and this suite is `sh` and git and nothing else.
+uncovered=$(sed -n '/^SEARCH_SOURCES = (/,/^)$/p;/^PIPELINE_SOURCES = SEARCH_SOURCES + (/,/^)$/p' \
+                "$_here/../tank/build.py" |
+            tr ',' '\n' | sed -n 's/^[^"]*"\([^"]*\)".*$/\1/p' |
+            while read -r _name; do
+                # Relative to `scripts/tank/`, where `sources_digest` resolves them.
+                _path=$(printf 'scripts/tank/%s' "$_name" |
+                        sed -e ':a' -e 's![^/][^/]*/\.\./!!;ta' -e 's!^\./!!')
+                printf '%s\n' "$_path" | assets_shared_surface || printf '%s\n' "$_path"
+            done)
+is "the predicate covers every source blend_digest hashes" "" "$uncovered"
+
 for path in \
     assets/tiger_1/tiger_1.glb \
     assets/tiger_1/tiger_1.blend \
+    assets/maps/kalinovo/derived/map_ui.png \
     src/net.rs \
     scripts/tank/test_asset_door.py \
-    scripts/lod/chain.py \
+    scripts/lod/test_refusals.py \
     README.md
 do
     surface "$path"
@@ -329,6 +368,11 @@ is "…and says nothing either" \
    "" "$(printf 'refs/heads/x deadbeefdeadbeefdeadbeefdeadbeefdeadbeef refs/heads/x %s\n' "$TWO" |
          assets_push_targets origin "$SCRATCH" 2>&1 >/dev/null)"
 
+is "a push that moves the LOD lane's library verifies every trio" \
+   "refs/heads/lodlane $LOD_LANE assets/panther/panther shared-surface
+refs/heads/lodlane $LOD_LANE assets/tiger_1/tiger_1 shared-surface" \
+   "$(targets "refs/heads/lodlane $LOD_LANE refs/heads/lodlane $TWO")"
+
 is "a push that changed no trio and no shared surface verifies nothing" \
    "" "$(targets "refs/heads/main $PARTIAL refs/heads/main $BASE")"
 
@@ -362,6 +406,9 @@ says "a range that re-exports a trio is affected" yes $?
 
 affected "$PANTHER" "$SUBSTANCES"
 says "a range that moves the shared surface is affected" yes $?
+
+affected "$TWO" "$LOD_LANE"
+says "a range that moves the LOD lane's library is affected" yes $?
 
 affected "$BASE" "$PARTIAL"
 says "a range of paths no verdict is computed from is unaffected" no $?
@@ -644,12 +691,12 @@ done
 #
 # The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list — so no
 # revision is examined and no asset is verified, and what is measured is only which lanes ran. That
-# is the claim being made: the default is the cheap set, and the two expensive ones are behind
-# `OVERMATCH_FULL=1` because CI runs them on every push regardless.
+# is the claim being made: the default is the cheap set, and the expensive one is behind
+# `OVERMATCH_FULL=1` because CI runs it on every push regardless.
 #
 # `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
-# The lanes' CONTENTS are proven elsewhere — by CI, by the door's own suites, by `test_chain.py` —
-# and re-running them here would cost a compile to learn nothing about the hook.
+# The lanes' CONTENTS are proven elsewhere — by CI and by the door's own suites — and re-running them
+# here would cost a compile to learn nothing about the hook.
 
 group "the hook — which lanes run by default"
 
@@ -692,10 +739,10 @@ is "…and not the tank build when it is skipped" \
    "$(hook OVERMATCH_SKIP=assets >/dev/null
       grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
 
-is "…and it says the two it did not run and where they are" \
+is "…and it says the one it did not run and where it is" \
    "yes" \
    "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^2$' && echo yes || echo no)"
+      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^1$' && echo yes || echo no)"
 
 is "…and ends green" \
    "yes" \
@@ -704,12 +751,10 @@ is "…and ends green" \
 
 group "the hook — OVERMATCH_FULL and OVERMATCH_SKIP"
 
-is "OVERMATCH_FULL=1 adds the lod lane and the cargo test lane" \
+is "OVERMATCH_FULL=1 adds the cargo test lane" \
    "git-lfs pre-push
 cargo fmt
 cargo clippy
-python3 scripts/lod/test_chain.py
-python3 scripts/lod/test_refusals.py
 cargo test" "$(hook OVERMATCH_FULL=1)"
 
 is "a skipped lane is not run" \
@@ -721,16 +766,15 @@ is "…and says so loudly" \
    "$(hook OVERMATCH_SKIP=clippy >/dev/null
       grep -q 'SKIPPED clippy (OVERMATCH_SKIP)' "$WORK/hook.out" && echo yes || echo no)"
 
-is "OVERMATCH_SKIP still names the full lanes when they are the ones running" \
+is "OVERMATCH_SKIP names the full lane too, when it is the one running" \
    "git-lfs pre-push
 cargo fmt
-cargo clippy
-cargo test" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=lod)"
+cargo clippy" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=test)"
 
 # The LFS upload is not a lane: it is the only transport, and naming it must not turn it off.
 is "the lfs upload cannot be skipped" \
    "git-lfs pre-push" \
-   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,lod,test | head -1)"
+   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,test | head -1)"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 

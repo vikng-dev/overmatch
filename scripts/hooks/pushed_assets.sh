@@ -43,7 +43,7 @@ assets_pushed_paths() {   # <local_sha> <remote_sha> <remote>
 
 # Every asset in one revision, as stems, sorted. The rule IS the trio: a `.blend` whose sibling
 # `.tank.ron` and `.glb` are both there too. A blend with no spec sheet (`assets/shell/`) is not an
-# asset, a generated `<id>_link.rung3.glb` has no blend, and neither is discovered.
+# asset, and a glb with no blend beside it is not one either; neither is discovered.
 assets_trios() {   # <rev>
     git ls-tree -r --name-only "$1" | awk '
         /\.blend$/     { blend[substr($0, 1, length($0) - 6)] = 1; next }
@@ -92,7 +92,8 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 
 # Whether the changed set touches the surface EVERY asset's verdict is computed from: the shared
 # material library, the pinned toolchain, the source pass, the door, the finding shape, the encoder,
-# the derivation verifier, and the Rust consumer contract with the modules it certifies against.
+# the derivation verifier, the LOD lane's production half, the world the ladder's right wall is cut
+# from, and the Rust consumer contract with the modules it certifies against.
 # `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what the shared
 # material data means to the gate and hands the canon file its key list, so it moves every asset's
 # verdict exactly as `assets/materials/` does. `src/bin/asset_verify.rs` and `src/lib.rs` are in it
@@ -101,8 +102,20 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 # moves only one of them changes every verdict while touching no law. Any of those moving means the
 # door now answers differently about bytes that did not move, so every discovered trio is
 # re-verified rather than none of them.
+#
+# THE LIST IS THE BUILD'S OWN DECLARED DEPENDENCIES, NOT A SEPARATE OPINION. `scripts/tank/build.py`
+# names them: `PIPELINE_SOURCES` is what `blend_digest` hashes, so anything in it moving makes every
+# tracked certificate STALE by the build's own arithmetic — `scripts/lod/{config,measure,generate}`
+# are in that list, and a push that moved one of them used to skip every `build.py verify` and ship
+# a trio the next verify would refuse.
+#
+# `src/map.rs` and the map manifests are here for the same reason one level out: `config.RIGHT_WALL_M`
+# is PARSED from `assets/maps/<DEFAULT_MAP_ID>/level.json` at import, and the wall decides where a
+# chain stops. A grown map is a different ladder, so it is a re-verification. The pattern takes every
+# map's `level.json` rather than resolving the default: which map is default is `src/map.rs`'s
+# answer, and this predicate refuses to be a second reader of it.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/bin/asset_verify\.rs$|src/lib\.rs$)'
+    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$|src/lib\.rs$)'
 }
 
 # EVERY (revision, asset) pair a push must verify, one per line:
