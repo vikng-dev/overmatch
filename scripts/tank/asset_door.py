@@ -586,9 +586,14 @@ def source_pass(mode: str, blend: str, glb: str, canon: str, raw: Optional[str],
 
 
 def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work: str,
-           registry: str) -> None:
+           registry: str, stage_to: Optional[str] = None) -> None:
     """Everything after the raw candidate: the consumer contract on it, the texture derivation, the
-    derivation verifier, the contract again on the baked bytes, and the tracked path."""
+    derivation verifier, the contract again on the baked bytes, and the tracked path.
+
+    `stage_to` MOVES THE CERTIFIED CANDIDATE THERE INSTEAD OF LANDING IT. Every check above has run;
+    what has not happened is the replacement of the tracked model, which `scripts/tank/build.py`
+    owns — it appends the LOD rung records and publishes the three artifacts as one staged set.
+    """
     run_stage("consumer (raw)", contract(registry, raw), root)
 
     baked = candidate(work, "baked", stem, spec)
@@ -604,13 +609,20 @@ def derive(mode: str, raw: str, stem: str, spec: str, glb: str, root: str, work:
     if mode == "verify":
         compare(baked, glb)
         return
+    if stage_to is not None:
+        shutil.move(baked, stage_to)
+        print("door  ▸ stage: {} — {:.1f} MB, sha256 {}".format(
+            stage_to, os.path.getsize(stage_to) / 1e6, digest(stage_to)
+        ), flush=True)
+        return
     landed = replace(baked, glb)
     print("door  ▸ export: {} — {:.1f} MB, sha256 {}".format(
         glb, os.path.getsize(baked) / 1e6, landed
     ), flush=True)
 
 
-def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blender: str) -> None:
+def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blender: str,
+          stage_to: Optional[str] = None) -> None:
     """Every stage, in order, raising `Refused` at the first one that says no.
 
     The order is what makes the door cheap to fail: the source pass and the consumer contract both
@@ -624,7 +636,7 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
     source_pass(mode, blend, glb, canon, raw, root, blender)
     if mode == "lint":
         return
-    derive(mode, raw, stem, spec, glb, root, work, registry)
+    derive(mode, raw, stem, spec, glb, root, work, registry, stage_to)
 
 
 # ── the command line ─────────────────────────────────────────────────────────────────────────────
@@ -640,7 +652,8 @@ def parse(argv: Optional[List[str]] = None):
     return parser.parse_args(argv)
 
 
-def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None) -> int:
+def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None,
+         stage_to: Optional[str] = None) -> int:
     """One invocation. Returns the exit code: non-zero exactly when a stage refused."""
     blend = os.path.abspath(blend)
     stem = os.path.splitext(blend)[0]
@@ -653,16 +666,17 @@ def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] =
         try:
             root = repo_root()
             with tempfile.TemporaryDirectory(prefix="asset-door-") as work:
-                chain(mode, blend, spec, glb, root, work, blender)
+                chain(mode, blend, spec, glb, root, work, blender, stage_to)
         except Refused as refusal:
             stage, findings = refusal.stage, refusal.findings
         else:
-            print("door  ▸ {} certified".format(mode), flush=True)
+            print("door  ▸ {} certified".format("stage" if stage_to else mode), flush=True)
             return 0
 
     print(report.render_text(report.sorted_findings(findings)), end="", flush=True)
     print("door  ▸ {} refused at {}{}".format(
-        mode, stage, " — {} is unchanged".format(glb) if mode == "export" else "",
+        "stage" if stage_to else mode, stage,
+        " — {} is unchanged".format(glb) if mode == "export" and not stage_to else "",
     ), flush=True)
     return 1
 

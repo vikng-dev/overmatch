@@ -36,11 +36,12 @@ import asset_door  # noqa: E402
 
 ROOT = asset_door.repo_root()
 
-#: The four producers, by the file that declares their checks.
+#: The producers, by the file that declares their checks.
 PRODUCERS = (
     os.path.join(".agents", "blender", "export_tank.py"),
     os.path.join("scripts", "tank", "glb_ktx2.py"),
     os.path.join("scripts", "tank", "asset_door.py"),
+    os.path.join("scripts", "tank", "build.py"),
     os.path.join("scripts", "toolchain.py"),
     os.path.join("src", "bake.rs"),
 )
@@ -49,6 +50,7 @@ LINT = os.path.join(".agents", "blender", "test_tank_lint.py")
 CONTRACT = os.path.join("src", "bake.rs")
 DERIVATION = os.path.join("scripts", "tank", "test_glb_ktx2.py")
 DOOR = os.path.join("scripts", "tank", "test_asset_door.py")
+BUILD = os.path.join("scripts", "tank", "test_build.py")
 
 #: check id → (file, case) — the one case that drives this check's refusal through the real stage.
 #: Several checks may share a case where one fixture is one defect that names them both.
@@ -113,6 +115,14 @@ COVERAGE = {
     "door.stage-failed": (DOOR, "test_an_encoder_failure_refuses"),
     "door.candidate-mismatch": (
         DOOR, "test_a_mesh_bufferview_byte_flip_is_a_mismatch_naming_the_section"
+    ),
+
+    # ── the build's own rows: what only the trio's assembler can see (ADR 0035) ──────────────────
+    "build.trio-incoherent": (
+        BUILD, "test_a_tampered_certificate_digest_refuses_at_the_certificate"
+    ),
+    "build.sim-not-derived": (
+        BUILD, "test_a_sim_artifact_that_hashes_right_and_is_not_the_strip_refuses"
     ),
 }
 
