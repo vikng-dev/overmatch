@@ -380,7 +380,7 @@ fn bind_link_template(
     // no measurement to transcribe: the bands come out of the same derivation every scene
     // primitive's do.
     chains: Option<Res<crate::geometry_lod::GeometryLodChains>>,
-    view: Res<crate::geometry_lod::ViewProfile>,
+    view: Res<crate::view::ViewProfile>,
     geom: Res<RigGeom>,
 ) {
     let (mut link_box, mut pin_start, mut pin_end) = (None, None, None);
@@ -591,8 +591,8 @@ fn bind_link_template(
             band.end_margin.end,
             rung.deviation_mm,
             chain.map_or(f32::NAN, |chain| chain.chain().radius_m),
-            view.height_px,
-            view.vfov_rad,
+            view.facts.height_px,
+            view.facts.vfov_rad,
             view.budget_px,
             tier.get(Side::Left).id(),
             tier.get(Side::Right).id(),
@@ -997,8 +997,11 @@ mod tests {
 
     /// The view every certified distance was quoted in when the corpus was cut: the gunner optic
     /// at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
-    fn reference_view() -> crate::geometry_lod::ViewProfile {
-        crate::geometry_lod::ViewProfile::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0, 1.0)
+    fn reference_view() -> crate::view::ViewProfile {
+        crate::view::ViewProfile::of(
+            crate::view::ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            1.0,
+        )
     }
 
     /// The SHIPPED shoe chain, straight out of the certificate — the same record the bind resolves
@@ -1336,22 +1339,22 @@ mod tests {
     /// than metres.
     #[test]
     fn a_shorter_view_switches_sooner_than_the_reference_one() {
-        use crate::geometry_lod::ViewProfile;
+        use crate::view::{ViewFacts, ViewProfile};
 
         let chain = shoe_chain();
         let at = |view| chain.bands(view)[1].start_margin.start;
         let optic = crate::camera::GUNNER_FOV_FALLBACK;
         let reference = at(reference_view());
         assert!(
-            at(ViewProfile::new(optic, 1080.0, 1.0)) < reference,
+            at(ViewProfile::of(ViewFacts::new(optic, 1080.0), 1.0)) < reference,
             "half the pixels, half the deviation term",
         );
         assert!(
-            at(ViewProfile::new(0.785, 2160.0, 1.0)) < reference,
+            at(ViewProfile::of(ViewFacts::new(0.785, 2160.0), 1.0)) < reference,
             "a wider field spends fewer pixels on the same surface",
         );
         assert!(
-            at(ViewProfile::new(optic, 2160.0, 2.0)) < reference,
+            at(ViewProfile::of(ViewFacts::new(optic, 2160.0), 2.0)) < reference,
             "a looser budget admits the reduction sooner",
         );
     }
@@ -1860,8 +1863,8 @@ mod tests {
             // SAME exact projection `ViewProfile::switch_distance_m` inverts, less the bounding
             // radius slack it adds (the conservative direction here: a smaller pixel to clear).
             let view = reference_view();
-            let pixel_m = (from_m - chain.radius_m) * 2.0 * (view.vfov_rad / 2.0).tan()
-                / view.height_px
+            let pixel_m = (from_m - chain.radius_m) * 2.0 * (view.facts.vfov_rad / 2.0).tan()
+                / view.facts.height_px
                 * view.budget_px;
             let Some(VertexAttributeValues::Float32x2(uvs)) = shoe.attribute(Mesh::ATTRIBUTE_UV_0)
             else {

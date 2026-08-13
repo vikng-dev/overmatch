@@ -889,8 +889,8 @@ impl TankSpec {
                 }
             }
         }
-        // Every view's FOV is a DIVISOR downstream, not merely a camera setting: the terrain LOD
-        // ladder derives every switch distance from `dev / fov` (`terrain_lod::sub_pixel_distance_m`)
+        // Every view's FOV is a DIVISOR downstream, not merely a camera setting: both LOD ladders
+        // derive every switch distance through `2·tan(fov/2)` (`view::ViewFacts::sub_pixel_distance_m`)
         // and the sight derives its cursor-travel margin and sensitivity from it. A NaN authored
         // here propagates into NaN range boundaries, which compare false against every distance and
         // silently delete the ground; a negative one inverts the range chain. Neither is a picture

@@ -494,20 +494,21 @@ fn spawn_environment(
 ///
 /// Deliberately the NARROWEST view the game has (the gunner optic): a narrow field demands the
 /// finest geometry, so seeding with it means the first frames are over-detailed rather than
-/// under-detailed. `terrain_lod::adapt_ranges` replaces it with the live profile on the first
-/// frame that has a window and a camera, at human rate thereafter. A window bevy has not sized yet
-/// reports zero height, which `TerrainLodView::new` reads as ABSENT rather than as a one-pixel
-/// viewport.
+/// under-detailed. `terrain_lod::adapt_ranges` replaces it with the live view on the first frame
+/// that has a window and a camera, at human rate thereafter. A window bevy has not sized yet
+/// reports zero height, which `ViewFacts::new` reads as ABSENT rather than as a one-pixel viewport.
+///
+/// The FIELD is seeded, not read: no camera exists yet. The rendered HEIGHT comes out of
+/// `crate::view`'s own expression of it, so the seed and the live view cannot disagree about what
+/// the render scale does.
 fn terrain_lod_view(
     window: Option<&Window>,
     scale: Option<&crate::render_scale::RenderScale>,
-) -> crate::terrain_lod::TerrainLodView {
-    crate::terrain_lod::TerrainLodView::new(
+) -> crate::view::ViewProfile {
+    crate::terrain_lod::terrain_view(crate::view::ViewFacts::new(
         crate::camera::GUNNER_FOV_FALLBACK,
-        window.map_or(0.0, |window| {
-            window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0)
-        }),
-    )
+        crate::view::ViewFacts::rendered_height_px(window, scale),
+    ))
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a
