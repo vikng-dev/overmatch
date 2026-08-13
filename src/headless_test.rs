@@ -650,11 +650,13 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
 /// SERVER-COMPOSITION HONESTY — the structural invariant the ballistics sim/view split buys.
 ///
 /// `SimPlugin` alone (what `net::server::run` composes) fires an 88 and an MG burst and marches them.
-/// Not one projectile may carry a render component: no scene root, no streak child, no mesh, no
-/// `Visibility`. The server does not decide what a round looks like, so it must not be able to.
+/// Not one projectile may carry presentation state: no scene root, no streak child, no mesh, no
+/// `Visibility`, and no `ShellVisual` — the classification marker is the view's own interface to
+/// `vfx`, so a server that attached it would be deciding what a round IS to the renderer. The server
+/// does not decide what a round looks like, so it must not be able to.
 #[test]
 fn a_server_composition_dresses_no_round_at_all() {
-    use crate::ballistics::{Projectile, TracerStreak};
+    use crate::ballistics::{Projectile, ShellVisual, TracerStreak};
     use bevy::world_serialization::WorldAssetRoot;
 
     // SimOnly: the dedicated server's ballistics composition, on the real spawn path.
@@ -696,14 +698,16 @@ fn a_server_composition_dresses_no_round_at_all() {
                 saw_mg = true;
             }
         }
-        // Every render component the old shared spawn used to emit, checked on the projectile itself.
+        // Every render component the old shared spawn used to emit, plus the marker the view half
+        // classifies on — all checked on the projectile itself.
         let world = app.world_mut();
-        for (root, mesh, material, visibility) in world
+        for (root, mesh, material, visibility, classified) in world
             .query_filtered::<(
                 Has<WorldAssetRoot>,
                 Has<Mesh3d>,
                 Has<MeshMaterial3d<StandardMaterial>>,
                 Has<Visibility>,
+                Has<ShellVisual>,
             ), With<Projectile>>()
             .iter(world)
         {
@@ -712,6 +716,7 @@ fn a_server_composition_dresses_no_round_at_all() {
                 (mesh, "Mesh3d"),
                 (material, "MeshMaterial3d"),
                 (visibility, "Visibility"),
+                (classified, "ShellVisual"),
             ] {
                 if present && !dressed.contains(&name) {
                     dressed.push(name);

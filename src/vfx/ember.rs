@@ -200,7 +200,11 @@ mod tests {
             "the ember hangs off the 88 shell"
         );
 
-        // Idempotent: re-marking the shell adds no second bead (the Embered gate).
+        // Idempotent: a SECOND `Add` grows no second bead (the `Embered` gate). Re-inserting a
+        // component that is already there raises `Insert`, not `Add`, so the observer would never
+        // run and the assertion would pin nothing — the marker has to be removed and re-added for
+        // this to exercise the guard at all.
+        app.world_mut().entity_mut(shell).remove::<ShellVisual>();
         app.world_mut().entity_mut(shell).insert(ShellVisual);
         app.update();
         let world = app.world_mut();
@@ -209,7 +213,9 @@ mod tests {
                 .query_filtered::<Entity, With<Ember>>()
                 .iter(world)
                 .count(),
-            1
+            1,
+            "a re-dressed shell must keep its single ember — the Embered guard is what stops a \
+             second bead being hung off the same round",
         );
 
         // Burn steady, then fade out and despawn.

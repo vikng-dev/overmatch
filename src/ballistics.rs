@@ -2796,7 +2796,22 @@ mod march_tests {
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
     /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
     /// so the spatial-query pipeline includes the plate before any shell is marched.
+    ///
+    /// SIM ONLY — the server's composition. A shell here is born bare, which is what almost every
+    /// gate in this module wants; the ones that assert on what a round is DRAWN as use
+    /// [`view_world_with_plate`] instead.
     fn world_with_plate(size: Vec3, at: Vec3) -> App {
+        plate_world(size, at, false)
+    }
+
+    /// [`world_with_plate`] plus the PRESENTATION half — a CLIENT's composition, the way
+    /// `ClientPlugin` mounts the two. The fixture for the hold-visibility law: `Held` is the sim
+    /// fact, and only with [`view::plugin`] mounted does anything derive a `Visibility` from it.
+    fn view_world_with_plate(size: Vec3, at: Vec3) -> App {
+        plate_world(size, at, true)
+    }
+
+    fn plate_world(size: Vec3, at: Vec3, view: bool) -> App {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
@@ -2817,8 +2832,16 @@ mod march_tests {
         // clock; here `Res<Time>` is the virtual clock the manual duration steps).
         .add_systems(Update, integrate_projectiles);
 
+        if view {
+            // The asset stores `view::setup_assets` fills; the plate world only needed `Mesh`.
+            app.init_asset::<StandardMaterial>()
+                .init_asset::<WorldAsset>()
+                .add_plugins(view::plugin);
+        }
+
         // Drive plugin finish/cleanup by hand (a bare `update()` loop skips it) — Avian registers its
         // diagnostics resources in `Plugin::finish`, and the spatial-query systems require them.
+        // Every plugin must be mounted BEFORE this: `add_plugins` panics once an App is finished.
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -3580,6 +3603,141 @@ mod march_tests {
                 .iter()
                 .any(|p| (*p - bounce_origin).dot(bounce_direction) > 1.0),
             "ShellPath contains travel strictly after the bounce for the remote trail"
+        );
+    }
+
+    /// THE HOLD-VISIBILITY LAW, on a client's composition: `Held` is the sim fact, and `Visibility`
+    /// is derived from it by `ballistics::view` alone. This is the CATCH-UP half — a shell born
+    /// holding, from the same spawn bundle.
+    ///
+    /// The two are separate tests because the two hides reach the round by different routes:
+    /// dressing reads `Has<Held>` on a round that is ALREADY holding when it is born, while
+    /// [`a_mid_flight_hold_hides_the_drawn_round`] goes through the `Add` adapter on a round that
+    /// was drawn visible first. Removing either one leaves a shell stuck on the plate or invisible
+    /// for the rest of its flight, and no assertion on `Held` alone can tell.
+    #[test]
+    fn a_shell_born_holding_is_hidden_from_its_first_frame() {
+        let mut app = view_world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        app.insert_resource(crate::ClientReplica);
+        app.init_resource::<SanctionedShots>();
+        app.insert_resource(crate::PredictedPresent(120));
+        app.add_observer(on_fire_shell);
+
+        let shot = a_shot();
+        app.world_mut().trigger(FireShell {
+            origin: Vec3::new(0.0, 2.0, 2.0),
+            direction: Dir3::NEG_Z,
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            mechanism: crate::spec::FireMechanism::Single,
+            shooter: None,
+            tracer: true,
+            shot_origin: FireShellOrigin::Reconstructed,
+            catch_up_ticks: 20,
+            shot: Some(shot),
+        });
+        // FLUSH, not update: the spawn, its `Add` observers and their commands all land in this one
+        // flush, so this asserts the round's FIRST frame — it is never drawn on the plate, not even
+        // for the frame between being born and the first hide.
+        app.world_mut().flush();
+
+        let shell = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Projectile>, With<Held>)>()
+            .single(app.world())
+            .expect("the armor catch-up keeps one held, keyed shell waiting for authority");
+        assert!(
+            app.world().get::<ShellVisual>(shell).is_some(),
+            "an 88 is dressed even while it holds — otherwise this test proves nothing about \
+             visibility",
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Hidden),
+            "a shell BORN holding must be hidden from its first frame — a visible one is a round \
+             frozen on the plate while the client waits for the authority",
+        );
+
+        // The authority's keyframe releases the hold, and the same law shows the round again.
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: Vec3::new(4.0, 2.0, 0.03),
+                direction: Vec3::Z,
+                speed: 480.0,
+                bounce_tick: 101,
+                sequence: 0,
+                victim: None,
+            },
+        );
+        app.update();
+
+        assert!(
+            app.world().get::<Held>(shell).is_none(),
+            "the keyframe releases the hold",
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "releasing the hold must show the round again — a shell that stays hidden flies the \
+             rest of its trajectory invisibly",
+        );
+    }
+
+    /// THE HOLD-VISIBILITY LAW, mid-flight half: a round drawn visible reaches armor on a replica,
+    /// holds, and must go hidden — then show again on the authority's re-seed. See
+    /// [`a_shell_born_holding_is_hidden_from_its_first_frame`] for why the two are split.
+    #[test]
+    fn a_mid_flight_hold_hides_the_drawn_round() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+
+        let mut app = view_world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        app.insert_resource(crate::ClientReplica);
+        app.insert_resource(SanctionedShots::default()); // keyframe not yet arrived
+        let shell = spawn_oblique_shell(&mut app, shot);
+        app.world_mut().flush();
+
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "a round with no hold is drawn — the mid-flight hide below has to change something",
+        );
+
+        let mut froze = false;
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                froze = true;
+                break;
+            }
+        }
+        assert!(froze, "the keyed shell holds at armor contact");
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Hidden),
+            "the hold is an INVISIBLE stop — no frozen round hanging on the plate",
+        );
+
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                bounce_tick: 0,
+                sequence: 0,
+                victim: None,
+            },
+        );
+        app.update();
+
+        assert!(app.world().get::<Held>(shell).is_none(), "hold cleared");
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "the re-seeded shell is shown again",
         );
     }
 
