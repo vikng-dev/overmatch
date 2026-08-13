@@ -50,8 +50,6 @@ runs:
     #                                    name is read OUT of level.json, so neither can be resolved
     #                                    at packaging time. `derived/` is excluded — `map_ui.png` is
     #                                    loaded only by `net::spawn_map`, a client plugin.
-    #   shell/shell.glb                  ballistics::setup_assets, a Startup system inside
-    #                                    SimPlugin with no window gate (src/ballistics.rs)
     #   <id>/<id>.sim.glb                the bake's consumer contract, the geometry_lod trio
     #                                    fingerprint, and the track rig's marker read — the ONE
     #                                    geometry artifact the server opens (ADR 0035)
@@ -59,7 +57,9 @@ runs:
     #   <id>/<id>.tank.ron               the spec sheet, loaded through the AssetServer
     #
     # WHAT IS DELIBERATELY ABSENT, each proven client-only by the plugin that loads it: `<id>.glb`,
-    # the 64 MB view artifact (geometry_lod::view_plugin, mounted only by the client roots); the
+    # the 64 MB view artifact (geometry_lod::view_plugin, mounted only by the client roots);
+    # `shell/shell.glb`, the main-gun round's model, loaded only by ballistics::view_plugin — the
+    # server mounts ballistics::sim_plugin, which spawns a bare projectile and opens nothing; the
     # terrain KTX2 (behind `!windows.is_empty()`, and the server builds no primary window); the vfx
     # atlases, the shaders and the fonts (vfx/render_scale/ui_font plugins, client roots only); and
     # `materials/materials.ron`, which is `include_str!`d into the binary rather than read.
@@ -91,7 +91,7 @@ runs:
           echo "::error::No asset trio found — the server tarball would carry no vehicle"
           exit 1
         fi
-        paths=("assets/shell/shell.glb")
+        paths=()
         for stem in "${stems[@]}"; do
           paths+=("${stem}.sim.glb" "${stem}.lod.json" "${stem}.tank.ron")
         done

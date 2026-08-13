@@ -608,8 +608,10 @@ impl Plugin for SimPlugin {
             track::sim_plugin,
             aim::sim_plugin,
             // `ballistics` owns the shell trajectory + impact seam; `shooting` is the gun control
-            // that drives it (the sandbox drives the same `FireShell` from its camera).
-            ballistics::plugin,
+            // that drives it (the sandbox drives the same `FireShell` from its camera). SIM half
+            // only: the shell scene, the tracer streak and shell visibility are
+            // `ballistics::view_plugin`, which the client roots mount and the server never does.
+            ballistics::sim_plugin,
             damage::plugin,
             shooting::plugin,
         ));
@@ -674,13 +676,19 @@ impl Plugin for ClientPlugin {
             // pose (view-only, ADR-0014 — the server never mounts this).
             track::view_plugin,
         ));
-        // The live view, and the render half of the certificate: the view artifact's fingerprint,
-        // the chain resolution and the two range writers. Separate call — the tuple above is at
-        // bevy's 15-plugin arity limit.
+        // The live view, the render half of the certificate (the view artifact's fingerprint, the
+        // chain resolution and the two range writers), and the render half of ballistics (the shell
+        // glb, the tracer streak, and the visibility a hold draws with — never mounted by
+        // `SimPlugin`, which births a bare shell). Separate call — the tuple above is at bevy's
+        // 15-plugin arity limit.
         //
         // `view` FIRST and always beside it: both LOD ladders select through the facts it owns, and
         // a windowed root that mounts a ladder without it has a terrain layer that never reselects.
-        app.add_plugins((view::plugin, geometry_lod::view_plugin));
+        app.add_plugins((
+            view::plugin,
+            geometry_lod::view_plugin,
+            ballistics::view_plugin,
+        ));
         app.add_plugins(drive_hud::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
@@ -754,6 +762,9 @@ impl Plugin for NetClientPlugin {
         app.add_plugins((view::plugin, geometry_lod::view_plugin));
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
+            // The render half of ballistics (see `ClientPlugin`): the shell glb, the tracer streak
+            // and hold visibility. `SimPlugin` mounts only the sim half.
+            ballistics::view_plugin,
             drive_hud::plugin,
             // The render-policy resolver (see `ClientPlugin`) — every windowed root needs it, or
             // nothing that declares a scope or a profile is ever resolved. Down here rather than

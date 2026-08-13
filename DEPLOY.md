@@ -44,14 +44,15 @@ rather than the client's whole tree:
 | Path | Opened by |
 |---|---|
 | `assets/maps/*/level.json`, `assets/maps/*/*.png` | `crate::map::parse`, the terrain height decode, and the handshake content digest. Every map: `$OVERMATCH_MAP` picks one at runtime, and the heightmap's file name is inside `level.json`. |
-| `assets/shell/shell.glb` | `ballistics::setup_assets`, a `Startup` system in `SimPlugin` |
 | `assets/<id>/<id>.sim.glb` | the bake's consumer contract, the `geometry_lod` trio fingerprint, and the track rig — the one geometry artifact the server reads (ADR-0035) |
 | `assets/<id>/<id>.lod.json` | `geometry_lod::load_certificate` (panics without it) |
 | `assets/<id>/<id>.tank.ron` | the spec sheet, through the `AssetServer` |
 
-The 64 MB view glb, the terrain KTX2, the vfx atlases, the shaders and the fonts stay out: every one
-is loaded by a plugin the server does not mount, or behind the `!windows.is_empty()` branch a
-window-less server never takes. `materials/materials.ron` is `include_str!`d into the binary.
+The 64 MB view glb, `shell/shell.glb`, the terrain KTX2, the vfx atlases, the shaders and the fonts
+stay out: every one is loaded by a plugin the server does not mount, or behind the
+`!windows.is_empty()` branch a window-less server never takes. The shell model in particular belongs
+to `ballistics::view_plugin` — the server mounts `ballistics::sim_plugin`, whose projectiles carry no
+scene root at all. `materials/materials.ron` is `include_str!`d into the binary.
 
 Common ops:
 

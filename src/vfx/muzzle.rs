@@ -346,7 +346,7 @@ fn on_main_gun_fire(
     camera: Query<&GlobalTransform, With<Camera3d>>,
     mut commands: Commands,
 ) {
-    // The same boundary as the shell-scene branch in `ballistics::on_fire_shell`: this dressing is
+    // The same boundary as the shell-scene branch in `ballistics::view`: this dressing is
     // the main gun's.
     if fire.caliber < TRACER_MAX_CALIBER {
         return;

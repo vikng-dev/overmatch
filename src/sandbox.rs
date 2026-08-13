@@ -255,7 +255,7 @@ pub fn plugin(app: &mut App) {
         // of ending it (see `crate::quit`).
         crate::quit::plugin,
         world::plugin,
-        ballistics::plugin,
+        ballistics::sim_plugin,
         damage::plugin,
         // `spec` registers the `.tank.ron` loader so the target tank's volumes bind with their data.
         spec::plugin,
@@ -285,6 +285,11 @@ pub fn plugin(app: &mut App) {
         // sandbox tank needs a `TankCommand` + the per-tick edge consumption for them to land.
         command::core_plugin,
     ))
+    // The render half of ballistics — the shell scene, the tracer streak, and the visibility a hold
+    // draws with. This root mounts `ballistics` but NOT `vfx`, which is exactly why that half is a
+    // ballistics-owned view plugin rather than a vfx concern: without this line the sandbox's shells
+    // would fly invisibly. (Its own call: the tuple above is at bevy's 15-plugin arity limit.)
+    .add_plugins(ballistics::view_plugin)
     // The weapon clock the shared status panel (`crew_ui::update_status_panel`) reads, FROZEN at
     // tick 0 — this sandbox does not simulate the gun and must not pretend to.
     //

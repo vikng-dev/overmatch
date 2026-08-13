@@ -52,7 +52,7 @@ pub(super) fn spawn_prewarm_rig(
     mut rng: ResMut<ViewRng>,
     mut ring: ResMut<BillboardRing>,
 ) {
-    // The 88 shell scene — the same asset path `ballistics::setup_assets` preloads, so this rides
+    // The 88 shell scene — the same asset path `ballistics::view`'s setup preloads, so this rides
     // the identical (already started) load and only ADDS the instantiate + first-draw that used to
     // happen on the first shot. Its glTF meshes get `NoFrustumCulling` as they appear
     // (`tag_prewarm_meshes`); the root can't carry it for them.

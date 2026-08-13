@@ -6,9 +6,9 @@
 //! shell's PATH history, the ember is its CURRENT position, readable at 1500 m+ and at the moment of
 //! impact.
 //!
-//! It rides the 88 shell as a child (attached by the same `ShellPath + WorldAssetRoot` signature the
-//! smoke trail uses — [`super::trail`]), so it follows the round for free and despawns with it at
-//! impact. View-only (ADR-0014), client-mounted; the headless server never mounts `vfx`.
+//! It rides the 88 shell as a child (attached on the same `ShellVisual` signature the smoke trail
+//! uses — [`super::trail`]), so it follows the round for free and despawns with it at impact.
+//! View-only (ADR-0014), client-mounted; the headless server never mounts `vfx`.
 //!
 //! Hardcoded on the 88's single ammunition nature for now. Real ammunition differs — HE (Sprgr.) is
 //! untraced, tracer color and burn vary by round — so this is the seed of a future per-ammo
@@ -17,9 +17,8 @@
 
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
-use bevy::world_serialization::WorldAssetRoot;
 
-use crate::ballistics::ShellPath;
+use crate::ballistics::ShellVisual;
 
 /// The ember's emissive at full burn (linear) — well up into the bloom-catching band so the 88's
 /// point reads as ONE deliberate glowing ember with a small halo, not the pre-tuning non-glowing dot.
@@ -44,7 +43,11 @@ const EMBER_FADE: f32 = 0.4;
 
 pub(super) fn plugin(app: &mut App) {
     app.add_systems(Startup, setup_ember_assets)
-        .add_systems(Update, (attach_embers, fade_embers));
+        // Attachment observes the dressing, so the bead exists from the shell's first drawn frame —
+        // `ballistics::view` marks the round in whichever schedule spawned it, and an `Update` system
+        // would miss a net-spawned round by a frame.
+        .add_observer(attach_ember)
+        .add_systems(Update, fade_embers);
 }
 
 /// Preloaded ember view assets: the shared bead mesh plus the birth-state material VALUE (not a
@@ -63,7 +66,7 @@ struct Ember {
     age: f32,
 }
 
-/// Marks an 88 shell that already carries an ember (so [`attach_embers`] runs once per shell).
+/// Marks an 88 shell that already carries an ember (so [`attach_ember`] runs once per shell).
 #[derive(Component)]
 struct Embered;
 
@@ -83,30 +86,31 @@ pub(super) fn setup_ember_assets(mut commands: Commands, mut meshes: ResMut<Asse
     });
 }
 
-/// Give every new 88 shell an ember bead at its base — the same `ShellPath + WorldAssetRoot`
-/// signature the trail keys on (only the main-gun branch of `ballistics::on_fire_shell` attaches a
-/// scene root), so MG rounds never get one.
-fn attach_embers(
-    shells: Query<Entity, (With<ShellPath>, With<WorldAssetRoot>, Without<Embered>)>,
+/// Give every new 88 shell an ember bead at its base — the same `ShellVisual` signature the trail
+/// keys on (`ballistics::view` marks only the main-gun branch), so MG rounds never get one.
+fn attach_ember(
+    add: On<Add, ShellVisual>,
+    embered: Query<(), With<Embered>>,
     assets: Res<EmberAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    for shell in &shells {
-        // Per-ember material asset (clone the template): the fade mutates it every frame; the strong
-        // handle lives only on the ember child, so despawning the shell frees the asset.
-        let material = materials.add(assets.material.clone());
-        commands.entity(shell).insert(Embered).with_child((
-            Ember { age: 0.0 },
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(material),
-            // The shell's local +Z is the trailing direction; the bead sits a little behind center,
-            // at the base.
-            Transform::from_translation(Vec3::Z * EMBER_BASE_OFFSET),
-            NotShadowCaster,
-            NotShadowReceiver,
-        ));
+    if embered.contains(add.entity) {
+        return;
     }
+    // Per-ember material asset (clone the template): the fade mutates it every frame; the strong
+    // handle lives only on the ember child, so despawning the shell frees the asset.
+    let material = materials.add(assets.material.clone());
+    commands.entity(add.entity).insert(Embered).with_child((
+        Ember { age: 0.0 },
+        Mesh3d(assets.mesh.clone()),
+        MeshMaterial3d(material),
+        // The shell's local +Z is the trailing direction; the bead sits a little behind center, at
+        // the base.
+        Transform::from_translation(Vec3::Z * EMBER_BASE_OFFSET),
+        NotShadowCaster,
+        NotShadowReceiver,
+    ));
 }
 
 /// Burn each ember steadily for [`EMBER_BURN`], then fade it over [`EMBER_FADE`] and despawn — the
@@ -149,16 +153,18 @@ fn fade_embers(
 mod tests {
     use super::*;
 
-    /// The wiring on real ECS systems: an 88-signature shell (ShellPath + WorldAssetRoot) grows one
-    /// ember child; an MG round (no scene root) never does; and the ember fades to nothing and
-    /// despawns after its burn + fade.
+    use crate::ballistics::ShellPath;
+
+    /// The wiring on real ECS systems: a DRESSED shell (`ShellVisual`) grows one ember child; an
+    /// undressed round never does; and the ember fades to nothing and despawns after its burn + fade.
     #[test]
     fn embers_attach_to_the_88_only_and_burn_out() {
         let mut app = App::new();
         app.init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Time>()
-            .add_systems(Update, (attach_embers, fade_embers));
+            .add_observer(attach_ember)
+            .add_systems(Update, fade_embers);
         // Bare ember assets (default handles fine headless).
         app.insert_resource(EmberAssets {
             mesh: Handle::default(),
@@ -168,10 +174,10 @@ mod tests {
             },
         });
 
-        // An 88-signature shell and an MG round (ShellPath only).
+        // A dressed 88 shell and an undressed MG round (ShellPath only).
         let shell = app
             .world_mut()
-            .spawn((ShellPath::default(), WorldAssetRoot::default()))
+            .spawn((ShellPath::default(), ShellVisual))
             .id();
         app.world_mut().spawn(ShellPath::default());
         app.update();
@@ -194,7 +200,8 @@ mod tests {
             "the ember hangs off the 88 shell"
         );
 
-        // Idempotent: a second pass adds no more (the Embered marker gate).
+        // Idempotent: re-marking the shell adds no second bead (the Embered gate).
+        app.world_mut().entity_mut(shell).insert(ShellVisual);
         app.update();
         let world = app.world_mut();
         assert_eq!(

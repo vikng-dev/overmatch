@@ -15,10 +15,9 @@ use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
 };
 use bevy::shader::ShaderRef;
-use bevy::world_serialization::WorldAssetRoot;
 use serde_json::json;
 
-use crate::ballistics::{PenetrationMarks, ShellPath, Shot};
+use crate::ballistics::{PenetrationMarks, ShellPath, ShellVisual, Shot};
 use crate::{PredictedPresent, ShotId};
 
 use super::ViewRng;
@@ -48,14 +47,10 @@ pub(super) fn plugin(app: &mut App) {
     app.init_resource::<TrailRing>()
         .add_plugins(MaterialPlugin::<VfxTrailMaterial>::default())
         .add_systems(Startup, setup_trail_assets)
+        .add_observer(attach_trail)
         .add_observer(flush_removed_shell_path)
-        // Invariant: attach after remote `Update` fire and rebuild after transform propagation.
-        .add_systems(
-            PostUpdate,
-            (attach_trails, update_trails)
-                .chain()
-                .after(TransformSystems::Propagate),
-        );
+        // Invariant: rebuild after transform propagation.
+        .add_systems(PostUpdate, update_trails.after(TransformSystems::Propagate));
 }
 
 /// Mount the minimum real trail pipeline the loss-injected harness needs. This deliberately omits
@@ -69,13 +64,9 @@ pub(super) fn mount_loss_harness(app: &mut App) {
         .init_resource::<Assets<VfxTrailMaterial>>()
         .init_resource::<ViewRng>()
         .add_message::<TrailStationMeshEvidence>()
+        .add_observer(attach_trail)
         .add_observer(flush_removed_shell_path)
-        .add_systems(
-            PostUpdate,
-            (attach_trails, update_trails)
-                .chain()
-                .in_set(TrailHarnessSet),
-        );
+        .add_systems(PostUpdate, update_trails.in_set(TrailHarnessSet));
     let material = app
         .world_mut()
         .resource_mut::<Assets<VfxTrailMaterial>>()
@@ -185,7 +176,7 @@ pub(super) fn setup_trail_assets(
     commands.insert_resource(TrailAssets { material });
 }
 
-/// Marker on a shell whose trail has been attached (so `attach_trails` runs once per shell).
+/// Marker on a shell whose trail has been attached (so [`attach_trail`] runs once per shell).
 #[derive(Component)]
 struct TrailedShell;
 
@@ -239,63 +230,66 @@ pub(crate) struct TrailRibbon {
 #[derive(Resource, Default)]
 struct TrailRing(VecDeque<Entity>);
 
-/// Give every new main-gun shell a trail ribbon. The gate is the same signature the headless MG
-/// test pins for "88 shell": a `ShellPath` (a shell in flight) carrying the `shell.glb` scene root
-/// (`WorldAssetRoot` — only the main-gun branch of `ballistics::on_fire_shell` attaches one).
-fn attach_trails(
-    shells: Query<
-        (Entity, &ShellPath, Option<&Shot>),
-        (With<WorldAssetRoot>, Without<TrailedShell>),
-    >,
+/// Give every new main-gun shell a trail ribbon. The gate is `ShellVisual` — the marker
+/// `ballistics::view` puts on a shell-class round, and the same one the ember keys on.
+///
+/// It OBSERVES the dressing rather than polling for it: the ribbon then opens on the round's real
+/// birth tick in whichever schedule spawned it, so a shell whose whole flight resolves between two
+/// rendered frames still has its path captured.
+fn attach_trail(
+    add: On<Add, ShellVisual>,
+    shells: Query<(&ShellPath, Option<&Shot>), Without<TrailedShell>>,
     mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<TrailAssets>,
     mut ring: ResMut<TrailRing>,
     mut rng: ResMut<ViewRng>,
     mut commands: Commands,
 ) {
-    for (shell, path, shot) in &shells {
-        commands.entity(shell).insert(TrailedShell);
-        let mut ribbon = TrailRibbon {
-            shell,
-            shot: shot.map(|shot| shot.0),
-            points: VecDeque::new(),
-            consumed: 0,
-            arc: 0.0,
-            observed_ricochets: 0,
-            pending_bounces: VecDeque::new(),
-            #[cfg(test)]
-            mesh_evidence_pending: VecDeque::new(),
-        };
-        // Catch-up points receive elapsed ages so the ribbon starts at its current flight state.
-        let pre = path.points.len();
-        for (i, point) in path.points.iter().enumerate() {
-            capture_point(
-                &mut ribbon,
-                *point,
-                (pre - i) as f32 * (1.0 / 64.0),
-                i,
-                path_segment(path, i),
-                &mut rng,
-            );
-        }
-        ribbon.consumed = pre;
-        let mesh = meshes.add(empty_ribbon_mesh());
-        let trail = commands
-            .spawn((
-                ribbon,
-                Mesh3d(mesh),
-                MeshMaterial3d(assets.material.clone()),
-                // Vertices are authored in world space and the ribbon spans hundreds of meters —
-                // rebuilding a tight AABB every frame buys nothing, so skip culling (trails are
-                // few, see TRAIL_CAP).
-                NoFrustumCulling,
-                Transform::IDENTITY,
-                NotShadowCaster,
-                NotShadowReceiver,
-            ))
-            .id();
-        crate::push_capped_entity(&mut commands, &mut ring.0, trail, TRAIL_CAP);
+    let shell = add.entity;
+    let Ok((path, shot)) = shells.get(shell) else {
+        return;
+    };
+    commands.entity(shell).insert(TrailedShell);
+    let mut ribbon = TrailRibbon {
+        shell,
+        shot: shot.map(|shot| shot.0),
+        points: VecDeque::new(),
+        consumed: 0,
+        arc: 0.0,
+        observed_ricochets: 0,
+        pending_bounces: VecDeque::new(),
+        #[cfg(test)]
+        mesh_evidence_pending: VecDeque::new(),
+    };
+    // Catch-up points receive elapsed ages so the ribbon starts at its current flight state.
+    let pre = path.points.len();
+    for (i, point) in path.points.iter().enumerate() {
+        capture_point(
+            &mut ribbon,
+            *point,
+            (pre - i) as f32 * (1.0 / 64.0),
+            i,
+            path_segment(path, i),
+            &mut rng,
+        );
     }
+    ribbon.consumed = pre;
+    let mesh = meshes.add(empty_ribbon_mesh());
+    let trail = commands
+        .spawn((
+            ribbon,
+            Mesh3d(mesh),
+            MeshMaterial3d(assets.material.clone()),
+            // Vertices are authored in world space and the ribbon spans hundreds of meters —
+            // rebuilding a tight AABB every frame buys nothing, so skip culling (trails are few, see
+            // TRAIL_CAP).
+            NoFrustumCulling,
+            Transform::IDENTITY,
+            NotShadowCaster,
+            NotShadowReceiver,
+        ))
+        .id();
+    crate::push_capped_entity(&mut commands, &mut ring.0, trail, TRAIL_CAP);
 }
 
 /// Capture `pos` as a new trail point if it clears the spacing filter (always captures the first).
@@ -441,7 +435,7 @@ fn finish_pending_bounces(
 /// bounce and terminal between render frames would lose the last segment before `update_trails` saw it.
 fn flush_removed_shell_path(
     remove: On<Remove, ShellPath>,
-    shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<WorldAssetRoot>>,
+    shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<ShellVisual>>,
     mut trails: Query<&mut TrailRibbon>,
     mut rng: ResMut<ViewRng>,
     present: Option<Res<PredictedPresent>>,
@@ -992,9 +986,9 @@ mod tests {
         assert_eq!(ribbon.points.len(), TRAIL_MAX_POINTS);
     }
 
-    /// The live wiring on real ECS systems: an 88-signature shell (ShellPath + WorldAssetRoot)
-    /// grows a ribbon whose mesh has geometry; an MG round (no scene root) never does; and once the
-    /// shell despawns the ribbon outlives it only until its smoke fully expires.
+    /// The live wiring on real ECS systems: a DRESSED shell (`ShellVisual`) grows a ribbon whose
+    /// mesh has geometry; an undressed MG round never does; and once the shell despawns the ribbon
+    /// outlives it only until its smoke fully expires.
     #[test]
     fn trails_attach_follow_and_outlive_the_shell() {
         let mut app = App::new();
@@ -1005,8 +999,9 @@ mod tests {
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(9))
             .add_message::<TrailStationMeshEvidence>()
+            .add_observer(attach_trail)
             .add_observer(flush_removed_shell_path)
-            .add_systems(Update, (attach_trails, update_trails).chain());
+            .add_systems(Update, update_trails);
         let material = app
             .world_mut()
             .resource_mut::<Assets<VfxTrailMaterial>>()
@@ -1020,7 +1015,7 @@ mod tests {
             });
         app.insert_resource(TrailAssets { material });
 
-        // An 88-signature shell mid-flight, and an MG round (ShellPath only).
+        // A dressed shell mid-flight, and an undressed MG round (ShellPath only).
         let shell = app
             .world_mut()
             .spawn((
@@ -1029,7 +1024,7 @@ mod tests {
                     segment_starts: Vec::new(),
                 },
                 PenetrationMarks::default(),
-                WorldAssetRoot::default(),
+                ShellVisual,
                 Transform::from_translation(Vec3::X * 50.0),
             ))
             .id();
