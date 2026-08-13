@@ -197,6 +197,26 @@ def certificate_over(view_blob, rungs, chains=None):
     return embedded, sim, cert
 
 
+# ── the UV convention ────────────────────────────────────────────────────────────────────────────
+
+class UvConventionLaw(unittest.TestCase):
+    """`blender_uv` cancels the exporter's `1 - v`: a decoded rung re-exports with its L0's V.
+    Coordinates are binary fractions, so both flips are exact in float and equality is bitwise."""
+
+    CORNER_UV = np.array([[[0.25, 0.75], [0.5, 0.125], [1.0, 0.0]]], dtype=np.float32)
+
+    def test_the_write_in_cancels_the_exporters_flip(self):
+        written = chains.blender_uv(self.CORNER_UV)
+        exported = written.copy()
+        exported[..., 1] = 1.0 - exported[..., 1]
+        self.assertTrue((exported == self.CORNER_UV).all())
+
+    def test_u_is_untouched_and_v_actually_moves(self):
+        written = chains.blender_uv(self.CORNER_UV)
+        self.assertTrue((written[..., 0] == self.CORNER_UV[..., 0]).all())
+        self.assertTrue((written[..., 1] != self.CORNER_UV[..., 1]).all())
+
+
 # ── the census ───────────────────────────────────────────────────────────────────────────────────
 
 class CensusLaw(unittest.TestCase):
