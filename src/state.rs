@@ -131,6 +131,12 @@ fn release_on_focus_lost(
     let Some(false) = collapse_focus(&mut focus) else {
         return;
     };
+    // Capture lever: the sim keeps running on focus loss so an unattended measurement window
+    // never pauses mid-leg. The log line lets a capture record count focus losses.
+    if crate::env_flag("OVERMATCH_NO_FOCUS_PAUSE", false) {
+        info!("state: focus lost — pause suppressed (OVERMATCH_NO_FOCUS_PAUSE)");
+        return;
+    }
     let mut cursor = cursor.into_inner();
     cursor.grab_mode = CursorGrabMode::None;
     cursor.visible = true;
