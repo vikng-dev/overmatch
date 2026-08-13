@@ -1,9 +1,9 @@
-//! The tank build's certificate, read as data — five fields, nothing derivable (ADR-0035) — and
-//! the projection every switch distance comes out of (ADR-0033 §9).
+//! The tank build's certificate, read as data — five fields, nothing derivable (ADR-0035).
 //!
 //! NO METRE DISTANCES SHIP. The certificate carries a chain's bounding `radius_m` and its rungs'
 //! certified `deviation_mm`; the metres a [`VisibilityRange`] is written with are derived here,
-//! against the active [`ViewProfile`], and are recomputed when that profile moves.
+//! against the active [`ViewProfile`] — the shared live view (`crate::view`) spent at this
+//! ladder's own pixel budget — and are recomputed when that profile moves.
 //!
 //! # The failure law is map loading's (ADR-0011)
 //!
@@ -24,9 +24,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bevy::camera::visibility::VisibilityRange;
-use bevy::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+
+use crate::view::ViewProfile;
 
 // ---------------------------------------------------------------------------------------------
 // The document
@@ -242,80 +243,12 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
         }))
 }
 
-// ---------------------------------------------------------------------------------------------
-// The projection
-// ---------------------------------------------------------------------------------------------
-
-/// The view a chain's switch distances are currently derived for: one perspective field, the pixel
-/// height the main pass actually renders at, and the screen-space error budget.
-///
-/// ONE PROFILE, the most demanding active view (ADR-0035's YAGNI ledger). The game has a single
-/// 3-D camera and the optic swaps its projection in place, so the live pair IS the demanding view.
-#[derive(Resource, Clone, Copy, PartialEq, Debug)]
-pub(crate) struct ViewProfile {
-    /// Vertical field of view, radians.
-    pub(crate) vfov_rad: f32,
-    /// Rendered height of the main pass, pixels (window physical height × render scale).
-    pub(crate) height_px: f32,
-    /// Screen-space error budget, pixels (`settings::LodPixelBudget`).
-    pub(crate) budget_px: f32,
-}
-
-impl Default for ViewProfile {
-    /// The pre-window guess: the narrowest authored field, a modest height, the budget's own
-    /// default. Every term errs toward switching LATER than the live profile will.
-    fn default() -> Self {
-        Self {
-            vfov_rad: crate::camera::GUNNER_FOV_FALLBACK,
-            height_px: 1080.0,
-            budget_px: 1.0,
-        }
-    }
-}
-
-impl ViewProfile {
-    /// A profile from live inputs, all three treated as UNTRUSTED.
-    ///
-    /// `vfov_rad` is a DIVISOR: `NaN` produces `NaN` boundaries, which compare false against every
-    /// distance and stop the geometry being drawn at all; a value outside `(0, π)` has no
-    /// perspective half-angle. A non-positive height is an absent window rather than a small one,
-    /// and a non-positive budget collapses every distance onto the bounding radius. Each falls
-    /// back to the default profile's value, and the next frame with sane inputs corrects it.
-    pub(crate) fn new(vfov_rad: f32, height_px: f32, budget_px: f32) -> Self {
-        let default = Self::default();
-        Self {
-            vfov_rad: if vfov_rad > 0.0 && vfov_rad < core::f32::consts::PI {
-                vfov_rad
-            } else {
-                default.vfov_rad
-            },
-            height_px: if height_px.is_finite() && height_px > 0.0 {
-                height_px
-            } else {
-                default.height_px
-            },
-            budget_px: if budget_px.is_finite() && budget_px > 0.0 {
-                budget_px
-            } else {
-                default.budget_px
-            },
-        }
-    }
-
-    /// The distance beyond which `deviation_mm` fits inside this profile's pixel budget, plus the
-    /// chain's bounding radius as slack.
-    ///
-    /// ```text
-    /// D = dev_m · height_px / (2 · tan(vfov / 2) · budget_px) + radius_m
-    /// ```
-    ///
-    /// EXACT, not small-angle — the same expression as `scripts/lod/config.py::switch_distance_m`
-    /// (ADR-0033 §9). The radius term is there because [`VisibilityRange`] measures camera-to-entity
-    /// ORIGIN while the certified deviation lives on the SURFACE, which can be one bounding radius
-    /// nearer the camera than the point the runtime tested.
-    pub(crate) fn switch_distance_m(self, deviation_mm: f32, radius_m: f32) -> f32 {
-        let budget_rad = 2.0 * (self.vfov_rad / 2.0).tan() * self.budget_px;
-        (deviation_mm / 1000.0) * self.height_px / budget_rad + radius_m
+impl Rung {
+    /// The certified deviation in METRES — the unit the projection works in
+    /// ([`ViewProfile::switch_distance_m`]). The certificate quotes millimetres because that is the
+    /// scale a silhouette deviation is measured at; this is the one place the two meet.
+    pub(crate) fn deviation_m(&self) -> f32 {
+        self.deviation_mm / 1000.0
     }
 }
 
@@ -335,7 +268,7 @@ impl Chain {
         let starts: Vec<f32> = self
             .rungs
             .iter()
-            .map(|rung| view.switch_distance_m(rung.deviation_mm, self.radius_m))
+            .map(|rung| view.switch_distance_m(rung.deviation_m(), self.radius_m))
             .collect();
         (0..=starts.len())
             .map(|level| {
@@ -350,6 +283,7 @@ impl Chain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::ViewFacts;
 
     /// The shipped tank's id, and the only trio in the tree today.
     const TIGER: &str = "tiger_1";
@@ -571,60 +505,23 @@ mod tests {
         }
     }
 
-    /// THE PROJECTION, worked by hand against the certificate's own reference view.
-    ///
-    /// `0.027841808 m × 2160 / (2·tan(0.06)) + 0.380365 = 500.9314 m` — the same arithmetic
-    /// `scripts/lod/config.py::switch_distance_m` applies, and the same probe the deleted
-    /// hand-transcribed chain table the track view used to carry.
+    /// THE CERTIFICATE'S OWN REFERENCE PROBE, through the shared projection: the shoe's rung at the
+    /// view the corpus was cut in. `0.027841808 m × 2160 / (2·tan(0.06)) + 0.380365 = 500.9314 m` —
+    /// the same arithmetic `scripts/lod/config.py::switch_distance_m` applies on the build side, so
+    /// the metres a rung was certified against and the metres it is selected at agree. (The
+    /// projection itself is pinned in `crate::view`; this pins the MILLIMETRE seam feeding it.)
     #[test]
-    fn the_switch_distance_is_the_exact_projection() {
-        let view = ViewProfile::new(0.12, 2160.0, 1.0);
-        let derived = view.switch_distance_m(27.841808, 0.380365);
+    fn a_certified_rung_derives_the_distance_it_was_cut_for() {
+        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0), 1.0);
+        let rung = Rung {
+            mesh: "probe".to_owned(),
+            deviation_mm: 27.841808,
+        };
+        let derived = view.switch_distance_m(rung.deviation_m(), 0.380365);
         assert!(
             (derived - 500.9314).abs() < 0.01,
             "D = dev_m × height_px / (2·tan(vfov/2)·budget_px) + radius, got {derived}",
         );
-        // ...and it is EXACT, not small-angle: the shortcut reads 501.4 m here, 0.06 % at the optic
-        // and 5.5 % at the commander field (ADR-0033 §9).
-        let small_angle = (27.841808 / 1000.0) / (0.12 / 2160.0) + 0.380365;
-        assert!(
-            (derived - small_angle).abs() > 0.1,
-            "the small-angle shortcut must not be what is wired",
-        );
-    }
-
-    /// A HALVED BUDGET doubles every distance; a HALVED HEIGHT halves the deviation term. Both
-    /// terms are linear, and the radius slack rides outside them.
-    #[test]
-    fn the_budget_and_the_height_scale_the_deviation_term() {
-        let base = ViewProfile::new(0.12, 2160.0, 1.0);
-        let radius = 0.5;
-        let term = base.switch_distance_m(10.0, radius) - radius;
-        let halved_budget = ViewProfile::new(0.12, 2160.0, 0.5);
-        assert!((halved_budget.switch_distance_m(10.0, radius) - radius - 2.0 * term).abs() < 1e-2);
-        let halved_height = ViewProfile::new(0.12, 1080.0, 1.0);
-        assert!((halved_height.switch_distance_m(10.0, radius) - radius - 0.5 * term).abs() < 1e-2);
-    }
-
-    /// UNTRUSTED INPUTS fall back rather than poisoning a divisor.
-    #[test]
-    fn a_hostile_view_falls_back_to_the_conservative_profile() {
-        let default = ViewProfile::default();
-        for (fov, height, budget) in [
-            (f32::NAN, 1440.0, 1.0),
-            (0.0, 1440.0, 1.0),
-            (core::f32::consts::PI, 1440.0, 1.0),
-            (0.12, 0.0, 1.0),
-            (0.12, f32::INFINITY, 1.0),
-            (0.12, 1440.0, -1.0),
-        ] {
-            let view = ViewProfile::new(fov, height, budget);
-            assert!(view.vfov_rad > 0.0 && view.vfov_rad < core::f32::consts::PI);
-            assert!(view.height_px.is_finite() && view.height_px > 0.0);
-            assert!(view.budget_px.is_finite() && view.budget_px > 0.0);
-            assert!(view.switch_distance_m(10.0, 0.5).is_finite());
-        }
-        assert_eq!(ViewProfile::new(f32::NAN, -1.0, f32::NAN), default);
     }
 
     /// THE BANDS TILE `[0, ∞)`: one level per distance, no gap and no double-draw, with the
@@ -633,7 +530,7 @@ mod tests {
     fn every_distance_is_owned_by_exactly_one_level() {
         let root = crate::assets::asset_root();
         let certificate = load(&root, TIGER);
-        let view = ViewProfile::new(0.12, 2160.0, 1.0);
+        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0), 1.0);
         for (key, chain) in &certificate.chains {
             let bands = chain.bands(view);
             assert_eq!(

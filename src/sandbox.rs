@@ -262,6 +262,9 @@ pub fn plugin(app: &mut App) {
         // The certificate: the sim artifact `bake` opens is fingerprinted before it is read, and
         // the tank's scene primitives get their certified rungs.
         crate::geometry_lod::sim_plugin,
+        // The live view both LOD ladders select through — this root mounts `world::plugin`'s
+        // terrain layer as well as the tank's chains.
+        crate::view::plugin,
         crate::geometry_lod::view_plugin,
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
         // `TankBlueprint`, exactly like the game's tanks; the shadow harness rides along.

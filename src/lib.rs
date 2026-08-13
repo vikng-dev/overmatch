@@ -186,6 +186,12 @@ mod ui_font;
 /// the shared billboard/erosion/gradient-LUT machinery they are built from. Mounted by both
 /// windowed clients (ADR-0014 — never the server).
 mod vfx;
+/// THE LIVE VIEW, once: the single 3-D camera's field and the pixel height the main pass renders
+/// at, read by ONE system on human-rate events, plus the exact screen-space projection (ADR-0033
+/// §9) both LOD ladders derive their switch distances through. `terrain_lod` and `geometry_lod` are
+/// consumers of it — each pairing the shared facts with its OWN pixel budget, which is a tuning
+/// knob and not view state. Mounted by every windowed root; a headless composition has no view.
+mod view;
 mod world;
 
 /// Configure Bevy's default plugin group for a GPU-less composition root.
@@ -668,10 +674,13 @@ impl Plugin for ClientPlugin {
             // pose (view-only, ADR-0014 — the server never mounts this).
             track::view_plugin,
         ));
-        // The render half of the certificate: the view artifact's fingerprint, the chain resolution
-        // and the two range writers. Separate call — the tuple above is at bevy's 15-plugin arity
-        // limit.
-        app.add_plugins(geometry_lod::view_plugin);
+        // The live view, and the render half of the certificate: the view artifact's fingerprint,
+        // the chain resolution and the two range writers. Separate call — the tuple above is at
+        // bevy's 15-plugin arity limit.
+        //
+        // `view` FIRST and always beside it: both LOD ladders select through the facts it owns, and
+        // a windowed root that mounts a ladder without it has a terrain layer that never reselects.
+        app.add_plugins((view::plugin, geometry_lod::view_plugin));
         app.add_plugins(drive_hud::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
@@ -740,9 +749,9 @@ impl Plugin for NetClientPlugin {
             // `net::render_error` orders the set after its correction smoothing).
             track::view_plugin,
         ));
-        // The render half of the certificate (see `ClientPlugin`), separate for the same arity
-        // reason as the block below.
-        app.add_plugins(geometry_lod::view_plugin);
+        // The live view + the render half of the certificate (see `ClientPlugin`), separate for the
+        // same arity reason as the block below.
+        app.add_plugins((view::plugin, geometry_lod::view_plugin));
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             drive_hud::plugin,

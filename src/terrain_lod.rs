@@ -128,6 +128,7 @@ use crate::terrain_grid::{
     HeightGrid, MESH_TILE_CELLS, TERRAIN_MESH_USAGE, TEXTURE_TILE_M, mesh_tile_node_ranges,
     node_world_coord, surface_normal_at,
 };
+use crate::view::{ViewFacts, ViewProfile};
 
 /// The DECLARED deviation ladder, metres — both the extraction schedule and the rung vocabulary a
 /// measured level is quantized up into. A level carrying rung `r` lies within
@@ -154,118 +155,36 @@ pub(crate) const TERRAIN_LOD_LADDER: [f32; 6] = [0.0, 0.02, 0.05, 0.10, 0.25, 0.
 /// creeps into the wiring.
 pub(crate) const TERRAIN_LOD_BUDGET_PX: f32 = 1.0;
 
-/// The screen-space-error selection rule: the distance (metres) at which a world-space deviation
-/// of `dev_m` projects to exactly `budget_px` pixels in a view of vertical field `fov_y_rad`
-/// rendered `height_px` pixels tall.
+/// The view this ladder selects through: the shared live view (`crate::view`) spent at
+/// [`TERRAIN_LOD_BUDGET_PX`].
 ///
-/// `D = dev_m · height_px / (fov_y_rad · budget_px)`
+/// The FACTS have one home and one writer for the whole tree; the BUDGET is this ladder's own
+/// tuning knob. Composed rather than stored, so there is nothing here that can drift from what the
+/// tank's chains are being selected against.
+pub(crate) fn terrain_view(facts: ViewFacts) -> ViewProfile {
+    ViewProfile::of(facts, TERRAIN_LOD_BUDGET_PX)
+}
+
+/// The distance (metres, camera → tile CENTRE) at or beyond which rung `rung` is legal for a tile
+/// whose bounding radius is `radius_m`.
 ///
-/// SMALL-ANGLE, DELIBERATELY. The exact form divides by `2·tan(fov/2)` rather than `fov`, and
-/// `2·tan(fov/2) ≥ fov` always — so this form returns a LARGER distance, i.e. it holds the finer
-/// level closer to the camera than strictly necessary. Measured on our two views: 0.1 % in the
-/// gunner optic (fov 0.12 rad) and 5.5 % conservative in the commander view (fov π/4). That is an
-/// error in the safe direction and it keeps one closed-form expression across every view; do not
-/// "fix" it into a `tan` call without re-deriving the wired thresholds.
-pub(crate) fn sub_pixel_distance_m(
-    dev_m: f32,
-    height_px: f32,
-    fov_y_rad: f32,
-    budget_px: f32,
-) -> f32 {
-    if dev_m <= 0.0 {
+/// Two terms, and both are load-bearing:
+/// * the exact projection ([`ViewFacts::sub_pixel_distance_m`]) — when the rung's declared
+///   deviation stops being worth a pixel;
+/// * `+ radius_m` — because `use_aabb` measures to the tile's CENTRE (verified in the vendored
+///   source, see the module doc) while the deviation lives on the tile's nearest SURFACE, which can
+///   be a full bounding radius closer to the camera. One shared radius (the largest over all tiles)
+///   rather than a per-tile float, so the range table stays small.
+///
+/// Rung 0 is the exact surface: it starts at the camera, always.
+///
+/// A FREE FUNCTION, not a method: the ladder holds the radius and is borrowed mutably while its
+/// levels are spawned, and the profile is a value composed on the spot.
+pub(crate) fn rung_switch_distance_m(view: ViewProfile, rung: usize, radius_m: f32) -> f32 {
+    if rung == 0 {
         return 0.0;
     }
-    dev_m * height_px / (fov_y_rad * budget_px)
-}
-
-/// The view the terrain ladder is currently selected FOR: one perspective camera's vertical field
-/// and the pixel height it actually renders at (window physical height × `render_scale`).
-///
-/// There is exactly one 3-D camera in the game (`camera::spawn_camera`) and the gunner optic
-/// swaps its `Projection` fov in place, so "the view profile" is a single live pair — which is
-/// what makes the adaptive layer affordable here and not on the shoe.
-#[derive(Resource, Clone, Copy, PartialEq, Debug)]
-pub(crate) struct TerrainLodView {
-    /// Vertical field of view, radians.
-    pub(crate) fov_y_rad: f32,
-    /// Rendered height of the main pass, pixels.
-    pub(crate) height_px: f32,
-    /// Screen-space error budget, pixels.
-    pub(crate) budget_px: f32,
-}
-
-impl Default for TerrainLodView {
-    fn default() -> Self {
-        // The narrow optic and a modest window: the conservative pre-window guess, replaced by the
-        // adaptive layer on the first frame that has a real window.
-        Self {
-            fov_y_rad: crate::camera::GUNNER_FOV_FALLBACK,
-            height_px: 1080.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        }
-    }
-}
-
-impl TerrainLodView {
-    /// A live profile from a camera's field and a rendered pixel height, with both inputs treated
-    /// as UNTRUSTED.
-    ///
-    /// A NON-POSITIVE height is not a small window, it is an ABSENT one — a window bevy has not
-    /// sized yet at Startup, or a zero render scale. Taking it literally would collapse every
-    /// switch distance onto the bounding radius and put the COARSEST level 94 m from the camera on
-    /// the frames the player first sees, which is the exact opposite of the conservative direction.
-    ///
-    /// A FOV outside `(0, π)` is worse, because it is a DIVISOR: `NaN` produces `NaN` range
-    /// boundaries, which compare false against every distance — the ground simply stops being drawn
-    /// — a negative one inverts the whole chain, and π or more has no perspective half-angle to be
-    /// the field of. `spec::TankSpec::validate` rejects such a sheet outright over the same
-    /// interval, so this is the second line: a camera whose projection has been written by anything
-    /// other than an authored view (a debug tool, a half-initialised projection) still leaves the
-    /// ladder with a usable profile instead of an invisible world.
-    ///
-    /// Both fall back to the default profile's value, and the next frame with sane inputs corrects
-    /// it. Silently, on purpose: this is a per-frame view-layer read, and a fail-loud here would
-    /// panic the client on a transient.
-    pub(crate) fn new(fov_y_rad: f32, height_px: f32) -> Self {
-        let default = Self::default();
-        Self {
-            fov_y_rad: if fov_y_rad > 0.0 && fov_y_rad < core::f32::consts::PI {
-                fov_y_rad
-            } else {
-                // `NaN` fails both comparisons and lands here with everything else out of range.
-                default.fov_y_rad
-            },
-            height_px: if height_px.is_finite() && height_px > 0.0 {
-                height_px
-            } else {
-                default.height_px
-            },
-            ..default
-        }
-    }
-
-    /// The distance (metres, camera → tile CENTRE) at or beyond which rung `rung` is legal for a
-    /// tile whose bounding radius is `radius_m`.
-    ///
-    /// Two terms, and both are load-bearing:
-    /// * `sub_pixel_distance_m` — when the rung's deviation stops being worth a pixel;
-    /// * `+ radius_m` — because `use_aabb` measures to the tile's CENTRE (verified in the vendored
-    ///   source, see the module doc) while the deviation lives on the tile's nearest SURFACE,
-    ///   which can be a full bounding radius closer to the camera. One shared radius (the largest
-    ///   over all tiles) rather than a per-tile float, so the range table stays small.
-    ///
-    /// Rung 0 is the exact surface: it starts at the camera, always.
-    pub(crate) fn switch_distance_m(self, rung: usize, radius_m: f32) -> f32 {
-        if rung == 0 {
-            return 0.0;
-        }
-        sub_pixel_distance_m(
-            TERRAIN_LOD_LADDER[rung],
-            self.height_px,
-            self.fov_y_rad,
-            self.budget_px,
-        ) + radius_m
-    }
+    view.switch_distance_m(TERRAIN_LOD_LADDER[rung], radius_m)
 }
 
 /// One extracted level of one tile.
@@ -330,15 +249,11 @@ pub(crate) struct TerrainLod {
 impl TerrainLod {
     /// The complementary visibility ranges for one tile: `[0, s₁) [s₁, s₂) … [sₙ, ∞)`, every
     /// distance covered exactly once, so a tile is never drawn twice and never vanishes.
-    pub(crate) fn ranges(
-        &self,
-        tile: &TerrainLodTile,
-        view: TerrainLodView,
-    ) -> Vec<VisibilityRange> {
+    pub(crate) fn ranges(&self, tile: &TerrainLodTile, view: ViewProfile) -> Vec<VisibilityRange> {
         let starts: Vec<f32> = tile
             .levels
             .iter()
-            .map(|level| view.switch_distance_m(level.rung, self.bounding_radius_m))
+            .map(|level| rung_switch_distance_m(view, level.rung, self.bounding_radius_m))
             .collect();
         (0..starts.len())
             .map(|k| {
@@ -923,7 +838,7 @@ pub(crate) fn spawn(
     meshes: &mut Assets<Mesh>,
     material: &Handle<StandardMaterial>,
     grid: &HeightGrid,
-    view: TerrainLodView,
+    view: ViewProfile,
 ) {
     let mut lod = build(grid);
     let tangents_started = Instant::now();
@@ -937,7 +852,7 @@ pub(crate) fn spawn(
         let starts: Vec<f32> = tile
             .levels
             .iter()
-            .map(|level| view.switch_distance_m(level.rung, radius))
+            .map(|level| rung_switch_distance_m(view, level.rung, radius))
             .collect();
         for (level_index, level) in tile.levels.iter_mut().enumerate() {
             let (tiles_kept, tris, worst) = &mut census[level.rung];
@@ -985,7 +900,7 @@ pub(crate) fn spawn(
             "terrain LOD: rung δ ≤ {declared:.2} m — {tiles_kept} tiles, {tris} tris, \
              measured worst δ {worst:.4} m, switch at {switch:.0} m",
             declared = TERRAIN_LOD_LADDER[rung],
-            switch = view.switch_distance_m(rung, radius),
+            switch = rung_switch_distance_m(view, rung, radius),
         );
     }
     info!(
@@ -995,12 +910,11 @@ pub(crate) fn spawn(
         tiles = lod.tiles.len(),
         gen = lod.build.as_millis(),
         tan = tangents.as_millis(),
-        fov = view.fov_y_rad,
-        height = view.height_px,
+        fov = view.facts.vfov_rad,
+        height = view.facts.height_px,
         budget = view.budget_px,
     );
     commands.insert_resource(TerrainLodLadder(lod));
-    commands.insert_resource(view);
 }
 
 /// The live ladder, kept so the adaptive layer can rewrite thresholds without regenerating meshes.
@@ -1008,14 +922,6 @@ pub(crate) fn spawn(
 /// census and the geometry of selection.
 #[derive(Resource)]
 pub(crate) struct TerrainLodLadder(pub(crate) TerrainLod);
-
-/// Relative field-of-view change that must accumulate before the thresholds are rewritten.
-///
-/// The optic toggle is a 6.5× jump (π/4 → 0.12 rad), so this never gates a real view change; what
-/// it gates is a magnification slider being dragged, where a rewrite per frame would be a per-frame
-/// walk of a few hundred entities for a sub-pixel difference. Shared with `geometry_lod`, whose
-/// asset chains are selected against the same live view.
-pub(crate) const FOV_HYSTERESIS: f32 = 0.10;
 
 /// Which level the ladder is currently showing. [`TerrainLodClamp::Adaptive`] is the product
 /// behaviour and the default; every other value pins the whole map to one rung so a human can look
@@ -1085,14 +991,15 @@ fn never_visible() -> VisibilityRange {
     }
 }
 
-/// THE ONE WRITER of terrain visibility ranges. Rewrites every threshold when the view profile
-/// changes — fov (the optic toggle, a magnification step), rendered height (window resize), render
-/// scale — or when the dev clamp moves.
+/// THE ONE WRITER of terrain visibility ranges. Rewrites every threshold when the shared view moves
+/// — fov (the optic toggle, a magnification step), rendered height (window resize, render scale) —
+/// or when the dev clamp moves.
 ///
-/// Affordable BECAUSE terrain is a few hundred entities and both triggers are human-rate. The
-/// thresholds stay octave-shared: this writes at most one distinct value per (rung, profile), never
-/// a per-tile float, so the permanent range table grows by a handful of slots per profile the player
-/// actually visits.
+/// NOT A READER OF THE VIEW. `view::track_view_facts` owns that, dead band included; this system
+/// consumes [`ViewFacts`] and pairs it with this ladder's own budget. Affordable BECAUSE terrain is
+/// a few hundred entities and both triggers are human-rate. The thresholds stay octave-shared: this
+/// writes at most one distinct value per (rung, profile), never a per-tile float, so the permanent
+/// range table grows by a handful of slots per profile the player actually visits.
 ///
 /// The clamp rides THIS path rather than a parallel one on purpose. A second writer would race this
 /// one for the same components, and whichever ran last would win a frame at a time — the clamp would
@@ -1100,37 +1007,24 @@ fn never_visible() -> VisibilityRange {
 fn adapt_ranges(
     mut commands: Commands,
     ladder: Option<Res<TerrainLodLadder>>,
-    current: Option<ResMut<TerrainLodView>>,
+    facts: Res<ViewFacts>,
     clamp: Res<TerrainLodClamp>,
-    mut applied: Local<Option<TerrainLodClamp>>,
-    camera: Query<&Projection, With<Camera3d>>,
-    windows: Query<&Window>,
-    scale: Option<Res<crate::render_scale::RenderScale>>,
+    // The applied PROFILE, not the live one: the ladder is spawned against a Startup seed (the
+    // narrow-optic guess in `world`), so the first frame with real facts must rewrite even when
+    // nothing has moved since.
+    mut applied: Local<Option<(ViewProfile, TerrainLodClamp)>>,
     entities: Query<(Entity, &TerrainLodEntity)>,
 ) {
-    let (Some(ladder), Some(mut current)) = (ladder, current) else {
+    let Some(ladder) = ladder else {
         return;
     };
-    let Ok(Projection::Perspective(projection)) = camera.single() else {
-        return;
-    };
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let wanted = TerrainLodView::new(
-        projection.fov,
-        window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0),
-    );
-    let fov_moved = (wanted.fov_y_rad - current.fov_y_rad).abs()
-        > FOV_HYSTERESIS * current.fov_y_rad.max(f32::MIN_POSITIVE);
-    let view_moved =
-        fov_moved || wanted.height_px != current.height_px || wanted.budget_px != current.budget_px;
-    let clamp_moved = *applied != Some(*clamp);
+    let wanted = terrain_view(*facts);
+    let clamp_moved = applied.is_none_or(|(_, applied)| applied != *clamp);
+    let view_moved = applied.is_none_or(|(applied, _)| applied != wanted);
     if !view_moved && !clamp_moved {
         return;
     }
-    *current = wanted;
-    *applied = Some(*clamp);
+    *applied = Some((wanted, *clamp));
     let (mut pinned, mut fallback) = (0usize, 0usize);
     for (entity, marker) in &entities {
         let Some(tile) = ladder.0.tiles.get(marker.tile) else {
@@ -1159,13 +1053,13 @@ fn adapt_ranges(
         TerrainLodClamp::Adaptive if clamp_moved => info!(
             "terrain LOD clamp: ADAPTIVE — live thresholds restored (fov {fov:.3} rad × \
              {height:.0} px)",
-            fov = wanted.fov_y_rad,
-            height = wanted.height_px,
+            fov = wanted.facts.vfov_rad,
+            height = wanted.facts.height_px,
         ),
         TerrainLodClamp::Adaptive => info!(
             "terrain LOD: view profile → fov {fov:.3} rad × {height:.0} px, thresholds rewritten",
-            fov = wanted.fov_y_rad,
-            height = wanted.height_px,
+            fov = wanted.facts.vfov_rad,
+            height = wanted.facts.height_px,
         ),
         TerrainLodClamp::Rung(0) => {
             info!("terrain LOD clamp: EXACT ({pinned} tiles at full density)")
@@ -1181,9 +1075,18 @@ fn adapt_ranges(
 
 /// Mount the adaptive layer, and on dev builds the rung cycler. Generation itself is driven by
 /// `world::spawn_environment`.
+///
+/// `world::plugin` mounts this module on the DEDICATED SERVER too, which has no window, no camera
+/// and therefore no `view::plugin` — and no ladder either, since nothing there spawns terrain
+/// meshes. The run condition states that: a composition with no live view has no selection to make.
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<TerrainLodClamp>()
-        .add_systems(Update, adapt_ranges);
+    app.init_resource::<TerrainLodClamp>().add_systems(
+        Update,
+        adapt_ranges
+            .run_if(resource_exists::<ViewFacts>)
+            // Same frame as the resize that caused it, not the next one.
+            .after(crate::view::track_view_facts),
+    );
     // The eyeball rig. `dev_tools` is a DEFAULT feature, so this ships to playtest builds and not
     // to a release client; without it nothing can move `TerrainLodClamp` off `Adaptive` and the
     // resource is inert.
@@ -1702,7 +1605,7 @@ mod tests {
     #[test]
     fn terrain_lod_ranges_are_complementary() {
         let lod = build(&shipped_grid());
-        let view = TerrainLodView::default();
+        let view = terrain_view(ViewFacts::default());
         for (t, tile) in lod.tiles.iter().enumerate() {
             let ranges = lod.ranges(tile, view);
             assert_eq!(ranges.len(), tile.levels.len());
@@ -1742,12 +1645,17 @@ mod tests {
     fn the_range_chain_covers_every_distance_even_at_a_degenerate_view() {
         let lod = build(&shipped_grid());
         for view in [
-            TerrainLodView {
-                fov_y_rad: std::f32::consts::FRAC_PI_4,
-                height_px: 0.0,
+            // Built FIELD-BY-FIELD rather than through `ViewFacts::new`, whose whole job is to
+            // refuse this: the point is that the range chain survives a degenerate profile even if
+            // one ever reaches it.
+            ViewProfile {
+                facts: ViewFacts {
+                    vfov_rad: std::f32::consts::FRAC_PI_4,
+                    height_px: 0.0,
+                },
                 budget_px: TERRAIN_LOD_BUDGET_PX,
             },
-            TerrainLodView::default(),
+            terrain_view(ViewFacts::default()),
         ] {
             for tile in &lod.tiles {
                 let ranges = lod.ranges(tile, view);
@@ -1772,11 +1680,7 @@ mod tests {
     #[test]
     fn wired_thresholds_are_the_derivation() {
         let lod = build(&shipped_grid());
-        let view = TerrainLodView {
-            fov_y_rad: crate::camera::GUNNER_FOV_FALLBACK,
-            height_px: 2160.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        };
+        let view = terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0));
         // Independent re-derivation of the whole chain, from the constants only.
         let radius = lod
             .tiles
@@ -1791,7 +1695,12 @@ mod tests {
                 if rung == 0 {
                     0.0
                 } else {
-                    dev * view.height_px / (view.fov_y_rad * view.budget_px) + radius
+                    // THE EXACT PROJECTION, written out here rather than called: this test is the
+                    // independent side of the derivation, so it must not reach for the same
+                    // expression the wiring uses (ADR-0033 §9).
+                    dev * view.facts.height_px
+                        / (2.0 * (view.facts.vfov_rad / 2.0).tan() * view.budget_px)
+                        + radius
                 }
             })
             .collect();
@@ -1830,11 +1739,7 @@ mod tests {
         let started = std::time::Instant::now();
         let lod = build(&grid);
         let wall = started.elapsed();
-        let view = TerrainLodView {
-            fov_y_rad: crate::camera::GUNNER_FOV_FALLBACK,
-            height_px: 2160.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        };
+        let view = terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0));
         let mut census = vec![(0usize, 0usize, 0.0f32); TERRAIN_LOD_LADDER.len()];
         for tile in &lod.tiles {
             for level in &tile.levels {
@@ -1858,7 +1763,7 @@ mod tests {
                 "  rung δ ≤ {:.2} m: {tiles} tiles, {tris} tris, worst measured δ {worst:.4} m, \
                  switch at {:.0} m",
                 TERRAIN_LOD_LADDER[rung],
-                view.switch_distance_m(rung, lod.bounding_radius_m),
+                rung_switch_distance_m(view, rung, lod.bounding_radius_m),
             );
         }
         let entities: usize = lod.tiles.iter().map(|tile| tile.levels.len()).sum();
@@ -1900,13 +1805,10 @@ mod tests {
     #[test]
     fn the_adaptive_layer_rewrites_thresholds_when_the_view_changes() {
         let mut app = App::new();
-        app.add_plugins(plugin);
+        // The SHARED view alongside the ladder: this module no longer reads a camera or a window,
+        // so without `view::plugin` there is nothing for it to consume.
+        app.add_plugins((crate::view::plugin, plugin));
         app.insert_resource(TerrainLodLadder(synthetic_ladder()));
-        app.insert_resource(TerrainLodView {
-            fov_y_rad: std::f32::consts::FRAC_PI_4,
-            height_px: 1440.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        });
         let world = app.world_mut();
         let window = world.spawn(Window::default()).id();
         let camera = world
@@ -1928,15 +1830,6 @@ mod tests {
                     .id()
             })
             .collect();
-
-        // A zero pixel height is an ABSENT viewport (a window bevy has not sized yet), not a
-        // one-pixel one. Read literally it would collapse every threshold onto the bounding radius
-        // and put the COARSEST level 94 m from the camera on the first frames a player sees.
-        assert_eq!(
-            TerrainLodView::new(0.5, 0.0).height_px,
-            TerrainLodView::default().height_px,
-            "an unsized window must not be read as a zero-pixel viewport"
-        );
 
         app.update();
         app.world_mut()
@@ -2016,13 +1909,8 @@ mod tests {
     /// A three-level synthetic tile plus the ECS scaffolding the rewrite system needs.
     fn clamp_fixture() -> (App, Vec<Entity>) {
         let mut app = App::new();
-        app.add_plugins(plugin);
+        app.add_plugins((crate::view::plugin, plugin));
         app.insert_resource(TerrainLodLadder(synthetic_ladder()));
-        app.insert_resource(TerrainLodView {
-            fov_y_rad: std::f32::consts::FRAC_PI_4,
-            height_px: 1440.0,
-            budget_px: TERRAIN_LOD_BUDGET_PX,
-        });
         let world = app.world_mut();
         world.spawn(Window::default());
         world.spawn((
@@ -2061,7 +1949,7 @@ mod tests {
         );
         app.update();
         let ladder = synthetic_ladder();
-        let view = *app.world().resource::<TerrainLodView>();
+        let view = terrain_view(*app.world().resource::<ViewFacts>());
         let expected = ladder.ranges(&ladder.tiles[0], view);
         for (level, &entity) in entities.iter().enumerate() {
             assert_eq!(
@@ -2106,7 +1994,7 @@ mod tests {
         // And back: the live chain returns unchanged.
         *app.world_mut().resource_mut::<TerrainLodClamp>() = TerrainLodClamp::Adaptive;
         app.update();
-        let view = *app.world().resource::<TerrainLodView>();
+        let view = terrain_view(*app.world().resource::<ViewFacts>());
         let expected = ladder.ranges(&ladder.tiles[0], view);
         for (level, &entity) in entities.iter().enumerate() {
             assert_eq!(
@@ -2190,6 +2078,10 @@ mod tests {
     /// the same interval; this is the second line, for a projection written by something that is not
     /// an authored view. The accepted end of the interval is checked too, so a fallback that
     /// swallowed every value would fail here rather than pass quietly.
+    ///
+    /// The guard itself lives in `crate::view` now, shared with the tank's chains — so what this
+    /// pins is that the terrain RANGE CHAIN is behind it, which is the property that would be lost
+    /// if this ladder ever grew a second way to build a profile.
     #[test]
     fn an_invalid_fov_cannot_reach_the_range_chain() {
         let lod = build(&shipped_grid());
@@ -2202,10 +2094,10 @@ mod tests {
             core::f32::consts::PI,
             6.0,
         ] {
-            let view = TerrainLodView::new(fov, 1440.0);
+            let view = terrain_view(ViewFacts::new(fov, 1440.0));
             assert_eq!(
-                view.fov_y_rad,
-                TerrainLodView::default().fov_y_rad,
+                view.facts.vfov_rad,
+                ViewFacts::default().vfov_rad,
                 "fov {fov} must fall back"
             );
             for tile in &lod.tiles {
@@ -2231,7 +2123,7 @@ mod tests {
         // The legal interval is passed THROUGH, right up to its open ends.
         for fov in [1.0e-4, 0.12, std::f32::consts::FRAC_PI_4, 3.0] {
             assert_eq!(
-                TerrainLodView::new(fov, 1440.0).fov_y_rad,
+                ViewFacts::new(fov, 1440.0).vfov_rad,
                 fov,
                 "fov {fov} is legal and must not be replaced"
             );
@@ -2239,8 +2131,8 @@ mod tests {
         // Heights get the same treatment.
         for height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
             assert_eq!(
-                TerrainLodView::new(0.5, height).height_px,
-                TerrainLodView::default().height_px,
+                ViewFacts::new(0.5, height).height_px,
+                ViewFacts::default().height_px,
                 "height {height} must fall back"
             );
         }
@@ -2270,18 +2162,42 @@ mod tests {
         }
     }
 
-    /// Small-angle conservatism, pinned with the numbers the doc comment claims: the wired form
-    /// never switches to a coarser level SOONER than the exact projection would allow.
+    /// ONE PROJECTION, BOTH LADDERS. A deviation of a given size goes sub-pixel at one distance in
+    /// this session, whether it is carried by a terrain rung or by a certified rung of the tank's
+    /// geometry — the property two independent readers of the same camera could not have, and the
+    /// one this ladder did not have while it divided by `fov` instead of by `2·tan(fov/2)`.
+    ///
+    /// The shortcut it replaced was conservative (it always returned the LARGER distance, holding
+    /// the finer level nearer the eye), which is why nothing looked wrong; it also read 5.5 % long
+    /// at the commander field, which is what ADR-0033 §9 refuses.
     #[test]
-    fn the_small_angle_form_is_conservative_in_both_views() {
-        for (fov, claim) in [(0.12_f32, 0.002_f32), (std::f32::consts::FRAC_PI_4, 0.06)] {
-            let ours = sub_pixel_distance_m(0.05, 2160.0, fov, 1.0);
-            let exact = 0.05 * 2160.0 / (2.0 * (fov / 2.0).tan());
-            assert!(ours >= exact, "small-angle must not switch early at {fov}");
+    fn the_terrain_ladder_derives_through_the_shared_exact_projection() {
+        let commander = std::f32::consts::FRAC_PI_4;
+        let radius = 133.4;
+        let view = terrain_view(ViewFacts::new(commander, 2160.0));
+        for (rung, &dev) in TERRAIN_LOD_LADDER.iter().enumerate().skip(1) {
+            let wired = rung_switch_distance_m(view, rung, radius);
+            // Same view, same deviation, same metres — reached through the CERTIFICATE's side of
+            // the projection instead of the ladder's.
+            let chain = crate::geometry_lod::Chain {
+                radius_m: radius,
+                rungs: vec![crate::geometry_lod::certificate::Rung {
+                    mesh: "probe".to_owned(),
+                    deviation_mm: dev * 1000.0,
+                }],
+            };
+            assert_eq!(
+                wired,
+                chain.bands(view)[1].start_margin.start,
+                "rung {rung} does not agree with the certificate's own derivation",
+            );
+            // And it is the exact form, never the shortcut.
+            let exact = dev * 2160.0 / (2.0 * (commander / 2.0).tan() * TERRAIN_LOD_BUDGET_PX);
+            assert!((wired - radius - exact).abs() < 1e-2, "rung {rung}");
+            let small_angle = dev * 2160.0 / (commander * TERRAIN_LOD_BUDGET_PX);
             assert!(
-                (ours - exact) / exact <= claim,
-                "small-angle overshoot at fov {fov} is {}, claimed ≤ {claim}",
-                (ours - exact) / exact
+                wired - radius < small_angle,
+                "rung {rung} still reads the small-angle shortcut",
             );
         }
     }
@@ -2467,7 +2383,7 @@ mod tactical {
         /// The surface a camera at `eye` under view profile `view` would actually be shown: one
         /// level per tile, chosen by the same distance-to-AABB-centre rule
         /// `check_visibility_ranges` applies (`bevy_camera-0.19.0/src/visibility/range.rs:263`).
-        fn selected(&self, eye: Vec3, view: TerrainLodView) -> Surface<'_> {
+        fn selected(&self, eye: Vec3, view: ViewProfile) -> Surface<'_> {
             let choice = self
                 .lod
                 .tiles
@@ -2688,7 +2604,8 @@ mod tactical {
     ];
 
     /// The widest pixel budget the quality row has been sketched with, for low-end machines. Every
-    /// switch distance scales as `1/budget` ([`sub_pixel_distance_m`]), so this is the setting under
+    /// switch distance scales as `1/budget` ([`ViewFacts::sub_pixel_distance_m`]), so this is the
+    /// setting under
     /// which coarse levels sit nearest the camera and the reported numbers are worst.
     const WIDEST_SKETCHED_BUDGET_PX: f32 = 8.0;
 
@@ -2696,23 +2613,20 @@ mod tactical {
     /// the commander field at [`WIDEST_SKETCHED_BUDGET_PX`]. The last is the binding case — widest
     /// field × loosest budget puts the coarsest geometry nearest the eye — and it is in the sweep so
     /// the table shows the whole envelope, not just the setting that ships today.
-    fn reported_profiles() -> [(&'static str, TerrainLodView); 3] {
+    fn reported_profiles() -> [(&'static str, ViewProfile); 3] {
         let commander = std::f32::consts::FRAC_PI_4;
         [
             (
                 "gunner optic 4K @ 1 px",
-                TerrainLodView::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+                terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)),
             ),
             (
                 "commander 4K @ 1 px",
-                TerrainLodView::new(commander, 2160.0),
+                terrain_view(ViewFacts::new(commander, 2160.0)),
             ),
             (
                 "commander 4K @ 8 px (widest sketched quality setting)",
-                TerrainLodView {
-                    budget_px: WIDEST_SKETCHED_BUDGET_PX,
-                    ..TerrainLodView::new(commander, 2160.0)
-                },
+                ViewProfile::of(ViewFacts::new(commander, 2160.0), WIDEST_SKETCHED_BUDGET_PX),
             ),
         ]
     }
@@ -2748,7 +2662,7 @@ mod tactical {
                     .map(|rung| format!(
                         "δ{:.2}@{:.0}m",
                         TERRAIN_LOD_LADDER[rung],
-                        view.switch_distance_m(rung, radius)
+                        rung_switch_distance_m(view, rung, radius)
                     ))
                     .collect::<Vec<_>>()
                     .join(" ")
@@ -2942,7 +2856,8 @@ mod tactical {
                      nearest coarse switch is {:.0} m and the farthest a camera can be from any \
                      tile centre on a {} m map is ~{:.0} m — terrain LOD never fires in this \
                      view, so these zeroes are the honest answer and not a passing gate.",
-                    view.switch_distance_m(
+                    rung_switch_distance_m(
+                        view,
                         ladder.lod.tiles[0]
                             .levels
                             .get(1)

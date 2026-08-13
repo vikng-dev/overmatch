@@ -1,15 +1,18 @@
 name: Build overmatch-server
 description: >-
   The single canonical build + package recipe for the Linux `overmatch-server`
-  dedicated server. Runs as steps inside the caller's job: toolchain -> apt deps
-  -> rust-cache -> cargo build -> tar over the server's own asset allowlist.
-  release.yml's `build-server` is the only caller; its one tarball is both
-  deployed and released.
+  dedicated server. Runs as steps inside the caller's job: toolchain -> resolve
+  the asset allowlist -> LFS pull over that allowlist -> apt deps -> rust-cache
+  -> cargo build -> tar over the same allowlist. release.yml's `build-server` is
+  the only caller; its one tarball is both deployed and released.
 
 # CONTRACT (the seam):
-#   * The CALLER checks out the repo FIRST, fetches LFS via committed `.lfsconfig`
-#     (`git lfs pull` after `lfs: false` checkout), and `persist-credentials: false`.
-#     Checkout stays job-level so the local composite resolves.
+#   * The CALLER checks out the repo FIRST, with `lfs: false` and
+#     `persist-credentials: false`. Checkout stays job-level so the local composite
+#     resolves. The caller does NOT pull LFS: the server ships a small slice of
+#     `assets/`, and hydrating it is packaging's business, so it happens here where
+#     the allowlist that decides the slice is written down. (The client jobs still
+#     `git lfs pull` whole — they ship whole.)
 #   * THIS action then does everything build-shaped and leaves
 #     `overmatch-server.tar.gz` in the workspace root (exposed as the `tar`
 #     output). What the caller does with that tar (upload-artifact / attach to
@@ -35,31 +38,6 @@ runs:
   steps:
     - uses: dtolnay/rust-toolchain@stable
 
-    # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
-    - name: Install Linux build dependencies
-      shell: bash
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-          pkg-config libasound2-dev libudev-dev \
-          libwayland-dev libxkbcommon-dev libx11-dev
-
-    # Shared server build cache (key: server-net) — release, dispatch, and deploy all warm the
-    # same cache on purpose.
-    - uses: Swatinem/rust-cache@v2
-      with:
-        key: server-net
-
-    # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
-    # thin LTO.
-    - name: Build server
-      shell: bash
-      run: cargo build --release --locked --bin overmatch-server
-
-    # Stage a self-contained folder: the binary alongside the assets it opens, so on the droplet
-    # `BEVY_ASSET_ROOT=<extracted dir>` finds them and `./overmatch-server` just runs. With
-    # deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before packing.
-    #
     # THE ASSET SET IS AN ALLOWLIST, stated POSITIVELY: these are the paths `overmatch-server`
     # OPENS, not `assets/` minus whatever seemed heavy. The server mounts `SimPlugin` and no client
     # plugin, so it is a short list — and it is not derivable from the client's, which is why it is
@@ -88,15 +66,17 @@ runs:
     #
     # The vehicles are DISCOVERED by the same trio rule the door and the hook use, so a second
     # vehicle ships without a line here. A named path that is missing is a FAILURE, not a smaller
-    # tarball: the server would boot and panic on the droplet.
-    - name: Package
+    # tarball: the server would boot and panic on the droplet — so the check is here, before the
+    # twenty-minute build, rather than at `cp` time.
+    #
+    # ONE LIST, TWO CONSUMERS: the file written here is what the LFS pull hydrates AND what the tar
+    # packs. The `--include` list cannot drift from the tarball's contents because it IS the
+    # tarball's contents; the pointer check after the pull is the tripwire that says so.
+    - name: Resolve the server asset allowlist
+      id: allowlist
       shell: bash
-      env:
-        DEPLOYED_SHA: ${{ inputs.deployed-sha }}
       run: |
         set -euo pipefail
-        mkdir -p stage/overmatch-server
-        cp target/release/overmatch-server stage/overmatch-server/
         stems=()
         while IFS= read -r stem; do stems+=("$stem"); done < <(
           git ls-files |
@@ -124,10 +104,74 @@ runs:
             echo "::error::${path} is on the server's allowlist and is not in this checkout"
             exit 1
           fi
-          mkdir -p "stage/overmatch-server/$(dirname "${path}")"
-          cp "${path}" "stage/overmatch-server/${path}"
         done
         printf 'server asset: %s\n' "${paths[@]}"
+        printf '%s\n' "${paths[@]}" > "${RUNNER_TEMP}/server-assets.txt"
+        echo "file=${RUNNER_TEMP}/server-assets.txt" >> "${GITHUB_OUTPUT}"
+
+    # LFS on R2 via the committed `.lfsconfig` (checkout `lfs: true` ignores it and hits GitHub, so
+    # the caller checks out with `lfs: false` and the pull happens here). Scoped to the allowlist:
+    # the full repo is ~210 MB of LFS objects — the Tiger's `.blend` and view `.glb` alone are 131 MB
+    # — against ~14 MB the server actually ships, and downloading the rest to delete it is the whole
+    # cost being cut. Paths on the allowlist that are not LFS-tracked (level.json, `.lod.json`,
+    # `.tank.ron`) are simply not matched by any pointer and cost nothing to name.
+    #
+    # Then the tripwire: a `--include` that fails to match leaves a ~130-byte pointer file in place,
+    # which `cp` would cheerfully pack and the droplet would panic on. Refuse instead.
+    - name: Git LFS pull (R2, the allowlist only)
+      shell: bash
+      env:
+        ASSETS: ${{ steps.allowlist.outputs.file }}
+      run: |
+        set -euo pipefail
+        git lfs install --local
+        git lfs pull --include="$(paste -sd, "${ASSETS}")"
+        while IFS= read -r path; do
+          if head -c 42 "${path}" | LC_ALL=C grep -qa '^version https://git-lfs'; then
+            echo "::error::${path} is still an LFS pointer after the scoped pull — the --include list no longer covers the allowlist"
+            exit 1
+          fi
+        done < "${ASSETS}"
+
+    # Bevy needs alsa/udev + windowing libs to COMPILE on Linux even though the server runs headless.
+    - name: Install Linux build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          pkg-config libasound2-dev libudev-dev \
+          libwayland-dev libxkbcommon-dev libx11-dev
+
+    # Shared server build cache (key: server-net) — release, dispatch, and deploy all warm the
+    # same cache on purpose.
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: server-net
+
+    # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
+    # thin LTO.
+    - name: Build server
+      shell: bash
+      run: cargo build --release --locked --bin overmatch-server
+
+    # Stage a self-contained folder: the binary alongside the assets it opens, so on the droplet
+    # `BEVY_ASSET_ROOT=<extracted dir>` finds them and `./overmatch-server` just runs. The assets
+    # are the allowlist resolved above — the same list the LFS pull hydrated, read back rather than
+    # recomputed. With deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before
+    # packing.
+    - name: Package
+      shell: bash
+      env:
+        ASSETS: ${{ steps.allowlist.outputs.file }}
+        DEPLOYED_SHA: ${{ inputs.deployed-sha }}
+      run: |
+        set -euo pipefail
+        mkdir -p stage/overmatch-server
+        cp target/release/overmatch-server stage/overmatch-server/
+        while IFS= read -r path; do
+          mkdir -p "stage/overmatch-server/$(dirname "${path}")"
+          cp "${path}" "stage/overmatch-server/${path}"
+        done < "${ASSETS}"
         if [ "${DEPLOYED_SHA}" = "true" ]; then
           printf '%s\n' "${GITHUB_SHA}" > stage/overmatch-server/DEPLOYED_SHA
         fi

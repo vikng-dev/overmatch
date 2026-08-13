@@ -57,8 +57,9 @@
 use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 
-use crate::geometry_lod::{LodPinned, TankCertificate, ViewProfile};
+use crate::geometry_lod::{LodPinned, TankCertificate};
 use crate::track::link_view::{ShoeLod, shoe_chain_key};
+use crate::view::ViewProfile;
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
 ///
@@ -366,6 +367,7 @@ fn aim_camera_down_range(mut done: Local<bool>, mut camera: Query<&mut Transform
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::ViewFacts;
 
     /// The shipped shoe chain's switch distances at the view the corpus was quoted in — the gunner
     /// optic at 4K native, one pixel of budget.
@@ -377,7 +379,10 @@ mod tests {
             )));
         shoe_switches(
             &certificate,
-            ViewProfile::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0, 1.0),
+            ViewProfile::of(
+                ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+                1.0,
+            ),
         )
     }
 

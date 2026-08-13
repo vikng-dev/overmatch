@@ -21,10 +21,11 @@
 //!
 //! # Switch distances are derived, never shipped
 //!
-//! The certificate carries deviations and a bounding radius; [`ViewProfile`] carries the view. The
-//! metres come out of `certificate::ViewProfile::switch_distance_m` and are rewritten only when the
-//! profile moves — a resolution change, a render-scale change, an optic/fov change, a pixel-budget
-//! change — with hysteresis on the field (ADR-0033 §11). Bevy's render table retains every distinct
+//! The certificate carries deviations and a bounding radius; [`ViewProfile`] carries the view —
+//! `crate::view`'s shared facts spent at this ladder's own pixel budget. The metres come out of
+//! `view::ViewProfile::switch_distance_m` and are rewritten only when that profile moves — a
+//! resolution change, a render-scale change, an optic/fov change, a pixel-budget change — with
+//! hysteresis on the field (ADR-0033 §11). Bevy's render table retains every distinct
 //! `VisibilityRange` slot for the app's lifetime, so per-frame threshold mutation is off the table
 //! by construction.
 //!
@@ -47,7 +48,9 @@ use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::{Gltf, GltfMesh, GltfMeshName};
 use bevy::prelude::*;
 
-pub(crate) use certificate::{Chain, TrioMember, ViewProfile};
+pub(crate) use certificate::{Chain, TrioMember};
+
+use crate::view::ViewProfile;
 
 /// The shipped tank's asset id. The trio lives at `assets/<id>/<id>.{glb,sim.glb,lod.json}`.
 pub(crate) const TIGER_ID: &str = "tiger_1";
@@ -114,12 +117,15 @@ pub(crate) fn view_plugin(app: &mut App) {
                     .and_then(not(resource_exists::<GeometryLodChains>)),
             ),
             attach_rungs.run_if(resource_exists::<GeometryLodChains>),
-            adapt_view_profile,
+            compose_view_profile,
             adapt_bands
                 .run_if(resource_changed::<ViewProfile>)
-                .after(adapt_view_profile),
+                .after(compose_view_profile),
         )
-            .chain(),
+            .chain()
+            // The facts are read once per frame, upstream of every consumer: without this the
+            // profile would compose from LAST frame's view and the bands would lag a resize.
+            .after(crate::view::track_view_facts),
     );
 }
 
@@ -398,47 +404,30 @@ fn attach_rungs(
 // The adaptive layer
 // ---------------------------------------------------------------------------------------------
 
-/// Track the live view, and move [`ViewProfile`] only when it actually moves.
+/// Compose this ladder's [`ViewProfile`]: the shared [`ViewFacts`] spent at the player's pixel
+/// budget.
 ///
-/// The three inputs are the human-rate ones: the single 3-D camera's field (the optic swaps it in
-/// place), the main pass's rendered height (window physical height × render scale), and the pixel
-/// budget the settings page owns. The field carries a relative dead band — the shared
-/// `terrain_lod::FOV_HYSTERESIS` — because a per-frame float would mint a permanent range slot per
-/// distinct value.
-fn adapt_view_profile(
-    camera: Query<&Projection, With<Camera3d>>,
-    windows: Query<&Window>,
-    scale: Option<Res<crate::render_scale::RenderScale>>,
+/// NOT A READER OF THE VIEW. `view::track_view_facts` is the one system that reads a `Projection`,
+/// a `Window` and the render scale, and it already carries the dead band on the field; what is
+/// local to this ladder is the BUDGET (`settings::LodPixelBudget`, the detail row), which is a
+/// tuning knob and not view state. The profile therefore moves on exactly two human-rate events:
+/// the facts moved, or the player moved the row.
+fn compose_view_profile(
+    facts: Res<crate::view::ViewFacts>,
     budget: Option<Res<crate::settings::LodPixelBudget>>,
     mut view: ResMut<ViewProfile>,
 ) {
-    let Ok(Projection::Perspective(projection)) = camera.single() else {
-        return;
-    };
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let wanted = ViewProfile::new(
-        projection.fov,
-        window.physical_height() as f32 * scale.map_or(1.0, |scale| scale.0),
-        budget.map_or(1.0, |budget| budget.0),
+    let wanted = ViewProfile::of(
+        *facts,
+        budget.map_or_else(|| ViewProfile::default().budget_px, |budget| budget.0),
     );
-    let field_moved = (wanted.vfov_rad - view.vfov_rad).abs()
-        > crate::terrain_lod::FOV_HYSTERESIS * view.vfov_rad.max(f32::MIN_POSITIVE);
-    if !field_moved && wanted.height_px == view.height_px && wanted.budget_px == view.budget_px {
+    if wanted == *view {
         return;
     }
-    *view = ViewProfile {
-        vfov_rad: if field_moved {
-            wanted.vfov_rad
-        } else {
-            view.vfov_rad
-        },
-        ..wanted
-    };
+    *view = wanted;
     info!(
         "geometry_lod: view profile → {:.4} rad × {:.0} px at {:.2} px budget, bands rewritten",
-        view.vfov_rad, view.height_px, view.budget_px,
+        view.facts.vfov_rad, view.facts.height_px, view.budget_px,
     );
 }
 
@@ -466,11 +455,15 @@ fn adapt_bands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view::ViewFacts;
 
     /// The reference view every certified distance was quoted in when the corpus was cut: the
     /// gunner optic at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
     pub(crate) fn reference_view() -> ViewProfile {
-        ViewProfile::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0, 1.0)
+        ViewProfile::of(
+            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            1.0,
+        )
     }
 
     /// EVERY RUNG MESH RECORD SHIPS TANGENTS.
@@ -539,7 +532,7 @@ mod tests {
             .chains
             .values()
             .filter_map(|chain| chain.rungs.last().map(|rung| (chain, rung)))
-            .map(|(chain, rung)| view.switch_distance_m(rung.deviation_mm, chain.radius_m))
+            .map(|(chain, rung)| view.switch_distance_m(rung.deviation_m(), chain.radius_m))
             .fold(f32::INFINITY, f32::min);
         assert!(
             deepest <= diagonal_m,

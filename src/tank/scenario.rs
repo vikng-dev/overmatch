@@ -118,7 +118,7 @@ fn spawn_tank_when_loaded(
     source: TankSimSource,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     certificate: Res<crate::geometry_lod::TankCertificate>,
-    view: Option<Res<crate::geometry_lod::ViewProfile>>,
+    view: Option<Res<crate::view::ViewProfile>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
@@ -297,7 +297,7 @@ fn spawn_lod_showcase(
     presentation: TankPresentation,
     grid: Option<&crate::terrain_grid::HeightGrid>,
     certificate: &crate::geometry_lod::TankCertificate,
-    view: crate::geometry_lod::ViewProfile,
+    view: crate::view::ViewProfile,
 ) {
     // The staging distances are derived at the LIVE profile, which by now has seen the real window:
     // a pair belongs where its switch actually happens in the session it is being judged in.
