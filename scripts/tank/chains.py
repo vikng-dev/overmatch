@@ -55,6 +55,15 @@ class ChainError(SystemExit):
 
 # ── the source primitive as a Blender object ─────────────────────────────────────────────────────
 
+def blender_uv(corner_uv):
+    """Decoded glTF corner UVs in Blender's convention. V runs top-down in glTF and bottom-up in
+    Blender, and the exporter applies `1 - v` on the way out — so the write-in must apply it too,
+    or every re-exported rung ships V-flipped against its L0."""
+    uv = np.asarray(corner_uv, dtype=np.float64).copy()
+    uv[..., 1] = 1.0 - uv[..., 1]
+    return uv
+
+
 def object_from_surface(surface, name):
     """A Blender object holding the decoded primitive, welded back to its authored topology.
 
@@ -87,7 +96,7 @@ def object_from_surface(surface, name):
             f"decode and the Blender mesh are not the same surface",
         )
     layer = mesh.uv_layers.new(name="UVMap")
-    layer.uv.foreach_set("vector", surface.corner_uv.reshape(-1).astype(np.float32))
+    layer.uv.foreach_set("vector", blender_uv(surface.corner_uv).reshape(-1).astype(np.float32))
     mesh.normals_split_custom_set(
         [tuple(row) for row in surface.corner_n.reshape(-1, 3)]
     )
