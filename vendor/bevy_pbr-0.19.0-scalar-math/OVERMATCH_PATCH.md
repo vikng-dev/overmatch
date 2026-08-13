@@ -48,7 +48,7 @@ Upstream fixed this in bevyengine/bevy **#24797** (fixes #24792), merged 2026-07
 (it attaches `RenderLayers` as a component on the extracted light entity and drops
 `ExtractedDirectionalLight::render_layers`); ours is smaller and changes no public API, which is
 what a vendored backport wants. Full decode, minimal repro and the comparison:
-`.agents/docs/upstream/bevy-shadow-view-ignores-light-render-layers.md`.
+`upstream/bevy-shadow-view-ignores-light-render-layers.md`.
 `tests/bevy_shadow_view_render_layers.rs` is the tripwire that fails if a vendor refresh drops it.
 
 Re-evaluate and preferably remove this vendored crate when upgrading Bevy.

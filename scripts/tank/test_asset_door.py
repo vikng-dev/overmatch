@@ -939,27 +939,11 @@ class TrackedPath(unittest.TestCase):
 
 
 class TheSideDoorIsClosed(unittest.TestCase):
-    """`asset_door.py export` was a second public writer of a tracked model.
+    """ADR 0035 gives all three artifacts to one writer, so this door publishes nothing.
 
-    It replaced `<id>.glb` and only that, leaving `<id>.sim.glb` and `<id>.lod.json` describing
-    bytes that were gone — an incoherent trio that `build.py verify` would catch afterwards, which
-    is one refusal too late. ADR 0035 gives all three artifacts to one writer, so the entrance is
-    gone; the chain behind it is not, and `build.py` still drives it through `stage_to`.
+    `export` reaches the chain only through `build.py`'s `stage_to`; without one there is no
+    landing branch to reach, and the door writes no tracked model of its own.
     """
-
-    def test_the_retired_entrance_writes_nothing_and_names_the_successor(self):
-        blend = trio("retired-entrance")
-        directory = os.path.dirname(blend)
-        before = {
-            name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
-        }
-        code, printed = door("export", blend)
-        self.assertEqual(code, 1, printed)
-        self.assertIn("scripts/tank/build.py build", printed)
-        after = {
-            name: digest(os.path.join(directory, name)) for name in sorted(os.listdir(directory))
-        }
-        self.assertEqual(before, after, "the retired entrance wrote something")
 
     def test_the_chain_refuses_to_publish_when_asked_for_no_staging_path(self):
         """The API half of the same law: `derive` has no landing branch left to reach."""

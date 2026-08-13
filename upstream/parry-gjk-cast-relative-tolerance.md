@@ -1,10 +1,13 @@
 # parry3d 0.27: GJK shape-cast stagnation exit returns unrefined lower TOI bound — ~140 mm error vs large colliders
 
-**Target:** github.com/dimforge/parry · parry3d 0.27 · **Severity for us:** HIGH (fixed f4a24c2) · **Status:** FILED 2026-07-11 — issue dimforge/parry#429, PR dimforge/parry#430 (branch fix/shape-cast-stagnation-refine on vikng-dev/parry)
-**Automatic retirement tripwire:** `tests/spherecast_scale.rs` FAILS when parry fixes this (it
-asserts the raw TOI error stays > 10 mm at 500 m) — that failure means: file the workaround for
-removal. (Verified 2026-07-10: against the candidate fix the raw error at 500 m drops to
-0.00024 mm, so the tripwire fires as designed.)
+**Target:** github.com/dimforge/parry · parry3d 0.27 · **Severity for us:** DORMANT — unreachable · **Status:** FILED 2026-07-11 — issue dimforge/parry#429, PR dimforge/parry#430 (branch fix/shape-cast-stagnation-refine on vikng-dev/parry)
+
+**Reachability (2026-08-13):** `src/` holds ZERO shape-cast call sites, so nothing in the game can
+reach this defect. The workaround (`sphere_cast_ground_contact`) was deleted wholesale at 9758d97 as
+phase-B collateral with the raycast-era suspension, not via the tripwire — which therefore never
+fired and is gone with the test that carried it. What remains valid is ADR-0015's ≤10 m collider
+tiling rule: parry3d 0.27.0 still ships the defect, and the FIRST shape-cast consumer inherits it.
+`tests/shape_cast_reachability.rs` is the inverted tripwire that fires at that moment.
 
 ## Suggested title
 
@@ -53,38 +56,30 @@ witness deviation into forward error ≈ r·θ²/2), where 0.27.0 was strictly o
 (b) a stagnation hit whose refined TOI exceeds `max_time_of_impact` now correctly returns
 `None` where 0.27.0 returned a wrongly-short hit.
 
-## Our workaround + removal condition
+## Our workaround (REMOVED)
 
-`sphere_cast_ground_contact` (src/driving.rs, commit f4a24c2): reconstruct distance from the
-witness (`point1 + normal1·r` = ball centre), clamped to `[toi, toi + 0.20 m]` (at 0.27.0 the
-TOI is never long; post-fix parry can overshoot by ≲0.12 mm, far inside the clamp band, so the
-clamp stays valid either way). Conservative fallbacks for penetrating starts and non-finite
-witnesses. Remove when the tripwire test fails against an upgraded parry.
+`sphere_cast_ground_contact` (src/driving/contact.rs, commit f4a24c2) reconstructed distance from
+the witness (`point1 + normal1·r` = ball centre), clamped to `[toi, toi + 0.20 m]`, with
+conservative fallbacks for penetrating starts and non-finite witnesses. The `SPHERE_CAST_TOI_SLACK
+= 0.20` band was itself a measured artefact of this defect, sized from 19,828 live samples so it
+would clip none of them. It went out wholesale at 9758d97 with the raycast-era suspension, taking
+`tests/spherecast_scale.rs` with it — nothing to clean up.
 
-## What fixing this unlocks for us
+The recovery it banked stands on the record: the pre-workaround cast noise fed 10–40 kN/tick of
+force noise through a 551 kN/m spring, a sustained at-rest hull limit cycle (~12 mm heave, ~2.2 kW
+pumped) and a standing amplifier of client/server divergence at contact.
 
-**Clean up.** `sphere_cast_ground_contact` collapses back to `hit.distance` arithmetic: the witness
-reconstruction, the `SPHERE_CAST_TOI_SLACK = 0.20` clamp band (whose 0.20 m width is itself a measured
-artefact of this defect — sized from 19,828 live samples so it would clip none of them), the
-penetrating-start and non-finite-witness fallbacks, and `tests/spherecast_scale.rs` (which exists to
-fail on the fix, and is verified to do so: raw error at 500 m half-extent 139 mm → 0.00024 mm against
-the candidate patch).
+## What fixing this would still unlock
 
-**Optimize.** Marginal in the frame budget (a witness read and a clamp, per wheel per tick). The real
-recovery already happened at f4a24c2 — the pre-workaround cast noise fed 10–40 kN/tick of force noise
-through a 551 kN/m spring, a sustained at-rest hull limit cycle (~12 mm heave, ~2.2 kW pumped) and a
-standing amplifier of client/server divergence at contact. An upstream fix does not re-bank that; it
-banks the deletion.
-
-**Explore — the two things the workaround does NOT cover.**
+**The two things the workaround never covered.**
 
 - **Map authoring is currently constrained by this bug.** ADR-0015 carries a defence-in-depth rule:
   *"prefer tiling large static colliders to ≤10 m extents"*, because cast error scales with the target
   collider's extent (0.25 mm at 5 m half-extent vs 139–172 mm at 500 m) — and it notes the rule is *not*
   applied retroactively: *"the 1000 m slab stands until a map-authoring pass."* A fixed parry retires
   that constraint and lets terrain be authored for the terrain's sake.
-- **Only the sphere probe is immune, and only because we hand-rolled it.** Every *future* shape-cast
-  consumer — track-model contact stations, armor probes, any spatial query against big static geometry
-  — inherits the raw defect and would have to re-derive the same witness reconstruction. That is the
-  standing tax the fix removes: shape casts become trustworthy by default rather than one function at
-  a time.
+- **Every future shape-cast consumer inherits the raw defect.** Track-model contact stations, armor
+  probes, any spatial query against big static geometry would have to re-derive the same witness
+  reconstruction. That is the standing tax the fix removes: shape casts become trustworthy by
+  default rather than one function at a time. `tests/shape_cast_reachability.rs` holds the line at
+  zero consumers until then.

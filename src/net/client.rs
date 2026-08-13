@@ -1987,7 +1987,7 @@ mod tests {
     ///
     /// If you genuinely need adaptive input delay back, the fix is NOT to delete this test: it is to
     /// make lightyear's client stop re-authoring a buffer tick it has already sent (upstream write-up
-    /// in `.agents/scratch/upstream-reports/lightyear-absent-anchor-input-freeze.md`).
+    /// in `upstream/lightyear-absent-anchor-input-freeze.md`).
     #[test]
     fn input_delay_is_constant() {
         let config = shipping_input_delay();

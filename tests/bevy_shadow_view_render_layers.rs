@@ -1,6 +1,6 @@
 //! UPSTREAM TRIPWIRE for the vendored `bevy_pbr` patch that gives every shadow view the LIGHT's
 //! `RenderLayers` mask. Full decode + upstream status:
-//! `.agents/docs/upstream/bevy-shadow-view-ignores-light-render-layers.md`. Upstream fixed this in
+//! `upstream/bevy-shadow-view-ignores-light-render-layers.md`. Upstream fixed this in
 //! bevyengine/bevy #24797 (merged 2026-07-08, milestone 0.19.1) — unreleased, hence the vendor
 //! patch and this guard.
 //!
@@ -118,8 +118,8 @@ fn every_shadow_view_carries_the_lights_render_layers() {
             "a shadow view is being built WITHOUT the light's RenderLayers. `queue_shadows` tests \
              casters against the shadow view's own mask, so a maskless view defaults to layer 0 \
              and drops every caster on any other layer. Re-apply the `// OVERMATCH PATCH:` edits \
-             in {VENDORED_LIGHT_RS} (see .agents/docs/upstream/\
-             bevy-shadow-view-ignores-light-render-layers.md). Offending site:\n{insert}"
+             in {VENDORED_LIGHT_RS} (see \
+             upstream/bevy-shadow-view-ignores-light-render-layers.md). Offending site:\n{insert}"
         );
     }
 }
@@ -179,7 +179,7 @@ fn queue_shadows_still_filters_on_the_view_mask() {
          If bevy restructured or removed that filter, the vendored patch is no longer needed as \
          written: re-derive it against the new source, or — if this is bevy 0.19.1+ carrying \
          bevyengine/bevy #24797 — delete the patch, this test, and the vendor entry's section 2 \
-         (see .agents/docs/upstream/bevy-shadow-view-ignores-light-render-layers.md)."
+         (see upstream/bevy-shadow-view-ignores-light-render-layers.md)."
     );
 }
 

@@ -1,10 +1,7 @@
 """The error-ladder's generation half, as a library. `scripts/tank/chains.py` is the only driver.
 
-NOT AN ENTRY POINT. It was one: a global `config.ASSETS` table, a corpus of sidecar glbs and
-`assets/lod_manifest.json` beside them. ADR 0035 retired all three — the certificate is PER TANK
-and the seam is the glTF PRIMITIVE, so the asset table, the manifest and the `--asset` merge went
-with them. What is left is the machinery that cuts one surface's ladder, imported by the per-tank
-build inside Blender.
+NOT AN ENTRY POINT: this is the machinery that cuts one surface's ladder, imported by the per-tank
+build inside Blender (ADR 0035).
 
 WHAT THIS IS. ADR 0033's generation stage as amended by ADR 0036: one global octave grid of
 deviation targets, a SPARSE subset of it per surface, triangle counts as outputs. Every threshold
@@ -17,13 +14,8 @@ target, PROVEN_PASS when every live bound closes under it, UNDECIDED when the no
 UNDECIDED, an invalid candidate and a budget below the topology floor are all treated as FAIL, so
 they can cost triangles and never honesty.
 
-WHAT THAT GIVES UP, ON THE RECORD. The exhaustive staircase this replaced proved the winner was the
-FEWEST-triangle valid output meeting the rung. ADR 0036 §2 retires that claim deliberately: 85 % of
-a reference run was measurement, the enforcement was the difference between unfinishable and
-minutes, and the 5 % search bracket leaked minimality anyway — the directed search found a CHEAPER
-answer at two rungs of the reference asset. The contract is now "deterministically found,
-certified", and what the player depends on — the certified bound at the switch distance — is
-untouched.
+The contract is "deterministically found, certified", not minimal — ADR 0036 §2 retires the
+minimality claim and records what it cost.
 
 THE ORDER IS SACRED (ADR 0033 §6). Per level: decimate -> cleanup -> export -> decode the written
 glb -> measure everything on those bytes. The search itself measures pre-export candidates, because

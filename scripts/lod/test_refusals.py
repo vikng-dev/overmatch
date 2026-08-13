@@ -8,9 +8,8 @@ GLBs built byte by byte, rather than trusted because they are written down. nump
 which is why this suite runs on every push (the BVH-backed deviation search does need Blender and is
 exercised by the tank build itself).
 
-THE SUITE THAT USED TO SIT BESIDE IT — `test_chain.py` — retired with the global
-`assets/lod_manifest.json` it certified (ADR 0035). What it proved about the LADDER rather than
-about that document lives on here: `ProjectionTests` at the end of this file.
+`ProjectionTests` at the end of this file holds what the ladder's arithmetic owes, independent of
+any one asset (ADR 0035).
 """
 
 import json
@@ -600,8 +599,7 @@ class GateParityTests(unittest.TestCase):
 
         THE CALLERS ARE THE TWO HALVES OF ONE SEARCH: `generate.py`'s pre-filter, which admits a
         candidate before it can cost a verdict, and `scripts/tank/chains.py`'s certification of the
-        decoded shipped bytes. They were `generate.py` and the retired `chain.py` when the corpus
-        was a global manifest.
+        decoded shipped bytes.
 
         WHAT EVADES IT, stated because a heuristic that hides its holes reads as a proof: a key
         assembled at runtime (`GATES["max_" + name]`), a name held in a variable or built by an
@@ -1313,14 +1311,11 @@ class DirectedSearchTests(unittest.TestCase):
 
 
 class ProjectionTests(unittest.TestCase):
-    """The one projection, and the world it is quoted in — carried over from `test_chain.py`.
+    """The one projection, and the world it is quoted in.
 
-    THE REGRESSION THESE EXIST FOR: an exporter comment narrated 223.7 m for a level whose runtime
-    derivation said 335.5 m. Both were "measured"; the comment had frozen a stale deviation and used
-    the small-angle projection besides. Nobody writes a switch distance down now — the runtime
-    derives it from the certificate's deviations and the active view — but the ladder still reads
-    this projection to decide where a chain STOPS (`RIGHT_WALL_M`), so the arithmetic is still load
-    bearing and is still held here.
+    Nobody writes a switch distance down — the runtime derives it from the certificate's deviations
+    and the active view — but the ladder still reads this projection to decide where a chain STOPS
+    (`RIGHT_WALL_M`), so the arithmetic is load bearing and is held here.
     """
 
     #: The reference view the doctrine quotes, spelled out so a `config` that moved is a failure

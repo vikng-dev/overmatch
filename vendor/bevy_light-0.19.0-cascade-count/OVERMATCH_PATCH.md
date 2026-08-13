@@ -14,6 +14,6 @@ backport resizes every thread slot before each view's par_iter, exactly as merge
 
 This patch is what makes the runtime ShadowCascades setting safe. The full mechanism record,
 upstream status, and validation evidence live in
-`.agents/docs/upstream/bevy-cascade-count-stale-local-parallel.md`. Remove this vendored crate when
+`upstream/bevy-cascade-count-stale-local-parallel.md`. Remove this vendored crate when
 upgrading to bevy 0.19.1 or later (a 0.19.0-versioned patch entry against a newer bevy is
 stale-but-harmless: cargo warns "patch not used").

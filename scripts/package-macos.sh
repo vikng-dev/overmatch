@@ -78,13 +78,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 mv "$DIST/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 cp "$ICON" "$APP/Contents/Resources/$BIN_NAME.icns"
-# Runtime assets in Resources/assets (matches asset_root() in net::client). Prune sources, plus the
-# stale pre-restructure asset backups under assets/**/backup/ (~63 MB of superseded glb+ron that
-# stays in git but must not ship).
+# Runtime assets in Resources/assets (matches asset_root() in net::client). Prune sources.
 cp -R assets "$APP/Contents/Resources/assets"
 find "$APP/Contents/Resources/assets" -type f \
   \( -name '*.blend' -o -name '*.blend1' -o -name '.DS_Store' \) -delete
-find "$APP/Contents/Resources/assets" -type d -name backup -prune -exec rm -rf {} +
 
 # Info.plist notes (display research brief §5.6, .agents/docs/design/display/):
 #   LSApplicationCategoryType = games   — how the App Store / Launchpad classify us, and the key

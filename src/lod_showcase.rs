@@ -5,11 +5,9 @@
 //!
 //! `scripts/lod/generate.py` certifies every level with a PROVEN BOUND on its worst-case surface
 //! deviation at the distance it takes over. That bound is the whole guarantee, and there is exactly
-//! one question it cannot answer: whether the swap LOOKS like a swap. The pipeline used to answer
-//! that with a rendered-difference score; ADR 0036 §3 deleted the gate, because it had been
-//! comparing the shipped meshes under fallback textures since the corpus was cut — running, and
-//! testing nothing. So the eye is now the only audit of appearance, and re-arming a rendered gate
-//! has a named trigger: a switch seen to pop, here.
+//! one question it cannot answer: whether the swap LOOKS like a swap. The eye is the only audit of
+//! appearance, and re-arming a rendered gate has a named trigger: a switch seen to pop, here
+//! (ADR 0036 §3).
 //!
 //! Looking is harder than it sounds, which is the actual reason this file exists rather than a note
 //! telling a human to drive around. To see a switch you have to be at its exact distance from a

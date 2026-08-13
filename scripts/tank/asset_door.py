@@ -71,17 +71,6 @@ from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa
 #: certified candidate and is reachable only through `chain(..., stage_to=)` — `build.py`'s call.
 MODES = ("lint", "verify")
 
-#: The refusal the retired entrance answers with. It names the successor rather than the law,
-#: because the caller's next move is a command and not a reading.
-RETIRED_ENTRANCE = (
-    "door  ▸ `asset_door.py export` is retired. A tank is three artifacts and this door writes "
-    "none of them:\n"
-    "        python3 scripts/tank/build.py build <blend>\n"
-    "        The build drives this same chain, then publishes <id>.glb, <id>.sim.glb and "
-    "<id>.lod.json\n"
-    "        as one staged set (ADR 0035). Nothing has been written."
-)
-
 #: The Blender half, run once per invocation.
 SOURCE_PASS = os.path.join(".agents", "blender", "export_tank.py")
 
@@ -621,10 +610,7 @@ def chain(mode: str, blend: str, spec: str, glb: str, root: str, work: str, blen
 
 def parse(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(prog="asset_door.py", allow_abbrev=False)
-    # `export` is accepted and then REFUSED by name (`door`), rather than dropped from `choices`:
-    # argparse would answer "invalid choice", which tells a reader what is not there and not what
-    # replaced it.
-    parser.add_argument("mode", choices=MODES + ("export",))
+    parser.add_argument("mode", choices=MODES)
     parser.add_argument("blend", help="assets/<id>/<id>.blend — the sole model truth")
     parser.add_argument("--spec", help="TEST ONLY: the spec sheet, which otherwise derives from "
                                        "the blend's stem")
@@ -635,15 +621,7 @@ def parse(argv: Optional[List[str]] = None):
 
 def door(mode: str, blend: str, spec: Optional[str] = None, glb: Optional[str] = None,
          stage_to: Optional[str] = None) -> int:
-    """One invocation. Returns the exit code: non-zero exactly when a stage refused.
-
-    `export` WITHOUT `stage_to` is the retired entrance and is refused HERE, before the toolchain
-    preflight and before any Blender launch — so it costs nothing and, more to the point, writes
-    nothing. `build.py` reaches the same chain with a `stage_to` and is unaffected.
-    """
-    if mode == "export" and stage_to is None:
-        print(RETIRED_ENTRANCE, file=sys.stderr, flush=True)
-        return 1
+    """One invocation. Returns the exit code: non-zero exactly when a stage refused."""
     blend = os.path.abspath(blend)
     stem = os.path.splitext(blend)[0]
     spec = os.path.abspath(spec or stem + ".tank.ron")
