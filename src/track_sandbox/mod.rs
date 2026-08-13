@@ -312,6 +312,8 @@ pub fn plugin(app: &mut App) {
     // shoe's chain is resolved for the link view below.
     app.add_plugins((
         crate::geometry_lod::sim_plugin,
+        // The live view the shoe's chain is selected through.
+        crate::view::plugin,
         crate::geometry_lod::view_plugin,
     ));
     app.add_plugins((crate::spec::plugin, crate::bake::plugin))

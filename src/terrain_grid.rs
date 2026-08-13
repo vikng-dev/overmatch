@@ -1818,9 +1818,10 @@ pub(crate) mod tests {
     #[test]
     fn the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band() {
         use crate::camera::ORBIT_FAR;
-        use crate::geometry_lod::{TIGER_ID, ViewProfile, certificate};
+        use crate::geometry_lod::{TIGER_ID, certificate};
         use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
         use crate::track::link_view::shoe_chain_key;
+        use crate::view::{ViewFacts, ViewProfile};
 
         /// How much room the placement must have on either side of the band edge. A placement that
         /// is inside its band by a metre is one heightmap re-author or one orbit tweak from being
@@ -1840,9 +1841,8 @@ pub(crate) mod tests {
             .chains
             .remove(&shoe_chain_key())
             .expect("the shipped certificate names the shoe's chain");
-        let bands = chain.bands(ViewProfile::new(
-            crate::camera::GUNNER_FOV_FALLBACK,
-            2160.0,
+        let bands = chain.bands(ViewProfile::of(
+            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
             1.0,
         ));
         let level_at = |d: f32| {
