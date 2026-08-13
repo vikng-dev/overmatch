@@ -607,6 +607,9 @@ pub fn run() {
             .run_if(in_state(AppState::Playing))
             .run_if(not(is_in_rollback)),
     );
+    // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
+    // clock the own hull moves on is the first thing any capture of this session must state.
+    app.add_systems(Update, log_local_tank_role);
     // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`; KEPT — useful): once per second, log
     // every `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
     // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
@@ -1072,6 +1075,29 @@ fn drop_stranded_input_buffer(
             );
         }
     }
+}
+
+/// Name the replication role the server gave this client's own tank, the first frame that role is
+/// observable. `Predicted` = local physics under input; `Interpolated` = the server stream, RTT/2 +
+/// the interpolation delay behind (the server's `OVERMATCH_UNPREDICTED_DRIVE` lever). Latches on the
+/// first resolved role, so a respawn does not re-log a decision that cannot change mid-session.
+fn log_local_tank_role(
+    tank: Query<(Entity, Has<Predicted>, Has<Interpolated>), (With<GameControlled>, With<NetTank>)>,
+    mut logged: Local<bool>,
+) {
+    if *logged {
+        return;
+    }
+    let Ok((entity, predicted, interpolated)) = tank.single() else {
+        return;
+    };
+    let role = match (predicted, interpolated) {
+        (true, _) => "PREDICTED (local physics under input)",
+        (false, true) => "INTERPOLATED (server stream — unpredicted drive)",
+        (false, false) => return,
+    };
+    *logged = true;
+    info!("client: own tank {entity} drives {role}");
 }
 
 /// Opt-in ownership trace. Only the local tank may carry `Controlled`, `InputMarker`, and `Predicted`.

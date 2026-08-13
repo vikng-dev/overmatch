@@ -607,6 +607,12 @@ fn spawn_pending_tanks(
     }
 }
 
+/// Experiment lever: move the owner out of the prediction set and into the interpolation set, so its
+/// own hull renders and drives from the server stream exactly like an opponent's. Server-side only —
+/// the wire surface is unchanged (both markers are lightyear registrations in every build), so a
+/// stock client connects and simply receives `Interpolated` where it used to receive `Predicted`.
+const UNPREDICTED_DRIVE: &str = "OVERMATCH_UNPREDICTED_DRIVE";
+
 /// Construct an authoritative player tank. Initial join and respawn share this exact ownership and
 /// prediction bundle so reacquisition cannot drift from first spawn.
 fn spawn_player_tank(
@@ -619,7 +625,8 @@ fn spawn_player_tank(
     spawn_rot: Quat,
     combatant: CombatantId,
 ) -> Entity {
-    spawn_complete_tank(
+    let unpredicted = crate::env_flag(UNPREDICTED_DRIVE, false);
+    let root = spawn_complete_tank(
         commands,
         content,
         assets.presentation(),
@@ -645,9 +652,22 @@ fn spawn_player_tank(
             (
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
-                // Owner predicts; every other client interpolates.
-                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+                // Owner predicts; every other client interpolates. Under `UNPREDICTED_DRIVE` the
+                // owner leaves the prediction set and joins the interpolation set instead; both
+                // components stay inserted in the same flush either way, so the default path is
+                // unchanged and only the target sets move.
+                PredictionTarget::to_clients(if unpredicted {
+                    NetworkTarget::None
+                } else {
+                    NetworkTarget::Single(client_id)
+                }),
+                InterpolationTarget::to_clients(if unpredicted {
+                    NetworkTarget::All
+                } else {
+                    NetworkTarget::AllExceptSingle(client_id)
+                }),
+                // The owner marker, and the only one the client's game layer keys on: it rides
+                // `ControlledBy`'s owner-scoped visibility, not the prediction target.
                 ControlledBy {
                     owner: link,
                     lifetime: default(),
@@ -655,7 +675,14 @@ fn spawn_player_tank(
             ),
             (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
-    )
+    );
+    let mode = if unpredicted {
+        "owner INTERPOLATES (unpredicted drive)"
+    } else {
+        "owner predicts"
+    };
+    info!("server: spawned tank {root} for client {client_id} — {mode} [{UNPREDICTED_DRIVE}]");
+    root
 }
 
 /// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps
