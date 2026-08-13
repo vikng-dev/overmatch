@@ -269,21 +269,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # LFS on R2 via `.lfsconfig`. Checkout stays job-level so the local composite resolves;
-      # pull after checkout (checkout `lfs: true` ignores `.lfsconfig` and hits GitHub).
+      # Checkout stays job-level so the local composite resolves. NO `git lfs pull` here, unlike the
+      # client jobs: the server ships a short asset allowlist, and the action hydrates exactly that
+      # allowlist — pulling the repo's ~210 MB of LFS objects to pack ~14 MB of them is the cost the
+      # scoping removes.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           lfs: false
-      - name: Git LFS pull (R2)
-        run: |
-          git lfs install --local
-          git lfs pull
 
-      # The canonical server build + package recipe (toolchain -> deps -> prune -> cache -> build ->
-      # tar). deployed-sha: true bakes a DEPLOYED_SHA marker into the tar, so the tarball on the
-      # droplet and the one attached to the Release both name the commit they were built from.
-      # Leaves overmatch-server.tar.gz in the workspace root.
+      # The canonical server build + package recipe (toolchain -> allowlist -> scoped LFS pull ->
+      # deps -> cache -> build -> tar). deployed-sha: true bakes a DEPLOYED_SHA marker into the tar,
+      # so the tarball on the droplet and the one attached to the Release both name the commit they
+      # were built from. Leaves overmatch-server.tar.gz in the workspace root.
       - uses: ./.github/actions/build-server
         with:
           deployed-sha: 'true'
