@@ -732,7 +732,8 @@ fn build_server(port: u16) -> App {
     });
     super::protocol::plugin(&mut app);
     super::disclosure::install_server(&mut app);
-    app.add_plugins(crate::ballistics::plugin);
+    // The authority's composition: the SIM half alone, exactly as `net::server::run` composes it.
+    app.add_plugins(crate::ballistics::sim_plugin);
     spawn_plate(&mut app);
 
     super::shot_transport::install_server(&mut app);
@@ -801,7 +802,12 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     });
     install_input_buffer_guard(&mut app);
     super::protocol::plugin(&mut app);
-    app.add_plugins(crate::ballistics::plugin);
+    // A CLIENT's composition: both halves. The view half is what dresses a shell with `ShellVisual`,
+    // which is the signature the trail harness below attaches its ribbon on.
+    app.add_plugins((
+        crate::ballistics::sim_plugin,
+        crate::ballistics::view_plugin,
+    ));
     if role == HarnessClient::Observer {
         crate::vfx::mount_trail_loss_harness(&mut app);
     } else {

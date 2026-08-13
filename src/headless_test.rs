@@ -112,7 +112,15 @@ impl std::ops::DerefMut for BootedSim {
 /// `world` selects the ground: `None` the flat slab + authored test course, `Some(grid)` a
 /// synthetic height grid. Either marker is inserted before the first update, so
 /// `terrain_grid::decode_height_grid` sees it and never decodes the shipped map.
-fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
+///
+/// `halves` selects how much of `ballistics` is composed. [`BallisticsHalves::SimOnly`] is the
+/// DEDICATED SERVER's composition and the default: a shell is born bare, with no scene root, no
+/// streak and no `Visibility`. A gate about what a round LOOKS like has to ask for the view half
+/// explicitly, exactly as a client root does.
+fn headless_app_on(
+    world: Option<crate::terrain_grid::HeightGrid>,
+    halves: BallisticsHalves,
+) -> App {
     let mut app = headless_shell();
     // The gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
     // the flat straight-line lanes): keep the heightmap world out even though the PNG ships in
@@ -136,9 +144,21 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
     ))
     .add_observer(assert_tank_state_at_add)
     .add_observer(assert_range_table_at_add);
+    if halves == BallisticsHalves::SimAndView {
+        app.add_plugins(crate::ballistics::view_plugin);
+    }
 
     finish_plugins(&mut app);
     app
+}
+
+/// Which halves of `ballistics` a fixture composes — see [`headless_app_on`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BallisticsHalves {
+    /// The dedicated server's composition: `SimPlugin` and nothing presentational.
+    SimOnly,
+    /// A client root's composition: `SimPlugin` plus `ballistics::view_plugin`.
+    SimAndView,
 }
 
 /// The bare headless host every full-app fixture is built on: `DefaultPlugins` with no wgpu
@@ -253,16 +273,20 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
 /// that lease, and the deadline clock only starts once the lease is in hand (a test queued behind a
 /// sibling must not burn its own boot budget waiting its turn).
 fn booted_sim() -> BootedSim {
-    booted_sim_on(None)
+    booted_sim_on(None, BallisticsHalves::SimOnly)
 }
 
-/// [`booted_sim`] over an explicitly chosen world — see [`headless_app_on`].
-fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
+/// [`booted_sim`] over an explicitly chosen world and ballistics composition — see
+/// [`headless_app_on`].
+fn booted_sim_on(
+    world: Option<crate::terrain_grid::HeightGrid>,
+    halves: BallisticsHalves,
+) -> BootedSim {
     let lease = BOOT_LEASE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let mut app = headless_app_on(world);
+    let mut app = headless_app_on(world, halves);
 
     // Asset IO is genuinely async on wall-clock IO threads (the spec RON + tiger_1.glb), so poll
     // until the spawn gate opens and the app enters Playing. Each not-yet-Playing pass yields 1 ms
@@ -333,7 +357,13 @@ fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
 /// shared scaffolding for the shooting tests, which need the REAL tiger geometry (a synthetic plate
 /// cannot reproduce a muzzle that recoils behind its own mantlet).
 fn booted_sp_app() -> BootedSim {
-    let mut sim = booted_sim();
+    booted_sp_app_with(BallisticsHalves::SimOnly)
+}
+
+/// [`booted_sp_app`] over an explicit ballistics composition — the shooting gates that are about
+/// what a round LOOKS like ask for [`BallisticsHalves::SimAndView`].
+fn booted_sp_app_with(halves: BallisticsHalves) -> BootedSim {
+    let mut sim = booted_sim_on(None, halves);
     start_fixed_clock(&mut sim);
     for _ in 0..30 {
         sim.update();
@@ -505,19 +535,24 @@ fn the_element_law_drives_and_strains_on_a_scripted_drive() {
     );
 }
 
-/// The MG-tracer render gate, exercised on the real spawn path headless. Firing the secondary trigger
-/// must, over a burst:
+/// The MG-tracer render gate, exercised on the real spawn path headless with a CLIENT's ballistics
+/// composition (sim + view — the view half is what dresses a round at all). Firing the secondary
+/// trigger must, over a burst:
 ///   * spawn tracer STREAKS (`TracerStreak`) for the ~1-in-5 tracer rounds, and
 ///   * spawn NO `shell.glb` scene root on ANY MG round. A shell in flight carries `ShellPath`; only a
-///     main-gun-calibre round also gets a `WorldAssetRoot` scene, so `ShellPath + WorldAssetRoot`
-///     over an MG-only burst must stay empty while streaks appear.
+///     main-gun-calibre round is dressed with `ShellVisual` + its `WorldAssetRoot` scene, so
+///     `ShellPath + WorldAssetRoot` over an MG-only burst must stay empty while streaks appear.
+///
+/// The composition is load-bearing: on a server's `SimOnly` half the scene-root assertion would pass
+/// for every calibre and prove nothing. [`a_server_composition_dresses_no_round_at_all`] is the gate
+/// for that side.
 #[test]
 fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
-    use crate::ballistics::{ShellPath, TracerStreak};
+    use crate::ballistics::{ShellPath, ShellVisual, TracerStreak};
     use bevy::world_serialization::WorldAssetRoot;
 
     // A booted, settled rig: the muzzles/weapons must exist for `fire` to find a bore.
-    let mut app = booted_sp_app();
+    let mut app = booted_sp_app_with(BallisticsHalves::SimAndView);
 
     let mut tank_q = app
         .world_mut()
@@ -577,6 +612,136 @@ fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
         !saw_mg_shell_scene,
         "an MG round spawned a shell.glb scene root (WorldAssetRoot) — the very bug this fixes: MG \
          bullets must NOT render as 88 mm shell scenes",
+    );
+
+    // The other half of the same law, on the same rig: the MAIN GUN round IS dressed. Without it the
+    // "no scene root" assertion above could be satisfied by a view plugin that dresses nothing.
+    let mut saw_dressed_shell = false;
+    for tick in 0..30 {
+        {
+            let mut entity = app.world_mut().entity_mut(tank);
+            let mut cmd = entity
+                .get_mut::<TankCommand>()
+                .expect("tank carries a command");
+            cmd.fire_secondary = false;
+            // A single trigger edge; the gun is loaded from the boot settle above.
+            cmd.fire_primary = tick == 0;
+        }
+        app.update();
+
+        let world = app.world_mut();
+        if world
+            .query_filtered::<(), (With<ShellPath>, With<ShellVisual>, With<WorldAssetRoot>)>()
+            .iter(world)
+            .count()
+            > 0
+        {
+            saw_dressed_shell = true;
+            break;
+        }
+    }
+    assert!(
+        saw_dressed_shell,
+        "the 88's round was never dressed — a main-gun shell must get ShellVisual + its shell.glb \
+         scene root from ballistics::view_plugin",
+    );
+}
+
+/// SERVER-COMPOSITION HONESTY — the structural invariant the ballistics sim/view split buys.
+///
+/// `SimPlugin` alone (what `net::server::run` composes) fires an 88 and an MG burst and marches them.
+/// Not one projectile may carry presentation state: no scene root, no streak child, no mesh, no
+/// `Visibility`, and no `ShellVisual` — the classification marker is the view's own interface to
+/// `vfx`, so a server that attached it would be deciding what a round IS to the renderer. The server
+/// does not decide what a round looks like, so it must not be able to.
+#[test]
+fn a_server_composition_dresses_no_round_at_all() {
+    use crate::ballistics::{Projectile, ShellVisual, TracerStreak};
+    use bevy::world_serialization::WorldAssetRoot;
+
+    // SimOnly: the dedicated server's ballistics composition, on the real spawn path.
+    let mut app = booted_sp_app_with(BallisticsHalves::SimOnly);
+
+    let mut tank_q = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let tank = tank_q.single(app.world()).expect("one controlled tank");
+
+    // BOTH calibres have to actually fly, or the gate is vacuous on the branch that matters: the
+    // main gun is the only round that was ever dressed with a scene, the MG the only one with a
+    // streak.
+    let mut saw_main_gun = false;
+    let mut saw_mg = false;
+    let mut dressed = Vec::new();
+    // DERIVED: long enough for the crew to finish the main gun's opening load (the MG cycles from
+    // tick one, the 88 does not) — the loop breaks as soon as both calibres have flown.
+    for _ in 0..200 {
+        if saw_main_gun && saw_mg {
+            break;
+        }
+        {
+            let mut entity = app.world_mut().entity_mut(tank);
+            let mut cmd = entity
+                .get_mut::<TankCommand>()
+                .expect("tank carries a command");
+            // Both triggers held: the 88 fires the moment its gate opens, under a continuous MG burst.
+            cmd.fire_primary = true;
+            cmd.fire_secondary = true;
+        }
+        app.update();
+
+        let world = app.world_mut();
+        for projectile in world.query::<&Projectile>().iter(world) {
+            if projectile.caliber() >= crate::ballistics::TRACER_MAX_CALIBER {
+                saw_main_gun = true;
+            } else {
+                saw_mg = true;
+            }
+        }
+        // Every render component the old shared spawn used to emit, plus the marker the view half
+        // classifies on — all checked on the projectile itself.
+        let world = app.world_mut();
+        for (root, mesh, material, visibility, classified) in world
+            .query_filtered::<(
+                Has<WorldAssetRoot>,
+                Has<Mesh3d>,
+                Has<MeshMaterial3d<StandardMaterial>>,
+                Has<Visibility>,
+                Has<ShellVisual>,
+            ), With<Projectile>>()
+            .iter(world)
+        {
+            for (present, name) in [
+                (root, "WorldAssetRoot"),
+                (mesh, "Mesh3d"),
+                (material, "MeshMaterial3d"),
+                (visibility, "Visibility"),
+                (classified, "ShellVisual"),
+            ] {
+                if present && !dressed.contains(&name) {
+                    dressed.push(name);
+                }
+            }
+        }
+        // The streak is a CHILD, so it is counted on its own rather than on the projectile.
+        let world = app.world_mut();
+        if world.query::<&TracerStreak>().iter(world).count() > 0
+            && !dressed.contains(&"TracerStreak")
+        {
+            dressed.push("TracerStreak");
+        }
+    }
+
+    assert!(
+        saw_main_gun && saw_mg,
+        "the burst never put both calibres in flight (main gun {saw_main_gun}, MG {saw_mg}) — the \
+         gate below would then be vacuously true for the branch that never fired",
+    );
+    assert!(
+        dressed.is_empty(),
+        "a server-composed projectile carried presentation state ({dressed:?}). SimPlugin must not \
+         name a render component: dressing belongs to ballistics::view_plugin, which no server root \
+         mounts",
     );
 }
 
@@ -777,22 +942,19 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         }),
     };
 
-    // Control: omitting `shooter` holds the catch-up shell at the armor candidate.
+    // Control: omitting `shooter` holds the catch-up shell at the armor candidate. `Held` IS the
+    // hidden stop — this fixture is a server's `SimOnly` composition, so nothing here draws at all
+    // and the view's `Visibility::Hidden` is derived from exactly this fact on a client.
     app.world_mut().trigger(fire(None));
     app.update();
-    let mut shells = app.world_mut().query::<(Entity, &Visibility, &ShellPath)>();
-    let control = shells
-        .iter(app.world())
-        .next()
-        .map(|(entity, visibility, _)| (entity, *visibility))
-        .expect("the keyed control shell should survive as an authority-waiting candidate");
-    assert_eq!(
-        control.1,
-        Visibility::Hidden,
-        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet must be held \
-         hidden there — it cannot honestly fly or render a tracer",
+    let mut shells = app
+        .world_mut()
+        .query_filtered::<Entity, (With<ShellPath>, With<crate::ballistics::Held>)>();
+    let control = shells.iter(app.world()).next().expect(
+        "CONTROL: an un-attributed replica shell fired from inside the shooter's mantlet must be \
+             HELD there — it cannot honestly fly or render a tracer",
     );
-    app.world_mut().despawn(control.0);
+    app.world_mut().despawn(control);
 
     // THE FIX — the same shot, naming its shooter. The shooter's own volumes are transparent to it, so
     // the round is spawned and flies.
@@ -2992,7 +3154,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
 
     let mut app = {
         let grid = crate::terrain_grid::tests::shipped_grid();
-        let mut sim = booted_sim_on(Some(grid));
+        let mut sim = booted_sim_on(Some(grid), BallisticsHalves::SimOnly);
         start_fixed_clock(&mut sim);
         // Let both tanks settle onto the terrain before anything is fired at them.
         for _ in 0..30 {

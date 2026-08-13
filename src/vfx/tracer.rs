@@ -96,7 +96,9 @@ mod tests {
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
             16,
         )))
-        .add_plugins(crate::ballistics::plugin)
+        // Both halves: the streak is attached by `ballistics::view`, maintained by the plugin below.
+        .add_plugins(crate::ballistics::sim_plugin)
+        .add_plugins(crate::ballistics::view_plugin)
         .add_plugins(plugin);
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
@@ -292,7 +294,7 @@ mod tests {
 
     /// CLASS GUARD: the two spawn paths must stay compositionally IDENTICAL wherever the view layer is
     /// concerned. Both a locally-fired round and a net observer's cosmetic round are dressed by the one
-    /// `ballistics::on_fire_shell` observer, so every view system's query matches both — and this pins
+    /// `ballistics::view` dressing observer, so every view system's query matches both — and this pins
     /// that, so a component added to one path alone (the failure mode that would silently make a view
     /// system skip remote shells entirely) fails here instead of in a playtest.
     ///

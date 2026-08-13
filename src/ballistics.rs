@@ -56,6 +56,14 @@ pub mod fuzz;
 #[cfg(test)]
 mod goldens;
 
+/// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
+/// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
+/// composes [`sim_plugin`] and therefore opens no view artifact and emits no render component.
+mod view;
+
+pub(crate) use view::ShellVisual;
+pub use view::{TracerStreak, plugin as view_plugin};
+
 pub(crate) use sanctioned::{
     SanctionedBounce, SanctionedBounceInsert, SanctionedShots, SanctionedTerminal,
 };
@@ -501,7 +509,7 @@ pub enum FireShellOrigin {
 /// Invariant: re-age from `PredictedPresent - bounce_tick` when available; `waited` counts only
 /// forward ticks after this client created the hold. See ADR-0021.
 #[derive(Component)]
-struct Held {
+pub(crate) struct Held {
     /// Fixed ticks spent actually waiting for a verdict after this client created the hold.
     waited: u32,
     /// Re-age fallback when [`PredictedPresent`] is unavailable.
@@ -605,6 +613,12 @@ impl Projectile {
     /// sizes an effect off a shell in flight rather than off a landed impact.
     pub(crate) fn caliber(&self) -> f32 {
         self.caliber
+    }
+
+    /// The round's current speed (m/s) — read by view code that scales an effect off a shell in
+    /// flight (the tracer streak's nominal length).
+    pub(crate) fn speed(&self) -> f32 {
+        self.velocity.length()
     }
 
     /// A shell of `caliber` at rest, for view-layer tests that need a projectile ENTITY and none of
@@ -949,40 +963,11 @@ pub(crate) const TRACER_MAX_CALIBER: f32 = 0.02;
 /// authority damage is unaffected.
 pub(crate) const STALE_FIRE_TICKS: u32 = 16;
 
-/// View-only tracer streak child. The view layer clamps it to travel since the latest anchor.
-#[derive(Component)]
-pub struct TracerStreak {
-    pub nominal_len: f32,
-}
-
-impl TracerStreak {
-    /// Child transform for a streak that has travelled `flown` metres from its current anchor.
-    ///
-    /// Invariant: both spawn and view maintenance use this function, so the tail never precedes
-    /// the muzzle or latest ricochet.
-    pub(crate) fn drawn_transform(&self, flown: f32) -> Transform {
-        let len = self.nominal_len.min(flown).max(0.0);
-        Transform {
-            translation: Vec3::Z * (len * 0.5),
-            rotation: Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z),
-            scale: Vec3::new(1.0, len, 1.0),
-        }
-    }
-}
-
-/// Preloaded tracer-streak view assets (mesh + emissive material), built once so a tracer round clones
-/// handles rather than rebuilding them per shot — the streak twin of [`ProjectileAssets`].
-#[derive(Resource)]
-struct TracerAssets {
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-}
-
-/// Preloaded shell scene, cloned per shot rather than loaded each time.
-#[derive(Resource)]
-struct ProjectileAssets {
-    scene: Handle<WorldAsset>,
-}
+/// This round carries a tracer — a fact of the BELT it came out of ([`FireShell::tracer`]), and so a
+/// simulation fact: it says what the round IS, not that anything is drawn. Flight and collision are
+/// identical with or without it; only [`view`] reads it, to decide whether to hang a streak.
+#[derive(Component, Clone, Copy, Default)]
+pub(crate) struct TracerRound;
 
 /// The impact surface class, resolved from ballistic-volume ancestry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1039,7 +1024,10 @@ pub struct MgShortCircuit(pub bool);
 /// Caliber ceiling (m) for [`MgShortCircuit`].
 const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 
-pub fn plugin(app: &mut App) {
+/// The SIMULATION half: the flight, the armor resolution, and the impact seam. It opens no asset,
+/// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
+/// entity, and [`view::plugin`] (client roots only) is what dresses one.
+pub fn sim_plugin(app: &mut App) {
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
         .insert_resource(MgShortCircuit(crate::env_flag(
@@ -1048,7 +1036,6 @@ pub fn plugin(app: &mut App) {
         )))
         .add_observer(on_fire_shell)
         .add_observer(on_impact)
-        .add_systems(Startup, setup_assets)
         // The same march, integrated on whichever clock the mode selects: `Real` on the fixed
         // server step (`Res<Time>` is `Time<Fixed>` here), `Demo` per-frame on virtual time
         // (`Res<Time>` is `Time<Virtual>` here). One reads as the true sim, the other as smooth.
@@ -1066,44 +1053,12 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-fn setup_assets(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // Preload once; firing clones the handle rather than hitting the asset server per shot.
-    commands.insert_resource(ProjectileAssets {
-        scene: asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb")),
-    });
-    // The tracer streak: a thin UNIT capsule authored along its local +Y. The per-shot child
-    // transform (`on_fire_shell`) rotates that axis onto the shell's local −Z (its travel axis — the
-    // projectile `Transform` is kept `look_to(velocity)` by `integrate_projectiles`) and scales the
-    // Scale the capsule in the per-shot child transform.
-    let mesh = meshes.add(Capsule3d::new(0.018, 1.0));
-    // The EMISSIVE IS THE WHOLE VISUAL: black base + zero reflectance kill every lit contribution,
-    // so the streak renders exactly its emissive — which rides far above 1.0 in linear space, where
-    // the HDR camera's `Bloom` (camera.rs) halos it and the tonemapper rolls the over-bright core to
-    // white-hot for free. Do NOT set `unlit: true` here: StandardMaterial's unlit path outputs
-    // `base_color` alone and IGNORES `emissive`, which rendered the old streak as a flat sRGB
-    // "square sausage" that bloom never caught. Warm orange; magnitude tunes against bloom intensity.
-    let material = materials.add(StandardMaterial {
-        base_color: Color::BLACK,
-        reflectance: 0.0,
-        emissive: LinearRgba::rgb(30.0, 12.0, 3.0),
-        ..default()
-    });
-    commands.insert_resource(TracerAssets { mesh, material });
-}
-
 /// Spawn a shell from `FireShell`, using fixed-tick catch-up when requested.
 ///
 /// Invariant: each skipped chord is checked. Terrain may end locally; a keyed replica armor contact
-/// becomes a hidden hold until an authority outcome arrives. Replica ballistics never decides armor.
+/// becomes a [`Held`] stop until an authority outcome arrives. Replica ballistics never decides armor.
 fn on_fire_shell(
     fire: On<FireShell>,
-    assets: Res<ProjectileAssets>,
-    tracer_assets: Res<TracerAssets>,
     // The FIXED timestep, NOT `Res<Time>`: this observer can fire from `Update` (the net client
     // re-raises `FireShell` at render rate), where `Res<Time>` is `Time<Virtual>` (a render-frame dt).
     // The catch-up counts fixed SERVER ticks, so it must step the fixed timestep the live march also
@@ -1278,13 +1233,9 @@ fn on_fire_shell(
     let travel = Dir3::new(velocity).unwrap_or(fire.direction);
     let speed = velocity.length();
     // The sim shell is IDENTICAL for every round — it flies and raycasts the same whether or not it is
-    // visible (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
-    // rejected). Only the ATTACHED VISUAL differs, gated below at the RENDER layer.
-    let visibility = if catch_up_hold.is_some() {
-        Visibility::Hidden
-    } else {
-        Visibility::default()
-    };
+    // drawn (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
+    // rejected). What the round IS rides along as [`TracerRound`]; whether anything is DRAWN for it is
+    // decided by `ballistics::view`, which a server never mounts.
     let shell_base = (
         Projectile {
             velocity,
@@ -1312,27 +1263,38 @@ fn on_fire_shell(
             speed,
             capability: capability(fire.mass, speed),
         },
-        // Root visibility so an attached streak child inherits it (harmless on the shell-scene path).
-        visibility,
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
 
-    // Every sim-affecting component is in this ONE spawn transaction. Bevy 0.19 bundles have a
-    // 15-element tuple limit, so use explicit branches rather than a late `.insert`: an `Option<T>`
-    // is not a Bundle, and inserting `Shot`/`ShotSource` after `Projectile` lets lifecycle
-    // observers see a logically incomplete shell.
-    let mut shell = match (fire.shot, fire.shooter, catch_up_hold) {
+    // Every component the shell is born with is in this ONE spawn transaction — `view`'s dressing
+    // observer reads the finished round (Bevy 0.19 writes the whole bundle before any `Add` observer
+    // runs), so a late `.insert` here would hand it an incomplete shell. `Option<T>` is not a Bundle,
+    // hence the explicit branches; [`spawn_shell`] folds the tracer fact in so they do not double.
+    let tracer = fire.tracer;
+    match (fire.shot, fire.shooter, catch_up_hold) {
         (Some(shot), Some(source), Some(held)) => {
-            commands.spawn((shell_base, Shot(shot), source, held))
+            spawn_shell(
+                &mut commands,
+                (shell_base, Shot(shot), source, held),
+                tracer,
+            );
         }
-        (Some(shot), Some(source), None) => commands.spawn((shell_base, Shot(shot), source)),
-        (Some(shot), None, Some(held)) => commands.spawn((shell_base, Shot(shot), held)),
-        (Some(shot), None, None) => commands.spawn((shell_base, Shot(shot))),
-        (None, Some(source), Some(held)) => commands.spawn((shell_base, source, held)),
-        (None, Some(source), None) => commands.spawn((shell_base, source)),
-        (None, None, Some(held)) => commands.spawn((shell_base, held)),
-        (None, None, None) => commands.spawn(shell_base),
-    };
+        (Some(shot), Some(source), None) => {
+            spawn_shell(&mut commands, (shell_base, Shot(shot), source), tracer);
+        }
+        (Some(shot), None, Some(held)) => {
+            spawn_shell(&mut commands, (shell_base, Shot(shot), held), tracer);
+        }
+        (Some(shot), None, None) => {
+            spawn_shell(&mut commands, (shell_base, Shot(shot)), tracer);
+        }
+        (None, Some(source), Some(held)) => {
+            spawn_shell(&mut commands, (shell_base, source, held), tracer);
+        }
+        (None, Some(source), None) => spawn_shell(&mut commands, (shell_base, source), tracer),
+        (None, None, Some(held)) => spawn_shell(&mut commands, (shell_base, held), tracer),
+        (None, None, None) => spawn_shell(&mut commands, shell_base, tracer),
+    }
 
     // Lifecycle trace attribution is explicit: a received `FireEvent` can legitimately reconstruct
     // at the same tick (`catch_up_ticks == 0`), so timing cannot distinguish it from local fire.
@@ -1350,28 +1312,17 @@ fn on_fire_shell(
             || json!({ "src": src, "cu": fire.catch_up_ticks }),
         );
     }
+}
 
-    // Visual policy: main-gun scene, MG tracer streak, or invisible non-tracer MG round.
-    if fire.caliber >= TRACER_MAX_CALIBER {
-        shell.insert(WorldAssetRoot(assets.scene.clone()));
-    } else if fire.tracer {
-        // Scale with travel speed, with a floor for slow rounds.
-        let streak = TracerStreak {
-            nominal_len: (speed * 0.018).max(2.0),
-        };
-        // Seed clamped: an observer may be born after the per-frame maintainer has run.
-        let flown = position.distance(fire.origin);
-        let transform = streak.drawn_transform(flown);
-        shell.with_child((
-            Mesh3d(tracer_assets.mesh.clone()),
-            MeshMaterial3d(tracer_assets.material.clone()),
-            transform,
-            // A light streak neither casts nor receives shadow — without this the sun dragged a
-            // long capsule shadow across the terrain under every tracer. World geometry otherwise:
-            // it is a child of a SHELL, never of a tank, so it is drawn in every view.
-            crate::render_policy::VisualScope::WORLD_EFFECT,
-            streak,
-        ));
+/// Spawn one complete shell, with [`TracerRound`] folded into the SAME bundle when the belt says the
+/// round carries a tracer. Generic over the caller's branch so the eight identity/hold arms above do
+/// not become sixteen — and so the tracer fact is born with the shell rather than inserted after it,
+/// which is what lets `view`'s `Add` observer read a finished round.
+fn spawn_shell(commands: &mut Commands, shell: impl Bundle, tracer: bool) {
+    if tracer {
+        commands.spawn((shell, TracerRound));
+    } else {
+        commands.spawn(shell);
     }
 }
 
@@ -1816,11 +1767,9 @@ fn resolve_held_shell(
         }
 
         resume_from_catch_up(shell, &caught_up);
-        // Un-hide (the hold's invisible-stop) and resume marching next tick.
-        commands
-            .entity(entity)
-            .remove::<Held>()
-            .insert(Visibility::Inherited);
+        // Release the hold and resume marching next tick. `Held` is the whole fact — the view's
+        // `Remove` adapter un-hides a dressed shell off it.
+        commands.entity(entity).remove::<Held>();
         return;
     }
     // Consume a terminal only after every preceding bounce; re-anchor at server truth.
@@ -2557,15 +2506,13 @@ fn resolve_replica_armor_contact(
         return ReplicaArmorContact::Stopped;
     }
     if let Some(shot) = shot {
-        // Hold a keyed shell hidden until the authority outcome or expiry.
-        commands.entity(entity).insert((
-            Held {
-                waited: 0,
-                age: 0,
-                normal: hit_normal,
-            },
-            Visibility::Hidden,
-        ));
+        // Hold a keyed shell until the authority outcome or expiry. The stop is invisible where
+        // anything is drawn at all: the view's `Add` adapter hides a dressed shell off this.
+        commands.entity(entity).insert(Held {
+            waited: 0,
+            age: 0,
+            normal: hit_normal,
+        });
         // The corresponding `hold` row closes this trace interval.
         crate::shot_trace::record(
             shot_trace,
@@ -2849,7 +2796,22 @@ mod march_tests {
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
     /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
     /// so the spatial-query pipeline includes the plate before any shell is marched.
+    ///
+    /// SIM ONLY — the server's composition. A shell here is born bare, which is what almost every
+    /// gate in this module wants; the ones that assert on what a round is DRAWN as use
+    /// [`view_world_with_plate`] instead.
     fn world_with_plate(size: Vec3, at: Vec3) -> App {
+        plate_world(size, at, false)
+    }
+
+    /// [`world_with_plate`] plus the PRESENTATION half — a CLIENT's composition, the way
+    /// `ClientPlugin` mounts the two. The fixture for the hold-visibility law: `Held` is the sim
+    /// fact, and only with [`view::plugin`] mounted does anything derive a `Visibility` from it.
+    fn view_world_with_plate(size: Vec3, at: Vec3) -> App {
+        plate_world(size, at, true)
+    }
+
+    fn plate_world(size: Vec3, at: Vec3, view: bool) -> App {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
@@ -2870,8 +2832,16 @@ mod march_tests {
         // clock; here `Res<Time>` is the virtual clock the manual duration steps).
         .add_systems(Update, integrate_projectiles);
 
+        if view {
+            // The asset stores `view::setup_assets` fills; the plate world only needed `Mesh`.
+            app.init_asset::<StandardMaterial>()
+                .init_asset::<WorldAsset>()
+                .add_plugins(view::plugin);
+        }
+
         // Drive plugin finish/cleanup by hand (a bare `update()` loop skips it) — Avian registers its
         // diagnostics resources in `Plugin::finish`, and the spatial-query systems require them.
+        // Every plugin must be mounted BEFORE this: `add_plugins` panics once an App is finished.
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -3427,13 +3397,6 @@ mod march_tests {
 
     /// Raise an unkeyed catch-up shell and return its fallback impacts.
     fn fire_shell_catch_up(app: &mut App, catch_up_ticks: u32) -> Vec<Captured> {
-        app.insert_resource(ProjectileAssets {
-            scene: Handle::default(),
-        });
-        app.insert_resource(TracerAssets {
-            mesh: Handle::default(),
-            material: Handle::default(),
-        });
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
             origin: Vec3::new(0.0, 2.0, 2.0),
@@ -3467,13 +3430,6 @@ mod march_tests {
         }
 
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-        app.insert_resource(ProjectileAssets {
-            scene: Handle::default(),
-        });
-        app.insert_resource(TracerAssets {
-            mesh: Handle::default(),
-            material: Handle::default(),
-        });
         app.init_resource::<SpawnedShot>()
             .add_observer(on_fire_shell)
             .add_observer(capture);
@@ -3554,13 +3510,6 @@ mod march_tests {
         app.insert_resource(crate::ClientReplica);
         app.init_resource::<SanctionedShots>();
         app.insert_resource(crate::PredictedPresent(120));
-        app.insert_resource(ProjectileAssets {
-            scene: Handle::default(),
-        });
-        app.insert_resource(TracerAssets {
-            mesh: Handle::default(),
-            material: Handle::default(),
-        });
         app.add_observer(on_fire_shell);
 
         let shot = a_shot();
@@ -3587,11 +3536,12 @@ mod march_tests {
             .world_mut()
             .query_filtered::<Entity, (With<Projectile>, With<Shot>, With<Held>)>()
             .single(app.world())
-            .expect("the armor catch-up keeps one hidden, keyed shell waiting for authority");
-        assert_eq!(
-            app.world().get::<Visibility>(shell),
-            Some(&Visibility::Hidden),
-            "the candidate shell is invisible while it awaits authority"
+            .expect("the armor catch-up keeps one held, keyed shell waiting for authority");
+        // `Held` IS the invisible stop — the view derives `Visibility::Hidden` from it, and only
+        // where something is drawn at all (`ballistics::view`, which this sim fixture never mounts).
+        assert!(
+            app.world().get::<Held>(shell).is_some(),
+            "the candidate shell stops and waits for authority instead of resolving locally"
         );
 
         // The shot was already old when its fire event arrived, but that age must not consume the
@@ -3620,14 +3570,10 @@ mod march_tests {
         );
         app.update();
 
+        // The hold is released, which is also what un-hides the round wherever it is drawn.
         assert!(
             app.world().get::<Held>(shell).is_none(),
-            "the keyframe releases the held catch-up shell"
-        );
-        assert_eq!(
-            app.world().get::<Visibility>(shell),
-            Some(&Visibility::Inherited),
-            "the sanctioned keyframe makes the continued shell visible again"
+            "the sanctioned keyframe releases the held catch-up shell and it flies on"
         );
         let marks = app
             .world()
@@ -3657,6 +3603,141 @@ mod march_tests {
                 .iter()
                 .any(|p| (*p - bounce_origin).dot(bounce_direction) > 1.0),
             "ShellPath contains travel strictly after the bounce for the remote trail"
+        );
+    }
+
+    /// THE HOLD-VISIBILITY LAW, on a client's composition: `Held` is the sim fact, and `Visibility`
+    /// is derived from it by `ballistics::view` alone. This is the CATCH-UP half — a shell born
+    /// holding, from the same spawn bundle.
+    ///
+    /// The two are separate tests because the two hides reach the round by different routes:
+    /// dressing reads `Has<Held>` on a round that is ALREADY holding when it is born, while
+    /// [`a_mid_flight_hold_hides_the_drawn_round`] goes through the `Add` adapter on a round that
+    /// was drawn visible first. Removing either one leaves a shell stuck on the plate or invisible
+    /// for the rest of its flight, and no assertion on `Held` alone can tell.
+    #[test]
+    fn a_shell_born_holding_is_hidden_from_its_first_frame() {
+        let mut app = view_world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+        app.insert_resource(crate::ClientReplica);
+        app.init_resource::<SanctionedShots>();
+        app.insert_resource(crate::PredictedPresent(120));
+        app.add_observer(on_fire_shell);
+
+        let shot = a_shot();
+        app.world_mut().trigger(FireShell {
+            origin: Vec3::new(0.0, 2.0, 2.0),
+            direction: Dir3::NEG_Z,
+            speed: 800.0,
+            caliber: 0.088,
+            mass: 10.2,
+            mechanism: crate::spec::FireMechanism::Single,
+            shooter: None,
+            tracer: true,
+            shot_origin: FireShellOrigin::Reconstructed,
+            catch_up_ticks: 20,
+            shot: Some(shot),
+        });
+        // FLUSH, not update: the spawn, its `Add` observers and their commands all land in this one
+        // flush, so this asserts the round's FIRST frame — it is never drawn on the plate, not even
+        // for the frame between being born and the first hide.
+        app.world_mut().flush();
+
+        let shell = app
+            .world_mut()
+            .query_filtered::<Entity, (With<Projectile>, With<Held>)>()
+            .single(app.world())
+            .expect("the armor catch-up keeps one held, keyed shell waiting for authority");
+        assert!(
+            app.world().get::<ShellVisual>(shell).is_some(),
+            "an 88 is dressed even while it holds — otherwise this test proves nothing about \
+             visibility",
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Hidden),
+            "a shell BORN holding must be hidden from its first frame — a visible one is a round \
+             frozen on the plate while the client waits for the authority",
+        );
+
+        // The authority's keyframe releases the hold, and the same law shows the round again.
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: Vec3::new(4.0, 2.0, 0.03),
+                direction: Vec3::Z,
+                speed: 480.0,
+                bounce_tick: 101,
+                sequence: 0,
+                victim: None,
+            },
+        );
+        app.update();
+
+        assert!(
+            app.world().get::<Held>(shell).is_none(),
+            "the keyframe releases the hold",
+        );
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "releasing the hold must show the round again — a shell that stays hidden flies the \
+             rest of its trajectory invisibly",
+        );
+    }
+
+    /// THE HOLD-VISIBILITY LAW, mid-flight half: a round drawn visible reaches armor on a replica,
+    /// holds, and must go hidden — then show again on the authority's re-seed. See
+    /// [`a_shell_born_holding_is_hidden_from_its_first_frame`] for why the two are split.
+    #[test]
+    fn a_mid_flight_hold_hides_the_drawn_round() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+
+        let mut app = view_world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        app.insert_resource(crate::ClientReplica);
+        app.insert_resource(SanctionedShots::default()); // keyframe not yet arrived
+        let shell = spawn_oblique_shell(&mut app, shot);
+        app.world_mut().flush();
+
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "a round with no hold is drawn — the mid-flight hide below has to change something",
+        );
+
+        let mut froze = false;
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                froze = true;
+                break;
+            }
+        }
+        assert!(froze, "the keyed shell holds at armor contact");
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Hidden),
+            "the hold is an INVISIBLE stop — no frozen round hanging on the plate",
+        );
+
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                bounce_tick: 0,
+                sequence: 0,
+                victim: None,
+            },
+        );
+        app.update();
+
+        assert!(app.world().get::<Held>(shell).is_none(), "hold cleared");
+        assert_eq!(
+            app.world().get::<Visibility>(shell),
+            Some(&Visibility::Inherited),
+            "the re-seeded shell is shown again",
         );
     }
 
@@ -4278,14 +4359,11 @@ mod march_tests {
                 break;
             }
         }
+        // `Held` is the whole stop, and the whole reason the round goes invisible where it is drawn:
+        // no frozen shell hanging on the plate. The visibility itself is `ballistics::view`'s.
         assert!(
             froze,
             "the own shell holds at armor contact like any Shot-carrying shell"
-        );
-        assert_eq!(
-            app.world().get::<Visibility>(shell),
-            Some(&Visibility::Hidden),
-            "the hold is an INVISIBLE stop — no frozen round hanging on the plate",
         );
         assert!(
             app.world().resource::<ImpactLog>().0.is_empty(),
@@ -4309,12 +4387,8 @@ mod march_tests {
         );
         app.update();
 
+        // Hold cleared — which is also what shows the re-seeded round again, in the view.
         assert!(app.world().get::<Held>(shell).is_none(), "hold cleared");
-        assert_eq!(
-            app.world().get::<Visibility>(shell),
-            Some(&Visibility::Inherited),
-            "the re-seeded shell is shown again",
-        );
         let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
         assert_eq!(
             marks.ricochets.len(),
