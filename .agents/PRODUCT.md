@@ -6,9 +6,9 @@ The single top-level authority on what this game is, where it stands, and what i
 
 Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, sound, sky — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
 
-In flight: the rebuilt Tiger asset + 5-level LOD ladder + watertight ray kernel (one PR, in adversarial review); pipeline generalization per ADR-0034; level design (external lane, below). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings.
+In flight: level design (external lane, below). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings, the rebuilt Tiger asset, and the one-command tank build — `scripts/tank/build.py` cuts a per-tank trio (view glb, sim glb, LOD certificate) and the server runs on the sim bytes (ADR-0035/0036, shipped v0.3.1).
 
-Next: land the asset PR; coincident-shell refinement (unconditional fuzzer zero); Houdini map-pipeline direction session; building-destruction implementation research.
+Next: coincident-shell refinement (unconditional fuzzer zero); Houdini map-pipeline direction session; building-destruction implementation research.
 
 ## Values
 

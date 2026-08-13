@@ -23,7 +23,7 @@ mod fixture;
 mod report;
 
 use report::sorted;
-pub use report::{Check, Finding, Severity, Stage, Subject, SubjectKind, has_error, render};
+pub use report::{Check, Finding, Severity, Stage, Subject, has_error, render};
 
 /// The L2 consumer contract, one static row per law. Severity is compiled in beside the id: every
 /// row is an error, because every row is a refusal to build the sim from this asset.

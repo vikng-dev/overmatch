@@ -28,10 +28,7 @@ mod bake;
 /// The consumer contract, and the one report shape it answers in. `bin/asset_verify` is a thin
 /// adapter over [`verify_asset`]; the runtime bake calls the same implementation at startup, so a
 /// law cannot hold at one door and not the other.
-pub use bake::{
-    Check, Finding, Severity, Stage, Subject, SubjectKind, canon_lists, has_error, render,
-    verify_asset,
-};
+pub use bake::{Check, Finding, canon_lists, has_error, render, verify_asset};
 mod ballistics;
 /// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate
 /// itself also rides `cargo test` at CI scale — see `ballistics::fuzz`.
@@ -160,14 +157,16 @@ mod substances;
 mod tank;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.
-pub mod terrain_grid;
+pub(crate) mod terrain_grid;
 /// The terrain render LOD ladder: RTIN/Martini error-bounded levels per render tile, generated at
 /// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
 /// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
 mod terrain_lod;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
-/// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
+/// investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
+/// net-specific rows exist only where the MP client/server plugin registers them, and the net
+/// extras read their resources through `Option`, so they are absent in single-player.
 mod trace;
 /// The track model's pure core (route/oracle/wrap math) — consumed by the sandbox lab and, in
 /// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.

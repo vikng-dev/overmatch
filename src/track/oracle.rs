@@ -336,32 +336,6 @@ impl BlockField {
             }
         }
     }
-
-    /// Signed distance (m) from `p` to the terrain surface: negative inside. Union = min over
-    /// blocks; full fold — a correct GLOBAL nearest distance can't be bucket-pruned.
-    /// Diagnostic/authoring surface with no live caller: every consumer wants the directional
-    /// first hit, so the hot path is [`TerrainOracle::depth_along`].
-    pub fn sdf(&self, p: Vec3) -> f32 {
-        let blocks = self
-            .blocks
-            .iter()
-            .map(|b| block_sdf(p, b))
-            .fold(f32::INFINITY, f32::min);
-        match &self.height {
-            // Vertical distance to the height surface: exact on flat ground, a conservative
-            // bound on slopes — adequate for this fn's diagnostic role (hot paths ray-cast via
-            // `depth_along`).
-            Some(grid) => blocks.min(p.y - grid.height_at(p.x, p.z)),
-            None => blocks,
-        }
-    }
-
-    /// Signed EUCLIDEAN penetration of `p` (nearest-surface distance, capped at `reach`):
-    /// positive inside. Diagnostic use — Euclidean depth under a raised block plateaus at the
-    /// block's side-face distance, which is why the physics reads `depth_along`.
-    pub fn signed_depth(&self, p: Vec3, reach: f32) -> f32 {
-        (-self.sdf(p)).min(reach)
-    }
 }
 
 impl TerrainOracle for BlockField {

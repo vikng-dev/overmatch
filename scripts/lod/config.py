@@ -249,20 +249,17 @@ NORMAL_DIAGNOSTIC_SAMPLES = 20_000
 #: schedule and decides the bytes; and double generation inside ONE process cannot see either kind
 #: of difference, which is precisely the gap it looks like it closes.
 #:
-#: THE VALUES ARE `scripts/toolchain.py`'S — this lane names them, it does not declare them. Two
-#: copies of a pin is two pins, and the equality between them was held by a test whose only job was
-#: to notice them drifting; a reference cannot drift, so that test is gone.
+#: THE VALUES ARE `scripts/toolchain.py`'S — this lane names them, it does not declare them.
 EXPECTED_BLENDER = toolchain.BLENDER_VERSION
 EXPECTED_BLENDER_BUILD = toolchain.BLENDER_BUILD
 EXPECTED_GLTF_EXPORTER = toolchain.GLTF_EXPORTER_VERSION
 BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
-#: WHAT HASHES THESE SOURCES NOW: `scripts/tank/build.py`. Its `SEARCH_SOURCES` names
+#: WHAT HASHES THESE SOURCES: `scripts/tank/build.py`. Its `SEARCH_SOURCES` names
 #: `../lod/config.py`, `../lod/measure.py` and `../lod/generate.py` — this lane's whole production
 #: half — and keys the per-mesh chain cache on their digest; `PIPELINE_SOURCES` folds the same
-#: digest into every certificate's `blend_digest`. So the rule "a corpus cut by code that is no
-#: longer here is stale" is enforced from there rather than restated here, and the second copy this
-#: file used to keep (`GENERATOR_SOURCES`, hashed into the retired global manifest) is gone.
+#: digest into every certificate's `blend_digest`. So "a corpus cut by code that is no longer here
+#: is stale" is enforced from there rather than restated here.
 
 
 # ── the search's budget ──────────────────────────────────────────────────────────────────────────

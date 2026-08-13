@@ -1,6 +1,6 @@
 //! UPSTREAM TRIPWIRE for the bevy_image KTX2/UASTC fallback length panic that the
 //! `CompressedImageFormatSupport` insertion in `src/headless_test.rs` works around. Full decode +
-//! suggested upstream fix: `.agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
+//! suggested upstream fix: `upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
 //!
 //! The mechanism being pinned, in bevy_image 0.19 (`src/ktx2.rs`, `ktx2_buffer_to_image`,
 //! `TranscodeFormat::Uastc` arm): the length of the SOURCE slice handed to
@@ -21,8 +21,7 @@
 //! is INVERTED on purpose: it passes while upstream is broken, so its failure is the retirement
 //! signal, not a regression. On that day: delete the `CompressedImageFormatSupport` insertion in
 //! `src/headless_test.rs`; delete this test file and `tests/fixtures/uastc_16x16_mipped.ktx2`; and
-//! move `.agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md` to DO-NOT-FILE, citing
-//! the fixing PR.
+//! move `upstream/bevy-ktx2-uastc-fallback-length-panic.md` to DO-NOT-FILE, citing the fixing PR.
 //!
 //! The panic is raised on this thread inside `Image::from_buffer`, so `catch_unwind` observes it
 //! directly. No panic hook is installed: a `thread ... panicked at ... range end index` line in
@@ -64,7 +63,7 @@ fn fallback_transcode_still_panics() {
              — upstream fixed the ktx2 fallback slice length. Remove the \
              CompressedImageFormatSupport insertion in src/headless_test.rs, delete this test and \
              tests/fixtures/uastc_16x16_mipped.ktx2, and update \
-             .agents/docs/upstream/bevy-ktx2-uastc-fallback-length-panic.md (see module header)."
+             upstream/bevy-ktx2-uastc-fallback-length-panic.md (see module header)."
         )
     });
 

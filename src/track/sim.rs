@@ -297,20 +297,6 @@ impl TrackGear {
         self.params.inertia
     }
 
-    /// The measured half-tread `b` (m) — read-only, for instrumentation that converts a belt
-    /// difference into the kinematic yaw rate it implies.
-    #[cfg(test)]
-    pub(crate) fn half_tread(&self) -> f32 {
-        self.plane_x
-    }
-
-    /// The assembled force law parameters — read-only, so instrumentation can recompute the
-    /// transmission scheduler's own reserve/landing inputs through the production helpers.
-    #[cfg(test)]
-    pub(crate) fn force_params(&self) -> &ForceParams {
-        &self.params
-    }
-
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
     /// road wheel may drop. `0.0` when the profile is empty. The track view spans its cosmetic
     /// wheels this far below rest so a fully-drooped wheel's drawn belt wrap stays feasible at the

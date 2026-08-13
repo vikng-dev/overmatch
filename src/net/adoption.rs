@@ -17,7 +17,7 @@
 //!
 //! # Why this cannot ride the registered comparator
 //!
-//! `.agents/docs/upstream/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`
+//! `upstream/lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md`
 //! documents it in full. At the client lead our shipping sync configuration actually produces (0,
 //! and −1 under the sync deadband) lightyear never dispatches a registered comparator for an entity
 //! the server explicitly confirms: the receive-time check requires `confirmed_tick < current_tick`,

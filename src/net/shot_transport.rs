@@ -63,9 +63,6 @@ pub(crate) struct ShotTransportMetrics {
     pub visual_fresh_budget_refusal_attempts: u64,
     pub visual_repair_budget_refusal_attempts: u64,
     pub visual_budget_deferred_producers: u64,
-    pub visual_send_accepted_batches: u64,
-    pub visual_send_accepted_wire_upper_bound_bytes: u64,
-    pub max_visual_queue: usize,
     pub max_batch_wire_bytes: usize,
     pub reliable_public_enqueued: u64,
     pub reliable_public_send_accepted_facts: u64,
@@ -74,8 +71,6 @@ pub(crate) struct ShotTransportMetrics {
     pub max_reliable_outcome_sent_unacked_messages: u64,
     /// Greatest first-send age among those outcome messages, in authority ticks.
     pub oldest_reliable_outcome_sent_unacked_ticks: u32,
-    pub private_damage_enqueued: u64,
-    pub private_damage_send_accepted_facts: u64,
     /// Sum across connected links of reliable damage messages sent but not yet acknowledged.
     pub reliable_damage_sent_unacked_messages: u64,
     pub max_reliable_damage_sent_unacked_messages: u64,
@@ -85,7 +80,6 @@ pub(crate) struct ShotTransportMetrics {
     pub private_damage_no_recipient_facts: u64,
     pub send_call_errors: u64,
     pub send_call_error_facts: u64,
-    pub route_conflicts: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -191,7 +185,6 @@ impl VisualQueue {
             last_sent: None,
         });
         metrics.visual_enqueued += 1;
-        metrics.max_visual_queue = metrics.max_visual_queue.max(self.len());
     }
 
     fn len(&self) -> usize {
@@ -450,7 +443,6 @@ fn queue_fire(
         .insert(shot, ShotRoute { owner, class })
         .is_some()
     {
-        metrics.route_conflicts += 1;
         warn!("server: duplicate ShotId route replaced: {shot:?}");
     }
 
@@ -562,7 +554,6 @@ fn queue_damage(
     damage: On<ShellDamage>,
     timeline: Res<LocalTimeline>,
     mut transport: ResMut<ShotTransport>,
-    mut metrics: ResMut<ShotTransportMetrics>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     crate::shot_trace::record(
@@ -587,7 +578,6 @@ fn queue_damage(
             damage_tick: timeline.tick(),
         },
     });
-    metrics.private_damage_enqueued += 1;
 }
 
 fn forget_route_on_projectile_removal(
@@ -752,7 +742,6 @@ fn flush_shot_transport(
             error!("server: private damage fact could not enter transport: {err}");
             continue;
         }
-        metrics.private_damage_send_accepted_facts += 1;
         record_send(
             &mut shot_trace,
             now,
@@ -785,8 +774,6 @@ fn flush_shot_transport(
         visual_batches_send_accepted += 1;
         visual_wire_bytes_send_accepted += bytes as u64;
         metrics.visual_send_accepted_facts += fact_count;
-        metrics.visual_send_accepted_batches += 1;
-        metrics.visual_send_accepted_wire_upper_bound_bytes += bytes as u64;
         for fact in &batch.facts {
             record_send(
                 &mut shot_trace,

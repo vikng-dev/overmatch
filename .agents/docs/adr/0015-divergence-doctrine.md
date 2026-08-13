@@ -15,6 +15,13 @@ none conjectured.
 > seams. The two-layer doctrine and the divergence/misprediction distinction are unchanged; one
 > divergence class is now closed.
 
+> **2026-08-13 annotation:** the shape-cast measurements below stand, and the defect still ships in
+> parry3d 0.27.0 — but `src/` holds **zero shape-cast call sites** (every cast is a raycast or
+> analytic), so the defect is unreachable and the ≤10 m tiling rule in Consequences is **dormant**.
+> It is kept as a guard on the FIRST future shape-cast consumer, which inherits the defect the
+> moment it lands; `tests/shape_cast_reachability.rs` fails at exactly that moment. The workaround
+> that once made the rule live went out with the raycast-era suspension (9758d97).
+
 ## Context: what divergence actually is here
 
 We run state replication + prediction ([[0004-avian-physics]] world, lightyear 0.28): the server
@@ -139,11 +146,12 @@ shrinks what the scaffolding has to absorb.
   upstream ordering), the `net/protocol.rs` bars tighten toward the reference values instead of
   ossifying.
 - **Map authoring, defence-in-depth: prefer tiling large static colliders to ≤10 m extents.**
-  parry's GJK shape-cast converges on a *relative* tolerance, so cast error scales with the
-  target collider's extent (measured: 0.25 mm at 5 m half-extent vs 139–172 mm at 500 m —
-  `tests/spherecast_scale.rs`). The sphere probe now reconstructs distance from witness geometry
-  and is immune, but any *future* shape-cast consumer inherits the defect; small tiles cap it at
-  the source. (Not applied retroactively — the 1000 m slab stands until a map-authoring pass.)
+  parry's GJK shape cast (`minkowski_ray_cast`) takes a stagnation exit: when the upper TOI bound
+  stops moving under float cancellation against a large shape's support coordinates, the last-chance
+  return hands back the *unrefined lower bound*, so hits come back short and the error scales with
+  the target collider's extent (measured: 0.25 mm at 5 m half-extent vs 139–172 mm at 500 m). Any
+  *future* shape-cast consumer inherits it; small tiles cap it at the source. (Not applied
+  retroactively — the 1000 m slab stands until a map-authoring pass.)
 
 ## Related
 

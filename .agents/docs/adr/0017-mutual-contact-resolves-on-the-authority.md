@@ -14,7 +14,7 @@ War Thunder ships option 1 *without* determinism — extrapolated remote vehicle
 
 ## Consequences
 
-**Determinism comes before predict-everyone, not after.** With a non-deterministic contact solver, two predicted bodies both mispredict and each feeds the other's error through an expansive system. With forward determinism the divergence error class disappears and only irreducible misprediction remains. Revisit this ADR when — and only when — avian's entity-index-keyed constraint ordering is fixed (`scratch/upstream-reports/avian-solver-constraint-order.md`, avian #480/#734).
+**Determinism comes before predict-everyone, not after.** With a non-deterministic contact solver, two predicted bodies both mispredict and each feeds the other's error through an expansive system. With forward determinism the divergence error class disappears and only irreducible misprediction remains. Revisit this ADR when — and only when — avian's entity-index-keyed constraint ordering is fixed (`upstream/avian-solver-constraint-order.md`, avian #480/#734).
 
 **Two further blockers, both found in lightyear 0.28 source.** The bot has no `ControlledBy` and no client authoring its input, so nothing rebroadcasts for it and a predicted bot would coast on a default command — this is really *predict-every-player*, mixed mode, and `ServoAngles`/`FireEvent` survive it. And reliable remote fire needs input-side rollback, which targets ticks not gated by state confirmation and would break `apply_net_health`'s tick-agnosticism (`net/protocol.rs`, `a96e9fd`).
 

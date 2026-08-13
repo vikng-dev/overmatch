@@ -38,7 +38,6 @@ jobs:
       - name: Prune non-runtime assets
         run: |
           find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
-          find assets -type d -name backup -prune -exec rm -rf {} +
       - uses: Swatinem/rust-cache@v2
         with:
           key: server-net

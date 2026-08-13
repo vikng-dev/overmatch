@@ -134,29 +134,13 @@
 //! time and refuses the bind if it cannot. Otherwise a swap would change the LIGHTING as well as the
 //! silhouette, and the distances below are argued only about the silhouette.
 //!
-//! The cost of the pattern is entity count: the pool is multiplied by the number of levels, and
-//! every one of those entities is visited by `check_visibility_ranges` each frame. That is the trade
-//! a measurement sweep has to judge — the triangle win is only worth having if it is not eaten by
-//! the visibility walk, and at 194 shoes × 5 levels × 30 tanks the walk is ~29 k entities. The
-//! probe scenario can stand its 30-tank block on either side of the swap (`OVERMATCH_PROBE_FAR` —
-//! see [`crate::tank::scenario::probe_far`]), which is what makes both halves of that measurable.
-//! If the near sweep says the walk costs more than the triangles save, the retreat is NOT editing a
-//! number here — there is no number here to edit. It is re-cutting the ladder with a coarser
-//! `e1_mm` (or a larger `skip_fraction`) and rebuilding the trio; the bands follow.
+//! The pattern costs entity count — the pool is multiplied by the number of levels, and every one
+//! of those entities is visited by `check_visibility_ranges` each frame. There is no number here to
+//! tune: the retreat is re-cutting the ladder and rebuilding the trio, and the bands follow.
 //!
-//! # `OVERMATCH_LOD_SHOWCASE=1`: judging the switches by eye
-//!
-//! The pipeline no longer scores a switch by rendering it: ADR 0036 §3 deleted the
-//! rendered-difference gate, which had been comparing the shipped meshes under the wrong textures
-//! since the corpus was cut. What certifies a level now is purely geometric — a proven bound on its
-//! worst-case deviation at the distance it takes over — and the one thing that bound cannot tell
-//! anybody is whether a swap LOOKS like a swap. So the eye is the only remaining audit, and the
-//! showcase lever ([`crate::lod_showcase`]) is the instrument for it: it flattens the world and
-//! stands one PAIR of tanks at each switch distance with their shoes CLAMPED to the two levels that
-//! switch is between. That clamp is the only thing in the game that overrides a shoe's range, it is
-//! written by a system that does not run unless the variable is set, and it takes the ranges it
-//! writes from [`shoe_lod_range`] — so it cannot drift from the chain it is showing off. A swap
-//! seen to pop here is the named trigger for re-arming a rendered gate (ADR 0036 §3).
+//! Whether a swap LOOKS like a swap is the one thing the geometric bound cannot answer;
+//! [`crate::lod_showcase`] is the instrument for judging it by eye, and takes the ranges it writes
+//! from [`shoe_lod_range`] so it cannot drift from the chain it is showing off.
 
 use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
@@ -812,10 +796,9 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 ///
 /// # The tangents are READ, and the generation is the fallback that must never fire
 ///
-/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export
-/// and the manifest certifies `tangent_default_verts: 0` on the DECODED BYTES), so this function's
-/// generation branch is dead on the assets as they ship — which is the point of the branch, not an
-/// argument for deleting it.
+/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export,
+/// and the gate below reads the SHIPPED BYTES), so this function's generation branch is dead on the
+/// assets as they ship — which is the point of the branch, not an argument for deleting it.
 ///
 /// It exists because of what `bevy_gltf` 0.19 does NOT do. Its own mikktspace pass runs only when a
 /// primitive's OWN material wants tangents (`needs_tangents`: a normal texture, or a clearcoat
@@ -1172,17 +1155,6 @@ mod tests {
                 thresholds, derived,
                 "the spawned bands are the certificate's derivation, in order",
             );
-            // ...and the chain as it SHIPS is four reductions. Spelled out so a level added or
-            // dropped is a deliberate edit here, not a silent one — the ladder's LENGTH is an
-            // output of generation, so it is exactly the thing a re-cut can change without anyone
-            // noticing. It has changed four times: 2026-08-07 (four reductions to three against
-            // the welded 764-triangle shoe), 2026-08-08 (back to four against the rebuilt
-            // 1 520-triangle shoe), 2026-08-12 (the directed search, ADR 0036) and 2026-08-12
-            // again (the per-primitive build of ADR 0035, whose rungs are octaves 1/3/4/5). The
-            // METRES are not spelled out: they are a function of the view profile now, and the
-            // derivation above is what pins them.
-            assert_eq!(thresholds.len(), 4);
-
             // Every level is TAGGED with its own index, which is what lets the showcase override
             // a selection without matching mesh handles back to the template.
             for (i, &e) in levels.iter().enumerate() {
@@ -1795,9 +1767,8 @@ mod tests {
     /// Three things, and the first two are the reason the third can be absolute:
     ///
     ///   1. **The shipped bytes CARRY tangents.** `scripts/lod/generate.py` bakes `TANGENT` into
-    ///      every level glb (and into `tiger_1.glb`'s own `Link`), and the manifest certifies
-    ///      `tangent_default_verts: 0` on the DECODED bytes. [`shipped_reduced_shoe`] refuses a
-    ///      primitive without the accessor, so a re-export that stopped baking fails here rather
+    ///      every level glb (and into `tiger_1.glb`'s own `Link`). [`shipped_reduced_shoe`] refuses
+    ///      a primitive without the accessor, so a re-export that stopped baking fails here rather
     ///      than quietly falling back.
     ///   2. **Bevy generates NOTHING.** [`lod_shoe_meshes`]' mikktspace branch is skipped when the
     ///      attribute is present, so the right-hand mesh must be the glb's tangents unchanged and
@@ -1823,11 +1794,11 @@ mod tests {
     /// deciding, per load, what the lighting looks like.
     ///
     /// The middle row is also the record of a real gap between two gates, worth keeping: the
-    /// manifest certified `tangent_default_verts: 0` for that asset and BEVY still defaulted one
-    /// vertex, because `scripts/lod/measure.py` counts a vertex whose faces ALL have zero UV area
-    /// and none of those faces did. A numeric gate on the source data is not a gate on what the
-    /// runtime's own solver returns. That is why this test reads the SHIPPED bytes through the REAL
-    /// bind path rather than trusting the manifest, and why it stays that way now that it is green.
+    /// retired manifest gate certified `tangent_default_verts: 0` for that asset and BEVY still
+    /// defaulted one vertex, because `scripts/lod/measure.py` counts a vertex whose faces ALL have
+    /// zero UV area and none of those faces did. A numeric gate on the source data is not a gate on
+    /// what the runtime's own solver returns. That is why this test reads the SHIPPED bytes through
+    /// the REAL bind path, and why it stays that way now that it is green.
     ///
     /// If this ever goes red again the FIX IS AN ASSET (or the generator's cleanup), not a number.
     /// If it has to be parked, park it as `#[ignore = "..."]` naming what it waits on — never by

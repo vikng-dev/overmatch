@@ -103,7 +103,7 @@ const SETTINGS_VERSION: u32 = 1;
 /// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because
 /// `vendor/bevy_light-0.19.0-cascade-count/` backports upstream PR #24807 (merged, milestone
 /// 0.19.1 — unreleased as of 2026-07-27); see
-/// `.agents/docs/upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream record and
+/// `upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream record and
 /// the validation evidence. **The vendored patch must outlive this row**: dropping the
 /// `[patch.crates-io]` entry before bevy 0.19.1 ships reintroduces the crash below on the first
 /// grow step. Everything from MEASURED down is kept as the historical record of the mechanism.
@@ -2429,7 +2429,7 @@ mod tests {
     /// scheduling-dependent (it needs a pooled thread-local that missed a frame's init), so a test
     /// that tried to reproduce it could pass with the bug fully live — worse than no test. The
     /// backport's own validation lives with the vendor entry
-    /// (`.agents/docs/upstream/bevy-cascade-count-stale-local-parallel.md`).
+    /// (`upstream/bevy-cascade-count-stale-local-parallel.md`).
     #[test]
     fn the_cascade_count_follows_its_row_and_only_its_row() {
         let mut app = App::new();
