@@ -897,8 +897,10 @@ pub(crate) fn extract_tank_geometry(
     })?;
     let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
 
-    // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`); external `.bin`
-    // URIs are read relative to the glb (not used by our assets, supported for completeness).
+    // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`). A `Source::Uri`
+    // buffer — a sidecar or a data: URI — is refused, not resolved: the geometry the fingerprint
+    // names must be the bytes of the file it names, so vertices living beside the glb are a
+    // different artifact. Same refusal as `track::marker_model`, which reads the same glb.
     let mut buffers: Vec<Vec<u8>> = Vec::new();
     for buffer in document.buffers() {
         match buffer.source() {
@@ -909,13 +911,10 @@ pub(crate) fn extract_tank_geometry(
                 )
             })?),
             gltf::buffer::Source::Uri(uri) => {
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                buffers.push(std::fs::read(parent.join(uri)).map_err(|err| {
-                    refused(
-                        format!("buffer `{uri}`: {err}"),
-                        "re-export the model as a self-contained binary glb",
-                    )
-                })?);
+                return Err(refused(
+                    format!("buffer `{uri}` lives outside the file"),
+                    "re-export the model as a self-contained binary glb",
+                ));
             }
         }
     }
