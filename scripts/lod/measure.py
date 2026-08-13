@@ -65,13 +65,8 @@ class Refusal(Exception):
 
 # ── decoding the shipped bytes ───────────────────────────────────────────────────────────────────
 
-def glb_chunks(path):
-    """The JSON dict and the BIN blob of a glb. Stdlib + a struct unpack, no importer involved."""
-    with open(path, "rb") as handle:
-        return glb_chunks_from_bytes(handle.read(), path)
-
-
 def glb_chunks_from_bytes(blob, path="<bytes>"):
+    """The JSON dict and the BIN blob of a glb. Stdlib + a struct unpack, no importer involved."""
     magic, _version, length = struct.unpack_from("<4sII", blob, 0)
     if magic != b"glTF":
         raise Refusal("not-a-glb", path)
@@ -1063,27 +1058,6 @@ def same_surface(a, b, tol=1e-9):
     if tris_a.shape != tris_b.shape or not np.array_equal(tris_a, tris_b):
         return False, "welded triangle sets differ — same points, joined differently"
     return True, "identical welded topology and positions"
-
-
-def vertex_deviation(a, b):
-    """Two-way max distance from each surface's VERTICES to the other surface, in millimetres.
-
-    The cheap check, and the only honest one for an IDENTITY comparison. Branch-and-bound cannot
-    close a bracket on two identical surfaces: the true worst case is zero, so the stop test
-    `bound <= best + tol` demands every patch be subdivided until its own covering radius is under
-    `tol` — a quarter-million sub-triangles per triangle, for a number everybody already knows. For
-    "did these bytes ship the mesh I measured", vertices plus matched triangle counts is the
-    statement worth making, and it costs one BVH query per vertex.
-    """
-    from mathutils import Vector
-
-    worst = 0.0
-    for source, target in ((a, b), (b, a)):
-        for point in source.verts:
-            hit = target.bvh.find_nearest(Vector(point))
-            if hit[0] is not None:
-                worst = max(worst, hit[3])
-    return worst * 1000.0
 
 
 def certified_deviation(a, b, tol, max_nodes, target_mm=None, rel_tol=0.0):

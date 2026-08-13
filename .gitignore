@@ -6,12 +6,12 @@
 # A CANONICAL blend is canonical BY LOCATION: `assets/<id>/<id>.blend` — one directory under
 # `assets/`, named after that directory, which is where the trio rule looks for a source and where
 # every derived path is cut from. Those are tracked (LFS, `.gitattributes`), because the committed
-# derivative — the glb, the LOD chain, the manifest — must travel with the source it was cut from or
-# nothing can re-cut it; the shared material library at `assets/materials/materials.blend` has that
-# shape too, and every tank blend links its substances out of it. A second vehicle is tracked by
-# that rule and edits nothing here. Everything else blend-shaped is local authoring scratch: a blend
-# anywhere else, Blender's own `.blend1` rolling backup, and the hand-made `.bak` snapshots a
-# session leaves beside it.
+# derivative — the trio of view glb, sim glb and certificate — must travel with the source it was
+# cut from or nothing can re-cut it; the shared material library at
+# `assets/materials/materials.blend` has that shape too, and every tank blend links its substances
+# out of it. A second vehicle is tracked by that rule and edits nothing here. Everything else
+# blend-shaped is local authoring scratch: a blend anywhere else, Blender's own `.blend1` rolling
+# backup, and the hand-made `.bak` snapshots a session leaves beside it.
 #
 # THE NEGATION BELOW IS BROADER THAN THAT LAW and cannot be narrowed: a gitignore pattern has no way
 # to say "named after its own directory", so `!assets/*/*.blend` unignores every blend in an asset's
@@ -33,6 +33,3 @@
 # Cloudflare wrangler local cache
 .wrangler/
 __pycache__/
-
-# Renders the LOD chain's rendered-difference gate writes when it is pointed at a kept directory.
-scripts/lod/out/

@@ -31,7 +31,7 @@ each with its default, preserved alternatives, and revert cost. See
 - **Tanks are data; every system, law, gate and test is generic.** Nothing is tested,
   asserted, tweaked or modeled around a specific vehicle — the Tiger is the seed and the
   test fixture, never the spec. Per-tank truth lives only in declarative asset data
-  (`<tank>.tank.ron`, `materials.ron`, LOD manifest), which supplies parameters
+  (`<tank>.tank.ron`, `materials.ron`, LOD certificate), which supplies parameters
   to and selects among generic laws; it never overrides system behavior for one vehicle.
   No tank name in logic, no per-tank constant, no per-tank branch, no asset-specific pass
   condition in a gate or test (class invariants only; fixture numbers are labeled fixture

@@ -812,10 +812,9 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
 ///
 /// # The tangents are READ, and the generation is the fallback that must never fire
 ///
-/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export
-/// and the manifest certifies `tangent_default_verts: 0` on the DECODED BYTES), so this function's
-/// generation branch is dead on the assets as they ship — which is the point of the branch, not an
-/// argument for deleting it.
+/// The shipped levels now BAKE `TANGENT` (`scripts/lod/generate.py` runs mikktspace before export,
+/// and the gate below reads the SHIPPED BYTES), so this function's generation branch is dead on the
+/// assets as they ship — which is the point of the branch, not an argument for deleting it.
 ///
 /// It exists because of what `bevy_gltf` 0.19 does NOT do. Its own mikktspace pass runs only when a
 /// primitive's OWN material wants tangents (`needs_tangents`: a normal texture, or a clearcoat
@@ -1792,9 +1791,8 @@ mod tests {
     /// Three things, and the first two are the reason the third can be absolute:
     ///
     ///   1. **The shipped bytes CARRY tangents.** `scripts/lod/generate.py` bakes `TANGENT` into
-    ///      every level glb (and into `tiger_1.glb`'s own `Link`), and the manifest certifies
-    ///      `tangent_default_verts: 0` on the DECODED bytes. [`shipped_reduced_shoe`] refuses a
-    ///      primitive without the accessor, so a re-export that stopped baking fails here rather
+    ///      every level glb (and into `tiger_1.glb`'s own `Link`). [`shipped_reduced_shoe`] refuses
+    ///      a primitive without the accessor, so a re-export that stopped baking fails here rather
     ///      than quietly falling back.
     ///   2. **Bevy generates NOTHING.** [`lod_shoe_meshes`]' mikktspace branch is skipped when the
     ///      attribute is present, so the right-hand mesh must be the glb's tangents unchanged and

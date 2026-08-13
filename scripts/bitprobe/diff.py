@@ -14,9 +14,6 @@ from pathlib import Path
 from typing import BinaryIO, Iterator
 
 MAGIC = b"OMBP\x01\r\n\0"
-FNV_OFFSET = 0xCBF29CE484222325
-FNV_PRIME = 0x00000100000001B3
-MASK64 = (1 << 64) - 1
 
 
 class DumpError(Exception):
@@ -28,15 +25,6 @@ def read_exact(stream: BinaryIO, size: int, context: str) -> bytes:
     if len(data) != size:
         raise DumpError(f"truncated {context}: wanted {size} bytes, got {len(data)}")
     return data
-
-
-def fnv1a(words: tuple[int, ...]) -> int:
-    value = FNV_OFFSET
-    for word in words:
-        for byte in struct.pack("<I", word):
-            value ^= byte
-            value = (value * FNV_PRIME) & MASK64
-    return value
 
 
 @dataclass(frozen=True)
@@ -150,12 +138,6 @@ def first_startup_difference(left: dict, right: dict) -> tuple[int, dict | None,
         if a != b:
             return index, a, b
     return None
-
-
-def field_schema(schema: dict) -> list[dict]:
-    if schema["layout"] == "records":
-        return schema["record_fields"]
-    return schema["fields"]
 
 
 def locate(schema: dict, word_index: int, words: tuple[int, ...]) -> Location:

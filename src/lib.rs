@@ -167,7 +167,9 @@ pub mod terrain_grid;
 mod terrain_lod;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
 /// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
-/// investigation. Off (zero cost) unless the env var is set. Net-specific rows are `#[cfg(net)]`.
+/// investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
+/// net-specific rows exist only where the MP client/server plugin registers them, and the net
+/// extras read their resources through `Option`, so they are absent in single-player.
 mod trace;
 /// The track model's pure core (route/oracle/wrap math) — consumed by the sandbox lab and, in
 /// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
