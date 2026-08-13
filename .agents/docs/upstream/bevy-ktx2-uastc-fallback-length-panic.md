@@ -164,7 +164,7 @@ rather than panic. A unit test in `crates/bevy_image/src/ktx2.rs` over a tiny UA
 
 ## Local resolution
 
-Both headless compositions insert the resource bevy would have inserted if a device existed:
+The headless test harness inserts the resource bevy would have inserted if a device existed:
 
 ```rust
 app.insert_resource(bevy::image::CompressedImageFormatSupport(
@@ -173,24 +173,29 @@ app.insert_resource(bevy::image::CompressedImageFormatSupport(
 ```
 
 - `src/headless_test.rs` (`headless_app_on`, before `app.finish()`)
-- `src/net/server.rs` (`run`, before `app.run()`)
 
 Ordering is load-bearing: both `bevy_render`'s `TexturePlugin::finish` (`texture/mod.rs:47-60`) and
 `bevy_gltf`'s `finish` (`bevy_gltf-0.19.0/src/lib.rs:282-299`) read the resource once, at finish
 time, and warn-then-default to `NONE` when it is absent.
 
+The dedicated server (`src/net/server.rs`) carried the same insertion until the ADR-0035 sim/view
+split (slice 4) took the view glb off its asset set. It no longer needs one: every texture on the
+server's allowlist (`.github/actions/build-server/action.yml`) is png, `<id>.sim.glb` carries no
+image at all, and the UASTC KTX2 that remains — the view artifact's and the terrain maps' — is
+reached only through plugins the server does not mount.
+
 Why the claim is safe rather than merely convenient: it makes the destination geometry (ASTC 4x4,
 16 B) match the source's, so the buggy derivation lands on the correct number and the transcode is
-*exact* — UASTC→ASTC 4x4 is the lossless path bevy's own comment at `ktx2.rs:343-345` prefers.
-Neither headless composition has a GPU to upload to, so the only consequence is which bytes sit in
-RAM, and ASTC 4x4 is 8 bpp against the RGBA8 fallback's 32 — strictly less memory than the honest
-answer would have cost. Nothing reads texture *contents* on the server; the tank's collision and
-ballistic geometry come from the baked blueprint, not from image data.
+*exact* — UASTC→ASTC 4x4 is the lossless path bevy's own comment at `ktx2.rs:343-345` prefers. The
+harness has no GPU to upload to, so the only consequence is which bytes sit in RAM, and ASTC 4x4 is
+8 bpp against the RGBA8 fallback's 32 — strictly less memory than the honest answer would have cost.
+Nothing reads texture *contents* there; the tank's collision and ballistic geometry come from the
+baked blueprint, not from image data.
 
 **Retirement is automatic.** `tests/bevy_ktx2_uastc_fallback.rs::fallback_transcode_still_panics` is
 inverted — it asserts the panic still happens, so it PASSES while upstream is broken and FAILS the
-first time a bevy upgrade fixes the arithmetic. That failure is the instruction to delete both
-insertions, the test, its fixture, and to move this doc to DO-NOT-FILE with the fixing PR. The
+first time a bevy upgrade fixes the arithmetic. That failure is the instruction to delete the
+insertion, the test, its fixture, and to move this doc to DO-NOT-FILE with the fixing PR. The
 companion test `astc_support_transcodes_the_same_bytes` pins the workaround's premise (same bytes,
 5 mip levels, `Ok`) and stays valid after a fix.
 
