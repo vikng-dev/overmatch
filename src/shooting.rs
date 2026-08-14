@@ -24,6 +24,15 @@ use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
 const RECOIL_FEEL: f32 = 1.0;
 
+/// THE single expression of the recoil reaction a fired round puts on its hull: the shell's
+/// momentum, opposite the bore. Applied at the muzzle point by [`fire`], and modelled — never
+/// re-derived — by the client's own-hull view overlay (`net::recoil_overlay`), so the sim and the
+/// view cannot disagree on what a shot does (the derive-the-consequence doctrine, ADR-0016; the same
+/// rule [`kick_recoil`] states for the barrel).
+pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
+    bore * (-mass * speed * RECOIL_FEEL)
+}
+
 /// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest (battery)
 /// position, built during complete tank construction from the weapon's `recoil` spec and barrel
 /// node's authored translation — spawn-time data, not a bind-time transform capture. The recoil
@@ -348,7 +357,7 @@ fn fire(
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
         if let Ok((forces, wake)) = bodies.get_mut(root.0) {
-            let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
+            let impulse = recoil_impulse(bore, weapon.mass, weapon.speed);
             apply_explicit_impulse(
                 forces,
                 wake,

@@ -32,6 +32,9 @@ mod interp_delay;
 mod lead_zero_rollback;
 mod physics;
 mod protocol;
+/// The own hull's firing recoil, overlaid on the rendered pose while the replicated kick is still
+/// in flight down the interpolation buffer.
+mod recoil_overlay;
 mod render_error;
 mod rig;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
@@ -58,6 +61,7 @@ pub(super) use death_screen::plugin as death_screen_plugin;
 pub(super) use debug_hud::plugin as debug_hud_plugin;
 pub(super) use hit_feel::plugin as hit_feel_plugin;
 pub(crate) use protocol::NetBot;
+pub(crate) use recoil_overlay::RecoilOverlay;
 pub(crate) use render_error::RenderErrorOffset;
 pub(super) use spawn_map::plugin as spawn_map_plugin;
 

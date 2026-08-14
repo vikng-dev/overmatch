@@ -320,6 +320,11 @@ pub fn run() {
     // accumulates that snap as a decaying offset on the predicted root's render `Transform` so the
     // VIEW never lurches.
     app.add_plugins(super::render_error::plugin);
+    // The own-hull recoil overlay (client only): when the server stream owns the owner's hull, the
+    // firing kick arrives `RTT/2 + D` after the flash. This layer presents it at the local fire tick
+    // and retires it exactly as the interpolation cursor crosses that tick. Arms nothing in
+    // predicted mode.
+    app.add_plugins(super::recoil_overlay::plugin);
     // The rollback watchdog (client only): the backstop for lightyear's receive-time mismatch
     // check, which starves permanently at zero prediction margin — exactly where `balanced()`
     // input delay puts a LAN/loopback client (see the module doc for the vendored mechanism).

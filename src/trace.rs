@@ -435,6 +435,10 @@ fn record_frame(
     // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
     // row — and the single-player composition, which never mounts the layer — omitting the field.
     view_offset: Query<&crate::net::RenderErrorOffset>,
+    // The own interpolated root's live fire-recoil overlay. Present only on the entity
+    // `net::recoil_overlay` armed (an unpredicted owner's hull); every other tank row — and the
+    // single-player composition, which never mounts the layer — omits the fields.
+    recoil_overlay: Query<&crate::net::RecoilOverlay>,
     // The client connection entity: the clock interpolated tanks (and, under unpredicted drive, the
     // own hull) actually render on, the two link statistics the `min_delay` law consumes, and the
     // delay in force. Matches nothing in the single-player or server compositions, so those rows
@@ -540,6 +544,18 @@ fn record_frame(
                 }
                 obj.insert("vo".into(), vec3(offset.translation));
                 obj.insert("voq".into(), quat(offset.rotation));
+            }
+            // The own-hull fire-recoil overlay (`net::recoil_overlay`), present only on an
+            // interpolated owner. Omitted when spent, so field presence means a transient is in
+            // flight and `ro`'s last frame against `itick`'s crossing of the shot's fire tick is the
+            // decay-to-zero-by-handoff property, measured.
+            if let Ok(overlay) = recoil_overlay.get(entity) {
+                if overlay.translation != Vec3::ZERO {
+                    obj.insert("ro".into(), vec3(overlay.translation));
+                }
+                if overlay.rotation != Quat::IDENTITY {
+                    obj.insert("roq".into(), quat(overlay.rotation));
+                }
             }
         }
         trace.write(&row);
