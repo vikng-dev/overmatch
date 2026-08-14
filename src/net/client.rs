@@ -471,6 +471,18 @@ pub fn run() {
     // Mounts the deriving system and resolves `OVERMATCH_INTERP_DELAY_MS`; the returned config is
     // the entity's starting value, rewritten every frame unless the env var pins it.
     let interpolation = super::interp_delay::install(&mut app, tick_duration);
+    // Mounts the sync-margin laws on both wire timelines: the input timeline's floor/deadband
+    // (rewritten every frame once the own tank's role resolves interpolated, or pinned by
+    // `OVERMATCH_INPUT_MARGIN_MS`) and the interpolation timeline's sync margins (static for the
+    // session, or pinned by `OVERMATCH_INTERP_MARGIN_MS`). Receives the SAME `input_delay` the
+    // timeline below is built with, so its rebuilds cannot change the delay's shape.
+    let interpolation = super::sync_margin::install(
+        &mut app,
+        tick_duration,
+        sync_config,
+        input_delay,
+        interpolation,
+    );
     // `OVERMATCH_FUSED_FIRE=1`: the own shot presents from the server echo at the cursor crossing
     // instead of on the local fire tick (see `crate::FusedOwnFire`). Read exactly once; absent =
     // today's local presentation, bit-identical.

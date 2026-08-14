@@ -560,11 +560,10 @@ pub(crate) fn jitter_multiple() -> u8 {
 }
 
 /// `SPIKE_JITTER_MARGIN` (default 1.0, lightyear's own default): the FIXED half of the sync
-/// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync
-/// sync.rs:126-128: `jitter * jitter_multiple + tick_duration * jitter_margin`). It moves the
-/// input timeline's objective forward AND the interpolation timeline's objective backward by the
-/// same amount, so raising it buys prediction lead at the price of remote-view lag — the item-4
-/// A/B lever for the 1.0 → 4.0 question.
+/// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync sync.rs:
+/// `jitter * jitter_multiple + tick_duration * jitter_margin`). Reaches the INPUT timeline's
+/// install-time config only, so it is the runtime value exactly where `net::sync_margin`'s derived
+/// law does not rewrite it: predicted mode, and the pre-arm window of an unpredicted session.
 pub(crate) fn jitter_margin() -> f32 {
     env_parse("SPIKE_JITTER_MARGIN").unwrap_or(1.0)
 }
