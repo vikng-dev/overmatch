@@ -24,6 +24,8 @@ mod hit_feel;
 /// combat, on the production registration.
 #[cfg(test)]
 mod hull_shock_rollback;
+/// The interpolation buffer's size, derived from the measured link instead of pinned.
+mod interp_delay;
 /// Does an authoritative hull fact reach the client at the lead the SHIPPING sync config actually
 /// produces (0, and −1 under deadband drift)? RED by design — slice 2's acceptance test.
 #[cfg(test)]

@@ -38,9 +38,10 @@ pub(crate) use state_hash::{
 
 use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
+use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prelude::{
-    ControlledBy, LocalTimeline, PredictionManager, PredictionMetrics, ReplicationCheckpointMap,
-    Rollback, RollbackSystems,
+    ControlledBy, InterpolationTimeline, LocalTimeline, NetworkTimeline, PingManager,
+    PredictionManager, PredictionMetrics, ReplicationCheckpointMap, Rollback, RollbackSystems,
 };
 
 /// Shared JSONL sink. Values pass through `serde_json::Value` so non-finite floats serialize as
@@ -253,6 +254,11 @@ fn quat(q: Quat) -> Value {
     Value::Array(vec![num(q.x), num(q.y), num(q.z), num(q.w)])
 }
 
+/// Link timings are recorded in milliseconds — the unit the interpolation law is stated in.
+fn millis(d: Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
 /// Insert `role` before the extension of the raw `SPIKE_TRACE` value, so concurrently-launched
 /// processes sharing one value write to distinct files. `/tmp/t.jsonl` → `/tmp/t.<role>.jsonl`; a
 /// value with no extension gets `.<role>.jsonl` appended (`/tmp/t` → `/tmp/t.<role>.jsonl`).
@@ -429,6 +435,11 @@ fn record_frame(
     // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
     // row — and the single-player composition, which never mounts the layer — omitting the field.
     view_offset: Query<&crate::net::RenderErrorOffset>,
+    // The client connection entity: the clock interpolated tanks (and, under unpredicted drive, the
+    // own hull) actually render on, the two link statistics the `min_delay` law consumes, and the
+    // delay in force. Matches nothing in the single-player or server compositions, so those rows
+    // simply omit the fields.
+    link: Query<(&InterpolationTimeline, &InterpolationConfig, &PingManager)>,
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
     // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
@@ -436,6 +447,17 @@ fn record_frame(
         .iter()
         .next()
         .map(GlobalTransform::to_scale_rotation_translation);
+    // One connection state for every tank row this frame, the way `tick`/`conf` already repeat.
+    // `itick` carries the overstep because headroom (`conft − itick`) is a sub-tick quantity —
+    // the whole point of the measurement is how little of it is left.
+    let link = link.iter().next().map(|(timeline, config, pings)| {
+        (
+            f64::from(timeline.tick().0) + f64::from(timeline.overstep().to_f32()),
+            millis(pings.rtt()),
+            millis(pings.jitter()),
+            millis(config.min_delay),
+        )
+    });
     for (entity, global, controlled) in roots.iter().take(frame_row_cap()) {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
         let mut row = json!({
@@ -474,6 +496,14 @@ fn record_frame(
                 obj.insert("rb".into(), Value::from(metrics.rollbacks));
                 obj.insert("rbt".into(), Value::from(metrics.rollback_ticks));
             }
+            // The interpolation clock and the inputs to the delay that placed it. Headroom is
+            // `conft − itick`; `mind` makes a capture self-documenting about which law produced it.
+            if let Some((itick, rtt, jitter, min_delay)) = link {
+                obj.insert("itick".into(), Value::from(itick));
+                obj.insert("rtt".into(), Value::from(rtt));
+                obj.insert("jit".into(), Value::from(jitter));
+                obj.insert("mind".into(), Value::from(min_delay));
+            }
             // The LATEST confirmed (server-authoritative) Position/LinearVelocity this predicted
             // root has received, plus the tick it belongs to. `ConfirmedHistory::newest_present`
             // is the buffer's most-recent present sample — `(tick, value)` — exactly the sample
@@ -481,7 +511,12 @@ fn record_frame(
             // authoritative tick; when it stalls while the global `conf` keeps advancing, the
             // tank's confirmed updates stopped arriving (silent-desync branch a). Omit all three
             // when the buffer is still empty — a not-yet-confirmed frame carries no `conf*`.
+            // `hlen` is that buffer's occupancy: the keyframes the interpolation cursor has left to
+            // walk, recorded whenever the buffer exists (zero included — that IS the starved case).
             if let Ok((confp, confv)) = conf.get(entity) {
+                if let Some(history) = confp {
+                    obj.insert("hlen".into(), Value::from(history.len() as u64));
+                }
                 if let Some((tick, position)) = confp.and_then(|h| h.newest_present()) {
                     obj.insert("confp".into(), vec3(position.0));
                     obj.insert("conft".into(), Value::from(u64::from(tick.0)));

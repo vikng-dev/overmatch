@@ -12,7 +12,6 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowMode};
-use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
@@ -304,10 +303,10 @@ pub fn run() {
         }
     }
 
-    // Register the shared protocol before creating the client link.
-    app.add_plugins(ClientPlugins {
-        tick_duration: Duration::from_secs_f64(1.0 / 64.0),
-    });
+    // Register the shared protocol before creating the client link. The step lightyear publishes as
+    // `TickDuration`; `net::interp_delay` derives its gap term from the same binding.
+    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     super::grip::install_client(&mut app);
     app.add_plugins(physics::physics_plugins());
@@ -456,8 +455,9 @@ pub fn run() {
                 .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
         );
     }
-    let interp_delay_ms = harness::env_parse::<u64>("OVERMATCH_INTERP_DELAY_MS").unwrap_or(100);
-    info!("net: interpolation min_delay {interp_delay_ms} ms [OVERMATCH_INTERP_DELAY_MS]");
+    // Mounts the deriving system and resolves `OVERMATCH_INTERP_DELAY_MS`; the returned config is
+    // the entity's starting value, rewritten every frame unless the env var pins it.
+    let interpolation = super::interp_delay::install(&mut app, tick_duration);
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
@@ -473,16 +473,10 @@ pub fn run() {
         },
         // Explicitly own the input timeline configuration required by prediction.
         InputTimelineConfig::new(sync_config, input_delay),
-        // Interpolated replicas need a nonzero buffer behind the server estimate. Keep this explicit
-        // while `tests/net_interp_delay.rs` covers Lightyear's zero-send-interval default (the
-        // adaptive path collapses to 5 ms under our per-tick sender). `OVERMATCH_INTERP_DELAY_MS`
-        // overrides the 100 ms shipping floor — under unpredicted drive the own hull rides this
-        // buffer, so the floor is the dominant input-delay term. Sizing: ≥ RTT/2 + jitter margin;
-        // too low = freeze-then-step on every interpolated tank.
-        InterpolationConfig {
-            min_delay: Duration::from_millis(interp_delay_ms),
-            ..Default::default()
-        },
+        // Interpolated replicas need a buffer behind the server estimate, and under unpredicted
+        // drive the own hull rides it too, so it is also the dominant own-input latency term.
+        // `net::interp_delay` owns the sizing law and rewrites `min_delay` every frame.
+        interpolation,
         NetcodeClient::new(
             Authentication::Manual {
                 server_addr,
