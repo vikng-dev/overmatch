@@ -34,9 +34,9 @@ use super::walk::{
     Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, BallisticSurfaces, ComponentHealth, HullShockLedger, Impact, ImpactSurface,
-    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
-    ShockCause, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
+    ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactSurface, MarchingShell,
+    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, apply_hit_impulse,
+    capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
 /// How far past first contact the first corridor reaches. Most crossings close well inside it; the
@@ -146,11 +146,7 @@ pub(crate) fn resolve_crossing(
     seeds: &[SampleSeed],
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     not_own: &dyn Fn(Entity) -> bool,
     commands: &mut Commands,
 ) -> Result<Crossing, WalkError> {
@@ -466,11 +462,7 @@ fn ricochet(
     radius: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
@@ -503,7 +495,6 @@ fn ricochet(
             body,
             shell.projectile.mass * (v_in - Vec3::from(out) * bled),
             position,
-            ShockCause::Ricochet,
         );
     }
 
@@ -561,11 +552,7 @@ fn perforate_or_embed(
     speed: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
@@ -614,13 +601,7 @@ fn perforate_or_embed(
             shell.path.points.push(at);
             // Stopped: the entrance surface's body absorbs the whole remaining momentum.
             if let Some(body) = body {
-                apply_hit_impulse(
-                    bodies,
-                    body,
-                    shell.projectile.mass * v_in,
-                    at,
-                    ShockCause::Embed,
-                );
+                apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, at);
             }
             (ArmorCrossing::Embedded { at }, at, Vec::new(), approach + t)
         }
@@ -637,7 +618,6 @@ fn perforate_or_embed(
                     body,
                     shell.projectile.mass * (v_in - Vec3::from(bent) * residual),
                     entrance_position,
-                    ShockCause::Perforation,
                 );
             }
             shell.marks.events.push(PenetrationEvent {

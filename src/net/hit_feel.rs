@@ -188,8 +188,8 @@ pub fn plugin(app: &mut App) {
 }
 
 /// Arm each replicated tank with a [`HealthMemory`] seeded to its current health, so the frame the
-/// component first appears is never diffed as a hit. Polling (not an observer) for the same reason as
-/// `net::render_error::arm_render_error`: replicated markers arrive in no guaranteed order.
+/// component first appears is never diffed as a hit. Polling (not an observer) because replicated
+/// markers arrive in no guaranteed order.
 fn arm_health_memory(
     tanks: Query<(Entity, &NetCrew), (With<Remote>, Without<HealthMemory>)>,
     mut commands: Commands,

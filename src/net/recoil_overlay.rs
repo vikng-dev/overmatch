@@ -79,25 +79,18 @@
 //!
 //! # SCOPE OF THE WRITE
 //!
-//! `Transform` only, never `Position`/`Rotation` — the identical contract `net::render_error`
-//! states, and this module reuses that module's offset shape: an entity-keyed presentation offset,
-//! a world-space translation delta plus a body-local rotation delta applied on the right of the
+//! `Transform` only, never `Position`/`Rotation`: an entity-keyed presentation offset, a
+//! world-space translation delta plus a body-local rotation delta applied on the right of the
 //! simulated rotation, composed in `PostUpdate` onto a pose RE-DERIVED from `Position`/`Rotation`
 //! rather than accumulated onto whatever `Transform` holds.
 //!
-//! Two ordering facts are load-bearing, and one is opposite to that module's:
+//! Two ordering facts are load-bearing:
 //!
-//! - `apply_recoil_overlay` runs **after** `camera::OrbitCameraSet`. `render_error` runs before it
-//!   so the camera orbits the offset pose and the correction is invisible; the recoil overlay must
-//!   be visible, so the third-person camera places itself from the un-rocked pose and the hull rocks
-//!   inside the frame. There is no camera kick in this module.
+//! - `apply_recoil_overlay` runs **after** `camera::OrbitCameraSet`: the recoil must be visible,
+//!   so the third-person camera places itself from the un-rocked pose and the hull rocks inside
+//!   the frame. There is no camera kick in this module.
 //! - `track::view::TrackViewSet` orders after this set, so the belt and wheels are written from the
 //!   same presented root pose the hull renders at.
-//!
-//! Arming is disjoint from `render_error`'s by construction — that module requires `Predicted`, this
-//! one requires `Interpolated` and `Without<RenderErrorOffset>` — so exactly one presentation layer
-//! ever re-derives a given root's `Transform`. In predicted mode this module arms nothing and the
-//! local hull moves from the real impulse, as it always did.
 //!
 //! # A LOCAL FIRE THE SERVER REFUSED
 //!
@@ -127,7 +120,6 @@ use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::{Interpolated, LocalTimeline, NetworkTimeline, Predicted};
 
 use super::protocol::NetTank;
-use super::render_error::RenderErrorOffset;
 use crate::ballistics::{FireShell, FireShellOrigin};
 use crate::command::TankCommand;
 use crate::shooting::recoil_impulse;
@@ -432,14 +424,14 @@ pub fn plugin(app: &mut App) {
         apply_recoil_overlay
             .in_set(RecoilOverlayApplied)
             .after(PhysicsSystems::Writeback)
-            // THE "no camera kick" EDGE, inverted relative to `net::render_error` deliberately: the
-            // third-person camera must place itself from the un-rocked pose.
+            // THE "no camera kick" EDGE: the third-person camera must place itself from the
+            // un-rocked pose.
             .after(crate::camera::OrbitCameraSet)
             .before(TransformSystems::Propagate),
     );
     // The belt and wheels are written FROM the presented root pose, so they must read the rocked
-    // one. The edge lives here for the same reason `net::render_error` owns its copy: the
-    // net-boundary guard keeps `track::view` from naming the netcode.
+    // one. The edge lives here because the net-boundary guard keeps `track::view` from naming the
+    // netcode.
     app.configure_sets(
         PostUpdate,
         crate::track::view::TrackViewSet.after(RecoilOverlayApplied),
@@ -448,9 +440,7 @@ pub fn plugin(app: &mut App) {
 
 /// Arm the own tank once the server stream — not local physics — owns its hull.
 ///
-/// `Without<Predicted>` and `Without<RenderErrorOffset>` together make this module inert in
-/// predicted mode and keep exactly one presentation layer re-deriving a root's `Transform`. The
-/// mass-property requirements are the excitation's inputs: a root that has not finished
+/// The mass-property requirements are the excitation's inputs: a root that has not finished
 /// construction cannot yet derive a response.
 #[expect(clippy::type_complexity, reason = "one arming predicate, spelled out")]
 fn arm_recoil_overlay(
@@ -468,7 +458,6 @@ fn arm_recoil_overlay(
             With<AngularInertia>,
             With<CenterOfMass>,
             Without<Predicted>,
-            Without<RenderErrorOffset>,
             Without<RecoilOverlay>,
             Without<ChildOf>,
         ),
@@ -1508,9 +1497,9 @@ mod tests {
     }
 
     /// PREDICTED MODE IS INERT. The overlay arms only where the server stream owns the hull; a
-    /// predicted root's kick comes from the real impulse and `net::render_error` owns its pose.
-    /// The `both` case pins `Without<Predicted>` itself: prediction wins even on a root that also
-    /// carries `Interpolated`.
+    /// predicted root's kick comes from the real impulse. The `both` case pins
+    /// `Without<Predicted>` itself: prediction wins even on a root that also carries
+    /// `Interpolated`.
     #[test]
     fn only_the_own_interpolated_hull_arms() {
         let mut app = App::new();
@@ -1545,17 +1534,6 @@ mod tests {
             .world_mut()
             .spawn((NetTank, Interpolated, mass_properties()))
             .id();
-        // A root `net::render_error` already owns — the disjointness guard.
-        let smoothed = app
-            .world_mut()
-            .spawn((
-                NetTank,
-                Controlled,
-                Interpolated,
-                RenderErrorOffset::default(),
-                mass_properties(),
-            ))
-            .id();
 
         app.world_mut()
             .run_system_once(arm_recoil_overlay)
@@ -1568,10 +1546,6 @@ mod tests {
             "a root prediction owns must never arm, whatever else it carries",
         );
         assert!(app.world().get::<RecoilOverlay>(opponent).is_none());
-        assert!(
-            app.world().get::<RecoilOverlay>(smoothed).is_none(),
-            "two presentation layers must never re-derive one root's Transform",
-        );
     }
 
     /// FUSED OWN FIRE NEVER ARMS THE OVERLAY: the kick presents from the stream itself at the

@@ -488,41 +488,6 @@ pub(crate) fn canonical_tank_state_digest(
     }
 }
 
-/// Test-only readout for the exact `helm` stream. Keeping the digest fields private prevents
-/// production callers from depending on its decomposition while the netcode battery can name the
-/// element-hash assertion explicitly.
-#[cfg(test)]
-pub(crate) fn canonical_element_hash(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
-    drive: &TrackDrive,
-    grip: &TrackGrip,
-    elements: &TrackGripElements,
-    transmission: &TankTransmission,
-    weapon_gate: &WeaponGate,
-    shock: Option<&HullShock>,
-    servos: &TankServos,
-    sim: &TankSim,
-) -> u64 {
-    canonical_tank_state_digest(
-        position,
-        rotation,
-        linvel,
-        angvel,
-        drive,
-        grip,
-        elements,
-        transmission,
-        weapon_gate,
-        shock,
-        servos,
-        sim,
-    )
-    .elements
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

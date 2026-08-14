@@ -877,10 +877,6 @@ fn insert_root_components(
         TankSim {
             weapons: vec![WeaponState::default(); weapon_count],
         },
-        // Local, never-replicated bookkeeping beside the replicated `HullShock`: the authority's
-        // episode window on one side, the owner's last-realized mark on the other. It rides every
-        // spawn path — including a replicated attachment, whose `HullShock` arrives instead.
-        crate::ballistics::HullShockLedger::default(),
         rig,
         SimParts(parts),
     ));

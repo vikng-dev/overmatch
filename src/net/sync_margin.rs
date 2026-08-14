@@ -28,9 +28,7 @@
 //! A late input degrades to hold-last steering for the late window plus a fail-closed trigger that
 //! `net::fire_presentation` already covers — cheap only while the own hull rides the server
 //! stream. The derived uplink law therefore arms on the observed role (own tank `Interpolated`,
-//! the same latch `net::fire_presentation` arms on) and latches for the session; predicted mode
-//! keeps the installed margins, so the loopback lead-zero premise in `net::lead_zero_rollback`
-//! stands untouched there.
+//! the same latch `net::fire_presentation` arms on) and latches for the session.
 //!
 //! # Downlink (the interpolation timeline)
 //!

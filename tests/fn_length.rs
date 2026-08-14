@@ -47,7 +47,6 @@ const TEST_ONLY_FILES: &[&str] = &[
     "src/headless_test.rs",
     "src/track/transmission/tests.rs",
     "src/net/shot_loss.rs",
-    "src/net/grip_battery.rs",
 ];
 
 /// Functions allowed past [`MAX_FN_LINES`], each with the reason it is not a defect.

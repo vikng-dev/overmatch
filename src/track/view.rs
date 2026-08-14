@@ -39,9 +39,9 @@ use super::wrap;
 /// Ordering owner for the track view's presented-pose read: after physics writeback (Avian has
 /// written the frame's root `Transform`, interpolated in SP, wire/frame-interpolated under
 /// netcode), before propagation carries the written view poses out. The net client additionally
-/// orders this set after its rollback-correction smoothing (`RenderErrorApplied`) — that edge
-/// lives in `net::render_error`, which owns the set, because the net-boundary guard keeps this
-/// module from naming the netcode (same inversion as `camera::OrbitCameraSet`).
+/// orders this set after its presentation overlays (`RecoilOverlayApplied`) — that edge lives in
+/// `net::recoil_overlay`, which owns it, because the net-boundary guard keeps this module from
+/// naming the netcode (same inversion as `camera::OrbitCameraSet`).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrackViewSet;
 
@@ -105,12 +105,9 @@ fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 
 /// Downward terrain-probe reach (m) — for the wrap's conform and the view wheel lift.
 const PROBE_REACH: f32 = 0.5;
 /// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
-/// a teleport/respawn/snap-correction, not motion — reset the wrap filters and the wheel-lift
-/// state. `render_error` publishes no signal (it consumes oversized corrections silently), so the
-/// view detects locally: works identically in SP and MP, no netcode coupling. 60 km/h at 30 fps is
-/// 0.56 m/frame — half the trip threshold. MUST stay below `render_error`'s snap thresholds
-/// (2 m / 60°) so every unsmoothed correction trips this too — `net::render_error` pins that
-/// bracket in a test. `pub(crate)` for exactly that test.
+/// a teleport/respawn/snap, not motion — reset the wrap filters and the wheel-lift state. The view
+/// detects locally, with no published signal: works identically in SP and MP, no netcode coupling.
+/// 60 km/h at 30 fps is 0.56 m/frame — half the trip threshold.
 pub(crate) const SNAP_TRANSLATION: f32 = 1.2;
 /// Axis chord per frame (~30°), checked on BOTH the forward and up axes — a pure roll leaves
 /// forward unchanged.

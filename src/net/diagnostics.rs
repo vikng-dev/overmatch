@@ -3,14 +3,11 @@
 use avian3d::prelude::{
     AngularVelocity, ColliderOf, ColliderTransform, LinearVelocity, Position, RigidBody, Rotation,
 };
-use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
-use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
 use lightyear::prelude::input::native::NativeBuffer;
 
-use super::adoption::ImpactPresentation;
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
 use crate::command::TankCommand;
@@ -129,28 +126,6 @@ pub(crate) fn nan_tripwire(
             *tripped = true;
         }
     }
-}
-
-/// Periodically read the diagnostics plugin mounted by prediction.
-pub(crate) fn log_prediction_diagnostics(
-    diagnostics: Res<DiagnosticsStore>,
-    mut timer: Local<f32>,
-    time: Res<Time>,
-) {
-    *timer += time.delta_secs();
-    if *timer < 5.0 {
-        return;
-    }
-    *timer = 0.0;
-    let rollbacks = diagnostics
-        .get(&PredictionDiagnosticsPlugin::ROLLBACKS)
-        .and_then(|d| d.value())
-        .unwrap_or_default();
-    let depth = diagnostics
-        .get(&PredictionDiagnosticsPlugin::ROLLBACK_DEPTH)
-        .and_then(|d| d.value())
-        .unwrap_or_default();
-    info!("net: PredictionDiagnostics rollbacks={rollbacks} rollback_depth={depth:.2}");
 }
 
 /// Periodically log grounded track sides and each root's turret/reload state.
@@ -306,16 +281,6 @@ pub(crate) fn log_positions(
     }
 }
 
-/// Log arrival of the predicted tank marker.
-pub(crate) fn log_predicted_tank(add: On<Add, Predicted>, tanks: Query<(), With<NetTank>>) {
-    if tanks.contains(add.entity) {
-        info!(
-            "client: {} predicted (carries Predicted) — moves immediately under input",
-            add.entity
-        );
-    }
-}
-
 /// Log the first replicated tank marker.
 pub(crate) fn log_connected(add: On<Add, Connected>) {
     info!("client: connected (entity {})", add.entity);
@@ -329,75 +294,7 @@ pub(crate) fn count_shell_spawns(shells: Query<Entity, Added<ShellPath>>, mut to
     }
 }
 
-/// Tracks the predicted tank's previous-tick `Position` so a big jump can be logged as a
-/// `ROLLBACK-SNAP` (the map's suggested fallback detector alongside `PredictionMetrics`).
-#[derive(Component, Default)]
-pub(crate) struct LastPosition(pub Option<Vec3>);
-
-/// Backup rollback detector (map's fallback): a same-tick `Position` discontinuity > 0.5 m on the
-/// predicted entity. Also logs final positions for the convergence check.
-pub(crate) fn log_snap(
-    mut tanks: Query<(Entity, &Position, &mut LastPosition), (With<Predicted>, With<NetTank>)>,
-) {
-    for (entity, position, mut last) in &mut tanks {
-        if let Some(previous) = last.0 {
-            let delta = (position.0 - previous).length();
-            if delta > 0.5 {
-                info!(
-                    "client: ROLLBACK-SNAP {entity} moved {delta:.2} m in one tick (from {previous:?} to {:?})",
-                    position.0
-                );
-            }
-        }
-        last.0 = Some(position.0);
-    }
-}
-
-/// Polls `PredictionMetrics` each frame and logs on change — the primary "a rollback fired"
-/// signal (map's suggested mechanism; `lightyear_prediction`'s own diagnostics counter).
-#[derive(Resource, Default)]
-pub(crate) struct RollbackWatch {
-    last_count: u32,
-}
-
-pub(crate) fn watch_rollback_metrics(
-    metrics: Res<PredictionMetrics>,
-    presentation: Res<ImpactPresentation>,
-    mut watch: ResMut<RollbackWatch>,
-) {
-    if metrics.rollbacks != watch.last_count {
-        // The ordering instrument rides this line because a rollback is exactly when it changes.
-        // `net::adoption`'s shove ordering is BEST EFFORT, so both failure modes are reported:
-        // `budget` counts shoves the local patience budget released with none of their own hits
-        // drawn, and `bypassed` counts shoves a confirmed-state rollback this client did not order
-        // landed ahead of their spark — the gap trigger arbitration structurally cannot close.
-        // Those are what decide whether a presentation commit barrier is ever worth building.
-        //
-        // `undelivered` is not one of those two: it is a TRIPWIRE and must read zero forever. It
-        // counts shoves this module ordered a rollback for and did not receive, which
-        // `net::adoption::request_staged_adoption` establishes cannot happen — it re-reads the same
-        // confirmed histories at the same target tick in the same frame, immediately before it
-        // claims the slot. A non-zero here means that revalidation and lightyear's
-        // `prepare_rollback` disagree, which on a dependency bump is the first place it would show;
-        // the ERROR log that accompanies each one says which fact was lost.
-        let tally = presentation.tally();
-        info!(
-            "client: ROLLBACK fired (PredictionMetrics.rollbacks={}, rollback_ticks={}, \
-             shoves_on_impact={}, shoves_on_budget={}, shoves_bypassed={}, \
-             shoves_undelivered={}, max_shove_wait_ticks={})",
-            metrics.rollbacks,
-            metrics.rollback_ticks,
-            tally.released_on_impact,
-            tally.released_on_budget,
-            tally.bypassed,
-            tally.undelivered,
-            tally.max_wait_ticks,
-        );
-        watch.last_count = metrics.rollbacks;
-    }
-}
-
-/// Per-root previous hull-to-turret offset for rollback diagnostics.
+/// Per-root previous hull-to-turret offset for child-rig desync diagnostics.
 #[derive(Resource, Default)]
 pub(crate) struct TurretWatch {
     /// Previous hull-to-turret offset keyed by root.

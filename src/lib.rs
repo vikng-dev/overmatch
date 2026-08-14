@@ -763,8 +763,8 @@ impl Plugin for NetClientPlugin {
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
             vfx::plugin,
-            // Live tracks on the presented pose — predicted AND remote tanks (one code path;
-            // `net::render_error` orders the set after its correction smoothing).
+            // Live tracks on the presented pose — own AND remote tanks (one code path;
+            // `net::recoil_overlay` orders the set after its overlay apply).
             track::view_plugin,
         ));
         // The live view + the render half of the certificate (see `ClientPlugin`), separate for the
