@@ -357,7 +357,7 @@ fn spawn_owned_shooter(
     if shooter.0.is_some() {
         return;
     }
-    let Some((link, remote)) = clients
+    let Some((link, _)) = clients
         .iter()
         .find(|(_, remote)| matches!(remote.0, PeerId::Netcode(SHOOTER_CLIENT_ID)))
     else {
@@ -387,8 +387,7 @@ fn spawn_owned_shooter(
                 CombatDisclosure::owner(link),
                 Replicate::to_clients(NetworkTarget::All),
                 DisableReplicateHierarchy,
-                PredictionTarget::to_clients(NetworkTarget::Single(remote.0)),
-                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(remote.0)),
+                InterpolationTarget::to_clients(NetworkTarget::All),
                 ControlledBy {
                     owner: link,
                     lifetime: default(),
@@ -924,11 +923,9 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
             Link::new(None),
             LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
             PeerAddr(server_addr),
-            // The prediction stack is what SYNCS `LocalTimeline` to the server's tick — and the
-            // client's predicted present `P` is what `fire_catch_up_ticks` measures a shot's age
-            // against, so without it every arriving `FireEvent` would read as absurdly stale and be
-            // rejected. Use the same fixed input delay as the shipping client.
-            crate::net::test_harness::prediction_manager(),
+            // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the
+            // present `P` that `fire_catch_up_ticks` measures a shot's age against. Same fixed
+            // input delay as the shipping client.
             InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
             NetcodeClient::new(
                 Authentication::Manual {

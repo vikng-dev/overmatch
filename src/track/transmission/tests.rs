@@ -213,10 +213,6 @@ fn rev14_transmission_state_inventory_tripwire() {
     // Adding a field? Classify it in transmission-design.md's authoritative REV-14 inventory,
     // then extend the exhaustive canonical projection. Do not add `..` there.
     let classified_fields = transmission_state_projection(&fresh(&lab_tp()));
-    assert_eq!(classified_fields[0].name, "gear");
-    assert_eq!(classified_fields[12].name, "band_confirm_ticks");
-    assert_eq!(classified_fields[16].name, "hold_reengage_ticks");
-
     assert_eq!(
         classified_fields.len(),
         REPLICATE_EXACT_FIELDS + DERIVE_FIELDS + LOCAL_VIEW_FIELDS

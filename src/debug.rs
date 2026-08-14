@@ -231,7 +231,6 @@ mod tests {
             surface: ImpactSurface::Terrain,
             penetrated: false,
             deflection: None,
-            authority: None,
         });
         app.world_mut().flush();
         assert_eq!(marker_count(&mut app), 0);
@@ -250,7 +249,6 @@ mod tests {
                 surface: ImpactSurface::Terrain,
                 penetrated: false,
                 deflection: None,
-                authority: None,
             });
             app.world_mut().flush();
         }

@@ -217,11 +217,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
-        // The REV-22 hull-shock counter starts at "never hit". Like the gate above, it is
-        // authority state a replicated client attachment must not overwrite.
-        crate::ballistics::HullShock::default(),
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
-        // view and never initializes rollback state.
+        // view and never initializes replicated state.
         tank_servos(content.spec()),
         root_bundle,
     ));
@@ -254,7 +251,6 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             TrackGripWake::default(),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
-            crate::ballistics::HullShock::default(),
             tank_servos(content.spec()),
             root_bundle,
         ))
