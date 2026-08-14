@@ -454,6 +454,10 @@ pub fn plugin(app: &mut App) {
 /// construction cannot yet derive a response.
 #[expect(clippy::type_complexity, reason = "one arming predicate, spelled out")]
 fn arm_recoil_overlay(
+    // Fused own fire presents the kick from the stream itself, at the cursor — there is no early
+    // presentation to cancel, so the overlay must not arm. Read at arming: with the lever unset the
+    // resource is absent and this system is bit-identical to before the lever existed.
+    fused: Option<Res<crate::FusedOwnFire>>,
     tanks: Query<
         Entity,
         (
@@ -471,6 +475,9 @@ fn arm_recoil_overlay(
     >,
     mut commands: Commands,
 ) {
+    if fused.is_some() {
+        return;
+    }
     for entity in &tanks {
         info!("net: {entity} own interpolated hull armed with the fire-recoil overlay");
         commands.entity(entity).insert(RecoilOverlay::default());
@@ -1564,6 +1571,43 @@ mod tests {
         assert!(
             app.world().get::<RecoilOverlay>(smoothed).is_none(),
             "two presentation layers must never re-derive one root's Transform",
+        );
+    }
+
+    /// FUSED OWN FIRE NEVER ARMS THE OVERLAY: the kick presents from the stream itself at the
+    /// cursor, so there is no early presentation to cancel. With the lever unset the same root
+    /// arms — the default path, pinned.
+    #[test]
+    fn the_fused_lever_keeps_the_overlay_unarmed() {
+        let mut app = App::new();
+        app.insert_resource(crate::FusedOwnFire);
+        let own = app
+            .world_mut()
+            .spawn((
+                NetTank,
+                Controlled,
+                Interpolated,
+                Mass(HULL_MASS_KG),
+                tiger_inertia(),
+                CenterOfMass(Vec3::ZERO),
+            ))
+            .id();
+
+        app.world_mut()
+            .run_system_once(arm_recoil_overlay)
+            .expect("arming runs");
+        assert!(
+            app.world().get::<RecoilOverlay>(own).is_none(),
+            "fused: the overlay must not arm",
+        );
+
+        app.world_mut().remove_resource::<crate::FusedOwnFire>();
+        app.world_mut()
+            .run_system_once(arm_recoil_overlay)
+            .expect("arming runs");
+        assert!(
+            app.world().get::<RecoilOverlay>(own).is_some(),
+            "lever unset: the own interpolated hull arms exactly as before",
         );
     }
 }

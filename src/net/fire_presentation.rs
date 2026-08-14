@@ -171,7 +171,10 @@ fn arm_own_fire_presentation(
 }
 
 /// Restore the presented gate over every arriving snapshot, folding the snapshot into the ledger.
-fn hold_presentation_gate(mut roots: Query<(&mut WeaponGate, &mut OwnFirePresentation)>) {
+fn hold_presentation_gate(
+    fused: Option<Res<crate::FusedOwnFire>>,
+    mut roots: Query<(&mut WeaponGate, &mut OwnFirePresentation)>,
+) {
     for (mut gate, mut ledger) in &mut roots {
         // Immutable derefs first: a tick with no arriving snapshot must flag neither component.
         let arrived = ledger.slots.iter().enumerate().any(|(slot, entry)| {
@@ -191,15 +194,28 @@ fn hold_presentation_gate(mut roots: Query<(&mut WeaponGate, &mut OwnFirePresent
             }
             entry.confirm(arriving);
             if entry.overrun() > 0 {
-                warn!(
-                    "net: weapon {slot} accounted for {} rounds this client never presented \
-                     (presented {}, confirmed {}, absorbed {}) — own legality cannot exceed own \
-                     intent",
-                    entry.overrun(),
-                    entry.presented,
-                    entry.confirmed,
-                    entry.absorbed(),
-                );
+                // Under fused own fire the snapshot's belt delta legitimately lands before the
+                // echoed round crosses the cursor, so a transient overrun is the in-flight window,
+                // not a violated invariant.
+                if fused.is_some() {
+                    debug!(
+                        "net: weapon {slot} has {} confirmed rounds still in flight to the cursor \
+                         (presented {}, confirmed {})",
+                        entry.overrun(),
+                        entry.presented,
+                        entry.confirmed,
+                    );
+                } else {
+                    warn!(
+                        "net: weapon {slot} accounted for {} rounds this client never presented \
+                         (presented {}, confirmed {}, absorbed {}) — own legality cannot exceed own \
+                         intent",
+                        entry.overrun(),
+                        entry.presented,
+                        entry.confirmed,
+                        entry.absorbed(),
+                    );
+                }
             }
             gate.weapons[slot] = entry.presented_gate;
         }
@@ -229,8 +245,21 @@ fn record_presentation_gate(mut roots: Query<(&WeaponGate, &mut OwnFirePresentat
 /// Count one presented round against its slot. Same observer channel `net::recoil_overlay` excites
 /// on, and the same three filters: a reconstructed opponent shot is somebody else's, a sandbox
 /// free-fly shot has no shooter, and the query admits only the armed own root.
-fn count_presented_round(fire: On<FireShell>, mut ledgers: Query<&mut OwnFirePresentation>) {
-    if fire.shot_origin != FireShellOrigin::Local {
+///
+/// Under fused own fire (`crate::FusedOwnFire`) the own round's one presentation IS the
+/// reconstructed echo, so the count admits `Reconstructed` shots too — the ledger query still
+/// restricts them to the armed own root, and in mode A an own-rooted reconstructed shot cannot
+/// occur (the echo is suppressed), so the admission changes nothing with the lever unset.
+fn count_presented_round(
+    fire: On<FireShell>,
+    fused: Option<Res<crate::FusedOwnFire>>,
+    mut ledgers: Query<&mut OwnFirePresentation>,
+) {
+    let counted = match fire.shot_origin {
+        FireShellOrigin::Local => true,
+        FireShellOrigin::Reconstructed => fused.is_some(),
+    };
+    if !counted {
         return;
     }
     let Some(source) = fire.shooter else {
@@ -700,6 +729,66 @@ mod tests {
         assert!(app.world().get::<OwnFirePresentation>(own).is_some());
         assert!(app.world().get::<OwnFirePresentation>(predicted).is_none());
         assert!(app.world().get::<OwnFirePresentation>(opponent).is_none());
+    }
+
+    /// LEDGER COUNTING ACROSS THE MODES: a reconstructed round on the armed own root counts only
+    /// under the fused lever (there it IS the round's one presentation); with the lever unset it
+    /// does not count — mode A's Local-only accounting, pinned. A Local round counts in both.
+    #[test]
+    fn a_reconstructed_own_round_counts_only_under_the_fused_lever() {
+        let fire = |origin| FireShell {
+            origin: Vec3::ZERO,
+            direction: Dir3::NEG_Z,
+            speed: 755.0,
+            caliber: 0.0079,
+            mass: 0.0118,
+            mechanism: crate::spec::FireMechanism::Automatic,
+            shooter: None,
+            tracer: true,
+            shot_origin: origin,
+            catch_up_ticks: 0,
+            shot: None,
+        };
+        let presented = |fused: bool, origin| {
+            let mut app = App::new();
+            if fused {
+                app.insert_resource(crate::FusedOwnFire);
+            }
+            app.add_observer(count_presented_round);
+            let root = app
+                .world_mut()
+                .spawn(OwnFirePresentation {
+                    slots: vec![SlotLedger::default()],
+                })
+                .id();
+            let mut event = fire(origin);
+            event.shooter = Some(crate::ballistics::ShotSource {
+                tank: root,
+                weapon: 0,
+            });
+            app.world_mut().trigger(event);
+            app.world()
+                .get::<OwnFirePresentation>(root)
+                .expect("armed ledger")
+                .slots[0]
+                .presented
+        };
+
+        assert_eq!(
+            presented(false, FireShellOrigin::Reconstructed),
+            0,
+            "mode A: a reconstructed shot never counts against the own ledger",
+        );
+        assert_eq!(
+            presented(true, FireShellOrigin::Reconstructed),
+            1,
+            "fused: the echo is the own round's one presentation and must count",
+        );
+        assert_eq!(
+            presented(false, FireShellOrigin::Local),
+            1,
+            "mode A: the local round counts exactly as before",
+        );
     }
 
     /// The seed is the ONE tick the arriving gate decides anything: the ledger starts from the
