@@ -14,32 +14,54 @@
 //! are not own-initiated knowledge (`net::hit_feel` serves the first at message arrival); nothing
 //! here generalizes to them.
 //!
-//! # THE HANDOFF IS AN EVENT, NOT AN ESTIMATE
+//! # RESPONSE REPLAY: THE SIM'S OWN RESPONSE, PLAYED AT THE CLICK, SUBTRACTED AT THE CURSOR
 //!
-//! The instant the replicated kick begins to appear is the instant the **interpolation cursor**
-//! reaches the **fire tick**. Both numbers are held locally: `ShotId::fire_tick` is the client's own
-//! `LocalTimeline` tick at the fire (`net::protocol::publish_shot_clock` republishes it as
-//! `ShotClock`), and the cursor is `InterpolationTimeline::tick()` + overstep — the same quantity
-//! `trace::record_frame` emits as `itick`. The overlay therefore needs no delay model, no threshold
-//! and no constant: it measures the window it must live in, at the fire, and then tracks the cursor
-//! through it. Lightyear's ±5 % clock dilation and an interpolation clamp both move the crossing;
-//! driving the transient off the observed cursor rather than off wall time follows it either way.
+//! At the fire the module computes the hull's full impulse response by MICROSIM. The basis is the
+//! newest CONFIRMED server state of the own hull — `ConfirmedHistory::newest_present` for
+//! `Position`/`Rotation` (the snapshot buffer backing the interpolated stream) plus the
+//! live-replicated `LinearVelocity`/`AngularVelocity` — and the excitation is
+//! `shooting::recoil_impulse`, the SAME expression the sim applies, resolved about the authored
+//! centre of mass with the authored inertia (`I⁻¹ (r × J)`, Avian's own principal-frame tensor).
+//! One free rigid body is integrated [`RESPONSE_TICKS`] fixed ticks in the sim's own semi-implicit
+//! order — gravity into velocity, velocity into the centre of mass, the world angular velocity
+//! exponentiated onto the rotation — twice, kicked and unkicked, and the stored trajectory is the
+//! difference, `R(k) = kicked pose − unkicked pose`. Ground contact, suspension and the gyroscopic
+//! term are omitted; that fidelity gap plus the basis staleness (~RTT/2) IS the residual the
+//! certification capture measures.
 //!
-//! # NOTHING HERE IS TUNED
+//! The displayed offset is one subtraction:
 //!
-//! - **Amplitude and direction** come from `shooting::recoil_impulse` — the SAME expression the sim
-//!   applies to the hull, so the two cannot diverge on what a shot does. Linear response is
-//!   `J / mass`; angular response is `I⁻¹ (r × J)` about the authored centre of mass, both read from
-//!   the root's spec-authored `Mass` / `AngularInertia` / `CenterOfMass`. An MG round falls out
-//!   ~700× smaller on its own, with no per-weapon term.
-//! - **Duration** is the measured handoff window `fire_tick − cursor`, sampled at the fire. It is
-//!   the derived interpolation delay plus the client's lead over the server, observed rather than
-//!   reconstructed.
-//! - **Shape** is forced by its boundary conditions. Requiring `x(0) = 0`, `ẋ(0) = v₀`, `x(W) = 0`
-//!   and `ẋ(W) = 0` — leave at the physical recoil velocity, be back at rest exactly when the stream
-//!   takes over — determines a unique cubic, `x(u) = v₀·W·u·(1−u)²`. There is no free coefficient to
-//!   pick. `ẋ(W) = 0` is the C¹ condition at the crossing: the overlay adds neither a pose step nor
-//!   a velocity step to the frame the replicated kick starts on.
+//! ```text
+//! offset = R(local clock − fire) − R(cursor − fire, clamped ≥ 0)
+//! ```
+//!
+//! At the click the second term is zero, so the rendered hull shows the FULL kick, once. As the
+//! interpolation cursor crosses the fire tick the stream begins delivering the true kick inside
+//! the hull positions, and the second term subtracts the SAME stored trajectory back out —
+//! cancellation by the sim's own arithmetic, never by a tuned envelope. Both clocks are held
+//! locally: `ShotId::fire_tick` is the client's own `LocalTimeline` tick at the fire, and the
+//! cursor is `InterpolationTimeline::tick()` + overstep — the same quantity `trace::record_frame`
+//! emits as `itick` — so lightyear's ±5 % clock dilation and an interpolation clamp move both
+//! terms and the subtraction tracks them.
+//!
+//! Content time carries a one-tick lead ([`content_time`]): the impulse lands before the fire
+//! tick's own position integration, so the pose stamped `fire_tick` already holds the first
+//! response step, and the stream starts blending it in one tick earlier.
+//!
+//! # THE TAIL HEALS THROUGH THE TRAJECTORY'S OWN END
+//!
+//! `R(a) − R(b)` at fixed lag does not vanish on its own — an impulse leaves a persistent velocity
+//! change — so the trajectory CLAMPS at its horizon: past [`RESPONSE_TICKS`] the played term holds
+//! `R(N)` while the delivered term walks the stored tail at the cursor's own rate, and the offset
+//! reaches exactly zero the moment the cursor clears the response window. The heal window is
+//! therefore the measured handoff span itself — a derived rate, where `track::view`'s
+//! `PHASE_HEAL_OMEGA` needs a free one.
+//!
+//! # RESPONSE_TICKS IS THE ONE TUNED CONSTANT
+//!
+//! Everything else is derived: amplitude and direction from `recoil_impulse` and the authored mass
+//! properties, timing from the two observed clocks, the heal rate from the handoff span.
+//! [`RESPONSE_TICKS`] alone is TUNED — see its doc for the bounds that pin it.
 //!
 //! # SCOPE OF THE WRITE
 //!
@@ -66,25 +88,27 @@
 //! # A LOCAL FIRE THE SERVER REFUSED
 //!
 //! It can happen. `shooting::fire` gates on the client's own `WeaponGate`, which under this branch
-//! is plain replicated state rather than predicted state, so a crew-paused reload the server applied
-//! is invisible for `RTT/2`; a starved input can also fail the `for_tick` attestation in
-//! `net::protocol::bridge_action_state_to_tank_command`. The cost here is bounded to a phantom rock
-//! that decays to zero on its own — this overlay carries no negative lobe and cancels nothing out of
-//! the stream, so it needs no confirmation gate. (One is available if it ever does: the server's
-//! confirmation arrives at `RTT/2` and the crossing at `RTT/2 + D`, so it provably lands first.)
+//! is presentation state (`net::fire_presentation`), so a crew-paused reload the server applied is
+//! invisible for `RTT/2`. The subtraction is clocked, not content-matched: for a refused fire the
+//! delivered term still walks the stored trajectory while the stream carries no kick, so the hull
+//! rocks and then un-rocks over the same window — a bounded phantom that ends at exactly zero, so
+//! no confirmation gate is needed. (One is available if it ever is: the server's confirmation
+//! arrives at `RTT/2` and the crossing at `RTT/2 + D`, so it provably lands first.)
 //!
-//! Rapid refire composes additively: each shot contributes its own transient over its own measured
-//! window, and the offsets sum.
+//! Rapid refire composes additively: each shot contributes its own response over its own window,
+//! and the offsets sum.
 //!
 //! Design note: `.agents/scratch/impulse-prediction-mixed-timeline-2026-08-14.md`.
 
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, ComputedAngularInertia, Mass, PhysicsSystems, Position, Rotation,
+    AngularInertia, AngularVelocity, CenterOfMass, ComputedAngularInertia, Gravity, LinearVelocity,
+    Mass, PhysicsSystems, Position, Rotation,
 };
 use bevy::prelude::*;
+use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::core::tick::TickDuration;
 use lightyear::interpolation::timeline::InterpolationTimeline;
-use lightyear::prelude::{Interpolated, NetworkTimeline, Predicted};
+use lightyear::prelude::{Interpolated, LocalTimeline, NetworkTimeline, Predicted};
 
 use super::protocol::NetTank;
 use super::render_error::RenderErrorOffset;
@@ -97,20 +121,112 @@ use crate::tank::Controlled;
 const ZERO_EPS_M: f32 = 1e-6;
 const ZERO_EPS_RAD: f32 = 1e-6;
 
-/// One shot's transient, in flight between its fire tick and the cursor's crossing of it.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Microsim horizon in fixed ticks — the ONE TUNED CONSTANT in this module (312 ms at 64 Hz).
+///
+/// Bounded from BELOW by legibility: the free-body response must run at least as long as the real
+/// hull's contact-arrested transient reads on screen (the suspension settles a kick in roughly a
+/// third of a second), or the presented kick dies before the eye has it.
+///
+/// Bounded from ABOVE by the model's own fidelity: with no ground contact the kicked body keeps
+/// its velocity forever, so every extra tick carries the trajectory further from the arrested
+/// truth the stream will deliver — and lands directly in the post-cancellation residual the
+/// certification capture measures. It also stretches the heal tail, which lasts one handoff span
+/// past the horizon.
+const RESPONSE_TICKS: usize = 20;
+
+/// One free rigid body of the microsim: centre-of-mass position, rotation, world-frame velocities.
+#[derive(Debug, Clone, Copy)]
+struct FreeBody {
+    com: Vec3,
+    rot: Quat,
+    linear: Vec3,
+    angular: Vec3,
+}
+
+impl FreeBody {
+    /// One fixed tick in the sim's own semi-implicit order: gravity into velocity, velocity into
+    /// the centre of mass, the world angular velocity exponentiated onto the rotation (Avian's
+    /// `integrate_velocities`/`integrate_positions` for a torque-free body).
+    fn step(&mut self, gravity: Vec3, dt: f32) {
+        self.linear += gravity * dt;
+        self.com += self.linear * dt;
+        self.rot = (Quat::from_scaled_axis(self.angular * dt) * self.rot).normalize();
+    }
+}
+
+/// Integrate the kicked and unkicked bodies side by side and store the difference:
+/// `R(k) = (world centre-of-mass delta, body-local rotation delta)` for `k = 0..=RESPONSE_TICKS`.
+///
+/// `surge` is the world-frame velocity change `J / mass`; `spin` is the world-frame angular
+/// velocity change. Gravity is applied to BOTH bodies — it cancels in the difference exactly, and
+/// keeping it in the loop keeps the step honest to the sim's integration rather than to a
+/// simplified copy of it.
+fn impulse_response(
+    basis: FreeBody,
+    surge: Vec3,
+    spin: Vec3,
+    gravity: Vec3,
+    dt: f32,
+) -> Vec<(Vec3, Quat)> {
+    // A free body's dynamics are position-independent, so both trajectories are integrated about
+    // the basis origin: the metre-scale world coordinate would otherwise cancel catastrophically
+    // out of the millimetre-scale difference in f32.
+    let mut clean = FreeBody {
+        com: Vec3::ZERO,
+        ..basis
+    };
+    let mut kicked = FreeBody {
+        com: Vec3::ZERO,
+        linear: basis.linear + surge,
+        angular: basis.angular + spin,
+        ..basis
+    };
+    let mut response = Vec::with_capacity(RESPONSE_TICKS + 1);
+    response.push((Vec3::ZERO, Quat::IDENTITY));
+    for _ in 0..RESPONSE_TICKS {
+        clean.step(gravity, dt);
+        kicked.step(gravity, dt);
+        response.push((
+            kicked.com - clean.com,
+            (clean.rot.inverse() * kicked.rot).normalize(),
+        ));
+    }
+    response
+}
+
+/// Sample the stored response at a fractional tick, clamped to `[0, RESPONSE_TICKS]`.
+///
+/// Piecewise-linear between entries — the same structure lightyear's interpolation applies to the
+/// arriving keyframes, so the delivered term subtracts what the stream is actually showing
+/// mid-tick. The clamp at the horizon is the tail-heal law: see the module doc.
+fn sample(response: &[(Vec3, Quat)], at: f64) -> (Vec3, Quat) {
+    let at = at.clamp(0.0, (response.len() - 1) as f64);
+    let index = at.floor() as usize;
+    let frac = (at - at.floor()) as f32;
+    if frac == 0.0 || index + 1 >= response.len() {
+        return response[index];
+    }
+    let (near_com, near_rot) = response[index];
+    let (far_com, far_rot) = response[index + 1];
+    (near_com.lerp(far_com, frac), near_rot.slerp(far_rot, frac))
+}
+
+/// A clock reading converted to response content time, in ticks.
+///
+/// The `+ 1`: the impulse lands before the fire tick's own position integration
+/// (`SimPhase::WeaponFire` precedes the solver), so the pose STAMPED `fire_tick` already holds one
+/// step of response — content time 1 — and the stream starts blending it in one tick earlier.
+fn content_time(fire_tick: u32, clock: f64) -> f64 {
+    clock - f64::from(fire_tick) + 1.0
+}
+
+/// One shot's stored impulse response, in flight until the cursor clears its horizon.
+#[derive(Debug, Clone, PartialEq)]
 struct RecoilKick {
     /// The client `LocalTimeline` tick the shot was fired on (`ShotId::fire_tick`).
     fire_tick: u32,
-    /// The handoff window in ticks — `fire_tick − cursor`, sampled once at the fire. Strictly
-    /// positive: a kick whose crossing is already due is never admitted.
-    span_ticks: f64,
-    /// The same window in seconds. The transient's only time scale.
-    window_secs: f32,
-    /// World-frame recoil velocity of the centre of mass (m/s), `J / mass`.
-    surge: Vec3,
-    /// Body-frame recoil angular velocity (rad/s) as a rotation vector, `I⁻¹ (r × J)`.
-    twist: Vec3,
+    /// `R(k)` for `k = 0..=RESPONSE_TICKS`.
+    response: Vec<(Vec3, Quat)>,
 }
 
 /// Presentation-only recoil offset composed onto the own interpolated root.
@@ -186,39 +302,40 @@ fn arm_recoil_overlay(
     }
 }
 
-/// The interpolation cursor in fractional ticks — `trace`'s `itick`, and the only clock this module
-/// reads. `f64` because a session's tick counter outgrows `f32`'s sub-tick resolution.
+/// The interpolation cursor in fractional ticks — `trace`'s `itick`, and the delivered term's only
+/// clock. `f64` because a session's tick counter outgrows `f32`'s sub-tick resolution.
 fn cursor_ticks(timeline: &InterpolationTimeline) -> f64 {
     f64::from(timeline.tick().0) + f64::from(timeline.overstep().to_f32())
 }
 
-/// Where the cursor stands inside one kick's handoff window: `0` at the fire, `1` at the crossing.
+/// One kick's contribution at the two clock readings: `(surge, twist, spent)`.
 ///
-/// Clamped at both ends, so a cursor that stalls (an interpolation clamp) holds the transient where
-/// it was rather than skipping it, and a cursor at or past the fire tick reports a spent kick.
-fn handoff_progress(fire_tick: u32, span_ticks: f64, cursor: f64) -> f32 {
-    let remaining = f64::from(fire_tick) - cursor;
-    (1.0 - remaining / span_ticks).clamp(0.0, 1.0) as f32
+/// The played term samples at local content time, the delivered term at cursor content time
+/// (clamped ≥ 0 — before the crossing nothing has arrived), and the offset is their difference:
+/// world translation subtracted directly, body-local rotation composed as `D(b)⁻¹ · D(a)` and
+/// returned as a rotation vector so refire composes additively. Spent — identically zero, forever —
+/// once the cursor clears the response horizon.
+fn kick_offset(kick: &RecoilKick, local_clock: f64, cursor: f64) -> (Vec3, Vec3, bool) {
+    let delivered = content_time(kick.fire_tick, cursor);
+    if delivered >= (kick.response.len() - 1) as f64 {
+        return (Vec3::ZERO, Vec3::ZERO, true);
+    }
+    let played = content_time(kick.fire_tick, local_clock);
+    let (played_com, played_rot) = sample(&kick.response, played);
+    let (delivered_com, delivered_rot) = sample(&kick.response, delivered.max(0.0));
+    (
+        played_com - delivered_com,
+        (delivered_rot.inverse() * played_rot).to_scaled_axis(),
+        false,
+    )
 }
 
-/// The unique cubic on `[0, 1]` with `s(0) = 0`, `s'(0) = 1`, `s(1) = 0`, `s'(1) = 0`, in units of
-/// the window: the offset is `v₀ · W · s(u)`.
-fn transient(u: f32) -> f32 {
-    u * (1.0 - u) * (1.0 - u)
-}
-
-/// One kick's contribution at cursor position `cursor`: `(surge, twist, spent)`.
-fn kick_offset(kick: &RecoilKick, cursor: f64) -> (Vec3, Vec3, bool) {
-    let progress = handoff_progress(kick.fire_tick, kick.span_ticks, cursor);
-    let scale = kick.window_secs * transient(progress);
-    (kick.surge * scale, kick.twist * scale, progress >= 1.0)
-}
-
-/// The hull's response to one shot: `(surge, twist)` from the sim's own recoil impulse.
+/// The hull's velocity response to one shot: `(surge, twist)` from the sim's own recoil impulse.
 ///
-/// `surge` is world-frame linear velocity; `twist` is BODY-frame angular velocity, which is the
-/// frame the offset is stored and applied in. Working the moment arm in the body frame is what keeps
-/// the inertia tensor un-rotated: `I_world = R I R⁻¹`, so `R⁻¹ I_world⁻¹ = I⁻¹ R⁻¹`.
+/// `surge` is world-frame linear velocity; `twist` is BODY-frame angular velocity — the moment arm
+/// is body-fixed geometry, read at the pose the muzzle point was computed in. Working the arm in
+/// the body frame is what keeps the inertia tensor un-rotated: `I_world = R I R⁻¹`, so
+/// `R⁻¹ I_world⁻¹ = I⁻¹ R⁻¹`.
 fn hull_response(
     impulse: Vec3,
     muzzle: Vec3,
@@ -245,17 +362,23 @@ fn hull_response(
     )
 }
 
-/// Admit one locally-fired shot's transient, sized by the handoff window observed at the fire.
+/// Admit one locally-fired shot: microsim the response from the newest confirmed basis, store it.
+#[expect(clippy::type_complexity, reason = "one basis read, spelled out")]
 fn excite_recoil_overlay(
     fire: On<FireShell>,
     cursors: Query<&InterpolationTimeline>,
     tick: Res<TickDuration>,
+    gravity: Res<Gravity>,
     mut roots: Query<(
         &Position,
         &Rotation,
         &Mass,
         &AngularInertia,
         &CenterOfMass,
+        Option<&ConfirmedHistory<Position>>,
+        Option<&ConfirmedHistory<Rotation>>,
+        Option<&LinearVelocity>,
+        Option<&AngularVelocity>,
         &mut RecoilOverlay,
     )>,
 ) {
@@ -268,8 +391,18 @@ fn excite_recoil_overlay(
     let (Some(source), Some(shot)) = (fire.shooter, fire.shot) else {
         return;
     };
-    let Ok((position, rotation, mass, inertia, center_of_mass, mut overlay)) =
-        roots.get_mut(source.tank)
+    let Ok((
+        position,
+        rotation,
+        mass,
+        inertia,
+        center_of_mass,
+        confirmed_position,
+        confirmed_rotation,
+        linear,
+        angular,
+        mut overlay,
+    )) = roots.get_mut(source.tank)
     else {
         return;
     };
@@ -278,11 +411,12 @@ fn excite_recoil_overlay(
     };
     // The cursor is already at or past the fire tick: the stream is about to carry the kick itself,
     // and there is no window to fill.
-    let span_ticks = f64::from(shot.fire_tick) - cursor_ticks(timeline);
-    if span_ticks <= 0.0 {
+    if f64::from(shot.fire_tick) - cursor_ticks(timeline) <= 0.0 {
         return;
     }
     let impulse = recoil_impulse(fire.direction, fire.mass, fire.speed);
+    // The moment arm is read at the live pose — the frame `fire.origin` was computed in — and the
+    // twist it yields is body-frame, so it transfers to the basis rotation below.
     let (surge, twist) = hull_response(
         impulse,
         fire.origin,
@@ -292,18 +426,45 @@ fn excite_recoil_overlay(
         inertia,
         center_of_mass,
     );
+    // The microsim basis: newest CONFIRMED pose (the snapshot buffer the stream interpolates), and
+    // the live-replicated velocities (plain replication writes them on arrival — they ARE the
+    // newest confirmed values). A history still warming up falls back to the live pose.
+    let confirmed = confirmed_position.and_then(ConfirmedHistory::newest_present);
+    let basis_position = confirmed.map_or(position.0, |(_, confirmed)| confirmed.0);
+    let basis_rotation = confirmed_rotation
+        .and_then(ConfirmedHistory::newest_present)
+        .map_or(rotation.0, |(_, confirmed)| confirmed.0);
+    let basis = FreeBody {
+        com: basis_position + basis_rotation * center_of_mass.0,
+        rot: basis_rotation,
+        linear: linear.map_or(Vec3::ZERO, |velocity| velocity.0),
+        angular: angular.map_or(Vec3::ZERO, |velocity| velocity.0),
+    };
+    debug!(
+        "net: recoil response replay armed — fire tick {}, confirmed basis tick {:?}, basis |v| \
+         {:.3} m/s |w| {:.3} rad/s",
+        shot.fire_tick,
+        confirmed.map(|(tick, _)| tick.0),
+        basis.linear.length(),
+        basis.angular.length(),
+    );
     overlay.kicks.push(RecoilKick {
         fire_tick: shot.fire_tick,
-        span_ticks,
-        window_secs: (span_ticks * tick.0.as_secs_f64()) as f32,
-        surge,
-        twist,
+        response: impulse_response(
+            basis,
+            surge,
+            basis_rotation * twist,
+            gravity.0,
+            tick.0.as_secs_f32(),
+        ),
     });
 }
 
-/// Compose every in-flight transient and present it, re-derived from the sim pose.
+/// Compose every in-flight response and present it, re-derived from the sim pose.
 fn apply_recoil_overlay(
     cursors: Query<&InterpolationTimeline>,
+    local: Res<LocalTimeline>,
+    fixed: Res<Time<Fixed>>,
     mut roots: Query<(
         &mut Transform,
         &Position,
@@ -316,14 +477,17 @@ fn apply_recoil_overlay(
         return;
     };
     let cursor = cursor_ticks(timeline);
+    // The played term's clock: the local timeline in fractional ticks — the clock `fire_tick` was
+    // stamped on, carried between fixed steps by the fixed accumulator's overstep.
+    let local_clock = f64::from(local.tick().0) + f64::from(fixed.overstep_fraction());
 
     for (mut transform, position, rotation, center_of_mass, mut overlay) in &mut roots {
         let mut surge = Vec3::ZERO;
         let mut twist = Vec3::ZERO;
-        // A spent kick contributes exactly zero (`transient(1) == 0`), so summing and retiring in
-        // one pass cannot change the composed offset.
+        // A spent kick contributes exactly zero, so summing and retiring in one pass cannot change
+        // the composed offset.
         overlay.kicks.retain(|kick| {
-            let (kick_surge, kick_twist, spent) = kick_offset(kick, cursor);
+            let (kick_surge, kick_twist, spent) = kick_offset(kick, local_clock, cursor);
             surge += kick_surge;
             twist += kick_twist;
             !spent
@@ -383,7 +547,8 @@ mod tests {
     const MUZZLE_LIFT_M: f32 = 1.5;
     const MUZZLE_REACH_M: f32 = 3.0;
     /// The fixed tick, in seconds (64 Hz).
-    const TICK_SECS: f64 = 1.0 / 64.0;
+    const TICK_SECS: f32 = 1.0 / 64.0;
+    const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
     fn tiger_inertia() -> AngularInertia {
         AngularInertia::from_shape(&Cuboid::new(3.7, 2.0, 6.3), HULL_MASS_KG)
@@ -405,13 +570,21 @@ mod tests {
         )
     }
 
-    fn kick(fire_tick: u32, span_ticks: f64) -> RecoilKick {
+    /// A moving, spinning basis on a gravity world — nothing about the response laws below may
+    /// depend on any of it being zero.
+    fn rolling_basis() -> FreeBody {
+        FreeBody {
+            com: Vec3::new(140.0, 6.6, 290.0),
+            rot: Quat::from_rotation_y(0.4),
+            linear: Vec3::new(1.0, 0.2, -3.0),
+            angular: Vec3::new(0.05, -0.3, 0.02),
+        }
+    }
+
+    fn kick(fire_tick: u32, surge: Vec3, spin: Vec3) -> RecoilKick {
         RecoilKick {
             fire_tick,
-            span_ticks,
-            window_secs: (span_ticks * TICK_SECS) as f32,
-            surge: Vec3::new(0.0, 0.0, 1.0),
-            twist: Vec3::new(1.0, 0.0, 0.0),
+            response: impulse_response(rolling_basis(), surge, spin, GRAVITY, TICK_SECS),
         }
     }
 
@@ -506,105 +679,213 @@ mod tests {
         );
     }
 
-    /// THE PROPERTY THIS MODULE EXISTS FOR, and the one the mutation check breaks: the overlay is
-    /// exactly zero at the cursor's crossing of the fire tick, whatever the interpolation delay in
-    /// force — because the window it decays over IS the observed distance to that crossing.
-    ///
-    /// Five spans, from one tick to forty, each sampled at its own crossing. A decay duration
-    /// decoupled from the cursor (a fixed tick count, a wall-clock constant) leaves a residual in
-    /// every span but the one it happens to match.
+    /// THE MICROSIM'S LINEAR LAW: the stored difference is the kick velocity integrated tick by
+    /// tick, and gravity — applied to both bodies — cancels out of it exactly. Applying gravity to
+    /// one body only, or scaling the surge anywhere in the loop, moves every entry off
+    /// `surge · k · dt`.
     #[test]
-    fn the_overlay_is_spent_exactly_at_the_cursors_crossing_for_every_interp_delay() {
-        const FIRE_TICK: u32 = 4_000;
-        for span in [1.0_f64, 3.0, 6.7, 12.5, 40.0] {
-            let kick = kick(FIRE_TICK, span);
-            // The START is zero only to floating point: reconstructing `remaining` from a cursor
-            // that was itself derived by subtraction loses the last bits of a fractional span. The
-            // CROSSING below is exact — `remaining = 0` makes the progress clamp return exactly 1
-            // and the cubic's `(1 − u)²` factor exactly 0.
-            let cursor_at_fire = f64::from(FIRE_TICK) - span;
-            let (surge, twist, spent) = kick_offset(&kick, cursor_at_fire);
+    fn the_linear_response_is_the_kick_velocity_integrated_and_gravity_cancels() {
+        let surge = Vec3::new(0.02, 0.01, 0.138);
+        let response = impulse_response(rolling_basis(), surge, Vec3::ZERO, GRAVITY, TICK_SECS);
+        for (k, (com, rot)) in response.iter().enumerate() {
+            let expected = surge * k as f32 * TICK_SECS;
             assert!(
-                surge.length() < 1e-9 && twist.length() < 1e-9 && !spent,
-                "span {span}: the transient must start from the clean pose, got {surge:?}",
+                (*com - expected).length() < 1e-4,
+                "tick {k}: {com:?}, expected {expected:?}",
             );
-
-            // Halfway to the crossing the overlay must be genuinely present, or "zero at the
-            // crossing" would be satisfied by an overlay that never existed.
-            let (surge, twist, spent) = kick_offset(&kick, cursor_at_fire + span / 2.0);
             assert!(
-                surge.length() > 0.0 && twist.length() > 0.0 && !spent,
-                "span {span}: the overlay must be live mid-window",
+                rot.to_scaled_axis().length() < 1e-6,
+                "tick {k}: a pure surge must not rock the hull, got {rot:?}",
             );
-
-            assert_eq!(
-                kick_offset(&kick, f64::from(FIRE_TICK)),
-                (Vec3::ZERO, Vec3::ZERO, true),
-                "span {span}: the overlay must be spent AT the crossing",
-            );
-            // And past it, forever.
-            assert_eq!(
-                kick_offset(&kick, f64::from(FIRE_TICK) + 30.0),
-                (Vec3::ZERO, Vec3::ZERO, true),
-                "span {span}: the overlay must stay spent past the crossing",
+        }
+        let heavy = impulse_response(rolling_basis(), surge, Vec3::ZERO, GRAVITY * 4.0, TICK_SECS);
+        for (k, (light, heavy)) in response.iter().zip(&heavy).enumerate() {
+            assert!(
+                (light.0 - heavy.0).length() < 1e-4,
+                "tick {k}: gravity must cancel out of the difference",
             );
         }
     }
 
-    /// The transient LANDS at rest, so the frame the replicated kick starts on inherits neither a
-    /// pose step nor a velocity step from the overlay — and LEAVES at the physical recoil velocity,
-    /// so the amplitude derived above is the one actually presented.
+    /// THE MICROSIM'S ANGULAR LAW: on a still basis the stored rotation delta is the spin
+    /// exponentiated tick by tick — expressed BODY-locally, so the world axis lands in it rotated
+    /// by the basis. On a spinning basis the delta rides the basis rotation: the deviation from the
+    /// still-basis axis is the proof the base motion is integrated, not ignored. Zeroing the basis
+    /// angular velocity inside the microsim erases the deviation and reds the second half.
     #[test]
-    fn the_transient_leaves_at_the_recoil_velocity_and_lands_at_rest() {
-        const FIRE_TICK: u32 = 900;
-        const SPAN: f64 = 8.0;
-        let kick = kick(FIRE_TICK, SPAN);
-        let at = |progress: f64| {
-            kick_offset(&kick, f64::from(FIRE_TICK) - SPAN * (1.0 - progress))
-                .0
-                .length()
+    fn the_angular_response_rides_the_basis_rotation() {
+        let spin = Vec3::new(0.057, 0.0, 0.0);
+        let still = FreeBody {
+            angular: Vec3::ZERO,
+            ..rolling_basis()
         };
-        let peak = at(1.0 / 3.0);
+        let response = impulse_response(still, Vec3::ZERO, spin, GRAVITY, TICK_SECS);
+        // The stored delta is BODY-local: the world spin axis lands in it rotated by the basis.
+        let body_spin = still.rot.inverse() * spin;
+        for (k, (com, rot)) in response.iter().enumerate() {
+            let expected = body_spin * k as f32 * TICK_SECS;
+            assert!(
+                (rot.to_scaled_axis() - expected).length() < 1e-5,
+                "tick {k}: {rot:?}, expected {expected:?} as a rotation vector",
+            );
+            assert!(
+                com.length() < 1e-6,
+                "tick {k}: a pure spin must not translate the centre of mass",
+            );
+        }
+
+        let yawing = FreeBody {
+            angular: Vec3::new(0.0, 0.5, 0.0),
+            ..rolling_basis()
+        };
+        let ridden = impulse_response(yawing, Vec3::ZERO, spin, GRAVITY, TICK_SECS);
+        let last = ridden[RESPONSE_TICKS].1;
+        let angle = last.to_scaled_axis().length();
+        let expected_angle = spin.length() * RESPONSE_TICKS as f32 * TICK_SECS;
         assert!(
-            at(0.99) < peak * 1e-3,
-            "the last percent of the window must be at rest: {} vs peak {peak}",
-            at(0.99),
+            (angle - expected_angle).abs() < expected_angle * 0.1,
+            "the delta's magnitude stays first-order: {angle} vs {expected_angle}",
         );
-        let ballistic = 0.01 * f64::from(kick.window_secs) * f64::from(kick.surge.length());
-        let leaving = f64::from(at(0.01)) / ballistic;
+        let still_axis = response[RESPONSE_TICKS].1.to_scaled_axis().normalize();
         assert!(
-            (leaving - 1.0).abs() < 0.03,
-            "the transient must leave at the physical recoil velocity, ratio {leaving}",
+            last.to_scaled_axis().normalize().angle_between(still_axis) > 0.02,
+            "a yawing basis must precess the body-frame delta axis off the still-basis one: \
+             {last:?}",
         );
     }
 
-    /// A CURSOR THAT STALLS HOLDS THE OVERLAY rather than skipping it. An interpolation clamp
-    /// freezes the stream; the overlay must freeze with it, not retire early against wall time.
+    /// THE FULL KICK PRESENTS AT THE CLICK. On the first rendered frame after the fire tick the
+    /// delivered term is still zero, and the offset is the response itself — content time 1 at the
+    /// tick boundary, because the fire tick's own integration step is inside the pose stamped with
+    /// it. Dropping `content_time`'s one-tick lead presents `R(0) = 0` here and reds this.
     #[test]
-    fn a_stalled_cursor_holds_the_transient_where_it_was() {
+    fn the_full_response_presents_at_the_click() {
+        const FIRE_TICK: u32 = 4_000;
+        let surge = Vec3::new(0.0, 0.01, 0.138);
+        let kick = kick(FIRE_TICK, surge, Vec3::new(0.057, 0.0, 0.0));
+        // Cursor 8 ticks behind the fire: delivered content clamps to zero.
+        let (offset, twist, spent) = kick_offset(&kick, f64::from(FIRE_TICK), 3_992.0);
+        assert!(!spent);
+        assert!(
+            (offset - surge * TICK_SECS).length() < 1e-5,
+            "at the click the offset is the first response step, got {offset:?}",
+        );
+        assert!(twist.length() > 0.0, "and the rock is already presented");
+
+        // Mid-window, still before the crossing: the offset IS the stored trajectory, unscaled.
+        let (offset, _, spent) = kick_offset(&kick, f64::from(FIRE_TICK) + 4.5, 3_996.5);
+        let (expected, _) = sample(&kick.response, 5.5);
+        assert!(!spent);
+        assert!(
+            (offset - expected).length() < 1e-6,
+            "pre-crossing the played term presents whole: {offset:?} vs {expected:?}",
+        );
+    }
+
+    /// THE STREAM IS SUBTRACTED THROUGH THE IDENTICAL TRAJECTORY: what the delivered term removes
+    /// is exactly what a click at that content time would have presented, so played = presented +
+    /// delivered with no envelope anywhere. Scaling the delivered sample — any tuned cancellation —
+    /// breaks the identity.
+    #[test]
+    fn the_delivered_stream_cancels_through_the_identical_response() {
+        const FIRE_TICK: u32 = 4_000;
+        let kick = kick(
+            FIRE_TICK,
+            Vec3::new(0.0, 0.01, 0.138),
+            Vec3::new(0.057, 0.0, 0.01),
+        );
+        let clock = f64::from(FIRE_TICK) + 10.0; // played content 11
+        let crossed = f64::from(FIRE_TICK) + 4.0; // delivered content 5
+        let uncrossed = f64::from(FIRE_TICK) - 1.0; // delivered content 0
+
+        let (full, full_twist, _) = kick_offset(&kick, clock, uncrossed);
+        let (residual, residual_twist, _) = kick_offset(&kick, clock, crossed);
+        let (delivered, delivered_twist, _) =
+            kick_offset(&kick, f64::from(FIRE_TICK) + 4.0, uncrossed);
+
+        assert!(
+            residual.length() < full.length(),
+            "a delivering stream must shrink the presented offset",
+        );
+        assert!(
+            (residual + delivered - full).length() < 1e-6,
+            "presented + delivered must equal the full response: {residual:?} + {delivered:?} vs \
+             {full:?}",
+        );
+        let recomposed =
+            Quat::from_scaled_axis(delivered_twist) * Quat::from_scaled_axis(residual_twist);
+        assert!(
+            recomposed.angle_between(Quat::from_scaled_axis(full_twist)) < 1e-5,
+            "the rock decomposes through the same trajectory",
+        );
+    }
+
+    /// THE TAIL RETURNS TO EXACTLY ZERO. Past the horizon the played term holds `R(N)` while the
+    /// delivered term walks the stored tail; the moment the cursor clears the window the offset is
+    /// identically zero and the kick is spent — forever. Extrapolating the response past its last
+    /// entry leaves the persistent-velocity residual in place and reds every assertion here.
+    #[test]
+    fn the_offset_is_exactly_zero_once_the_stream_has_delivered_the_response() {
+        const FIRE_TICK: u32 = 4_000;
+        let horizon = f64::from(FIRE_TICK) - 1.0 + RESPONSE_TICKS as f64;
+        let kick = kick(
+            FIRE_TICK,
+            Vec3::new(0.0, 0.01, 0.138),
+            Vec3::new(0.057, 0.0, 0.0),
+        );
+        // Mid-heal: the played term is clamped at the horizon, the delivered term is still short of
+        // it — the residual is live and easing down the stored tail.
+        let (offset, twist, spent) = kick_offset(&kick, horizon + 3.0, horizon - 3.0);
+        assert!(
+            offset.length() > 0.0 && twist.length() > 0.0 && !spent,
+            "the heal tail is presented while the stream still owes response",
+        );
+
+        // The cursor clears the window: exactly zero, spent, and it stays that way.
+        assert_eq!(
+            kick_offset(&kick, horizon + 6.0, horizon),
+            (Vec3::ZERO, Vec3::ZERO, true),
+        );
+        assert_eq!(
+            kick_offset(&kick, horizon + 400.0, horizon + 300.0),
+            (Vec3::ZERO, Vec3::ZERO, true),
+        );
+    }
+
+    /// A CURSOR THAT STALLS HOLDS THE OVERLAY rather than skipping it: the delivered term is driven
+    /// by the observed cursor, and once the played term is past the horizon a frozen cursor freezes
+    /// the whole offset, not just half of it.
+    #[test]
+    fn a_stalled_cursor_holds_the_residual_where_it_was() {
         const FIRE_TICK: u32 = 512;
-        const SPAN: f64 = 10.0;
-        let kick = kick(FIRE_TICK, SPAN);
-        let stalled = f64::from(FIRE_TICK) - SPAN * 0.6;
-        let first = kick_offset(&kick, stalled);
-        assert_eq!(first, kick_offset(&kick, stalled));
-        assert!(!first.2, "a stalled cursor has not reached the crossing");
+        let kick = kick(
+            FIRE_TICK,
+            Vec3::new(0.0, 0.01, 0.138),
+            Vec3::new(0.057, 0.0, 0.0),
+        );
+        let stalled = f64::from(FIRE_TICK) + 6.0;
+        let first = kick_offset(&kick, f64::from(FIRE_TICK) + 30.0, stalled);
+        assert_eq!(
+            first,
+            kick_offset(&kick, f64::from(FIRE_TICK) + 60.0, stalled)
+        );
+        assert!(!first.2, "a stalled cursor has not cleared the window");
         assert!(first.0.length() > 0.0, "and the offset is still presented");
     }
 
-    /// RAPID REFIRE COMPOSES ADDITIVELY: a second shot before the first transient is spent adds its
+    /// RAPID REFIRE COMPOSES ADDITIVELY: a second shot before the first response is spent adds its
     /// own, and neither is reset.
     #[test]
-    fn a_second_shot_adds_its_transient_to_the_one_still_in_flight() {
+    fn a_second_shot_adds_its_response_to_the_one_still_in_flight() {
         const FIRST: u32 = 2_000;
-        const SPAN: f64 = 10.0;
-        let first = kick(FIRST, SPAN);
-        let second = kick(FIRST + 4, SPAN);
-        // Five ticks short of the first crossing: the first kick is 50 % through its window, the
-        // second 10 %.
-        let cursor = f64::from(FIRST) - 5.0;
-        let (first_surge, first_twist, _) = kick_offset(&first, cursor);
-        let (second_surge, second_twist, _) = kick_offset(&second, cursor);
+        let surge = Vec3::new(0.0, 0.01, 0.138);
+        let spin = Vec3::new(0.057, 0.0, 0.0);
+        let first = kick(FIRST, surge, spin);
+        let second = kick(FIRST + 4, surge, spin);
+        let clock = f64::from(FIRST) + 8.0;
+        let cursor = f64::from(FIRST) - 2.0;
+        let (first_surge, first_twist, _) = kick_offset(&first, clock, cursor);
+        let (second_surge, second_twist, _) = kick_offset(&second, clock, cursor);
         assert!(first_surge.length() > 0.0 && second_surge.length() > 0.0);
         assert!(
             (first_surge + second_surge).length() > first_surge.length()
@@ -615,6 +896,8 @@ mod tests {
 
     /// PREDICTED MODE IS INERT. The overlay arms only where the server stream owns the hull; a
     /// predicted root's kick comes from the real impulse and `net::render_error` owns its pose.
+    /// The `both` case pins `Without<Predicted>` itself: prediction wins even on a root that also
+    /// carries `Interpolated`.
     #[test]
     fn only_the_own_interpolated_hull_arms() {
         let mut app = App::new();
@@ -632,6 +915,17 @@ mod tests {
         let predicted = app
             .world_mut()
             .spawn((NetTank, Controlled, Predicted, mass_properties()))
+            .id();
+        // Both markers at once — a role transition in flight. Prediction owns the pose.
+        let both = app
+            .world_mut()
+            .spawn((
+                NetTank,
+                Controlled,
+                Interpolated,
+                Predicted,
+                mass_properties(),
+            ))
             .id();
         // An opponent: interpolated, but not the player's.
         let opponent = app
@@ -656,6 +950,10 @@ mod tests {
 
         assert!(app.world().get::<RecoilOverlay>(own).is_some());
         assert!(app.world().get::<RecoilOverlay>(predicted).is_none());
+        assert!(
+            app.world().get::<RecoilOverlay>(both).is_none(),
+            "a root prediction owns must never arm, whatever else it carries",
+        );
         assert!(app.world().get::<RecoilOverlay>(opponent).is_none());
         assert!(
             app.world().get::<RecoilOverlay>(smoothed).is_none(),

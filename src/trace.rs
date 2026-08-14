@@ -546,9 +546,10 @@ fn record_frame(
                 obj.insert("voq".into(), quat(offset.rotation));
             }
             // The own-hull fire-recoil overlay (`net::recoil_overlay`), present only on an
-            // interpolated owner. Omitted when spent, so field presence means a transient is in
-            // flight and `ro`'s last frame against `itick`'s crossing of the shot's fire tick is the
-            // decay-to-zero-by-handoff property, measured.
+            // interpolated owner. Omitted when spent, so field presence means a response is in
+            // flight; `ro` after `itick` crosses the shot's fire tick is the post-cancellation
+            // residual, and its last frame against the cursor clearing the response window is the
+            // return-to-exactly-zero property, measured.
             if let Ok(overlay) = recoil_overlay.get(entity) {
                 if overlay.translation != Vec3::ZERO {
                     obj.insert("ro".into(), vec3(overlay.translation));
