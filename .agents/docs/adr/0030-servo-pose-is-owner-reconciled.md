@@ -1,6 +1,10 @@
 # Servo pose is owner-reconciled authority state
 
-> **Status: accepted; shipped in declared `PROTOCOL_REV = 18`.**
+> **Status: accepted; shipped in declared `PROTOCOL_REV = 18`. Superseded by
+> [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the atomic
+> `TankServos` component and its trace role survive, but owner reconciliation is gone — the
+> own turret is click-immediate client view state; remotes drive from replicated
+> `ServoAngles`.
 
 The complete turret/gun servo integrator is one root-resident `TankServos` component, replicated by
 the authority, predicted by the owner, and restored from confirmed history at the authority sample's

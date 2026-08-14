@@ -1,5 +1,10 @@
 # Element grip converges through local rollback plus authoritative checkpoints
 
+> **Status: superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15,
+> `PROTOCOL_REV = 27`). The convergence machinery (anchors, checkpoints, resync) is deleted;
+> the disclosure boundary survives — the private element field never leaves the server, now
+> trivially, since clients simulate no elements.
+
 At DECLARED `PROTOCOL_REV = 16`, the networked element law keeps the complete
 `TrackGripElements` field as root-resident simulation state. The authority constructs it
 synchronously from tank data at spawn. Its exact current value crosses to the owning client once in
