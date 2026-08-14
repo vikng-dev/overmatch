@@ -53,8 +53,10 @@ use super::transmission::{
 };
 
 // Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
-// for the terrain/ground-type mechanic — deliberately not vehicle spec).
-const MU: f32 = 0.9;
+// for the terrain/ground-type mechanic — deliberately not vehicle spec). `pub(crate)`: the
+// traction ceiling `μg` bounds hull acceleration, so `net::extrapolate` derives its horizon
+// from this same constant.
+pub(crate) const MU: f32 = 0.9;
 const SLIP_SATURATION: f32 = 0.4;
 
 /// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
