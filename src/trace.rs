@@ -3,12 +3,10 @@
 //! Invariant: tracing never writes simulation state. `SPIKE_TRACE` enables recorder registration;
 //! role-qualified paths prevent concurrently launched compositions from sharing a sink.
 //!
-//! Rows have `k` values `meta`, `frame`, `tick`, `rollback`, `grip_anchor_compare`,
-//! `grip_resync_request`, or `grip_checkpoint_apply`. Fields unavailable in a composition are omitted
-//! rather than represented as null, except a resync with no retained anchor context, whose diagnostic
-//! values are explicitly null. Cross-process analysis joins on `tick` and `role`, never on entity
-//! identifiers. [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py) consumes the
-//! base schema; grip rows are the repair-loop root-cause capture.
+//! Rows have `k` values `meta`, `frame`, `tick`, or `rollback`. Fields unavailable in a
+//! composition are omitted rather than represented as null. Cross-process analysis joins on `tick`
+//! and `role`, never on entity identifiers.
+//! [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py) consumes the base schema.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -20,11 +18,10 @@ use bevy::prelude::*;
 use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
-use crate::CombatantId;
 use crate::ballistics::HullShock;
 use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate};
 use crate::track::sim::{
-    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripEffect, TrackGripElements,
+    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
 };
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
@@ -32,9 +29,7 @@ mod state_hash;
 
 use state_hash::hash_tank_state_with_elements;
 #[cfg(test)]
-pub(crate) use state_hash::{
-    CanonicalTankStateDigest, canonical_element_hash, canonical_tank_state_digest,
-};
+pub(crate) use state_hash::{CanonicalTankStateDigest, canonical_tank_state_digest};
 
 use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
@@ -90,154 +85,6 @@ impl TraceWriter {
     fn write(&mut self, row: &Value) {
         self.sink.write(row);
     }
-
-    pub(crate) fn record_grip_anchor_compare(
-        &mut self,
-        sample: GripAnchorTrace,
-        request_reason: GripRequestReason,
-        evidence_spent: bool,
-        request_due: bool,
-        request_sent: bool,
-    ) {
-        let mut row = grip_trace_row("grip_anchor_compare", sample, request_reason);
-        let object = row.as_object_mut().expect("grip trace row is an object");
-        object.insert("evidence_spent".into(), Value::Bool(evidence_spent));
-        object.insert("request_due".into(), Value::Bool(request_due));
-        object.insert("request_sent".into(), Value::Bool(request_sent));
-        self.write(&row);
-    }
-
-    pub(crate) fn record_grip_resync_request(
-        &mut self,
-        sample: GripAnchorTrace,
-        request_reason: GripRequestReason,
-    ) {
-        self.write(&grip_trace_row(
-            "grip_resync_request",
-            sample,
-            request_reason,
-        ));
-    }
-
-    pub(crate) fn record_grip_resync_without_anchor(
-        &mut self,
-        combatant: CombatantId,
-        tick: u32,
-        epoch: u32,
-        request_reason: GripRequestReason,
-    ) {
-        self.write(&json!({
-            "k": "grip_resync_request",
-            "tick": tick,
-            "combatant": combatant.0,
-            "request_reason": request_reason.as_str(),
-            "anchor_producing_tick": Value::Null,
-            "history_tick": Value::Null,
-            "authority_force": Value::Null,
-            "predicted_force": Value::Null,
-            "authority_torque": Value::Null,
-            "predicted_torque": Value::Null,
-            "authority_belt": Value::Null,
-            "predicted_belt": Value::Null,
-            "e_v": Value::Null,
-            "e_omega": Value::Null,
-            "e_belt": Value::Null,
-            "epoch": epoch,
-            "authority_digest": Value::Null,
-            "predicted_digest": Value::Null,
-            "digest_match": Value::Null,
-        }));
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn record_grip_checkpoint_apply(
-        &mut self,
-        tick: u32,
-        combatant: CombatantId,
-        epoch: u32,
-        state_entering_tick: u32,
-        checkpoint_hash: u64,
-        field_bits_changed: bool,
-        rollback: bool,
-    ) {
-        self.write(&json!({
-            "k": "grip_checkpoint_apply",
-            "tick": tick,
-            "combatant": combatant.0,
-            "epoch": epoch,
-            "state_entering_tick": state_entering_tick,
-            "checkpoint_hash": checkpoint_hash,
-            "field_bits_changed": field_bits_changed,
-            "rollback": rollback,
-        }));
-    }
-}
-
-/// Complete values at one anchor/history comparison, copied so an ensuing resync request can emit
-/// the same evidence into a separate JSONL row.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct GripAnchorTrace {
-    pub(crate) tick: u32,
-    pub(crate) combatant: CombatantId,
-    pub(crate) anchor_producing_tick: u32,
-    pub(crate) history_tick: u32,
-    pub(crate) authority: TrackGripEffect,
-    pub(crate) predicted: TrackGripEffect,
-    pub(crate) e_v: f32,
-    pub(crate) e_omega: f32,
-    pub(crate) e_belt: [f32; 2],
-    pub(crate) epoch: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GripRequestReason {
-    None,
-    Effect,
-    Digest,
-    EffectAndDigest,
-    StaleCheckpoint,
-}
-
-impl GripRequestReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::None => "none",
-            Self::Effect => "effect",
-            Self::Digest => "digest",
-            Self::EffectAndDigest => "effect_and_digest",
-            Self::StaleCheckpoint => "stale_checkpoint",
-        }
-    }
-}
-
-fn grip_trace_row(kind: &'static str, sample: GripAnchorTrace, reason: GripRequestReason) -> Value {
-    json!({
-        "k": kind,
-        "tick": sample.tick,
-        "combatant": sample.combatant.0,
-        "request_reason": reason.as_str(),
-        "anchor_producing_tick": sample.anchor_producing_tick,
-        "history_tick": sample.history_tick,
-        "authority_force": vec3(sample.authority.traction_force),
-        "predicted_force": vec3(sample.predicted.traction_force),
-        "authority_torque": vec3(sample.authority.traction_torque),
-        "predicted_torque": vec3(sample.predicted.traction_torque),
-        "authority_belt": [
-            num(sample.authority.belt_reaction[0]),
-            num(sample.authority.belt_reaction[1]),
-        ],
-        "predicted_belt": [
-            num(sample.predicted.belt_reaction[0]),
-            num(sample.predicted.belt_reaction[1]),
-        ],
-        "e_v": num(sample.e_v),
-        "e_omega": num(sample.e_omega),
-        "e_belt": [num(sample.e_belt[0]), num(sample.e_belt[1])],
-        "epoch": sample.epoch,
-        "authority_digest": sample.authority.field_digest,
-        "predicted_digest": sample.predicted.field_digest,
-        "digest_match": sample.authority.field_digest == sample.predicted.field_digest,
-    })
 }
 
 // JSON helpers shared across the recorders. Non-finite values become JSON `null`.
@@ -361,10 +208,6 @@ pub fn client_plugin(app: &mut App) {
         PreUpdate,
         clear_rollback_triggers.before(RollbackSystems::Check),
     );
-    app.add_systems(
-        PreUpdate,
-        record_fact_events.after(RollbackSystems::EndRollback),
-    );
     app.add_observer(record_rollback);
 }
 
@@ -410,10 +253,9 @@ fn frame_row_cap() -> usize {
 /// `after(TransformSystems::Propagate)` so `GlobalTransform` already reflects the frame-interpolated
 /// + correction-adjusted `Position`/`Rotation` (MP) or avian's render interpolation (SP).
 ///
-/// The net extras (`net`, `conf`, `view_offset`) read prediction/correction state that only a real MP
-/// client mounts; every one is accessed OPTIONALLY, so the same system runs unchanged in the
-/// single-player composition (where those resources/components are simply absent at runtime) and
-/// emits an SP-shaped row.
+/// The net extras (`net`, `conf`) read connection state that only a real MP client mounts; every
+/// one is accessed OPTIONALLY, so the same system runs unchanged in the single-player composition
+/// (where those resources/components are simply absent at runtime) and emits an SP-shaped row.
 fn record_frame(
     mut trace: ResMut<TraceWriter>,
     real: Res<Time<Real>>,
@@ -422,27 +264,22 @@ fn record_frame(
     // The optional world-camera pose permits camera-space analysis; headless rows omit it.
     camera: Query<&GlobalTransform, With<Camera3d>>,
     net: NetFrameCtx,
-    // The predicted root's confirmed-authority history: lightyear seeds these buffers from every
-    // replication receive (`add_confirmed_to_history`) and `prepare_rollback` reads them as the
-    // rollback source. `Option<&…>` per component and an unfiltered query so the single-player
-    // composition — which never registers `ConfirmedHistory` — yields `(None, None)` rather than
-    // failing system-param validation.
+    // The root's confirmed-authority history: lightyear seeds these buffers from every replication
+    // receive (`add_confirmed_to_history`) and the interpolation cursor walks them. `Option<&…>`
+    // per component and an unfiltered query so the single-player composition — which never
+    // registers `ConfirmedHistory` — yields `(None, None)` rather than failing system-param
+    // validation.
     conf: Query<(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
-    // The predicted root's live render-space error offset. Present only on the entity `net::render_error`
-    // armed (the client's predicted tank); an unfiltered `Option`-style `get` keeps every other tank
-    // row — and the single-player composition, which never mounts the layer — omitting the field.
-    view_offset: Query<&crate::net::RenderErrorOffset>,
     // The own interpolated root's live fire-recoil overlay. Present only on the entity
-    // `net::recoil_overlay` armed (an unpredicted owner's hull); every other tank row — and the
+    // `net::recoil_overlay` armed (an owner's hull); every other tank row — and the
     // single-player composition, which never mounts the layer — omits the fields.
     recoil_overlay: Query<&crate::net::RecoilOverlay>,
-    // The client connection entity: the clock interpolated tanks (and, under unpredicted drive, the
-    // own hull) actually render on, the two link statistics the `min_delay` law consumes, and the
-    // delay in force. Matches nothing in the single-player or server compositions, so those rows
-    // simply omit the fields.
+    // The client connection entity: the clock every hull (own included) actually renders on, the
+    // two link statistics the `min_delay` law consumes, and the delay in force. Matches nothing in
+    // the single-player or server compositions, so those rows simply omit the fields.
     link: Query<(&InterpolationTimeline, &InterpolationConfig, &PingManager)>,
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
@@ -508,11 +345,10 @@ fn record_frame(
                 obj.insert("jit".into(), Value::from(jitter));
                 obj.insert("mind".into(), Value::from(min_delay));
             }
-            // The LATEST confirmed (server-authoritative) Position/LinearVelocity this predicted
-            // root has received, plus the tick it belongs to. `ConfirmedHistory::newest_present`
-            // is the buffer's most-recent present sample — `(tick, value)` — exactly the sample
-            // `prepare_rollback` prefers as the rollback source. `conft` is the entity's OWN last
-            // authoritative tick; when it stalls while the global `conf` keeps advancing, the
+            // The LATEST confirmed (server-authoritative) Position/LinearVelocity this root has
+            // received, plus the tick it belongs to. `ConfirmedHistory::newest_present` is the
+            // buffer's most-recent present sample — `(tick, value)`. `conft` is the entity's OWN
+            // last authoritative tick; when it stalls while the global `conf` keeps advancing, the
             // tank's confirmed updates stopped arriving (silent-desync branch a). Omit all three
             // when the buffer is still empty — a not-yet-confirmed frame carries no `conf*`.
             // `hlen` is that buffer's occupancy: the keyframes the interpolation cursor has left to
@@ -528,22 +364,6 @@ fn record_frame(
                 if let Some((_, velocity)) = confv.and_then(|h| h.newest_present()) {
                     obj.insert("confv".into(), vec3(velocity.0));
                 }
-            }
-            // The render-space error offset is the authoritative live correction: capture consumes
-            // lightyear's transient correction inputs in `PreUpdate`, and this component survives
-            // through the frame recorder. Keep the existing `cp`/`cq` schema names for analyzer
-            // compatibility, but omit each field when that axis is exactly spent so field presence
-            // still means correction activity. `vo`/`voq` remain the unconditional predicted-root
-            // view-offset record.
-            if let Ok(offset) = view_offset.get(entity) {
-                if offset.translation != Vec3::ZERO {
-                    obj.insert("cp".into(), vec3(offset.translation));
-                }
-                if offset.rotation != Quat::IDENTITY {
-                    obj.insert("cq".into(), quat(offset.rotation));
-                }
-                obj.insert("vo".into(), vec3(offset.translation));
-                obj.insert("voq".into(), quat(offset.rotation));
             }
             // The own-hull fire-recoil overlay (`net::recoil_overlay`), present only on an
             // interpolated owner. Omitted when spent, so field presence means a response is in
@@ -561,23 +381,6 @@ fn record_frame(
         }
         trace.write(&row);
     }
-}
-
-#[cfg(test)]
-pub(crate) fn install_test_frame_trace(app: &mut App, path: &Path) {
-    app.insert_resource(TraceWriter {
-        sink: JsonlSink::create(path).expect("test trace sink"),
-        role: "client",
-        sim_fields: false,
-    });
-    app.add_systems(PostUpdate, record_frame.after(TransformSystems::Propagate));
-}
-
-#[cfg(test)]
-pub(crate) fn close_test_frame_trace(app: &mut App) {
-    app.world_mut()
-        .remove_resource::<TraceWriter>()
-        .expect("the test trace was enabled");
 }
 
 /// Per fixed tick, per tank root: sim truth (`Position`/`Rotation`/velocities are the rolled-back,
@@ -867,70 +670,6 @@ static TRACE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Per-fact adoption telemetry: lifecycle events pushed by `net::adoption` as a fact moves
-/// staged → (waiting…) → requested → retired/dropped, drained into `k:"fact"` rows by
-/// [`record_fact_events`]. This is the PRIMARY ownership instrument for the inert-comparator A/B:
-/// the tally counters aggregate, these rows account for EVERY client-observed fact individually —
-/// which route delivered it, what it waited on, and where its sequence jumped (the coalescing
-/// signal). Capped like the trigger slot; a burst past the cap drops events, never blocks.
-///
-/// Payload ticks (staged/produced/retired) are stamped by the EMITTING site; the row-level `tick`
-/// is merely when the drain wrote it, one schedule point later — read the payload, not the stamp.
-static FACT_EVENTS: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
-
-/// Push one fact-lifecycle event. The closure only runs in a traced run, so untraced call sites
-/// pay a single relaxed atomic load — same contract as [`note_rollback_trigger`].
-pub(crate) fn note_fact_event(build: impl FnOnce() -> Value) {
-    if !TRACE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    if let Ok(mut events) = FACT_EVENTS.lock()
-        && events.len() < 256
-    {
-        events.push(build());
-    }
-}
-
-/// Drain the fact-event slot into `k:"fact"` rows. Runs after `EndRollback` so a frame's whole
-/// stage→request→retire arc lands in order before the drain; events emitted later in the frame
-/// (the spark observer fires from an `Update` drain) are written by the NEXT frame's pass.
-fn record_fact_events(
-    mut trace: ResMut<TraceWriter>,
-    real: Res<Time<Real>>,
-    timeline: Res<LocalTimeline>,
-) {
-    let drained = FACT_EVENTS
-        .lock()
-        .map(|mut events| std::mem::take(&mut *events))
-        .unwrap_or_default();
-    for mut event in drained {
-        if let Some(fields) = event.as_object_mut() {
-            fields.insert("k".into(), Value::from("fact"));
-            fields.insert("t".into(), num(real.elapsed_secs()));
-            fields.insert("tick".into(), Value::from(u64::from(timeline.tick().0)));
-        }
-        trace.write(&event);
-    }
-}
-
-/// Arm the fact-row fast path for a unit test that asserts on emitted rows. Process-global and
-/// never disarmed — harmless: test apps mount no `TraceWriter`, so events just accumulate to the
-/// cap and are dropped, and the closures' cost is paid only while some test is armed.
-#[cfg(test)]
-pub(crate) fn arm_fact_rows_for_test() {
-    TRACE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Take everything in the fact slot. Parallel tests may interleave rows here; assert with
-/// `any()`, never with exact counts.
-#[cfg(test)]
-pub(crate) fn drain_fact_events_for_test() -> Vec<Value> {
-    FACT_EVENTS
-        .lock()
-        .map(|mut events| std::mem::take(&mut *events))
-        .unwrap_or_default()
-}
-
 /// Record that `component`'s rollback condition tripped this check, by `magnitude`. Called from
 /// [`note_if_tripped`] when a condition returns true. No-op
 /// when tracing is off (the atomic guard) — so the closures pay nothing in an untraced run, and the
@@ -1045,59 +784,5 @@ mod tests {
             Some(PathBuf::from("/tmp/manual.client.jsonl")),
             "SPIKE_TRACE must beat the --capture auto path"
         );
-    }
-
-    #[test]
-    fn grip_anchor_trace_contains_the_root_cause_capture_fields() {
-        let row = grip_trace_row(
-            "grip_anchor_compare",
-            GripAnchorTrace {
-                tick: 20,
-                combatant: CombatantId(7),
-                anchor_producing_tick: 18,
-                history_tick: 18,
-                authority: TrackGripEffect {
-                    traction_force: Vec3::X,
-                    traction_torque: Vec3::Y,
-                    belt_reaction: [1.0, 2.0],
-                    field_digest: 3,
-                },
-                predicted: TrackGripEffect {
-                    traction_force: Vec3::Z,
-                    traction_torque: -Vec3::Y,
-                    belt_reaction: [4.0, 5.0],
-                    field_digest: 6,
-                },
-                e_v: 0.1,
-                e_omega: 0.2,
-                e_belt: [0.3, 0.4],
-                epoch: 8,
-            },
-            GripRequestReason::Effect,
-        );
-        let object = row.as_object().expect("trace row is an object");
-        for field in [
-            "request_reason",
-            "anchor_producing_tick",
-            "history_tick",
-            "authority_force",
-            "predicted_force",
-            "authority_torque",
-            "predicted_torque",
-            "authority_belt",
-            "predicted_belt",
-            "e_v",
-            "e_omega",
-            "e_belt",
-            "epoch",
-            "authority_digest",
-            "predicted_digest",
-            "digest_match",
-        ] {
-            assert!(
-                object.contains_key(field),
-                "missing grip trace field {field}"
-            );
-        }
     }
 }

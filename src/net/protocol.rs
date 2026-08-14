@@ -18,7 +18,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
-use crate::ballistics::{ComponentHealth, HullShock, HullShockLedger};
+use crate::ballistics::{ComponentHealth, HullShock};
 use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
@@ -1389,10 +1389,6 @@ pub(crate) fn plugin(app: &mut App) {
     // state is the separately authoritative `TankServos` component above).
     app.local_rollback::<TankSim>();
     app.add_observer(strip_confirmed_history::<TankSim>);
-    // The owner's "last realized shock" mark rides local rollback for the same reason `TankSim`
-    // does: replay must re-derive it from the restored tick, not inherit the abandoned future's.
-    app.local_rollback::<HullShockLedger>();
-    app.add_observer(strip_confirmed_history::<HullShockLedger>);
 
     app.add_systems(
         FixedPostUpdate,
@@ -1420,17 +1416,6 @@ pub(crate) fn plugin(app: &mut App) {
             .before(DamageConsequences),
     );
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
-    // Both halves of the hull-shock seam run inside `GameplaySet`, so replay re-runs them: the
-    // authority closes episodes after the march that arms them, and the owner re-realizes the
-    // arriving shock against the restored history.
-    app.add_systems(
-        FixedUpdate,
-        (
-            close_hull_shock_episodes.after(crate::state::SimPhase::ProjectileMarch),
-            realize_hull_shock,
-        )
-            .in_set(GameplaySet),
-    );
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
     app.add_systems(
         FixedUpdate,
@@ -1438,12 +1423,6 @@ pub(crate) fn plugin(app: &mut App) {
             .in_set(InputBridge)
             .before(GameplaySet),
     );
-    // The DELIVERY half of the same seam, mounted here for the same reason both halves above are:
-    // the discriminator is a marker, not a composition root. `net::adoption` turns an arriving
-    // authoritative fact into a forced rollback without consulting any threshold — the registered
-    // condition on `HullShock` cannot, because at the client lead our sync config produces lightyear
-    // never dispatches it for an explicitly confirmed entity.
-    super::adoption::plugin(app);
 }
 
 /// Local-only rollback components must have no confirmed history: rollback restores them from
@@ -1455,73 +1434,6 @@ fn strip_confirmed_history<C: Component + Clone>(
     commands
         .entity(add.entity)
         .try_remove::<ConfirmedHistory<C>>();
-}
-
-/// AUTHORITY: close an armed hull-shock episode and publish it. `Without<Remote>` is the same
-/// authority discriminator [`publish_servo_angles`] uses.
-///
-/// EPISODE granularity, not per-tick. Every impulse arms the ledger (`ballistics::apply_hit_impulse`)
-/// and this publishes at most one episode per hull per [`SHOCK_EPISODE_TICKS`]. An armed shock is
-/// DEFERRED, never dropped: an isolated hit finds no open episode and publishes in its own tick,
-/// while everything that lands inside an open one publishes together the tick it expires. Dropping
-/// instead of deferring would silently lose the hit that matters most — a main-gun round arriving
-/// four ticks behind an MG pellet — because nothing later would ever mention it.
-fn close_hull_shock_episodes(
-    timeline: Res<LocalTimeline>,
-    mut hulls: Query<(&mut HullShock, &mut HullShockLedger), Without<Remote>>,
-) {
-    let now = timeline.tick().0;
-    for (mut shock, mut ledger) in &mut hulls {
-        let Some(episode) = ledger.close_episode(now, SHOCK_EPISODE_TICKS) else {
-            continue;
-        };
-        *shock = HullShock {
-            count: shock.count.wrapping_add(1),
-            tick: now,
-            opened: episode.opened,
-            cause: episode.cause,
-        };
-    }
-}
-
-/// OWNER: mark an arrived hull shock realized, and say so when its replay window has already passed.
-///
-/// Nothing is applied here — the shove rides the state the rollback restored — which is exactly why
-/// this cannot quietly substitute for it. The one failure mode is a shock whose producing tick is
-/// older than the client can roll back to, so no replay could have restored the hull state carrying
-/// it; the honest response is to report it, not to invent motion. Modelled on the stale-checkpoint
-/// detection in `net::grip::client`, minus the correction it has and this deliberately has not.
-fn realize_hull_shock(
-    timeline: Res<LocalTimeline>,
-    managers: Query<&PredictionManager>,
-    mut hulls: Query<(Entity, &HullShock, &mut HullShockLedger), With<Remote>>,
-) {
-    let now = timeline.tick();
-    let window = managers
-        .single()
-        .ok()
-        .map(|manager| i32::from(manager.rollback_policy.max_rollback_ticks));
-    for (hull, shock, mut ledger) in &mut hulls {
-        if ledger.is_realized(shock.count) {
-            continue;
-        }
-        let age = now - Tick(shock.tick);
-        // The producing tick has not run locally yet. Leave the shock unrealized and retry rather
-        // than spend it against a tick this client has no history for.
-        if age < 0 {
-            continue;
-        }
-        if let Some(window) = window
-            && age > window
-        {
-            warn!(
-                "client: hull shock #{} on {hull} was stamped for tick {} ({age} ticks ago, \
-                 rollback window {window}) — no replay could restore the state that carries it",
-                shock.count, shock.tick,
-            );
-        }
-        ledger.realize(shock.count);
-    }
 }
 
 /// The input bridge's ordering handle: every writer that must land on top of the attested command
@@ -1565,76 +1477,6 @@ mod tests {
     use super::*;
     use crate::command::CrewSwap;
     use crate::damage::CrewStation;
-
-    /// The authority seam, end to end on the system that owns it: an armed ledger becomes a bumped
-    /// replicated counter in the same tick, a second shock inside the open episode publishes
-    /// nothing, and the deferred episode publishes when the window expires. The counter is the only
-    /// thing that moves — no force ever reaches the wire.
-    #[test]
-    fn the_authority_publishes_one_shock_per_episode_and_defers_the_rest() {
-        use crate::ballistics::ShockCause;
-
-        let mut world = World::new();
-        world.insert_resource(LocalTimeline::default());
-        world.resource_mut::<LocalTimeline>().apply_delta(100);
-        let hull = world
-            .spawn((HullShock::default(), HullShockLedger::default()))
-            .id();
-
-        let arm = |world: &mut World, cause| {
-            world.get_mut::<HullShockLedger>(hull).unwrap().arm(cause);
-        };
-        let close = |world: &mut World| {
-            world.run_system_once(close_hull_shock_episodes).unwrap();
-            *world.get::<HullShock>(hull).unwrap()
-        };
-
-        assert_eq!(
-            close(&mut world),
-            HullShock::default(),
-            "no hit, no episode"
-        );
-
-        arm(&mut world, ShockCause::Perforation);
-        assert_eq!(
-            close(&mut world),
-            HullShock {
-                count: 1,
-                tick: 100,
-                opened: 100,
-                cause: ShockCause::Perforation,
-            },
-            "an isolated hit publishes in its own tick, and SPANS that one tick",
-        );
-
-        // A second hit four ticks later — one MG cyclic interval — must not publish a second
-        // episode, and must not be forgotten either.
-        world
-            .resource_mut::<LocalTimeline>()
-            .apply_delta(i32::from(4u8));
-        arm(&mut world, ShockCause::Ricochet);
-        assert_eq!(
-            close(&mut world).count,
-            1,
-            "a hit inside the open episode publishes nothing",
-        );
-
-        world
-            .resource_mut::<LocalTimeline>()
-            .apply_delta(SHOCK_EPISODE_TICKS as i32);
-        assert_eq!(
-            close(&mut world),
-            HullShock {
-                count: 2,
-                tick: 100 + 4 + SHOCK_EPISODE_TICKS,
-                opened: 104,
-                cause: ShockCause::Ricochet,
-            },
-            "the deferred episode publishes once its window expires, and names the tick its first \
-             hit landed on rather than leaving it to be guessed from the close tick",
-        );
-        assert_eq!(close(&mut world).count, 2, "nothing is left armed");
-    }
 
     #[test]
     fn transmission_rollback_comparison_is_exact_for_discrete_and_tolerant_for_floats() {

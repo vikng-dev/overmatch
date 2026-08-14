@@ -741,20 +741,6 @@ pub enum ShockCause {
     Perforation,
 }
 
-impl ShockCause {
-    /// Which cause survives when several resolutions land inside one open episode: the most severe.
-    /// A perforation and a graze in the same window are one episode, and the player is owed the
-    /// perforation's name for it.
-    const fn severity(self) -> u8 {
-        match self {
-            Self::None => 0,
-            Self::Ricochet => 1,
-            Self::Embed => 2,
-            Self::Perforation => 3,
-        }
-    }
-}
-
 /// Owner-private PROOF that the authority applied an impulse this hull could not have predicted.
 ///
 /// The client cannot predict being shot, so its own copy never moves on its own. Registered
@@ -790,119 +776,6 @@ pub struct HullShock {
     /// life. `net::adoption` matches sparks against this range; see [`HullShockLedger::arm`].
     pub opened: u32,
     pub cause: ShockCause,
-}
-
-/// One episode [`HullShockLedger::close_episode`] just published: what caused it, and the tick of
-/// the first impulse it is made of.
-///
-/// Returned as one value because the two are only meaningful together — [`HullShock::opened`] is
-/// what makes `[opened, tick]` the episode's exact span, and a caller that could write one without
-/// the other could publish a span the ledger never observed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct ClosedEpisode {
-    pub(crate) cause: ShockCause,
-    pub(crate) opened: u32,
-}
-
-/// Local, never-replicated bookkeeping kept beside [`HullShock`]. Its two halves belong to
-/// different composition roles and never both run on one peer.
-///
-/// AUTHORITY half ([`HullShockLedger::arm`] / [`HullShockLedger::close_episode`]) implements the
-/// episode rule. OWNER half ([`HullShockLedger::realize`]) is the monotonic "last realized" mark
-/// that makes re-application during replay idempotent: the component is registered for local
-/// rollback, so a rollback rewinds it with the rest of the tick's state and replay re-realizes the
-/// shock against the restored history.
-#[derive(Component, Clone, Copy, Default, Debug, PartialEq, Eq)]
-pub struct HullShockLedger {
-    pending: Option<ShockCause>,
-    /// The tick the OPEN (unpublished) group of impulses started on — see [`Self::close_episode`],
-    /// which is what stamps it. `None` exactly when `pending` is `None`.
-    opened_at: Option<u32>,
-    last_bump_tick: Option<u32>,
-    applied_count: u32,
-}
-
-impl HullShockLedger {
-    /// AUTHORITY: record that an external impulse just landed on this hull. It is armed, not
-    /// published — [`Self::close_episode`] decides which tick the episode closes on, and stamps the
-    /// tick it opened on.
-    pub(crate) fn arm(&mut self, cause: ShockCause) {
-        if self
-            .pending
-            .is_none_or(|open| cause.severity() > open.severity())
-        {
-            self.pending = Some(cause);
-        }
-    }
-
-    /// AUTHORITY: take the armed cause iff no episode has opened within `episode_ticks` of `now`.
-    ///
-    /// While an episode is open the armed cause is DEFERRED, not dropped — it closes the moment the
-    /// window expires. Dropping would silently lose the hit that matters most (a main-gun round
-    /// arriving a few ticks behind an MG pellet), because nothing later would ever mention it.
-    ///
-    /// WHY THE OPEN TICK IS STAMPED HERE and not in [`Self::arm`]. `net::protocol` runs this EVERY
-    /// authority tick, after the march that arms the ledger
-    /// (`close_hull_shock_episodes.after(SimPhase::ProjectileMarch)`), so the first tick this sees a
-    /// pending cause IS the tick that cause was armed on. Stamping it in `arm` would mean plumbing a
-    /// tick through the whole ballistic march for a value the once-per-tick caller already holds.
-    ///
-    /// The stamp gives [`HullShock::opened`] two properties by CONSTRUCTION, and the ordering rule in
-    /// `net::adoption` rests on both:
-    ///
-    /// - `opened ≤ tick`, because it is written on a tick at or before the one that publishes;
-    /// - `opened` of the NEXT episode is strictly greater than this one's `tick`, because publishing
-    ///   clears it and only a later call can write it again. Consecutive episodes on one hull
-    ///   therefore span DISJOINT tick ranges, with no appeal to `episode_ticks` arithmetic — which is
-    ///   what makes a fresh ledger's single-tick first episode as exact as a deferred one's.
-    ///
-    /// Both are claims about PLAIN numeric order and are NOT wrap-general — the assumption belongs in
-    /// the open, because the deferral test one line below deliberately IS wrap-aware
-    /// (`now.wrapping_sub(last)`) and the two could be mistaken for the same discipline. The tick
-    /// counter these spans live in is lightyear 0.28's `Tick`: a u32 compared with plain `u32::cmp`
-    /// and advanced with SATURATING arithmetic, on that crate's documented assumption that a session
-    /// never reaches the ~828-day boundary. At saturation the timeline freezes, so a pending episode
-    /// stalls rather than wrapping into a span that falsely covers an older spark — the direction
-    /// that is safe. Anything that made the counter genuinely wrap invalidates the ordering argument,
-    /// not the deferral one.
-    ///
-    /// If this were ever NOT called on some tick, the stamp lands late and the published span is
-    /// NARROWER than the truth. That direction is safe: a claim can only fail to match a spark it
-    /// owns, never match one it does not.
-    pub(crate) fn close_episode(&mut self, now: u32, episode_ticks: u32) -> Option<ClosedEpisode> {
-        let cause = self.pending?;
-        let opened = *self.opened_at.get_or_insert(now);
-        if self
-            .last_bump_tick
-            .is_some_and(|last| now.wrapping_sub(last) < episode_ticks)
-        {
-            return None;
-        }
-        self.pending = None;
-        self.opened_at = None;
-        self.last_bump_tick = Some(now);
-        Some(ClosedEpisode { cause, opened })
-    }
-
-    /// OWNER: whether this monotonic count has already been realized on this timeline.
-    pub(crate) fn is_realized(&self, count: u32) -> bool {
-        self.applied_count == count
-    }
-
-    /// OWNER: mark a count realized. Rewound by local rollback, so replay re-realizes it.
-    pub(crate) fn realize(&mut self, count: u32) {
-        self.applied_count = count;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending(&self) -> Option<ShockCause> {
-        self.pending
-    }
-
-    #[cfg(test)]
-    pub(crate) fn applied(&self) -> u32 {
-        self.applied_count
-    }
 }
 
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
@@ -1439,11 +1312,7 @@ fn integrate_projectiles(
         &'static Collider,
         Option<&'static BallisticSurfaces>,
     )>,
-    mut bodies: Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
@@ -2043,11 +1912,7 @@ fn march_shell_step(
         Option<&'static BallisticSurfaces>,
     )>,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     sanctioned: Option<&SanctionedShots>,
     // Authority = not a replica: only then does a hit actually mutate health here.
     deposit: bool,
@@ -2609,31 +2474,18 @@ fn throw_spall_burst(
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
 /// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
-///
-/// The same match arms the body's [`HullShockLedger`], so the owner is told an unpredictable
-/// impulse happened exactly when one actually reached a body — never on a resolution the physics
-/// itself skipped. The ledger records only that it happened and why; the shove reaches the owner as
-/// part of the state the resulting rollback restores (see [`HullShock`]).
 fn apply_hit_impulse(
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     body: Entity,
     impulse: Vec3,
     point: Vec3,
-    cause: ShockCause,
 ) {
-    if let Ok((forces, wake, ledger)) = bodies.get_mut(body) {
+    if let Ok((forces, wake)) = bodies.get_mut(body) {
         crate::track::sim::apply_explicit_impulse(
             forces,
             wake,
             crate::track::sim::ExplicitImpulse::AtPoint { impulse, point },
         );
-        if let Some(mut ledger) = ledger {
-            ledger.arm(cause);
-        }
     }
 }
 
@@ -2963,183 +2815,6 @@ mod march_tests {
                 );
             }
         }
-    }
-
-    /// The same crossing that moves the authority body ARMS its hull-shock ledger, and a replica
-    /// arms nothing — the mirror of [`hit_impulse_changes_only_the_authority_body`] on the fact the
-    /// owner is owed rather than on the momentum itself.
-    ///
-    /// Only ARMING is asserted here: publishing is the episode rule's decision (`net::protocol`),
-    /// and this world has no timeline to decide it on.
-    #[test]
-    fn hit_impulse_arms_the_hull_shock_ledger_only_on_the_authority() {
-        for replica in [false, true] {
-            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-            if replica {
-                app.insert_resource(crate::ClientReplica);
-            }
-            let body = app
-                .world_mut()
-                .spawn((
-                    RigidBody::Dynamic,
-                    Transform::default(),
-                    Mass(100.0),
-                    AngularInertia::new(Vec3::splat(50.0)),
-                    NoAutoMass,
-                    NoAutoAngularInertia,
-                    GravityScale(0.0),
-                    HullShockLedger::default(),
-                ))
-                .id();
-            let mut plates = app
-                .world_mut()
-                .query_filtered::<Entity, With<BallisticVolume>>();
-            let plate = plates.single(app.world()).expect("one plate");
-            app.world_mut().entity_mut(plate).insert(VolumeOf(body));
-            app.update();
-
-            assert_eq!(
-                app.world().get::<HullShockLedger>(body).unwrap().pending(),
-                None,
-                "an unstruck hull owes its owner nothing",
-            );
-            let impacts = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
-            assert_eq!(impacts.len(), 1, "the owned plate was crossed once");
-            let pending = app.world().get::<HullShockLedger>(body).unwrap().pending();
-
-            if replica {
-                assert_eq!(
-                    pending, None,
-                    "a replica never authors the fact it was shot — it is told",
-                );
-            } else {
-                assert!(
-                    pending.is_some(),
-                    "the crossing that moved the authority body must owe its owner a shock",
-                );
-            }
-        }
-    }
-
-    /// The episode rule, on the ledger that implements it: the first shock closes immediately, a
-    /// shock landing inside the open window is DEFERRED rather than dropped, and it closes the tick
-    /// the window expires. The deferral is the whole correctness argument — a main-gun round
-    /// arriving behind an MG pellet must not be silently swallowed.
-    #[test]
-    fn a_shock_inside_an_open_episode_is_deferred_not_dropped() {
-        const WINDOW: u32 = 16;
-        let mut ledger = HullShockLedger::default();
-
-        assert_eq!(ledger.close_episode(100, WINDOW), None, "nothing armed");
-        ledger.arm(ShockCause::Ricochet);
-        assert_eq!(
-            ledger.close_episode(100, WINDOW),
-            Some(ClosedEpisode {
-                cause: ShockCause::Ricochet,
-                opened: 100,
-            }),
-            "an isolated shock closes in its own tick — no latency the player can feel, and it \
-             spans that ONE tick, not a window's worth",
-        );
-        assert_eq!(
-            ledger.close_episode(101, WINDOW),
-            None,
-            "nothing left armed"
-        );
-
-        // A burst: every pellet inside the open window coalesces into ONE episode, and the most
-        // severe cause is the one the owner is told about.
-        for tick in 104..=112 {
-            ledger.arm(ShockCause::Ricochet);
-            assert_eq!(
-                ledger.close_episode(tick, WINDOW),
-                None,
-                "tick {tick} is inside the open episode",
-            );
-        }
-        ledger.arm(ShockCause::Perforation);
-        ledger.arm(ShockCause::Ricochet);
-        assert_eq!(ledger.close_episode(115, WINDOW), None);
-        assert_eq!(
-            ledger.close_episode(116, WINDOW),
-            Some(ClosedEpisode {
-                cause: ShockCause::Perforation,
-                opened: 104,
-            }),
-            "the deferred episode closes the tick its window expires, naming its worst hit and the \
-             tick its FIRST hit landed on",
-        );
-        assert_eq!(ledger.close_episode(117, WINDOW), None);
-    }
-
-    /// THE SPAN IS EXACT FOR EVERY EPISODE, INCLUDING THE FIRST — the property `net::adoption`'s
-    /// spark correlation rests on, and the one a `close − SHOCK_EPISODE_TICKS` window did not have.
-    ///
-    /// A fresh ledger has no open episode to defer behind, so its first hit publishes on its own
-    /// tick and spans exactly that tick. Every later episode opens strictly after the previous one
-    /// closed. So the spans of consecutive episodes on one hull never overlap, and a fresh hull's
-    /// first episode never reaches back over ticks it did not cover — which, because a respawn
-    /// keeps the combatant identity, is where a PREVIOUS life's hits live.
-    #[test]
-    fn episode_spans_never_overlap_and_a_fresh_ledgers_first_spans_one_tick() {
-        const WINDOW: u32 = 16;
-        let mut ledger = HullShockLedger::default();
-        let mut spans: Vec<(u32, u32)> = Vec::new();
-
-        // ONE monotonic clock, exactly as `close_hull_shock_episodes` sees it — every tick, after
-        // the march that arms. An isolated hit at 100, a burst at 104/110, an isolated one at 140.
-        const HITS: [u32; 4] = [100, 104, 110, 140];
-        for now in 100..=160 {
-            if HITS.contains(&now) {
-                ledger.arm(ShockCause::Embed);
-            }
-            if let Some(episode) = ledger.close_episode(now, WINDOW) {
-                spans.push((episode.opened, now));
-            }
-        }
-
-        assert_eq!(
-            spans,
-            vec![(100, 100), (104, 116), (140, 140)],
-            "the first hit publishes alone on its own tick; the burst coalesces into one episode \
-             spanning its first hit to the tick the window expired; the last is isolated again",
-        );
-        for pair in spans.windows(2) {
-            let ((_, closed), (opened, _)) = (pair[0], pair[1]);
-            // PLAIN `>`, deliberately, and the assumption is the one lightyear already makes: the
-            // authority tick counter is a u32 with saturating arithmetic and plain ordering, so it
-            // does not wrap inside any session this game can have (~828 days at 64 Hz). This is NOT
-            // a wrap-general proof of disjointness and must not be read as one.
-            assert!(
-                opened > closed,
-                "episode spans must be disjoint: {:?} then {:?}",
-                pair[0],
-                pair[1],
-            );
-        }
-        assert!(
-            spans
-                .iter()
-                .all(|(opened, closed)| closed - opened < WINDOW),
-            "no episode can span more than its window: {spans:?}",
-        );
-    }
-
-    /// The owner half is a monotonic comparison, not an event subscription: replication carries
-    /// STATE, so a count that was bumped and restored inside one send window is only ever seen as a
-    /// final value, and rewinding the mark (what local rollback does) must re-arm realization.
-    #[test]
-    fn realization_is_a_rewindable_comparison_not_an_event() {
-        let mut ledger = HullShockLedger::default();
-        assert!(ledger.is_realized(0), "a never-shot hull owes nothing");
-        assert!(!ledger.is_realized(7));
-
-        ledger.realize(7);
-        assert!(ledger.is_realized(7), "realizing twice is a no-op");
-
-        // What a rollback does to this component: restore the pre-shock value from history.
-        let rewound = HullShockLedger::default();
-        assert!(!rewound.is_realized(7), "replay must re-realize the shock");
     }
 
     /// SHOOTER SELF-EXCLUSION ([`not_own_volume`]): a round is transparent to the tank that FIRED it.

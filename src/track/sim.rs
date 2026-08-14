@@ -153,10 +153,6 @@ impl TrackGripWake {
             self.generation = self.generation.wrapping_add(1);
         }
     }
-
-    pub(crate) fn generation(self) -> u32 {
-        self.generation
-    }
 }
 
 /// The two physically distinct explicit hull-impulse operations. Point impulses retain their
@@ -294,11 +290,6 @@ impl TrackGear {
     /// the sole owner of how this choice affects simulation.
     pub(crate) fn mode(&self) -> TransmissionMode {
         self.mode
-    }
-
-    /// Per-side reflected belt inertia used by the anchor's physical belt-speed error metric.
-    pub(crate) fn belt_inertia(&self) -> f32 {
-        self.params.inertia
     }
 
     /// The spec-authored material-link count — the station count [`belt_tick`] runs and the

@@ -315,35 +315,23 @@ pub fn run() {
     let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
-    super::grip::install_client(&mut app);
     app.add_plugins(physics::physics_plugins());
     // The render half of prediction (frame interpolation + armed rollback correction) — client
     // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
     // it idles harmlessly, and `SPIKE_SIM_WINDOWED` runs the real presentation stack (hidden
     // window by default; `SPIKE_SIM_VISIBLE=1` shows it for eyes-on diagnosis).
     app.add_plugins(client_smoothing_plugin);
-    // The render-space error layer (client only): with `instant_correction` on the PredictionManager
-    // below, lightyear snaps the sim pose to the corrected present in one frame; this layer
-    // accumulates that snap as a decaying offset on the predicted root's render `Transform` so the
-    // VIEW never lurches.
-    app.add_plugins(super::render_error::plugin);
-    // The own-hull recoil overlay (client only): when the server stream owns the owner's hull, the
-    // firing kick arrives `RTT/2 + D` after the flash. This layer presents it at the local fire tick
-    // and retires it exactly as the interpolation cursor crosses that tick. Arms nothing in
-    // predicted mode.
+    // The own-hull recoil overlay (client only): the firing kick arrives `RTT/2 + D` after the
+    // flash. This layer presents it at the local fire tick and retires it exactly as the
+    // interpolation cursor crosses that tick.
     app.add_plugins(super::recoil_overlay::plugin);
-    // The own-fire presentation ledger (client only): when the server stream owns the owner's gate,
-    // the arriving snapshot is a legality report, not permission to draw. This layer holds the gate
-    // the local cadence left, reconciles the snapshot forward, and feeds `shooting::fire` the
-    // consumables this client authored rather than the attested echo. Arms nothing in predicted
-    // mode.
+    // The own-fire presentation ledger (client only): the arriving gate snapshot is a legality
+    // report, not permission to draw. This layer holds the gate the local cadence left, reconciles
+    // the snapshot forward, and feeds `shooting::fire` the consumables this client authored rather
+    // than the attested echo.
     app.add_plugins(super::fire_presentation::plugin);
-    // The rollback watchdog (client only): the backstop for lightyear's receive-time mismatch
-    // check, which starves permanently at zero prediction margin — exactly where `balanced()`
-    // input delay puts a LAN/loopback client (see the module doc for the vendored mechanism).
-    app.add_plugins(super::watchdog::plugin);
-    // Step 7: the real sim — same `SimPlugin` the server mounts, so client-side rollback replay
-    // re-runs the actual driving/aim/shooting systems, not a stub.
+    // The real sim — same `SimPlugin` the server mounts: cosmetic shells, servos, and the recoil
+    // microsim run against the actual driving/aim/shooting systems, not a stub.
     app.add_plugins(SimPlugin);
     // Server-authoritative combat: replicas fly shells cosmetically but never deposit HP or apply
     // hit impulse. Private crew detail and public life state arrive independently from the server;
@@ -594,8 +582,6 @@ pub fn run() {
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
         .add_observer(claim_input_slot)
-        .add_observer(diagnostics::log_predicted_tank)
-        .init_resource::<diagnostics::RollbackWatch>()
         .init_resource::<diagnostics::TurretWatch>()
         .add_systems(
             Update,
@@ -605,12 +591,9 @@ pub fn run() {
                 receive_damage_confirms,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
-                diagnostics::watch_rollback_metrics,
                 diagnostics::watch_turret_pose,
-                diagnostics::log_snap,
                 diagnostics::log_positions,
                 diagnostics::count_shell_spawns,
-                diagnostics::log_prediction_diagnostics,
                 diagnostics::log_sim_evidence,
             ),
         );
@@ -1060,7 +1043,6 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
         InputMarker::<TankCommand>::default(),
         ActionState::<TankCommand>::default(),
         GameControlled,
-        diagnostics::LastPosition::default(),
     ));
 }
 

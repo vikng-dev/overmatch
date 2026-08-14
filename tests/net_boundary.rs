@@ -34,9 +34,9 @@ const NET_AWARE_FILES: &[&str] = &[
     "src/net/",
     // The library facade declares the private `net` module and mounts `NetClientPlugin`.
     "src/lib.rs",
-    // The divergence instrument reads rollback/prediction state by design — `LocalTimeline`,
-    // `Rollback`, `ConfirmedHistory`, `VisualCorrection`, `net::render_error::RenderErrorOffset`.
-    // A passive observer of the netcode, never a sim dependency: it writes no sim state.
+    // The divergence instrument reads net state by design — `LocalTimeline`, `Rollback`,
+    // `ConfirmedHistory`, interpolation timelines. A passive observer of the netcode, never a sim
+    // dependency: it writes no sim state.
     "src/trace.rs",
     // The world-anchored nameplate prefixes `[BOT]` from the replicated `net::protocol::NetBot`
     // marker. View layer, not sim.
