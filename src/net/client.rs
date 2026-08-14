@@ -456,6 +456,8 @@ pub fn run() {
                 .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
         );
     }
+    let interp_delay_ms = harness::env_parse::<u64>("OVERMATCH_INTERP_DELAY_MS").unwrap_or(100);
+    info!("net: interpolation min_delay {interp_delay_ms} ms [OVERMATCH_INTERP_DELAY_MS]");
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
@@ -472,9 +474,13 @@ pub fn run() {
         // Explicitly own the input timeline configuration required by prediction.
         InputTimelineConfig::new(sync_config, input_delay),
         // Interpolated replicas need a nonzero buffer behind the server estimate. Keep this explicit
-        // while `tests/net_interp_delay.rs` covers Lightyear's zero-send-interval default.
+        // while `tests/net_interp_delay.rs` covers Lightyear's zero-send-interval default (the
+        // adaptive path collapses to 5 ms under our per-tick sender). `OVERMATCH_INTERP_DELAY_MS`
+        // overrides the 100 ms shipping floor — under unpredicted drive the own hull rides this
+        // buffer, so the floor is the dominant input-delay term. Sizing: ≥ RTT/2 + jitter margin;
+        // too low = freeze-then-step on every interpolated tank.
         InterpolationConfig {
-            min_delay: Duration::from_millis(100),
+            min_delay: Duration::from_millis(interp_delay_ms),
             ..Default::default()
         },
         NetcodeClient::new(
