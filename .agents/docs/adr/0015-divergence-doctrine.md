@@ -1,5 +1,10 @@
 # Divergence doctrine: continuous simulation, removable netcode scaffolding
 
+> **Status: partially superseded by [[0037-one-authoritative-timeline-and-view-overlays]]**
+> (2026-08-15). The permanent layer stands (continuous force laws, the solo-divergence model,
+> the shape-cast guard); the removable prediction scaffolding — and with it the
+> divergence-vs-misprediction distinction — is gone: nothing predicts.
+
 Client/server divergence is now managed under one doctrine with two layers: a **permanent
 simulation-design rule** (contact and force laws must be continuous functions of pose and
 velocity) and a set of **deliberately removable netcode workarounds**, each mapped to a named
