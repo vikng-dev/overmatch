@@ -481,6 +481,9 @@ pub fn run() {
         );
         app.insert_resource(crate::FusedOwnFire);
     }
+    // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
+    // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
+    super::extrapolate::install(&mut app);
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
@@ -1337,8 +1340,14 @@ pub(super) fn receive_fire_events(
     mut held: ResMut<HeldFireEvents>,
     mut pending_fires: ResMut<PendingFireEvents>,
     mut sanctioned: ResMut<SanctionedShots>,
-    // Optional lifecycle recorder for wire arrivals and dedup results.
-    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    // Nested: the optional lifecycle recorder for wire arrivals/dedup results, and the impulse
+    // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
+    // the tick the shooter's hull surged). A tuple param keeps the system under Bevy's 16-param
+    // bound.
+    (mut shot_trace, mut impulses): (
+        Option<ResMut<crate::shot_trace::ShotTrace>>,
+        ResMut<super::extrapolate::ImpulseTicks>,
+    ),
     mut commands: Commands,
 ) {
     let now = timeline.tick();
@@ -1349,6 +1358,9 @@ pub(super) fn receive_fire_events(
     for mut receiver in &mut batch_receivers {
         for batch in receiver.receive() {
             for fact in batch.facts {
+                if let FireVisualFact::Fire(event) = &fact {
+                    impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
+                }
                 consume_fire_visual_fact(
                     fact,
                     now,
@@ -1363,6 +1375,7 @@ pub(super) fn receive_fire_events(
     }
     for mut receiver in &mut fire_receivers {
         for event in receiver.receive() {
+            impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
             consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut shot_trace);
         }
     }
@@ -1736,11 +1749,15 @@ pub(super) fn receive_damage_confirms(
     timeline: Res<LocalTimeline>,
     mut seen: ResMut<SeenDamage>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    // Impulse ledger for the buffer-edge gap∧impulse coincidence instrument: a damage confirm
+    // marks the tick the victim's hull took the shot's impulse.
+    mut impulses: ResMut<super::extrapolate::ImpulseTicks>,
     mut commands: Commands,
 ) {
     let received_tick = timeline.tick();
     for mut receiver in &mut receivers {
         for damage in receiver.receive() {
+            impulses.record(damage.damage_tick, super::extrapolate::ImpulseClass::Damage);
             consume_damage_confirm(
                 &damage,
                 received_tick,
