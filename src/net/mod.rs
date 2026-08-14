@@ -57,16 +57,13 @@ pub(crate) use protocol::NetBot;
 pub(crate) use recoil_overlay::RecoilOverlay;
 pub(super) use spawn_map::plugin as spawn_map_plugin;
 
-use rig::client_smoothing_plugin;
-
 use crate::state::AppState;
 use crate::tank::PendingTankAssets;
 
-/// Shared protocol, physics, rig, and safety wiring. Both endpoints must mount it identically.
+/// Shared protocol, physics, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
     protocol::plugin(app);
     physics::plugin(app);
-    rig::plugin(app);
     // Record corrupt values before Avian's physics preparation consumes them.
     app.add_systems(
         FixedPostUpdate,

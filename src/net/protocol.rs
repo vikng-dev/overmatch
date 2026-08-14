@@ -9,8 +9,8 @@ use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
-// authority-vs-replica discriminator — see `upgrade_predicted_to_dynamic` on why
-// `Predicted`/`Interpolated` are not (the server entity carries both markers itself).
+// authority-vs-replica discriminator — `Predicted`/`Interpolated` are not (the server entity
+// carries both markers itself).
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
@@ -740,8 +740,8 @@ fn publish_shot_clock(
 /// Authority side: mirror the live `ServoState` angles onto the replicated root component.
 /// `FixedPostUpdate`, so it reads what `drive_servos` (FixedUpdate, after `GameplaySet`) just
 /// stepped. `Without<Remote>` makes it authority-only in shared code: every client-side tank
-/// arrived by replication and carries `Remote` (see `upgrade_predicted_to_dynamic` on why the
-/// `Predicted`/`Interpolated` markers can NOT discriminate here — the server carries both).
+/// arrived by replication and carries `Remote` (the `Predicted`/`Interpolated` markers can NOT
+/// discriminate here — the server carries both).
 fn publish_servo_angles(
     mut tanks: Query<(&Rig, &TankServos, &mut ServoAngles), Without<Remote>>,
     servo_slots: Query<&ServoIndex>,
@@ -1666,7 +1666,7 @@ mod tests {
     }
 
     /// The owner's servo targets belong to `aim::drive_aim_servos` alone. An interpolated OWN tank
-    /// (unpredicted drive) is `Remote` and carries no `Predicted` marker, so only the owner marker
+    /// is `Remote` and carries no `Predicted` marker, so only the owner marker
     /// keeps this pump off it — mutate `Without<GameControlled>` away and the replicated angle
     /// overwrites the local intent here.
     #[test]
@@ -1704,14 +1704,6 @@ mod tests {
             rig.contains("With<TankTransmission>"),
             "client rig attachment must wait for the replicated current transmission state"
         );
-        assert!(
-            rig.contains("With<WeaponGate>") && rig.contains("Option<&WeaponGate>"),
-            "the predicted rig must wait for its owner-private authoritative weapon gate"
-        );
-        assert!(
-            rig.contains("With<TankServos>") && rig.contains("Option<&TankServos>"),
-            "the predicted rig must wait for its owner-private authoritative servo integrator"
-        );
 
         let spawn = strip_comments(&read_source("src/tank/spawn.rs"));
         let attach = spawn
@@ -1732,12 +1724,6 @@ mod tests {
         assert!(
             !attach.contains("TankServos::for_count"),
             "client attachment must not overwrite a JIP servo snapshot with spawn defaults"
-        );
-        assert!(
-            rig.contains("Option<&TrackGripElements>")
-                && rig.contains("replica_role_ready(")
-                && rig.contains("content.spec().track.link_count"),
-            "a predicted rig must wait for the exact, correctly sized replicate-once grip field"
         );
         assert!(
             !attach.contains("TrackGripElements::for_links"),

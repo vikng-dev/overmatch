@@ -1,6 +1,6 @@
 //! The own hull's firing recoil, presented at the local fire tick instead of at the cursor.
 //!
-//! Under unpredicted drive the owner's body is `RigidBody::Static` (`net::rig`), so the hull
+//! The owner's body is `RigidBody::Static` (`net::rig`), so the hull
 //! impulse `shooting::fire` applies integrates nowhere client-side: the whole visible kick arrives
 //! as replicated `Position`/`Rotation` on the interpolation buffer, `RTT/2 + D` after the click,
 //! while the muzzle flash and the barrel spring fire on the local tick. This module puts the kick
@@ -117,7 +117,7 @@ use bevy::prelude::*;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::core::tick::TickDuration;
 use lightyear::interpolation::timeline::InterpolationTimeline;
-use lightyear::prelude::{Interpolated, LocalTimeline, NetworkTimeline, Predicted};
+use lightyear::prelude::{Interpolated, LocalTimeline, NetworkTimeline};
 
 use super::protocol::NetTank;
 use crate::ballistics::{FireShell, FireShellOrigin};
@@ -457,7 +457,6 @@ fn arm_recoil_overlay(
             With<Mass>,
             With<AngularInertia>,
             With<CenterOfMass>,
-            Without<Predicted>,
             Without<RecoilOverlay>,
             Without<ChildOf>,
         ),
@@ -1496,10 +1495,7 @@ mod tests {
         );
     }
 
-    /// PREDICTED MODE IS INERT. The overlay arms only where the server stream owns the hull; a
-    /// predicted root's kick comes from the real impulse. The `both` case pins
-    /// `Without<Predicted>` itself: prediction wins even on a root that also carries
-    /// `Interpolated`.
+    /// The overlay arms only on the own interpolated hull — never an opponent's.
     #[test]
     fn only_the_own_interpolated_hull_arms() {
         let mut app = App::new();
@@ -1514,21 +1510,6 @@ mod tests {
             .world_mut()
             .spawn((NetTank, Controlled, Interpolated, mass_properties()))
             .id();
-        let predicted = app
-            .world_mut()
-            .spawn((NetTank, Controlled, Predicted, mass_properties()))
-            .id();
-        // Both markers at once — a role transition in flight. Prediction owns the pose.
-        let both = app
-            .world_mut()
-            .spawn((
-                NetTank,
-                Controlled,
-                Interpolated,
-                Predicted,
-                mass_properties(),
-            ))
-            .id();
         // An opponent: interpolated, but not the player's.
         let opponent = app
             .world_mut()
@@ -1540,11 +1521,6 @@ mod tests {
             .expect("arming runs");
 
         assert!(app.world().get::<RecoilOverlay>(own).is_some());
-        assert!(app.world().get::<RecoilOverlay>(predicted).is_none());
-        assert!(
-            app.world().get::<RecoilOverlay>(both).is_none(),
-            "a root prediction owns must never arm, whatever else it carries",
-        );
         assert!(app.world().get::<RecoilOverlay>(opponent).is_none());
     }
 

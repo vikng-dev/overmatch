@@ -60,15 +60,18 @@ pub(super) fn finish(app: &mut App) {
     app.cleanup();
 }
 
-/// The shipping `PredictionManager` policy every fixture in this tree spawns.
-///
-/// These are production-path probes, so neither lightyear's 200 ms / 0.5 correction default nor its
-/// enabled input-rollback default is an admissible fixture convenience. The replay-window test
-/// derives its unchanged 100-tick state window from this manager rather than assuming it.
+/// The `PredictionManager` policy the rollback-era fixtures in this tree spawn: state rollback
+/// only (input arm disabled — we author our own inputs), instant correction (no built-in visual
+/// smoothing). The shipping client mounts NO `PredictionManager`; this exists solely so the
+/// remaining rollback-machinery tests exercise the lightyear schedule they pin.
 pub(super) fn prediction_manager() -> lightyear::prelude::PredictionManager {
     lightyear::prelude::PredictionManager {
-        rollback_policy: super::client::shipping_rollback_policy(),
-        correction_policy: super::client::shipping_correction_policy(),
+        rollback_policy: lightyear::prelude::RollbackPolicy {
+            input: lightyear::prelude::RollbackMode::Disabled,
+            ..default()
+        },
+        correction_policy: lightyear::prediction::correction::CorrectionPolicy::instant_correction(
+        ),
         ..default()
     }
 }

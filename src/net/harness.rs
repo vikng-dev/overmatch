@@ -563,7 +563,7 @@ pub(crate) fn jitter_multiple() -> u8 {
 /// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync sync.rs:
 /// `jitter * jitter_multiple + tick_duration * jitter_margin`). Reaches the INPUT timeline's
 /// install-time config only, so it is the runtime value exactly where `net::sync_margin`'s derived
-/// law does not rewrite it: predicted mode, and the pre-arm window of an unpredicted session.
+/// law does not rewrite it: the pre-arm window of a session.
 pub(crate) fn jitter_margin() -> f32 {
     env_parse("SPIKE_JITTER_MARGIN").unwrap_or(1.0)
 }

@@ -1,7 +1,7 @@
-//! Predicted network-client composition root.
+//! Network-client composition root.
 //!
-//! The local tank is predicted and reconciled by rollback; client presentation never pauses the
-//! simulation while the authority continues ticking.
+//! Every hull — the own tank included — renders from the interpolated server stream; client
+//! presentation never pauses the simulation while the authority continues ticking.
 
 use core::time::Duration;
 use std::hash::{BuildHasher, Hasher};
@@ -13,7 +13,6 @@ use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowMode};
 use lightyear::interpolation::timeline::InterpolationTimeline;
-use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
 use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
@@ -25,7 +24,7 @@ use super::protocol::{
     DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, ImpactConfirm,
     NetTank, RicochetKeyframe, protocol_id,
 };
-use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
+use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
     FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce,
     SanctionedBounceInsert, SanctionedShots, SanctionedTerminal, ShotSource,
@@ -129,42 +128,6 @@ pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 /// Return an RTT-independent fixed input delay.
 pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
-}
-
-/// The rollback policy the shipping client installs.
-///
-/// The input-rollback branch is a permanent no-op for us — we never rebroadcast inputs and our own
-/// inputs cannot mismatch (we author them), so `RollbackMode`'s input arm only costs a per-frame
-/// input-buffer scan. Disable it; STATE rollback (the real one, against replicated
-/// `Position`/`Rotation`/velocity) stays `Check`, and everything else keeps its `RollbackPolicy`
-/// default (`max_rollback_ticks: 100`).
-///
-/// A function rather than an inline literal because `net::adoption` ASSERTS the disabled input arm:
-/// an input rollback restores from the client's own prediction history and can carry no
-/// authoritative fact, so several fixtures there are written against a client that never takes that
-/// branch and must fail loudly if it starts to.
-pub(crate) fn shipping_rollback_policy() -> RollbackPolicy {
-    RollbackPolicy {
-        input: RollbackMode::Disabled,
-        ..default()
-    }
-}
-
-/// The visual-correction policy the shipping client installs.
-///
-/// Let the sim SNAP: `decay_period` 1 ms / `decay_ratio` 1e-7 collapses lightyear's built-in visual
-/// correction to a single frame — the error underflows to ~0 the frame the rollback lands — so the
-/// lightyear-visible pose reaches the corrected present at once. ALL visible smoothing lives in
-/// `net::render_error`, which offsets the render `Transform` and decays it with a capped correction
-/// velocity. Leaving lightyear's 200 ms / 0.5 DEFAULT here would double-smooth (and lightyear's has
-/// no velocity cap), reintroducing the lurch that layer exists to kill.
-///
-/// A FUNCTION rather than an inline literal, and every `PredictionManager` a FIXTURE spawns calls
-/// it too. Until slice 4 the test modules all carried `PredictionManager::default()` — the 200 ms /
-/// 0.5 policy — so every fixture in this tree exercised a smoothing configuration the game never
-/// runs. That divergence is closed here rather than by copying two constants into each fixture.
-pub(crate) fn shipping_correction_policy() -> CorrectionPolicy {
-    CorrectionPolicy::instant_correction()
 }
 
 /// Renounce macOS app activation for a hidden capture client — registered only on the `hidden`
@@ -311,11 +274,6 @@ pub fn run() {
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
-    // The render half of prediction (frame interpolation + armed rollback correction) — client
-    // only; the server has no `Predicted` view to smooth. Mounted in simulate mode too: headless
-    // it idles harmlessly, and `SPIKE_SIM_WINDOWED` runs the real presentation stack (hidden
-    // window by default; `SPIKE_SIM_VISIBLE=1` shows it for eyes-on diagnosis).
-    app.add_plugins(client_smoothing_plugin);
     // The own-hull recoil overlay (client only): the firing kick arrives `RTT/2 + D` after the
     // flash. This layer presents it at the local fire tick and retires it exactly as the
     // interpolation cursor crosses that tick.
@@ -343,8 +301,8 @@ pub fn run() {
     if !simulate || sim_windowed {
         app.add_plugins(NetClientPlugin);
     }
-    // Passive jitter-trace recorder: frame + tick + rollback rows with prediction/correction extras.
-    // Idle unless `SPIKE_TRACE` is set.
+    // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless
+    // `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::client_plugin);
     // Per-fixed-tick sim-cost recorder: idle unless `SPIKE_COST_TRACE` is set (the MG-march cost spike).
     app.add_plugins(crate::cost::client_plugin);
@@ -502,16 +460,12 @@ pub fn run() {
         Link::new(conditioner),
         LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
         PeerAddr(server_addr),
-        PredictionManager {
-            rollback_policy: shipping_rollback_policy(),
-            correction_policy: shipping_correction_policy(),
-            ..default()
-        },
-        // Explicitly own the input timeline configuration required by prediction.
+        // Explicitly own the input timeline configuration: inputs are stamped and sent on this
+        // timeline regardless of any predicted view.
         InputTimelineConfig::new(sync_config, input_delay),
-        // Interpolated replicas need a buffer behind the server estimate, and under unpredicted
-        // drive the own hull rides it too, so it is also the dominant own-input latency term.
-        // `net::interp_delay` owns the sizing law and rewrites `min_delay` every frame.
+        // Every replica — the own hull included — rides the interpolation buffer behind the server
+        // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns
+        // the sizing law and rewrites `min_delay` every frame.
         interpolation,
         NetcodeClient::new(
             Authentication::Manual {
@@ -1119,26 +1073,20 @@ fn drop_stranded_input_buffer(
 }
 
 /// Name the replication role the server gave this client's own tank, the first frame that role is
-/// observable. `Predicted` = local physics under input; `Interpolated` = the server stream, RTT/2 +
-/// the interpolation delay behind (the server's `OVERMATCH_UNPREDICTED_DRIVE` lever). Latches on the
-/// first resolved role, so a respawn does not re-log a decision that cannot change mid-session.
+/// observable: the interpolated server stream, RTT/2 + the interpolation delay behind. Latches on
+/// the first resolved role, so a respawn does not re-log a decision that cannot change mid-session.
 fn log_local_tank_role(
-    tank: Query<(Entity, Has<Predicted>, Has<Interpolated>), (With<GameControlled>, With<NetTank>)>,
+    tank: Query<Entity, (With<GameControlled>, With<NetTank>, With<Interpolated>)>,
     mut logged: Local<bool>,
 ) {
     if *logged {
         return;
     }
-    let Ok((entity, predicted, interpolated)) = tank.single() else {
+    let Ok(entity) = tank.single() else {
         return;
     };
-    let role = match (predicted, interpolated) {
-        (true, _) => "PREDICTED (local physics under input)",
-        (false, true) => "INTERPOLATED (server stream — unpredicted drive)",
-        (false, false) => return,
-    };
     *logged = true;
-    info!("client: own tank {entity} drives {role}");
+    info!("client: own tank {entity} drives INTERPOLATED (server stream)");
 }
 
 /// Opt-in ownership trace. Only the local tank may carry `Controlled`, `InputMarker`, and `Predicted`.
