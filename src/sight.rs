@@ -442,8 +442,8 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
 
 /// A servo's live parent-local lay, addressed by its [`ServoIndex`] slot in the tank's root-resident
 /// integrator. Same preference the mechanism itself integrates through (`tank::servo`): the
-/// client-local [`RemoteServos`] when the tank carries one — every non-predicted replica, the own
-/// hull included when it drives unpredicted — else the authoritative [`TankServos`] snapshot. The
+/// client-local [`RemoteServos`] when the tank carries one — every replica, the own hull
+/// included — else the authoritative [`TankServos`] snapshot. The
 /// optic clamps intent against the gun's live lay, so it must read the integrator that is moving it.
 fn live_servo_angle(
     tank: Entity,
