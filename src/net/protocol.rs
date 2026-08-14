@@ -1434,7 +1434,9 @@ pub(crate) fn plugin(app: &mut App) {
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
     app.add_systems(
         FixedUpdate,
-        bridge_action_state_to_tank_command.before(GameplaySet),
+        bridge_action_state_to_tank_command
+            .in_set(InputBridge)
+            .before(GameplaySet),
     );
     // The DELIVERY half of the same seam, mounted here for the same reason both halves above are:
     // the discriminator is a marker, not a composition root. `net::adoption` turns an arriving
@@ -1521,6 +1523,12 @@ fn realize_hull_shock(
         ledger.realize(shock.count);
     }
 }
+
+/// The input bridge's ordering handle: every writer that must land on top of the attested command
+/// orders after this set (`net::fire_presentation`, which replaces the owner's consumables with
+/// what this client authored).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct InputBridge;
 
 /// Bridge Lightyear input to the simulation command.
 ///

@@ -325,6 +325,12 @@ pub fn run() {
     // and retires it exactly as the interpolation cursor crosses that tick. Arms nothing in
     // predicted mode.
     app.add_plugins(super::recoil_overlay::plugin);
+    // The own-fire presentation ledger (client only): when the server stream owns the owner's gate,
+    // the arriving snapshot is a legality report, not permission to draw. This layer holds the gate
+    // the local cadence left, reconciles the snapshot forward, and feeds `shooting::fire` the
+    // consumables this client authored rather than the attested echo. Arms nothing in predicted
+    // mode.
+    app.add_plugins(super::fire_presentation::plugin);
     // The rollback watchdog (client only): the backstop for lightyear's receive-time mismatch
     // check, which starves permanently at zero prediction margin — exactly where `balanced()`
     // input delay puts a LAN/loopback client (see the module doc for the vendored mechanism).
@@ -635,7 +641,13 @@ pub fn run() {
                 // "ticks" burned in <5 s wall).
                 // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
                 // just placed, and must be the last word before lightyear buffers it.
-                (harness::buffer_input, stamp_input_tick)
+                // `record_own_intent` chains after the stamp: the client's own copy of what it
+                // filed is keyed by the tick the stamp names.
+                (
+                    harness::buffer_input,
+                    stamp_input_tick,
+                    super::fire_presentation::record_own_intent,
+                )
                     .chain()
                     .in_set(InputSystems::WriteClientInputs)
                     .run_if(not(is_in_rollback)),
@@ -646,7 +658,11 @@ pub fn run() {
             // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
             // `ActionState` per tick — overwriting it with the *current* gathered command (or
             // re-stamping it with the replayed tick) would corrupt the replay's input.
-            (feed_action_state, stamp_input_tick)
+            (
+                feed_action_state,
+                stamp_input_tick,
+                super::fire_presentation::record_own_intent,
+            )
                 .chain()
                 .in_set(InputSystems::WriteClientInputs)
                 .run_if(not(is_in_rollback)),
