@@ -9,9 +9,11 @@
 //!
 //! The wrap fits the belt around the articulated running-gear circles as a pure function of pose,
 //! terrain and belt phase, plus two self-healing FILTER tiers (a hull-frame conform ease and a slack
-//! spring), always on. The filter state is client-local cosmetic memory, so a remote tank's drawn
-//! belt is not a pure function of replicated pose + phase — which is fine, it is view-layer juice,
-//! and the pins/wheels/gear spin still derive from replicated state alone. It is cheap enough
+//! spring), always on, and a third on the phase itself ([`presented_phase`], which carries the
+//! drawn belt at the sim's belt SPEED between sim samples so it does not step against a hull the
+//! renderer moves continuously). The filter state is client-local cosmetic memory, so a tank's
+//! drawn belt is not a pure function of replicated pose + phase — which is fine, it is view-layer
+//! juice, and every rotating part still reads ONE phase, so the tooth lock holds. It is cheap enough
 //! (~56 µs/tank/frame) that every tank gets it — no tier policy (architecture §6); tiers by
 //! projected link pitch return only if tank counts ever demand them.
 
@@ -63,6 +65,43 @@ pub fn view_plugin(app: &mut App) {
     app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
 }
 
+/// Presented-phase heal frequency (rad/s) — settle ≈ 4.7/ω ≈ 1.2 s.
+///
+/// Bounded from ABOVE by the artefact it exists to remove. Easing onto a staircase puts the
+/// staircase back into the drawn rate, scaled: a residual sawtooth of `speed × T_sample` entering a
+/// per-frame ease of `ω·Δt` ripples the drawn rate by at most `ω · T_sample / 2` of the belt's
+/// speed — under 2 % across one 64 Hz sample (MEASURED, `worst_rate_error`), a few times that
+/// across the multi-sample gaps jitter opens. Every factor faster is that much of the stutter back.
+///
+/// Bounded from BELOW by drift alone, and only barely: the carry integrates the sim's own belt
+/// speed, so the residual it accumulates is the acceleration across one sample, and the drawn belt
+/// stays tooth-locked whatever the residual is (pins and sprocket read the SAME presented phase).
+/// What drift costs is BELLY SCRUB — drawn travel walking away from ground travel — so the heal has
+/// to close it in well under the time a driver watches one patch of ground go by, not sooner.
+const PHASE_HEAL_OMEGA: f32 = 4.0;
+
+/// One frame of the belt's PRESENTED phase: carry the drawn phase at the sim's own belt speed, then
+/// ease the residual onto the sim phase. Pure; `None` (cold start, snap) adopts `sim` whole.
+///
+/// `phase` moves in STEPS and the hull it is bolted to does not. The sim advances it once per fixed
+/// tick ([`super::sim::apply_track_forces`], at the pre-update speed — the forward-Euler relation
+/// restated here), and for a tank that is not locally simulated it advances only when a replication
+/// packet lands, so drawing `phase` directly stalls the belt against ground that is sliding
+/// smoothly underneath it. `speed` is a VELOCITY, and a stepped velocity integrates to a continuous
+/// position — carrying at `speed` closes the gaps without a solver and without a second clock.
+///
+/// It also cannot invent travel the vehicle has not got: `speed` is the belt's surface speed, so a
+/// braked skid (`speed` 0) still stops the links dead and wheelspin still scrolls them under a
+/// stationary hull. The ease bounds what the carry accumulates — see [`PHASE_HEAL_OMEGA`].
+fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 {
+    let Some(previous) = previous else {
+        return sim;
+    };
+    let carried = previous + f64::from(speed) * f64::from(dt);
+    let heal = 1.0 - f64::from(-PHASE_HEAL_OMEGA * dt).exp();
+    carried + (sim - carried) * heal
+}
+
 /// Downward terrain-probe reach (m) — for the wrap's conform and the view wheel lift.
 const PROBE_REACH: f32 = 0.5;
 /// Presented-pose discontinuity thresholds: a root that moves further than this in ONE frame is
@@ -104,6 +143,9 @@ struct TrackRig {
     /// Per-side kinematic-wrap filter memory ([`wrap::WrapState`]). Reset on a
     /// presented-pose snap so the belly memory re-inits from the fresh pose rather than settling in.
     wrap: [wrap::WrapState; 2],
+    /// Per-side PRESENTED belt phase — the phase the view actually draws, carried at render rate by
+    /// [`presented_phase`]. `None` = cold start / reseed: the next frame adopts the sim phase whole.
+    presented_phase: [Option<f64>; 2],
     sides: [RigSide; 2],
     /// Last frame's presented affine — the snap detector's previous frame. `None` = cold start.
     prev_affine: Option<Affine3A>,
@@ -422,6 +464,7 @@ fn bind_track_rigs(
             pin_to_inner: geom.model.pin_to_inner,
             thickness: geom.thickness,
             wrap: Default::default(),
+            presented_phase: [None; 2],
             sides,
             prev_affine: None,
             field_revision: None,
@@ -575,6 +618,7 @@ fn drive_track_views(
             for state in &mut rig.wrap {
                 state.reset();
             }
+            rig.presented_phase = [None; 2];
         }
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
@@ -583,7 +627,16 @@ fn drive_track_views(
         // replicated one — real belt travel, so a braked skid stops the links and wheelspin scrolls
         // them honestly. The wrap needs only the phase (the drawn belt's motion IS the phase
         // advancing; there is no solver to feed a belt speed to).
-        let phases = [drive.sides[0].phase, drive.sides[1].phase];
+        //
+        // Carried to THIS frame by [`presented_phase`] before it is drawn: the sim advances that
+        // phase once per fixed tick and a non-simulated tank only when a packet lands, either way
+        // in steps, on a hull the renderer is moving continuously underneath it.
+        let phases = [0, 1].map(|si| {
+            let side = drive.sides[si];
+            let phase = presented_phase(rig.presented_phase[si], side.phase, side.speed, dt);
+            rig.presented_phase[si] = Some(phase);
+            phase
+        });
 
         // View wheel lift: probe the field at each wheel's REAL position across its DISC (not
         // the shoe), ease the lift (implicit rise / ballistic fall), then the wrap fits the belt
@@ -754,5 +807,125 @@ fn drive_track_views(
                 tr.set_if_neq(gear_spin_transform(&side.idler_rest, angle));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 120 fps render frame — faster than the 64 Hz sample rate, which is the whole problem.
+    const DT: f32 = 1.0 / 120.0;
+    const SPEED: f32 = 4.0;
+
+    /// Steady drive: `sim` moves once every `gap` frames by exactly the travel of those frames —
+    /// the staircase a fixed-tick sim (or a replication stream) hands the renderer. Returns the
+    /// worst per-frame scroll RATE error, in m/s, over the settled tail: raw, then presented.
+    fn worst_rate_error(gap: u32) -> (f64, f64) {
+        let step = f64::from(SPEED) * f64::from(DT) * f64::from(gap);
+        let (mut sim, mut drawn) = (0.0_f64, presented_phase(None, 0.0, SPEED, DT));
+        let (mut raw, mut presented) = (0.0_f64, 0.0_f64);
+        for frame in 1..2000 {
+            let (was_sim, was_drawn) = (sim, drawn);
+            if frame % gap == 0 {
+                sim += step;
+            }
+            drawn = presented_phase(Some(drawn), sim, SPEED, DT);
+            if frame > 1000 {
+                let rate = |d: f64| (d / f64::from(DT) - f64::from(SPEED)).abs();
+                raw = raw.max(rate(sim - was_sim));
+                presented = presented.max(rate(drawn - was_drawn));
+            }
+        }
+        (raw, presented)
+    }
+
+    /// Cold start adopts the sim phase whole — no ease-in from zero, no first-frame lurch.
+    #[test]
+    fn a_cold_start_adopts_the_sim_phase() {
+        assert_eq!(presented_phase(None, 12.5, 3.0, DT), 12.5);
+    }
+
+    /// A belt at rest draws no travel, however long the sample is stale: a braked skid stops the
+    /// links, and nothing here derives scroll from the hull moving.
+    #[test]
+    fn a_stopped_belt_never_scrolls() {
+        let mut phase = 7.0;
+        for _ in 0..1200 {
+            phase = presented_phase(Some(phase), 7.0, 0.0, DT);
+        }
+        assert_eq!(phase, 7.0);
+    }
+
+    /// THE artefact. Drawing the sim phase directly stalls the belt for every frame no sample
+    /// reached and lurches it on the one that did — an error of the belt's whole speed, growing
+    /// with the gap. The carry holds the belt's own speed across the same gaps.
+    #[test]
+    fn the_drawn_scroll_rate_survives_the_gaps_between_samples() {
+        // MEASURED ripple at ω = 4: 0.067 / 0.202 / 0.482 m/s. These bounds sit half again above
+        // that, so doubling ω fails all three rather than sneaking one through.
+        for (gap, tolerance) in [(2, 0.10), (4, 0.30), (8, 0.70)] {
+            let (raw, presented) = worst_rate_error(gap);
+            // A stalled frame alone is already the full belt speed out.
+            assert!(
+                raw >= f64::from(SPEED) - 1e-9,
+                "gap {gap}: raw error {raw} should stall a whole {SPEED} m/s",
+            );
+            assert!(
+                presented < tolerance,
+                "gap {gap}: presented error {presented} exceeds {tolerance} m/s",
+            );
+            // And the point of the exercise: the drawn rate is orders better, not marginally.
+            assert!(
+                presented * 10.0 < raw,
+                "gap {gap}: presented {presented} vs raw {raw}",
+            );
+        }
+    }
+
+    /// The ease is what keeps the carry from walking away from the ground — a belly that scrubs is
+    /// the failure a left-open residual causes. A whole metre of it must be down to 1 % inside two
+    /// seconds, which is the lower bound on [`PHASE_HEAL_OMEGA`]: halve the rate and this fails.
+    #[test]
+    fn the_heal_closes_a_residual_the_carry_cannot() {
+        let mut phase = 0.0;
+        let mut sim = 1.0;
+        for _ in 0..(2.0 / DT) as u32 {
+            sim += f64::from(SPEED) * f64::from(DT);
+            phase = presented_phase(Some(phase), sim, SPEED, DT);
+        }
+        assert!(
+            (sim - phase).abs() < 0.01,
+            "a 1 m residual must be 99 % gone in two seconds, not {}",
+            sim - phase,
+        );
+    }
+
+    /// The carry is what makes the ease ZERO-LAG at speed, and nothing above pins it: a plain
+    /// low-pass on the phase draws just as smoothly, sitting a constant `speed / ω` — a whole metre
+    /// of belt at cruise — behind, so the tracks would spin up a quarter-second late and keep
+    /// scrolling after the tank stopped. Steady drive must settle onto the sim phase ITSELF.
+    #[test]
+    fn a_steady_belt_draws_no_lag_behind_the_sim_phase() {
+        let mut sim = 0.0_f64;
+        let mut drawn = presented_phase(None, sim, SPEED, DT);
+        for _ in 0..2000 {
+            sim += f64::from(SPEED) * f64::from(DT);
+            drawn = presented_phase(Some(drawn), sim, SPEED, DT);
+        }
+        assert!(
+            (sim - drawn).abs() < 0.001,
+            "steady drive must draw the sim phase, not {} m behind it",
+            sim - drawn,
+        );
+    }
+
+    /// Reseeding is the escape hatch for every discontinuity the ease is too slow for, so it must
+    /// land exactly on the sim phase rather than merely near it.
+    #[test]
+    fn a_reseed_lands_exactly_on_the_sim_phase() {
+        let drifted = presented_phase(Some(0.0), 1000.0, SPEED, DT);
+        assert_ne!(drifted, 1000.0);
+        assert_eq!(presented_phase(None, 1000.0, SPEED, DT), 1000.0);
     }
 }
