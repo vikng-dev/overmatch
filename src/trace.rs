@@ -1,9 +1,9 @@
-//! An opt-in, passive JSONL recorder for render pose, fixed-step state, and rollback events.
+//! An opt-in, passive JSONL recorder for render pose and fixed-step state.
 //!
 //! Invariant: tracing never writes simulation state. `SPIKE_TRACE` enables recorder registration;
 //! role-qualified paths prevent concurrently launched compositions from sharing a sink.
 //!
-//! Rows have `k` values `meta`, `frame`, `tick`, or `rollback`. Fields unavailable in a
+//! Rows have `k` values `meta`, `frame`, or `tick`. Fields unavailable in a
 //! composition are omitted rather than represented as null. Cross-process analysis joins on `tick`
 //! and `role`, never on entity identifiers.
 //! [`scripts/divergence/analyze.py`](../../scripts/divergence/analyze.py) consumes the base schema.
@@ -18,7 +18,6 @@ use bevy::prelude::*;
 use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
-use crate::ballistics::HullShock;
 use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate};
 use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
@@ -36,7 +35,7 @@ use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prelude::{
     ControlledBy, InterpolationTimeline, LocalTimeline, NetworkTimeline, PingManager,
-    PredictionManager, PredictionMetrics, ReplicationCheckpointMap, Rollback, RollbackSystems,
+    ReplicationCheckpointMap,
 };
 
 /// Shared JSONL sink. Values pass through `serde_json::Value` so non-finite floats serialize as
@@ -175,11 +174,6 @@ fn install(app: &mut App, role: &'static str) -> bool {
     app.add_systems(Startup, write_meta);
     // Flush cadence lives inside `JsonlSink::write` (~1 s, checked per row — rows arrive every
     // frame while tracing), so no periodic flush system is needed.
-    // Arm the trigger-attribution slot's fast path. The slot only fills on the client (check_rollback
-    // is client-only), but the flag is role-agnostic and cheap; the server never calls
-    // `note_rollback_trigger`, so its slot stays empty regardless — as does the single-player
-    // composition, which registers no rollback conditions.
-    TRACE_ACTIVE.store(true, std::sync::atomic::Ordering::Relaxed);
     true
 }
 
@@ -194,24 +188,16 @@ pub fn sp_plugin(app: &mut App) {
     app.add_systems(FixedLast, record_tick);
 }
 
-/// MP client: frame and tick rows plus rollback observation. Replay rows carry `rp`; clearing the
-/// trigger slot before Lightyear's check scopes `trg` attribution to that check.
+/// MP client: frame and tick rows.
 pub fn client_plugin(app: &mut App) {
     if !install(app, "client") {
         return;
     }
     app.add_systems(PostUpdate, record_frame.after(TransformSystems::Propagate));
     app.add_systems(FixedLast, record_tick);
-    // Clear last frame's accumulated triggers BEFORE `check_rollback` runs, so the slot the rollback
-    // observer drains holds only this check's trips (see `clear_rollback_triggers`).
-    app.add_systems(
-        PreUpdate,
-        clear_rollback_triggers.before(RollbackSystems::Check),
-    );
-    app.add_observer(record_rollback);
 }
 
-/// MP server: tick rows only (it has no `Predicted` view to render, hence no frame/rollback rows).
+/// MP server: tick rows only (it renders nothing, hence no frame rows).
 pub fn server_plugin(app: &mut App) {
     if !install(app, "server") {
         return;
@@ -322,11 +308,9 @@ fn record_frame(
         }
         {
             // Net resources are optional so this shared system remains valid in single-player.
-            if let (Some(timeline), Some(checkpoints), Some(metrics)) = (
-                net.timeline.as_deref(),
-                net.checkpoints.as_deref(),
-                net.metrics.as_deref(),
-            ) {
+            if let (Some(timeline), Some(checkpoints)) =
+                (net.timeline.as_deref(), net.checkpoints.as_deref())
+            {
                 obj.insert("tick".into(), Value::from(u64::from(timeline.tick().0)));
                 obj.insert(
                     "conf".into(),
@@ -334,8 +318,6 @@ fn record_frame(
                         .last_confirmed_tick()
                         .map_or(Value::Null, |t| Value::from(u64::from(t.0))),
                 );
-                obj.insert("rb".into(), Value::from(metrics.rollbacks));
-                obj.insert("rbt".into(), Value::from(metrics.rollback_ticks));
             }
             // The interpolation clock and the inputs to the delay that placed it. Headroom is
             // `conft − itick`; `mind` makes a capture self-documenting about which law produced it.
@@ -388,8 +370,7 @@ fn record_frame(
 /// loads, collision pairs). Runs in `FixedLast`, after the physics step and avian's contact update,
 /// so `Collisions` is current for this tick.
 ///
-/// Replay ticks carry `rp`; network compositions use `LocalTimeline`, while others use a local
-/// monotonic counter.
+/// Network compositions use `LocalTimeline`; others use a local monotonic counter.
 fn record_tick(
     mut trace: ResMut<TraceWriter>,
     roots: Query<
@@ -403,8 +384,7 @@ fn record_tick(
             &TrackGrip,
             Option<&TrackGripElements>,
             &TankTransmission,
-            // Paired only because bevy's query tuple arity tops out at 16; they are unrelated.
-            (Option<&WeaponGate>, Option<&HullShock>),
+            Option<&WeaponGate>,
             Option<&TankServos>,
             Option<&RemoteServos>,
             &TrackContacts,
@@ -416,10 +396,6 @@ fn record_tick(
     collisions: Collisions,
     mut tick_counter: Local<u64>,
     timeline: Option<Res<LocalTimeline>>,
-    // Same source `is_in_rollback` reads (`Query<(), With<Rollback>>`): non-empty iff this tick is a
-    // rollback-replay re-simulation, which is what `rp` marks. Empty in the single-player composition
-    // (no rollback), which is correct.
-    replaying: Query<(), With<Rollback>>,
     // The server's ownership marker (`spawn_player_tank` inserts `ControlledBy` on every player
     // tank; the ownerless test bot has none). It is the SERVER-side half of the cross-world identity
     // the hash join pairs on: the client's own predicted tank carries the game `Controlled` marker
@@ -438,8 +414,6 @@ fn record_tick(
         Some(timeline) => u64::from(timeline.tick().0),
         None => next_local_tick(&mut tick_counter),
     };
-
-    let is_replay = !replaying.is_empty();
 
     // `hc`/`pen` include only touching, overlapping Avian pairs. A non-overlapping AABB makes a
     // contact record stale for this diagnostic; negative separations clamp to zero penetration.
@@ -470,7 +444,7 @@ fn record_tick(
         grip,
         elements,
         transmission,
-        (weapon_gate, shock),
+        weapon_gate,
         servos,
         remote_servos,
         track_contacts,
@@ -538,7 +512,6 @@ fn record_tick(
             elements,
             transmission,
             weapon_gate,
-            shock,
             servo_states,
             sim,
         );
@@ -546,7 +519,7 @@ fn record_tick(
         // boundary explicit so the analyzer omits private-state and combined equality for the pair.
         let disclosed_element_hash = own.then_some(hash.elm);
 
-        // `mut` for the `rp` stamp and the `simf` verbose dump below.
+        // `mut` for the `simf` verbose dump below.
         let mut row = json!({
             "k": "tick",
             "tick": tick_no,
@@ -577,15 +550,11 @@ fn record_tick(
             "hlv": hash.lv,
             "hav": hash.av,
             "hsim": hash.sim,
-            // The carried-state decode: which field family a `hsim` mismatch lives in. These seven
-            // streams are exactly what `hsim` folds — `hshk` below is NOT one of them.
+            // The carried-state decode: which field family a `hsim` mismatch lives in. These
+            // streams are exactly what `hsim` folds.
             "hdrv": hash.drv,
             "hsrv": hash.srv,
             "hrld": hash.rld,
-            // INFORMATIONAL, outside `hsim` and `h`. The owner legitimately disagrees with the
-            // authority here for the whole delivery window of every hit (see `TankStateHash::shk`),
-            // so folding it in would report every hit as unexplained drift.
-            "hshk": hash.shk,
             "hrec": hash.rec,
             "hblt": hash.blt,
             "htrn": hash.trn,
@@ -620,7 +589,7 @@ fn record_tick(
             // verbose diagnostic shape stays fixed across variants.
             let mut trn = Vec::with_capacity(18);
             for field in transmission_state_projection(&transmission.0) {
-                match field.value {
+                match field {
                     TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
                     TransmissionProjectionValue::I8(value) => trn.push(Value::from(value)),
                     TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
@@ -635,13 +604,6 @@ fn record_tick(
                 .expect("json! built an object")
                 .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "trn": trn}));
         }
-        // Mark rollback-replay ticks so analysis keeps the corrected value for this tick number.
-        // Never set in the single-player composition (`is_replay` is always false there — no rollback).
-        if is_replay {
-            row.as_object_mut()
-                .expect("json! built an object")
-                .insert("rp".into(), Value::Bool(true));
-        }
         trace.write(&row);
     }
 }
@@ -654,115 +616,12 @@ fn next_local_tick(counter: &mut Local<u64>) -> u64 {
     current
 }
 
-// --- Rollback trigger attribution --------------------------------------------------------------
-// Reached only on a real MP client (the server never runs check_rollback; single-player registers no
-// rollback conditions), but always compiled — the guard below makes it free when tracing is off.
-
-/// Set once the trace writer opens, so the rollback-condition closures in `net::protocol` can skip
-/// the mutex entirely when tracing is off — the cost of instrumentation is a single relaxed atomic
-/// load on the check_rollback hot path.
-static TRACE_ACTIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// The trigger-attribution slot: component/magnitude pairs pushed by the rollback-condition closures
-/// (`net::protocol`) as they trip, drained by [`record_rollback`] into the `trg` field. A plain
-/// `static Mutex` rather than a resource because the closures are `Fn` values with no `World` access.
-/// Capped at 64 to bound a pathological burst; excess is dropped.
-static ROLLBACK_TRIGGERS: std::sync::Mutex<Vec<(&'static str, f32)>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// Record that `component`'s rollback condition tripped this check, by `magnitude`. Called from
-/// [`note_if_tripped`] when a condition returns true. No-op
-/// when tracing is off (the atomic guard) — so the closures pay nothing in an untraced run, and the
-/// server (which never runs check_rollback) never reaches the push.
-fn note_rollback_trigger(component: &'static str, magnitude: f32) {
-    if !TRACE_ACTIVE.load(std::sync::atomic::Ordering::Relaxed) {
-        return;
-    }
-    if let Ok(mut triggers) = ROLLBACK_TRIGGERS.lock()
-        && triggers.len() < 64
-    {
-        triggers.push((component, magnitude));
-    }
-}
-
-/// Shared rollback condition: trip when `magnitude >= threshold` and record the attribution.
-pub(crate) fn note_if_tripped(component: &'static str, magnitude: f32, threshold: f32) -> bool {
-    let trip = magnitude >= threshold;
-    if trip {
-        note_rollback_trigger(component, magnitude);
-    }
-    trip
-}
-
-/// Clear the trigger slot before each frame's `check_rollback` (registered `.before(Check)` on the
-/// client). Lightyear's correction decay (`add_visual_correction`, PostUpdate) reuses the SAME
-/// registered rollback conditions to test whether the residual error is still significant, so those
-/// re-tests push into the slot every frame a `VisualCorrection` lives — pollution that would
-/// misattribute (or, past the 64-cap, evict) the real triggers a later rollback drains. Wiping the
-/// slot immediately before `check_rollback` guarantees the observer drains only THIS check's trips.
-fn clear_rollback_triggers() {
-    if let Ok(mut triggers) = ROLLBACK_TRIGGERS.lock() {
-        triggers.clear();
-    }
-}
-
-/// Take and clear the accumulated triggers. Clearing immediately before `check_rollback` makes the
-/// result exact per-check attribution.
-fn drain_rollback_triggers() -> Vec<(&'static str, f32)> {
-    ROLLBACK_TRIGGERS
-        .lock()
-        .map(|mut triggers| std::mem::take(&mut *triggers))
-        .unwrap_or_default()
-}
-
 /// Optional net resources used by frame rows. Optional access keeps the shared system valid in
 /// single-player.
 #[derive(SystemParam)]
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,
     checkpoints: Option<Res<'w, ReplicationCheckpointMap>>,
-    metrics: Option<Res<'w, PredictionMetrics>>,
-}
-
-/// Client rollback observer: `Rollback` is added to the `PredictionManager` (client link) entity
-/// when a rollback is decided (`net-facts`), so `add.entity` is that entity — read its
-/// `PredictionManager` for the start tick and the `Rollback` enum for the cause. Drains the trigger
-/// slot the condition closures filled during this same check_rollback.
-///
-/// Registered only in a traced run (`client_plugin` gates on `install`), so `TraceWriter` is present
-/// unconditionally — no Option guard needed.
-fn record_rollback(
-    add: On<Add, Rollback>,
-    mut trace: ResMut<TraceWriter>,
-    real: Res<Time<Real>>,
-    timeline: Res<LocalTimeline>,
-    managers: Query<&PredictionManager>,
-    rollbacks: Query<&Rollback>,
-) {
-    let tick = timeline.tick();
-    let start = managers
-        .get(add.entity)
-        .ok()
-        .and_then(PredictionManager::get_rollback_start_tick);
-    let cause = match rollbacks.get(add.entity) {
-        Ok(Rollback::FromState) => "state",
-        Ok(Rollback::FromInputs) => "input",
-        Err(_) => "unknown",
-    };
-    let triggers: Vec<Value> = drain_rollback_triggers()
-        .into_iter()
-        .map(|(component, magnitude)| Value::Array(vec![Value::from(component), num(magnitude)]))
-        .collect();
-    let row = json!({
-        "k": "rollback",
-        "t": real.elapsed_secs() as f64,
-        "tick": u64::from(tick.0),
-        "start": start.map_or(Value::Null, |t| Value::from(u64::from(t.0))),
-        "depth": start.map_or(Value::Null, |s| Value::from(i64::from(tick.0) - i64::from(s.0))),
-        "cause": cause,
-        "trg": Value::Array(triggers),
-    });
-    trace.write(&row);
 }
 
 #[cfg(test)]

@@ -11,7 +11,7 @@
 //!   is one gap. Gaps are counted with their durations (ticks), `SyncEvent` occurrences on the
 //!   interpolation timeline are counted (steady-state must be zero after the handshake resync),
 //!   and each closed gap is checked against a ledger of recent impulse-class authority ticks
-//!   (fire announcements, damage confirms, `HullShock` episodes) for gap∧impulse coincidence.
+//!   (fire announcements, damage confirms) for gap∧impulse coincidence.
 //!   A summary line logs every [`SUMMARY_PERIOD_SECS`], on disconnect, and at app exit.
 //!
 //! - **Gap-filler (`OVERMATCH_EXTRAPOLATE=1`).** Instead of the clamp, hull kinematics are
@@ -68,7 +68,6 @@ use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimel
 use lightyear::prelude::{Connected, Interpolated, IsSynced, NetworkTimeline};
 
 use super::protocol::NetTank;
-use crate::ballistics::HullShock;
 
 /// The certified visibility budget for a projected pose, in metres — the recoil microsim's
 /// mid-bounce residual (12.08 mm) ratified as a real-trajectory difference, not an error
@@ -116,7 +115,6 @@ pub(super) fn install(app: &mut App) {
     app.add_systems(
         Update,
         (
-            record_hull_shock_impulses,
             // After the lawful sample is written, before PostUpdate consumes the components.
             drive_hull_edges.after(InterpolationSystems::Interpolate),
             log_periodic_summary,
@@ -135,8 +133,6 @@ pub(super) enum ImpulseClass {
     /// An owner-private damage confirm (`DamageConfirm::damage_tick`) — the victim's hull takes
     /// the shot's impulse on this tick.
     Damage,
-    /// A replicated [`HullShock`] episode boundary — the authority applied an impulse here.
-    Shock,
 }
 
 /// Ring of recent impulse-class authority ticks, consulted when a starvation gap closes.
@@ -168,25 +164,6 @@ impl ImpulseTicks {
         self.ring
             .iter()
             .any(|(tick, _)| *tick - floor > 0 && *tick - ceil <= 0)
-    }
-}
-
-/// Stamp `HullShock` episode boundaries into the ledger as they replicate in. `[opened, tick]` is
-/// the episode's own impulse span; both ends are recorded (interior ticks are unknowable from the
-/// wire and the episode window is ≤ `SHOCK_EPISODE_TICKS`).
-fn record_hull_shock_impulses(
-    shocks: Query<&HullShock, (With<NetTank>, Changed<HullShock>)>,
-    mut impulses: ResMut<ImpulseTicks>,
-) {
-    for shock in &shocks {
-        if shock.count == 0 {
-            // The spawn-bundle default: no episode has ever been applied.
-            continue;
-        }
-        impulses.record(Tick(shock.opened), ImpulseClass::Shock);
-        if shock.tick != shock.opened {
-            impulses.record(Tick(shock.tick), ImpulseClass::Shock);
-        }
     }
 }
 

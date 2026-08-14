@@ -60,22 +60,6 @@ pub(super) fn finish(app: &mut App) {
     app.cleanup();
 }
 
-/// The `PredictionManager` policy the rollback-era fixtures in this tree spawn: state rollback
-/// only (input arm disabled — we author our own inputs), instant correction (no built-in visual
-/// smoothing). The shipping client mounts NO `PredictionManager`; this exists solely so the
-/// remaining rollback-machinery tests exercise the lightyear schedule they pin.
-pub(super) fn prediction_manager() -> lightyear::prelude::PredictionManager {
-    lightyear::prelude::PredictionManager {
-        rollback_policy: lightyear::prelude::RollbackPolicy {
-            input: lightyear::prelude::RollbackMode::Disabled,
-            ..default()
-        },
-        correction_policy: lightyear::prediction::correction::CorrectionPolicy::instant_correction(
-        ),
-        ..default()
-    }
-}
-
 /// Grab a free loopback UDP port by binding one and dropping it. A fixed port would collide with a
 /// concurrent test binary (or a stray dev server) on the same machine.
 pub(super) fn free_port() -> u16 {

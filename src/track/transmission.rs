@@ -985,53 +985,11 @@ pub(crate) enum TransmissionProjectionValue {
     Scheduler { tag: u8, from: u8, to: u8 },
 }
 
-impl TransmissionProjectionValue {
-    /// Bit-exact equality under the atomic replication contract.
-    pub(crate) fn bit_eq(self, other: Self) -> bool {
-        match (self, other) {
-            (Self::U8(a), Self::U8(b)) => a == b,
-            (Self::I8(a), Self::I8(b)) => a == b,
-            (Self::Bool(a), Self::Bool(b)) => a == b,
-            (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits(),
-            (
-                Self::Scheduler {
-                    tag: a_tag,
-                    from: a_from,
-                    to: a_to,
-                },
-                Self::Scheduler {
-                    tag: b_tag,
-                    from: b_from,
-                    to: b_to,
-                },
-            ) => a_tag == b_tag && a_from == b_from && a_to == b_to,
-            _ => false,
-        }
-    }
-
-    /// Absolute-tolerance equality for a projected float. Raw-bit equality is checked first so
-    /// matching NaN payloads remain the same carried state; distinct NaNs and non-float variants
-    /// never compare equal through a tolerance.
-    pub(crate) fn float_eq(self, other: Self, eps: f32) -> bool {
-        match (self, other) {
-            (Self::F32(a), Self::F32(b)) => a.to_bits() == b.to_bits() || (a - b).abs() <= eps,
-            _ => false,
-        }
-    }
-}
-
-/// A named field in the exhaustive authoritative transmission projection.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct TransmissionProjectionField {
-    pub(crate) name: &'static str,
-    pub(crate) value: TransmissionProjectionValue,
-}
-
 /// The exhaustive REV-14 transmission inventory in its canonical replication/hash/trace order.
 /// Adding state fails this destructure until the field is classified exactly once here.
 pub(crate) fn transmission_state_projection(
     state: &TransmissionState,
-) -> [TransmissionProjectionField; 17] {
+) -> [TransmissionProjectionValue; 17] {
     let TransmissionState {
         gear,
         shift_ticks,
@@ -1073,74 +1031,23 @@ pub(crate) fn transmission_state_projection(
     };
     use TransmissionProjectionValue::{Bool, F32, I8, U8};
     [
-        TransmissionProjectionField {
-            name: "gear",
-            value: U8(gear),
-        },
-        TransmissionProjectionField {
-            name: "shift_ticks",
-            value: U8(shift_ticks),
-        },
-        TransmissionProjectionField {
-            name: "steer_step",
-            value: U8(steer_step),
-        },
-        TransmissionProjectionField {
-            name: "reverse",
-            value: Bool(reverse),
-        },
-        TransmissionProjectionField {
-            name: "park",
-            value: Bool(park),
-        },
-        TransmissionProjectionField {
-            name: "last_shift_dir",
-            value: I8(last_shift_dir),
-        },
-        TransmissionProjectionField {
-            name: "dwell_ticks",
-            value: U8(dwell_ticks),
-        },
-        TransmissionProjectionField {
-            name: "omega_e",
-            value: F32(omega_e),
-        },
-        TransmissionProjectionField {
-            name: "clutch_out",
-            value: Bool(clutch_out),
-        },
-        TransmissionProjectionField {
-            name: "demand_n",
-            value: F32(demand_n),
-        },
-        TransmissionProjectionField {
-            name: "demand_initialized",
-            value: Bool(demand_initialized),
-        },
-        TransmissionProjectionField {
-            name: "grade_confirm_ticks",
-            value: U8(grade_confirm_ticks),
-        },
-        TransmissionProjectionField {
-            name: "band_confirm_ticks",
-            value: U8(band_confirm_ticks),
-        },
-        TransmissionProjectionField {
-            name: "grade_target",
-            value: U8(grade_target),
-        },
-        TransmissionProjectionField {
-            name: "scheduler",
-            value: scheduler,
-        },
-        TransmissionProjectionField {
-            name: "hill_hold",
-            value: Bool(hill_hold),
-        },
-        TransmissionProjectionField {
-            name: "hold_reengage_ticks",
-            value: U8(hold_reengage_ticks),
-        },
+        U8(gear),
+        U8(shift_ticks),
+        U8(steer_step),
+        Bool(reverse),
+        Bool(park),
+        I8(last_shift_dir),
+        U8(dwell_ticks),
+        F32(omega_e),
+        Bool(clutch_out),
+        F32(demand_n),
+        Bool(demand_initialized),
+        U8(grade_confirm_ticks),
+        U8(band_confirm_ticks),
+        U8(grade_target),
+        scheduler,
+        Bool(hill_hold),
+        U8(hold_reengage_ticks),
     ]
 }
 

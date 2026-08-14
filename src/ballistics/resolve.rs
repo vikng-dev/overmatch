@@ -488,7 +488,6 @@ fn ricochet(
         .get(struck)
         .ok()
         .map(|owner| owner.tank());
-    let victim = body.and_then(|body| context.world.combatants.get(body).ok().copied());
     if let Some(body) = body {
         apply_hit_impulse(
             bodies,
@@ -505,7 +504,6 @@ fn ricochet(
         surface: ImpactSurface::Armor,
         penetrated: false,
         deflection: Some(Vec3::from(out)),
-        authority: None,
     });
     shell.marks.ricochets.push(position);
     shell.path.points.push(position);
@@ -518,7 +516,6 @@ fn ricochet(
             direction: Vec3::from(out),
             speed: bled,
             sequence: (shell.marks.ricochets.len() - 1) as u32,
-            victim,
         });
     }
 
@@ -569,7 +566,6 @@ fn perforate_or_embed(
         .get(struck)
         .ok()
         .map(|owner| owner.tank());
-    let victim = body.and_then(|body| context.world.combatants.get(body).ok().copied());
     let v_in = Vec3::from(incoming) * speed;
 
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
@@ -678,7 +674,6 @@ fn perforate_or_embed(
         surface: ImpactSurface::Armor,
         penetrated: true,
         deflection: None,
-        authority: None,
     });
     if let Some(shot) = shell.shot
         && !*terminal_emitted
@@ -691,7 +686,6 @@ fn perforate_or_embed(
             normal: plan_entrance.normal,
             penetrated: true,
             after_bounces: shell.marks.ricochets.len() as u32,
-            victim,
         });
     }
 

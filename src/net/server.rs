@@ -15,8 +15,7 @@ use lightyear::prelude::*;
 
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::protocol::{
-    LaunchedTurretPose, NetCrew, NetTank, NetTrackGripAnchor, ServoAngles, SetSpawnPoint,
-    protocol_id,
+    LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -664,7 +663,6 @@ fn spawn_player_tank(
                     lifetime: default(),
                 },
             ),
-            NetTrackGripAnchor::default(),
         ),
     );
     info!("server: spawned tank {root} for client {client_id} — owner interpolates");
@@ -750,7 +748,6 @@ fn spawn_bot_entity(
                 // No owner or prediction target: every client interpolates this body.
                 InterpolationTarget::to_clients(NetworkTarget::All),
             ),
-            NetTrackGripAnchor::default(),
         ),
     )
 }

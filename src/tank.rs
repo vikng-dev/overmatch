@@ -26,8 +26,6 @@ pub use model::{
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;
-#[cfg(test)]
-pub(crate) use servo::ServoRest;
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
 #[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;

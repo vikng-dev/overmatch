@@ -341,11 +341,10 @@ pub fn run() {
     // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
     // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
     // id silently OVERWRITES the server's `PeerId → Entity` mapping, and ownership routing resolves by
-    // RAW id value — `PredictionTarget::to_clients(NetworkTarget::Single(id))` and
-    // `PeerMetadata.mapping` both key on the value, not on which machine sent it. Two machines that
-    // happened to share a PID would therefore collide: the server misroutes prediction / `ControlledBy`,
-    // and an opponent's tank arrives on the wrong client carrying `Predicted`/`Controlled` (turret
-    // desync, one client driving both tanks, input contention). A well-distributed random u64 makes a
+    // RAW id value — `ControlledBy` and `PeerMetadata.mapping` both key on the value, not on which
+    // machine sent it. Two machines that happened to share a PID would therefore collide: the server
+    // misroutes `ControlledBy`, and an opponent's tank arrives on the wrong client carrying
+    // `Controlled` (turret desync, one client driving both tanks, input contention). A well-distributed random u64 makes a
     // cross-machine collision vanishingly unlikely. `RandomState::new()` is seeded from OS randomness on
     // every call, so a fresh hasher's `finish()` yields a random u64 with NO new dependency. Generated
     // once here and stable for the session; a fresh identity across restarts is fine (back-to-back runs
@@ -1089,7 +1088,7 @@ fn log_local_tank_role(
     info!("client: own tank {entity} drives INTERPOLATED (server stream)");
 }
 
-/// Opt-in ownership trace. Only the local tank may carry `Controlled`, `InputMarker`, and `Predicted`.
+/// Opt-in ownership trace. Only the local tank may carry `Controlled` and `InputMarker`.
 #[expect(clippy::type_complexity, reason = "one-off diagnostic marker snapshot")]
 fn log_tank_ownership(
     tanks: Query<
@@ -1097,7 +1096,6 @@ fn log_tank_ownership(
             Entity,
             Has<GameControlled>,
             Has<InputMarker<TankCommand>>,
-            Has<Predicted>,
             Has<Interpolated>,
             Has<Remote>,
         ),
@@ -1111,9 +1109,9 @@ fn log_tank_ownership(
         return;
     }
     *next = now + 1.0;
-    for (entity, controlled, input_marker, predicted, interpolated, remote) in &tanks {
+    for (entity, controlled, input_marker, interpolated, remote) in &tanks {
         info!(
-            "ownership: {entity} controlled={controlled} input_marker={input_marker} predicted={predicted} interpolated={interpolated} remote={remote}"
+            "ownership: {entity} controlled={controlled} input_marker={input_marker} interpolated={interpolated} remote={remote}"
         );
     }
 }
@@ -1453,7 +1451,6 @@ fn consume_ricochet_keyframe(
             speed: keyframe.speed,
             bounce_tick: keyframe.bounce_tick.0,
             sequence: keyframe.sequence,
-            victim: keyframe.victim,
         },
     );
     let duplicate = result == SanctionedBounceInsert::Duplicate;
@@ -1489,7 +1486,6 @@ fn consume_impact_confirm(
             penetrated: confirm.penetrated,
             impact_tick: confirm.impact_tick.0,
             after_bounces: confirm.after_bounces,
-            victim: confirm.victim,
         },
     );
     crate::shot_trace::record(
@@ -3008,7 +3004,6 @@ mod tests {
                             speed: 600.0,
                             bounce_tick: Tick(43),
                             sequence: 0,
-                            victim: None,
                         }),
                         Tick(43),
                         None,
