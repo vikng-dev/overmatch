@@ -4,9 +4,21 @@
 //! owner-private, deduplicated [`DamageReceipt`] drives the outgoing hit marker. Neither path writes
 //! simulation state or feeds aim: camera kick modifies rendered `GlobalTransform` only, and
 //! [`stabilize_camera_pose`] restores it before `Update` readers consume the camera pose.
+//!
+//! Being-hit presents at ARRIVAL by default (reaction time). Under `OVERMATCH_CURSOR_HIT_FEEL=1`
+//! ([`CursorHitFeel`], read once in `net::client`) the own cue instead rides the same
+//! [`CursorQueue`] release-on-crossing rule as fire announcements: held at arrival with the hit's
+//! authority tick (the snapshot's replicon confirmation resolved through the checkpoint map — the
+//! same resolution lightyear's own registry uses), presented when the interpolation cursor crosses
+//! it, in sync with the interpolated motion of the hit. An unresolvable tick or an unsynced cursor
+//! presents at arrival, exactly as with the lever unset.
 
 use bevy::prelude::*;
+use bevy_replicon::client::confirm_history::ConfirmHistory;
+use lightyear::core::tick::Tick;
+use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::client::Remote;
+use lightyear::prelude::{Connected, IsSynced, NetworkTimeline, ReplicationCheckpointMap};
 
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
@@ -16,6 +28,7 @@ use crate::hud::HudCamera;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
+use super::cursor_queue::CursorQueue;
 use super::protocol::{DamageReceipt, NetCrew, health_bearing_volumes};
 
 // --- Feel dials (all in ONE place) -----------------------------------------------------------
@@ -69,6 +82,44 @@ pub(super) struct LocalHitConfirmed {
     pub damage_tick: u32,
 }
 
+/// `OVERMATCH_CURSOR_HIT_FEEL=1`: route the own being-hit cue through the cursor queue. Inserted
+/// once by `net::client`; absent = arrival presentation, bit-identical.
+#[derive(Resource, Debug)]
+pub(super) struct CursorHitFeel;
+
+/// One own being-hit cue awaiting its cursor crossing. Severity is fixed at arrival (the HP pools
+/// it reads are arrival state); bearing is re-resolved at release so it reads off the pose actually
+/// presented — and a despawn between hold and release degrades to a bearingless straight kick, the
+/// same fallback the arrival path has.
+#[derive(Debug, Clone, Copy)]
+struct HitCue {
+    root: Entity,
+    volume: Option<Entity>,
+    severity: f32,
+}
+
+/// Held own being-hit cues, released on the cursor crossing ([`CursorQueue`]'s rule).
+#[derive(Resource, Default)]
+struct HeldHitCues(CursorQueue<HitCue>);
+
+/// Where a cue presents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CueRoute {
+    /// Present now, at arrival — the default, and every fallback.
+    Arrival,
+    /// Hold for the cursor crossing of this authority tick.
+    Cursor(Tick),
+}
+
+/// The routing law: the cursor route requires BOTH the lever and a resolved authority tick.
+/// Pure, so the gate is testable without a live replication session.
+fn cue_route(lever: bool, tick: Option<Tick>) -> CueRoute {
+    match (lever, tick) {
+        (true, Some(tick)) => CueRoute::Cursor(tick),
+        _ => CueRoute::Arrival,
+    }
+}
+
 /// Remembered health and occupant identity. Occupant changes distinguish crew moves from damage.
 #[derive(Clone, Copy, PartialEq)]
 struct SlotMemory {
@@ -107,13 +158,16 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<CameraKick>()
         .init_resource::<DamageFlash>()
         .init_resource::<HitConfirm>()
+        .init_resource::<HeldHitCues>()
         .add_observer(on_local_hit_confirmed)
+        .add_observer(clear_held_cues_on_connect)
         .add_systems(Startup, spawn_cue_ui)
         .add_systems(
             Update,
             (
                 arm_health_memory,
                 detect_health_drops.after(arm_health_memory),
+                release_held_hit_cues.after(detect_health_drops),
                 drive_damage_flash,
                 drive_hit_confirm.after(super::client::receive_damage_confirms),
             ),
@@ -164,6 +218,12 @@ fn detect_health_drops(
     >,
     health: Query<&ComponentHealth>,
     transforms: Query<&GlobalTransform>,
+    // The cursor route (`OVERMATCH_CURSOR_HIT_FEEL=1`): the hit's authority tick is the snapshot's
+    // replicon confirmation resolved through the checkpoint map — lightyear's own resolution.
+    lever: Option<Res<CursorHitFeel>>,
+    checkpoints: Option<Res<ReplicationCheckpointMap>>,
+    confirms: Query<&ConfirmHistory>,
+    mut held: ResMut<HeldHitCues>,
     mut kick: ResMut<CameraKick>,
     mut flash: ResMut<DamageFlash>,
 ) {
@@ -198,15 +258,77 @@ fn detect_health_drops(
                 .and_then(|v| health.get(v).ok())
                 .map(|hp| (drop_hp / hp.max.max(1.0)).clamp(0.0, 1.0))
                 .unwrap_or(0.5);
-            let bearing = worst_volume.and_then(|v| hit_bearing(&transforms, root, v));
-            add_camera_kick(&mut kick, severity, bearing);
-            flash.0 = 1.0;
-            info!(
-                "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity {severity:.2}, \
-                 bearing {bearing:?}) → camera kick + damage flash"
-            );
+            let hit_tick = checkpoints
+                .as_deref()
+                .zip(confirms.get(root).ok())
+                .and_then(|(map, confirm)| map.get(confirm.last_tick()));
+            match cue_route(lever.is_some(), hit_tick) {
+                CueRoute::Cursor(tick) => {
+                    held.0.hold(
+                        tick,
+                        HitCue {
+                            root,
+                            volume: worst_volume,
+                            severity,
+                        },
+                    );
+                    info!(
+                        "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity \
+                         {severity:.2}) HELD for cursor crossing of tick {}",
+                        tick.0
+                    );
+                }
+                CueRoute::Arrival => {
+                    let bearing = worst_volume.and_then(|v| hit_bearing(&transforms, root, v));
+                    add_camera_kick(&mut kick, severity, bearing);
+                    flash.0 = 1.0;
+                    info!(
+                        "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity \
+                         {severity:.2}, bearing {bearing:?}) → camera kick + damage flash"
+                    );
+                }
+            }
         }
     }
+}
+
+/// Release held being-hit cues at their cursor crossing — the same clock comparison fire
+/// announcements release on. No synced cursor → present at arrival ([`CursorQueue::release_all`]),
+/// exactly the pre-lever behavior. With the lever unset the queue is never fed, this early-returns
+/// every frame, and nothing downstream can differ.
+fn release_held_hit_cues(
+    mut held: ResMut<HeldHitCues>,
+    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    transforms: Query<&GlobalTransform>,
+    mut kick: ResMut<CameraKick>,
+    mut flash: ResMut<DamageFlash>,
+) {
+    let due = match cursors.single() {
+        Ok(timeline) => held
+            .0
+            .release(timeline.tick(), f64::from(timeline.overstep().to_f32())),
+        Err(_) => held.0.release_all(),
+    };
+    for (tick, cue) in due {
+        // Bearing off the pose actually presented at release; a despawned root/volume degrades to
+        // the bearingless straight kick.
+        let bearing = cue
+            .volume
+            .and_then(|volume| hit_bearing(&transforms, cue.root, volume));
+        add_camera_kick(&mut kick, cue.severity, bearing);
+        flash.0 = 1.0;
+        info!(
+            "hit-feel: held OWN hit cue released at cursor crossing of tick {} (severity {:.2}, \
+             bearing {bearing:?}) → camera kick + damage flash",
+            tick.0, cue.severity
+        );
+    }
+}
+
+/// A (re)connect voids every held cue: its ticks belong to the previous session's timeline, and
+/// its entities to the previous session's replication.
+fn clear_held_cues_on_connect(_connected: On<Add, Connected>, mut held: ResMut<HeldHitCues>) {
+    held.0.clear();
 }
 
 /// Pulse the centre marker from the discrete authoritative fact. This is deliberately separate from
@@ -398,7 +520,98 @@ fn drive_hit_confirm(
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+    use lightyear::core::time::TickInstant;
+
     use super::*;
+
+    /// THE CURSOR ROUTE REQUIRES BOTH THE LEVER AND A RESOLVED TICK — lever unset routes to
+    /// arrival whatever the tick (the bit-identity half), and the lever with an unresolvable tick
+    /// falls back to arrival rather than dropping or guessing. Weakening either conjunct reds a
+    /// case.
+    #[test]
+    fn the_cursor_lever_routes_an_own_hit_to_the_queue_only_with_a_resolvable_tick() {
+        assert_eq!(cue_route(false, Some(Tick(42))), CueRoute::Arrival);
+        assert_eq!(cue_route(false, None), CueRoute::Arrival);
+        assert_eq!(cue_route(true, None), CueRoute::Arrival);
+        assert_eq!(cue_route(true, Some(Tick(42))), CueRoute::Cursor(Tick(42)));
+    }
+
+    fn cue_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<HeldHitCues>();
+        world.init_resource::<CameraKick>();
+        world.init_resource::<DamageFlash>();
+        world
+    }
+
+    fn hold_cue(world: &mut World, tick: Tick) {
+        let root = world.spawn_empty().id();
+        world.resource_mut::<HeldHitCues>().0.hold(
+            tick,
+            HitCue {
+                root,
+                volume: None,
+                severity: 1.0,
+            },
+        );
+    }
+
+    /// A HELD HIT CUE PRESENTS EXACTLY AT THE CURSOR CROSSING: a cursor short of the tick holds
+    /// (no kick, no flash), the crossing releases (kick + flash fire). Releasing early, or never,
+    /// reds one half.
+    #[test]
+    fn a_held_hit_cue_presents_exactly_at_the_cursor_crossing() {
+        let mut world = cue_world();
+        hold_cue(&mut world, Tick(100));
+        let mut timeline = InterpolationTimeline::default();
+        timeline.set_now(TickInstant::from(Tick(99)));
+        let cursor = world
+            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()))
+            .id();
+        world
+            .run_system_once(release_held_hit_cues)
+            .expect("release runs");
+        assert_eq!(
+            world.resource::<DamageFlash>().0,
+            0.0,
+            "a cursor short of the hit tick holds the cue",
+        );
+        assert_eq!(world.resource::<CameraKick>().angular, Vec3::ZERO);
+
+        world
+            .get_mut::<InterpolationTimeline>(cursor)
+            .expect("cursor timeline")
+            .set_now(TickInstant::from(Tick(100)));
+        world
+            .run_system_once(release_held_hit_cues)
+            .expect("release runs");
+        assert_eq!(
+            world.resource::<DamageFlash>().0,
+            1.0,
+            "the crossing presents the flash",
+        );
+        assert!(
+            world.resource::<CameraKick>().angular.x > 0.0,
+            "the crossing presents the kick",
+        );
+    }
+
+    /// WITH NO SYNCED CURSOR HELD CUES PRESENT AT ARRIVAL — the `release_all` fallback, the same
+    /// no-cursor rule fire announcements follow. Holding forever without a cursor reds this.
+    #[test]
+    fn with_no_synced_cursor_held_cues_present_at_arrival() {
+        let mut world = cue_world();
+        hold_cue(&mut world, Tick(1_000));
+        world
+            .run_system_once(release_held_hit_cues)
+            .expect("release runs");
+        assert_eq!(
+            world.resource::<DamageFlash>().0,
+            1.0,
+            "no cursor: the cue presents immediately",
+        );
+    }
 
     /// Build a snapshot of module slots (no occupant) with the given HP — the fixture for the plain
     /// HP-diff tests, where occupancy never changes so only the HP delta matters.

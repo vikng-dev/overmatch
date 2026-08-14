@@ -18,11 +18,12 @@
 //!   entry: every entry leaves on its crossing and the consumer re-resolves it there
 //!   (`net::client`'s resolve path, which already owns the missing-replica case).
 //!
-//! The queue's one member class is the fire announcement (`net::client::HeldFireEvents`, covering
-//! opponent fire and — under `crate::FusedOwnFire` — the own echo). Ricochet/impact facts stay OUT:
-//! they arm the sanctioned-outcome buffer for the cosmetic shell march, whose presentation is
-//! already slaved to the shell's own flight and `crate::PredictedPresent` re-aging (ADR-0021), and
-//! `net::hit_feel` stays at arrival by design (reaction time).
+//! Member classes: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
+//! and — under `crate::FusedOwnFire` — the own echo), and under `OVERMATCH_CURSOR_HIT_FEEL` the
+//! own being-hit cue (`net::hit_feel::HeldHitCues`; default stays at arrival by design — reaction
+//! time). Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
+//! shell march, whose presentation is already slaved to the shell's own flight and
+//! `crate::PredictedPresent` re-aging (ADR-0021).
 
 use std::collections::VecDeque;
 
