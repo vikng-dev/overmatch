@@ -111,6 +111,13 @@ fn ring_cap() -> usize {
 /// within seconds.
 const SPIKE_WINDOW: Duration = Duration::from_secs(2);
 
+/// Warmup ring floor: one full spike window of per-tick samples (2 s × 64 Hz = 128). The
+/// distribution is valid only once the window is full ([`ArrivalStats::warmed`]) — below either
+/// bound the quantile still reads the connect transient.
+fn warmup_ring_floor() -> usize {
+    (SPIKE_WINDOW.as_secs_f64() * TICK_RATE_HZ) as usize
+}
+
 /// Log-rate guard, not a term of the law: the margins follow the estimator continuously, so an
 /// unconditional log is per-frame spam.
 const LOG_STEP: Duration = Duration::from_millis(2);
@@ -123,6 +130,9 @@ pub(super) struct ArrivalStats {
     q50_s: f64,
     qp_s: f64,
     pub(super) samples: u64,
+    /// The distribution left warmup: the spike window holds a full [`SPIKE_WINDOW`] of samples
+    /// AND the ring holds ≥ [`warmup_ring_floor`] of them.
+    warmed: bool,
 }
 
 impl ArrivalStats {
@@ -144,7 +154,12 @@ impl ArrivalStats {
         Duration::from_secs_f64((self.q50_s - self.min_s).max(0.0))
     }
 
-    /// A digest with a known `Q_p − min`, for the law tests in sibling modules.
+    /// Whether the distribution is valid for a derived law to consume (see the field).
+    pub(super) fn warmed(&self) -> bool {
+        self.warmed
+    }
+
+    /// A digest with a known `Q_p − min`, past warmup, for the law tests in sibling modules.
     #[cfg(test)]
     pub(super) fn test_spread(spread_s: f64) -> Self {
         Self {
@@ -152,6 +167,16 @@ impl ArrivalStats {
             q50_s: 0.0,
             qp_s: spread_s,
             samples: 1,
+            warmed: true,
+        }
+    }
+
+    /// The same digest still inside warmup, for the arming tests in sibling modules.
+    #[cfg(test)]
+    pub(super) fn test_cold_spread(spread_s: f64) -> Self {
+        Self {
+            warmed: false,
+            ..Self::test_spread(spread_s)
         }
     }
 }
@@ -220,11 +245,21 @@ impl ArrivalDelay {
         let ip = index(quantile_p());
         let (_, qp, _) = scratch.select_nth_unstable_by(ip, f64::total_cmp);
         let qp_s = *qp;
+        // Warmed = the newest sample lies a full spike window past the first-ever sample (the
+        // window has evicted once, so it holds its whole 2 s) and the ring holds one window's
+        // worth of per-tick samples.
+        let warmed = self.ring.len() >= warmup_ring_floor()
+            && self.epoch.zip(self.window.back()).is_some_and(
+                |((epoch_secs, _), (newest_at, _))| {
+                    newest_at - epoch_secs >= SPIKE_WINDOW.as_secs_f64()
+                },
+            );
         self.stats = ArrivalStats {
             min_s,
             q50_s,
             qp_s,
             samples: self.samples,
+            warmed,
         };
     }
 
@@ -503,6 +538,7 @@ mod tests {
             q50_s: q50_ms / 1000.0,
             qp_s: qp_ms / 1000.0,
             samples: 1,
+            warmed: true,
         }
     }
 
@@ -576,6 +612,47 @@ mod tests {
             spread >= 100.0,
             "1 ms/packet accumulation over the 2 s min window must show ≥ ~128 ms of spread \
              (got {spread} ms)"
+        );
+    }
+
+    /// THE WARMUP GATE NEEDS BOTH BOUNDS: a full spike window of elapsed samples AND a full
+    /// window's worth in the ring (128 = 2 s × 64 Hz). Per-tick feeding crosses both at the same
+    /// boundary (129 samples span exactly 2 s); the sparse series passes the span but not the
+    /// ring, the dense series the ring but not the span — dropping either bound reds its case,
+    /// and dropping the gate entirely (always-warmed) reds all three cold cases.
+    #[test]
+    fn the_distribution_warms_only_on_a_full_window_and_ring() {
+        assert!(
+            !fed((0..128).map(|_| 0.0)).stats.warmed(),
+            "128 per-tick samples span 1.98 s — the window is not yet full"
+        );
+        assert!(
+            fed((0..129).map(|_| 0.0)).stats.warmed(),
+            "129 per-tick samples span exactly the 2 s window with a full ring"
+        );
+        // Sparse: two-tick spacing spans 3.1 s but holds only 100 samples.
+        let mut sparse = ArrivalDelay::default();
+        for i in 0..100_u32 {
+            sparse.record(
+                f64::from(i) * 2.0 * TICK_SECS,
+                Tick(1_000 + 2 * i),
+                TICK_SECS,
+            );
+        }
+        sparse.refresh(&mut Vec::new());
+        assert!(
+            !sparse.stats.warmed(),
+            "a 3 s span with a short ring is still warmup"
+        );
+        // Dense: 5 ms arrivals fill the ring inside 0.7 s.
+        let mut dense = ArrivalDelay::default();
+        for i in 0..140_u32 {
+            dense.record(f64::from(i) * 0.005, Tick(1_000 + i), TICK_SECS);
+        }
+        dense.refresh(&mut Vec::new());
+        assert!(
+            !dense.stats.warmed(),
+            "a full ring inside a short span is still warmup"
         );
     }
 

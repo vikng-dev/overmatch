@@ -31,6 +31,12 @@
 //! EWMA); every jitter term now comes from the measured stream. The Gaussian margin chain on top
 //! is zeroed by `net::sync_margin` — the quantile subsumes it — keeping the half-tick floor.
 //!
+//! The law ARMS only once the estimator distribution is valid — the spike window holds a full
+//! 2 s of samples AND the ring holds one window's worth (`ArrivalStats::warmed`, derivation in
+//! `net::sync_margin`). Before arming the installed default rides unchanged (the latch pattern of
+//! the uplink law), so startup estimator pollution — connect/load stalls read as hundreds of ms
+//! of arrival delay — never reaches the objective; arming then latches for the session.
+//!
 //! `sync_timelines` re-reads `&InterpolationConfig` every frame with no caching, so writing the
 //! component is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
 //! stepped target is an error step the controller escalates to `Resync` (the live gauge showed
@@ -130,10 +136,22 @@ pub(super) fn derive_interpolation_delay(
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
     mut clients: Query<(&mut InterpolationConfig, &PingManager)>,
+    mut armed: Local<bool>,
     mut logged: Local<Option<Duration>>,
 ) {
     if matches!(*mode, DelayMode::Fixed(_)) {
         return;
+    }
+    if !*armed {
+        if !estimator.stats.warmed() {
+            // Pre-arm the installed default rides unchanged (module doc: warmup arming).
+            return;
+        }
+        *armed = true;
+        info!(
+            "net: interpolation delay law ARMED — estimator distribution valid ({})",
+            estimator.describe()
+        );
     }
     for (mut config, pings) in &mut clients {
         let target = derived_min_delay(pings.rtt(), &estimator.stats, tick.0);
@@ -341,5 +359,54 @@ mod tests {
             }
         }
         assert_eq!(last, target, "the follower converges on the law exactly");
+    }
+
+    /// THE LAW ARMS ONLY ON A VALID DISTRIBUTION, AND ARMING LATCHES. A cold digest — even the
+    /// observed 243 ms startup-pollution Qp — leaves the installed default untouched; the first
+    /// warmed digest arms the writer; a digest later regressing below the warmup bound must not
+    /// re-freeze it. Dropping the arming gate reds the pre-arm half; dropping the latch (gating
+    /// on `warmed()` every frame) reds the regression half.
+    #[test]
+    fn the_writer_holds_the_installed_default_until_the_estimator_warms() {
+        let mut world = World::new();
+        world.insert_resource(super::DelayMode::Derived);
+        world.insert_resource(TickDuration(TICK));
+        let mut estimator = ArrivalDelay::default();
+        // The observed startup pollution: Qp 243 ms before the distribution is valid.
+        estimator.stats = ArrivalStats::test_cold_spread(0.243);
+        world.insert_resource(estimator);
+        let installed = Duration::from_nanos(15_625_000);
+        let client = world
+            .spawn((
+                InterpolationConfig::default().with_min_delay(installed),
+                PingManager::default(),
+            ))
+            .id();
+        // A registered system keeps its `Local` state across runs — the latch under test.
+        let writer = world.register_system(super::derive_interpolation_delay);
+        let read = |world: &World| {
+            world
+                .get::<InterpolationConfig>(client)
+                .expect("client config")
+                .min_delay
+        };
+        for _ in 0..8 {
+            world.run_system(writer).expect("writer runs");
+        }
+        assert_eq!(
+            read(&world),
+            installed,
+            "startup pollution must never reach the objective"
+        );
+        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_spread(0.1);
+        world.run_system(writer).expect("writer runs");
+        let after_arm = read(&world);
+        assert_ne!(after_arm, installed, "a valid distribution arms the law");
+        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_cold_spread(0.1);
+        world.run_system(writer).expect("writer runs");
+        assert!(
+            read(&world) > after_arm,
+            "arming latches — a regressing digest must not re-freeze the follower"
+        );
     }
 }
