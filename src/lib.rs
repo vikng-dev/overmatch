@@ -523,16 +523,6 @@ pub(crate) struct Replaying(pub bool);
 #[derive(Resource, Default)]
 pub(crate) struct PredictedPresent(pub u32);
 
-/// Fused own fire (`OVERMATCH_FUSED_FIRE=1`): the client's own keyed shot presents from the
-/// server's echoed fire fact when the interpolation cursor crosses the fire tick — the same release
-/// rule every opponent shot follows — so the local fire tick draws no shell, flash, or barrel kick,
-/// and a server-refused fire simply never presents. The sim half of `shooting::fire` (gate, belt,
-/// hull impulse) is mode-independent and still runs every tick. Net-neutral like [`Replaying`]:
-/// only `net::client` inserts it (once, from the env lever), so its absence reads as "present
-/// locally" everywhere — server, single-player, sandbox, and every client not opted in.
-#[derive(Resource, Default)]
-pub(crate) struct FusedOwnFire;
-
 /// Net-neutral current tick published before gameplay. Local network fire uses it to construct a
 /// [`ShotId`] before shell spawn; authority/sandbox shells may be unkeyed.
 #[derive(Resource, Default)]
@@ -763,8 +753,7 @@ impl Plugin for NetClientPlugin {
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
             vfx::plugin,
-            // Live tracks on the presented pose — own AND remote tanks (one code path;
-            // `net::recoil_overlay` orders the set after its overlay apply).
+            // Live tracks on the presented pose — own AND remote tanks (one code path).
             track::view_plugin,
         ));
         // The live view + the render half of the certificate (see `ClientPlugin`), separate for the

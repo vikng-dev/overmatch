@@ -259,10 +259,6 @@ fn record_frame(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
-    // The own interpolated root's live fire-recoil overlay. Present only on the entity
-    // `net::recoil_overlay` armed (an owner's hull); every other tank row — and the
-    // single-player composition, which never mounts the layer — omits the fields.
-    recoil_overlay: Query<&crate::net::RecoilOverlay>,
     // The client connection entity: the clock every hull (own included) actually renders on, the
     // two link statistics the `min_delay` law consumes, and the delay in force. Matches nothing in
     // the single-player or server compositions, so those rows simply omit the fields.
@@ -345,19 +341,6 @@ fn record_frame(
                 }
                 if let Some((_, velocity)) = confv.and_then(|h| h.newest_present()) {
                     obj.insert("confv".into(), vec3(velocity.0));
-                }
-            }
-            // The own-hull fire-recoil overlay (`net::recoil_overlay`), present only on an
-            // interpolated owner. Omitted when spent, so field presence means a response is in
-            // flight; `ro` after `itick` crosses the shot's fire tick is the post-cancellation
-            // residual, and its last frame against the cursor clearing the response window is the
-            // return-to-exactly-zero property, measured.
-            if let Ok(overlay) = recoil_overlay.get(entity) {
-                if overlay.translation != Vec3::ZERO {
-                    obj.insert("ro".into(), vec3(overlay.translation));
-                }
-                if overlay.rotation != Quat::IDENTITY {
-                    obj.insert("roq".into(), quat(overlay.rotation));
                 }
             }
         }

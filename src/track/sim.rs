@@ -288,13 +288,6 @@ impl TrackGear {
         self.mode
     }
 
-    /// The spec-authored material-link count — the station count [`belt_tick`] runs and the
-    /// slab size a caller-owned [`TrackGripElements`] must be constructed at
-    /// ([`TrackGripElements::for_links`]).
-    pub(crate) fn link_count(&self) -> usize {
-        self.count
-    }
-
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
     /// road wheel may drop. `0.0` when the profile is empty. The track view spans its cosmetic
     /// wheels this far below rest so a fully-drooped wheel's drawn belt wrap stays feasible at the
@@ -409,31 +402,6 @@ impl TrackGear {
     #[cfg(test)]
     pub(crate) fn trans_mut(&mut self) -> Option<&mut TransmissionParams> {
         self.trans.as_mut()
-    }
-
-    /// Test-only synthetic gear: a hand-authored loop/columns/travel/params rig (the shape
-    /// `track::forces`' fixtures use) wearing the [`TrackGear`] type, so [`belt_tick`] consumers —
-    /// the recoil microsim's fidelity gates — can run the REAL shared tick without a blueprint or
-    /// the measured glb. Governor mode: tableless, so no [`TransmissionParams`] fixture is needed.
-    #[cfg(test)]
-    pub(crate) fn test_fixture(
-        loop_pts: Vec<Vec2>,
-        count: usize,
-        plane_x: f32,
-        columns: [(f32, f32); 3],
-        travel_knots: Vec<(f32, f32)>,
-        params: ForceParams,
-    ) -> Self {
-        Self {
-            loop_pts,
-            count,
-            plane_x,
-            travel_knots,
-            columns: [columns, columns],
-            params,
-            trans: None,
-            mode: TransmissionMode::Governor,
-        }
     }
 }
 
@@ -604,9 +572,8 @@ pub(crate) struct BeltRig<'a> {
 
 /// ONE tank's complete drivetrain tick: command slew, both contact patches at their pre-tick
 /// belt speeds, the joint transmission solve, belt speed/phase commit. THE shared law —
-/// [`apply_track_forces`] (the ECS adapter) and the recoil-overlay microsim
-/// (`net::recoil_overlay`) both run exactly this function, so the microsimmed impulse response
-/// is the sim's own arithmetic, never a copy of it.
+/// [`apply_track_forces`] (the ECS adapter) runs exactly this function, so every caller gets the
+/// sim's own arithmetic, never a copy of it.
 ///
 /// Returns the per-side reports (force applications in emission order — the caller applies or
 /// integrates them, left then right, verbatim) and the transmission report. Belt state

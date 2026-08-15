@@ -25,10 +25,8 @@ use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
 const RECOIL_FEEL: f32 = 1.0;
 
 /// THE single expression of the recoil reaction a fired round puts on its hull: the shell's
-/// momentum, opposite the bore. Applied at the muzzle point by [`fire`], and modelled — never
-/// re-derived — by the client's own-hull view overlay (`net::recoil_overlay`), so the sim and the
-/// view cannot disagree on what a shot does (the derive-the-consequence doctrine, ADR-0016; the same
-/// rule [`kick_recoil`] states for the barrel).
+/// momentum, opposite the bore. Applied at the muzzle point by [`fire`] (the derive-the-consequence
+/// doctrine, ADR-0016; the same rule [`kick_recoil`] states for the barrel).
 pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
     bore * (-mass * speed * RECOIL_FEEL)
 }
@@ -220,11 +218,11 @@ fn fire(
     // (the forward tick already spawned it; the shell entity is not rolled back). Absent on the
     // authority (server/SP/sandbox never roll back), so it fires there unconditionally.
     replaying: Option<Res<crate::Replaying>>,
-    // Present only on a client running fused own fire: a keyed round's one presentation is the
-    // server's echoed fact, released at the interpolation cursor by `net::client`, so the local
-    // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox,
-    // and every client not opted in), where this system presents locally exactly as before.
-    fused: Option<Res<crate::FusedOwnFire>>,
+    // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
+    // the server's echoed fact, released at the interpolation cursor by `net::client`, so the local
+    // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox),
+    // where this system presents locally.
+    replica: Option<Res<crate::ClientReplica>>,
     // Present only in a composed network app. `net::protocol` republishes the `LocalTimeline`
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour. Single-player and sandboxes deliberately have no clock.
@@ -326,8 +324,8 @@ fn fire(
         });
         // Fused own fire suppresses exactly the rounds the server will echo: a keyed shot's shell,
         // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo
-        // and presents locally in both modes.
-        let fused_echo = fused.is_some() && shot.is_some();
+        // and presents locally.
+        let fused_echo = replica.is_some() && shot.is_some();
         // Hand off to ballistics: fire down the bore at the weapon's muzzle speed. SUPPRESSED on a
         // rollback replay (F1): the cosmetic shell was already spawned on the original forward tick
         // and is not rolled back, so re-triggering here would spawn a duplicate own shell sharing this
@@ -1041,10 +1039,10 @@ mod tests {
         weapon.barrel = Some(barrel);
     }
 
-    /// FUSED OWN FIRE (`crate::FusedOwnFire`): a keyed round draws NO local shell and NO local
-    /// barrel kick — its one presentation is the server echo, released at the cursor by
-    /// `net::client` — while every sim mutation (the belt walk here) runs unchanged. With the
-    /// lever unset the same tick presents locally, kick included: the default path, pinned.
+    /// FUSED OWN FIRE (a net client's keyed round): NO local shell and NO local barrel kick — its
+    /// one presentation is the server echo, released at the cursor by `net::client` — while every
+    /// sim mutation (the belt walk here) runs unchanged. On the authority (no `ClientReplica`) the
+    /// same tick presents locally, kick included.
     #[test]
     fn fused_own_fire_draws_no_local_shell_and_no_local_kick() {
         use crate::ballistics::FireShell;
@@ -1062,7 +1060,7 @@ mod tests {
         let (root, _) = spawn_mg_rig(&mut world, Vec::new());
         arm_barrel_recoil(&mut world, root);
 
-        world.insert_resource(crate::FusedOwnFire);
+        world.insert_resource(crate::ClientReplica);
         world.run_system_once(fire).unwrap();
         assert_eq!(
             world.resource::<FireShellCount>().0,
@@ -1080,24 +1078,24 @@ mod tests {
             "fused: the belt walk is sim truth and still runs",
         );
 
-        world.remove_resource::<crate::FusedOwnFire>();
+        world.remove_resource::<crate::ClientReplica>();
         advance(&mut world, 7);
         world.run_system_once(fire).unwrap();
         assert_eq!(
             world.resource::<FireShellCount>().0,
             1,
-            "lever unset: the local tick presents its own shell exactly as before",
+            "the authority presents its own shell locally",
         );
         assert!(
             weapon_state(&mut world, root).recoil_velocity > 0.0,
-            "lever unset: the local barrel kick applies exactly as before",
+            "the authority applies the local barrel kick",
         );
     }
 
     /// An UNKEYED round (no `ShotClock` → no `ShotId` → no echo will ever arrive) presents locally
-    /// even under the fused lever — suppression covers exactly the rounds the server will echo.
+    /// even on a net client — suppression covers exactly the rounds the server will echo.
     #[test]
-    fn fused_mode_still_presents_an_unkeyed_round_locally() {
+    fn a_client_still_presents_an_unkeyed_round_locally() {
         use crate::ballistics::FireShell;
 
         #[derive(Resource, Default)]
@@ -1111,7 +1109,7 @@ mod tests {
         world.add_observer(count_fire_shells);
         spawn_mg_rig(&mut world, Vec::new());
 
-        world.insert_resource(crate::FusedOwnFire);
+        world.insert_resource(crate::ClientReplica);
         world.run_system_once(fire).unwrap();
         assert_eq!(
             world.resource::<FireShellCount>().0,

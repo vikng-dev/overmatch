@@ -65,8 +65,7 @@
 //!
 //! # SCOPE
 //!
-//! Client-side, own tank, `Interpolated` — the same observable role `net::recoil_overlay`
-//! arms on.
+//! Client-side, own tank, `Interpolated`.
 //!
 //! Design note: `.agents/scratch/burst-state-fire-stack-map-2026-08-14.md`; the loss-proofing
 //! holes: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §3.
@@ -244,13 +243,13 @@ impl SlotLedger {
 
     /// Rounds presented that no arriving snapshot accounts for. Includes the rounds still in flight
     /// down the link, so it settles on a burst's phantom count only once the last snapshot lands.
+    #[cfg(test)]
     fn absorbed(&self) -> u32 {
         self.presented.saturating_sub(self.confirmed)
     }
 
     /// Rounds accounted for that this client has not presented. Under fused own fire this is the
-    /// lawful in-flight window (and, past the wait, the fallback's due list); in mode A it is the
-    /// direction that cannot happen and is reported, never acted on.
+    /// lawful in-flight window (and, past the wait, the fallback's due list).
     fn overrun(&self) -> u32 {
         self.confirmed.saturating_sub(self.presented)
     }
@@ -416,7 +415,6 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// replication write even when the value equals the presented copy; an unmoved one is silence —
 /// the signal [`heal_refused_presentations`] measures — never a fold.
 fn fold_arrivals(
-    fused: Option<Res<crate::FusedOwnFire>>,
     arrival: Option<Res<ArrivalDelay>>,
     mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresentation)>,
 ) {
@@ -444,25 +442,13 @@ fn fold_arrivals(
                 // Under fused own fire the state's consumption legitimately lands before the
                 // echoed round crosses the cursor, so a transient overrun is the in-flight
                 // window (and, past the wait, the fallback's due list), not a violated invariant.
-                if fused.is_some() {
-                    debug!(
-                        "net: weapon {slot} has {} confirmed rounds not yet presented \
-                         (presented {}, confirmed {})",
-                        entry.overrun(),
-                        entry.presented,
-                        entry.confirmed,
-                    );
-                } else {
-                    warn!(
-                        "net: weapon {slot} accounted for {} rounds this client never presented \
-                         (presented {}, confirmed {}, absorbed {}) — own legality cannot exceed own \
-                         intent",
-                        entry.overrun(),
-                        entry.presented,
-                        entry.confirmed,
-                        entry.absorbed(),
-                    );
-                }
+                debug!(
+                    "net: weapon {slot} has {} confirmed rounds not yet presented \
+                     (presented {}, confirmed {})",
+                    entry.overrun(),
+                    entry.presented,
+                    entry.confirmed,
+                );
             }
         }
     }
@@ -546,7 +532,6 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
 
 /// Hole 1, the belt-delta fallback: present a state-proven consumption whose announcement never
 /// crossed the cursor within [`announce_wait_ticks`], from this client's own spec and muzzle.
-/// Fused mode only — in mode A the own round presents locally and the reveal queue stays empty.
 ///
 /// The bang is synthesized at the muzzle's render pose: the tick-truth pose doctrine
 /// (`shooting::rig_world_pose`) binds shells the server also computes, and this shell is a
@@ -559,7 +544,6 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
     reason = "one recovery boundary owns the wait, the pose, and the counters"
 )]
 fn recover_unannounced_rounds(
-    fused: Option<Res<crate::FusedOwnFire>>,
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
     cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
@@ -569,9 +553,6 @@ fn recover_unannounced_rounds(
     mut diag: ResMut<OwnFireDiag>,
     mut commands: Commands,
 ) {
-    if fused.is_none() {
-        return;
-    }
     let Some(arrival) = arrival else {
         return;
     };
@@ -656,8 +637,7 @@ fn recover_unannounced_rounds(
 /// [`refusal_wait_ticks`] was never fired there (the attestation zeroed a late/lost input). The
 /// presented reload restores from the last state that actually arrived — the belt round returns
 /// and readiness re-derives on the local cadence — instead of running a reload for a round that
-/// never left. Both modes: mode A presented the phantom bang (absorbed accounting already covers
-/// it); fused presented nothing and no echo will come.
+/// never left. Fused own fire presented nothing for it, and no echo will come.
 fn heal_refused_presentations(
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
@@ -699,26 +679,14 @@ fn heal_refused_presentations(
     }
 }
 
-/// Count one presented round against its slot. Same observer channel `net::recoil_overlay` excites
-/// on, and the same three filters: a reconstructed opponent shot is somebody else's, a sandbox
-/// free-fly shot has no shooter, and the query admits only the armed own root.
+/// Count one presented round against its slot. Two filters: a sandbox free-fly shot has no
+/// shooter, and the query admits only the armed own root (a reconstructed opponent shot is
+/// somebody else's).
 ///
-/// Under fused own fire (`crate::FusedOwnFire`) the own round's one presentation IS the
-/// reconstructed echo, so the count admits `Reconstructed` shots too — the ledger query still
-/// restricts them to the armed own root, and in mode A an own-rooted reconstructed shot cannot
-/// occur (the echo is suppressed), so the admission changes nothing with the lever unset.
-fn count_presented_round(
-    fire: On<FireShell>,
-    fused: Option<Res<crate::FusedOwnFire>>,
-    mut ledgers: Query<&mut OwnFirePresentation>,
-) {
-    let counted = match fire.shot_origin {
-        FireShellOrigin::Local => true,
-        FireShellOrigin::Reconstructed => fused.is_some(),
-    };
-    if !counted {
-        return;
-    }
+/// Under fused own fire the own round's one presentation IS the reconstructed echo, so the count
+/// admits `Local` and `Reconstructed` shots alike — the ledger query still restricts them to the
+/// armed own root.
+fn count_presented_round(fire: On<FireShell>, mut ledgers: Query<&mut OwnFirePresentation>) {
     let Some(source) = fire.shooter else {
         return;
     };
@@ -1180,11 +1148,10 @@ mod tests {
         assert!(app.world().get::<OwnFirePresentation>(opponent).is_none());
     }
 
-    /// LEDGER COUNTING ACROSS THE MODES: a reconstructed round on the armed own root counts only
-    /// under the fused lever (there it IS the round's one presentation); with the lever unset it
-    /// does not count — mode A's Local-only accounting, pinned. A Local round counts in both.
+    /// LEDGER COUNTING: on the armed own root a `Reconstructed` round (the fused echo — the own
+    /// round's one presentation) and a `Local` round (an unkeyed shot) both count.
     #[test]
-    fn a_reconstructed_own_round_counts_only_under_the_fused_lever() {
+    fn local_and_reconstructed_own_rounds_both_count() {
         let fire = |origin| FireShell {
             origin: Vec3::ZERO,
             direction: Dir3::NEG_Z,
@@ -1198,11 +1165,8 @@ mod tests {
             catch_up_ticks: 0,
             shot: None,
         };
-        let presented = |fused: bool, origin| {
+        let presented = |origin| {
             let mut app = App::new();
-            if fused {
-                app.insert_resource(crate::FusedOwnFire);
-            }
             app.add_observer(count_presented_round);
             let root = app
                 .world_mut()
@@ -1222,19 +1186,14 @@ mod tests {
         };
 
         assert_eq!(
-            presented(false, FireShellOrigin::Reconstructed),
-            0,
-            "mode A: a reconstructed shot never counts against the own ledger",
+            presented(FireShellOrigin::Reconstructed),
+            1,
+            "the echo is the own round's one presentation and must count",
         );
         assert_eq!(
-            presented(true, FireShellOrigin::Reconstructed),
+            presented(FireShellOrigin::Local),
             1,
-            "fused: the echo is the own round's one presentation and must count",
-        );
-        assert_eq!(
-            presented(false, FireShellOrigin::Local),
-            1,
-            "mode A: the local round counts exactly as before",
+            "an unkeyed local round counts too",
         );
     }
 
@@ -1475,12 +1434,9 @@ mod tests {
             .push((fire.shooter, fire.catch_up_ticks, fire.shot.is_none()));
     }
 
-    fn recovery_app(fused: bool, cursor_tick: u32) -> (App, Entity) {
+    fn recovery_app(cursor_tick: u32) -> (App, Entity) {
         use lightyear::core::time::TickInstant;
         let mut app = App::new();
-        if fused {
-            app.insert_resource(crate::FusedOwnFire);
-        }
         app.insert_resource(lightyear::core::tick::TickDuration(
             core::time::Duration::from_nanos(1_000_000_000 / 64),
         ));
@@ -1533,13 +1489,12 @@ mod tests {
     /// the bang presents from the belt delta — this client's own spec at its own muzzle, keyed to
     /// the armed root so the ledger settles (presented +1, the reveal retires) and the recoil
     /// kick queues. Dropping the wait check presents rounds whose announcements are still in
-    /// flight (reds the young half); dropping the fused gate presents in mode A where the local
-    /// tick already did (reds the unfused case); dropping the trigger, the settle, or the kick
-    /// reds its own assert.
+    /// flight (reds the young half); dropping the trigger, the settle, or the kick reds its own
+    /// assert.
     #[test]
     fn a_dropped_announcement_presents_from_the_belt_delta_within_the_wait() {
         // Cursor 5 ticks past the reveal — beyond the cold-estimator wait of 1.
-        let (mut app, root) = recovery_app(true, 105);
+        let (mut app, root) = recovery_app(105);
         app.world_mut()
             .run_system_once(recover_unannounced_rounds)
             .expect("recovery runs");
@@ -1584,23 +1539,13 @@ mod tests {
         }
 
         // Inside the wait the announcement may still cross the cursor: nothing presents.
-        let (mut app, _) = recovery_app(true, 100);
+        let (mut app, _) = recovery_app(100);
         app.world_mut()
             .run_system_once(recover_unannounced_rounds)
             .expect("recovery runs");
         assert!(
             app.world().resource::<CapturedShells>().0.is_empty(),
             "no bang inside the announcement wait",
-        );
-
-        // Mode A never owes a fallback: the local tick presents own rounds.
-        let (mut app, _) = recovery_app(false, 105);
-        app.world_mut()
-            .run_system_once(recover_unannounced_rounds)
-            .expect("recovery runs");
-        assert!(
-            app.world().resource::<CapturedShells>().0.is_empty(),
-            "the fallback is fused-mode machinery only",
         );
     }
 

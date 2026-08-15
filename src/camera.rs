@@ -107,9 +107,9 @@ pub struct GunnerCameraPlaced;
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CameraKickApplied;
 
-/// The third-person orbit camera's system set — an ordering anchor. Net presentation layers order
-/// against it (`net::recoil_overlay` applies AFTER it, so the hull rocks inside the frame). A no-op
-/// edge in SP (those layers are net-gated) and on a headless client (no camera to place).
+/// The third-person orbit camera's system set — an ordering anchor for anything that must read or
+/// follow the placed orbit pose. A no-op edge in SP (net layers are net-gated) and on a headless
+/// client (no camera to place).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OrbitCameraSet;
 

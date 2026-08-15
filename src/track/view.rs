@@ -38,10 +38,7 @@ use super::wrap;
 
 /// Ordering owner for the track view's presented-pose read: after physics writeback (Avian has
 /// written the frame's root `Transform`, interpolated in SP, wire/frame-interpolated under
-/// netcode), before propagation carries the written view poses out. The net client additionally
-/// orders this set after its presentation overlays (`RecoilOverlayApplied`) — that edge lives in
-/// `net::recoil_overlay`, which owns it, because the net-boundary guard keeps this module from
-/// naming the netcode (same inversion as `camera::OrbitCameraSet`).
+/// netcode), before propagation carries the written view poses out.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TrackViewSet;
 
