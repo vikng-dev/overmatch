@@ -72,12 +72,15 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
-use lightyear::interpolation::timeline::InterpolationConfig;
+use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{InputTimelineConfig, Interpolated, Predicted, SyncConfig, SyncSystems};
+use lightyear::prelude::{
+    InputTimelineConfig, Interpolated, IsSynced, Predicted, SyncConfig, SyncSystems,
+};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
+use crate::state::AppState;
 use crate::tank::Controlled;
 
 /// Half of one content interval, in ticks — the mean of the uniform phase between per-tick content
@@ -291,13 +294,21 @@ impl ArrivalDelay {
 }
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
-/// ping estimator never reads.
+/// ping estimator never reads. Samples enter ONLY while BOTH hold: `AppState::Playing` is active
+/// AND an `IsSynced<InterpolationTimeline>` entity exists — connect/loading-phase arrivals carry
+/// client load stalls, not path delay, and each one evicted at ring capacity swings the delay law
+/// into a resync.
 fn record_packet_arrival(
     event: On<PacketReceived>,
     time: Res<Time<Real>>,
     tick: Res<TickDuration>,
+    state: Res<State<AppState>>,
+    synced: Query<(), With<IsSynced<InterpolationTimeline>>>,
     mut estimator: ResMut<ArrivalDelay>,
 ) {
+    if *state.get() != AppState::Playing || synced.is_empty() {
+        return;
+    }
     estimator.record(
         time.elapsed_secs_f64(),
         event.remote_tick,
@@ -503,13 +514,17 @@ fn derive_input_margins(
 mod tests {
     use core::time::Duration;
 
-    use lightyear::core::tick::Tick;
-    use lightyear::prelude::SyncConfig;
+    use bevy::prelude::{App, Real, State, Time};
+    use lightyear::core::tick::{Tick, TickDuration};
+    use lightyear::interpolation::timeline::InterpolationTimeline;
+    use lightyear::prelude::{IsSynced, SyncConfig};
+    use lightyear_transport::plugin::PacketReceived;
 
     use super::{
         ArrivalDelay, ArrivalStats, derived_input_sync, derived_interp_sync, fixed_input_sync,
-        fixed_interp_sync, quantile_p, ring_cap,
+        fixed_interp_sync, quantile_p, record_packet_arrival, ring_cap,
     };
+    use crate::state::AppState;
 
     /// The game's fixed tick (64 Hz), spelled out: these tests pin the arithmetic independently of
     /// any runtime binding.
@@ -653,6 +668,54 @@ mod tests {
         assert!(
             !dense.stats.warmed(),
             "a full ring inside a short span is still warmup"
+        );
+    }
+
+    /// THE RECORDING GATE IS Playing ∧ IsSynced<InterpolationTimeline>: an arrival while either
+    /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
+    /// `record_packet_arrival` (or either conjunct) — the matching pre-gate trigger records and
+    /// its zero-count assertion reds; the final trigger pins that the gated path still records.
+    #[test]
+    fn pre_gate_arrivals_never_enter_the_estimator() {
+        let mut app = App::new();
+        app.insert_resource(TickDuration(TICK));
+        app.insert_resource(State::new(AppState::Loading));
+        app.init_resource::<Time<Real>>();
+        app.init_resource::<ArrivalDelay>();
+        app.add_observer(record_packet_arrival);
+        let transport = app.world_mut().spawn_empty().id();
+        let arrive = |app: &mut App, tick: u32| {
+            app.world_mut().trigger(PacketReceived {
+                entity: transport,
+                remote_tick: Tick(tick),
+            });
+            app.world_mut().flush();
+            app.world().resource::<ArrivalDelay>().samples
+        };
+        assert_eq!(
+            arrive(&mut app, 1_000),
+            0,
+            "loading ∧ unsynced never records"
+        );
+        app.insert_resource(State::new(AppState::Playing));
+        assert_eq!(
+            arrive(&mut app, 1_001),
+            0,
+            "playing without a synced interpolation timeline never records"
+        );
+        app.insert_resource(State::new(AppState::Loading));
+        app.world_mut()
+            .spawn(IsSynced::<InterpolationTimeline>::default());
+        assert_eq!(
+            arrive(&mut app, 1_002),
+            0,
+            "a synced timeline outside Playing never records"
+        );
+        app.insert_resource(State::new(AppState::Playing));
+        assert_eq!(
+            arrive(&mut app, 1_003),
+            1,
+            "playing ∧ synced records — the observer stays live"
         );
     }
 
