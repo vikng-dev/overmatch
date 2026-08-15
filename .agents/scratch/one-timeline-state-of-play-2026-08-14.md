@@ -87,10 +87,14 @@ by the outcomes. Removed as no-brainers/dead: N (spike), late-latch + FEC (front
 redundancy (instrument-decided, events-only), quantile law + margins + instruments (strictly
 better, building), adaptive input delay + masking + prediction (ruled).
 
-## The fork (the only open design question)
+## The fork — CLOSED (Yan, 2026-08-15: "B is permanent")
 
-Per-channel assignment of {rock, surge, muzzle VFX} to {click, arrival, cursor}. Everything else
-is assigned and uncontested. Candidates:
+Ruled after the fix-wave field verdict ("feels perfect") on fused-fire defaults: **B — fuse** is
+the permanent architecture; A (replay/overlay, 1,563 LOC inert since fused went default-ON) and
+its A/B lever machinery are deleted in demolition pass 2, alongside CameraKick + the cursor-hit-
+feel fork (also ruled: delete, hull overlay is the future feel channel). Pass-2 menu = codex
+audit `scratchpad/codex-demolition-verdict.md`; FRONTIER instruments die last, after certifying
+the wave-C landing. Historical record of the candidates:
 
 - **A — replay** (landed, 3bca010): microsim + subtract. Instant, proven. Cost: ~900 LOC + standing
   fidelity contract (softenable: Smith-predictor band-limiting; demote to CI calibration under N).

@@ -33,3 +33,6 @@
 # Cloudflare wrangler local cache
 .wrangler/
 __pycache__/
+
+# agent worktrees are per-machine scratch, never sources
+.claude/worktrees/
