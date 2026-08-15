@@ -1827,14 +1827,13 @@ fn spawn_reconstructed_fire(
         // ARRIVAL clock — the surviving arrival-assigned presentation site: a pre-sync client has
         // no cursor (the queue released everything at arrival), so the shot ages against the local
         // timeline exactly as it did before the cursor existed.
-        None => fire_catch_up_ticks(event.fire_tick, now).map(|catch_up_ticks| {
+        None => fire_catch_up_ticks(event.fire_tick, now).inspect(|&catch_up_ticks| {
             super::fire_presentation::present_shot_at_age(
                 catch_up_ticks,
                 facts,
                 pending_recoil,
                 commands,
             );
-            catch_up_ticks
         }),
     };
     let Some(catch_up_ticks) = catch_up_ticks else {
