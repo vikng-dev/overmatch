@@ -7,9 +7,7 @@ use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
-use lightyear::prelude::input::server::{
-    InputSystems as ServerInputSystems, InputValidationAppExt, authorize_controlled_targets,
-};
+use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
@@ -102,16 +100,7 @@ pub fn run() {
             open_gameplay_gate,
             diagnostics::log_positions,
             diagnostics::log_sim_evidence,
-            diagnostics::log_input_arrival,
         ),
-    );
-    // The input arrival-margin instrument: sampled per fixed tick BEFORE lightyear consumes the
-    // buffers, so the margin describes exactly the read the server is about to make. The counter
-    // this adds is what certifies the client's derived sync margins (`net::sync_margin`).
-    app.init_resource::<diagnostics::InputArrival>();
-    app.add_systems(
-        FixedPreUpdate,
-        diagnostics::sample_input_arrival.before(ServerInputSystems::UpdateActionState),
     );
     app.add_systems(
         FixedUpdate,
