@@ -31,7 +31,6 @@ systemd unit `/etc/systemd/system/overmatch-server.service`, `enabled` + `Restar
 Type=simple
 WorkingDirectory=/opt/overmatch-server
 Environment=BEVY_ASSET_ROOT=/opt/overmatch-server
-Environment=SPIKE_PERTURB=0
 ExecStart=/opt/overmatch-server/overmatch-server
 Restart=on-failure
 RestartSec=3
@@ -123,6 +122,5 @@ ssh -i ~/.ssh/do-vikng-dev root@157.245.48.161 '
 ## Known-provisional bits
 
 - **Dev auth token is hardcoded** (fine for a friends playtest; not for anything public).
-- **`SPIKE_PERTURB=0`** is baked into the unit — the server runs the deterministic path.
 - The `overmatch-server.tar.gz` is left in `/opt` after extraction; harmless, delete if disk gets
   tight. It carries the server's asset allowlist (~13 MB of assets), not the client's tree.

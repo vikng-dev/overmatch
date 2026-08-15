@@ -29,7 +29,8 @@ paragraph below, are **retired**. That exact signature — client `hc=0` while t
 discriminated "no hull contact because the tank rides on its wheels or is airborne" (physically
 correct, and the common case) from "contact failed to re-form after restore" — so it is a **poison
 indicator**, not evidence for either direction. Superseded by: the `SPIKE_CONTACT_PROBE`
-reclassification (`8a08d60` — the mechanism was attachment poisoning, a render→sim leak, not a
+reclassification (`8a08d60`; probe module deleted 2026-08-15 — ADR-0037 — the mechanism was
+attachment poisoning, a render→sim leak, not a
 restore defect), the `AuthoredLocalTransform` shield (`33cc4e4`), and the post-shield
 re-measurement (`ca54288`). **Current understanding of the residual:** contact-transient solver
 noise across the two ECS Worlds (ADR-0015 ranked cause #1) plus in-contact replay load chaos — not

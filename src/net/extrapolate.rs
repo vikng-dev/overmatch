@@ -190,7 +190,7 @@ pub(super) struct FrontierDiag {
     gaps: u64,
     /// Gaps with at least one impulse-class tick inside their span.
     coincident: u64,
-    /// Closed gaps that presented extrapolated poses (the lever was armed).
+    /// Closed gaps that presented extrapolated poses.
     extrapolated: u64,
     /// Closed gaps that exceeded the horizon (the horizon pose held for the excess).
     beyond_horizon: u64,

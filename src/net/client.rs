@@ -1223,7 +1223,7 @@ pub(super) fn receive_fire_events(
     mut confirm_receivers: Query<&mut MessageReceiver<ImpactConfirm>>,
     // Fire's display/recoil entity must resolve before a cosmetic shell can be created.
     tanks: Query<(Entity, &CombatantId), With<NetTank>>,
-    // Fast-forward remote shells to this client's predicted present.
+    // Fast-forward remote shells to this client's current tick.
     timeline: Res<LocalTimeline>,
     // The release clock: the fractional interpolation cursor every held announcement compares its
     // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
@@ -1749,9 +1749,9 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
 /// the `u32::MAX` boundary), not a naive `u32` subtraction that would underflow. (A `u32` tick never
 /// actually wraps in a session — ~777 days at 64 Hz — but the arithmetic is correct at the boundary
 /// regardless, which is what the wraparound test pins.)
-///   - elapsed < 0: the fire tick is AHEAD of our predicted present. The server fires at a tick ≤ its
-///     own now, and `P` runs ahead of the server, so this only happens on clock skew or a malicious /
-///     wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
+///   - elapsed < 0: the fire tick is AHEAD of our current tick. The server fires at a tick ≤ its
+///     own now, and the local (input) timeline runs ahead of the server, so this only happens on
+///     clock skew or a malicious / wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
 ///   - 0 ≤ elapsed ≤ [`MAX_COSMETIC_CATCH_UP_TICKS`]: fast-forward that many ticks (the normal
 ///     case is DERIVED approximately 10).
 ///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale / wrapped nonsense — reject
@@ -2375,21 +2375,21 @@ mod tests {
         );
     }
 
-    /// A shot fired ON our predicted present needs no catch-up: spawn at the muzzle, fly normally.
+    /// A shot fired ON our current tick needs no catch-up: spawn at the muzzle, fly normally.
     #[test]
     fn fire_tick_equal_to_now_is_zero_catch_up() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
     }
 
-    /// A fire tick AHEAD of our predicted present (only reachable via clock skew / a malicious or
-    /// wrapped tick, since the server fires at a tick <= its now and `P` leads the server) clamps to
-    /// 0, never rewinds the shell.
+    /// A fire tick AHEAD of our current tick (only reachable via clock skew / a malicious or
+    /// wrapped tick, since the server fires at a tick <= its now and the local timeline leads the
+    /// server) clamps to 0, never rewinds the shell.
     #[test]
     fn future_fire_tick_clamps_to_zero() {
         assert_eq!(fire_catch_up_ticks(Tick(503), Tick(500)), Some(0));
     }
 
-    /// A shot fired a few ticks before our predicted present fast-forwards by exactly that many ticks.
+    /// A shot fired a few ticks before our current tick fast-forwards by exactly that many ticks.
     #[test]
     fn elapsed_within_bound_fast_forwards() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(505)), Some(5));

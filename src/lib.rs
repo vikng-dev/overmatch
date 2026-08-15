@@ -1,6 +1,6 @@
 //! Shared simulation and runtime composition for Overmatch.
 //!
-//! Product binaries compose this crate as an authoritative server or predicted network client.
+//! Product binaries compose this crate as an authoritative server or network client.
 //! Direct-simulation sandboxes are analytical tools, not alternate player runtimes. See
 //! `.agents/PRODUCT.md` and ADR-0024 for the current product topology.
 
@@ -55,7 +55,7 @@ pub(crate) mod damage;
 #[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
-/// by both the offline and predicted-network client roots.
+/// by both the offline and network client roots.
 mod drive_hud;
 /// Exact integer arithmetic over `f32`-sourced polynomials — the arithmetic the bake's embedding
 /// certificate and the corridor collector's parallel test are decided in, so neither has a
@@ -162,9 +162,8 @@ pub(crate) mod terrain_grid;
 /// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
 /// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
 mod terrain_lod;
-/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
-/// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
-/// investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
+/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs.
+/// simulated pose — passive instrumentation for the MP hull-jitter investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
 /// net-specific rows exist only where the MP client/server plugin registers them, and the net
 /// extras read their resources through `Option`, so they are absent in single-player.
 mod trace;
@@ -505,7 +504,7 @@ pub(crate) struct ClientReplica;
 pub(crate) struct ShotClock(pub u32);
 
 /// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
-/// `LocalTimeline` into it before gameplay (including rollback replay); non-network compositions
+/// `LocalTimeline` into it before gameplay; non-network compositions
 /// advance it once after each playing fixed tick and saturate at `u32::MAX` like Lightyear.
 #[derive(Resource, Default)]
 pub(crate) struct WeaponClock(pub u32);
@@ -723,8 +722,8 @@ impl Plugin for NetClientPlugin {
             // The death screen + respawn key — net-client only (SP has no respawn flow): shows
             // "YOU DIED" when the player's own tank is knocked out and latches the respawn edge.
             net::death_screen_plugin,
-            // View-layer combat feedback (net-client only): the camera kick + damage flash when the
-            // player is hit, and the hit-marker when the player's shell drops an opponent's health.
+            // View-layer combat feedback (net-client only): the damage flash when the player is
+            // hit, and the hit-marker when the player's shell drops an opponent's health.
             net::hit_feel_plugin,
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).

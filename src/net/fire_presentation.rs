@@ -1268,7 +1268,7 @@ mod tests {
         slot.presented += 1;
         slot.reconcile_reveals(None);
         assert_eq!(queued(&slot), 1);
-        // Presentation overtakes (mode A: the local bang precedes every confirm): queue empties
+        // Presentation overtakes (a recovered round presents before its confirm): queue empties
         // and stays empty — the fallback owes nothing.
         slot.presented += 2;
         slot.reconcile_reveals(None);

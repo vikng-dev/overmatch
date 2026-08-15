@@ -94,6 +94,12 @@ presentation consumers (recoil microsim, belt view).
 - Named tuned-constant debt, complete: `PHASE_HEAL_OMEGA` (derived replacement sketched in
   `recoil_overlay`) and the `SNAP_TRANSLATION`/`SNAP_AXIS` pair.
 
+**Amended 2026-08-15.** The recoil-overlay/hull-overlay lane above was closed by ruling: the
+fused own-fire echo is permanent, and `recoil_overlay`, `CameraKick`, and the cursor-hit-feel
+fork were deleted in demolition pass 2 — along with every mode lever (`OVERMATCH_FUSED_FIRE`,
+`OVERMATCH_EXTRAPOLATE`, `OVERMATCH_CURSOR_HIT_FEEL`) and the INPUT-ARRIVAL instrument
+(FRONTIER remains). The one-timeline half of this ADR stands unchanged.
+
 ## What survives of the superseded ADRs
 
 - **0015**: the permanent layer is untouched law — continuous force laws, the solo-divergence

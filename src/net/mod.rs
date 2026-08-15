@@ -41,7 +41,7 @@ mod test_harness;
 /// The hidden-capture focus revocation — shared with `run_offline`'s hidden-capture mode.
 #[cfg(target_os = "macos")]
 pub(crate) use client::revoke_macos_activation;
-/// Run the predicted network client.
+/// Run the network client.
 pub use client::run as run_client;
 /// Run the authoritative dedicated server.
 pub use server::run as run_server;
