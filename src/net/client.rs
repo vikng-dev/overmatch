@@ -1196,6 +1196,20 @@ fn log_tank_ownership(
 #[derive(Resource, Default)]
 pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
 
+impl PendingRecoilKicks {
+    /// Enqueue one kick cause. `net::fire_presentation`'s recovered rounds share this seam so a
+    /// fallback bang recoils exactly like an echoed one.
+    pub(super) fn push(&mut self, shooter: Entity, weapon: usize) {
+        self.0.push((shooter, weapon));
+    }
+
+    /// Test-only inspection of the queued causes.
+    #[cfg(test)]
+    pub(super) fn queued(&self) -> &[(Entity, usize)] {
+        &self.0
+    }
+}
+
 /// Bounded [`ShotId`] dedup cache across repeated visual batches and direct reliable facts.
 #[derive(Resource, Default)]
 pub(super) struct SeenShots {
@@ -1362,13 +1376,16 @@ pub(super) fn receive_fire_events(
     mut held: ResMut<HeldFireEvents>,
     mut pending_fires: ResMut<PendingFireEvents>,
     mut sanctioned: ResMut<SanctionedShots>,
-    // Nested: the optional lifecycle recorder for wire arrivals/dedup results, and the impulse
+    // Nested: the optional lifecycle recorder for wire arrivals/dedup results, the impulse
     // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
-    // the tick the shooter's hull surged). A tuple param keeps the system under Bevy's 16-param
-    // bound.
-    (mut shot_trace, mut impulses): (
+    // the tick the shooter's hull surged), and the own-fire ledger + counters for swallowing a
+    // late echo the fallback already presented. A tuple param keeps the system under Bevy's
+    // 16-param bound.
+    (mut shot_trace, mut impulses, mut own_ledgers, mut own_diag): (
         Option<ResMut<crate::shot_trace::ShotTrace>>,
         ResMut<super::extrapolate::ImpulseTicks>,
+        Query<&mut super::fire_presentation::OwnFirePresentation>,
+        ResMut<super::fire_presentation::OwnFireDiag>,
     ),
     mut commands: Commands,
 ) {
@@ -1420,6 +1437,8 @@ pub(super) fn receive_fire_events(
         &mut pending,
         &mut held,
         &mut pending_fires,
+        &mut own_ledgers,
+        &mut own_diag,
         &mut shot_trace,
         &mut commands,
     );
@@ -1431,6 +1450,8 @@ pub(super) fn receive_fire_events(
         &tanks,
         &mut pending,
         &mut pending_fires,
+        &mut own_ledgers,
+        &mut own_diag,
         &mut shot_trace,
         &mut commands,
     );
@@ -1620,6 +1641,8 @@ fn release_due_fire_events(
     pending_recoil: &mut PendingRecoilKicks,
     held: &mut HeldFireEvents,
     pending_fires: &mut PendingFireEvents,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
@@ -1637,6 +1660,8 @@ fn release_due_fire_events(
                 fused,
                 locally_fired,
                 pending_recoil,
+                own_ledgers,
+                own_diag,
                 shot_trace,
                 commands,
             ),
@@ -1667,6 +1692,8 @@ fn resolve_pending_fire_events(
     tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
     pending_recoil: &mut PendingRecoilKicks,
     pending_fires: &mut PendingFireEvents,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
@@ -1695,6 +1722,8 @@ fn resolve_pending_fire_events(
                 fused,
                 locally_fired,
                 pending_recoil,
+                own_ledgers,
+                own_diag,
                 shot_trace,
                 commands,
             ),
@@ -1721,12 +1750,31 @@ fn spawn_reconstructed_fire(
     fused: bool,
     locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     pending_recoil: &mut PendingRecoilKicks,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
     // Self-echo suppression: the shooter presented this round on its own local fire tick. Under
     // fused own fire the local tick drew nothing and the echo IS the round's one presentation.
     if locally_fired.contains(shooter) && !fused {
+        return;
+    }
+    // An own echo arriving so late the belt-delta fallback already presented its round: one
+    // consumption, one bang — swallow the duplicate (matched by weapon slot and wrap-safe
+    // fire-tick order against the recorded reveal, so a future round can never match).
+    if fused
+        && let Ok(mut ledger) = own_ledgers.get_mut(shooter)
+        && ledger.try_swallow_owed(event.weapon as usize, event.fire_tick.0)
+    {
+        own_diag.swallowed += 1;
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            event.shot_id(),
+            || json!({ "s": "fire", "res": "owed_swallow" }),
+        );
         return;
     }
     let Ok(direction) = Dir3::new(event.direction) else {
@@ -2787,6 +2835,10 @@ mod tests {
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut trace);
@@ -2799,6 +2851,8 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );
@@ -2816,6 +2870,10 @@ mod tests {
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     release_due_fire_events(
@@ -2827,6 +2885,8 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );
@@ -2841,6 +2901,7 @@ mod tests {
             .init_resource::<SeenShots>()
             .init_resource::<HeldFireEvents>()
             .init_resource::<PendingFireEvents>()
+            .init_resource::<crate::net::fire_presentation::OwnFireDiag>()
             .init_resource::<ReconstructedFireShells>()
             .add_observer(record_reconstructed_fire_shell);
         app
@@ -2862,6 +2923,10 @@ mod tests {
                  tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
+                 mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                 mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                  mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
@@ -2872,6 +2937,8 @@ mod tests {
                         &tanks,
                         &mut recoil,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );
@@ -3050,6 +3117,10 @@ mod tests {
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
                       mut sanctioned: ResMut<SanctionedShots>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_visual_fact(
@@ -3096,6 +3167,8 @@ mod tests {
                         &mut recoil,
                         &mut held,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );

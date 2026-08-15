@@ -13,7 +13,7 @@
 //! - `min{d_i}` over the [`SPIKE_WINDOW`] — the fastest recent packet, the anchor that absorbs
 //!   path shifts and clock skew (NetEQ's ~2 s spike window precedent; tracks the measured 0.52 s
 //!   burst period with margin);
-//! - an eviction ring of [`ring_cap`] samples exposing the empirical quantiles `Q_p` and `Q_50`.
+//! - an eviction ring of [`ring_cap`] samples exposing the empirical quantile `Q_p` and the median.
 //!
 //! Relative-arrival delay, not inter-arrival: an EWMA of gaps reads a slowly accumulating delay as
 //! "each gap normal" while the buffer starves (the NetEQ migration rationale; a test below pins
@@ -130,8 +130,9 @@ impl ArrivalStats {
         Duration::from_secs_f64((self.qp_s - self.min_s).max(0.0))
     }
 
-    /// `Q_p − Q_50`: the burst tail above the median — the uplink coverage term.
-    fn coverage(&self) -> Duration {
+    /// `Q_p − Q_50`: the burst tail above the median — the uplink coverage term, and the
+    /// announcement-vs-state skew bound `net::fire_presentation`'s recovery wait reads.
+    pub(super) fn coverage(&self) -> Duration {
         Duration::from_secs_f64((self.qp_s - self.q50_s).max(0.0))
     }
 
@@ -224,6 +225,21 @@ impl ArrivalDelay {
             qp_s,
             samples: self.samples,
         };
+    }
+
+    /// Newest remote tick seen on any packet — the "the server has simulated through here" bound
+    /// `net::fire_presentation`'s reveal stamps and heal deadlines read.
+    pub(super) fn newest_remote(&self) -> Option<Tick> {
+        self.newest_remote
+    }
+
+    /// A digest with a known newest remote tick, for sibling-module deadline tests.
+    #[cfg(test)]
+    pub(super) fn test_with_newest_remote(tick: Tick) -> Self {
+        Self {
+            newest_remote: Some(tick),
+            ..Self::default()
+        }
     }
 
     /// One line for the FRONTIER summary: the anchored spreads in ms and the sample count.

@@ -281,12 +281,22 @@ fn count_interp_sync_events(
     }
 }
 
-/// The estimator digest riding the FRONTIER line — absent in worlds that never mounted the sync
-/// margins (unit fixtures, the server).
-fn arrival_digest(arrival: &Option<Res<super::sync_margin::ArrivalDelay>>) -> String {
-    arrival.as_ref().map_or_else(String::new, |estimator| {
-        format!(" {}", estimator.describe())
-    })
+/// The estimator and own-fire digests riding the FRONTIER line — each absent in worlds that never
+/// mounted its module (unit fixtures, the server).
+fn sibling_digests(
+    arrival: &Option<Res<super::sync_margin::ArrivalDelay>>,
+    own_fire: &Option<Res<super::fire_presentation::OwnFireDiag>>,
+) -> String {
+    let mut digest = String::new();
+    if let Some(estimator) = arrival {
+        digest.push(' ');
+        digest.push_str(&estimator.describe());
+    }
+    if let Some(own_fire) = own_fire {
+        digest.push(' ');
+        digest.push_str(&own_fire.describe());
+    }
+    digest
 }
 
 fn log_periodic_summary(
@@ -294,6 +304,7 @@ fn log_periodic_summary(
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
     arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
+    own_fire: Option<Res<super::fire_presentation::OwnFireDiag>>,
     mut elapsed: Local<f32>,
 ) {
     *elapsed += time.delta_secs();
@@ -304,7 +315,7 @@ fn log_periodic_summary(
     info!(
         "net: FRONTIER {}{}",
         diag.summary(edges.open_gaps()),
-        arrival_digest(&arrival)
+        sibling_digests(&arrival, &own_fire)
     );
 }
 
@@ -313,11 +324,12 @@ fn log_summary_on_disconnect(
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
     arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
+    own_fire: Option<Res<super::fire_presentation::OwnFireDiag>>,
 ) {
     info!(
         "net: FRONTIER (disconnect) {}{}",
         diag.summary(edges.open_gaps()),
-        arrival_digest(&arrival)
+        sibling_digests(&arrival, &own_fire)
     );
 }
 
@@ -326,6 +338,7 @@ fn log_summary_on_exit(
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
     arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
+    own_fire: Option<Res<super::fire_presentation::OwnFireDiag>>,
     mut logged: Local<bool>,
 ) {
     if *logged || exits.read().next().is_none() {
@@ -335,7 +348,7 @@ fn log_summary_on_exit(
     info!(
         "net: FRONTIER (final) {}{}",
         diag.summary(edges.open_gaps()),
-        arrival_digest(&arrival)
+        sibling_digests(&arrival, &own_fire)
     );
 }
 

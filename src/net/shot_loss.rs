@@ -830,6 +830,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.init_resource::<SanctionedShots>();
     app.init_resource::<super::extrapolate::ImpulseTicks>();
     app.init_resource::<crate::PredictedPresent>();
+    app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
     app.add_systems(
