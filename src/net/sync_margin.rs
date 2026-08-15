@@ -33,8 +33,9 @@
 //!
 //! # Downlink (the interpolation timeline)
 //!
-//! `net::interp_delay` writes the delay law `min_delay = rtt/2 + (Q_p − min) + one send interval`
-//! from this estimator every frame. The Gaussian margin chain on top is therefore ZEROED here
+//! `net::interp_delay` writes the fused delay law (its module doc — the spread pays only its
+//! excess beyond the extrapolation horizon) from this estimator every frame. The Gaussian margin
+//! chain on top is therefore ZEROED here
 //! (`jitter_multiple = 0`) — the quantile subsumes it — keeping the structural half-tick floor
 //! (per-tick keyframes put the cursor's phase against arrival uniform over one interval; the floor
 //! carries that distribution's mean).

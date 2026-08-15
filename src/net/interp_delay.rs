@@ -14,12 +14,18 @@
 //! is the only writable slot, so it carries the whole law:
 //!
 //! ```text
-//! headroom  = Q_p{d_i} − min{d_i} + one send interval    (the arrival-delay distribution's
-//!                                                         covered spread — `net::sync_margin`'s
+//! headroom  = max(Q_p{d_i} − min{d_i} − g*, 0)           (the arrival-delay distribution's
+//!             + one send interval                         covered spread — `net::sync_margin`'s
 //!                                                         estimator, empirical, no Gaussian —
-//!                                                         plus the gap to the next keyframe)
+//!                                                         less the extrapolation horizon, plus
+//!                                                         the gap to the next keyframe)
 //! min_delay = rtt/2 + headroom                           (rtt/2 cancels the anchor, as above)
 //! ```
+//!
+//! `g*` is `net::extrapolate`'s horizon (the single source — imported, never restated): the
+//! extrapolator covers tail excursions up to g* invisibly (ε-bounded), so the buffer pays only
+//! for the excess beyond it. On a clean link the subtraction floors at zero and the law reduces
+//! to `rtt/2 + one send interval`.
 //!
 //! The rtt/2 term stays on the ping EWMA (it cancels the anchor, which is built from the same
 //! EWMA); every jitter term now comes from the measured stream. The Gaussian margin chain on top
@@ -56,8 +62,10 @@ pub(super) enum DelayMode {
 
 /// The law. The send interval is one tick — the server replicates every tick (`send_interval = 0`,
 /// the degenerate `tests/net_interp_delay.rs` pins), so the gap to the next keyframe is one tick.
+/// The spread pays only its excess beyond the extrapolation horizon (module doc); `saturating_sub`
+/// is the floor at zero.
 fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Duration {
-    rtt / 2 + stats.spread() + tick
+    rtt / 2 + stats.spread().saturating_sub(super::extrapolate::horizon()) + tick
 }
 
 /// Resolve the mode, mount the deriving system, and hand back the client entity's initial
@@ -81,8 +89,8 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
             delay.as_millis()
         ),
         DelayMode::Derived => info!(
-            "net: interpolation min_delay DERIVED = rtt/2 + (Qp − min) + one tick ({:.1} ms cold) \
-             [OVERMATCH_INTERP_DELAY_MS unset]",
+            "net: interpolation min_delay DERIVED = rtt/2 + max(Qp − min − g*, 0) + one tick \
+             ({:.1} ms cold) [OVERMATCH_INTERP_DELAY_MS unset]",
             millis(initial)
         ),
     }
@@ -153,11 +161,18 @@ mod tests {
         ArrivalStats::test_spread(ms / 1000.0)
     }
 
-    /// Absolute values at three operating points. Dropping `rtt/2` fails the 100/250 cases;
-    /// dropping the quantile spread fails the burst case; dropping the one-interval gap term
-    /// fails all three; using `rtt` instead of `rtt/2` fails 100/250.
+    /// `g*` recomputed here from the raw constants (μ = 0.9, g = 9.81, ε_vis = 12.08 mm)
+    /// independently of `net::extrapolate`'s expression — the same independence discipline as
+    /// `extrapolate`'s own horizon test.
+    fn g_star() -> Duration {
+        Duration::from_secs_f64((2.0 * 0.012_08_f64 / (0.9 * 9.81)).sqrt())
+    }
+
+    /// Absolute values at three operating points. Dropping `rtt/2` fails the 100 ms cases;
+    /// dropping the excess-spread term fails the burst case; dropping the one-interval gap term
+    /// fails all three; using `rtt` instead of `rtt/2` fails the 100 ms cases.
     #[test]
-    fn law_is_half_rtt_plus_spread_plus_the_interval_gap() {
+    fn law_is_half_rtt_plus_excess_spread_plus_the_interval_gap() {
         // Loopback, cold estimator: the gap term alone — 15.625 ms.
         assert_close(
             derived_min_delay(Duration::ZERO, &ArrivalStats::default(), TICK),
@@ -170,13 +185,30 @@ mod tests {
             Duration::from_nanos(65_625_000),
             "droplet clean",
         );
-        // rtt 100 ms over the measured burst link (Qp − min = 60 ms): 50 + 60 + 15.625 — the
-        // headroom the ping-EWMA law (which read this link as ~3 ms jitter) never carried.
+        // rtt 100 ms over the measured burst link (Qp − min = 60 ms): 50 + (60 − g*) + 15.625 —
+        // the extrapolator absorbs the first g* ≈ 52.3 ms of the burst invisibly, so the buffer
+        // pays only the ~7.7 ms excess.
         assert_close(
             derived_min_delay(Duration::from_millis(100), &spread(60.0), TICK),
-            Duration::from_nanos(125_625_000),
+            Duration::from_millis(100) / 2 + (Duration::from_millis(60) - g_star()) + TICK,
             "droplet burst",
         );
+    }
+
+    /// THE SUBTRACTION FLOORS AT ZERO: any spread at or under the horizon is fully absorbed by
+    /// the extrapolator, so the law reduces to the clean form `rtt/2 + one tick` exactly.
+    /// Dropping the `− g*` subtraction reds this (a 30 ms spread would leak into the delay);
+    /// dropping the floor (a signed subtraction) reds the sub-horizon case by underflow.
+    #[test]
+    fn a_spread_under_the_horizon_floors_to_the_clean_law() {
+        let clean = derived_min_delay(Duration::from_millis(100), &spread(0.0), TICK);
+        for ms in [10.0, 30.0, 52.0] {
+            assert_close(
+                derived_min_delay(Duration::from_millis(100), &spread(ms), TICK),
+                clean,
+                "sub-horizon spread is the extrapolator's to cover",
+            );
+        }
     }
 
     /// The slope in RTT is exactly 1/2, independent of the other terms. Fails if the `rtt/2` term
@@ -188,14 +220,14 @@ mod tests {
         assert_close(high - low, Duration::from_millis(100), "rtt slope");
     }
 
-    /// The spread term passes through at slope 1, independent of RTT: the headroom IS the measured
-    /// distribution's covered spread, not a multiple of it. A Gaussian-style multiplier on the
-    /// spread fails this.
+    /// Beyond the horizon the spread passes through at slope 1, independent of RTT: the headroom
+    /// IS the measured excess, not a multiple of it. A Gaussian-style multiplier on the excess
+    /// fails this; so does subtracting g* from only one of the pair.
     #[test]
-    fn the_spread_term_passes_through_at_slope_one() {
+    fn the_excess_spread_passes_through_at_slope_one() {
         let rtt = Duration::from_millis(60);
-        let narrow = derived_min_delay(rtt, &spread(10.0), TICK);
-        let wide = derived_min_delay(rtt, &spread(45.0), TICK);
-        assert_close(wide - narrow, Duration::from_millis(35), "spread slope");
+        let narrow = derived_min_delay(rtt, &spread(60.0), TICK);
+        let wide = derived_min_delay(rtt, &spread(95.0), TICK);
+        assert_close(wide - narrow, Duration::from_millis(35), "excess slope");
     }
 }
