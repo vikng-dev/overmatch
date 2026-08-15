@@ -138,6 +138,13 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     ),
     // ---- Deliberately named after deletion. -----------------------------------------------
     (
+        "src/net/protocol.rs",
+        "adoption",
+        "The REV 23/24/25 history names `net::adoption` as the module those revisions served. The \
+         one-timeline demolition deleted it (ADR-0037); the history that explains the wire's \
+         evolution must keep naming it.",
+    ),
+    (
         "src/track/transmission.rs",
         "DRAG_SAT_SPEED",
         "The module doc's constant ledger records it as REMOVED (stage B) and says what replaced \
