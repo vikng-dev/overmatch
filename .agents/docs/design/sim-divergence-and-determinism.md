@@ -466,9 +466,10 @@ only in a traced run):
 
 ### How to run it
 
-*(2026-08-15: `SPIKE_PERTURB` and the rollback it forced were deleted with the prediction
-machinery — ADR-0037. This recipe runs as written only at pre-demolition revisions; the
-divergence doctrine itself, and the deferred state-hash/seeded-replay decision, stand.)*
+*(2026-08-15: `SPIKE_PERTURB`, the rollback it forced, and `scripts/divergence/analyze.py`
+itself were deleted with the prediction machinery — ADR-0037. This recipe runs as written only
+at pre-demolition revisions; the divergence doctrine itself, and the deferred
+state-hash/seeded-replay decision, stand.)*
 
 Same harness as §6 (server `SPIKE_PERTURB=0` + headless scripted client, `SPIKE_TRACE` both
 ends — role-suffixed files; avoid `SPIKE_LATENCY_MS=0`, the §7 connect hang). Direct binary runs

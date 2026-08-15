@@ -4,7 +4,8 @@ Numbers that still decide things, distilled from the 2026-07-31 capture runs (MG
 flat-patch pose, 3840 ticks, two or more seeds per point, target-client traces). Tick rate 64 Hz,
 so 1 tick = 15.625 ms. Reproduce with `LAT=<ms> JIT=<ms> scripts/shot/run-hullshock-capture.sh
 <seed> <dir>`, then `scripts/shot/analyze.py`; the runs, their method and their side findings are
-in git.
+in git. *(Historical recipe — the HullShock capture suite was deleted with the prediction
+machinery; it runs only at pre-demolition revisions.)*
 
 ## Delivery catch-up is a latency curve, not a constant
 
