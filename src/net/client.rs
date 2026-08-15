@@ -26,8 +26,8 @@ use super::protocol::{
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce,
-    SanctionedBounceInsert, SanctionedShots, SanctionedTerminal, ShotSource,
+    MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
+    SanctionedTerminal, ShotSource,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -1727,7 +1727,42 @@ fn spawn_reconstructed_fire(
     let Ok(direction) = Dir3::new(event.direction) else {
         return;
     };
-    let Some(catch_up_ticks) = fire_catch_up_ticks(event.fire_tick, now) else {
+    let facts = super::fire_presentation::ReleasedShot {
+        origin: event.origin,
+        direction,
+        speed: event.speed,
+        caliber: event.caliber,
+        mass: event.mass,
+        tracer: event.tracer,
+        mechanism: event.mechanism,
+        shooter: ShotSource {
+            tank: shooter,
+            weapon: event.weapon as usize,
+        },
+        shot: Some(event.shot_id()),
+    };
+    let catch_up_ticks = match cursor {
+        // CURSOR clock: the seam measures the shot's age on the same clock that released it.
+        Some(cursor) => super::fire_presentation::present_released_shot(
+            event.fire_tick,
+            cursor,
+            facts,
+            pending_recoil,
+            commands,
+        ),
+        // ARRIVAL clock — the surviving arrival-assigned presentation site: a pre-sync client has
+        // no cursor (the queue released everything at arrival), so the shot ages against the local
+        // timeline exactly as it did before the cursor existed.
+        None => fire_catch_up_ticks(event.fire_tick, now).inspect(|&catch_up_ticks| {
+            super::fire_presentation::present_shot_at_age(
+                catch_up_ticks,
+                facts,
+                pending_recoil,
+                commands,
+            );
+        }),
+    };
+    let Some(catch_up_ticks) = catch_up_ticks else {
         return;
     };
     crate::shot_trace::record(
@@ -1737,23 +1772,6 @@ fn spawn_reconstructed_fire(
         event.shot_id(),
         || json!({ "itick": cursor_itick(cursor), "cu": catch_up_ticks }),
     );
-    commands.trigger(FireShell {
-        origin: event.origin,
-        direction,
-        speed: event.speed,
-        caliber: event.caliber,
-        mass: event.mass,
-        tracer: event.tracer,
-        shooter: Some(ShotSource {
-            tank: shooter,
-            weapon: event.weapon as usize,
-        }),
-        shot_origin: FireShellOrigin::Reconstructed,
-        catch_up_ticks,
-        shot: Some(event.shot_id()),
-        mechanism: event.mechanism,
-    });
-    pending_recoil.0.push((shooter, event.weapon as usize));
 }
 
 /// Drain the owner-private `DamageConfirm` channel and raise one presentation event per receipt.
@@ -1850,11 +1868,14 @@ pub(super) fn publish_predicted_present(
     present.0 = timeline.tick().0;
 }
 
-/// Ticks to fast-forward an opponent shell so it sits at OUR predicted present `P` — co-indexed with
-/// the client's own predicted hull (see `net::protocol::FireEvent::fire_tick` for why `P`, not the
-/// confirmed or server-now frame). `now` is `LocalTimeline::tick()`. `Some(n)` fast-forwards `n` ticks
-/// (`n == 0` = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller
-/// skips the tracer AND the recoil).
+/// LOCAL/ARRIVAL-clock shell age: ticks from `fire` to the local present `now`
+/// (`LocalTimeline::tick()`). Two call sites only — the consume-time validity bar (a fire whose
+/// tick is absurd against the local present is dropped before it is held), and the pre-sync
+/// arrival-presentation fallback in [`spawn_reconstructed_fire`]. A CURSOR-released shot never
+/// ages through this: its age is the seam's `cursor − released_tick`
+/// (`net::fire_presentation::present_released_shot`). `Some(n)` fast-forwards `n` ticks (`n == 0`
+/// = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller skips
+/// the tracer AND the recoil).
 ///
 /// Wrap-safe by construction: `Tick` is a wrapping `u32` (`lightyear_core::tick`, via `wrapping_id!`)
 /// and implements `Sub<Tick>` returning the difference as an `i32` — lightyear's OWN tick difference
@@ -1998,6 +2019,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::ballistics::{FireShell, FireShellOrigin};
 
     #[derive(Resource)]
     struct TestDamageCopies(Vec<DamageConfirm>);
@@ -2970,6 +2992,89 @@ mod tests {
             vec![(shot, root)],
             "an already-crossed fire presents at arrival",
         );
+    }
+
+    /// CERTIFICATION — the released burst, over the production consume/release gates: a 750-rpm
+    /// MG belt plus cannon rounds arrive ahead of the cursor and release as it sweeps. The
+    /// counters must agree — bang = flash = tracer = consumed rounds — and every round must
+    /// spawn younger than one tick (`catch_up_ticks` 0), which bounds its tracer's spawn
+    /// distance from the muzzle to `catch_up · v · Δt = 0 m`, strictly under one tick of shell
+    /// flight (`v · Δt` = 12.5 m at 800 m/s). The one named shot-skip class — a redundant
+    /// transport copy of an already-presented shot — is probed and presents nothing.
+    #[test]
+    fn released_burst_presents_every_consumed_round_exactly_once() {
+        use crate::ballistics::STALE_FIRE_TICKS;
+
+        #[derive(Resource, Default)]
+        struct Certified(Vec<(u32, bool)>);
+
+        fn certify(fire: On<FireShell>, mut certified: ResMut<Certified>) {
+            if fire.shot_origin == FireShellOrigin::Reconstructed {
+                certified.0.push((fire.catch_up_ticks, fire.tracer));
+            }
+        }
+
+        let mut app = fire_receive_app();
+        app.init_resource::<Certified>();
+        app.add_observer(certify);
+        let world = app.world_mut();
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+
+        // The burst: 20 MG rounds every 5 ticks from tick 100, plus 2 cannon rounds. Every
+        // round is a tracer, so the tracer counter must equal the bang counter.
+        let mut events: Vec<FireEvent> =
+            (0..20).map(|i| fire_event(root, 7, 100 + 5 * i)).collect();
+        for cannon_tick in [103, 158] {
+            let mut cannon = fire_event(root, 7, cannon_tick);
+            cannon.mechanism = crate::spec::FireMechanism::Single;
+            cannon.speed = 773.0;
+            cannon.caliber = 0.088;
+            cannon.mass = 10.2;
+            cannon.weapon = 1;
+            events.push(cannon);
+        }
+        let consumed = events.len();
+        let duplicate = events[0].clone();
+
+        // The link: a round fired at tick f arrives at local present f+8, while the cursor
+        // renders 16 ticks behind the present — ahead of the cursor at arrival, crossed 8
+        // ticks later with the cursor half a tick into f.
+        for now in 100u32..=225 {
+            let cursor = Some((Tick(now - 16), 0.5));
+            let mut arrived = false;
+            for event in events.iter().filter(|e| e.fire_tick.0 + 8 == now) {
+                consume_and_release(world, event.clone(), Tick(now), cursor, false);
+                arrived = true;
+            }
+            if !arrived {
+                release_at(world, Tick(now), cursor, false);
+            }
+        }
+
+        // The shot-skip probe: the redundant transport copy of an already-presented shot is
+        // behind the cursor (would present immediately) and must be swallowed by its ShotId.
+        consume_and_release(world, duplicate, Tick(230), Some((Tick(214), 0.5)), false);
+
+        let certified = &world.resource::<Certified>().0;
+        let bang = certified.len();
+        let flash = certified
+            .iter()
+            .filter(|(catch_up, _)| *catch_up <= STALE_FIRE_TICKS)
+            .count();
+        let tracer = certified.iter().filter(|(_, tracer)| *tracer).count();
+        println!("certification: consumed={consumed} bang={bang} flash={flash} tracer={tracer}",);
+        assert_eq!(
+            (bang, flash, tracer),
+            (consumed, consumed, consumed),
+            "every consumed round presents exactly once, under the flash stale gate, tracer lit",
+        );
+        for &(catch_up, _) in certified {
+            assert_eq!(
+                catch_up, 0,
+                "released at the crossing: age < 1 tick, spawn AT the muzzle — never the \
+                 local timeline's arrival lead",
+            );
+        }
     }
 
     /// FUSED OWN FIRE: the echo of a locally-fired round is suppressed with the lever unset

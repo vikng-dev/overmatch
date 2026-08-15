@@ -620,14 +620,17 @@ fn drive_track_views(
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
 
-        // Belt phase from the SIM (phase B): the owner's predicted `TrackDrive`, a remote's
-        // replicated one — real belt travel, so a braked skid stops the links and wheelspin scrolls
-        // them honestly. The wrap needs only the phase (the drawn belt's motion IS the phase
-        // advancing; there is no solver to feed a belt speed to).
+        // Belt phase from the SIM (phase B): the owner's predicted `TrackDrive`, a
+        // cursor-rendered remote's INTERPOLATED one (the per-channel clock map — an interpolated
+        // hull's belt speed/phase is a CURSOR-clock value, sampled by the protocol's
+        // `track_drive_lerp` on the same clock that places the hull, never the arrival-fresh
+        // packet that leads it) — real belt travel, so a braked skid stops the links and
+        // wheelspin scrolls them honestly. The wrap needs only the phase (the drawn belt's
+        // motion IS the phase advancing; there is no solver to feed a belt speed to).
         //
         // Carried to THIS frame by [`presented_phase`] before it is drawn: the sim advances that
-        // phase once per fixed tick and a non-simulated tank only when a packet lands, either way
-        // in steps, on a hull the renderer is moving continuously underneath it.
+        // phase once per fixed tick and an interpolated tank once per frame at the cursor,
+        // either way in steps, on a hull the renderer is moving continuously underneath it.
         let phases = [0, 1].map(|si| {
             let side = drive.sides[si];
             let phase = presented_phase(rig.presented_phase[si], side.phase, side.speed, dt);

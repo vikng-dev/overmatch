@@ -26,7 +26,7 @@ use crate::state::GameplaySet;
 use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
 };
-use crate::track::sim::{TankTransmission, TrackDrive};
+use crate::track::sim::{TankTransmission, TrackDrive, TrackDriveSide};
 use crate::{CombatantId, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -763,6 +763,27 @@ fn apply_launched_turret_pose(
     }
 }
 
+/// CURSOR-clock source for the track view (the per-channel clock map): an interpolated hull
+/// renders at the interpolation cursor, so the belt speed/phase its track view draws must be
+/// sampled on the same clock — component-wise linear, the belt phase in f64. Client-side
+/// presentation only: registering interpolation adds no wire type, mode, or direction (the
+/// wire-surface pins prove it), and a simulated hull carries no `Interpolated` marker, so its
+/// sim-written component is untouched.
+pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> TrackDrive {
+    let side = |a: TrackDriveSide, b: TrackDriveSide| TrackDriveSide {
+        speed: a.speed + (b.speed - a.speed) * t,
+        phase: a.phase + (b.phase - a.phase) * f64::from(t),
+    };
+    TrackDrive {
+        throttle: start.throttle + (end.throttle - start.throttle) * t,
+        steer: start.steer + (end.steer - start.steer) * t,
+        sides: [
+            side(start.sides[0], end.sides[0]),
+            side(start.sides[1], end.sides[1]),
+        ],
+    }
+}
+
 /// Ordered wire registrations. Keep this list aligned with [`plugin`]; its pinned hash is a direct
 /// handshake-fingerprint input. House process also bumps [`PROTOCOL_REV`] for release bookkeeping.
 ///
@@ -946,8 +967,12 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<LinearVelocity>().replicate();
     app.component::<AngularVelocity>().replicate();
     // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
-    // remote track view.
-    app.component::<TrackDrive>().replicate();
+    // remote track view. Interpolated like Position/Rotation so a cursor-rendered hull's track
+    // view reads cursor-time belt speed/phase, never the arrival-fresh value that visibly leads
+    // the hull.
+    app.component::<TrackDrive>()
+        .replicate()
+        .add_interpolation_with(track_drive_lerp);
     // The declared transmission's correlated state: one atomic snapshot.
     app.component::<TankTransmission>().replicate();
     // Complete weapon eligibility state: one atomic snapshot. `net::fire_presentation` reconciles
@@ -1033,6 +1058,73 @@ mod tests {
     use super::*;
     use crate::command::CrewSwap;
     use crate::damage::CrewStation;
+
+    #[test]
+    fn track_drive_is_registered_for_cursor_interpolation() {
+        use lightyear::interpolation::prelude::InterpolationRegistry;
+        use lightyear::prelude::client::ClientPlugins;
+
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+
+        let registry = app.world().resource::<InterpolationRegistry>();
+        assert!(
+            registry.interpolated::<TrackDrive>(),
+            "an interpolated hull's belt speed/phase must be a cursor-time value: TrackDrive \
+             needs an interpolation registration, or the track view reads arrival-fresh state"
+        );
+
+        let start = TrackDrive {
+            throttle: 0.0,
+            steer: -1.0,
+            sides: [
+                TrackDriveSide {
+                    speed: 2.0,
+                    phase: 10.0,
+                },
+                TrackDriveSide {
+                    speed: -4.0,
+                    phase: 6.0,
+                },
+            ],
+        };
+        let end = TrackDrive {
+            throttle: 1.0,
+            steer: 1.0,
+            sides: [
+                TrackDriveSide {
+                    speed: 6.0,
+                    phase: 30.0,
+                },
+                TrackDriveSide {
+                    speed: 0.0,
+                    phase: 8.0,
+                },
+            ],
+        };
+        let mid = registry.interpolate(start, end, 0.5);
+        assert_eq!(
+            mid,
+            TrackDrive {
+                throttle: 0.5,
+                steer: 0.0,
+                sides: [
+                    TrackDriveSide {
+                        speed: 4.0,
+                        phase: 20.0,
+                    },
+                    TrackDriveSide {
+                        speed: -2.0,
+                        phase: 7.0,
+                    },
+                ],
+            },
+            "component-wise linear midpoint, belt phase carried in f64"
+        );
+    }
 
     #[test]
     fn public_servo_angles_drive_remote_tanks() {

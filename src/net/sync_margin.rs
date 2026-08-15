@@ -33,8 +33,9 @@
 //!
 //! # Downlink (the interpolation timeline)
 //!
-//! `net::interp_delay` writes the delay law `min_delay = rtt/2 + (Q_p − min) + one send interval`
-//! from this estimator every frame. The Gaussian margin chain on top is therefore ZEROED here
+//! `net::interp_delay` writes the fused delay law (its module doc — the spread pays only its
+//! excess beyond the extrapolation horizon) from this estimator every frame. The Gaussian margin
+//! chain on top is therefore ZEROED here
 //! (`jitter_multiple = 0`) — the quantile subsumes it — keeping the structural half-tick floor
 //! (per-tick keyframes put the cursor's phase against arrival uniform over one interval; the floor
 //! carries that distribution's mean).
@@ -71,12 +72,13 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
-use lightyear::interpolation::timeline::InterpolationConfig;
+use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{InputTimelineConfig, Interpolated, SyncConfig, SyncSystems};
+use lightyear::prelude::{InputTimelineConfig, Interpolated, IsSynced, SyncConfig, SyncSystems};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
+use crate::state::AppState;
 use crate::tank::Controlled;
 
 /// Half of one content interval, in ticks — the mean of the uniform phase between per-tick content
@@ -110,6 +112,13 @@ fn ring_cap() -> usize {
 /// within seconds.
 const SPIKE_WINDOW: Duration = Duration::from_secs(2);
 
+/// Warmup ring floor: one full spike window of per-tick samples (2 s × 64 Hz = 128). The
+/// distribution is valid only once the window is full ([`ArrivalStats::warmed`]) — below either
+/// bound the quantile still reads the connect transient.
+fn warmup_ring_floor() -> usize {
+    (SPIKE_WINDOW.as_secs_f64() * TICK_RATE_HZ) as usize
+}
+
 /// Log-rate guard, not a term of the law: the margins follow the estimator continuously, so an
 /// unconditional log is per-frame spam.
 const LOG_STEP: Duration = Duration::from_millis(2);
@@ -122,6 +131,9 @@ pub(super) struct ArrivalStats {
     q50_s: f64,
     qp_s: f64,
     pub(super) samples: u64,
+    /// The distribution left warmup: the spike window holds a full [`SPIKE_WINDOW`] of samples
+    /// AND the ring holds ≥ [`warmup_ring_floor`] of them.
+    warmed: bool,
 }
 
 impl ArrivalStats {
@@ -143,7 +155,12 @@ impl ArrivalStats {
         Duration::from_secs_f64((self.q50_s - self.min_s).max(0.0))
     }
 
-    /// A digest with a known `Q_p − min`, for the law tests in sibling modules.
+    /// Whether the distribution is valid for a derived law to consume (see the field).
+    pub(super) fn warmed(&self) -> bool {
+        self.warmed
+    }
+
+    /// A digest with a known `Q_p − min`, past warmup, for the law tests in sibling modules.
     #[cfg(test)]
     pub(super) fn test_spread(spread_s: f64) -> Self {
         Self {
@@ -151,6 +168,16 @@ impl ArrivalStats {
             q50_s: 0.0,
             qp_s: spread_s,
             samples: 1,
+            warmed: true,
+        }
+    }
+
+    /// The same digest still inside warmup, for the arming tests in sibling modules.
+    #[cfg(test)]
+    pub(super) fn test_cold_spread(spread_s: f64) -> Self {
+        Self {
+            warmed: false,
+            ..Self::test_spread(spread_s)
         }
     }
 }
@@ -219,11 +246,21 @@ impl ArrivalDelay {
         let ip = index(quantile_p());
         let (_, qp, _) = scratch.select_nth_unstable_by(ip, f64::total_cmp);
         let qp_s = *qp;
+        // Warmed = the newest sample lies a full spike window past the first-ever sample (the
+        // window has evicted once, so it holds its whole 2 s) and the ring holds one window's
+        // worth of per-tick samples.
+        let warmed = self.ring.len() >= warmup_ring_floor()
+            && self.epoch.zip(self.window.back()).is_some_and(
+                |((epoch_secs, _), (newest_at, _))| {
+                    newest_at - epoch_secs >= SPIKE_WINDOW.as_secs_f64()
+                },
+            );
         self.stats = ArrivalStats {
             min_s,
             q50_s,
             qp_s,
             samples: self.samples,
+            warmed,
         };
     }
 
@@ -255,13 +292,21 @@ impl ArrivalDelay {
 }
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
-/// ping estimator never reads.
+/// ping estimator never reads. Samples enter ONLY while BOTH hold: `AppState::Playing` is active
+/// AND an `IsSynced<InterpolationTimeline>` entity exists — connect/loading-phase arrivals carry
+/// client load stalls, not path delay, and each one evicted at ring capacity swings the delay law
+/// into a resync.
 fn record_packet_arrival(
     event: On<PacketReceived>,
     time: Res<Time<Real>>,
     tick: Res<TickDuration>,
+    state: Res<State<AppState>>,
+    synced: Query<(), With<IsSynced<InterpolationTimeline>>>,
     mut estimator: ResMut<ArrivalDelay>,
 ) {
+    if *state.get() != AppState::Playing || synced.is_empty() {
+        return;
+    }
     estimator.record(
         time.elapsed_secs_f64(),
         event.remote_tick,
@@ -466,13 +511,17 @@ fn derive_input_margins(
 mod tests {
     use core::time::Duration;
 
-    use lightyear::core::tick::Tick;
-    use lightyear::prelude::SyncConfig;
+    use bevy::prelude::{App, Real, State, Time};
+    use lightyear::core::tick::{Tick, TickDuration};
+    use lightyear::interpolation::timeline::InterpolationTimeline;
+    use lightyear::prelude::{IsSynced, SyncConfig};
+    use lightyear_transport::plugin::PacketReceived;
 
     use super::{
         ArrivalDelay, ArrivalStats, derived_input_sync, derived_interp_sync, fixed_input_sync,
-        fixed_interp_sync, quantile_p, ring_cap,
+        fixed_interp_sync, quantile_p, record_packet_arrival, ring_cap,
     };
+    use crate::state::AppState;
 
     /// The game's fixed tick (64 Hz), spelled out: these tests pin the arithmetic independently of
     /// any runtime binding.
@@ -501,6 +550,7 @@ mod tests {
             q50_s: q50_ms / 1000.0,
             qp_s: qp_ms / 1000.0,
             samples: 1,
+            warmed: true,
         }
     }
 
@@ -574,6 +624,95 @@ mod tests {
             spread >= 100.0,
             "1 ms/packet accumulation over the 2 s min window must show ≥ ~128 ms of spread \
              (got {spread} ms)"
+        );
+    }
+
+    /// THE WARMUP GATE NEEDS BOTH BOUNDS: a full spike window of elapsed samples AND a full
+    /// window's worth in the ring (128 = 2 s × 64 Hz). Per-tick feeding crosses both at the same
+    /// boundary (129 samples span exactly 2 s); the sparse series passes the span but not the
+    /// ring, the dense series the ring but not the span — dropping either bound reds its case,
+    /// and dropping the gate entirely (always-warmed) reds all three cold cases.
+    #[test]
+    fn the_distribution_warms_only_on_a_full_window_and_ring() {
+        assert!(
+            !fed((0..128).map(|_| 0.0)).stats.warmed(),
+            "128 per-tick samples span 1.98 s — the window is not yet full"
+        );
+        assert!(
+            fed((0..129).map(|_| 0.0)).stats.warmed(),
+            "129 per-tick samples span exactly the 2 s window with a full ring"
+        );
+        // Sparse: two-tick spacing spans 3.1 s but holds only 100 samples.
+        let mut sparse = ArrivalDelay::default();
+        for i in 0..100_u32 {
+            sparse.record(
+                f64::from(i) * 2.0 * TICK_SECS,
+                Tick(1_000 + 2 * i),
+                TICK_SECS,
+            );
+        }
+        sparse.refresh(&mut Vec::new());
+        assert!(
+            !sparse.stats.warmed(),
+            "a 3 s span with a short ring is still warmup"
+        );
+        // Dense: 5 ms arrivals fill the ring inside 0.7 s.
+        let mut dense = ArrivalDelay::default();
+        for i in 0..140_u32 {
+            dense.record(f64::from(i) * 0.005, Tick(1_000 + i), TICK_SECS);
+        }
+        dense.refresh(&mut Vec::new());
+        assert!(
+            !dense.stats.warmed(),
+            "a full ring inside a short span is still warmup"
+        );
+    }
+
+    /// THE RECORDING GATE IS Playing ∧ IsSynced<InterpolationTimeline>: an arrival while either
+    /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
+    /// `record_packet_arrival` (or either conjunct) — the matching pre-gate trigger records and
+    /// its zero-count assertion reds; the final trigger pins that the gated path still records.
+    #[test]
+    fn pre_gate_arrivals_never_enter_the_estimator() {
+        let mut app = App::new();
+        app.insert_resource(TickDuration(TICK));
+        app.insert_resource(State::new(AppState::Loading));
+        app.init_resource::<Time<Real>>();
+        app.init_resource::<ArrivalDelay>();
+        app.add_observer(record_packet_arrival);
+        let transport = app.world_mut().spawn_empty().id();
+        let arrive = |app: &mut App, tick: u32| {
+            app.world_mut().trigger(PacketReceived {
+                entity: transport,
+                remote_tick: Tick(tick),
+            });
+            app.world_mut().flush();
+            app.world().resource::<ArrivalDelay>().samples
+        };
+        assert_eq!(
+            arrive(&mut app, 1_000),
+            0,
+            "loading ∧ unsynced never records"
+        );
+        app.insert_resource(State::new(AppState::Playing));
+        assert_eq!(
+            arrive(&mut app, 1_001),
+            0,
+            "playing without a synced interpolation timeline never records"
+        );
+        app.insert_resource(State::new(AppState::Loading));
+        app.world_mut()
+            .spawn(IsSynced::<InterpolationTimeline>::default());
+        assert_eq!(
+            arrive(&mut app, 1_002),
+            0,
+            "a synced timeline outside Playing never records"
+        );
+        app.insert_resource(State::new(AppState::Playing));
+        assert_eq!(
+            arrive(&mut app, 1_003),
+            1,
+            "playing ∧ synced records — the observer stays live"
         );
     }
 

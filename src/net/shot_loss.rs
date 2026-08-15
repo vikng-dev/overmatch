@@ -594,9 +594,10 @@ fn collect_client_shells(fire: On<FireShell>, mut shells: ResMut<ClientShells>) 
     }
 }
 
-/// A hidden keyed shell created by the real catch-up armor path. The observer records this before
-/// its later sanctioned bounce re-seeds it, proving the delayed FireEvent did not skip directly to
-/// an ordinary live contact.
+/// A hidden keyed shell created by the catch-up armor path (a spawn fast-forwarded into a
+/// contact). Under the cursor clock the steady delayed-observer link must record NONE: the round
+/// waits in the `CursorQueue` and presents at its own tick, age ~0, at the muzzle — a hold here
+/// means a presentation site aged the shell on the arrival clock again.
 #[derive(Resource, Default)]
 struct ClientCatchUpArmorHolds(Vec<ShotId>);
 
@@ -1321,14 +1322,32 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         bounced.len(),
     );
 
+    // THE CURSOR ABSORBS A STEADY TRANSPORT DELAY. The configured 12-tick raw receive delay used
+    // to force local-clock catch-up spawns (hidden keyed armor holds at the plate); under the
+    // cursor clock the delayed round presents at its own tick, age ~0, at the muzzle — so the
+    // delayed observer must record NO hidden hold. Reverting a presentation site to arrival-clock
+    // aging fast-forwards these shells ~12 ticks (~150 m, past the 125 m plate) and reds this.
+    // Catch-up survives only for a round arriving after its cursor crossing (a loss-repaired
+    // resend), whose seeded-deterministic age on this link stays under the shell's flight to the
+    // plate (RANGE / one tick of flight).
     let observed_catch_up_holds: Vec<_> = observer_catch_up_holds
         .iter()
         .copied()
         .filter(|held| observer_spawned.iter().any(|(shot, _)| shot == held))
         .collect();
     assert!(
-        !observed_catch_up_holds.is_empty(),
-        "the configured delayed observer path produced no MEASURED hidden keyed armor hold"
+        observed_catch_up_holds.is_empty(),
+        "hidden keyed armor hold(s) under a steady delay — a presentation site is aging shells \
+         on the arrival clock again: {observed_catch_up_holds:?}"
+    );
+    let max_spawn_age = observer_spawned
+        .iter()
+        .map(|(_, catch_up)| *catch_up)
+        .max()
+        .unwrap_or(0);
+    println!(
+        "MEASURED delayed-observer spawn ages: {} shells, max catch_up {max_spawn_age} tick(s)",
+        observer_spawned.len(),
     );
 
     // DISCRETE DAMAGE CONFIRMATION: every authority-side damaging shot produces exactly one marker
