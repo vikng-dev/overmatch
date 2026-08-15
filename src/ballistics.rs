@@ -138,9 +138,11 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
     (elapsed <= i32::MAX as u32).then_some(elapsed)
 }
 
-/// DERIVED from the client's default 100-tick rollback window: cosmetic recovery never integrates
-/// farther than simulation can reconcile. A larger authority interval fails closed rather than
-/// drawing a shortened, invented trajectory.
+/// Presentation catch-up bound: a fire fact arrives bearing a server tick behind the client's
+/// presentation cursor, and the cosmetic shell fast-forwards by exactly that elapsed interval —
+/// at most 100 ticks (~1.6 s at 64 Hz, far beyond any honest delivery latency). An older fire
+/// tick is stale or corrupt off the wire and fails closed rather than drawing a shortened,
+/// invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
 /// Reference-mm penetration capability using a DeMarre-shaped mass and speed curve.
