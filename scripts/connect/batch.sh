@@ -1,8 +1,7 @@
 #!/bin/zsh
 # Batch connect-defect verifier — doc §7 (connect hang) + §10 (constant-offset runaway).
 #
-# Runs N headless scripted client connects at 80/10 against a fresh local server per run
-# (fresh server so client/server SPIKE_TRACE files pair 1:1 for scripts/divergence/analyze.py),
+# Runs N headless scripted client connects at 80/10 against a fresh local server per run,
 # classifies each run from its client log, and appends one TSV row per run to $OUT/summary.tsv.
 #
 #   usage: scripts/connect/batch.sh [N=24] [START=1]
@@ -12,8 +11,7 @@
 #
 # Classes: OK | HANG_TIMEOUT_KILLED (external 90 s kill) | HANG_NO_INPUT_SLOT (in-app 40 s
 # watchdog) | ANOMALOUS (nonzero exit without script completion — §7 hangs OS-SIGKILLed
-# before 90 s land here, exit 137). Offset runaway needs the trace post-pass:
-#   uv run scripts/divergence/analyze.py --client $OUT/runN.client.jsonl --server $OUT/runN.server.jsonl
+# before 90 s land here, exit 137).
 set -u
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${OUT:-/tmp/connect-verify}"
@@ -34,7 +32,7 @@ if [ "${LOAD:-0}" = "1" ]; then
 fi
 
 SUMMARY="$OUT/summary.tsv"
-[ -f "$SUMMARY" ] || echo "run\texit\tclass\tconnected\tinput_slot\tscript_complete\twd_timeout\tsnap_lines\trollback_fired\twatchdog_fired\tdur_s\tlast_line" > "$SUMMARY"
+[ -f "$SUMMARY" ] || echo "run\texit\tclass\tconnected\tinput_slot\tscript_complete\twd_timeout\tdur_s\tlast_line" > "$SUMMARY"
 
 for i in $(seq $START $((START + N - 1))); do
   base="$OUT/run$i"
@@ -74,9 +72,6 @@ for i in $(seq $START $((START + N - 1))); do
   slot=$(grep -c "input slot" "$log" || true)
   complete=$(grep -c "simulation script complete" "$log" || true)
   wdto=$(grep -c "watchdog timeout" "$log" || true)
-  snaps=$(grep -c "ROLLBACK-SNAP" "$log" || true)
-  rbfired=$(grep -c "ROLLBACK fired" "$log" || true)
-  wdfired=$(grep -c "watchdog: receive-time" "$log" || true)
   last=$(tail -1 "$log" | cut -c1-160)
 
   if [ $killed -eq 1 ]; then cls=HANG_TIMEOUT_KILLED
@@ -85,7 +80,7 @@ for i in $(seq $START $((START + N - 1))); do
   else cls=ANOMALOUS
   fi
 
-  echo "run$i\t$ec\t$cls\t$connected\t$slot\t$complete\t$wdto\t$snaps\t$rbfired\t$wdfired\t$dur\t$last" >> "$SUMMARY"
+  echo "run$i\t$ec\t$cls\t$connected\t$slot\t$complete\t$wdto\t$dur\t$last" >> "$SUMMARY"
   echo "run$i -> $cls (exit=$ec dur=${dur}s)"
 done
 echo "BATCH DONE -> $SUMMARY"
