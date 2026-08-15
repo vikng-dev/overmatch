@@ -667,6 +667,17 @@ fn a_server_composition_dresses_no_round_at_all() {
         .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
     let tank = tank_q.single(app.world()).expect("one controlled tank");
 
+    // Clear the bore: the map parks a second tank ~17 m down the barrel, and an 88 covers that
+    // inside ONE fixed tick — the round strikes armour and is gone before any sample below can see
+    // it fly. Park the other tank far off the firing line. What a server-composed round CARRIES is
+    // this test's subject; what it hits is not.
+    let world = app.world_mut();
+    let mut others = world
+        .query_filtered::<&mut avian3d::prelude::Position, (With<Tank>, Without<Controlled>)>();
+    for mut position in others.iter_mut(world) {
+        position.0 += Vec3::X * 500.0;
+    }
+
     // BOTH calibres have to actually fly, or the gate is vacuous on the branch that matters: the
     // main gun is the only round that was ever dressed with a scene, the MG the only one with a
     // streak.
