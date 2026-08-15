@@ -688,7 +688,7 @@ pub struct TransmissionAuthoring<'a> {
     pub half_tread_m: f32,
 }
 
-const RPM_TO_RAD: f32 = std::f32::consts::TAU / 60.0;
+pub(crate) const RPM_TO_RAD: f32 = std::f32::consts::TAU / 60.0;
 
 impl TransmissionParams {
     /// Validate and derive runtime parameters from the one authored transmission shape shared by

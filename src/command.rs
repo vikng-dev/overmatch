@@ -116,7 +116,13 @@ impl ButtonBinding {
         }
     }
 
-    fn just_pressed(&self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+    /// `pub(crate)` for `sfx`: the trigger click reads the device edge directly, because the
+    /// command's `fire_primary` is a latch a fixed tick consumes, not a per-frame edge.
+    pub(crate) fn just_pressed(
+        &self,
+        keys: &ButtonInput<KeyCode>,
+        mouse: &ButtonInput<MouseButton>,
+    ) -> bool {
         match *self {
             Self::Key(key) => keys.just_pressed(key),
             Self::Mouse(button) => mouse.just_pressed(button),

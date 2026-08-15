@@ -257,6 +257,10 @@ fn spawn_camera(mut commands: Commands) {
         // component for the optic's profile and back. That single write is the whole "hide my own
         // tank in the gunner sight" mechanism — see `render_policy`.
         crate::render_policy::CameraProfile::BattlefieldThirdPerson,
+        // WHAT THIS CAMERA HEARS. Every spatial emitter pans and attenuates against this one
+        // listener; the ear gap is the panning width (`sfx::LISTENER_EAR_GAP`), and bevy's default
+        // of 4 m would hard-pan anything closer than that.
+        SpatialListener::new(crate::sfx::LISTENER_EAR_GAP),
         // The HUD reprojects world-anchored labels through this camera.
         HudCamera,
     ));
