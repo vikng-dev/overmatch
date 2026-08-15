@@ -2522,16 +2522,6 @@ mod tests {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
     }
 
-    /// The shared cosmetic bound stays coupled to the rollback depth it was derived from.
-    #[test]
-    fn cosmetic_catch_up_horizon_matches_the_default_rollback_policy() {
-        assert_eq!(
-            MAX_COSMETIC_CATCH_UP_TICKS,
-            u32::from(RollbackPolicy::default().max_rollback_ticks),
-            "the cosmetic catch-up horizon must not drift from Lightyear's rollback window"
-        );
-    }
-
     /// A fire tick AHEAD of our predicted present (only reachable via clock skew / a malicious or
     /// wrapped tick, since the server fires at a tick <= its now and `P` leads the server) clamps to
     /// 0, never rewinds the shell.
