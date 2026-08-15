@@ -8,10 +8,8 @@ use lightyear::prelude::*;
 
 use lightyear::prelude::input::native::NativeBuffer;
 
-use super::protocol::NetTank;
-use crate::ballistics::ShellPath;
 use crate::command::TankCommand;
-use crate::tank::{RemoteServos, Rig, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
+use crate::tank::{RemoteServos, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
 use crate::track::sim::TrackContacts;
 
 /// Log and latch corrupt physics state before Avian consumes it.
@@ -265,65 +263,9 @@ pub(crate) fn log_input_arrival(
     );
 }
 
-/// Periodically log network-tank positions.
-pub(crate) fn log_positions(
-    tanks: Query<(Entity, &Position), With<NetTank>>,
-    mut timer: Local<f32>,
-    time: Res<Time>,
-) {
-    *timer += time.delta_secs();
-    if *timer < 2.0 {
-        return;
-    }
-    *timer = 0.0;
-    for (entity, position) in &tanks {
-        info!("net: {entity} position={:?}", position.0);
-    }
-}
-
 /// Log the first replicated tank marker.
 pub(crate) fn log_connected(add: On<Add, Connected>) {
     info!("client: connected (entity {})", add.entity);
-}
-
-/// Count locally spawned shell/tracer presentation effects.
-pub(crate) fn count_shell_spawns(shells: Query<Entity, Added<ShellPath>>, mut total: Local<u32>) {
-    for entity in &shells {
-        *total += 1;
-        info!("client: SHELL-SPAWN {entity} (total={})", *total);
-    }
-}
-
-/// Per-root previous hull-to-turret offset for child-rig desync diagnostics.
-#[derive(Resource, Default)]
-pub(crate) struct TurretWatch {
-    /// Previous hull-to-turret offset keyed by root.
-    last_relative: std::collections::HashMap<Entity, Vec3>,
-}
-
-/// Log discontinuities in each turret's hull-relative pose, keyed by root.
-pub(crate) fn watch_turret_pose(
-    roots: Query<(Entity, &Rig)>,
-    globals: Query<&GlobalTransform>,
-    mut watch: ResMut<TurretWatch>,
-) {
-    for (root, rig) in &roots {
-        let (Ok(hull), Ok(turret)) = (globals.get(rig.hull), globals.get(rig.turret)) else {
-            continue;
-        };
-        let relative_vec = turret.translation() - hull.translation();
-        if let Some(&previous) = watch.last_relative.get(&root) {
-            let delta = (relative_vec - previous).length();
-            if delta > 0.1 {
-                let relative = relative_vec.length();
-                warn!(
-                    "client: TURRET-DRIFT {root} relative offset moved {delta:.3} m in one tick \
-                     (hull-relative distance now {relative:.3} m) — child rig desynced from root"
-                );
-            }
-        }
-        watch.last_relative.insert(root, relative_vec);
-    }
 }
 
 #[cfg(test)]
