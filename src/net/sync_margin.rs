@@ -44,8 +44,8 @@
 //!
 //! The uplink cannot measure its own arrival at the client, so its margin is the downlink
 //! distribution's spread — the SYMMETRY ASSUMPTION, stated: the measured burst structure (60–70 ms
-//! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions, and the server's
-//! `INPUT-ARRIVAL` instrument (`net::diagnostics`) is the live certifier of this derivation.
+//! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions, and the client's
+//! `FRONTIER` arrival summary (`net::extrapolate`) is the live certifier of this derivation.
 //! The objective's terms:
 //!
 //! - `jitter_margin` (coverage) = the half-tick content-phase floor + `(Q_p − Q_50)/tick` — the

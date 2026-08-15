@@ -1,48 +1,21 @@
 //! View-layer combat feedback for network clients.
 //!
-//! The player's own replicated [`NetCrew`] drives incoming-hit kick and damage flash. An
-//! owner-private, deduplicated [`DamageReceipt`] drives the outgoing hit marker. Neither path writes
-//! simulation state or feeds aim: camera kick modifies rendered `GlobalTransform` only, and
-//! [`stabilize_camera_pose`] restores it before `Update` readers consume the camera pose.
-//!
-//! Being-hit presents at ARRIVAL by default (reaction time). Under `OVERMATCH_CURSOR_HIT_FEEL=1`
-//! ([`CursorHitFeel`], read once in `net::client`) the own cue instead rides the same
-//! [`CursorQueue`] release-on-crossing rule as fire announcements: held at arrival with the hit's
-//! authority tick (the snapshot's replicon confirmation resolved through the checkpoint map — the
-//! same resolution lightyear's own registry uses), presented when the interpolation cursor crosses
-//! it, in sync with the interpolated motion of the hit. An unresolvable tick or an unsynced cursor
-//! presents at arrival, exactly as with the lever unset.
+//! The player's own replicated [`NetCrew`] drives the damage flash. An owner-private, deduplicated
+//! [`DamageReceipt`] drives the outgoing hit marker. Neither path writes simulation state or feeds
+//! aim. Being-hit presents at ARRIVAL (reaction time).
 
 use bevy::prelude::*;
-use bevy_replicon::client::confirm_history::ConfirmHistory;
-use lightyear::core::tick::Tick;
-use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::client::Remote;
-use lightyear::prelude::{Connected, IsSynced, NetworkTimeline, ReplicationCheckpointMap};
 
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
-use crate::camera::CameraKickApplied;
 use crate::damage::{CrewStation, TankVolumes};
-use crate::hud::HudCamera;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
-use super::cursor_queue::CursorQueue;
 use super::protocol::{DamageReceipt, NetCrew, health_bearing_volumes};
 
 // --- Feel dials (all in ONE place) -----------------------------------------------------------
-/// Camera-kick impulse per hit before severity scaling.
-const KICK_PITCH_RAD: f32 = 0.055;
-const KICK_YAW_RAD: f32 = 0.035;
-const KICK_ROLL_RAD: f32 = 0.030;
-/// Per-axis clamp on the accumulated kick, so a burst of hits jolts hard but never spins the view.
-const KICK_MAX_RAD: f32 = 0.22;
-/// Kick retention per 60 Hz frame; `powf(dt * 60)` makes decay frame-rate independent.
-const KICK_RETAIN: f32 = 0.80;
-/// Below this magnitude the kick is spent and zeroed, so it never lingers as denormal dust.
-const KICK_ZERO_EPS: f32 = 1e-4;
-
 /// A per-volume health drop smaller than this (in HP) is treated as noise, not a hit — guards against
 /// any float churn in the replicated snapshot re-triggering a cue.
 const HIT_EPS_HP: f32 = 0.01;
@@ -51,14 +24,6 @@ const HIT_EPS_HP: f32 = 0.01;
 const CUE_RETAIN: f32 = 0.86;
 /// Below this intensity the flash/marker is fully hidden (and its resource pinned to 0).
 const CUE_ZERO_EPS: f32 = 0.02;
-
-/// The decaying camera-kick offset, in the camera's LOCAL frame: `x` = pitch (up), `y` = yaw, `z` =
-/// roll, all radians. Composed as a post-multiplied rotation on the camera's rendered pose and decayed
-/// to zero between hits — presentation only, see the module doc's leak analysis.
-#[derive(Resource, Default)]
-struct CameraKick {
-    angular: Vec3,
-}
 
 /// Damage-flash intensity ∈ [0, 1]: 1.0 the instant the player's own tank takes a hit, decaying to 0.
 /// Drives the screen-edge red frame's alpha.
@@ -76,48 +41,10 @@ struct HitConfirm(f32);
 #[derive(Event)]
 pub(super) struct LocalHitConfirmed {
     pub receipt: DamageReceipt,
-    /// Client predicted-present tick at the wire receive boundary.
+    /// Client tick at the wire receive boundary.
     pub received_tick: u32,
     /// Authority tick at which this shot first damaged an HP pool.
     pub damage_tick: u32,
-}
-
-/// `OVERMATCH_CURSOR_HIT_FEEL=1`: route the own being-hit cue through the cursor queue. Inserted
-/// once by `net::client`; absent = arrival presentation, bit-identical.
-#[derive(Resource, Debug)]
-pub(super) struct CursorHitFeel;
-
-/// One own being-hit cue awaiting its cursor crossing. Severity is fixed at arrival (the HP pools
-/// it reads are arrival state); bearing is re-resolved at release so it reads off the pose actually
-/// presented — and a despawn between hold and release degrades to a bearingless straight kick, the
-/// same fallback the arrival path has.
-#[derive(Debug, Clone, Copy)]
-struct HitCue {
-    root: Entity,
-    volume: Option<Entity>,
-    severity: f32,
-}
-
-/// Held own being-hit cues, released on the cursor crossing ([`CursorQueue`]'s rule).
-#[derive(Resource, Default)]
-struct HeldHitCues(CursorQueue<HitCue>);
-
-/// Where a cue presents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CueRoute {
-    /// Present now, at arrival — the default, and every fallback.
-    Arrival,
-    /// Hold for the cursor crossing of this authority tick.
-    Cursor(Tick),
-}
-
-/// The routing law: the cursor route requires BOTH the lever and a resolved authority tick.
-/// Pure, so the gate is testable without a live replication session.
-fn cue_route(lever: bool, tick: Option<Tick>) -> CueRoute {
-    match (lever, tick) {
-        (true, Some(tick)) => CueRoute::Cursor(tick),
-        _ => CueRoute::Arrival,
-    }
 }
 
 /// Remembered health and occupant identity. Occupant changes distinguish crew moves from damage.
@@ -155,35 +82,18 @@ struct DamageFlashNode;
 struct HitConfirmNode;
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<CameraKick>()
-        .init_resource::<DamageFlash>()
+    app.init_resource::<DamageFlash>()
         .init_resource::<HitConfirm>()
-        .init_resource::<HeldHitCues>()
         .add_observer(on_local_hit_confirmed)
-        .add_observer(clear_held_cues_on_connect)
         .add_systems(Startup, spawn_cue_ui)
         .add_systems(
             Update,
             (
                 arm_health_memory,
                 detect_health_drops.after(arm_health_memory),
-                release_held_hit_cues.after(detect_health_drops),
                 drive_damage_flash,
                 drive_hit_confirm.after(super::client::receive_damage_confirms),
             ),
-        )
-        // Restore the camera's rendered pose to its un-kicked truth at the head of the frame, BEFORE
-        // any `Update` reader (notably `aim::commit_aim`) turns the camera pose into committed aim.
-        .add_systems(PreUpdate, stabilize_camera_pose)
-        // Apply the kick to the rendered pose AFTER both camera placements have set it. `.after`
-        // both the gunner set (itself after `Propagate`) and `Propagate` directly, because in
-        // commander view the gunner set is empty and only the `Propagate` edge is load-bearing.
-        .add_systems(
-            PostUpdate,
-            apply_camera_kick
-                .in_set(CameraKickApplied)
-                .after(crate::camera::GunnerCameraPlaced)
-                .after(TransformSystems::Propagate),
         );
 }
 
@@ -203,36 +113,22 @@ fn arm_health_memory(
 
 /// Diff every changed `NetCrew` against its remembered snapshot and raise the being-hit cue on any
 /// per-volume DROP (an increase — a respawn's health reset — raises nothing). The player's own
-/// (`Controlled`) tank drives the being-hit cue (camera kick + screen flash). Opponent deltas are state
+/// (`Controlled`) tank drives the being-hit cue (damage flash). Opponent deltas are state
 /// only and raise no marker: the discrete, attributed [`LocalHitConfirmed`] path owns that semantic.
 fn detect_health_drops(
     mut tanks: Query<
-        (
-            Entity,
-            &TankVolumes,
-            &NetCrew,
-            &mut HealthMemory,
-            Has<Controlled>,
-        ),
+        (&TankVolumes, &NetCrew, &mut HealthMemory, Has<Controlled>),
         (With<Remote>, Changed<NetCrew>),
     >,
     health: Query<&ComponentHealth>,
-    transforms: Query<&GlobalTransform>,
-    // The cursor route (`OVERMATCH_CURSOR_HIT_FEEL=1`): the hit's authority tick is the snapshot's
-    // replicon confirmation resolved through the checkpoint map — lightyear's own resolution.
-    lever: Option<Res<CursorHitFeel>>,
-    checkpoints: Option<Res<ReplicationCheckpointMap>>,
-    confirms: Query<&ConfirmHistory>,
-    mut held: ResMut<HeldHitCues>,
-    mut kick: ResMut<CameraKick>,
     mut flash: ResMut<DamageFlash>,
 ) {
-    for (root, volumes, net, mut memory, is_own) in &mut tanks {
+    for (volumes, net, mut memory, is_own) in &mut tanks {
         // The per-volume snapshot (HP + occupant) in the SAME health-bearing order the server published
         // (index i ↔ volume). `Changed<NetCrew>` also fires each tick a swap countdown ticks AND on the
         // tick a swap COMPLETES — when the two seats' HP transpose. `worst_drop` discounts any slot
-        // whose occupant changed, so a completing swap raises no false cue on either the owner (a
-        // camera kick + damage flash). Opponent state deltas never own hit-confirm event count.
+        // whose occupant changed, so a completing swap raises no false cue on the owner. Opponent
+        // state deltas never own hit-confirm event count.
         let slots = slot_memory(net);
         let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
         // A transient length skew while the rig is still spawning: resync memory, diff nothing.
@@ -246,89 +142,15 @@ fn detect_health_drops(
         let worst = worst_drop(&memory.0, &slots);
         memory.0 = slots;
 
-        let Some((worst_index, drop_hp)) = worst else {
+        let Some((_, drop_hp)) = worst else {
             continue;
         };
-        let worst_volume = bearers.get(worst_index).copied();
 
         if is_own {
-            // Severity from the worst volume's share of its own pool; a light chip barely nudges, a
-            // heavy penetration jolts hard.
-            let severity = worst_volume
-                .and_then(|v| health.get(v).ok())
-                .map(|hp| (drop_hp / hp.max.max(1.0)).clamp(0.0, 1.0))
-                .unwrap_or(0.5);
-            let hit_tick = checkpoints
-                .as_deref()
-                .zip(confirms.get(root).ok())
-                .and_then(|(map, confirm)| map.get(confirm.last_tick()));
-            match cue_route(lever.is_some(), hit_tick) {
-                CueRoute::Cursor(tick) => {
-                    held.0.hold(
-                        tick,
-                        HitCue {
-                            root,
-                            volume: worst_volume,
-                            severity,
-                        },
-                    );
-                    info!(
-                        "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity \
-                         {severity:.2}) HELD for cursor crossing of tick {}",
-                        tick.0
-                    );
-                }
-                CueRoute::Arrival => {
-                    let bearing = worst_volume.and_then(|v| hit_bearing(&transforms, root, v));
-                    add_camera_kick(&mut kick, severity, bearing);
-                    flash.0 = 1.0;
-                    info!(
-                        "hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp (severity \
-                         {severity:.2}, bearing {bearing:?}) → camera kick + damage flash"
-                    );
-                }
-            }
+            flash.0 = 1.0;
+            info!("hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp → damage flash");
         }
     }
-}
-
-/// Release held being-hit cues at their cursor crossing — the same clock comparison fire
-/// announcements release on. No synced cursor → present at arrival ([`CursorQueue::release_all`]),
-/// exactly the pre-lever behavior. With the lever unset the queue is never fed, this early-returns
-/// every frame, and nothing downstream can differ.
-fn release_held_hit_cues(
-    mut held: ResMut<HeldHitCues>,
-    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
-    transforms: Query<&GlobalTransform>,
-    mut kick: ResMut<CameraKick>,
-    mut flash: ResMut<DamageFlash>,
-) {
-    let due = match cursors.single() {
-        Ok(timeline) => held
-            .0
-            .release(timeline.tick(), f64::from(timeline.overstep().to_f32())),
-        Err(_) => held.0.release_all(),
-    };
-    for (tick, cue) in due {
-        // Bearing off the pose actually presented at release; a despawned root/volume degrades to
-        // the bearingless straight kick.
-        let bearing = cue
-            .volume
-            .and_then(|volume| hit_bearing(&transforms, cue.root, volume));
-        add_camera_kick(&mut kick, cue.severity, bearing);
-        flash.0 = 1.0;
-        info!(
-            "hit-feel: held OWN hit cue released at cursor crossing of tick {} (severity {:.2}, \
-             bearing {bearing:?}) → camera kick + damage flash",
-            tick.0, cue.severity
-        );
-    }
-}
-
-/// A (re)connect voids every held cue: its ticks belong to the previous session's timeline, and
-/// its entities to the previous session's replication.
-fn clear_held_cues_on_connect(_connected: On<Add, Connected>, mut held: ResMut<HeldHitCues>) {
-    held.0.clear();
 }
 
 /// Pulse the centre marker from the discrete authoritative fact. This is deliberately separate from
@@ -386,71 +208,6 @@ fn worst_drop(prev: &[SlotMemory], now: &[SlotMemory]) -> Option<(usize, f32)> {
         }
     }
     worst
-}
-
-/// The struck volume's lateral position in the tank ROOT's local frame, `+` = struck on the right —
-/// the bearing the camera kick leans into. Computed as the volume's world position mapped through the
-/// root's inverse world transform, so it is correct whatever way the hull faces. `None` if either
-/// pose is unavailable (a kick with no bearing is still a straight pitch-up punch).
-fn hit_bearing(transforms: &Query<&GlobalTransform>, root: Entity, volume: Entity) -> Option<f32> {
-    let root_gt = transforms.get(root).ok()?;
-    let volume_gt = transforms.get(volume).ok()?;
-    let local = root_gt
-        .affine()
-        .inverse()
-        .transform_point3(volume_gt.translation());
-    Some(local.x)
-}
-
-/// Add a hit's kick impulse to the accumulated offset, bearing-aware, clamped per axis. A pitch-up
-/// punch always; yaw/roll lean toward the struck side when a bearing is known.
-fn add_camera_kick(kick: &mut CameraKick, severity: f32, bearing: Option<f32>) {
-    let scale = 0.6 + severity; // never a nothing-kick, harder with severity
-    let side = bearing.map(f32::signum).unwrap_or(0.0);
-    kick.angular.x = (kick.angular.x + KICK_PITCH_RAD * scale).clamp(-KICK_MAX_RAD, KICK_MAX_RAD);
-    kick.angular.y =
-        (kick.angular.y + KICK_YAW_RAD * scale * -side).clamp(-KICK_MAX_RAD, KICK_MAX_RAD);
-    kick.angular.z =
-        (kick.angular.z + KICK_ROLL_RAD * scale * side).clamp(-KICK_MAX_RAD, KICK_MAX_RAD);
-}
-
-/// Restore the camera's rendered `GlobalTransform` to its un-kicked `Transform` at the head of the
-/// frame — see the module doc. The camera is parentless, so `GlobalTransform == Transform` is the
-/// invariant truth; writing it here can only remove last frame's kick, never corrupt the pose. Runs
-/// before `Update`, so `aim::commit_aim` and the world-anchored HUD read the stable pose.
-fn stabilize_camera_pose(camera: Single<(&Transform, &mut GlobalTransform), With<HudCamera>>) {
-    let (transform, mut global) = camera.into_inner();
-    *global = GlobalTransform::from(*transform);
-}
-
-/// Decay the kick and displace the camera's rendered pose by it. Writes ONLY `GlobalTransform`; the
-/// leak analysis is in the module doc. Post-multiplying the offset rotation keeps the kick in the
-/// camera's local frame (pitch about local X, etc.).
-fn apply_camera_kick(
-    time: Res<Time<Real>>,
-    mut kick: ResMut<CameraKick>,
-    camera: Single<&mut GlobalTransform, With<HudCamera>>,
-) {
-    let retain = KICK_RETAIN.powf(time.delta_secs() * 60.0);
-    kick.angular *= retain;
-    if kick.angular.length() <= KICK_ZERO_EPS {
-        kick.angular = Vec3::ZERO;
-        return; // nothing to apply — the stabilized pose already holds
-    }
-
-    let mut global = camera.into_inner();
-    let (scale, rotation, translation) = global.to_scale_rotation_translation();
-    let offset = Quat::from_euler(
-        EulerRot::YXZ,
-        kick.angular.y,
-        kick.angular.x,
-        kick.angular.z,
-    );
-    *global = GlobalTransform::from(Transform {
-        translation,
-        rotation: (rotation * offset).normalize(),
-        scale,
-    });
 }
 
 /// Spawn the two cue overlays once. The damage frame is a hollow full-screen red border; the
@@ -520,98 +277,7 @@ fn drive_hit_confirm(
 
 #[cfg(test)]
 mod tests {
-    use bevy::ecs::system::RunSystemOnce;
-    use lightyear::core::time::TickInstant;
-
     use super::*;
-
-    /// THE CURSOR ROUTE REQUIRES BOTH THE LEVER AND A RESOLVED TICK — lever unset routes to
-    /// arrival whatever the tick (the bit-identity half), and the lever with an unresolvable tick
-    /// falls back to arrival rather than dropping or guessing. Weakening either conjunct reds a
-    /// case.
-    #[test]
-    fn the_cursor_lever_routes_an_own_hit_to_the_queue_only_with_a_resolvable_tick() {
-        assert_eq!(cue_route(false, Some(Tick(42))), CueRoute::Arrival);
-        assert_eq!(cue_route(false, None), CueRoute::Arrival);
-        assert_eq!(cue_route(true, None), CueRoute::Arrival);
-        assert_eq!(cue_route(true, Some(Tick(42))), CueRoute::Cursor(Tick(42)));
-    }
-
-    fn cue_world() -> World {
-        let mut world = World::new();
-        world.init_resource::<HeldHitCues>();
-        world.init_resource::<CameraKick>();
-        world.init_resource::<DamageFlash>();
-        world
-    }
-
-    fn hold_cue(world: &mut World, tick: Tick) {
-        let root = world.spawn_empty().id();
-        world.resource_mut::<HeldHitCues>().0.hold(
-            tick,
-            HitCue {
-                root,
-                volume: None,
-                severity: 1.0,
-            },
-        );
-    }
-
-    /// A HELD HIT CUE PRESENTS EXACTLY AT THE CURSOR CROSSING: a cursor short of the tick holds
-    /// (no kick, no flash), the crossing releases (kick + flash fire). Releasing early, or never,
-    /// reds one half.
-    #[test]
-    fn a_held_hit_cue_presents_exactly_at_the_cursor_crossing() {
-        let mut world = cue_world();
-        hold_cue(&mut world, Tick(100));
-        let mut timeline = InterpolationTimeline::default();
-        timeline.set_now(TickInstant::from(Tick(99)));
-        let cursor = world
-            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()))
-            .id();
-        world
-            .run_system_once(release_held_hit_cues)
-            .expect("release runs");
-        assert_eq!(
-            world.resource::<DamageFlash>().0,
-            0.0,
-            "a cursor short of the hit tick holds the cue",
-        );
-        assert_eq!(world.resource::<CameraKick>().angular, Vec3::ZERO);
-
-        world
-            .get_mut::<InterpolationTimeline>(cursor)
-            .expect("cursor timeline")
-            .set_now(TickInstant::from(Tick(100)));
-        world
-            .run_system_once(release_held_hit_cues)
-            .expect("release runs");
-        assert_eq!(
-            world.resource::<DamageFlash>().0,
-            1.0,
-            "the crossing presents the flash",
-        );
-        assert!(
-            world.resource::<CameraKick>().angular.x > 0.0,
-            "the crossing presents the kick",
-        );
-    }
-
-    /// WITH NO SYNCED CURSOR HELD CUES PRESENT AT ARRIVAL — the `release_all` fallback, the same
-    /// no-cursor rule fire announcements follow. Holding forever without a cursor reds this.
-    #[test]
-    fn with_no_synced_cursor_held_cues_present_at_arrival() {
-        let mut world = cue_world();
-        hold_cue(&mut world, Tick(1_000));
-        world
-            .run_system_once(release_held_hit_cues)
-            .expect("release runs");
-        assert_eq!(
-            world.resource::<DamageFlash>().0,
-            1.0,
-            "no cursor: the cue presents immediately",
-        );
-    }
 
     /// Build a snapshot of module slots (no occupant) with the given HP — the fixture for the plain
     /// HP-diff tests, where occupancy never changes so only the HP delta matters.
@@ -676,8 +342,8 @@ mod tests {
 
     #[test]
     fn picks_the_largest_drop_and_its_index() {
-        // Volume 0 chips by 5, volume 2 by 40 — the worst is volume 2, and it is what the bearing
-        // reads off. Volume 1 rose and is ignored.
+        // Volume 0 chips by 5, volume 2 by 40 — the worst is volume 2. Volume 1 rose and is
+        // ignored.
         let (index, drop) = worst_drop(
             &modules(&[100.0, 30.0, 80.0]),
             &modules(&[95.0, 60.0, 40.0]),
@@ -724,31 +390,5 @@ mod tests {
         let (index, drop) = worst_drop(&a, &b).unwrap();
         assert_eq!(index, 0);
         assert!((drop - 60.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn a_kick_leans_toward_the_struck_side_and_clamps() {
-        // Camera-local +yaw turns left, so a right-side (+bearing) hit yaws right (negative) and
-        // rolls right (positive); the left side is its literal inverse.
-        let mut kick = CameraKick::default();
-        add_camera_kick(&mut kick, 1.0, Some(2.0));
-        assert!(kick.angular.x > 0.0, "always a pitch-up punch");
-        assert!(kick.angular.y < 0.0, "right-side hit yaws the camera right");
-        assert!(
-            kick.angular.z > 0.0,
-            "right-side hit rolls the camera right"
-        );
-        let mut left = CameraKick::default();
-        add_camera_kick(&mut left, 1.0, Some(-2.0));
-        assert!(left.angular.y > 0.0, "left-side hit yaws the camera left");
-        assert!(left.angular.z < 0.0, "left-side hit rolls the camera left");
-        for _ in 0..50 {
-            add_camera_kick(&mut kick, 1.0, Some(2.0));
-        }
-        assert!(kick.angular.x <= KICK_MAX_RAD + 1e-6, "pitch stays clamped");
-        assert!(
-            kick.angular.y.abs() <= KICK_MAX_RAD + 1e-6,
-            "yaw stays clamped"
-        );
     }
 }

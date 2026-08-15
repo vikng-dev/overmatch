@@ -226,7 +226,8 @@ entities (rollback.rs:583). `InputDelayConfig::balanced()` at LAN/loopback RTT a
 into input delay → zero prediction margin → the client sits level with the server → every update
 skips → state rollback permanently, silently dead. Measured: 35–50 m divergence with fresh
 authority arriving and **zero rollbacks**; 3,296 skip-trace lines in one run; the falsifier
-`SPIKE_INPUT_DELAY_TICKS=0` capped divergence at 0.015–0.57 m. Fixed by `src/net/watchdog.rs`
+`SPIKE_INPUT_DELAY_TICKS=0` capped divergence at 0.015–0.57 m *(lever deleted with the
+prediction machinery, 2026-08-15 — ADR-0037)*. Fixed by `src/net/watchdog.rs`
 (forced-rollback backstop). **Methodology consequence:** lat0 rollback counts from pre-watchdog
 builds measured check starvation, not convergence — invalid as an A/B metric. lat0 |Δp| tick-row
 divergence remains valid.
@@ -258,7 +259,8 @@ The §2 contact-restore row and §5's ranked term #2 both carried the pre-shield
 shield landed (33cc4e4). Nobody had re-measured after the shield. This section is that
 measurement. Binary built from `src/` as of 0fa6cd8 — the last commit touching it; the commits
 after it are docs and editor config (shield 33cc4e4 and probe reclassification 8a08d60
-both in). Same harness as the original: server `SPIKE_PERTURB=0`, client `SPIKE_SIM_LONG=1
+both in). Same harness as the original *(`SPIKE_PERTURB` deleted 2026-08-15 — ADR-0037)*:
+server `SPIKE_PERTURB=0`, client `SPIKE_SIM_LONG=1
 SPIKE_SIMULATE_INPUT=1` (the ~20 s dead-straight course crossing the bump z≈−70 and washboard
 z≈−82…−90), each of `SPIKE_LATENCY_MS=0` and `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10`. Metric
 identical to the original: fraction of client `tick` rows with `rp=true` where `hc==0` — the
@@ -285,7 +287,7 @@ the discriminating metric the original methodology lacked:
   (gnd=0, p.y≈1.5, falling) or wheel-borne (gnd=16, hull just clear of the ground) — states where
   hc=0 is the correct reading (cf. e12a07b, "hc=0 on every wheel-borne row"). hc=1 appears exactly
   when the hull is actually on the ground.
-- **Attachment healed (`SPIKE_CONTACT_PROBE`, 3505 lines, lat0).** The proxy's root-relative
+- **Attachment healed (`SPIKE_CONTACT_PROBE` — module deleted 2026-08-15, ADR-0037; 3505 lines, lat0).** The proxy's root-relative
   offset `cto` is constant; `leaf_dvg`/`tleaf_dvg` = 0.000000 throughout; no proxy levitation —
   the 2.8 m ratchet the poison produced is gone. The BVH-stomp and zombie-pair suspects stay
   exonerated.
@@ -463,6 +465,10 @@ only in a traced run):
    carry. `--json` emits the rates/tally as a machine payload for A/B scripting.
 
 ### How to run it
+
+*(2026-08-15: `SPIKE_PERTURB` and the rollback it forced were deleted with the prediction
+machinery — ADR-0037. This recipe runs as written only at pre-demolition revisions; the
+divergence doctrine itself, and the deferred state-hash/seeded-replay decision, stand.)*
 
 Same harness as §6 (server `SPIKE_PERTURB=0` + headless scripted client, `SPIKE_TRACE` both
 ends — role-suffixed files; avoid `SPIKE_LATENCY_MS=0`, the §7 connect hang). Direct binary runs

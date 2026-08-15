@@ -42,7 +42,7 @@ want() { [[ " ${SCENARIOS[*]} " == *" $1 "* ]]; }
 start_server() {
   local base="$1"; shift
   rm -f "$OUT/$base.server.jsonl" "$OUT/$base.server.log"
-  env "$@" SPIKE_PERTURB=0 SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
+  env "$@" SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" \
     BEVY_ASSET_ROOT="$REPO" "$SERVER" > "$OUT/$base.server.log" 2>&1 &
   SERVER_PID=$!
   local t

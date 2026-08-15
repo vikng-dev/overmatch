@@ -50,7 +50,8 @@ solo divergence, ranked:
    replayed tick (hc=0 on 55% of replayed ticks at 80 ms/10 ms jitter, 98.4% at lat0, with Δlv
    exactly −g·dt = 0.1533 m/s vertical at k=1 while pose restore is near-exact, |Δp| p50 1.5 mm)",
    read as a self-feeding engine in hull-contact states, felt as "the hull-stuck tank never
-   settles". *(superseded 2026-07-06 by the `SPIKE_CONTACT_PROBE` reclassification (8a08d60),
+   settles". *(superseded 2026-07-06 by the `SPIKE_CONTACT_PROBE` reclassification (8a08d60;
+   probe module deleted 2026-08-15 — ADR-0037),
    retired by the `AuthoredLocalTransform` shield (33cc4e4), re-measured post-shield 2026-07-09.)*
    Two corrections. (a) The mechanism was never a restore defect: it was attachment poisoning —
    child-collider proxies levitating up to 2.8 m above the root, so `hc=0` was avian being honest

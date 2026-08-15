@@ -6,8 +6,7 @@
 //! delay` later. Presenting at arrival therefore desynchronizes announcement from motion by the
 //! whole interpolation delay — an opponent's shot bangs before its hull visibly rocks. This queue
 //! is the scheduling rule that closes the seam: hold the announcement, release it when the cursor
-//! crosses the announcement's tick — the SAME clock comparison `net::recoil_overlay` retires the
-//! own-fire overlay on, with no free constant anywhere (release time IS the crossing).
+//! crosses the announcement's tick, with no free constant anywhere (release time IS the crossing).
 //!
 //! Mechanics, each pinned by a test below:
 //! - an announcement whose tick the cursor has already crossed releases on the same drain (a late
@@ -18,12 +17,11 @@
 //!   entry: every entry leaves on its crossing and the consumer re-resolves it there
 //!   (`net::client`'s resolve path, which already owns the missing-replica case).
 //!
-//! Member classes: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
-//! and — under `crate::FusedOwnFire` — the own echo), and under `OVERMATCH_CURSOR_HIT_FEEL` the
-//! own being-hit cue (`net::hit_feel::HeldHitCues`; default stays at arrival by design — reaction
-//! time). Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
+//! Member class: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
+//! and the fused own echo). The own being-hit cue presents at arrival by design — reaction
+//! time. Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
 //! shell march, whose presentation is already slaved to the shell's own flight and
-//! `crate::PredictedPresent` re-aging (ADR-0021).
+//! `crate::ShotClock` re-aging (ADR-0021).
 
 use std::collections::VecDeque;
 

@@ -1,10 +1,10 @@
 //! The interpolation buffer's EDGE: starvation instruments (always on) and the bounded
-//! extrapolation gap-filler (default ON; `OVERMATCH_EXTRAPOLATE=0` opts out).
+//! extrapolation gap-filler.
 //!
 //! When the interpolation cursor overruns the newest confirmed snapshot, lightyear clamps the
 //! sample to that newest value (`lightyear_interpolation` `registry.rs`, `fraction.clamp(0.0,
 //! 1.0)`) — freeze, then step, with no counter or event anywhere on the path. This module makes
-//! that edge observable and, behind the lever, lawful:
+//! that edge observable and lawful:
 //!
 //! - **Instruments (unconditional, read-only).** Per interpolated hull, every frame the cursor
 //!   sits at/past its newest confirmed `Position` sample is a starved frame; a maximal run of them
@@ -14,8 +14,7 @@
 //!   (fire announcements, damage confirms) for gap∧impulse coincidence.
 //!   A summary line logs every [`SUMMARY_PERIOD_SECS`], on disconnect, and at app exit.
 //!
-//! - **Gap-filler (default ON; `OVERMATCH_EXTRAPOLATE=0` opts out).** Instead of the clamp, hull
-//!   kinematics are
+//! - **Gap-filler.** Instead of the clamp, hull kinematics are
 //!   projected at constant velocity from the newest confirmed `Position`/`Rotation` using the
 //!   live replicated `LinearVelocity`/`AngularVelocity`, up to the derived horizon; past the
 //!   horizon the HORIZON POSE HOLDS — the presentation never reverts to the clamp mid-gap (the
@@ -111,27 +110,16 @@ pub(super) fn horizon() -> Duration {
     Duration::from_secs_f32(horizon_secs())
 }
 
-/// Gap-filler writes armed, default ON. `OVERMATCH_EXTRAPOLATE=0` opts out, leaving this module
-/// instruments only with every presented pose bit-identical to the clamp.
-#[derive(Resource, Debug)]
-pub(super) struct ExtrapolateHulls;
-
-/// Read the lever once, mount the instruments unconditionally.
+/// Mount the gap-filler and the instruments.
 pub(super) fn install(app: &mut App) {
-    if super::harness::env_flag("OVERMATCH_EXTRAPOLATE", true) {
-        info!(
-            "net: hull extrapolation ON (default) — horizon {:.1} ms = \
-             sqrt(2·ε_vis/μg) (ε_vis {:.2} mm, μg {:.2} m/s²), hold at the horizon, \
-             blend w = clamp(residual/v_ref, 1..4 send intervals) [OVERMATCH_EXTRAPOLATE=0 \
-             opts out]",
-            horizon_secs() * 1000.0,
-            EPSILON_VIS_M * 1000.0,
-            a_max(),
-        );
-        app.insert_resource(ExtrapolateHulls);
-    } else {
-        info!("net: hull extrapolation OFF [OVERMATCH_EXTRAPOLATE=0] — buffer-edge clamp");
-    }
+    info!(
+        "net: hull extrapolation — horizon {:.1} ms = \
+         sqrt(2·ε_vis/μg) (ε_vis {:.2} mm, μg {:.2} m/s²), hold at the horizon, \
+         blend w = clamp(residual/v_ref, 1..4 send intervals)",
+        horizon_secs() * 1000.0,
+        EPSILON_VIS_M * 1000.0,
+        a_max(),
+    );
     app.init_resource::<ImpulseTicks>();
     app.init_resource::<FrontierDiag>();
     app.init_resource::<HullEdges>();
@@ -202,7 +190,7 @@ pub(super) struct FrontierDiag {
     gaps: u64,
     /// Gaps with at least one impulse-class tick inside their span.
     coincident: u64,
-    /// Closed gaps that presented extrapolated poses (the lever was armed).
+    /// Closed gaps that presented extrapolated poses.
     extrapolated: u64,
     /// Closed gaps that exceeded the horizon (the horizon pose held for the excess).
     beyond_horizon: u64,
@@ -416,8 +404,6 @@ struct EdgeParams {
     horizon_secs: f32,
     /// One send interval (one tick — the server replicates per tick): the blend window's unit.
     interval_secs: f32,
-    /// The lever: false = instruments only, every verdict is `Lawful`.
-    extrapolate: bool,
 }
 
 /// The blend-window law (module doc DERIVATIONS): `w = clamp(residual/v_ref, 1 interval,
@@ -501,42 +487,36 @@ impl HullEdge {
                     floor,
                     ceil: cursor.0,
                     max_gap_ticks,
-                    extrapolated: params.extrapolate,
+                    extrapolated: true,
                     overran,
                     blend_residual_m: None,
                 };
-                if params.extrapolate {
-                    // Projective velocity blending, on EVERY close: the close frame (α = 0)
-                    // presents the pose the last starved frame showed (held at the horizon when
-                    // the gap overran) — continuity, never a snap — and the blend's projection
-                    // continues from it at the gap's stream velocities.
-                    let age =
-                        projection_age_secs(params, cursor, basis.tick).min(params.horizon_secs);
-                    let (proj_pos, proj_rot) = project(&basis, age);
-                    let residual = proj_pos.distance(lawful.0);
-                    let window_secs = blend_window_secs(params, residual, vel.length());
-                    self.phase = Phase::Blending {
-                        basis: Basis {
-                            tick: cursor.0,
-                            pos: proj_pos,
-                            rot: proj_rot,
-                            vel: basis.vel,
-                            ang: basis.ang,
-                        },
-                        start: cursor,
-                        window_secs,
-                    };
-                    (
-                        Presented::Pose(proj_pos, proj_rot),
-                        Some(ClosedGap {
-                            blend_residual_m: Some(residual),
-                            ..closed
-                        }),
-                    )
-                } else {
-                    self.phase = Phase::Tracking;
-                    (Presented::Lawful, Some(closed))
-                }
+                // Projective velocity blending, on EVERY close: the close frame (α = 0)
+                // presents the pose the last starved frame showed (held at the horizon when
+                // the gap overran) — continuity, never a snap — and the blend's projection
+                // continues from it at the gap's stream velocities.
+                let age = projection_age_secs(params, cursor, basis.tick).min(params.horizon_secs);
+                let (proj_pos, proj_rot) = project(&basis, age);
+                let residual = proj_pos.distance(lawful.0);
+                let window_secs = blend_window_secs(params, residual, vel.length());
+                self.phase = Phase::Blending {
+                    basis: Basis {
+                        tick: cursor.0,
+                        pos: proj_pos,
+                        rot: proj_rot,
+                        vel: basis.vel,
+                        ang: basis.ang,
+                    },
+                    start: cursor,
+                    window_secs,
+                };
+                (
+                    Presented::Pose(proj_pos, proj_rot),
+                    Some(ClosedGap {
+                        blend_residual_m: Some(residual),
+                        ..closed
+                    }),
+                )
             }
             Phase::Blending {
                 basis,
@@ -588,12 +568,8 @@ fn projection_age_secs(params: &EdgeParams, cursor: (Tick, f64), basis_tick: Tic
 }
 
 /// The starved-frame verdict: extrapolate inside the horizon, HOLD the horizon pose beyond it
-/// (and report the overrun — the presentation never reverts to the clamp mid-gap), clamp always
-/// with the lever unset.
+/// (and report the overrun — the presentation never reverts to the clamp mid-gap).
 fn starved_pose(params: &EdgeParams, gap_ticks: f64, basis: &Basis) -> (Presented, bool) {
-    if !params.extrapolate {
-        return (Presented::Lawful, false);
-    }
     let dt = gap_ticks as f32 * params.tick_secs;
     let (pos, rot) = project(basis, dt.min(params.horizon_secs));
     (Presented::Pose(pos, rot), dt > params.horizon_secs)
@@ -615,10 +591,9 @@ impl HullEdges {
     }
 }
 
-/// The edge driver: detect starvation on every interpolated hull (instrument), and under the
-/// lever replace the clamp with the bounded projection / blend-back.
+/// The edge driver: detect starvation on every interpolated hull (instrument), and replace the
+/// clamp with the bounded projection / blend-back.
 fn drive_hull_edges(
-    lever: Option<Res<ExtrapolateHulls>>,
     tick: Res<TickDuration>,
     cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
     mut hulls: Query<
@@ -649,7 +624,6 @@ fn drive_hull_edges(
         tick_secs,
         horizon_secs: horizon_secs(),
         interval_secs: tick_secs,
-        extrapolate: lever.is_some(),
     };
     edges.frame += 1;
     let frame = edges.frame;
@@ -735,12 +709,11 @@ mod tests {
     /// The game's fixed tick (64 Hz), matching `ClientPlugins { tick_duration }` in `net::client`.
     const TICK_SECS: f32 = 1.0 / 64.0;
 
-    fn params(extrapolate: bool) -> EdgeParams {
+    fn params() -> EdgeParams {
         EdgeParams {
             tick_secs: TICK_SECS,
             horizon_secs: horizon_secs(),
             interval_secs: TICK_SECS,
-            extrapolate,
         }
     }
 
@@ -783,8 +756,7 @@ mod tests {
         let mut edge = HullEdge::default();
         let clamp = (newest.1, newest.2);
         // Two ticks of gap: 31.25 ms, inside g* ≈ 52 ms.
-        let (presented, closed) =
-            edge.step(&params(true), (Tick(102), 0.0), newest, vel, ang, clamp);
+        let (presented, closed) = edge.step(&params(), (Tick(102), 0.0), newest, vel, ang, clamp);
         assert_eq!(closed, None, "the gap is still open");
         let dt = 2.0 * TICK_SECS;
         let expected_pos = newest.1 + vel * dt;
@@ -817,7 +789,7 @@ mod tests {
         };
         let horizon_pose = project(&basis, horizon_secs());
         // 5 ticks = 78 ms > g* ≈ 52 ms.
-        let (presented, _) = edge.step(&params(true), (Tick(105), 0.0), newest, vel, ang, clamp);
+        let (presented, _) = edge.step(&params(), (Tick(105), 0.0), newest, vel, ang, clamp);
         let Presented::Pose(pos, rot) = presented else {
             panic!("past the horizon the held pose presents — never the clamp");
         };
@@ -827,7 +799,7 @@ mod tests {
         );
         assert!(rot.angle_between(horizon_pose.1) < 1e-6, "angular hold");
         // Deeper into the same gap the pose is FROZEN: no further advance, no revert.
-        let (deeper, closed) = edge.step(&params(true), (Tick(106), 0.25), newest, vel, ang, clamp);
+        let (deeper, closed) = edge.step(&params(), (Tick(106), 0.25), newest, vel, ang, clamp);
         assert_eq!(closed, None, "the gap is still open");
         assert_eq!(deeper, Presented::Pose(pos, rot), "the horizon pose holds");
         assert!(
@@ -844,10 +816,10 @@ mod tests {
         let (newest, vel, ang) = basis_inputs();
         let clamp = (newest.1, newest.2);
         let mut edge = HullEdge::default();
-        let (presented, _) = edge.step(&params(true), (Tick(100), 0.0), newest, vel, ang, clamp);
+        let (presented, _) = edge.step(&params(), (Tick(100), 0.0), newest, vel, ang, clamp);
         assert_eq!(presented, Presented::Lawful, "gap 0 is the exact sample");
         assert!(matches!(edge.phase, Phase::Tracking), "no episode opens");
-        let (presented, _) = edge.step(&params(true), (Tick(100), 0.01), newest, vel, ang, clamp);
+        let (presented, _) = edge.step(&params(), (Tick(100), 0.01), newest, vel, ang, clamp);
         assert!(
             matches!(presented, Presented::Pose(..)),
             "the first fraction past the sample is a starved frame",
@@ -868,7 +840,7 @@ mod tests {
         let ang = Vec3::ZERO;
         let clamp = (newest.1, newest.2);
         let mut edge = HullEdge::default();
-        let p = params(true);
+        let p = params();
 
         // The gap: the cursor walks 2 ticks past the newest sample in 240 Hz frames.
         let frame_ticks = 64.0 / 240.0;
@@ -976,7 +948,7 @@ mod tests {
         let ang = Vec3::ZERO;
         let clamp = (newest.1, newest.2);
         let mut edge = HullEdge::default();
-        let p = params(true);
+        let p = params();
         let frame_ticks = 64.0 / 240.0;
         let frame_secs = frame_ticks as f32 * TICK_SECS;
         let dir = vel.normalize();
@@ -1025,7 +997,7 @@ mod tests {
         let ang = Vec3::ZERO;
         let clamp = (newest.1, newest.2);
         let mut edge = HullEdge::default();
-        let p = params(true);
+        let p = params();
 
         // The gap: the cursor walks 6 ticks (94 ms > g* ≈ 52 ms) past the newest sample.
         let frame_ticks = 64.0 / 240.0;
@@ -1072,7 +1044,7 @@ mod tests {
             if first {
                 let gap = closed.expect("the gap closes on the first fresh frame");
                 assert!(gap.overran, "the episode overran the horizon");
-                assert!(gap.extrapolated, "the lever was armed for the whole gap");
+                assert!(gap.extrapolated, "every closed gap presented projections");
                 let residual = gap.blend_residual_m.expect("an overrun close still blends");
                 let expected_residual = (lawful_pos - held_pose).length();
                 assert!(
@@ -1138,7 +1110,7 @@ mod tests {
         let (newest, vel, ang) = basis_inputs();
         let clamp = (newest.1, newest.2);
         let mut edge = HullEdge::default();
-        let p = params(true);
+        let p = params();
         edge.step(&p, (Tick(101), 0.5), newest, vel, ang, clamp);
         // One sample lands (tick 101) but the cursor is already at 102.5: still starving.
         let fresh = (Tick(101), newest.1 + vel * TICK_SECS, newest.2);
@@ -1228,33 +1200,17 @@ mod tests {
         (world, hull)
     }
 
-    /// LEVER UNSET = BIT-IDENTICAL TO BASE: a starving hull's pose is never written, while the
-    /// instrument still counts the starved frame. The same world with the lever writes the
-    /// projection — so an unconditional write path reds the first half, and a dead write path
-    /// reds the second.
+    /// A STARVING HULL PRESENTS THE PROJECTION AND THE INSTRUMENT COUNTS: the edge driver writes
+    /// the constant-velocity projection over the clamp and records the starved frame. A dead write
+    /// path reds the pose half; an unwired counter reds the instrument half.
     #[test]
-    fn without_the_lever_nothing_is_written_and_the_instrument_still_counts() {
+    fn a_starving_hull_presents_the_projection_and_the_instrument_counts() {
         // Cursor two ticks past the newest sample (inside the horizon).
         let (mut world, hull) = edge_world(TickInstant::from(Tick(102)));
         world
             .run_system_once(drive_hull_edges)
             .expect("edge driver runs");
         let clamp = Vec3::new(10.0, 0.0, -4.0);
-        assert_eq!(
-            world.get::<Position>(hull).expect("hull position").0,
-            clamp,
-            "without the lever the clamp must present untouched",
-        );
-        assert_eq!(
-            world.resource::<FrontierDiag>().starved_frames,
-            1,
-            "the instrument counts regardless of the lever",
-        );
-
-        world.insert_resource(ExtrapolateHulls);
-        world
-            .run_system_once(drive_hull_edges)
-            .expect("edge driver runs");
         let expected = clamp + Vec3::new(5.0, 0.0, 0.0) * (2.0 * TICK_SECS);
         assert!(
             world
@@ -1263,7 +1219,12 @@ mod tests {
                 .0
                 .distance(expected)
                 < 1e-5,
-            "with the lever the projection presents",
+            "the projection presents over the clamp",
+        );
+        assert_eq!(
+            world.resource::<FrontierDiag>().starved_frames,
+            1,
+            "the instrument counts the starved frame",
         );
     }
 

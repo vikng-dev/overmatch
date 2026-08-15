@@ -40,7 +40,7 @@ trap 'exit 143' TERM
 # zero damage rows in a full run). This pose is the flattest 40 m patch on the shipped heightmap
 # (4 cm relief, center x=149.3 z=293.9); y = surface + 2 m spawn clearance. Lane 1 puts the
 # shooter at +8 x, so aim -8,0,0 points back at the target; identity rotation.
-env SPIKE_PERTURB=0 SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" \
+env SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" \
   SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!

@@ -112,11 +112,6 @@ use std::path::{Path, PathBuf};
 const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     // ---- Owned by another codebase. -------------------------------------------------------
     (
-        "src/net/contact_probe.rs",
-        "AABB_MARGIN",
-        "avian's own broad-phase AABB margin (5 cm). Named to size OUR margin against it.",
-    ),
-    (
         "src/settings/store.rs",
         "ERROR_ACCESS_DENIED",
         "Win32 error code 5. Named as documentation for the numeric literal we actually match.",

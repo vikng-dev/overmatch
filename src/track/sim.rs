@@ -7,10 +7,10 @@
 //! Sim discipline (hard rules, each bought with a measured MP failure in the raycast sim this
 //! replaces):
 //! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
-//!   per machine and freezes through rollback replays).
+//!   per machine).
 //! - Terrain from the analytic [`TrackField`] — pure closed-form arithmetic, no spatial
-//!   queries, no BVH rollback dependency.
-//! - Runs every replayed tick (NO `Replaying` gate — this is sim state); stays inside
+//!   queries.
+//! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
 //! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still has
 //!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);
@@ -151,29 +151,15 @@ impl TrackGripWake {
     }
 }
 
-/// The two physically distinct explicit hull-impulse operations. Point impulses retain their
-/// torque arm; center impulses do not synthesize one.
-pub(crate) enum ExplicitImpulse {
-    Center(Vec3),
-    AtPoint { impulse: Vec3, point: Vec3 },
-}
-
-/// Apply an explicit hull impulse and notify the grip rest detector as one operation.
+/// Apply an explicit hull impulse at a world point (retaining its torque arm) and notify the grip
+/// rest detector as one operation.
 pub(crate) fn apply_explicit_impulse(
     mut forces: ForcesItem<'_, '_>,
     wake: Option<Mut<'_, TrackGripWake>>,
-    explicit: ExplicitImpulse,
+    impulse: Vec3,
+    point: Vec3,
 ) {
-    let impulse = match explicit {
-        ExplicitImpulse::Center(impulse) => {
-            forces.apply_linear_impulse(impulse);
-            impulse
-        }
-        ExplicitImpulse::AtPoint { impulse, point } => {
-            forces.apply_linear_impulse_at_point(impulse, point);
-            impulse
-        }
-    };
+    forces.apply_linear_impulse_at_point(impulse, point);
     if let Some(mut wake) = wake {
         wake.record_impulse(impulse);
     }
@@ -286,13 +272,6 @@ impl TrackGear {
     /// the sole owner of how this choice affects simulation.
     pub(crate) fn mode(&self) -> TransmissionMode {
         self.mode
-    }
-
-    /// The spec-authored material-link count — the station count [`belt_tick`] runs and the
-    /// slab size a caller-owned [`TrackGripElements`] must be constructed at
-    /// ([`TrackGripElements::for_links`]).
-    pub(crate) fn link_count(&self) -> usize {
-        self.count
     }
 
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
@@ -409,31 +388,6 @@ impl TrackGear {
     #[cfg(test)]
     pub(crate) fn trans_mut(&mut self) -> Option<&mut TransmissionParams> {
         self.trans.as_mut()
-    }
-
-    /// Test-only synthetic gear: a hand-authored loop/columns/travel/params rig (the shape
-    /// `track::forces`' fixtures use) wearing the [`TrackGear`] type, so [`belt_tick`] consumers —
-    /// the recoil microsim's fidelity gates — can run the REAL shared tick without a blueprint or
-    /// the measured glb. Governor mode: tableless, so no [`TransmissionParams`] fixture is needed.
-    #[cfg(test)]
-    pub(crate) fn test_fixture(
-        loop_pts: Vec<Vec2>,
-        count: usize,
-        plane_x: f32,
-        columns: [(f32, f32); 3],
-        travel_knots: Vec<(f32, f32)>,
-        params: ForceParams,
-    ) -> Self {
-        Self {
-            loop_pts,
-            count,
-            plane_x,
-            travel_knots,
-            columns: [columns, columns],
-            params,
-            trans: None,
-            mode: TransmissionMode::Governor,
-        }
     }
 }
 
@@ -604,9 +558,8 @@ pub(crate) struct BeltRig<'a> {
 
 /// ONE tank's complete drivetrain tick: command slew, both contact patches at their pre-tick
 /// belt speeds, the joint transmission solve, belt speed/phase commit. THE shared law —
-/// [`apply_track_forces`] (the ECS adapter) and the recoil-overlay microsim
-/// (`net::recoil_overlay`) both run exactly this function, so the microsimmed impulse response
-/// is the sim's own arithmetic, never a copy of it.
+/// [`apply_track_forces`] (the ECS adapter) runs exactly this function, so every caller gets the
+/// sim's own arithmetic, never a copy of it.
 ///
 /// Returns the per-side reports (force applications in emission order — the caller applies or
 /// integrates them, left then right, verbatim) and the transmission report. Belt state

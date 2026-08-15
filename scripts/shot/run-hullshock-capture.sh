@@ -54,7 +54,7 @@ trap 'exit 143' TERM
 
 # SPIKE_SPAWN_POSE: the flattest 40 m patch on the shipped heightmap (4 cm relief); the lane
 # default at world origin is a slope where the tanks slide apart and the -8,0,0 aim misses.
-env SPIKE_PERTURB=0 SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" SPIKE_SHOT_TRACE="$OUT/server" \
+env SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" SPIKE_SHOT_TRACE="$OUT/server" \
   SPIKE_TRACE="$OUT/server-trace.jsonl" SPIKE_TRACE_SIM_FIELDS=1 \
   BEVY_ASSET_ROOT="$REPO" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
