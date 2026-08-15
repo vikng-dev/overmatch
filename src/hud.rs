@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use crate::net::NetBot;
 
 use crate::ballistics::{ComponentHealth, ComponentVolume};
-use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
+use crate::camera::GunnerCameraPlaced;
 use crate::damage::{Ammo, CrewStation, FunctionRole};
 use crate::tank::{Tank, ViewNode};
 use crate::ui_font::UiFonts;
@@ -31,18 +31,15 @@ pub fn plugin(app: &mut App) {
     app.add_systems(Startup, spawn_labels).add_systems(
         PostUpdate,
         // Reproject AFTER the frame's rendered pose is final: transform propagation has run and the
-        // gunner camera has been placed (`GunnerCameraPlaced`, itself after `Propagate`), and the net
-        // hit-kick has displaced the camera's rendered pose (`CameraKickApplied`). Read in `Update`
-        // (where these used to live) the systems saw *last* frame's propagated tank and camera
-        // globals while the mesh renders from *this* frame's — a one-frame skew that isn't constant
-        // (Avian re-interpolates the overstep and the orbit camera re-tracks every frame), so the
-        // labels swam/jittered against the model. Same read-after-Propagate idiom as the gunner
-        // reticles (`sight`) and the trace recorder. The kick edge is vacuous in SP/headless (that
-        // set is net-client-only, empty there).
+        // gunner camera has been placed (`GunnerCameraPlaced`, itself after `Propagate`). Read in
+        // `Update` (where these used to live) the systems saw *last* frame's propagated tank and
+        // camera globals while the mesh renders from *this* frame's — a one-frame skew that isn't
+        // constant (Avian re-interpolates the overstep and the orbit camera re-tracks every frame),
+        // so the labels swam/jittered against the model. Same read-after-Propagate idiom as the
+        // gunner reticles (`sight`) and the trace recorder.
         (update_component_hp_labels, update_tank_nameplates)
             .after(TransformSystems::Propagate)
-            .after(GunnerCameraPlaced)
-            .after(CameraKickApplied),
+            .after(GunnerCameraPlaced),
     );
 }
 

@@ -438,16 +438,6 @@ pub fn run() {
     // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
     // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
     super::extrapolate::install(&mut app);
-    // `OVERMATCH_CURSOR_HIT_FEEL=1`: the own being-hit cue (camera kick + damage flash) presents at
-    // the interpolation cursor's crossing of the damage tick instead of at arrival. Read exactly
-    // once; absent = arrival presentation, bit-identical.
-    if harness::env_flag("OVERMATCH_CURSOR_HIT_FEEL", false) {
-        info!(
-            "net: cursor hit feel ON [OVERMATCH_CURSOR_HIT_FEEL] — the own being-hit cue \
-             presents at the interpolation cursor crossing of its damage tick"
-        );
-        app.insert_resource(super::hit_feel::CursorHitFeel);
-    }
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((

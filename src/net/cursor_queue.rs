@@ -17,10 +17,9 @@
 //!   entry: every entry leaves on its crossing and the consumer re-resolves it there
 //!   (`net::client`'s resolve path, which already owns the missing-replica case).
 //!
-//! Member classes: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
-//! and the fused own echo), and under `OVERMATCH_CURSOR_HIT_FEEL` the
-//! own being-hit cue (`net::hit_feel::HeldHitCues`; default stays at arrival by design — reaction
-//! time). Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
+//! Member class: the fire announcement (`net::client::HeldFireEvents`, covering opponent fire
+//! and the fused own echo). The own being-hit cue presents at arrival by design — reaction
+//! time. Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
 //! shell march, whose presentation is already slaved to the shell's own flight and
 //! `crate::ShotClock` re-aging (ADR-0021).
 
