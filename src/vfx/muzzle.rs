@@ -15,10 +15,19 @@ use super::billboard::{
     spawn_billboard, unit_quad,
 };
 
-/// Flash cluster lifetime in seconds.
-const FLASH_LIFETIME: f32 = 0.035;
+/// Flash core lifetime in seconds. The 88's hot layers are STAGGERED — core dies first, then the
+/// flame planes ([`FLASH_PLANE_LIFETIME`]), then the glow card ([`FLASH_GLOW_CARD_LIFETIME`]), then
+/// the gas smoke ([`SMOKE_LIFETIME`]) — and every one of them is at maximum size on frame one
+/// (`end_size` below `start_size`; nothing in the flash cluster grows in).
+const FLASH_LIFETIME: f32 = 0.026;
+/// Flame-plane lifetime (s): outlives the core, dead well before the glow card.
+const FLASH_PLANE_LIFETIME: f32 = 0.045;
 /// Core flash diameter range in metres.
 const FLASH_CORE_SIZE: (f32, f32) = (3.5, 4.6);
+/// Shrink factors the hot layers ease to over their life (< 1: born maximal, collapsing).
+const FLASH_CORE_SHRINK: f32 = 0.85;
+const FLASH_PLANE_SHRINK: f32 = 0.9;
+const FLASH_GLOW_CARD_SHRINK: f32 = 0.9;
 /// Directional flame-plane length range in metres and width ratio.
 const FLASH_PLANE_LENGTH: (f32, f32) = (4.3, 6.4);
 const FLASH_PLANE_WIDTH_RATIO: f32 = 0.55;
@@ -27,21 +36,21 @@ const FLASH_GLOW: f32 = 14.0;
 
 /// The 88's fireball glow card: ONE soft additive billboard behind the starburst core — the classic
 /// card that sells fireball VOLUME between the 2-frame flash and the lingering smoke. Camera-facing,
-/// ~1.5× the core, LOW alpha, on the round-glow (`mg_core`) sprite, and it fades fast over its own
-/// ~0.1 s. It is the ONLY thing allowed to linger past [`FLASH_LIFETIME`] — the 2-frame flash
-/// discipline itself is untouched. Rides the same additive billboard pipeline as the flash (no new
-/// permutation, so the prewarm rig already covers it).
+/// ~1.5× the core, LOW alpha, on the round-glow (`mg_core`) sprite, and it erodes out over its own
+/// lifetime — the LAST beat of the flash cluster, still an order of magnitude under the smoke.
+/// Rides the same additive billboard pipeline as the flash (no new permutation, so the prewarm rig
+/// already covers it).
 const FLASH_GLOW_CARD_SCALE: f32 = 1.5;
-const FLASH_GLOW_CARD_LIFETIME: f32 = 0.1;
+const FLASH_GLOW_CARD_LIFETIME: f32 = 0.075;
 /// LOW overall alpha (billboard `fade.w`) and a softened emissive boost (`glow.x`) — a fill glow, not
 /// a second hot core.
 const FLASH_GLOW_CARD_ALPHA: f32 = 0.35;
 const FLASH_GLOW_CARD_GLOW: f32 = 4.0;
 
 /// Lingering muzzle smoke: lifetime (s), size ease (m), and its drift (up + a muzzle-gas push).
-/// Birth size nudged up (was 1.6) so the punched-up flash hands off to a smoke puff that is already
-/// present, not a wisp.
-const SMOKE_LIFETIME: f32 = 1.2;
+/// The one 88 layer that grows IN — birth is ~half the end size, and it outlives the whole flash
+/// cluster by an order of magnitude.
+const SMOKE_LIFETIME: f32 = 1.5;
 const SMOKE_SIZE: (f32, f32) = (2.2, 4.2);
 const SMOKE_RISE: f32 = 0.55;
 const SMOKE_PUSH: f32 = 1.3;
@@ -51,15 +60,47 @@ const SMOKE_SPIN_MAX: f32 = 0.6;
 /// Faint heat on young smoke (it is lit by the flash for the first instants).
 const SMOKE_GLOW: f32 = 5.0;
 
-/// Main-gun light peak (lm), range (m), and lifetime (s).
+/// Main-gun light peak (lm), range (m), and lifetime (s) — a flash-and-out envelope: cubic decay
+/// off the first-frame peak, dark inside ~55 ms. Stays strictly longer than the MG glimmer's
+/// ([`MG_LIGHT_LIFETIME`]).
 const LIGHT_PEAK_LUMENS: f32 = 8.0e6;
 const LIGHT_RANGE: f32 = 35.0;
-const LIGHT_LIFETIME: f32 = 0.1;
+const LIGHT_LIFETIME: f32 = 0.055;
 /// Shared muzzle-light population cap; oldest lights are evicted first.
 const LIGHT_CAP: usize = 12;
 /// The MG tracer-round brightness spike: a tracer round's muzzle light is this much brighter than a
 /// ball round's, so the flicker still reads harder exactly when a streak leaves the barrel.
 const MG_TRACER_LIGHT_BOOST: f32 = 1.5;
+
+// --- The muzzle GROUND DUST cloud (main gun only): the blast wave lifting the earth under the
+// barrel. Gated on the muzzle sitting within [`GROUND_DUST_MAX_HEIGHT`] of the terrain below it
+// ([`crate::terrain_grid::HeightGrid::height_at`] — no grid resource means no known ground and no
+// cloud). Every metric below is authored at [`GROUND_DUST_CALIBER`] and scales LINEARLY with the
+// firing bore (ADR-0023: physical inputs only — the camera never enters this).
+
+/// Muzzle height above the ground under it (m) at which the blast still lifts dust.
+const GROUND_DUST_MAX_HEIGHT: f32 = 2.5;
+/// The bore (m) the sizes/speeds below are authored against; the cloud scales `caliber / this`.
+const GROUND_DUST_CALIBER: f32 = 0.088;
+/// Puffs per shot, inclusive range.
+const GROUND_DUST_COUNT: (u32, u32) = (5, 8);
+/// Puff size ease (m): birth diameter → end of life (the cloud billows as it spreads).
+const GROUND_DUST_SIZE: (f32, f32) = (1.8, 5.0);
+/// Birth-offset range (m) from the ground point under the muzzle, along each puff's own azimuth.
+const GROUND_DUST_SPREAD: (f32, f32) = (0.4, 3.0);
+/// Outward drift speed range (m/s) and the slow lift that keeps the cloud hugging the ground.
+const GROUND_DUST_PUSH: (f32, f32) = (1.8, 4.0);
+const GROUND_DUST_RISE: f32 = 0.35;
+/// How far each puff's random azimuth is pulled onto the bore azimuth (0 = radial ring, 1 = all
+/// straight down-bore).
+const GROUND_DUST_BORE_BIAS: f32 = 0.65;
+/// Cloud lifetime range (s) — the slowest muzzle layer, well past the gas smoke.
+const GROUND_DUST_LIFETIME: (f32, f32) = (2.0, 2.5);
+/// Overall alpha of a puff, its flipbook rate (frames/s over the 4-frame dust atlas), and its roll
+/// rate bound (rad/s).
+const GROUND_DUST_ALPHA: f32 = 0.5;
+const GROUND_DUST_FRAME_RATE: f32 = 3.0;
+const GROUND_DUST_SPIN_MAX: f32 = 0.35;
 
 // --- The MG's dressing knobs (slice B): the 88's machinery at rifle scale.
 
@@ -189,8 +230,13 @@ pub(super) struct MuzzleVfxAssets {
     mg_core: Handle<Image>,
     flame_atlas: Handle<Image>,
     smoke_atlas: Handle<Image>,
+    /// The billow atlas the impact read also loads (the asset server dedupes the load and shares
+    /// the GPU texture) — the mass sprite the ground-dust cloud is drawn from.
+    dust_atlas: Handle<Image>,
     flash_lut: Handle<Image>,
     smoke_lut: Handle<Image>,
+    /// Earth palette for the ground-dust cloud — brown lifted soil, never the smoke gray.
+    dust_lut: Handle<Image>,
 }
 
 impl MuzzleVfxAssets {
@@ -230,6 +276,22 @@ impl MuzzleVfxAssets {
             alpha_mode: AlphaMode::Blend,
         }
     }
+
+    /// The ground-dust material template: the billow atlas through the earth LUT, alpha-blend
+    /// occluding mass with no heat (lifted soil is lit mass, never an emitter). Rides the smoke's
+    /// already-warmed Blend pipeline.
+    fn dust_material(&self) -> VfxBillboardMaterial {
+        VfxBillboardMaterial {
+            params: VfxParams {
+                frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
+                fade: Vec4::new(0.0, 2.2, 0.0, GROUND_DUST_ALPHA),
+                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            },
+            atlas: self.dust_atlas.clone(),
+            lut: self.dust_lut.clone(),
+            alpha_mode: AlphaMode::Blend,
+        }
+    }
 }
 
 pub(super) fn setup_muzzle_assets(
@@ -260,14 +322,28 @@ pub(super) fn setup_muzzle_assets(
         let heat = x * (-y * 9.0).exp();
         (color, heat)
     });
+    // Dust LUT: sunlit tan where the sprite signal is strong, sinking to a dark damp brown in the
+    // cloud's shadow and darkening as it ages (Y). No heat lane — lifted soil never emits.
+    let dust_lut = gradient_lut(&mut images, |x, y| {
+        let lum = 0.07 + 0.36 * x;
+        let age = 1.0 - y;
+        let color = LinearRgba::rgb(
+            lum * (0.80 + 0.28 * age),
+            lum * (0.61 + 0.19 * age),
+            lum * (0.43 + 0.11 * age),
+        );
+        (color, 0.0)
+    });
     commands.insert_resource(MuzzleVfxAssets {
         quad: unit_quad(&mut meshes),
         core_atlas: asset_server.load("vfx/flash_core_atlas.png"),
         mg_core: asset_server.load("vfx/mg_core.png"),
         flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
         smoke_atlas: asset_server.load("vfx/smoke_atlas.png"),
+        dust_atlas: asset_server.load("vfx/impact_dust.png"),
         flash_lut,
         smoke_lut,
+        dust_lut,
     });
 }
 
@@ -332,9 +408,9 @@ fn spawn_muzzle_light(
     crate::push_capped_entity(commands, &mut ring.0, light, LIGHT_CAP);
 }
 
-/// Dress a main-gun shot: flash cluster + muzzle light + lingering smoke, all view entities hung
-/// off the `FireShell` geometry (origin + bore direction). MG-calibre rounds pass through untouched
-/// — their dressing is slice B, on this same machinery.
+/// Dress a main-gun shot: flash cluster + muzzle light + lingering smoke + the ground-dust cloud a
+/// low barrel lifts, all view entities hung off the `FireShell` geometry (origin + bore direction).
+/// MG-calibre rounds pass through untouched — their dressing is slice B, on this same machinery.
 fn on_main_gun_fire(
     fire: On<FireShell>,
     assets: Res<MuzzleVfxAssets>,
@@ -344,6 +420,8 @@ fn on_main_gun_fire(
     shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
+    // The decoded terrain surface, when the world has one — the ground-dust gate's only query.
+    grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
 ) {
     // The same boundary as the shell-scene branch in `ballistics::view`: this dressing is
@@ -383,7 +461,7 @@ fn on_main_gun_fire(
             start_frame: rng.range(0.0, 4.0).floor(),
             frame_rate: 0.0,
             start_size: core_size,
-            end_size: core_size * 1.25,
+            end_size: core_size * FLASH_CORE_SHRINK,
             aspect: Vec3::ONE,
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: 0.0,
@@ -417,7 +495,7 @@ fn on_main_gun_fire(
                 start_frame: 0.0,
                 frame_rate: 0.0,
                 start_size: glow_size,
-                end_size: glow_size * 1.3,
+                end_size: glow_size * FLASH_GLOW_CARD_SHRINK,
                 aspect: Vec3::ONE,
                 roll: rng.range(0.0, std::f32::consts::TAU),
                 spin: 0.0,
@@ -449,14 +527,14 @@ fn on_main_gun_fire(
                 assets.quad.clone(),
                 BillboardSpec {
                     material: assets.flash_material(assets.flame_atlas.clone(), 2.0),
-                    lifetime: FLASH_LIFETIME,
+                    lifetime: FLASH_PLANE_LIFETIME,
                     origin: origin + dir * (length * 0.45),
                     drift: Vec3::ZERO,
                     frames: 4,
                     start_frame: (plane_frame + i as f32) % 4.0,
                     frame_rate: 0.0,
                     start_size: length,
-                    end_size: length * 1.15,
+                    end_size: length * FLASH_PLANE_SHRINK,
                     aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
                     roll: 0.0,
                     spin: 0.0,
@@ -494,6 +572,23 @@ fn on_main_gun_fire(
         );
     }
 
+    // --- Ground dust: the blast lifting the earth under a low barrel. Near-only like the rest of
+    // the full dressing (the LOD contract is about COST — the cloud's metres come from the bore,
+    // never from the camera), and only when the terrain under the muzzle is close enough to lift.
+    if near && let Some(ground_y) = dust_ground_y(grid.as_deref(), origin) {
+        spawn_ground_dust(
+            origin,
+            dir,
+            ground_y,
+            fire.caliber,
+            &assets,
+            &mut materials,
+            &mut ring,
+            &mut rng,
+            &mut commands,
+        );
+    }
+
     // --- Muzzle light: transient, first frame hottest (Vlambeer: the environment lighting up IS a
     // large share of the perceived power). The 88 casts a shadow unless the lever is fully Off.
     spawn_muzzle_light(
@@ -506,6 +601,81 @@ fn on_main_gun_fire(
         0.4,
         shadows.main_gun_casts(),
     );
+}
+
+/// The ground height (m) under `muzzle` when a shot there lifts dust, else `None`: no decoded
+/// terrain (`grid`) and no ground is known, and outside the grid's span the world ends at the
+/// collider edge — [`crate::terrain_grid::HeightGrid::height_at`] would hand back a clamped
+/// phantom there. A muzzle higher than [`GROUND_DUST_MAX_HEIGHT`] over that surface raises nothing.
+fn dust_ground_y(grid: Option<&crate::terrain_grid::HeightGrid>, muzzle: Vec3) -> Option<f32> {
+    let grid = grid?;
+    if !grid.contains_xz(muzzle.x, muzzle.z) {
+        return None;
+    }
+    let ground = grid.height_at(muzzle.x, muzzle.z);
+    (muzzle.y - ground <= GROUND_DUST_MAX_HEIGHT).then_some(ground)
+}
+
+/// The ground-dust cloud: [`GROUND_DUST_COUNT`] wide alpha-blend puffs born on the ground under the
+/// muzzle and pushed outward, each along an azimuth pulled toward the bore's by
+/// [`GROUND_DUST_BORE_BIAS`]. Sizes, offsets and push speeds scale linearly with `caliber` against
+/// [`GROUND_DUST_CALIBER`]; the puffs ride the smoke's Blend pipeline and the shared billboard ring.
+#[allow(clippy::too_many_arguments)]
+fn spawn_ground_dust(
+    muzzle: Vec3,
+    dir: Vec3,
+    ground_y: f32,
+    caliber: f32,
+    assets: &MuzzleVfxAssets,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    rng: &mut ViewRng,
+    commands: &mut Commands,
+) {
+    let bore = caliber / GROUND_DUST_CALIBER;
+    let base = Vec3::new(muzzle.x, ground_y, muzzle.z);
+    // The bore's ground-plane azimuth; a vertical barrel has none, and the cloud stays a plain ring.
+    let bore_xz = Vec3::new(dir.x, 0.0, dir.z).try_normalize();
+    let count = GROUND_DUST_COUNT.0
+        + (rng.next_f32() * (GROUND_DUST_COUNT.1 - GROUND_DUST_COUNT.0 + 1) as f32) as u32;
+    for _ in 0..count.min(GROUND_DUST_COUNT.1) {
+        let theta = rng.range(0.0, std::f32::consts::TAU);
+        let radial = Vec3::new(theta.cos(), 0.0, theta.sin());
+        let away = match bore_xz {
+            Some(bore_dir) => (radial * (1.0 - GROUND_DUST_BORE_BIAS)
+                + bore_dir * GROUND_DUST_BORE_BIAS)
+                .try_normalize()
+                .unwrap_or(bore_dir),
+            None => radial,
+        };
+        let start_size = GROUND_DUST_SIZE.0 * bore;
+        let end_size = rng.range(GROUND_DUST_SIZE.1 * 0.75, GROUND_DUST_SIZE.1) * bore;
+        let offset = rng.range(GROUND_DUST_SPREAD.0, GROUND_DUST_SPREAD.1) * bore;
+        let push = rng.range(GROUND_DUST_PUSH.0, GROUND_DUST_PUSH.1) * bore;
+        spawn_billboard(
+            commands,
+            materials,
+            ring,
+            assets.quad.clone(),
+            BillboardSpec {
+                material: assets.dust_material(),
+                lifetime: rng.range(GROUND_DUST_LIFETIME.0, GROUND_DUST_LIFETIME.1),
+                // Half a birth diameter up: the puff's lower edge sits ON the surface.
+                origin: base + away * offset + Vec3::Y * (start_size * 0.5),
+                drift: away * push + Vec3::Y * GROUND_DUST_RISE,
+                frames: 4,
+                start_frame: rng.range(0.0, 4.0),
+                frame_rate: GROUND_DUST_FRAME_RATE,
+                start_size,
+                end_size,
+                aspect: Vec3::ONE,
+                roll: rng.range(0.0, std::f32::consts::TAU),
+                spin: rng.range(-GROUND_DUST_SPIN_MAX, GROUND_DUST_SPIN_MAX),
+                erosion_end: 1.0,
+                rotation: None,
+            },
+        );
+    }
 }
 
 /// Dress an MG shot (slice B): a small 1–2-frame flash (core + one near-only flame plane), a dim
@@ -688,8 +858,10 @@ mod tests {
     use crate::vfx::billboard::Billboard;
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
-    /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing). Defaults
-    /// to the shipped `MuzzleShadows::MainGunOnly`; `harness_shadows` overrides for the lever tests.
+    /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing), and NO
+    /// height grid (so the ground-dust gate finds no known ground; `with_ground` adds one).
+    /// Defaults to the shipped `MuzzleShadows::MainGunOnly`; `harness_shadows` overrides for the
+    /// lever tests.
     fn harness() -> App {
         harness_shadows(MuzzleShadows::default())
     }
@@ -714,9 +886,24 @@ mod tests {
             mg_core: Handle::default(),
             flame_atlas: Handle::default(),
             smoke_atlas: Handle::default(),
+            dust_atlas: Handle::default(),
             flash_lut: Handle::default(),
             smoke_lut: Handle::default(),
+            dust_lut: Handle::default(),
         });
+        app
+    }
+
+    /// The harness with a FLAT terrain surface at `height` under it — what the ground-dust gate
+    /// measures the muzzle against (the shots below fire from y = 2.0).
+    fn harness_ground(height: f32) -> App {
+        let mut app = harness();
+        let size = 33usize;
+        app.insert_resource(crate::terrain_grid::HeightGrid::new(
+            vec![height; size * size].into(),
+            size as u32,
+            crate::terrain_grid::FIXTURE_EXTENT,
+        ));
         app
     }
 
@@ -762,8 +949,10 @@ mod tests {
             .count()
     }
 
-    /// An 88 shot spawns the full main-gun dressing — core + glow card + 2 planes + smoke
-    /// (5 billboards) and 1 light — and an MG-calibre round gets the MG dressing instead: core +
+    /// An 88 shot over unknown ground spawns the airborne main-gun dressing — core + glow card +
+    /// 2 planes + smoke (5 billboards) and 1 light (the ground-dust cloud needs a terrain surface;
+    /// see `ground_dust_needs_a_low_barrel_over_known_ground`) — and an MG-calibre round gets the
+    /// MG dressing instead: core +
     /// 1 flame plane (no smoke on the first round — the ration counts from 1) at a fraction of the
     /// 88's size, plus its own dim light (now on EVERY round). Each round is dressed by exactly ONE
     /// observer.
@@ -816,6 +1005,119 @@ mod tests {
             lights(&mut app),
             1,
             "the muzzle light carries the read at range"
+        );
+    }
+
+    /// The ground-dust puffs of the last shot: `(start size, birth position)` each. The flipbook
+    /// rate is the discriminator — no other muzzle layer plays at [`GROUND_DUST_FRAME_RATE`].
+    fn dust_puffs(app: &mut App) -> Vec<(f32, Vec3)> {
+        let world = app.world_mut();
+        let mut q = world.query::<&Billboard>();
+        q.iter(world)
+            .filter(|b| b.frame_rate == GROUND_DUST_FRAME_RATE)
+            .map(|b| (b.start_size, b.origin))
+            .collect()
+    }
+
+    /// The ground-dust gate: an 88 fired a couple of metres over known terrain lifts a cloud of
+    /// [`GROUND_DUST_COUNT`] puffs sitting on that surface; the same shot with the ground far below
+    /// lifts none, and an MG round never lifts dust at all.
+    #[test]
+    fn ground_dust_needs_a_low_barrel_over_known_ground() {
+        // Muzzle at y = 2.0, ground at y = 0.0 — inside GROUND_DUST_MAX_HEIGHT.
+        let mut low = harness_ground(0.0);
+        fire(&mut low, 0.088, 0);
+        let puffs = dust_puffs(&mut low);
+        assert!(
+            (GROUND_DUST_COUNT.0 as usize..=GROUND_DUST_COUNT.1 as usize).contains(&puffs.len()),
+            "dust puff count {} outside {GROUND_DUST_COUNT:?}",
+            puffs.len()
+        );
+        assert_eq!(
+            billboards(&mut low),
+            5 + puffs.len(),
+            "the airborne dressing plus the cloud"
+        );
+        for (size, position) in &puffs {
+            assert!(
+                position.y >= 0.0 && position.y <= size * 0.5 + 1e-3,
+                "a puff must hug the ground it was lifted from (y = {})",
+                position.y
+            );
+        }
+
+        // The same shot with the surface 6 m down: nothing to lift.
+        let mut high = harness_ground(-6.0);
+        fire(&mut high, 0.088, 0);
+        assert!(dust_puffs(&mut high).is_empty(), "a high barrel lifts none");
+        assert_eq!(billboards(&mut high), 5);
+
+        // The MG's dressing has no ground layer at any height.
+        let mut mg = harness_ground(0.0);
+        fire_round(&mut mg, MG_CALIBER, 0, true);
+        assert!(dust_puffs(&mut mg).is_empty(), "no dust off a rifle bore");
+        assert_eq!(billboards(&mut mg), 2);
+    }
+
+    /// The cloud is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
+    /// doubles every puff's metres.
+    #[test]
+    fn ground_dust_scales_with_the_bore() {
+        let mut reference = harness_ground(0.0);
+        fire(&mut reference, GROUND_DUST_CALIBER, 0);
+        let small = dust_puffs(&mut reference)[0].0;
+        assert!((small - GROUND_DUST_SIZE.0).abs() < 1e-4);
+
+        let mut big_bore = harness_ground(0.0);
+        fire(&mut big_bore, GROUND_DUST_CALIBER * 2.0, 0);
+        let big = dust_puffs(&mut big_bore)[0].0;
+        assert!(
+            (big - small * 2.0).abs() < 1e-4,
+            "twice the bore, twice the puff: {small} → {big}"
+        );
+    }
+
+    /// The 88's curve contract, read off one real shot: every HOT layer (core, both flame planes,
+    /// glow card) is born maximal and shrinks, each dying on its own beat, and all of them are gone
+    /// before the first MASS layer (gas smoke, ground dust — the ones that grow) expires.
+    #[test]
+    fn the_88_layers_are_staggered() {
+        let mut app = harness_ground(0.0);
+        fire(&mut app, 0.088, 0);
+        let world = app.world_mut();
+        let mut q = world.query::<&Billboard>();
+        let layers: Vec<(f32, f32, f32)> = q
+            .iter(world)
+            .map(|b| (b.lifetime, b.start_size, b.end_size))
+            .collect();
+        let mut hot: Vec<f32> = layers
+            .iter()
+            .filter(|(_, start, end)| end < start)
+            .map(|(life, _, _)| *life)
+            .collect();
+        let mass: Vec<f32> = layers
+            .iter()
+            .filter(|(_, start, end)| end > start)
+            .map(|(life, _, _)| *life)
+            .collect();
+        assert_eq!(
+            hot.len(),
+            4,
+            "core + 2 flame planes + glow card are born maximal"
+        );
+        let last_hot = hot.iter().copied().fold(f32::MIN, f32::max);
+        let first_mass = mass.iter().copied().fold(f32::MAX, f32::min);
+        assert!(
+            last_hot < first_mass,
+            "the flash cluster must be dead ({last_hot} s) before any mass layer fades \
+             ({first_mass} s)"
+        );
+        hot.sort_by(f32::total_cmp);
+        hot.dedup();
+        assert_eq!(
+            hot.len(),
+            3,
+            "core, planes and glow card die on three beats"
         );
     }
 

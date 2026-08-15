@@ -139,6 +139,11 @@ pub mod sandbox;
 /// over the wire. Buildings join `world::TerrainMap`'s block list; firs carry a trunk collider only.
 mod scatter;
 mod settings;
+/// Ship-facing view-layer audio: render-only subscribers to the device and `FireShell` seams (the
+/// trigger click and the 88's report) plus the RPM-driven engine loop every tank carries. Owns the
+/// game's one spatial-falloff law and the listener the camera wears. Mounted by both windowed
+/// clients (ADR-0014 — never the server, which has no audio device).
+mod sfx;
 mod shooting;
 /// The SHOT-LIFECYCLE recorder (`SPIKE_SHOT_TRACE=<path>`): an env-gated JSONL log of what happens to
 /// each [`ShotId`] on BOTH ends — the authority's fire/keyframe/terminal/damage emissions, and the
@@ -666,6 +671,9 @@ impl Plugin for ClientPlugin {
             ballistics::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
+        // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
+        // the 88's report on the fire seam, and the per-tank engine loop.
+        app.add_plugins(sfx::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
         app.add_plugins(frame_cost::client_plugin);
@@ -759,6 +767,9 @@ impl Plugin for NetClientPlugin {
             // declarer that makes it visible.
             settings::plugin(settings::PageEntry::OverlayMenu),
         ));
+        // View-layer audio (see `ClientPlugin`): the trigger click, the 88's report, and the engine
+        // loop on own AND remote tanks — `TankTransmission` is replicated, so one code path.
+        app.add_plugins(sfx::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
