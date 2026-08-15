@@ -763,8 +763,7 @@ impl AuthoredIntent {
 }
 
 /// Record what this client just filed for its stamped tick. Mounted by `net::client`, chained after
-/// `stamp_input_tick` under the same `not(is_in_rollback)` gate as the writers: a replayed tick
-/// restores a historical `ActionState` this ledger has already filed.
+/// `stamp_input_tick` so the copy is keyed by the tick the stamp names.
 pub(super) fn record_own_intent(
     mut intent: ResMut<AuthoredIntent>,
     slots: Query<&ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
@@ -1741,7 +1740,7 @@ mod tests {
     fn cursor_assigned_presentation_reads_no_local_timeline() {
         let fire = strip_comments(&read_source("src/net/fire_presentation.rs"));
         let seam = fn_body(&fire, "pub(super) fn present_released_shot(");
-        for banned in ["LocalTimeline", "fire_catch_up_ticks", "PredictedPresent"] {
+        for banned in ["LocalTimeline", "fire_catch_up_ticks", "ShotClock"] {
             assert!(
                 !seam.contains(banned),
                 "the seam ages on the cursor only: found {banned}",

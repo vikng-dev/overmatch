@@ -23,8 +23,8 @@ use lightyear::prelude::*;
 
 use super::client::{
     HeldFireEvents, InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage,
-    SeenShots, age_sanctioned_shots, install_input_buffer_guard, publish_predicted_present,
-    receive_damage_confirms, receive_fire_events, shipping_input_delay,
+    SeenShots, age_sanctioned_shots, install_input_buffer_guard, receive_damage_confirms,
+    receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
@@ -829,14 +829,9 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
     app.init_resource::<super::extrapolate::ImpulseTicks>();
-    app.init_resource::<crate::PredictedPresent>();
     app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
-    app.add_systems(
-        FixedUpdate,
-        publish_predicted_present.before(crate::state::GameplaySet),
-    );
 
     app.init_resource::<ClientShells>();
     app.init_resource::<ClientBounces>();

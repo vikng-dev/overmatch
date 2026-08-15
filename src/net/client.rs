@@ -546,9 +546,7 @@ pub fn run() {
     //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
     //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
     //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
-    //     across 0/1/2-tick frames). Gated `not(is_in_rollback)` like `feed_action_state`: a rollback
-    //     replays `FixedMain` N times, and re-applying a queued one-shot kick per replayed tick would
-    //     multiply it — the queue is drained exactly once, on a real tick.
+    //     across 0/1/2-tick frames).
     app.init_resource::<PendingRecoilKicks>();
     // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
     // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
@@ -557,34 +555,8 @@ pub fn run() {
     app.init_resource::<PendingFireEvents>();
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
-    app.add_systems(
-        FixedUpdate,
-        // Gated `not(is_in_rollback)` so a replay (which re-runs `FixedMain` N times) does not
-        // over-age the buffer; expiry is sim-time coarse, so a real tick is the right cadence.
-        age_sanctioned_shots.run_if(not(is_in_rollback)),
-    );
-    // F1 (rollback-safe cosmetics): the net-neutral `crate::Replaying` bridge. The ballistics march
-    // and `shooting::fire`'s own-shell `FireShell` trigger are VIEW-layer, tick-timed cosmetics that
-    // must advance once per FORWARD tick — but they live in `GameplaySet`, which a rollback replays
-    // N times, and the sim layer cannot name lightyear's `Rollback` to gate itself
-    // (`tests/net_boundary`). This writer mirrors the replay state into the sim-visible flag at the
-    // HEAD of every FixedUpdate (`.before(GameplaySet)`, so both consumers read a fresh value the
-    // same tick), and it is the marker's ONLY writer. See `crate::Replaying`.
-    app.init_resource::<crate::Replaying>();
-    app.add_systems(FixedUpdate, mark_replaying.before(GameplaySet));
-    // F3 (tick-triggered consumption): republish the predicted present `P` to the sim layer each
-    // forward tick, so the ballistics march can consume an OVERDUE sanctioned outcome for a shell
-    // that MISSED the plate the server resolved on (see `crate::PredictedPresent`). `.before` the
-    // march in `GameplaySet`; gated `not(is_in_rollback)` so a replay does not stamp `P` backward to
-    // a historical tick (the march is skipped during replay anyway — F1 — so this only keeps the value
-    // clean on the tick the march next reads it forward).
-    app.init_resource::<crate::PredictedPresent>();
-    app.add_systems(
-        FixedUpdate,
-        publish_predicted_present
-            .before(GameplaySet)
-            .run_if(not(is_in_rollback)),
-    );
+    // Expiry is sim-time coarse, so a real tick is the right cadence.
+    app.add_systems(FixedUpdate, age_sanctioned_shots);
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks
@@ -593,8 +565,7 @@ pub fn run() {
             // `GameplaySet` (Playing-only), so the applier that WRITES the kick and the system that
             // SPRINGS it must agree on when they may run — otherwise a `FireEvent` draining outside
             // `Playing` writes a kick into `TankSim` that `apply_recoil` never releases.
-            .run_if(in_state(AppState::Playing))
-            .run_if(not(is_in_rollback)),
+            .run_if(in_state(AppState::Playing)),
     );
     // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
     // clock the own hull moves on is the first thing any capture of this session must state.
@@ -612,11 +583,6 @@ pub fn run() {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
                 FixedPreUpdate,
-                // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
-                // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
-                // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
-                // the scripted tick counter would count every replayed tick (verified live: 640
-                // "ticks" burned in <5 s wall).
                 // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
                 // just placed, and must be the last word before lightyear buffers it.
                 // `record_own_intent` chains after the stamp: the client's own copy of what it
@@ -627,23 +593,18 @@ pub fn run() {
                     super::fire_presentation::record_own_intent,
                 )
                     .chain()
-                    .in_set(InputSystems::WriteClientInputs)
-                    .run_if(not(is_in_rollback)),
+                    .in_set(InputSystems::WriteClientInputs),
             );
     } else {
         app.add_systems(
             FixedPreUpdate,
-            // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
-            // `ActionState` per tick — overwriting it with the *current* gathered command (or
-            // re-stamping it with the replayed tick) would corrupt the replay's input.
             (
                 feed_action_state,
                 stamp_input_tick,
                 super::fire_presentation::record_own_intent,
             )
                 .chain()
-                .in_set(InputSystems::WriteClientInputs)
-                .run_if(not(is_in_rollback)),
+                .in_set(InputSystems::WriteClientInputs),
         );
     }
     install_input_buffer_guard(&mut app);
@@ -716,8 +677,7 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///   - **not yet initiated** — gate the first `Connect` on the tank assets, exactly as the old
 ///     asset-gate did: the sim body spawns whole from extracted data the moment the replicated root
 ///     lands, and preloading keeps view pop-in to ~a frame. (No local ground spawn: `SimPlugin` →
-///     `world::plugin` builds the real terrain on both sides; rollback replays collide with it and
-///     the track force probes sample it.)
+///     `world::plugin` builds the real terrain on both sides; the track force probes sample it.)
 ///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
 ///     `ChallengeResponse`); wait it out.
 ///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and
@@ -1285,8 +1245,8 @@ fn reset_shot_receive_state(
 /// [`receive_damage_confirms`].
 ///
 /// This must run in `Update`: Lightyear clears undrained message receivers in `Last`, while a frame
-/// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. `Update` also
-/// stays outside rollback replay; only the `TankSim` recoil write crosses to the fixed clock.
+/// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. Only the
+/// `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
     mut batch_receivers: Query<&mut MessageReceiver<FireVisualBatch>>,
     mut fire_receivers: Query<&mut MessageReceiver<FireEvent>>,
@@ -1805,29 +1765,6 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
     sanctioned.age(time.delta_secs());
 }
 
-/// F1 writer for the net-neutral [`crate::Replaying`] marker: mirror lightyear's rollback state into
-/// a sim-visible `bool` each FixedUpdate. `Query<(), With<Rollback>>` is exactly what the
-/// `is_in_rollback` run condition reads (non-empty iff THIS tick is a rollback replay), so the flag
-/// is `true` on replayed ticks and `false` on forward ticks — the sim layer reads it (as
-/// `Option<Res<Replaying>>`) to keep the cosmetic shell march, `Held` aging, and the own-shell
-/// `FireShell` trigger off replayed ticks. Runs unconditionally (a rollback only ever fires during
-/// gameplay; maintaining the flag when the march can't run is harmless).
-fn mark_replaying(mut replaying: ResMut<crate::Replaying>, rollback: Query<(), With<Rollback>>) {
-    replaying.0 = !rollback.is_empty();
-}
-
-/// F3 writer for the net-neutral [`crate::PredictedPresent`] marker: republish this client's
-/// predicted present tick `P` to the sim layer each forward tick. Every cosmetic shell lives at `P`,
-/// so the ballistics march compares an overdue sanctioned outcome's server tick against this one
-/// value. `LocalTimeline::tick()` is the same present `bridge_action_state_to_tank_command` and
-/// `receive_fire_events` read (the tick the own tank is simulated at, ahead of the server).
-pub(super) fn publish_predicted_present(
-    mut present: ResMut<crate::PredictedPresent>,
-    timeline: Res<LocalTimeline>,
-) {
-    present.0 = timeline.tick().0;
-}
-
 /// LOCAL/ARRIVAL-clock shell age: ticks from `fire` to the local present `now`
 /// (`LocalTimeline::tick()`). Two call sites only — the consume-time validity bar (a fire whose
 /// tick is absurd against the local present is dropped before it is held), and the pre-sync
@@ -1870,14 +1807,12 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// `shooting::apply_recoil` then springs the barrel back home from this velocity.
 ///
 /// Scheduled `FixedUpdate`, `.before(GameplaySet)` so `apply_recoil` (in the set) sees the kick the
-/// same tick; gated `in_state(Playing)` to match that consumer (see the registration); and gated
-/// `not(is_in_rollback)`: `TankSim` is fixed-clock sim truth (a render-rate write would be a
-/// render→sim leak, non-deterministic across 0/1/2-tick frames), and a rollback replays `FixedMain`
-/// N times — draining the queue only on a real tick applies each one-shot kick exactly once.
+/// same tick; gated `in_state(Playing)` to match that consumer (see the registration). `TankSim` is
+/// fixed-clock sim truth — a render-rate write would be a render→sim leak, non-deterministic across
+/// 0/1/2-tick frames.
 ///
-/// Public fire facts reach the shooter too. [`receive_fire_events`] suppresses a fact whose shooter
-/// carries `ActionState<TankCommand>` before it enters this queue, so the echoed fact cannot kick the
-/// locally predicted, rollback-tracked `TankSim`.
+/// Public fire facts reach the shooter too: under fused own fire the echo carries the own barrel
+/// kick through this same queue (the local fire tick applied none).
 ///
 /// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a
 /// recoil-less weapon (a coax) — a replica may not have finished spawning its rig, exactly as the
@@ -1906,7 +1841,7 @@ fn apply_pending_recoil_kicks(
 /// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,
 /// `drive_gunner_aim`, the range dial, the crew bar) have already filled the `Controlled` tank's
 /// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
-/// input plugin buffers it for the wire and for rollback replay. The reverse bridge (net::protocol)
+/// input plugin buffers it for the wire. The reverse bridge (net::protocol)
 /// hands it straight back to the sim, so locally the round trip is an identity copy — the buffer is
 /// the point. When input is blocked = a default command: the tank coasts to a stop instead of holding
 /// the last input, and clicks in the menu don't fire.
@@ -1943,17 +1878,12 @@ fn feed_action_state(
 /// the command into — so the stamp names the tick the command will be READ back on, on this client
 /// and on the server alike.
 ///
-/// From here the stamp is inert: it rides the `InputBuffer`, the wire, the server's `InputBuffer`
-/// and rollback replay without ever being rewritten. `net::protocol`'s bridge compares it against
+/// From here the stamp is inert: it rides the `InputBuffer`, the wire, and the server's
+/// `InputBuffer` without ever being rewritten. `net::protocol`'s bridge compares it against
 /// the tick actually being simulated, and any command lightyear inherited, repeated, fabricated or
 /// froze necessarily names a DIFFERENT tick. That is the whole mechanism — see
 /// `bridge_action_state_to_tank_command` for the four ways it happens and
 /// `TankCommand::fail_consumables_closed` for what we refuse to do about them.
-///
-/// Not run during rollback (chained under the same `not(is_in_rollback)` gate as the writers):
-/// lightyear restores the historical `ActionState` per replayed tick, stamp included, and
-/// re-stamping it with the replayed tick would forge attestation for input that was never authored
-/// for it — turning the guard into a rubber stamp. The historical stamp is already correct.
 ///
 /// Pre-sync, `input_delay()` is 0, so the stamp is the current tick and a joining player's first
 /// click attests immediately.
@@ -2421,7 +2351,7 @@ mod tests {
 
     /// The regression guard for the barrel-gate fix: a weapon with a recoil spec but NO barrel node
     /// kicks NOTHING — `apply_recoil` has no `RecoilParams` to step (built on the barrel node), so a
-    /// kick here would accumulate in rollback-tracked `recoil_velocity` and never decay. The gate
+    /// kick here would accumulate in `recoil_velocity` and never decay. The gate
     /// lives in the shared `kick_recoil` so this holds identically on the server's `fire` path too.
     #[test]
     fn barrel_less_weapon_is_noop() {
@@ -2480,16 +2410,6 @@ mod tests {
     #[test]
     fn fire_tick_equal_to_now_is_zero_catch_up() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
-    }
-
-    /// The shared cosmetic bound stays coupled to the rollback depth it was derived from.
-    #[test]
-    fn cosmetic_catch_up_horizon_matches_the_default_rollback_policy() {
-        assert_eq!(
-            MAX_COSMETIC_CATCH_UP_TICKS,
-            u32::from(RollbackPolicy::default().max_rollback_ticks),
-            "the cosmetic catch-up horizon must not drift from Lightyear's rollback window"
-        );
     }
 
     /// A fire tick AHEAD of our predicted present (only reachable via clock skew / a malicious or

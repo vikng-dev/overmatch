@@ -22,7 +22,7 @@
 //! own being-hit cue (`net::hit_feel::HeldHitCues`; default stays at arrival by design — reaction
 //! time). Ricochet/impact facts stay OUT: they arm the sanctioned-outcome buffer for the cosmetic
 //! shell march, whose presentation is already slaved to the shell's own flight and
-//! `crate::PredictedPresent` re-aging (ADR-0021).
+//! `crate::ShotClock` re-aging (ADR-0021).
 
 use std::collections::VecDeque;
 

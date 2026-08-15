@@ -56,8 +56,8 @@ pub(crate) struct RecoilParams {
 /// The `barrel` gate lives HERE, not at the call sites, and is load-bearing: `apply_recoil` only
 /// steps slots that have `RecoilParams`, which tank construction installs on the barrel node — so a
 /// kick on a barrel-less slot would land in `recoil_velocity` and NEVER decay, accumulating without
-/// bound in rollback-tracked `TankSim` state, shot after shot. Gating in one place makes that
-/// unreachable on both ends.
+/// bound in `TankSim` state, shot after shot. Gating in one place makes that unreachable on both
+/// ends.
 pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
     // No barrel node to recoil (no `RecoilParams`, so `apply_recoil` never springs it back), or a
     // recoil-less weapon — either way, no kick.
@@ -106,7 +106,7 @@ pub fn plugin(app: &mut App) {
 }
 
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
-/// overwrite it from `LocalTimeline` before the next gameplay pass, including every replay tick.
+/// overwrite it from `LocalTimeline` before the next gameplay pass.
 fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
     clock.0 = clock.0.saturating_add(1);
 }
@@ -211,13 +211,6 @@ fn fire(
     mut bodies: Query<(Forces, Option<&mut TrackGripWake>), With<Tank>>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
-    // F1: `true` only while a net client is REPLAYING a rollback. The DETERMINISTIC sim mutations
-    // below (belt decrement, reload/recoil arming, hull impulse, the tracer counter) MUST replay so
-    // rolled-back `TankSim` re-derives exactly — but the cosmetic `FireShell` trigger must NOT, or a
-    // replay re-crossing this fire tick spawns a DUPLICATE own shell sharing the round's `ShotId`
-    // (the forward tick already spawned it; the shell entity is not rolled back). Absent on the
-    // authority (server/SP/sandbox never roll back), so it fires there unconditionally.
-    replaying: Option<Res<crate::Replaying>>,
     // Present only on a net client, where own fire is FUSED: a keyed round's one presentation is
     // the server's echoed fact, released at the interpolation cursor by `net::client`, so the local
     // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox),
@@ -231,7 +224,6 @@ fn fire(
     fixed_time: Res<Time<Fixed>>,
     mut commands: Commands,
 ) {
-    let replaying = replaying.is_some_and(|r| r.0);
     for (muzzle_entity, weapon, slot, root) in &weapons {
         let Ok((command, tank_volumes, position, rotation, combatant)) = tanks.get(root.0) else {
             continue;
@@ -282,13 +274,9 @@ fn fire(
         // Round bookkeeping: is THIS round a tracer, then advance the counter. A `Single`'s round
         // always traces (its visual is the shell scene, not a streak — `tracer_round` is belt
         // arithmetic and only the `Automatic` arm calls it). Decided from root-resident `TankSim`
-        // state so the server and the predicted client — which both run this `fire` and count
-        // their own belts from 0 — agree on each round's tracer-ness (and a rollback replay
-        // restores the counter, re-deriving the same answer). The flag rides FireShell → FireEvent
-        // so remote clients match too. A rollback that drops a predicted shot can leave THIS
-        // client's own counter one round out of phase with the server's; the resulting one-round
-        // tracer skew on the shooter's own view is cosmetic and accepted (see
-        // `WeaponState::rounds_fired`).
+        // state so the server and the client — which both run this `fire` and count their own
+        // belts from 0 — agree on each round's tracer-ness. The flag rides FireShell → FireEvent
+        // so remote clients match too (see `WeaponState::rounds_fired`).
         let tracer = if let Ok(mut sim) = sims.get_mut(root.0) {
             match sim.weapons.get_mut(slot.0) {
                 Some(state) => {
@@ -326,12 +314,8 @@ fn fire(
         // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo
         // and presents locally.
         let fused_echo = replica.is_some() && shot.is_some();
-        // Hand off to ballistics: fire down the bore at the weapon's muzzle speed. SUPPRESSED on a
-        // rollback replay (F1): the cosmetic shell was already spawned on the original forward tick
-        // and is not rolled back, so re-triggering here would spawn a duplicate own shell sharing this
-        // round's `ShotId`. The sim mutations above/below (tracer counter, and belt/reload/recoil/hull
-        // below) still run — they MUST replay for the rolled-back `TankSim` to re-derive exactly.
-        if !replaying && !fused_echo {
+        // Hand off to ballistics: fire down the bore at the weapon's muzzle speed.
+        if !fused_echo {
             commands.trigger(FireShell {
                 origin: muzzle_position,
                 direction: bore,
@@ -403,8 +387,7 @@ fn fire(
     }
 }
 
-/// Step each recoiling barrel's damped spring (state root-resident in `TankSim::weapons`, so a
-/// rollback replay re-derives the barrel — and therefore the muzzle — from restored state) and
+/// Step each recoiling barrel's damped spring (state root-resident in `TankSim::weapons`) and
 /// write the barrel's node `Transform`.
 fn apply_recoil(
     mut barrels: Query<(&mut Transform, &RecoilParams, &WeaponIndex, &TankRoot)>,
@@ -976,54 +959,6 @@ mod tests {
         world.entity_mut(root).remove::<crate::CombatantId>();
 
         world.run_system_once(fire).unwrap();
-    }
-
-    /// F1: a rollback replay re-runs `fire` for a tick that already fired on the forward pass. The
-    /// DETERMINISTIC sim mutation (the belt walk) MUST replay so the rolled-back `TankSim` re-derives
-    /// exactly — but the cosmetic `FireShell` trigger must NOT, or the replay spawns a duplicate own
-    /// shell sharing the round's `ShotId` (the forward tick's shell is not rolled back).
-    #[test]
-    fn rollback_replay_walks_the_belt_but_spawns_no_duplicate_own_shell() {
-        use crate::ballistics::FireShell;
-
-        #[derive(Resource, Default)]
-        struct FireShellCount(usize);
-        fn count_fire_shells(_: On<FireShell>, mut c: ResMut<FireShellCount>) {
-            c.0 += 1;
-        }
-
-        let mut world = test_world();
-        world.init_resource::<FireShellCount>();
-        world.add_observer(count_fire_shells);
-        let (root, _) = spawn_mg_rig(&mut world, Vec::new());
-
-        // A FORWARD tick (no `Replaying` resource → the flag reads `false`): one cosmetic shell spawns
-        // and the belt walks 2 → 1.
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            world.resource::<FireShellCount>().0,
-            1,
-            "the forward tick spawns exactly one own shell",
-        );
-        assert_eq!(gate_state(&world, root).belt_remaining, 1);
-
-        // Arm past the cyclic interval so the weapon is ready to fire again.
-        advance(&mut world, 7);
-
-        // Now REPLAYING: `fire` re-runs for this ready tick. The belt still walks 1 → 0 (determinism),
-        // but no SECOND cosmetic shell may spawn.
-        world.insert_resource(crate::Replaying(true));
-        world.run_system_once(fire).unwrap();
-        assert_eq!(
-            world.resource::<FireShellCount>().0,
-            1,
-            "a replayed fire tick spawns NO duplicate own shell",
-        );
-        assert_eq!(
-            gate_state(&world, root).belt_remaining,
-            0,
-            "the belt still decrements on replay — WeaponGate must re-derive the rolled-back state",
-        );
     }
 
     /// Give the rig's weapon a barrel and a recoil spec, so `kick_recoil` has a kick to apply and

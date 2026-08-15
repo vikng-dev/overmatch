@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
 use crate::state::{GameplaySet, SimPhase};
 use crate::terrain_grid::HeightGrid;
-use crate::{ClientReplica, Layer, PredictedPresent, Replaying, ShotId};
+use crate::{ClientReplica, Layer, ShotClock, ShotId};
 
 /// Server-sanctioned outcome bookkeeping: the client's reconciliation buffer and the bounded
 /// catch-up that replays it into a drawable flight. Netcode, not ballistics — the flight,
@@ -138,9 +138,9 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
     (elapsed <= i32::MAX as u32).then_some(elapsed)
 }
 
-/// DERIVED from the client's default 100-tick rollback window: cosmetic recovery never integrates
-/// farther than simulation can reconcile. A larger authority interval fails closed rather than
-/// drawing a shortened, invented trajectory.
+/// The presentation-validity bound: the farthest (in ticks) a cosmetic shell may be fast-forwarded
+/// to catch the presented timeline — the cursor catch-up ceiling. A larger authority interval fails
+/// closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
 /// Reference-mm penetration capability using a DeMarre-shaped mass and speed curve.
@@ -505,13 +505,13 @@ pub enum FireShellOrigin {
 
 /// Hidden replica shell waiting for an authority bounce or terminal.
 ///
-/// Invariant: re-age from `PredictedPresent - bounce_tick` when available; `waited` counts only
+/// Invariant: re-age from `ShotClock - bounce_tick` when available; `waited` counts only
 /// forward ticks after this client created the hold. See ADR-0021.
 #[derive(Component)]
 pub(crate) struct Held {
     /// Fixed ticks spent actually waiting for a verdict after this client created the hold.
     waited: u32,
-    /// Re-age fallback when [`PredictedPresent`] is unavailable.
+    /// Re-age fallback when [`ShotClock`] is unavailable.
     age: u32,
     /// Local contact normal for the first sanctioned bounce after this hold re-seeds.
     normal: Vec3,
@@ -872,13 +872,10 @@ fn on_fire_shell(
     // exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
     // fallback world, where the parry terrain cast remains.
     grid: Option<Res<HeightGrid>>,
-    // The net client's predicted present `P` — the tick every cosmetic shell lives at, and the one
-    // the shot-lifecycle recorder stamps its rows with. Absent on the authority (server / SP /
-    // sandbox), where an OBSERVER shell (the only kind that carries `fire.shot` here) never exists.
-    present: Option<Res<PredictedPresent>>,
-    // The server has no `PredictedPresent`, but the shared network protocol gives it this
-    // net-neutral tick so locally authored lifecycle rows retain their actual fire time.
-    shot_clock: Option<Res<crate::ShotClock>>,
+    // The shared network protocol's net-neutral tick — the tick every cosmetic shell lives at, and
+    // the one the shot-lifecycle recorder stamps its rows with. Absent on SP / sandbox, where an
+    // unstamped row's tick is 0.
+    shot_clock: Option<Res<ShotClock>>,
     // The shot-lifecycle recorder (`SPIKE_SHOT_TRACE`): absent unless armed, so an unrecorded run pays
     // one `Option` check per shot. `FireShellOrigin` preserves local-vs-reconstructed attribution;
     // `ClientReplica` distinguishes the two locally authored roles (`own` vs `auth`).
@@ -886,9 +883,7 @@ fn on_fire_shell(
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     mut commands: Commands,
 ) {
-    let now = present
-        .as_deref()
-        .map_or_else(|| shot_clock.as_deref().map_or(0, |clock| clock.0), |p| p.0);
+    let now = shot_clock.as_deref().map_or(0, |clock| clock.0);
     if fire.catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
         warn!(
             catch_up_ticks = fire.catch_up_ticks,
@@ -1124,8 +1119,7 @@ fn spawn_shell(commands: &mut Commands, shell: impl Bundle, tracer: bool) {
 struct ProjectileMarchNet<'w> {
     replica: Option<Res<'w, ClientReplica>>,
     sanctioned: Option<Res<'w, SanctionedShots>>,
-    replaying: Option<Res<'w, Replaying>>,
-    present: Option<Res<'w, PredictedPresent>>,
+    shot_clock: Option<Res<'w, ShotClock>>,
 }
 
 /// The world one shell march probes: armor geometry, the ownership hierarchy that classifies a hit,
@@ -1248,22 +1242,8 @@ fn integrate_projectiles(
     let ProjectileMarchNet {
         replica,
         sanctioned,
-        replaying,
-        present,
+        shot_clock,
     } = net;
-    // F1 (rollback-safe cosmetics): on a net client, lightyear replays FixedMain N times per
-    // rollback. Every shell this system marches is VIEW-ONLY (`deposit == false` — HP and impulse are
-    // the server's authority; see `ClientReplica`) and its picture must advance exactly ONE step per
-    // FORWARD tick. Re-marching on each replayed tick would teleport every in-flight shell forward by
-    // the rollback depth (with duplicate `ShellPath` points) and age every `Held` shell one extra
-    // tick per replay — burning the grace window in a single frame and corrupting the
-    // `present − bounce_tick` re-seed arithmetic that `Held` depends on. So skip the whole march on a
-    // replayed tick; the shells resume untouched on the next forward tick. The DETERMINISTIC sim state
-    // a rollback exists to correct (`TankSim`, physics) is not here — it re-runs in `GameplaySet`
-    // normally. The authority (server/SP/sandbox) never sets `Replaying`, so it is never skipped.
-    if replaying.is_some_and(|r| r.0) {
-        return;
-    }
     // March-cost attribution timer (`SPIKE_COST_TRACE`): only sampled when the recorder is armed, so an
     // unmeasured run never touches the clock. Covers the whole march (query iteration + every cast).
     let march_t0 = cost.as_ref().map(|_| Instant::now());
@@ -1271,11 +1251,11 @@ fn integrate_projectiles(
     // Authority = not a replica: only then does a hit actually mutate health here.
     let deposit = replica.is_none();
     let sanctioned = sanctioned.as_deref();
-    // F3: the predicted present tick, if this is a net client — the clock the overdue-consumption
-    // check below compares each sanctioned outcome's server tick against. Absent on the authority.
-    let present = present.map(|p| p.0);
-    // The tick every shot-lifecycle row this march writes is stamped with: the predicted present (the
-    // tick each cosmetic shell lives at). Never read on the authority — every row site is `!deposit`.
+    // The published fixed tick — the clock the overdue-consumption check below compares each
+    // sanctioned outcome's server tick against. Absent on SP / sandbox.
+    let present = shot_clock.map(|clock| clock.0);
+    // The tick every shot-lifecycle row this march writes is stamped with (the tick each cosmetic
+    // shell lives at). Never read on the authority — every row site is `!deposit`.
     let now = present.unwrap_or(0);
 
     for (
@@ -3079,7 +3059,7 @@ mod march_tests {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
         app.insert_resource(crate::ClientReplica);
         app.init_resource::<SanctionedShots>();
-        app.insert_resource(crate::PredictedPresent(120));
+        app.insert_resource(crate::ShotClock(120));
         app.add_observer(on_fire_shell);
 
         let shot = a_shot();
@@ -3189,7 +3169,7 @@ mod march_tests {
         let mut app = view_world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
         app.insert_resource(crate::ClientReplica);
         app.init_resource::<SanctionedShots>();
-        app.insert_resource(crate::PredictedPresent(120));
+        app.insert_resource(crate::ShotClock(120));
         app.add_observer(on_fire_shell);
 
         let shot = a_shot();
@@ -3529,7 +3509,7 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
-                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // Inert in these tests (no `ShotClock` resource → the overdue path is off);
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
@@ -3635,7 +3615,7 @@ mod march_tests {
                 origin: bounce.origin,
                 direction: bounce.direction,
                 speed: bounce.speed,
-                // Inert in these tests (no `PredictedPresent` resource → the F3 overdue path is off);
+                // Inert in these tests (no `ShotClock` resource → the overdue path is off);
                 // the hold/pre-armed paths under test don't read it.
                 bounce_tick: 0,
                 sequence: 0,
@@ -3675,147 +3655,6 @@ mod march_tests {
         assert!(
             app.world().get::<Projectile>(shell).is_some(),
             "the shell survives and continues after the delayed re-seed",
-        );
-    }
-
-    /// Set the replica world's replay flag.
-    fn set_replaying(app: &mut App, replaying: bool) {
-        app.insert_resource(crate::Replaying(replaying));
-    }
-
-    /// Regression: replayed ticks do not advance a cosmetic shell.
-    #[test]
-    fn rollback_replay_freezes_the_cosmetic_march() {
-        let shot = a_shot();
-        let mut app = replica_world(SanctionedShots::default());
-        let origin = Vec3::new(0.0, 2.0, 5.0);
-        let dir = Vec3::Z;
-        let speed = 800.0;
-        let shell = app
-            .world_mut()
-            .spawn((
-                Projectile {
-                    velocity: dir * speed,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(dir),
-                },
-                DamageReport::default(),
-                TerminalReport::default(),
-                ShellPath {
-                    points: vec![origin],
-                    segment_starts: Vec::new(),
-                },
-                PenetrationMarks::default(),
-                SpallMarks::default(),
-                ShellReadout {
-                    speed,
-                    capability: capability(10.2, speed),
-                },
-                Transform::from_translation(origin).looking_to(dir, Vec3::Y),
-                Shot(shot),
-            ))
-            .id();
-
-        app.update();
-        assert!(
-            app.world().get::<Held>(shell).is_none(),
-            "baseline: the shell is still free-flying, not yet at contact",
-        );
-        let pos_before = app.world().get::<Transform>(shell).unwrap().translation;
-        let vel_before = app.world().get::<Projectile>(shell).unwrap().velocity;
-        let points_before = app.world().get::<ShellPath>(shell).unwrap().points.len();
-
-        set_replaying(&mut app, true);
-        for _ in 0..8 {
-            app.update();
-        }
-        assert_eq!(
-            app.world().get::<Transform>(shell).unwrap().translation,
-            pos_before,
-            "a replayed tick must not advance the shell (no double-march teleport)",
-        );
-        assert_eq!(
-            app.world().get::<Projectile>(shell).unwrap().velocity,
-            vel_before,
-            "a replayed tick must not integrate the shell's velocity",
-        );
-        assert_eq!(
-            app.world().get::<ShellPath>(shell).unwrap().points.len(),
-            points_before,
-            "a replayed tick must not append duplicate ShellPath points",
-        );
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "a replayed tick fires no impact",
-        );
-
-        set_replaying(&mut app, false);
-        app.update();
-        assert_ne!(
-            app.world().get::<Transform>(shell).unwrap().translation,
-            pos_before,
-            "a forward tick resumes the march",
-        );
-    }
-
-    /// Regression: replayed ticks do not age a hold or its re-seed.
-    #[test]
-    fn rollback_replay_does_not_age_the_hold_and_reseed_stays_exact() {
-        let shot = a_shot();
-        let bounce = authority_bounce(shot);
-        let mut app = replica_world(SanctionedShots::default());
-        let shell = spawn_oblique_shell(&mut app, shot);
-
-        for _ in 0..8 {
-            app.update();
-            if app.world().get::<Held>(shell).is_some() {
-                break;
-            }
-        }
-        assert!(app.world().get::<Held>(shell).is_some(), "held at contact");
-
-        const HELD_FWD: u32 = 4;
-        for _ in 0..HELD_FWD {
-            app.update();
-        }
-        assert_eq!(app.world().get::<Held>(shell).unwrap().waited, HELD_FWD);
-
-        set_replaying(&mut app, true);
-        for _ in 0..8 {
-            app.update();
-        }
-        assert_eq!(
-            app.world().get::<Held>(shell).unwrap().waited,
-            HELD_FWD,
-            "a replay must not age the hold window (it would burn the grace window and over-age the re-seed)",
-        );
-
-        set_replaying(&mut app, false);
-        app.world_mut().resource_mut::<SanctionedShots>().insert(
-            shot,
-            SanctionedBounce {
-                origin: bounce.origin,
-                direction: bounce.direction,
-                speed: bounce.speed,
-                bounce_tick: 0,
-                sequence: 0,
-            },
-        );
-        app.update();
-        let dt = 0.016;
-        let (expected_pos, _, _) = fast_forward_shell(
-            bounce.origin,
-            bounce.direction.normalize() * bounce.speed,
-            drag_k(0.088, 10.2),
-            dt,
-            HELD_FWD,
-        );
-        let pos = app.world().get::<Transform>(shell).unwrap().translation;
-        assert!(
-            pos.distance(expected_pos) < 1.0e-3,
-            "re-seed re-aged by the TRUE hold count, not the storm's replays (got {pos}, want {expected_pos})",
         );
     }
 
@@ -4006,7 +3845,7 @@ mod march_tests {
     fn overdue_bounce_reseeds_a_pose_divergent_miss() {
         let shot = a_shot();
         let mut app = replica_world(SanctionedShots::default());
-        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 20));
+        app.insert_resource(crate::ShotClock(shot.fire_tick + 20));
         let bounce_origin = Vec3::new(1.0, 2.0, 3.0);
         app.world_mut().resource_mut::<SanctionedShots>().insert(
             shot,
@@ -4052,7 +3891,7 @@ mod march_tests {
     fn overdue_terminal_finalizes_a_pose_divergent_miss() {
         let shot = a_shot();
         let mut app = replica_world(SanctionedShots::default());
-        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 20));
+        app.insert_resource(crate::ShotClock(shot.fire_tick + 20));
         let impact_pos = Vec3::new(1.0, 2.0, 3.0);
         app.world_mut()
             .resource_mut::<SanctionedShots>()
@@ -4093,7 +3932,7 @@ mod march_tests {
     fn a_sanctioned_outcome_within_the_margin_is_not_force_consumed() {
         let shot = a_shot();
         let mut app = replica_world(SanctionedShots::default());
-        app.insert_resource(crate::PredictedPresent(shot.fire_tick + 5));
+        app.insert_resource(crate::ShotClock(shot.fire_tick + 5));
         app.world_mut().resource_mut::<SanctionedShots>().insert(
             shot,
             SanctionedBounce {
@@ -4284,7 +4123,7 @@ mod march_tests {
                     position: server_pos,
                     normal: Vec3::Z,
                     penetrated: true,
-                    impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
+                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
             );
@@ -4328,7 +4167,7 @@ mod march_tests {
                 position: server_pos,
                 normal: Vec3::Z,
                 penetrated: true,
-                impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
+                impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 0,
             },
         );
@@ -4367,7 +4206,7 @@ mod march_tests {
                 position: server_pos,
                 normal: Vec3::Z,
                 penetrated: false,
-                impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
+                impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 1,
             },
         );
@@ -4395,7 +4234,7 @@ mod march_tests {
                 origin: Vec3::new(0.0, 2.0, 0.5),
                 direction: Vec3::new(0.12, 0.0, -1.0).normalize(),
                 speed: 480.0,
-                bounce_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
+                bounce_tick: 0, // inert (no `ShotClock` — overdue path off)
                 sequence: 0,
             },
         );
@@ -4447,7 +4286,7 @@ mod march_tests {
                     position: Vec3::new(0.0, 2.0, 0.07),
                     normal: Vec3::Z,
                     penetrated: true,
-                    impact_tick: 0, // inert (no `PredictedPresent` — F3 overdue path off)
+                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
             );

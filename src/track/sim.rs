@@ -7,10 +7,10 @@
 //! Sim discipline (hard rules, each bought with a measured MP failure in the raycast sim this
 //! replaces):
 //! - Pose from tick-truth `Position`/`Rotation`, never `GlobalTransform` (render lag differs
-//!   per machine and freezes through rollback replays).
+//!   per machine).
 //! - Terrain from the analytic [`TrackField`] — pure closed-form arithmetic, no spatial
-//!   queries, no BVH rollback dependency.
-//! - Runs every replayed tick (NO `Replaying` gate — this is sim state); stays inside
+//!   queries.
+//! - Runs every tick unconditionally (this is sim state); stays inside
 //!   `SimPhase::DrivingForces` so drive samples velocity before the weapon-fire impulse.
 //! - `Drive` capability gates the COMMAND, not the contact model: a dead engine still has
 //!   kinetic grip (the slip law keeps resisting motion — though it creeps on slopes, ADR-0025);

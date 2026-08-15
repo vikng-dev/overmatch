@@ -18,7 +18,7 @@ use bevy::shader::ShaderRef;
 use serde_json::json;
 
 use crate::ballistics::{PenetrationMarks, ShellPath, ShellVisual, Shot};
-use crate::{PredictedPresent, ShotId};
+use crate::{ShotClock, ShotId};
 
 use super::ViewRng;
 use super::billboard::{gradient_lut, smoothstep};
@@ -438,7 +438,7 @@ fn flush_removed_shell_path(
     shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<ShellVisual>>,
     mut trails: Query<&mut TrailRibbon>,
     mut rng: ResMut<ViewRng>,
-    present: Option<Res<PredictedPresent>>,
+    present: Option<Res<ShotClock>>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
     let Ok((path, marks, shot)) = shells.get(remove.entity) else {
@@ -471,7 +471,7 @@ fn update_trails(
     mut trails: Query<(Entity, &mut TrailRibbon, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<ViewRng>,
-    present: Option<Res<PredictedPresent>>,
+    present: Option<Res<ShotClock>>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     #[cfg(test)] mut mesh_evidence: MessageWriter<TrailStationMeshEvidence>,
     mut commands: Commands,
