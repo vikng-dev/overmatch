@@ -307,6 +307,7 @@ impl OwnFireDiag {
 
 /// One released shot's wire/state facts — everything presentation needs except its age, which is
 /// the seam's to measure.
+#[derive(Clone, Copy)]
 pub(super) struct ReleasedShot {
     pub(super) origin: Vec3,
     pub(super) direction: Dir3,
@@ -569,7 +570,6 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
 fn recover_unannounced_rounds(
     fused: Option<Res<crate::FusedOwnFire>>,
     tick: Res<TickDuration>,
-    timeline: Res<LocalTimeline>,
     arrival: Option<Res<ArrivalDelay>>,
     cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
     mut roots: Query<(Entity, &mut OwnFirePresentation)>,
@@ -588,13 +588,16 @@ fn recover_unannounced_rounds(
         return;
     };
     let wait = announce_wait_ticks(arrival.stats.coverage(), tick.0);
-    let now = timeline.tick();
+    // CURSOR clock, both halves: the wait is measured in cursor ticks past the reveal, and the
+    // recovered round's age is the seam's `cursor − revealed_tick` — a fallback bang lands at the
+    // same lag its lost announcement would have presented at.
+    let cursor = (cursor.tick(), f64::from(cursor.overstep().to_f32()));
     for (root, mut ledger) in &mut roots {
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
             let Some(&Reveal { revealed_tick, .. }) = entry.reveals.front() else {
                 continue;
             };
-            if (cursor.tick() - Tick(revealed_tick)) < wait as i32 {
+            if (cursor.0 - Tick(revealed_tick)) < wait as i32 {
                 continue;
             }
             let Some((weapon, muzzle)) = muzzles.iter().find_map(|(weapon, index, tank, pose)| {
@@ -605,8 +608,44 @@ fn recover_unannounced_rounds(
             let Ok(direction) = Dir3::new(muzzle.rotation() * Vec3::NEG_Z) else {
                 continue;
             };
-            let catch_up_ticks =
-                ((now - Tick(revealed_tick)).max(0) as u32).min(MAX_COSMETIC_CATCH_UP_TICKS);
+            let facts = ReleasedShot {
+                origin: muzzle.translation(),
+                direction,
+                speed: weapon.speed,
+                caliber: weapon.caliber,
+                mass: weapon.mass,
+                // The round's belt phase died with the announcement; a recovered round
+                // presents traced — the visible arm of the self-heal.
+                tracer: true,
+                mechanism: weapon.fire_mode.mechanism(),
+                shooter: ShotSource {
+                    tank: root,
+                    weapon: slot,
+                },
+                // The round's ShotId died with its announcement, so the shell flies
+                // uncorrected (no sanctioned bounces) — the honest remainder.
+                shot: None,
+            };
+            if present_released_shot(
+                Tick(revealed_tick),
+                cursor,
+                facts,
+                &mut recoil,
+                &mut commands,
+            )
+            .is_none()
+            {
+                // Over-horizon reveal (a multi-second stall with a round in flight): present at
+                // the horizon rather than jamming the slot — a rejected front reveal would retry
+                // forever and block every round behind it. The flash observers stale-gate the
+                // bang; the ledger settles through the same observer as any presentation.
+                present_shot_at_age(
+                    MAX_COSMETIC_CATCH_UP_TICKS,
+                    facts,
+                    &mut recoil,
+                    &mut commands,
+                );
+            }
             entry.owed_swallows.push_back(revealed_tick);
             if entry.owed_swallows.len() > QUEUE_CAP {
                 entry.owed_swallows.pop_front();
@@ -618,25 +657,6 @@ fn recover_unannounced_rounds(
                  (recovered {})",
                 diag.recovered,
             );
-            commands.trigger(FireShell {
-                origin: muzzle.translation(),
-                direction,
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                mechanism: weapon.fire_mode.mechanism(),
-                // The round's belt phase died with the announcement; a recovered round presents
-                // traced — the visible arm of the self-heal.
-                tracer: true,
-                shooter: Some(ShotSource {
-                    tank: root,
-                    weapon: slot,
-                }),
-                shot_origin: FireShellOrigin::Reconstructed,
-                catch_up_ticks,
-                shot: None,
-            });
-            recoil.push(root, slot);
         }
     }
 }
@@ -1550,8 +1570,9 @@ mod tests {
             let source = shooter.expect("the bang is keyed to the armed root");
             assert_eq!((source.tank, source.weapon), (root, 0));
             assert_eq!(
-                catch_up, 10,
-                "catch-up spans reveal (100) to the local present (110)",
+                catch_up, 5,
+                "catch-up spans reveal (100) to the CURSOR (105) — the cursor clock, never the \
+                 local present (110, which a wrong-clock mutant would read as 10)",
             );
             assert!(unkeyed, "the round's ShotId died with its announcement");
             let ledger = world.get::<OwnFirePresentation>(root).expect("ledger");
