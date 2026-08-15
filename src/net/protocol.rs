@@ -115,6 +115,11 @@ use crate::{CombatantId, ShotId};
 /// `Predicted` registration, so lightyear's own protocol hash differs from earlier REV-27 builds.
 /// REV 27 has never deployed, so the change rides this bump rather than forcing a 28 — the
 /// REV-19/REV-26 precedent above.
+///
+/// Still REV 27: `TankServos` leaves the wire — dead since the promotion path died; clients
+/// integrate `RemoteServos` from the `ServoAngles` stream, so the replicated snapshot had no
+/// reader. Surface and own-type graph move; the change rides the undeployed bump — the
+/// REV-19/REV-26 precedent above.
 pub const PROTOCOL_REV: u32 = 27;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -828,11 +833,10 @@ const WIRE_SURFACE: &[&str] = &[
     "TrackDrive",
     "TankTransmission",
     "WeaponGate",
-    "TankServos",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xaff3_f227_5247_1a3f;
+const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -853,8 +857,8 @@ const WIRE_SURFACE_HASH: u64 = 0xaff3_f227_5247_1a3f;
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
 //     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `TankServos`
-//     carries `ServoState`, `TankCommand` (src/command.rs) carries `CrewSwap`, and both
+//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`,
+//     `TankCommand` (src/command.rs) carries `CrewSwap`, and both
 //     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
@@ -868,7 +872,7 @@ const WIRE_SURFACE_HASH: u64 = 0xaff3_f227_5247_1a3f;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x1fb2_8215_02f6_32bc;
+const WIRE_TYPES_HASH: u64 = 0xc2eb_bad5_a206_7c75;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -981,9 +985,6 @@ pub(crate) fn plugin(app: &mut App) {
     // Complete weapon eligibility state: one atomic snapshot. `net::fire_presentation` reconciles
     // it as a legality report against the locally authored cadence.
     app.component::<WeaponGate>().replicate();
-    // Complete servo integrator state: one atomic snapshot; `RemoteServos` chases the public
-    // angles for presentation.
-    app.component::<TankServos>().replicate();
 
     app.add_systems(
         FixedPostUpdate,
@@ -1214,7 +1215,7 @@ mod tests {
         );
         assert!(
             !attach.contains("TankServos::for_count"),
-            "client attachment must not overwrite a JIP servo snapshot with spawn defaults"
+            "client attachment must not construct authoritative servo state; RemoteServos is the only client integrator"
         );
         assert!(
             !attach.contains("TrackGripElements::for_links"),
@@ -1272,7 +1273,7 @@ mod tests {
         );
         // Re-pinned for REV 26 (map2 terrain + 1500 m extent: same registrations, same own-type
         // definitions — the REV itself is what moved).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x44da_4e0a_9dc8_ca96;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x565b_f8e1_2bfa_c694;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1488,8 +1489,7 @@ mod tests {
     /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
-    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState`/`TankServos` from `tank/model.rs`,
-    /// `ServoState` from `tank/servo.rs`,
+    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
     /// `TankCommand`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`. External wire
     /// types (avian/lightyear) are covered by dependency version.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
@@ -1501,8 +1501,6 @@ mod tests {
         ("src/track/transmission.rs", "SchedulerState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
-        ("src/tank/model.rs", "TankServos"),
-        ("src/tank/servo.rs", "ServoState"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/net/protocol.rs", "ServoAngles"),
@@ -2322,19 +2320,15 @@ mod tests {
     /// Servo authority reaches clients only through the public `ServoAngles` pump on remotes; the
     /// tank holding the input slot keeps `drive_aim_servos` as its sole servo-target writer.
     #[test]
-    fn tank_servos_has_no_latest_arrival_sim_writer() {
+    fn servo_angles_is_the_only_servo_authority_path_to_clients() {
         let protocol = strip_comments(&read_source("src/net/protocol.rs"));
-        assert!(
-            protocol.contains("app.component::<TankServos>().replicate();"),
-            "TankServos rides plain replication with no client-side reconciliation path",
-        );
         assert!(
             protocol.contains("With<Remote>, Without<GameControlled>"),
             "the ServoAngles pump must stay scoped to remotes without the input slot",
         );
         assert!(
             !protocol.contains("fn apply_tank_servos"),
-            "latest network arrival must never copy TankServos into owner simulation",
+            "network arrival must never copy servo integrator state into simulation",
         );
     }
 }
