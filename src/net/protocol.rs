@@ -28,7 +28,9 @@ use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, TankSim,
     WeaponGate,
 };
-use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
+use crate::track::sim::{
+    TankTransmission, TrackDrive, TrackDriveSide, TrackGripEffect, TrackGripElements,
+};
 #[cfg(test)]
 use crate::track::transmission::TransmissionState;
 use crate::track::transmission::{RESERVE_MARGIN_FLOOR_N, transmission_state_projection};
@@ -976,6 +978,27 @@ pub(crate) fn track_drive_error(a: &TrackDrive, b: &TrackDrive) -> f32 {
     worst
 }
 
+/// CURSOR-clock source for the track view (the per-channel clock map): an interpolated hull
+/// renders at the interpolation cursor, so the belt speed/phase its track view draws must be
+/// sampled on the same clock — component-wise linear, the belt phase in f64. Client-side
+/// presentation only: registering interpolation adds no wire type, mode, or direction (the
+/// wire-surface pins prove it), and a simulated hull carries no `Interpolated` marker, so its
+/// sim-written component is untouched.
+pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> TrackDrive {
+    let side = |a: TrackDriveSide, b: TrackDriveSide| TrackDriveSide {
+        speed: a.speed + (b.speed - a.speed) * t,
+        phase: a.phase + (b.phase - a.phase) * f64::from(t),
+    };
+    TrackDrive {
+        throttle: start.throttle + (end.throttle - start.throttle) * t,
+        steer: start.steer + (end.steer - start.steer) * t,
+        sides: [
+            side(start.sides[0], end.sides[0]),
+            side(start.sides[1], end.sides[1]),
+        ],
+    }
+}
+
 /// Whether two atomic transmission snapshots differ under the REV-14 carried-state contract.
 /// Exhaustive projection in the transmission module makes a future field addition fail compilation
 /// until classified. Trace and determinism hashes continue to consume every projected raw value;
@@ -1294,7 +1317,9 @@ pub(crate) fn plugin(app: &mut App) {
         });
     // The tracked drivetrain (phase B): owner-predicted, replicated to remotes — velocity-like
     // continuous sim state, same registration shape as LinearVelocity (never NetCrew snap-to,
-    // never local_rollback: remotes need it for their track view).
+    // never local_rollback: remotes need it for their track view). Interpolated like
+    // Position/Rotation so a cursor-rendered hull's track view reads cursor-time belt
+    // speed/phase, never the arrival-fresh value that visibly leads the hull.
     app.component::<TrackDrive>()
         .replicate()
         .predict()
@@ -1304,7 +1329,8 @@ pub(crate) fn plugin(app: &mut App) {
                 track_drive_error(a, b),
                 ROLLBACK_TRACK_DRIVE,
             )
-        });
+        })
+        .add_interpolation_with(track_drive_lerp);
     // The declared transmission's correlated state: one atomic owner-predicted snapshot. Its 15
     // discrete fields are exact; the two continuous floats inherit explicit physical tolerance
     // bands. Matching NaN payloads remain equal, while distinct NaNs still force reconciliation.
@@ -1692,6 +1718,79 @@ mod tests {
         let mut nan_b = nan_a;
         nan_b.0.omega_e = f32::from_bits(0x7fc0_0043);
         assert!(tank_transmission_mismatch(&nan_a, &nan_b));
+    }
+
+    /// The track view's CURSOR-clock speed source (the per-channel clock map): an interpolated
+    /// hull's `TrackDrive` must come from the interpolation registry, sampled on the same clock
+    /// that places the hull. Two mutants red this: deleting the `.add_interpolation_with`
+    /// registration (the arrival-source mutant — the view would read arrival-fresh packets and
+    /// the tracks would lead the hull again) fails the `interpolated` assert; a wrong-math lerp
+    /// fails the midpoint asserts, field by field, belt phase in f64.
+    #[test]
+    fn track_drive_is_registered_for_cursor_interpolation() {
+        use lightyear::interpolation::prelude::InterpolationRegistry;
+        use lightyear::prelude::client::ClientPlugins;
+
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+
+        let registry = app.world().resource::<InterpolationRegistry>();
+        assert!(
+            registry.interpolated::<TrackDrive>(),
+            "an interpolated hull's belt speed/phase must be a cursor-time value: TrackDrive \
+             needs an interpolation registration, or the track view reads arrival-fresh state"
+        );
+
+        let start = TrackDrive {
+            throttle: 0.0,
+            steer: -1.0,
+            sides: [
+                TrackDriveSide {
+                    speed: 2.0,
+                    phase: 10.0,
+                },
+                TrackDriveSide {
+                    speed: -4.0,
+                    phase: 6.0,
+                },
+            ],
+        };
+        let end = TrackDrive {
+            throttle: 1.0,
+            steer: 1.0,
+            sides: [
+                TrackDriveSide {
+                    speed: 6.0,
+                    phase: 30.0,
+                },
+                TrackDriveSide {
+                    speed: 0.0,
+                    phase: 8.0,
+                },
+            ],
+        };
+        let mid = registry.interpolate(start, end, 0.5);
+        assert_eq!(
+            mid,
+            TrackDrive {
+                throttle: 0.5,
+                steer: 0.0,
+                sides: [
+                    TrackDriveSide {
+                        speed: 4.0,
+                        phase: 20.0,
+                    },
+                    TrackDriveSide {
+                        speed: -2.0,
+                        phase: 7.0,
+                    },
+                ],
+            },
+            "component-wise linear midpoint, belt phase carried in f64"
+        );
     }
 
     #[test]

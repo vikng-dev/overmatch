@@ -305,6 +305,79 @@ impl OwnFireDiag {
     }
 }
 
+/// One released shot's wire/state facts — everything presentation needs except its age, which is
+/// the seam's to measure.
+#[derive(Clone, Copy)]
+pub(super) struct ReleasedShot {
+    pub(super) origin: Vec3,
+    pub(super) direction: Dir3,
+    pub(super) speed: f32,
+    pub(super) caliber: f32,
+    pub(super) mass: f32,
+    pub(super) tracer: bool,
+    pub(super) mechanism: crate::spec::FireMechanism,
+    pub(super) shooter: ShotSource,
+    pub(super) shot: Option<crate::ShotId>,
+}
+
+/// THE SHOT-PRESENTATION SEAM: one complete released shot presents through this call — the
+/// `FireShell` it triggers carries the muzzle flash and report dressing (`vfx::muzzle`), the
+/// tracer/shell spawn (`ballistics`), and the ledger count ([`count_presented_round`]); the barrel
+/// kick queues beside it. Every cursor release path — the fused own echo, remote fire
+/// announcements, and the belt-delta fallback — funnels here.
+///
+/// CURSOR CLOCK (the per-channel clock map): a released shot's age is `cursor − released_tick`,
+/// fractional ticks on the same clock that released it — ≈ 0..1 at a crossing release, so the
+/// shell spawns at the muzzle and the flash clears `ballistics::STALE_FIRE_TICKS`. The local
+/// timeline's lead+delay must never age a cursor-released shot: it spawns the tracer a whole fuse
+/// downrange and stale-gates the flash.
+///
+/// `None` = the age exceeds [`MAX_COSMETIC_CATCH_UP_TICKS`] (the absurdity bar `ballistics`
+/// enforces on every `FireShell`): nothing presents and the caller's ledger stays untouched.
+pub(super) fn present_released_shot(
+    released_tick: Tick,
+    (cursor_tick, overstep): (Tick, f64),
+    shot: ReleasedShot,
+    recoil: &mut super::client::PendingRecoilKicks,
+    commands: &mut Commands,
+) -> Option<u32> {
+    // A release happens at or after the crossing, so the age is non-negative by construction; the
+    // clamp mirrors `fire_catch_up_ticks`' don't-rewind rule for a malformed tick.
+    let age = (f64::from(cursor_tick - released_tick) + overstep).max(0.0);
+    // Whole ticks feed the fixed-tick catch-up march; the dropped fraction is under one tick of
+    // shell flight.
+    let catch_up_ticks = age as u32;
+    if catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
+        return None;
+    }
+    present_shot_at_age(catch_up_ticks, shot, recoil, commands);
+    Some(catch_up_ticks)
+}
+
+/// The trigger body the seam and the pre-sync arrival fallback share: one `FireShell` plus one
+/// queued barrel kick per released shot. Age policy lives at the call sites — this only writes it.
+pub(super) fn present_shot_at_age(
+    catch_up_ticks: u32,
+    shot: ReleasedShot,
+    recoil: &mut super::client::PendingRecoilKicks,
+    commands: &mut Commands,
+) {
+    commands.trigger(FireShell {
+        origin: shot.origin,
+        direction: shot.direction,
+        speed: shot.speed,
+        caliber: shot.caliber,
+        mass: shot.mass,
+        mechanism: shot.mechanism,
+        tracer: shot.tracer,
+        shooter: Some(shot.shooter),
+        shot_origin: FireShellOrigin::Reconstructed,
+        catch_up_ticks,
+        shot: shot.shot,
+    });
+    recoil.push(shot.shooter.tank, shot.shooter.weapon);
+}
+
 /// Arm the own tank once the server stream — not local prediction — owns its gate.
 ///
 /// `Without<Predicted>` makes this inert in predicted mode, where the gate is predicted state with
@@ -497,7 +570,6 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
 fn recover_unannounced_rounds(
     fused: Option<Res<crate::FusedOwnFire>>,
     tick: Res<TickDuration>,
-    timeline: Res<LocalTimeline>,
     arrival: Option<Res<ArrivalDelay>>,
     cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
     mut roots: Query<(Entity, &mut OwnFirePresentation)>,
@@ -516,13 +588,16 @@ fn recover_unannounced_rounds(
         return;
     };
     let wait = announce_wait_ticks(arrival.stats.coverage(), tick.0);
-    let now = timeline.tick();
+    // CURSOR clock, both halves: the wait is measured in cursor ticks past the reveal, and the
+    // recovered round's age is the seam's `cursor − revealed_tick` — a fallback bang lands at the
+    // same lag its lost announcement would have presented at.
+    let cursor = (cursor.tick(), f64::from(cursor.overstep().to_f32()));
     for (root, mut ledger) in &mut roots {
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
             let Some(&Reveal { revealed_tick, .. }) = entry.reveals.front() else {
                 continue;
             };
-            if (cursor.tick() - Tick(revealed_tick)) < wait as i32 {
+            if (cursor.0 - Tick(revealed_tick)) < wait as i32 {
                 continue;
             }
             let Some((weapon, muzzle)) = muzzles.iter().find_map(|(weapon, index, tank, pose)| {
@@ -533,8 +608,44 @@ fn recover_unannounced_rounds(
             let Ok(direction) = Dir3::new(muzzle.rotation() * Vec3::NEG_Z) else {
                 continue;
             };
-            let catch_up_ticks =
-                ((now - Tick(revealed_tick)).max(0) as u32).min(MAX_COSMETIC_CATCH_UP_TICKS);
+            let facts = ReleasedShot {
+                origin: muzzle.translation(),
+                direction,
+                speed: weapon.speed,
+                caliber: weapon.caliber,
+                mass: weapon.mass,
+                // The round's belt phase died with the announcement; a recovered round
+                // presents traced — the visible arm of the self-heal.
+                tracer: true,
+                mechanism: weapon.fire_mode.mechanism(),
+                shooter: ShotSource {
+                    tank: root,
+                    weapon: slot,
+                },
+                // The round's ShotId died with its announcement, so the shell flies
+                // uncorrected (no sanctioned bounces) — the honest remainder.
+                shot: None,
+            };
+            if present_released_shot(
+                Tick(revealed_tick),
+                cursor,
+                facts,
+                &mut recoil,
+                &mut commands,
+            )
+            .is_none()
+            {
+                // Over-horizon reveal (a multi-second stall with a round in flight): present at
+                // the horizon rather than jamming the slot — a rejected front reveal would retry
+                // forever and block every round behind it. The flash observers stale-gate the
+                // bang; the ledger settles through the same observer as any presentation.
+                present_shot_at_age(
+                    MAX_COSMETIC_CATCH_UP_TICKS,
+                    facts,
+                    &mut recoil,
+                    &mut commands,
+                );
+            }
             entry.owed_swallows.push_back(revealed_tick);
             if entry.owed_swallows.len() > QUEUE_CAP {
                 entry.owed_swallows.pop_front();
@@ -546,25 +657,6 @@ fn recover_unannounced_rounds(
                  (recovered {})",
                 diag.recovered,
             );
-            commands.trigger(FireShell {
-                origin: muzzle.translation(),
-                direction,
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                mechanism: weapon.fire_mode.mechanism(),
-                // The round's belt phase died with the announcement; a recovered round presents
-                // traced — the visible arm of the self-heal.
-                tracer: true,
-                shooter: Some(ShotSource {
-                    tank: root,
-                    weapon: slot,
-                }),
-                shot_origin: FireShellOrigin::Reconstructed,
-                catch_up_ticks,
-                shot: None,
-            });
-            recoil.push(root, slot);
         }
     }
 }
@@ -1478,8 +1570,9 @@ mod tests {
             let source = shooter.expect("the bang is keyed to the armed root");
             assert_eq!((source.tank, source.weapon), (root, 0));
             assert_eq!(
-                catch_up, 10,
-                "catch-up spans reveal (100) to the local present (110)",
+                catch_up, 5,
+                "catch-up spans reveal (100) to the CURSOR (105) — the cursor clock, never the \
+                 local present (110, which a wrong-clock mutant would read as 10)",
             );
             assert!(unkeyed, "the round's ShotId died with its announcement");
             let ledger = world.get::<OwnFirePresentation>(root).expect("ledger");
@@ -1523,6 +1616,227 @@ mod tests {
         assert!(
             app.world().resource::<CapturedShells>().0.is_empty(),
             "the fallback is fused-mode machinery only",
+        );
+    }
+
+    /// A shot released at the cursor presents exactly once — one `FireShell`, one recoil
+    /// kick — younger than its first tick (`catch_up_ticks` 0), which keeps it under the muzzle
+    /// flash's stale gate. The fixture plants a `LocalTimeline` 16 ticks past the release as
+    /// wrong-clock bait: a mutant that ages the shot on the local/arrival timeline reports 16
+    /// (flash stale-gated, shell 16 ticks downrange) and reds the 0.
+    #[test]
+    fn a_cursor_released_shot_presents_once_younger_than_its_first_tick() {
+        let mut app = App::new();
+        app.init_resource::<CapturedShells>();
+        app.init_resource::<super::super::client::PendingRecoilKicks>();
+        app.add_observer(capture_shell);
+        let mut local = LocalTimeline::default();
+        local.apply_delta(116);
+        app.insert_resource(local);
+        let shooter = app.world_mut().spawn_empty().id();
+        let facts = ReleasedShot {
+            origin: Vec3::new(1.0, 2.0, 3.0),
+            direction: Dir3::NEG_Z,
+            speed: 755.0,
+            caliber: 0.088,
+            mass: 10.2,
+            tracer: true,
+            mechanism: crate::spec::FireMechanism::Single,
+            shooter: ShotSource {
+                tank: shooter,
+                weapon: 0,
+            },
+            shot: None,
+        };
+        let catch_up = app
+            .world_mut()
+            .run_system_once(
+                move |mut recoil: ResMut<super::super::client::PendingRecoilKicks>,
+                      mut commands: Commands| {
+                    present_released_shot(
+                        Tick(100),
+                        (Tick(100), 0.25),
+                        facts,
+                        &mut recoil,
+                        &mut commands,
+                    )
+                },
+            )
+            .expect("the seam runs");
+        assert_eq!(
+            catch_up,
+            Some(0),
+            "released a quarter-overstep before the cursor: age < 1 tick, never the local \
+             timeline's 16",
+        );
+        let world = app.world();
+        let captured = world.resource::<CapturedShells>();
+        let &[(source, presented_catch_up, _)] = captured.0.as_slice() else {
+            panic!("exactly one bang presents, got {}", captured.0.len());
+        };
+        let source = source.expect("the bang carries its shooter");
+        assert_eq!((source.tank, source.weapon), (shooter, 0));
+        assert_eq!(presented_catch_up, 0);
+        assert_eq!(
+            world
+                .resource::<super::super::client::PendingRecoilKicks>()
+                .queued(),
+            &[(shooter, 0)],
+            "one kick, through the same seam as the bang",
+        );
+    }
+
+    /// A refused round presents NOTHING: the heal restores the gate and retires the pending
+    /// consumption without a `FireShell` or a recoil kick. A mutant that routes the refusal
+    /// heal through the presentation seam reds the empty captures.
+    #[test]
+    fn a_refused_round_presents_no_flash_no_bang_no_kick() {
+        const FIRE_TICK: u32 = 100;
+        let (mut world, root) = heal_world(300);
+        world.spawn(PingManager::default());
+        world.init_resource::<CapturedShells>();
+        world.init_resource::<super::super::client::PendingRecoilKicks>();
+        world.add_observer(capture_shell);
+        {
+            let mut gate = world.get_mut::<WeaponGate>(root).expect("gate");
+            gate.weapons[0] = armed(FIRE_TICK, BELT - 1);
+            let mut ledger = world.get_mut::<OwnFirePresentation>(root).expect("ledger");
+            ledger.slots[0].presented_gate = armed(FIRE_TICK, BELT - 1);
+            ledger.slots[0].pending_local.push_back(FIRE_TICK);
+        }
+        world
+            .run_system_once(heal_refused_presentations)
+            .expect("heal runs");
+        assert_eq!(
+            world.resource::<OwnFireDiag>().healed,
+            1,
+            "the refusal healed"
+        );
+        assert!(
+            world.resource::<CapturedShells>().0.is_empty(),
+            "a refused round presents nothing",
+        );
+        assert!(
+            world
+                .resource::<super::super::client::PendingRecoilKicks>()
+                .queued()
+                .is_empty(),
+            "and kicks nothing",
+        );
+    }
+
+    // --- The clock-conformance tripwire -----------------------------------------------------
+    //
+    // Source-scan in the `no_latest_arrival_sim_writer` pattern (`net::protocol` tests): honest
+    // substring scans over comment-stripped source, biased toward false trips (a harmless
+    // re-read of the contract) over false passes (a presentation site quietly rewired to the
+    // wrong clock).
+
+    /// Read a repo-relative source file for a scan.
+    fn read_source(rel: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+    }
+
+    /// Blank `//` line- and `/* */` (nesting) block-comments to spaces, preserving newlines, so
+    /// only CODE is scanned and prose can neither trip nor mask the tripwire.
+    fn strip_comments(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        let mut block_depth = 0usize;
+        while let Some(c) = rest.chars().next() {
+            if block_depth > 0 {
+                if rest.starts_with("/*") {
+                    block_depth += 1;
+                    out.push_str("  ");
+                    rest = &rest[2..];
+                } else if rest.starts_with("*/") {
+                    block_depth -= 1;
+                    out.push_str("  ");
+                    rest = &rest[2..];
+                } else {
+                    out.push(if c == '\n' { '\n' } else { ' ' });
+                    rest = &rest[c.len_utf8()..];
+                }
+            } else if rest.starts_with("/*") {
+                block_depth = 1;
+                out.push_str("  ");
+                rest = &rest[2..];
+            } else if rest.starts_with("//") {
+                let end = rest.find('\n').unwrap_or(rest.len());
+                for _ in 0..end {
+                    out.push(' ');
+                }
+                rest = &rest[end..];
+            } else {
+                out.push(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+        out
+    }
+
+    /// One fn's body (between its outermost braces), brace-matched so braces inside it don't
+    /// fool the scan. `signature` must be the unique `fn name(` prefix.
+    fn fn_body<'a>(stripped: &'a str, signature: &str) -> &'a str {
+        let sig = stripped
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature} present"));
+        let open = sig + stripped[sig..].find('{').expect("fn opening brace");
+        let bytes = stripped.as_bytes();
+        let mut depth = 0i32;
+        for (i, &b) in bytes.iter().enumerate().skip(open) {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &stripped[open + 1..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{signature} body unterminated");
+    }
+
+    /// THE PER-CHANNEL CLOCK MAP, pinned in source: every cursor-assigned presentation site
+    /// consumes the cursor clock, and none reads the local/arrival timeline for age or rate —
+    /// the seam ages a shot only from its released tick and the cursor; the belt-delta fallback
+    /// carries no `LocalTimeline` at all; the client's release path routes cursor releases
+    /// through the seam; `TrackDrive` is registered for interpolation so the track view's speed
+    /// source is cursor-time on interpolated hulls. Rewiring any of these to arrival-fresh
+    /// state reds its assert.
+    #[test]
+    fn cursor_assigned_presentation_reads_no_local_timeline() {
+        let fire = strip_comments(&read_source("src/net/fire_presentation.rs"));
+        let seam = fn_body(&fire, "pub(super) fn present_released_shot(");
+        for banned in ["LocalTimeline", "fire_catch_up_ticks", "PredictedPresent"] {
+            assert!(
+                !seam.contains(banned),
+                "the seam ages on the cursor only: found {banned}",
+            );
+        }
+        let fallback = fn_body(&fire, "fn recover_unannounced_rounds(");
+        for banned in ["LocalTimeline", "fire_catch_up_ticks"] {
+            assert!(
+                !fallback.contains(banned),
+                "the belt-delta fallback is cursor-aged: found {banned}",
+            );
+        }
+
+        let client = strip_comments(&read_source("src/net/client.rs"));
+        let release = fn_body(&client, "fn spawn_reconstructed_fire(");
+        assert!(
+            release.contains("present_released_shot"),
+            "the cursor release path must route through the presentation seam",
+        );
+
+        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
+        assert!(
+            protocol.contains("add_interpolation_with(track_drive_lerp)"),
+            "TrackDrive must interpolate: without the registration the track view reads \
+             arrival-fresh drivetrain state and the tracks lead the hull",
         );
     }
 }
