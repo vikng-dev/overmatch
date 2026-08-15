@@ -27,8 +27,8 @@ use super::protocol::{
 };
 use super::{client_smoothing_plugin, diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
-    FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce,
-    SanctionedBounceInsert, SanctionedShots, SanctionedTerminal, ShotSource,
+    MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
+    SanctionedTerminal, ShotSource,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -1801,7 +1801,43 @@ fn spawn_reconstructed_fire(
     let Ok(direction) = Dir3::new(event.direction) else {
         return;
     };
-    let Some(catch_up_ticks) = fire_catch_up_ticks(event.fire_tick, now) else {
+    let facts = super::fire_presentation::ReleasedShot {
+        origin: event.origin,
+        direction,
+        speed: event.speed,
+        caliber: event.caliber,
+        mass: event.mass,
+        tracer: event.tracer,
+        mechanism: event.mechanism,
+        shooter: ShotSource {
+            tank: shooter,
+            weapon: event.weapon as usize,
+        },
+        shot: Some(event.shot_id()),
+    };
+    let catch_up_ticks = match cursor {
+        // CURSOR clock: the seam measures the shot's age on the same clock that released it.
+        Some(cursor) => super::fire_presentation::present_released_shot(
+            event.fire_tick,
+            cursor,
+            facts,
+            pending_recoil,
+            commands,
+        ),
+        // ARRIVAL clock — the surviving arrival-assigned presentation site: a pre-sync client has
+        // no cursor (the queue released everything at arrival), so the shot ages against the local
+        // timeline exactly as it did before the cursor existed.
+        None => fire_catch_up_ticks(event.fire_tick, now).map(|catch_up_ticks| {
+            super::fire_presentation::present_shot_at_age(
+                catch_up_ticks,
+                facts,
+                pending_recoil,
+                commands,
+            );
+            catch_up_ticks
+        }),
+    };
+    let Some(catch_up_ticks) = catch_up_ticks else {
         return;
     };
     crate::shot_trace::record(
@@ -1811,23 +1847,6 @@ fn spawn_reconstructed_fire(
         event.shot_id(),
         || json!({ "itick": cursor_itick(cursor), "cu": catch_up_ticks }),
     );
-    commands.trigger(FireShell {
-        origin: event.origin,
-        direction,
-        speed: event.speed,
-        caliber: event.caliber,
-        mass: event.mass,
-        tracer: event.tracer,
-        shooter: Some(ShotSource {
-            tank: shooter,
-            weapon: event.weapon as usize,
-        }),
-        shot_origin: FireShellOrigin::Reconstructed,
-        catch_up_ticks,
-        shot: Some(event.shot_id()),
-        mechanism: event.mechanism,
-    });
-    pending_recoil.0.push((shooter, event.weapon as usize));
 }
 
 /// Drain the owner-private `DamageConfirm` channel and raise one presentation event per receipt.
@@ -1924,11 +1943,14 @@ pub(super) fn publish_predicted_present(
     present.0 = timeline.tick().0;
 }
 
-/// Ticks to fast-forward an opponent shell so it sits at OUR predicted present `P` — co-indexed with
-/// the client's own predicted hull (see `net::protocol::FireEvent::fire_tick` for why `P`, not the
-/// confirmed or server-now frame). `now` is `LocalTimeline::tick()`. `Some(n)` fast-forwards `n` ticks
-/// (`n == 0` = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller
-/// skips the tracer AND the recoil).
+/// LOCAL/ARRIVAL-clock shell age: ticks from `fire` to the local present `now`
+/// (`LocalTimeline::tick()`). Two call sites only — the consume-time validity bar (a fire whose
+/// tick is absurd against the local present is dropped before it is held), and the pre-sync
+/// arrival-presentation fallback in [`spawn_reconstructed_fire`]. A CURSOR-released shot never
+/// ages through this: its age is the seam's `cursor − released_tick`
+/// (`net::fire_presentation::present_released_shot`). `Some(n)` fast-forwards `n` ticks (`n == 0`
+/// = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller skips
+/// the tracer AND the recoil).
 ///
 /// Wrap-safe by construction: `Tick` is a wrapping `u32` (`lightyear_core::tick`, via `wrapping_id!`)
 /// and implements `Sub<Tick>` returning the difference as an `i32` — lightyear's OWN tick difference
@@ -2072,6 +2094,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::ballistics::{FireShell, FireShellOrigin};
 
     #[derive(Resource)]
     struct TestDamageCopies(Vec<DamageConfirm>);

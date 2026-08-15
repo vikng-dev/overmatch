@@ -305,6 +305,78 @@ impl OwnFireDiag {
     }
 }
 
+/// One released shot's wire/state facts — everything presentation needs except its age, which is
+/// the seam's to measure.
+pub(super) struct ReleasedShot {
+    pub(super) origin: Vec3,
+    pub(super) direction: Dir3,
+    pub(super) speed: f32,
+    pub(super) caliber: f32,
+    pub(super) mass: f32,
+    pub(super) tracer: bool,
+    pub(super) mechanism: crate::spec::FireMechanism,
+    pub(super) shooter: ShotSource,
+    pub(super) shot: Option<crate::ShotId>,
+}
+
+/// THE SHOT-PRESENTATION SEAM: one complete released shot presents through this call — the
+/// `FireShell` it triggers carries the muzzle flash and report dressing (`vfx::muzzle`), the
+/// tracer/shell spawn (`ballistics`), and the ledger count ([`count_presented_round`]); the barrel
+/// kick queues beside it. Every cursor release path — the fused own echo, remote fire
+/// announcements, and the belt-delta fallback — funnels here.
+///
+/// CURSOR CLOCK (the per-channel clock map): a released shot's age is `cursor − released_tick`,
+/// fractional ticks on the same clock that released it — ≈ 0..1 at a crossing release, so the
+/// shell spawns at the muzzle and the flash clears `ballistics::STALE_FIRE_TICKS`. The local
+/// timeline's lead+delay must never age a cursor-released shot: it spawns the tracer a whole fuse
+/// downrange and stale-gates the flash.
+///
+/// `None` = the age exceeds [`MAX_COSMETIC_CATCH_UP_TICKS`] (the absurdity bar `ballistics`
+/// enforces on every `FireShell`): nothing presents and the caller's ledger stays untouched.
+pub(super) fn present_released_shot(
+    released_tick: Tick,
+    (cursor_tick, overstep): (Tick, f64),
+    shot: ReleasedShot,
+    recoil: &mut super::client::PendingRecoilKicks,
+    commands: &mut Commands,
+) -> Option<u32> {
+    // A release happens at or after the crossing, so the age is non-negative by construction; the
+    // clamp mirrors `fire_catch_up_ticks`' don't-rewind rule for a malformed tick.
+    let age = (f64::from(cursor_tick - released_tick) + overstep).max(0.0);
+    // Whole ticks feed the fixed-tick catch-up march; the dropped fraction is under one tick of
+    // shell flight.
+    let catch_up_ticks = age as u32;
+    if catch_up_ticks > MAX_COSMETIC_CATCH_UP_TICKS {
+        return None;
+    }
+    present_shot_at_age(catch_up_ticks, shot, recoil, commands);
+    Some(catch_up_ticks)
+}
+
+/// The trigger body the seam and the pre-sync arrival fallback share: one `FireShell` plus one
+/// queued barrel kick per released shot. Age policy lives at the call sites — this only writes it.
+pub(super) fn present_shot_at_age(
+    catch_up_ticks: u32,
+    shot: ReleasedShot,
+    recoil: &mut super::client::PendingRecoilKicks,
+    commands: &mut Commands,
+) {
+    commands.trigger(FireShell {
+        origin: shot.origin,
+        direction: shot.direction,
+        speed: shot.speed,
+        caliber: shot.caliber,
+        mass: shot.mass,
+        mechanism: shot.mechanism,
+        tracer: shot.tracer,
+        shooter: Some(shot.shooter),
+        shot_origin: FireShellOrigin::Reconstructed,
+        catch_up_ticks,
+        shot: shot.shot,
+    });
+    recoil.push(shot.shooter.tank, shot.shooter.weapon);
+}
+
 /// Arm the own tank once the server stream — not local prediction — owns its gate.
 ///
 /// `Without<Predicted>` makes this inert in predicted mode, where the gate is predicted state with
