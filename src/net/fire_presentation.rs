@@ -536,11 +536,10 @@ fn record_presentation_gate(
     }
 }
 
-/// The announcement wait W1, in cursor ticks past a reveal. The cursor already lags arrivals by
-/// the downlink headroom (`Q_p − min` + one interval — `net::interp_delay`'s law), so an
-/// announcement that arrived at all has presented by the time the cursor passes its fire tick
-/// (≤ the reveal tick). On top rides the burst-tail coverage `Q_p − Q_50` — the announcement may
-/// ride the tail while the revealing snapshot rode the bulk — plus one send interval.
+/// The announcement wait W1, in cursor ticks past a reveal: the burst-tail coverage `Q_p − Q_50`
+/// — the announcement may ride the tail while the revealing snapshot rode the bulk — plus one
+/// send interval. The seam presents exactly once whichever of the announcement and the fallback
+/// lands first, so the wait is a heal deadline, not a correctness gate.
 fn announce_wait_ticks(coverage: Duration, tick: Duration) -> u32 {
     (coverage.as_secs_f64() / tick.as_secs_f64()).ceil() as u32 + 1
 }
