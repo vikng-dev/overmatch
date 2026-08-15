@@ -12,7 +12,7 @@ mod debug_hud;
 mod diagnostics;
 mod disclosure;
 /// The interpolation buffer's edge: starvation instruments (always on) and the bounded
-/// extrapolation gap-filler (`OVERMATCH_EXTRAPOLATE=1`).
+/// extrapolation gap-filler.
 mod extrapolate;
 /// The owner's fire presentation: intent edges on the local tick, the arriving gate reconciled as a
 /// legality report instead of read as permission to draw.

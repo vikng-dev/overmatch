@@ -418,8 +418,7 @@ pub fn run() {
         input_delay,
         interpolation,
     );
-    // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
-    // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
+    // Buffer-edge starvation instruments and the bounded extrapolation gap-filler.
     super::extrapolate::install(&mut app);
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
