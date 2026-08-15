@@ -37,8 +37,7 @@ sha2 = "0.10"
 lightyear = { version = "0.28", default-features = false, features = [
     "std",
     "client", "server",
-    "replication", "prediction", "interpolation",
-    "frame_interpolation",
+    "replication", "interpolation",
     "input_native",
     "netcode", "udp",
     "avian3d",

@@ -110,6 +110,11 @@ use crate::{CombatantId, ShotId};
 /// comparators: dissolving the band deletes the symptom SENSOR, not the underlying cross-machine
 /// float divergence — nothing re-simulates servo state client-side anymore, so there is no gate
 /// left for it to storm.
+///
+/// Still REV 27 (pass 3): dropping lightyear's `prediction` cargo feature removes its internal
+/// `Predicted` registration, so lightyear's own protocol hash differs from earlier REV-27 builds.
+/// REV 27 has never deployed, so the change rides this bump rather than forcing a 28 — the
+/// REV-19/REV-26 precedent above.
 pub const PROTOCOL_REV: u32 = 27;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This

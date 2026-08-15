@@ -1,5 +1,9 @@
 # Sim divergence & the determinism landscape (bevy / avian / lightyear)
 
+> **2026-08-15, [ADR-0037](../adr/0037-one-authoritative-timeline-and-view-overlays.md):**
+> prediction and rollback are retired; the correction machinery described below is deleted. The
+> divergence measurements and the determinism findings stand as the record that priced the pivot.
+
 2026-07-04. Written after the step-8 rollback investigations, before the latency feel test
 (slices 2/3). Two halves: what we now *know empirically* about our own client/server divergence,
 and what the stack currently offers for cross-platform determinism. Sources: this repo's spike

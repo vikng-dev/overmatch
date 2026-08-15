@@ -487,7 +487,6 @@ pub fn run() {
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
         .add_observer(claim_input_slot)
-        .init_resource::<diagnostics::TurretWatch>()
         .add_systems(
             Update,
             (
@@ -496,9 +495,6 @@ pub fn run() {
                 receive_damage_confirms,
                 diagnostics::nan_tripwire,
                 open_gameplay_gate,
-                diagnostics::watch_turret_pose,
-                diagnostics::log_positions,
-                diagnostics::count_shell_spawns,
                 diagnostics::log_sim_evidence,
             ),
         );

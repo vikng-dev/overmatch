@@ -1,5 +1,10 @@
 # Timelines and shear: the client's four tick indices
 
+> **2026-08-15, [ADR-0037](../adr/0037-one-authoritative-timeline-and-view-overlays.md):** the
+> four-index model below is this era's record. `P` no longer exists — nothing predicts; every
+> hull, own included, renders from the interpolated cursor, and discrete facts fuse to it. The
+> shear analysis and §4's collision structure stand; read `P` as historical.
+
 2026-07-09. A networked client does not render "the simulation at an instant." It renders a
 **composite**: each entity is drawn from the sim at *some* tick, and different entities sit at
 different ticks in the same frame. The gap between two interacting entities' ticks is **shear**, and

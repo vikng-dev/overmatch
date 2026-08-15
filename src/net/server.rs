@@ -98,7 +98,6 @@ pub fn run() {
             schedule_bot_respawn,
             respawn_dead_bots,
             open_gameplay_gate,
-            diagnostics::log_positions,
             diagnostics::log_sim_evidence,
         ),
     );

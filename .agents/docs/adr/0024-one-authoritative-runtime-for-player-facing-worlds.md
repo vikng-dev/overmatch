@@ -1,5 +1,11 @@
 # Player-facing worlds use one authoritative Battle runtime
 
+> **Status: stands; under [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15)
+> "clients predict intent rather than outcomes" reads "clients submit intent, never outcomes" —
+> the one-runtime ruling is unchanged. The consequence "preserves authority, protocol,
+> prediction, and replication behavior" reads without prediction: there is no prediction
+> behavior to preserve — local training preserves authority, protocol, and replication.
+
 Overmatch's core product is official-server-hosted PvP, so the dedicated server is the sole authority for Battle rules and clients predict intent rather than outcomes. The shooting range launches that same authority runtime locally and connects the normal client; it does not revive a separate standalone gameplay path. Analytical tools such as armor inspection may drive the shared simulation directly because they are adapters for inquiry, not player-controlled Battle worlds.
 
 ## Consequences

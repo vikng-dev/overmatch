@@ -1,5 +1,9 @@
 # Shot replication separates trajectory presentation from authoritative consequence
 
+> **Status: stands; the prediction phrasing is superseded by
+> [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): the client's own firing
+> response is a view overlay (fire intent, own recoil response), not a predicted sim.
+
 The authority resolves every projectile contact, penetration, ricochet, and damage result. A
 client may predict its own firing response immediately, but no transient shot message grants
 gameplay authority. Replicated combat state remains the durable result; shot messages explain and

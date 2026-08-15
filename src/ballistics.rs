@@ -138,9 +138,11 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
     (elapsed <= i32::MAX as u32).then_some(elapsed)
 }
 
-/// The presentation-validity bound: the farthest (in ticks) a cosmetic shell may be fast-forwarded
-/// to catch the presented timeline — the cursor catch-up ceiling. A larger authority interval fails
-/// closed rather than drawing a shortened, invented trajectory.
+/// CEILING (chosen bound, not derived): the work/absurdity limit on cosmetic shell catch-up. A
+/// cursor-released shot normally ages ~0–1 tick at the cursor crossing; the arrival-clock path
+/// (`net::client::fire_catch_up_ticks`) reads this bound only as the consume-time validity bar
+/// and in the pre-sync arrival-presentation fallback. A fire tick older than the bound is stale
+/// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
 /// Reference-mm penetration capability using a DeMarre-shaped mass and speed curve.

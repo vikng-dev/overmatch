@@ -34,8 +34,8 @@ interpolation side.**
 
 - **"Predict the impact" is impossible.** The causing `FireEvent` reaches the victim client at a
   median of 0 to −1 ticks relative to the state fact itself; both ride the same link with the same
-  one-way latency. There is no earlier signal. ADR-0032's adoption machinery is load-bearing, not
-  a stand-in for a missing prediction path.
+  one-way latency. There is no earlier signal — ADR-0037's rule that a foreign fact is
+  presentable no earlier than its arrival rests on this measurement.
 - **"Quantize" was never scopeable.** The silent-desync measure a quantization change would move
   (`|confp − server_p(conft)|`) read zero windows across all ten capture runs.
 

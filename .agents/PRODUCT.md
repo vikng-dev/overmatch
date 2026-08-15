@@ -24,7 +24,7 @@ After a Battle produces a winner, the player returns to the **Garage**. The Gara
 
 ## Player-facing runtime modes
 
-- **Online Battle:** the dedicated server owns gameplay truth; clients submit intent, predict their own actions for responsiveness, and reconcile to authority.
+- **Online Battle:** the dedicated server owns gameplay truth; clients submit intent and render the interpolated authoritative stream, with view overlays for self-caused feedback (ADR-0037).
 - **Shooting range:** the normal client connects to the same authority runtime launched locally. It may admit locked tanks and inactive or scripted targets, but it uses standard Battle rules and produces no Progression.
 - **Armor inspection:** a future analytical adapter over the same tank and ballistic rules. It may drive simulation directly and expose privileged diagnostic truth; it is not an alternate gameplay implementation.
 - **Replay:** a future adapter over authoritative Battle history. Input-centric replay is the target once replay determinism is proven.
@@ -32,9 +32,9 @@ After a Battle produces a winner, the player returns to the **Garage**. The Gara
 
 Player-hosted online Battles are deferred. The foundation does not need listen-server mode, host migration, or NAT traversal.
 
-## Authority, prediction, and feedback
+## Authority, presentation, and feedback
 
-The client predicts causes; the server confirms consequences.
+The client sends intent; the server simulates and confirms consequences (one timeline, ADR-0037).
 
 - Controls, weapon response, recoil, audio, muzzle effects, and the beginning of a local shot happen immediately.
 - Penetration, ricochet, damage, crew and tank-module effects, knockout, and Progression consequences are authoritative.
