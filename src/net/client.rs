@@ -105,13 +105,18 @@ enum RecvConditionerMode {
     Seeded(u64),
 }
 
-/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit.
+/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit — or a
+/// burst is configured, which is deterministic by construction (epoch-phase, no RNG) and therefore
+/// activates the seeded conditioner on its own with every unset knob at zero.
 fn recv_conditioner_mode(
     latency_ms: u64,
     jitter_ms: u64,
     jitter_seed: Option<u64>,
+    burst: bool,
 ) -> RecvConditionerMode {
-    if latency_ms == 0 {
+    if burst {
+        RecvConditionerMode::Seeded(jitter_seed.unwrap_or(0))
+    } else if latency_ms == 0 {
         RecvConditionerMode::Off
     } else if jitter_ms > 0
         && let Some(seed) = jitter_seed
@@ -411,7 +416,15 @@ pub fn run() {
     let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
     let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
     let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
-    let conditioner_mode = recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed);
+    // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
+    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS").unwrap_or(0);
+    let burst_period_ticks: u64 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS").unwrap_or(0);
+    let burst = (burst_ms > 0 && burst_period_ticks > 0).then(|| {
+        let ticks = u32::try_from(burst_period_ticks).expect("a burst period fits ticks in u32");
+        (Duration::from_millis(burst_ms), tick_duration * ticks)
+    });
+    let conditioner_mode =
+        recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed, burst.is_some());
     let conditioner = match conditioner_mode {
         RecvConditionerMode::Stock => {
             info!(
@@ -425,7 +438,8 @@ pub fn run() {
         }
         RecvConditionerMode::Seeded(seed) => {
             info!(
-                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms seed={seed} (SPIKE_*)"
+                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms \
+                 seed={seed} burst={burst_ms}ms/{burst_period_ticks}t (SPIKE_*)"
             );
             None
         }
@@ -483,15 +497,18 @@ pub fn run() {
         input_delay,
         interpolation,
     );
-    // `OVERMATCH_FUSED_FIRE=1`: the own shot presents from the server echo at the cursor crossing
-    // instead of on the local fire tick (see `crate::FusedOwnFire`). Read exactly once; absent =
-    // today's local presentation, bit-identical.
-    if harness::env_flag("OVERMATCH_FUSED_FIRE", false) {
+    // Fused own fire, default ON: the own shot presents from the server echo at the cursor
+    // crossing instead of on the local fire tick (see `crate::FusedOwnFire`). Read exactly once;
+    // `OVERMATCH_FUSED_FIRE=0` opts back into local-tick presentation.
+    if harness::env_flag("OVERMATCH_FUSED_FIRE", true) {
         info!(
-            "net: fused own fire ON [OVERMATCH_FUSED_FIRE] — the own shot presents from the \
-             server echo at the interpolation cursor; the recoil overlay stays unarmed"
+            "net: fused own fire ON (default) — the own shot presents from the server echo at \
+             the interpolation cursor; the recoil overlay stays unarmed [OVERMATCH_FUSED_FIRE=0 \
+             opts out]"
         );
         app.insert_resource(crate::FusedOwnFire);
+    } else {
+        info!("net: fused own fire OFF [OVERMATCH_FUSED_FIRE=0] — local-tick presentation");
     }
     // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
     // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
@@ -543,9 +560,13 @@ pub fn run() {
         UdpIo::default(),
     ));
     if let RecvConditionerMode::Seeded(seed) = conditioner_mode {
-        client_entity.insert(harness::SeededRecvConditioner::new(
-            seed, latency_ms, jitter_ms,
-        ));
+        let mut seeded = harness::SeededRecvConditioner::new(seed, latency_ms, jitter_ms);
+        if let Some((burst, period)) = burst {
+            // The epoch is this install instant; the phase needs no cross-endpoint agreement,
+            // only a fixed anchor, because the signature is periodic.
+            seeded = seeded.with_burst(burst, period, lightyear::core::time::Instant::now());
+        }
+        client_entity.insert(seeded);
     }
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
@@ -2134,24 +2155,36 @@ mod tests {
     #[test]
     fn seeded_conditioner_requires_an_explicit_active_jitter_path() {
         assert_eq!(
-            recv_conditioner_mode(80, 10, None),
+            recv_conditioner_mode(80, 10, None, false),
             RecvConditionerMode::Stock,
             "an unset seed must preserve the stock conditioner",
         );
         assert_eq!(
-            recv_conditioner_mode(0, 10, Some(7)),
+            recv_conditioner_mode(0, 10, Some(7), false),
             RecvConditionerMode::Off,
             "zero base latency must preserve the existing disabled path",
         );
         assert_eq!(
-            recv_conditioner_mode(80, 0, Some(7)),
+            recv_conditioner_mode(80, 0, Some(7), false),
             RecvConditionerMode::Stock,
             "a seed without active jitter must not replace the stock latency path",
         );
         assert_eq!(
-            recv_conditioner_mode(80, 10, Some(0)),
+            recv_conditioner_mode(80, 10, Some(0), false),
             RecvConditionerMode::Seeded(0),
             "zero is a valid deterministic seed",
+        );
+        // A configured burst is deterministic without any jitter prerequisite: it must activate
+        // the seeded path on its own (seed 0 default), from any other-knob state.
+        assert_eq!(
+            recv_conditioner_mode(0, 0, None, true),
+            RecvConditionerMode::Seeded(0),
+            "a burst alone must activate the seeded conditioner",
+        );
+        assert_eq!(
+            recv_conditioner_mode(80, 10, Some(7), true),
+            RecvConditionerMode::Seeded(7),
+            "a burst must keep an explicit seed",
         );
     }
 

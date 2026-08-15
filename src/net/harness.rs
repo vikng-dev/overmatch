@@ -6,6 +6,8 @@
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
 //! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
+//! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
 //! | `SPIKE_COMBAT_STEER` | `f32`; `0.0` | Combat steer at/after its engagement tick; zero preserves straight driving. |
 //! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
@@ -49,6 +51,11 @@
 //! only those offsets: it is not simulation state and does not enter messages, replication, or the
 //! protocol fingerprint. Without `SPIKE_JITTER_SEED`, the client keeps Lightyear's stock unseeded
 //! receive conditioner.
+//!
+//! The burst pair (`SPIKE_BURST_MS=60 SPIKE_BURST_PERIOD_TICKS=33` reproduces the measured field
+//! link: 60 ms stalls every ~33 ticks, which a ping EWMA reads as ~3 ms jitter) also activates the
+//! seeded conditioner on its own — latency, jitter, and seed all default to zero, so a pure-burst
+//! run needs no other variables.
 
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
@@ -375,7 +382,36 @@ pub(crate) struct SeededRecvConditioner {
     packet_index: u64,
     latency_ms: u64,
     jitter_ms: u64,
+    burst: Option<BurstSpec>,
     pending: BTreeMap<Instant, VecDeque<RecvPayload>>,
+}
+
+/// Periodic receive stall, phase-anchored to a fixed epoch: every window `[k·period, k·period +
+/// burst)` after the epoch delivers nothing, and a packet whose delay lands it inside a window is
+/// pushed to that window's end — the whole window's packets arrive together, exactly the measured
+/// field signature (bursts, then a batch).
+struct BurstSpec {
+    burst: Duration,
+    period: Duration,
+    epoch: Instant,
+}
+
+impl BurstSpec {
+    /// Defer a ready timestamp out of the burst window it landed in, if any.
+    fn defer(&self, ready_at: Instant) -> Instant {
+        let phase_nanos =
+            ready_at.duration_since(self.epoch).as_nanos() % self.period.as_nanos().max(1);
+        if phase_nanos < self.burst.as_nanos() {
+            ready_at + self.burst - nanos_duration(phase_nanos)
+        } else {
+            ready_at
+        }
+    }
+}
+
+/// `u128` nanos from a modulo over `Duration::as_nanos` — always narrower than one period.
+fn nanos_duration(nanos: u128) -> Duration {
+    Duration::from_nanos(u64::try_from(nanos).expect("a burst period is far below u64 nanos"))
 }
 
 impl SeededRecvConditioner {
@@ -385,8 +421,20 @@ impl SeededRecvConditioner {
             packet_index: 0,
             latency_ms,
             jitter_ms,
+            burst: None,
             pending: BTreeMap::new(),
         }
+    }
+
+    /// Arm the periodic burst, anchored at `epoch` (the conditioner's install instant in
+    /// production; explicit here so tests control the phase).
+    pub(crate) fn with_burst(mut self, burst: Duration, period: Duration, epoch: Instant) -> Self {
+        self.burst = Some(BurstSpec {
+            burst,
+            period,
+            epoch,
+        });
+        self
     }
 
     /// Match the pinned stock conditioner's actual distribution: an integer offset in
@@ -405,7 +453,10 @@ impl SeededRecvConditioner {
     }
 
     fn condition_packet(&mut self, packet: RecvPayload, received_at: Instant) {
-        let ready_at = received_at + self.next_delay();
+        let mut ready_at = received_at + self.next_delay();
+        if let Some(burst) = &self.burst {
+            ready_at = burst.defer(ready_at);
+        }
         self.pending.entry(ready_at).or_default().push_back(packet);
     }
 
@@ -572,7 +623,9 @@ pub(crate) fn jitter_margin() -> f32 {
 mod tests {
     use core::time::Duration;
 
-    use super::{SeededRecvConditioner, parse_env_flag};
+    use lightyear::core::time::Instant;
+
+    use super::{BurstSpec, SeededRecvConditioner, parse_env_flag};
 
     #[test]
     fn env_flag_value_parsing_truth_table() {
@@ -606,6 +659,29 @@ mod tests {
                 |delay| (Duration::from_millis(70)..Duration::from_millis(90)).contains(delay)
             ),
             "80 ms base plus stock-shaped 10 ms jitter must stay in [70, 90) ms",
+        );
+    }
+
+    /// THE BURST LAW: a ready time inside `[k·period, k·period + burst)` past the epoch defers to
+    /// that window's end; outside passes untouched. The second-window case reds a dropped modulo,
+    /// the in-window case reds an inverted comparison, and the window-end equality reds a defer by
+    /// the full burst instead of the phase remainder.
+    #[test]
+    fn a_burst_window_delivery_defers_to_the_window_end() {
+        let epoch = Instant::now();
+        let spec = BurstSpec {
+            burst: Duration::from_millis(60),
+            period: Duration::from_millis(500),
+            epoch,
+        };
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(spec.defer(at(10)), at(60), "first window: the window end");
+        assert_eq!(spec.defer(at(60)), at(60), "the window end itself is clear");
+        assert_eq!(spec.defer(at(100)), at(100), "between windows: untouched");
+        assert_eq!(
+            spec.defer(at(510)),
+            at(560),
+            "the second window defers by epoch phase, not absolute time",
         );
     }
 }

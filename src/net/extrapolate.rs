@@ -1,5 +1,5 @@
 //! The interpolation buffer's EDGE: starvation instruments (always on) and the bounded
-//! extrapolation gap-filler (`OVERMATCH_EXTRAPOLATE=1`).
+//! extrapolation gap-filler (default ON; `OVERMATCH_EXTRAPOLATE=0` opts out).
 //!
 //! When the interpolation cursor overruns the newest confirmed snapshot, lightyear clamps the
 //! sample to that newest value (`lightyear_interpolation` `registry.rs`, `fraction.clamp(0.0,
@@ -14,7 +14,8 @@
 //!   (fire announcements, damage confirms, `HullShock` episodes) for gap∧impulse coincidence.
 //!   A summary line logs every [`SUMMARY_PERIOD_SECS`], on disconnect, and at app exit.
 //!
-//! - **Gap-filler (`OVERMATCH_EXTRAPOLATE=1`).** Instead of the clamp, hull kinematics are
+//! - **Gap-filler (default ON; `OVERMATCH_EXTRAPOLATE=0` opts out).** Instead of the clamp, hull
+//!   kinematics are
 //!   projected at constant velocity from the newest confirmed `Position`/`Rotation` using the
 //!   live replicated `LinearVelocity`/`AngularVelocity`, up to the derived horizon; past the
 //!   horizon the HORIZON POSE HOLDS — the presentation never reverts to the clamp mid-gap (the
@@ -104,23 +105,26 @@ fn horizon_secs() -> f32 {
     (2.0 * EPSILON_VIS_M / a_max()).sqrt()
 }
 
-/// `OVERMATCH_EXTRAPOLATE=1`: arm the gap-filler writes. Absent, this module is instruments only
-/// and every presented pose is bit-identical to the clamp.
+/// Gap-filler writes armed, default ON. `OVERMATCH_EXTRAPOLATE=0` opts out, leaving this module
+/// instruments only with every presented pose bit-identical to the clamp.
 #[derive(Resource, Debug)]
 pub(super) struct ExtrapolateHulls;
 
 /// Read the lever once, mount the instruments unconditionally.
 pub(super) fn install(app: &mut App) {
-    if super::harness::env_flag("OVERMATCH_EXTRAPOLATE", false) {
+    if super::harness::env_flag("OVERMATCH_EXTRAPOLATE", true) {
         info!(
-            "net: hull extrapolation ON [OVERMATCH_EXTRAPOLATE] — horizon {:.1} ms = \
+            "net: hull extrapolation ON (default) — horizon {:.1} ms = \
              sqrt(2·ε_vis/μg) (ε_vis {:.2} mm, μg {:.2} m/s²), hold at the horizon, \
-             blend w = clamp(residual/v_ref, 1..4 send intervals)",
+             blend w = clamp(residual/v_ref, 1..4 send intervals) [OVERMATCH_EXTRAPOLATE=0 \
+             opts out]",
             horizon_secs() * 1000.0,
             EPSILON_VIS_M * 1000.0,
             a_max(),
         );
         app.insert_resource(ExtrapolateHulls);
+    } else {
+        info!("net: hull extrapolation OFF [OVERMATCH_EXTRAPOLATE=0] — buffer-edge clamp");
     }
     app.init_resource::<ImpulseTicks>();
     app.init_resource::<FrontierDiag>();

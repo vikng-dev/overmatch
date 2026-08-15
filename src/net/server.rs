@@ -618,10 +618,11 @@ fn spawn_pending_tanks(
     }
 }
 
-/// Experiment lever: move the owner out of the prediction set and into the interpolation set, so its
-/// own hull renders and drives from the server stream exactly like an opponent's. Server-side only —
-/// the wire surface is unchanged (both markers are lightyear registrations in every build), so a
-/// stock client connects and simply receives `Interpolated` where it used to receive `Predicted`.
+/// The shipped drive law, default ON: the owner sits in the interpolation set with everyone else,
+/// so its own hull renders and drives from the server stream exactly like an opponent's.
+/// `OVERMATCH_UNPREDICTED_DRIVE=0` opts back into owner prediction. Server-side only — the wire
+/// surface is unchanged (both markers are lightyear registrations in every build), so a stock
+/// client connects and simply receives `Interpolated` where it used to receive `Predicted`.
 const UNPREDICTED_DRIVE: &str = "OVERMATCH_UNPREDICTED_DRIVE";
 
 /// Construct an authoritative player tank. Initial join and respawn share this exact ownership and
@@ -636,7 +637,7 @@ fn spawn_player_tank(
     spawn_rot: Quat,
     combatant: CombatantId,
 ) -> Entity {
-    let unpredicted = crate::env_flag(UNPREDICTED_DRIVE, false);
+    let unpredicted = crate::env_flag(UNPREDICTED_DRIVE, true);
     let root = spawn_complete_tank(
         commands,
         content,
@@ -663,10 +664,9 @@ fn spawn_player_tank(
             (
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
-                // Owner predicts; every other client interpolates. Under `UNPREDICTED_DRIVE` the
-                // owner leaves the prediction set and joins the interpolation set instead; both
-                // components stay inserted in the same flush either way, so the default path is
-                // unchanged and only the target sets move.
+                // Default: every client interpolates, the owner included. The opt-out moves the
+                // owner into the prediction set; both components stay inserted in the same flush
+                // either way, so only the target sets move.
                 PredictionTarget::to_clients(if unpredicted {
                     NetworkTarget::None
                 } else {
@@ -688,11 +688,13 @@ fn spawn_player_tank(
         ),
     );
     let mode = if unpredicted {
-        "owner INTERPOLATES (unpredicted drive)"
+        "owner INTERPOLATES (unpredicted drive, default)"
     } else {
-        "owner predicts"
+        "owner predicts (opt-out)"
     };
-    info!("server: spawned tank {root} for client {client_id} — {mode} [{UNPREDICTED_DRIVE}]");
+    info!(
+        "server: spawned tank {root} for client {client_id} — {mode} [{UNPREDICTED_DRIVE}=0 opts out]"
+    );
     root
 }
 
