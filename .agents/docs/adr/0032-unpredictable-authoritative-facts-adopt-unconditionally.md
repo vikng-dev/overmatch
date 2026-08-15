@@ -326,7 +326,8 @@ replay window drops it.
 **The reachability argument that used to be attached to that was FALSE, and the seventh review killed
 it.** It said replication transmits only components that CHANGED, so a hull standing still when it
 was shot publishes no new `Position` and the strong predicate would stall it. Three facts against
-that: `src/net/physics.rs` disables Avian's island sleeping for network physics; Avian's
+that: `src/net/physics.rs` disables Avian's island sleeping for network physics *[2026-08-15:
+in-era fact — the post-ADR-0037 demolition re-enabled the island plugins]*; Avian's
 `writeback_solver_bodies` takes `&mut Position` and `&mut Rotation` for every `SolverBody` on every
 physics step; and both the hit and the `HullShock` close happen in `FixedUpdate`, ahead of Avian's
 `FixedPostUpdate` step. So even a numerically stationary hull has both pose components marked changed

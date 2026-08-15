@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use avian3d::prelude::{
-    AngularVelocity, IslandPlugin, IslandSleepingPlugin, LinearVelocity,
-    PhysicsInterpolationPlugin, PhysicsPlugins, Position, RigidBody, Rotation,
+    AngularVelocity, LinearVelocity, PhysicsInterpolationPlugin, PhysicsPlugins, Position,
+    RigidBody, Rotation,
 };
 use bevy::app::{PluginGroup, PluginsState};
 use bevy::prelude::*;
@@ -453,14 +453,13 @@ fn build_app() -> App {
     app.add_plugins(crate::gpu_less_default_plugins(None))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
 
-    // Match the network authority's no-interpolation/no-sleep Avian policy. The standalone probe
-    // retains PhysicsTransformPlugin because Lightyear is intentionally absent and therefore cannot
-    // own transform synchronization as it does in the deployed composition.
+    // Match the network authority's Avian policy (`net::physics::physics_plugins`): interpolation
+    // disabled, islands enabled. The standalone probe retains PhysicsTransformPlugin because
+    // Lightyear is intentionally absent and therefore cannot own transform synchronization as it
+    // does in the deployed composition.
     let physics = PhysicsPlugins::default()
         .build()
-        .disable::<PhysicsInterpolationPlugin>()
-        .disable::<IslandPlugin>()
-        .disable::<IslandSleepingPlugin>();
+        .disable::<PhysicsInterpolationPlugin>();
     app.add_plugins(physics)
         .add_plugins(SimPlugin)
         // The probe's scripted scenario (settle/ramp/climb/cruise phases) is fixtured on the

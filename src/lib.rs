@@ -580,7 +580,8 @@ pub(crate) struct ShotId {
 
 /// The simulation — the authority layer, in the client/server sense (see the memory note and
 /// bevy_replicon's "abstracting over configurations"): everything the server must run to be the
-/// truth, and everything a predicting client re-runs. Consumes `TankCommand`s, never devices;
+/// truth; the net client mounts the same rules for its derived cosmetics (shells, servos, recoil
+/// response). Consumes `TankCommand`s, never devices;
 /// steps on the fixed clock. A dedicated server mounts exactly this (plus netcode) on
 /// `MinimalPlugins`; the single-player game mounts it alongside [`ClientPlugin`].
 pub struct SimPlugin;
