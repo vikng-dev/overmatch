@@ -267,10 +267,19 @@ fn count_interp_sync_events(
     }
 }
 
+/// The estimator digest riding the FRONTIER line — absent in worlds that never mounted the sync
+/// margins (unit fixtures, the server).
+fn arrival_digest(arrival: &Option<Res<super::sync_margin::ArrivalDelay>>) -> String {
+    arrival.as_ref().map_or_else(String::new, |estimator| {
+        format!(" {}", estimator.describe())
+    })
+}
+
 fn log_periodic_summary(
     time: Res<Time<Real>>,
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
+    arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
     mut elapsed: Local<f32>,
 ) {
     *elapsed += time.delta_secs();
@@ -278,17 +287,23 @@ fn log_periodic_summary(
         return;
     }
     *elapsed = 0.0;
-    info!("net: FRONTIER {}", diag.summary(edges.open_gaps()));
+    info!(
+        "net: FRONTIER {}{}",
+        diag.summary(edges.open_gaps()),
+        arrival_digest(&arrival)
+    );
 }
 
 fn log_summary_on_disconnect(
     _disconnected: On<Remove, Connected>,
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
+    arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
 ) {
     info!(
-        "net: FRONTIER (disconnect) {}",
-        diag.summary(edges.open_gaps())
+        "net: FRONTIER (disconnect) {}{}",
+        diag.summary(edges.open_gaps()),
+        arrival_digest(&arrival)
     );
 }
 
@@ -296,13 +311,18 @@ fn log_summary_on_exit(
     mut exits: MessageReader<AppExit>,
     diag: Res<FrontierDiag>,
     edges: Res<HullEdges>,
+    arrival: Option<Res<super::sync_margin::ArrivalDelay>>,
     mut logged: Local<bool>,
 ) {
     if *logged || exits.read().next().is_none() {
         return;
     }
     *logged = true;
-    info!("net: FRONTIER (final) {}", diag.summary(edges.open_gaps()));
+    info!(
+        "net: FRONTIER (final) {}{}",
+        diag.summary(edges.open_gaps()),
+        arrival_digest(&arrival)
+    );
 }
 
 // --- The edge state machine ------------------------------------------------------------------
