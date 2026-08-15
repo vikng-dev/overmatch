@@ -146,7 +146,7 @@ pub(crate) fn resolve_crossing(
     seeds: &[SampleSeed],
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<Forces>,
     not_own: &dyn Fn(Entity) -> bool,
     commands: &mut Commands,
 ) -> Result<Crossing, WalkError> {
@@ -462,7 +462,7 @@ fn ricochet(
     radius: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
@@ -549,7 +549,7 @@ fn perforate_or_embed(
     speed: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
