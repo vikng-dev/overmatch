@@ -68,6 +68,7 @@
 //!
 //! Research basis: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1 and §4.
 
+use core::time::Duration;
 use std::collections::VecDeque;
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
@@ -103,6 +104,12 @@ fn a_max() -> f32 {
 /// constant-velocity projection error `½·a_max·t²` stays under [`EPSILON_VIS_M`].
 fn horizon_secs() -> f32 {
     (2.0 * EPSILON_VIS_M / a_max()).sqrt()
+}
+
+/// `g*` in `Duration` form — the single exported source for the fused delay law
+/// (`net::interp_delay` subtracts it from the measured arrival spread).
+pub(super) fn horizon() -> Duration {
+    Duration::from_secs_f32(horizon_secs())
 }
 
 /// Gap-filler writes armed, default ON. `OVERMATCH_EXTRAPOLATE=0` opts out, leaving this module
