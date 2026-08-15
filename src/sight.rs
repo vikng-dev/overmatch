@@ -20,7 +20,8 @@ use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
-    Controlled, ServoIndex, ServoSpec, Tank, TankServos, TankViews, rig_world_pose, shortest_angle,
+    Controlled, RemoteServos, ServoIndex, ServoSpec, ServoState, Tank, TankServos, TankViews,
+    rig_world_pose, shortest_angle,
 };
 
 use reticle::Toast;
@@ -439,6 +440,30 @@ fn resume_commit(committed_point: Option<Vec3>, moved: bool, resolved: Vec3) -> 
     }
 }
 
+/// A servo's live parent-local lay, addressed by its [`ServoIndex`] slot in the tank's root-resident
+/// integrator. Same preference the mechanism itself integrates through (`tank::servo`): the
+/// client-local [`RemoteServos`] when the tank carries one — every non-predicted replica, the own
+/// hull included when it drives unpredicted — else the authoritative [`TankServos`] snapshot. The
+/// optic clamps intent against the gun's live lay, so it must read the integrator that is moving it.
+fn live_servo_angle(
+    tank: Entity,
+    slot: &ServoIndex,
+    states: &Query<&TankServos>,
+    remote: &Query<&RemoteServos>,
+) -> Option<f32> {
+    remote
+        .get(tank)
+        .ok()
+        .and_then(|servos| servos.0.get(slot.0))
+        .or_else(|| {
+            states
+                .get(tank)
+                .ok()
+                .and_then(|servos| servos.states.get(slot.0))
+        })
+        .map(ServoState::current)
+}
+
 /// Resolve optic input into the shared hull-local [`aim::CommittedAim`] and `TankCommand`.
 ///
 /// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
@@ -454,6 +479,7 @@ fn drive_gunner_aim(
     servo_slots: Query<&ServoIndex>,
     servo_specs: Query<&ServoSpec>,
     servo_states: Query<&TankServos>,
+    remote_servos: Query<&RemoteServos>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
     poses: Query<(&Position, &Rotation)>,
@@ -496,14 +522,12 @@ fn drive_gunner_aim(
     const REF_FOV: f32 = 0.12;
     let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
 
-    // Servo angles live root-resident (`TankServos`), addressed by each node's `ServoIndex`.
+    // The margin below clamps intent against the gun's live lay — see [`live_servo_angle`].
     let angle = |servo| {
-        servo_states
-            .get(tank)
+        servo_slots
+            .get(servo)
             .ok()
-            .zip(servo_slots.get(servo).ok())
-            .and_then(|(servos, slot)| servos.states.get(slot.0))
-            .map(crate::tank::ServoState::current)
+            .and_then(|slot| live_servo_angle(tank, slot, &servo_states, &remote_servos))
     };
     let Some(t_current) = angle(rig.turret) else {
         return;
@@ -707,6 +731,7 @@ struct FreeAimServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     specs: Query<'w, 's, &'static ServoSpec>,
     states: Query<'w, 's, &'static TankServos>,
+    remote: Query<'w, 's, &'static RemoteServos>,
     tables: Query<'w, 's, &'static RangeTable>,
     ranging: Res<'w, Ranging>,
 }
@@ -788,13 +813,9 @@ fn drive_free_aim(
             Some(point) => yaw_pitch_of(point - mount_local),
             None => {
                 let angle = |servo| {
-                    servos
-                        .states
-                        .get(tank)
-                        .ok()
-                        .zip(servos.slots.get(servo).ok())
-                        .and_then(|(states, slot)| states.states.get(slot.0))
-                        .map(crate::tank::ServoState::current)
+                    servos.slots.get(servo).ok().and_then(|slot| {
+                        live_servo_angle(tank, slot, &servos.states, &servos.remote)
+                    })
                 };
                 (
                     angle(rig.turret).unwrap_or(0.0),

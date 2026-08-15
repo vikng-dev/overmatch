@@ -24,7 +24,10 @@
 //! `net::client::run` writes `SyncConfig { jitter_multiple, ..default() }`, so `jitter_margin` and
 //! `error_margin` keep their 1.0 upstream defaults and the cancellation is exact, not incidental.
 //! [`shipping_loopback_client_lead_is_exactly_zero_ticks`] derives that number from the configured
-//! values rather than restating it.
+//! values rather than restating it. `net::sync_margin` rewrites those margins at runtime ONLY once
+//! the own tank resolves `Interpolated` (unpredicted drive, where none of this module's rollback
+//! routes carry the own hull) or under an explicit `OVERMATCH_INPUT_MARGIN_MS` pin — in the
+//! shipping predicted composition the installed values above are the runtime truth.
 //!
 //! Worse, the sync controller is allowed to sit up to `error_margin` behind the objective without
 //! correcting (`SyncContext::speed_adjustment` only acts once `offset.abs() > error_margin`), so

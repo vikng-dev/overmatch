@@ -22,8 +22,8 @@ use lightyear::prelude::server::{
 use lightyear::prelude::*;
 
 use super::client::{
-    InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots,
-    age_sanctioned_shots, install_input_buffer_guard, publish_predicted_present,
+    HeldFireEvents, InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage,
+    SeenShots, age_sanctioned_shots, install_input_buffer_guard, publish_predicted_present,
     receive_damage_confirms, receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
@@ -824,10 +824,13 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     // The production client's fire-receive wiring, verbatim (`net::client::run`).
     app.init_resource::<PendingRecoilKicks>();
     app.init_resource::<SeenShots>();
+    app.init_resource::<HeldFireEvents>();
     app.init_resource::<PendingFireEvents>();
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
+    app.init_resource::<super::extrapolate::ImpulseTicks>();
     app.init_resource::<crate::PredictedPresent>();
+    app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
     app.add_systems(

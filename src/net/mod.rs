@@ -12,10 +12,19 @@ mod adoption;
 mod arrival_rollback;
 mod client;
 mod contact_probe;
+/// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
+/// event presents in sync with the interpolated motion it belongs to.
+mod cursor_queue;
 mod death_screen;
 mod debug_hud;
 mod diagnostics;
 mod disclosure;
+/// The interpolation buffer's edge: starvation instruments (always on) and the bounded
+/// extrapolation gap-filler (`OVERMATCH_EXTRAPOLATE=1`).
+mod extrapolate;
+/// The owner's fire presentation: intent edges on the local tick, the arriving gate reconciled as a
+/// legality report instead of read as permission to draw.
+mod fire_presentation;
 mod grip;
 mod harness;
 pub(crate) use harness::{env_flag, env_parse, env_value};
@@ -24,12 +33,17 @@ mod hit_feel;
 /// combat, on the production registration.
 #[cfg(test)]
 mod hull_shock_rollback;
+/// The interpolation buffer's size, derived from the measured link instead of pinned.
+mod interp_delay;
 /// Does an authoritative hull fact reach the client at the lead the SHIPPING sync config actually
 /// produces (0, and −1 under deadband drift)? RED by design — slice 2's acceptance test.
 #[cfg(test)]
 mod lead_zero_rollback;
 mod physics;
 mod protocol;
+/// The own hull's firing recoil, overlaid on the rendered pose while the replicated kick is still
+/// in flight down the interpolation buffer.
+mod recoil_overlay;
 mod render_error;
 mod rig;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
@@ -40,6 +54,8 @@ mod shot_loss;
 mod shot_transport;
 // `pub(crate)` for `spawn_limit` — the clamp the spawn regression test resolves its corners at.
 pub(crate) mod spawn_map;
+/// The sync margins on both wire timelines, derived from the measured link instead of pinned.
+mod sync_margin;
 #[cfg(test)]
 mod test_harness;
 mod watchdog;
@@ -56,6 +72,7 @@ pub(super) use death_screen::plugin as death_screen_plugin;
 pub(super) use debug_hud::plugin as debug_hud_plugin;
 pub(super) use hit_feel::plugin as hit_feel_plugin;
 pub(crate) use protocol::NetBot;
+pub(crate) use recoil_overlay::RecoilOverlay;
 pub(crate) use render_error::RenderErrorOffset;
 pub(super) use spawn_map::plugin as spawn_map_plugin;
 

@@ -7,7 +7,9 @@ use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
-use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
+use lightyear::prelude::input::server::{
+    InputSystems as ServerInputSystems, InputValidationAppExt, authorize_controlled_targets,
+};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
@@ -108,7 +110,16 @@ pub fn run() {
             open_gameplay_gate,
             diagnostics::log_positions,
             diagnostics::log_sim_evidence,
+            diagnostics::log_input_arrival,
         ),
+    );
+    // The input arrival-margin instrument: sampled per fixed tick BEFORE lightyear consumes the
+    // buffers, so the margin describes exactly the read the server is about to make. The counter
+    // this adds is what certifies the client's derived sync margins (`net::sync_margin`).
+    app.init_resource::<diagnostics::InputArrival>();
+    app.add_systems(
+        FixedPreUpdate,
+        diagnostics::sample_input_arrival.before(ServerInputSystems::UpdateActionState),
     );
     app.add_systems(
         FixedUpdate,
@@ -607,6 +618,13 @@ fn spawn_pending_tanks(
     }
 }
 
+/// The shipped drive law, default ON: the owner sits in the interpolation set with everyone else,
+/// so its own hull renders and drives from the server stream exactly like an opponent's.
+/// `OVERMATCH_UNPREDICTED_DRIVE=0` opts back into owner prediction. Server-side only — the wire
+/// surface is unchanged (both markers are lightyear registrations in every build), so a stock
+/// client connects and simply receives `Interpolated` where it used to receive `Predicted`.
+const UNPREDICTED_DRIVE: &str = "OVERMATCH_UNPREDICTED_DRIVE";
+
 /// Construct an authoritative player tank. Initial join and respawn share this exact ownership and
 /// prediction bundle so reacquisition cannot drift from first spawn.
 fn spawn_player_tank(
@@ -619,7 +637,8 @@ fn spawn_player_tank(
     spawn_rot: Quat,
     combatant: CombatantId,
 ) -> Entity {
-    spawn_complete_tank(
+    let unpredicted = crate::env_flag(UNPREDICTED_DRIVE, true);
+    let root = spawn_complete_tank(
         commands,
         content,
         assets.presentation(),
@@ -645,9 +664,21 @@ fn spawn_player_tank(
             (
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
-                // Owner predicts; every other client interpolates.
-                PredictionTarget::to_clients(NetworkTarget::Single(client_id)),
-                InterpolationTarget::to_clients(NetworkTarget::AllExceptSingle(client_id)),
+                // Default: every client interpolates, the owner included. The opt-out moves the
+                // owner into the prediction set; both components stay inserted in the same flush
+                // either way, so only the target sets move.
+                PredictionTarget::to_clients(if unpredicted {
+                    NetworkTarget::None
+                } else {
+                    NetworkTarget::Single(client_id)
+                }),
+                InterpolationTarget::to_clients(if unpredicted {
+                    NetworkTarget::All
+                } else {
+                    NetworkTarget::AllExceptSingle(client_id)
+                }),
+                // The owner marker, and the only one the client's game layer keys on: it rides
+                // `ControlledBy`'s owner-scoped visibility, not the prediction target.
                 ControlledBy {
                     owner: link,
                     lifetime: default(),
@@ -655,7 +686,16 @@ fn spawn_player_tank(
             ),
             (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
-    )
+    );
+    let mode = if unpredicted {
+        "owner INTERPOLATES (unpredicted drive, default)"
+    } else {
+        "owner predicts (opt-out)"
+    };
+    info!(
+        "server: spawned tank {root} for client {client_id} — {mode} [{UNPREDICTED_DRIVE}=0 opts out]"
+    );
+    root
 }
 
 /// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps

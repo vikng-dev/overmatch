@@ -523,6 +523,16 @@ pub(crate) struct Replaying(pub bool);
 #[derive(Resource, Default)]
 pub(crate) struct PredictedPresent(pub u32);
 
+/// Fused own fire (`OVERMATCH_FUSED_FIRE=1`): the client's own keyed shot presents from the
+/// server's echoed fire fact when the interpolation cursor crosses the fire tick — the same release
+/// rule every opponent shot follows — so the local fire tick draws no shell, flash, or barrel kick,
+/// and a server-refused fire simply never presents. The sim half of `shooting::fire` (gate, belt,
+/// hull impulse) is mode-independent and still runs every tick. Net-neutral like [`Replaying`]:
+/// only `net::client` inserts it (once, from the env lever), so its absence reads as "present
+/// locally" everywhere — server, single-player, sandbox, and every client not opted in.
+#[derive(Resource, Default)]
+pub(crate) struct FusedOwnFire;
+
 /// Net-neutral current tick published before gameplay. Local network fire uses it to construct a
 /// [`ShotId`] before shell spawn; authority/sandbox shells may be unkeyed.
 #[derive(Resource, Default)]

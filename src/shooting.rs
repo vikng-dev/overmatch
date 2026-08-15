@@ -24,6 +24,15 @@ use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
 const RECOIL_FEEL: f32 = 1.0;
 
+/// THE single expression of the recoil reaction a fired round puts on its hull: the shell's
+/// momentum, opposite the bore. Applied at the muzzle point by [`fire`], and modelled — never
+/// re-derived — by the client's own-hull view overlay (`net::recoil_overlay`), so the sim and the
+/// view cannot disagree on what a shot does (the derive-the-consequence doctrine, ADR-0016; the same
+/// rule [`kick_recoil`] states for the barrel).
+pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
+    bore * (-mass * speed * RECOIL_FEEL)
+}
+
 /// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest (battery)
 /// position, built during complete tank construction from the weapon's `recoil` spec and barrel
 /// node's authored translation — spawn-time data, not a bind-time transform capture. The recoil
@@ -211,6 +220,11 @@ fn fire(
     // (the forward tick already spawned it; the shell entity is not rolled back). Absent on the
     // authority (server/SP/sandbox never roll back), so it fires there unconditionally.
     replaying: Option<Res<crate::Replaying>>,
+    // Present only on a client running fused own fire: a keyed round's one presentation is the
+    // server's echoed fact, released at the interpolation cursor by `net::client`, so the local
+    // tick must draw no shell and no barrel kick. Absent everywhere else (server / SP / sandbox,
+    // and every client not opted in), where this system presents locally exactly as before.
+    fused: Option<Res<crate::FusedOwnFire>>,
     // Present only in a composed network app. `net::protocol` republishes the `LocalTimeline`
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour. Single-player and sandboxes deliberately have no clock.
@@ -295,27 +309,31 @@ fn fire(
             false
         };
 
+        // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
+        // includes it in the shell's initial bundle, so lifecycle observers and the first march
+        // see the same keyed state. A slot that cannot fit the wire's u8 has no network shot
+        // (the server likewise declines to broadcast it), and SP/sandbox have no clock.
+        let shot = shot_clock.as_ref().and_then(|clock| {
+            let combatant = combatant.expect(
+                "network tank fired without spawn-complete CombatantId; immutable sim state \
+                 must arrive with the predicted root",
+            );
+            u8::try_from(slot.0).ok().map(|weapon| crate::ShotId {
+                combatant: *combatant,
+                weapon,
+                fire_tick: clock.0,
+            })
+        });
+        // Fused own fire suppresses exactly the rounds the server will echo: a keyed shot's shell,
+        // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo
+        // and presents locally in both modes.
+        let fused_echo = fused.is_some() && shot.is_some();
         // Hand off to ballistics: fire down the bore at the weapon's muzzle speed. SUPPRESSED on a
         // rollback replay (F1): the cosmetic shell was already spawned on the original forward tick
         // and is not rolled back, so re-triggering here would spawn a duplicate own shell sharing this
         // round's `ShotId`. The sim mutations above/below (tracer counter, and belt/reload/recoil/hull
         // below) still run — they MUST replay for the rolled-back `TankSim` to re-derive exactly.
-        if !replaying {
-            // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
-            // includes it in the shell's initial bundle, so lifecycle observers and the first march
-            // see the same keyed state. A slot that cannot fit the wire's u8 has no network shot
-            // (the server likewise declines to broadcast it), and SP/sandbox have no clock.
-            let shot = shot_clock.as_ref().and_then(|clock| {
-                let combatant = combatant.expect(
-                    "network tank fired without spawn-complete CombatantId; immutable sim state \
-                     must arrive with the predicted root",
-                );
-                u8::try_from(slot.0).ok().map(|weapon| crate::ShotId {
-                    combatant: *combatant,
-                    weapon,
-                    fire_tick: clock.0,
-                })
-            });
+        if !replaying && !fused_echo {
             commands.trigger(FireShell {
                 origin: muzzle_position,
                 direction: bore,
@@ -340,7 +358,8 @@ fn fire(
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so
         // this path and the opponent-view path (`net::client`) can't diverge on how a shot recoils.
-        if let Ok(mut sim) = sims.get_mut(root.0) {
+        // Under fused own fire the kick arrives with the echo, through that same opponent-view path.
+        if !fused_echo && let Ok(mut sim) = sims.get_mut(root.0) {
             kick_recoil(&mut sim, slot.0, weapon);
         }
         // Recoil reaction on the hull: the shell's momentum, opposite the bore, applied on the bore
@@ -348,7 +367,7 @@ fn fire(
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
         if let Ok((forces, wake)) = bodies.get_mut(root.0) {
-            let impulse = bore * (-weapon.mass * weapon.speed * RECOIL_FEEL);
+            let impulse = recoil_impulse(bore, weapon.mass, weapon.speed);
             apply_explicit_impulse(
                 forces,
                 wake,
@@ -1006,6 +1025,98 @@ mod tests {
             gate_state(&world, root).belt_remaining,
             0,
             "the belt still decrements on replay — WeaponGate must re-derive the rolled-back state",
+        );
+    }
+
+    /// Give the rig's weapon a barrel and a recoil spec, so `kick_recoil` has a kick to apply and
+    /// its suppression is observable in `recoil_velocity`.
+    fn arm_barrel_recoil(world: &mut World, barrel: Entity) {
+        let mut weapons = world.query_filtered::<&mut Weapon, With<Muzzle>>();
+        let mut weapon = weapons.single_mut(world).expect("one rig weapon");
+        weapon.recoil = Some(crate::spec::RecoilSpec {
+            kick: 1.5,
+            stiffness: 10.0,
+            damping: 1.0,
+        });
+        weapon.barrel = Some(barrel);
+    }
+
+    /// FUSED OWN FIRE (`crate::FusedOwnFire`): a keyed round draws NO local shell and NO local
+    /// barrel kick — its one presentation is the server echo, released at the cursor by
+    /// `net::client` — while every sim mutation (the belt walk here) runs unchanged. With the
+    /// lever unset the same tick presents locally, kick included: the default path, pinned.
+    #[test]
+    fn fused_own_fire_draws_no_local_shell_and_no_local_kick() {
+        use crate::ballistics::FireShell;
+
+        #[derive(Resource, Default)]
+        struct FireShellCount(usize);
+        fn count_fire_shells(_: On<FireShell>, mut c: ResMut<FireShellCount>) {
+            c.0 += 1;
+        }
+
+        let mut world = test_world();
+        world.insert_resource(crate::ShotClock(81));
+        world.init_resource::<FireShellCount>();
+        world.add_observer(count_fire_shells);
+        let (root, _) = spawn_mg_rig(&mut world, Vec::new());
+        arm_barrel_recoil(&mut world, root);
+
+        world.insert_resource(crate::FusedOwnFire);
+        world.run_system_once(fire).unwrap();
+        assert_eq!(
+            world.resource::<FireShellCount>().0,
+            0,
+            "fused: a keyed round triggers no local FireShell",
+        );
+        assert_eq!(
+            weapon_state(&mut world, root).recoil_velocity,
+            0.0,
+            "fused: no local barrel kick — it arrives with the echo",
+        );
+        assert_eq!(
+            gate_state(&world, root).belt_remaining,
+            1,
+            "fused: the belt walk is sim truth and still runs",
+        );
+
+        world.remove_resource::<crate::FusedOwnFire>();
+        advance(&mut world, 7);
+        world.run_system_once(fire).unwrap();
+        assert_eq!(
+            world.resource::<FireShellCount>().0,
+            1,
+            "lever unset: the local tick presents its own shell exactly as before",
+        );
+        assert!(
+            weapon_state(&mut world, root).recoil_velocity > 0.0,
+            "lever unset: the local barrel kick applies exactly as before",
+        );
+    }
+
+    /// An UNKEYED round (no `ShotClock` → no `ShotId` → no echo will ever arrive) presents locally
+    /// even under the fused lever — suppression covers exactly the rounds the server will echo.
+    #[test]
+    fn fused_mode_still_presents_an_unkeyed_round_locally() {
+        use crate::ballistics::FireShell;
+
+        #[derive(Resource, Default)]
+        struct FireShellCount(usize);
+        fn count_fire_shells(_: On<FireShell>, mut c: ResMut<FireShellCount>) {
+            c.0 += 1;
+        }
+
+        let mut world = test_world();
+        world.init_resource::<FireShellCount>();
+        world.add_observer(count_fire_shells);
+        spawn_mg_rig(&mut world, Vec::new());
+
+        world.insert_resource(crate::FusedOwnFire);
+        world.run_system_once(fire).unwrap();
+        assert_eq!(
+            world.resource::<FireShellCount>().0,
+            1,
+            "an echo-less round must not lose its only presentation",
         );
     }
 }

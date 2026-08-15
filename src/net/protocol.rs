@@ -24,7 +24,10 @@ use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
 use crate::state::GameplaySet;
-use crate::tank::{Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, TankSim, WeaponGate};
+use crate::tank::{
+    Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, TankSim,
+    WeaponGate,
+};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGripEffect, TrackGripElements};
 #[cfg(test)]
 use crate::track::transmission::TransmissionState;
@@ -762,11 +765,17 @@ fn publish_servo_angles(
 /// Client side, remote (interpolated) tanks: feed the replicated angles to the local servos as
 /// targets — the mechanism does the rest (see [`ServoAngles`]). In `GameplaySet` so it shares the
 /// Playing gate with the rest of the sim; `drive_servos` orders itself after the whole set, so the
-/// targets land before the mechanism steps. No write conflict with `drive_aim_servos` (also in the
-/// set): a remote tank's `TankCommand` stays default (no input slot, and the bridge below skips
-/// non-simulated tanks), so `aim` is `None` and that system never touches these tanks' servos.
+/// targets land before the mechanism steps.
+///
+/// `ServoCommand.target` has exactly one writer per tank, and the filter is what enforces it.
+/// `drive_aim_servos` (also in the set, unordered against this) writes it for every tank whose
+/// `TankCommand.aim` is `Some`, i.e. every tank holding an input slot. `Without<GameControlled>`
+/// excludes that tank here — by the OWNER marker, which rides `ControlledBy` rather than the
+/// prediction target, so the exclusion holds whether the owner is predicted or interpolated. Every
+/// other remote's `TankCommand` stays default (no input slot, and the bridge below skips
+/// non-simulated tanks), so `aim` is `None` and `drive_aim_servos` never touches its servos.
 fn apply_servo_angles(
-    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<Predicted>)>,
+    tanks: Query<(&ServoAngles, &Rig), (With<Remote>, Without<Predicted>, Without<GameControlled>)>,
     mut servos: Query<&mut ServoCommand>,
 ) {
     for (angles, rig) in &tanks {
@@ -1425,7 +1434,9 @@ pub(crate) fn plugin(app: &mut App) {
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.
     app.add_systems(
         FixedUpdate,
-        bridge_action_state_to_tank_command.before(GameplaySet),
+        bridge_action_state_to_tank_command
+            .in_set(InputBridge)
+            .before(GameplaySet),
     );
     // The DELIVERY half of the same seam, mounted here for the same reason both halves above are:
     // the discriminator is a marker, not a composition root. `net::adoption` turns an arriving
@@ -1512,6 +1523,12 @@ fn realize_hull_shock(
         ledger.realize(shock.count);
     }
 }
+
+/// The input bridge's ordering handle: every writer that must land on top of the attested command
+/// orders after this set (`net::fire_presentation`, which replaces the owner's consumables with
+/// what this client authored).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct InputBridge;
 
 /// Bridge Lightyear input to the simulation command.
 ///
@@ -1804,6 +1821,38 @@ mod tests {
 
         assert_eq!(world.get::<ServoCommand>(turret).unwrap().target, 0.75);
         assert_eq!(world.get::<ServoCommand>(gun).unwrap().target, -0.2);
+    }
+
+    /// The owner's servo targets belong to `aim::drive_aim_servos` alone. An interpolated OWN tank
+    /// (unpredicted drive) is `Remote` and carries no `Predicted` marker, so only the owner marker
+    /// keeps this pump off it — mutate `Without<GameControlled>` away and the replicated angle
+    /// overwrites the local intent here.
+    #[test]
+    fn public_servo_angles_skip_the_tank_that_holds_the_input_slot() {
+        let mut world = World::new();
+        let turret = world.spawn(ServoCommand::default()).id();
+        let gun = world.spawn(ServoCommand::default()).id();
+        let hull = world.spawn_empty().id();
+        let muzzle = world.spawn_empty().id();
+        world.spawn((
+            Remote,
+            GameControlled,
+            ServoAngles {
+                turret: 0.75,
+                gun: -0.2,
+            },
+            Rig {
+                hull,
+                turret,
+                gun,
+                muzzle,
+            },
+        ));
+
+        world.run_system_once(apply_servo_angles).unwrap();
+
+        assert_eq!(world.get::<ServoCommand>(turret).unwrap().target, 0.0);
+        assert_eq!(world.get::<ServoCommand>(gun).unwrap().target, 0.0);
     }
 
     #[test]
@@ -2981,6 +3030,11 @@ mod tests {
         assert!(
             protocol.contains("With<Remote>, Without<Predicted>"),
             "the legacy ServoAngles writer must remain scoped to non-predicted remotes",
+        );
+        assert!(
+            protocol.contains("Without<GameControlled>"),
+            "the tank holding the input slot must be excluded: `drive_aim_servos` is the sole \
+             writer of its servo targets, whether it is predicted or interpolated",
         );
         assert!(
             !protocol.contains("fn apply_tank_servos"),

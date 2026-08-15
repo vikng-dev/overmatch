@@ -12,7 +12,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowMode};
-use lightyear::interpolation::timeline::InterpolationConfig;
+use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prediction::correction::CorrectionPolicy;
 use lightyear::prelude::client::*;
 use lightyear::prelude::input::client::InputSystems;
@@ -20,6 +20,7 @@ use lightyear::prelude::input::native::{ActionState, InputMarker, NativeBuffer};
 use lightyear::prelude::{Controlled as NetControlled, *};
 use serde_json::json;
 
+use super::cursor_queue::CursorQueue;
 use super::protocol::{
     DamageConfirm, DamageReceipt, FireEvent, FireVisualBatch, FireVisualFact, ImpactConfirm,
     NetTank, RicochetKeyframe, protocol_id,
@@ -104,13 +105,18 @@ enum RecvConditionerMode {
     Seeded(u64),
 }
 
-/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit.
+/// Preserve the existing receive path unless all seeded-jitter prerequisites are explicit — or a
+/// burst is configured, which is deterministic by construction (epoch-phase, no RNG) and therefore
+/// activates the seeded conditioner on its own with every unset knob at zero.
 fn recv_conditioner_mode(
     latency_ms: u64,
     jitter_ms: u64,
     jitter_seed: Option<u64>,
+    burst: bool,
 ) -> RecvConditionerMode {
-    if latency_ms == 0 {
+    if burst {
+        RecvConditionerMode::Seeded(jitter_seed.unwrap_or(0))
+    } else if latency_ms == 0 {
         RecvConditionerMode::Off
     } else if jitter_ms > 0
         && let Some(seed) = jitter_seed
@@ -304,10 +310,10 @@ pub fn run() {
         }
     }
 
-    // Register the shared protocol before creating the client link.
-    app.add_plugins(ClientPlugins {
-        tick_duration: Duration::from_secs_f64(1.0 / 64.0),
-    });
+    // Register the shared protocol before creating the client link. The step lightyear publishes as
+    // `TickDuration`; `net::interp_delay` derives its gap term from the same binding.
+    let tick_duration = Duration::from_secs_f64(1.0 / 64.0);
+    app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     super::grip::install_client(&mut app);
     app.add_plugins(physics::physics_plugins());
@@ -321,6 +327,17 @@ pub fn run() {
     // accumulates that snap as a decaying offset on the predicted root's render `Transform` so the
     // VIEW never lurches.
     app.add_plugins(super::render_error::plugin);
+    // The own-hull recoil overlay (client only): when the server stream owns the owner's hull, the
+    // firing kick arrives `RTT/2 + D` after the flash. This layer presents it at the local fire tick
+    // and retires it exactly as the interpolation cursor crosses that tick. Arms nothing in
+    // predicted mode.
+    app.add_plugins(super::recoil_overlay::plugin);
+    // The own-fire presentation ledger (client only): when the server stream owns the owner's gate,
+    // the arriving snapshot is a legality report, not permission to draw. This layer holds the gate
+    // the local cadence left, reconciles the snapshot forward, and feeds `shooting::fire` the
+    // consumables this client authored rather than the attested echo. Arms nothing in predicted
+    // mode.
+    app.add_plugins(super::fire_presentation::plugin);
     // The rollback watchdog (client only): the backstop for lightyear's receive-time mismatch
     // check, which starves permanently at zero prediction margin — exactly where `balanced()`
     // input delay puts a LAN/loopback client (see the module doc for the vendored mechanism).
@@ -399,7 +416,15 @@ pub fn run() {
     let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
     let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
     let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
-    let conditioner_mode = recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed);
+    // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
+    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS").unwrap_or(0);
+    let burst_period_ticks: u64 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS").unwrap_or(0);
+    let burst = (burst_ms > 0 && burst_period_ticks > 0).then(|| {
+        let ticks = u32::try_from(burst_period_ticks).expect("a burst period fits ticks in u32");
+        (Duration::from_millis(burst_ms), tick_duration * ticks)
+    });
+    let conditioner_mode =
+        recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed, burst.is_some());
     let conditioner = match conditioner_mode {
         RecvConditionerMode::Stock => {
             info!(
@@ -413,7 +438,8 @@ pub fn run() {
         }
         RecvConditionerMode::Seeded(seed) => {
             info!(
-                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms seed={seed} (SPIKE_*)"
+                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms \
+                 seed={seed} burst={burst_ms}ms/{burst_period_ticks}t (SPIKE_*)"
             );
             None
         }
@@ -456,6 +482,47 @@ pub fn run() {
                 .in_set(lightyear::link::LinkReceiveSystems::ApplyConditioner),
         );
     }
+    // Mounts the deriving system and resolves `OVERMATCH_INTERP_DELAY_MS`; the returned config is
+    // the entity's starting value, rewritten every frame unless the env var pins it.
+    let interpolation = super::interp_delay::install(&mut app, tick_duration);
+    // Mounts the sync-margin laws on both wire timelines: the input timeline's floor/deadband
+    // (rewritten every frame once the own tank's role resolves interpolated, or pinned by
+    // `OVERMATCH_INPUT_MARGIN_MS`) and the interpolation timeline's sync margins (static for the
+    // session, or pinned by `OVERMATCH_INTERP_MARGIN_MS`). Receives the SAME `input_delay` the
+    // timeline below is built with, so its rebuilds cannot change the delay's shape.
+    let interpolation = super::sync_margin::install(
+        &mut app,
+        tick_duration,
+        sync_config,
+        input_delay,
+        interpolation,
+    );
+    // Fused own fire, default ON: the own shot presents from the server echo at the cursor
+    // crossing instead of on the local fire tick (see `crate::FusedOwnFire`). Read exactly once;
+    // `OVERMATCH_FUSED_FIRE=0` opts back into local-tick presentation.
+    if harness::env_flag("OVERMATCH_FUSED_FIRE", true) {
+        info!(
+            "net: fused own fire ON (default) — the own shot presents from the server echo at \
+             the interpolation cursor; the recoil overlay stays unarmed [OVERMATCH_FUSED_FIRE=0 \
+             opts out]"
+        );
+        app.insert_resource(crate::FusedOwnFire);
+    } else {
+        info!("net: fused own fire OFF [OVERMATCH_FUSED_FIRE=0] — local-tick presentation");
+    }
+    // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
+    // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
+    super::extrapolate::install(&mut app);
+    // `OVERMATCH_CURSOR_HIT_FEEL=1`: the own being-hit cue (camera kick + damage flash) presents at
+    // the interpolation cursor's crossing of the damage tick instead of at arrival. Read exactly
+    // once; absent = arrival presentation, bit-identical.
+    if harness::env_flag("OVERMATCH_CURSOR_HIT_FEEL", false) {
+        info!(
+            "net: cursor hit feel ON [OVERMATCH_CURSOR_HIT_FEEL] — the own being-hit cue \
+             presents at the interpolation cursor crossing of its damage tick"
+        );
+        app.insert_resource(super::hit_feel::CursorHitFeel);
+    }
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
@@ -471,12 +538,10 @@ pub fn run() {
         },
         // Explicitly own the input timeline configuration required by prediction.
         InputTimelineConfig::new(sync_config, input_delay),
-        // Interpolated replicas need a nonzero buffer behind the server estimate. Keep this explicit
-        // while `tests/net_interp_delay.rs` covers Lightyear's zero-send-interval default.
-        InterpolationConfig {
-            min_delay: Duration::from_millis(100),
-            ..Default::default()
-        },
+        // Interpolated replicas need a buffer behind the server estimate, and under unpredicted
+        // drive the own hull rides it too, so it is also the dominant own-input latency term.
+        // `net::interp_delay` owns the sizing law and rewrites `min_delay` every frame.
+        interpolation,
         NetcodeClient::new(
             Authentication::Manual {
                 server_addr,
@@ -495,9 +560,13 @@ pub fn run() {
         UdpIo::default(),
     ));
     if let RecvConditionerMode::Seeded(seed) = conditioner_mode {
-        client_entity.insert(harness::SeededRecvConditioner::new(
-            seed, latency_ms, jitter_ms,
-        ));
+        let mut seeded = harness::SeededRecvConditioner::new(seed, latency_ms, jitter_ms);
+        if let Some((burst, period)) = burst {
+            // The epoch is this install instant; the phase needs no cross-endpoint agreement,
+            // only a fixed anchor, because the signature is periodic.
+            seeded = seeded.with_burst(burst, period, lightyear::core::time::Instant::now());
+        }
+        client_entity.insert(seeded);
     }
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
@@ -565,6 +634,7 @@ pub fn run() {
     // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
     // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
     app.init_resource::<SeenShots>();
+    app.init_resource::<HeldFireEvents>();
     app.init_resource::<PendingFireEvents>();
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
@@ -607,6 +677,9 @@ pub fn run() {
             .run_if(in_state(AppState::Playing))
             .run_if(not(is_in_rollback)),
     );
+    // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
+    // clock the own hull moves on is the first thing any capture of this session must state.
+    app.add_systems(Update, log_local_tank_role);
     // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`; KEPT — useful): once per second, log
     // every `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
     // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
@@ -627,7 +700,13 @@ pub fn run() {
                 // "ticks" burned in <5 s wall).
                 // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
                 // just placed, and must be the last word before lightyear buffers it.
-                (harness::buffer_input, stamp_input_tick)
+                // `record_own_intent` chains after the stamp: the client's own copy of what it
+                // filed is keyed by the tick the stamp names.
+                (
+                    harness::buffer_input,
+                    stamp_input_tick,
+                    super::fire_presentation::record_own_intent,
+                )
                     .chain()
                     .in_set(InputSystems::WriteClientInputs)
                     .run_if(not(is_in_rollback)),
@@ -638,7 +717,11 @@ pub fn run() {
             // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
             // `ActionState` per tick — overwriting it with the *current* gathered command (or
             // re-stamping it with the replayed tick) would corrupt the replay's input.
-            (feed_action_state, stamp_input_tick)
+            (
+                feed_action_state,
+                stamp_input_tick,
+                super::fire_presentation::record_own_intent,
+            )
                 .chain()
                 .in_set(InputSystems::WriteClientInputs)
                 .run_if(not(is_in_rollback)),
@@ -1074,6 +1157,29 @@ fn drop_stranded_input_buffer(
     }
 }
 
+/// Name the replication role the server gave this client's own tank, the first frame that role is
+/// observable. `Predicted` = local physics under input; `Interpolated` = the server stream, RTT/2 +
+/// the interpolation delay behind (the server's `OVERMATCH_UNPREDICTED_DRIVE` lever). Latches on the
+/// first resolved role, so a respawn does not re-log a decision that cannot change mid-session.
+fn log_local_tank_role(
+    tank: Query<(Entity, Has<Predicted>, Has<Interpolated>), (With<GameControlled>, With<NetTank>)>,
+    mut logged: Local<bool>,
+) {
+    if *logged {
+        return;
+    }
+    let Ok((entity, predicted, interpolated)) = tank.single() else {
+        return;
+    };
+    let role = match (predicted, interpolated) {
+        (true, _) => "PREDICTED (local physics under input)",
+        (false, true) => "INTERPOLATED (server stream — unpredicted drive)",
+        (false, false) => return,
+    };
+    *logged = true;
+    info!("client: own tank {entity} drives {role}");
+}
+
 /// Opt-in ownership trace. Only the local tank may carry `Controlled`, `InputMarker`, and `Predicted`.
 #[expect(clippy::type_complexity, reason = "one-off diagnostic marker snapshot")]
 fn log_tank_ownership(
@@ -1110,6 +1216,20 @@ fn log_tank_ownership(
 /// fixed-clock `TankSim` write (which must be on the sim clock — see [`apply_pending_recoil_kicks`]).
 #[derive(Resource, Default)]
 pub(super) struct PendingRecoilKicks(Vec<(Entity, usize)>);
+
+impl PendingRecoilKicks {
+    /// Enqueue one kick cause. `net::fire_presentation`'s recovered rounds share this seam so a
+    /// fallback bang recoils exactly like an echoed one.
+    pub(super) fn push(&mut self, shooter: Entity, weapon: usize) {
+        self.0.push((shooter, weapon));
+    }
+
+    /// Test-only inspection of the queued causes.
+    #[cfg(test)]
+    pub(super) fn queued(&self) -> &[(Entity, usize)] {
+        &self.0
+    }
+}
 
 /// Bounded [`ShotId`] dedup cache across repeated visual batches and direct reliable facts.
 #[derive(Resource, Default)]
@@ -1197,6 +1317,14 @@ impl PendingFireEvents {
     }
 }
 
+/// Validated fire announcements awaiting the interpolation cursor (`net::cursor_queue`): each
+/// releases when the cursor crosses its `fire_tick`, so the bang/flash/kick lands as the stream
+/// draws the shooter's hull at the pose it fired from. Dedup ([`SeenShots`]) and wire validation
+/// stay at arrival; shooter resolution happens at release, where [`PendingFireEvents`] already owns
+/// the missing-replica case.
+#[derive(Resource, Default)]
+pub(super) struct HeldFireEvents(CursorQueue<FireEvent>);
+
 /// Connection-lifetime dedup ledger for owner-private damage confirmations.
 ///
 /// INVARIANT: a [`DamageReceipt`] is never reused within a match. Forgetting one would permit a late
@@ -1223,12 +1351,14 @@ fn reset_shot_receive_state(
     _connected: On<Add, Connected>,
     mut recoil: ResMut<PendingRecoilKicks>,
     mut shots: ResMut<SeenShots>,
+    mut held: ResMut<HeldFireEvents>,
     mut fires: ResMut<PendingFireEvents>,
     mut damage: ResMut<SeenDamage>,
     mut sanctioned: ResMut<SanctionedShots>,
 ) {
     *recoil = default();
     *shots = default();
+    held.0.clear();
     *fires = default();
     *damage = default();
     *sanctioned = default();
@@ -1236,8 +1366,12 @@ fn reset_shot_receive_state(
 
 /// Drain public fire, keyframe, and terminal facts.
 ///
-/// New fires spawn a cosmetic shell and enqueue recoil; keyframes and terminals arm its sanctioned
-/// outcome buffer. Damage confirmation is owner-private and handled by [`receive_damage_confirms`].
+/// New fires are validated and held for the interpolation cursor ([`HeldFireEvents`]); the release
+/// pass in this same drain spawns each one's cosmetic shell and enqueues its recoil when the cursor
+/// crosses the fire tick (immediately, for an event the cursor already passed). Keyframes and
+/// terminals arm the sanctioned outcome buffer at arrival — their presentation is slaved to the
+/// shell's own flight, not to this seam. Damage confirmation is owner-private and handled by
+/// [`receive_damage_confirms`].
 ///
 /// This must run in `Update`: Lightyear clears undrained message receivers in `Last`, while a frame
 /// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. `Update` also
@@ -1253,46 +1387,56 @@ pub(super) fn receive_fire_events(
     tanks: Query<(Entity, &CombatantId), With<NetTank>>,
     // Fast-forward remote shells to this client's predicted present.
     timeline: Res<LocalTimeline>,
+    // The release clock: the same fractional cursor `net::recoil_overlay` compares fire ticks
+    // against. Synced-only — a pre-sync client has no interpolated motion to fuse with, so its
+    // events present at arrival.
+    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    fused: Option<Res<crate::FusedOwnFire>>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut seen: ResMut<SeenShots>,
+    mut held: ResMut<HeldFireEvents>,
     mut pending_fires: ResMut<PendingFireEvents>,
     mut sanctioned: ResMut<SanctionedShots>,
-    // Optional lifecycle recorder for wire arrivals and dedup results.
-    mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    // Nested: the optional lifecycle recorder for wire arrivals/dedup results, the impulse
+    // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
+    // the tick the shooter's hull surged), and the own-fire ledger + counters for swallowing a
+    // late echo the fallback already presented. A tuple param keeps the system under Bevy's
+    // 16-param bound.
+    (mut shot_trace, mut impulses, mut own_ledgers, mut own_diag): (
+        Option<ResMut<crate::shot_trace::ShotTrace>>,
+        ResMut<super::extrapolate::ImpulseTicks>,
+        Query<&mut super::fire_presentation::OwnFirePresentation>,
+        ResMut<super::fire_presentation::OwnFireDiag>,
+    ),
     mut commands: Commands,
 ) {
     let now = timeline.tick();
+    let cursor = cursors
+        .single()
+        .ok()
+        .map(|timeline| (timeline.tick(), f64::from(timeline.overstep().to_f32())));
     for mut receiver in &mut batch_receivers {
         for batch in receiver.receive() {
             for fact in batch.facts {
+                if let FireVisualFact::Fire(event) = &fact {
+                    impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
+                }
                 consume_fire_visual_fact(
                     fact,
                     now,
-                    &locally_fired,
-                    &tanks,
-                    &mut pending,
+                    cursor,
                     &mut seen,
-                    &mut pending_fires,
+                    &mut held,
                     &mut sanctioned,
                     &mut shot_trace,
-                    &mut commands,
                 );
             }
         }
     }
     for mut receiver in &mut fire_receivers {
         for event in receiver.receive() {
-            consume_fire_event(
-                &event,
-                now,
-                &locally_fired,
-                &tanks,
-                &mut pending,
-                &mut seen,
-                &mut pending_fires,
-                &mut shot_trace,
-                &mut commands,
-            );
+            impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
+            consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut shot_trace);
         }
     }
     for mut receiver in &mut keyframe_receivers {
@@ -1305,45 +1449,53 @@ pub(super) fn receive_fire_events(
             consume_impact_confirm(&confirm, now, &mut sanctioned, &mut shot_trace);
         }
     }
+    release_due_fire_events(
+        now,
+        cursor,
+        fused.is_some(),
+        &locally_fired,
+        &tanks,
+        &mut pending,
+        &mut held,
+        &mut pending_fires,
+        &mut own_ledgers,
+        &mut own_diag,
+        &mut shot_trace,
+        &mut commands,
+    );
     resolve_pending_fire_events(
         now,
+        cursor,
+        fused.is_some(),
         &locally_fired,
         &tanks,
         &mut pending,
         &mut pending_fires,
+        &mut own_ledgers,
+        &mut own_diag,
         &mut shot_trace,
         &mut commands,
     );
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one receiver boundary keeps public visual facts coherent"
-)]
+/// The fractional cursor as one number — `trace`'s `itick` — for the lifecycle rows.
+fn cursor_itick(cursor: Option<(Tick, f64)>) -> Option<f64> {
+    cursor.map(|(tick, overstep)| f64::from(tick.0) + overstep)
+}
+
 fn consume_fire_visual_fact(
     fact: FireVisualFact,
     now: Tick,
-    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
-    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
-    pending_recoil: &mut PendingRecoilKicks,
+    cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
-    pending_fires: &mut PendingFireEvents,
+    held: &mut HeldFireEvents,
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
 ) {
     match fact {
-        FireVisualFact::Fire(event) => consume_fire_event(
-            &event,
-            now,
-            locally_fired,
-            tanks,
-            pending_recoil,
-            seen,
-            pending_fires,
-            shot_trace,
-            commands,
-        ),
+        FireVisualFact::Fire(event) => {
+            consume_fire_event(&event, now, cursor, seen, held, shot_trace)
+        }
         FireVisualFact::Ricochet(keyframe) => {
             consume_ricochet_keyframe(&keyframe, now, sanctioned, shot_trace)
         }
@@ -1353,30 +1505,25 @@ fn consume_fire_visual_fact(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the fire receive boundary owns dedup and deferred presentation"
-)]
+/// Dedup and validate one arriving fire, then hold it for the interpolation cursor. Presentation
+/// happens at release ([`release_due_fire_events`], same drain), never here.
 fn consume_fire_event(
     event: &FireEvent,
     now: Tick,
-    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
-    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
-    pending_recoil: &mut PendingRecoilKicks,
+    cursor: Option<(Tick, f64)>,
     seen: &mut SeenShots,
-    pending_fires: &mut PendingFireEvents,
+    held: &mut HeldFireEvents,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
 ) {
     let shot = event.shot_id();
     let fresh = seen.mark_new(shot);
-    crate::shot_trace::record(
-        shot_trace,
-        "fire_rx",
-        now.0,
-        shot,
-        || json!({ "dup": !fresh, "cu": fire_catch_up_ticks(event.fire_tick, now) }),
-    );
+    crate::shot_trace::record(shot_trace, "fire_rx", now.0, shot, || {
+        json!({
+            "dup": !fresh,
+            "cu": fire_catch_up_ticks(event.fire_tick, now),
+            "itick": cursor_itick(cursor),
+        })
+    });
     if !fresh {
         return;
     }
@@ -1390,21 +1537,14 @@ fn consume_fire_event(
         );
         return;
     }
-    match resolve_shooter(event, tanks) {
-        ShooterResolution::Resolved(shooter) => {
-            spawn_reconstructed_fire(event, shooter, now, locally_fired, pending_recoil, commands);
-        }
-        ShooterResolution::Missing | ShooterResolution::Ambiguous => {
-            if let Some(evicted) = pending_fires.insert(event.clone(), now) {
-                crate::shot_trace::record(
-                    shot_trace,
-                    "drop",
-                    now.0,
-                    evicted.event.shot_id(),
-                    || json!({ "s": "fire", "res": "pending_capacity" }),
-                );
-            }
-        }
+    if let Some((_, evicted)) = held.0.hold(event.fire_tick, event.clone()) {
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            evicted.shot_id(),
+            || json!({ "s": "fire", "res": "held_capacity" }),
+        );
     }
 }
 
@@ -1505,12 +1645,76 @@ fn resolve_shooter(
     }
 }
 
+/// The release half of the cursor hold: pop every fire whose tick the cursor has crossed and
+/// present it. A missing/ambiguous shooter defers to [`PendingFireEvents`], which owns the
+/// replica-race case (and its TTL) exactly as it did when presentation was at arrival. `None`
+/// cursor = release everything (pre-sync fallback: arrival presentation).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one release boundary owns cursor crossing and shooter resolution"
+)]
+fn release_due_fire_events(
+    now: Tick,
+    cursor: Option<(Tick, f64)>,
+    fused: bool,
+    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
+    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    pending_recoil: &mut PendingRecoilKicks,
+    held: &mut HeldFireEvents,
+    pending_fires: &mut PendingFireEvents,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) {
+    let due = match cursor {
+        Some((tick, overstep)) => held.0.release(tick, overstep),
+        None => held.0.release_all(),
+    };
+    for (_, event) in due {
+        match resolve_shooter(&event, tanks) {
+            ShooterResolution::Resolved(shooter) => spawn_reconstructed_fire(
+                &event,
+                shooter,
+                now,
+                cursor,
+                fused,
+                locally_fired,
+                pending_recoil,
+                own_ledgers,
+                own_diag,
+                shot_trace,
+                commands,
+            ),
+            ShooterResolution::Missing | ShooterResolution::Ambiguous => {
+                if let Some(evicted) = pending_fires.insert(event, now) {
+                    crate::shot_trace::record(
+                        shot_trace,
+                        "drop",
+                        now.0,
+                        evicted.event.shot_id(),
+                        || json!({ "s": "fire", "res": "pending_capacity" }),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one repair boundary owns expiry and shooter re-resolution"
+)]
 fn resolve_pending_fire_events(
     now: Tick,
+    cursor: Option<(Tick, f64)>,
+    fused: bool,
     locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
     pending_recoil: &mut PendingRecoilKicks,
     pending_fires: &mut PendingFireEvents,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
@@ -1535,8 +1739,13 @@ fn resolve_pending_fire_events(
                 &pending.event,
                 shooter,
                 now,
+                cursor,
+                fused,
                 locally_fired,
                 pending_recoil,
+                own_ledgers,
+                own_diag,
+                shot_trace,
                 commands,
             ),
             ShooterResolution::Missing | ShooterResolution::Ambiguous => {
@@ -1550,15 +1759,43 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
     now - received_tick > PendingFireEvents::TTL_TICKS
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one presentation boundary owns echo suppression and the release record"
+)]
 fn spawn_reconstructed_fire(
     event: &FireEvent,
     shooter: Entity,
     now: Tick,
+    cursor: Option<(Tick, f64)>,
+    fused: bool,
     locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     pending_recoil: &mut PendingRecoilKicks,
+    own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
+    own_diag: &mut super::fire_presentation::OwnFireDiag,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
-    if locally_fired.contains(shooter) {
+    // Self-echo suppression: the shooter presented this round on its own local fire tick. Under
+    // fused own fire the local tick drew nothing and the echo IS the round's one presentation.
+    if locally_fired.contains(shooter) && !fused {
+        return;
+    }
+    // An own echo arriving so late the belt-delta fallback already presented its round: one
+    // consumption, one bang — swallow the duplicate (matched by weapon slot and wrap-safe
+    // fire-tick order against the recorded reveal, so a future round can never match).
+    if fused
+        && let Ok(mut ledger) = own_ledgers.get_mut(shooter)
+        && ledger.try_swallow_owed(event.weapon as usize, event.fire_tick.0)
+    {
+        own_diag.swallowed += 1;
+        crate::shot_trace::record(
+            shot_trace,
+            "drop",
+            now.0,
+            event.shot_id(),
+            || json!({ "s": "fire", "res": "owed_swallow" }),
+        );
         return;
     }
     let Ok(direction) = Dir3::new(event.direction) else {
@@ -1567,6 +1804,13 @@ fn spawn_reconstructed_fire(
     let Some(catch_up_ticks) = fire_catch_up_ticks(event.fire_tick, now) else {
         return;
     };
+    crate::shot_trace::record(
+        shot_trace,
+        "present",
+        now.0,
+        event.shot_id(),
+        || json!({ "itick": cursor_itick(cursor), "cu": catch_up_ticks }),
+    );
     commands.trigger(FireShell {
         origin: event.origin,
         direction,
@@ -1596,11 +1840,15 @@ pub(super) fn receive_damage_confirms(
     timeline: Res<LocalTimeline>,
     mut seen: ResMut<SeenDamage>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    // Impulse ledger for the buffer-edge gap∧impulse coincidence instrument: a damage confirm
+    // marks the tick the victim's hull took the shot's impulse.
+    mut impulses: ResMut<super::extrapolate::ImpulseTicks>,
     mut commands: Commands,
 ) {
     let received_tick = timeline.tick();
     for mut receiver in &mut receivers {
         for damage in receiver.receive() {
+            impulses.record(damage.damage_tick, super::extrapolate::ImpulseClass::Damage);
             consume_damage_confirm(
                 &damage,
                 received_tick,
@@ -1907,24 +2155,36 @@ mod tests {
     #[test]
     fn seeded_conditioner_requires_an_explicit_active_jitter_path() {
         assert_eq!(
-            recv_conditioner_mode(80, 10, None),
+            recv_conditioner_mode(80, 10, None, false),
             RecvConditionerMode::Stock,
             "an unset seed must preserve the stock conditioner",
         );
         assert_eq!(
-            recv_conditioner_mode(0, 10, Some(7)),
+            recv_conditioner_mode(0, 10, Some(7), false),
             RecvConditionerMode::Off,
             "zero base latency must preserve the existing disabled path",
         );
         assert_eq!(
-            recv_conditioner_mode(80, 0, Some(7)),
+            recv_conditioner_mode(80, 0, Some(7), false),
             RecvConditionerMode::Stock,
             "a seed without active jitter must not replace the stock latency path",
         );
         assert_eq!(
-            recv_conditioner_mode(80, 10, Some(0)),
+            recv_conditioner_mode(80, 10, Some(0), false),
             RecvConditionerMode::Seeded(0),
             "zero is a valid deterministic seed",
+        );
+        // A configured burst is deterministic without any jitter prerequisite: it must activate
+        // the seeded path on its own (seed 0 default), from any other-knob state.
+        assert_eq!(
+            recv_conditioner_mode(0, 0, None, true),
+            RecvConditionerMode::Seeded(0),
+            "a burst alone must activate the seeded conditioner",
+        );
+        assert_eq!(
+            recv_conditioner_mode(80, 10, Some(7), true),
+            RecvConditionerMode::Seeded(7),
+            "a burst must keep an explicit seed",
         );
     }
 
@@ -2451,6 +2711,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<PendingRecoilKicks>()
             .init_resource::<SeenShots>()
+            .init_resource::<HeldFireEvents>()
             .init_resource::<PendingFireEvents>()
             .init_resource::<SeenDamage>()
             .init_resource::<SanctionedShots>()
@@ -2590,43 +2851,104 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pending_fire_duplicate_is_suppressed_by_shot_id() {
-        let mut app = App::new();
-        app.init_resource::<PendingRecoilKicks>()
-            .init_resource::<SeenShots>()
-            .init_resource::<PendingFireEvents>()
-            .init_resource::<ReconstructedFireShells>()
-            .add_observer(record_reconstructed_fire_shell);
-        let world = app.world_mut();
-        let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
-        let event = fire_event(unmapped, 7, 42);
-        let shot = event.shot_id();
-        let first = event.clone();
-
+    /// Consume one arriving fire through the production gate, then run the release pass at the
+    /// given cursor (`None` = the pre-sync fallback: release everything).
+    fn consume_and_release(
+        world: &mut World,
+        event: FireEvent,
+        now: Tick,
+        cursor: Option<(Tick, f64)>,
+        fused: bool,
+    ) {
         world
             .run_system_once(
                 move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
                       tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
+                      mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
-                    consume_fire_event(
-                        &first,
-                        Tick(42),
+                    consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut trace);
+                    release_due_fire_events(
+                        now,
+                        cursor,
+                        fused,
                         &locally_fired,
                         &tanks,
                         &mut recoil,
-                        &mut seen,
+                        &mut held,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );
                 },
             )
             .expect("production fire-consumption gate runs");
+    }
+
+    /// Run only the release pass at the given cursor.
+    fn release_at(world: &mut World, now: Tick, cursor: Option<(Tick, f64)>, fused: bool) {
+        world
+            .run_system_once(
+                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
+                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                      mut recoil: ResMut<PendingRecoilKicks>,
+                      mut held: ResMut<HeldFireEvents>,
+                      mut pending: ResMut<PendingFireEvents>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
+                      mut commands: Commands| {
+                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
+                    release_due_fire_events(
+                        now,
+                        cursor,
+                        fused,
+                        &locally_fired,
+                        &tanks,
+                        &mut recoil,
+                        &mut held,
+                        &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
+                        &mut trace,
+                        &mut commands,
+                    );
+                },
+            )
+            .expect("production release pass runs");
+    }
+
+    fn fire_receive_app() -> App {
+        let mut app = App::new();
+        app.init_resource::<PendingRecoilKicks>()
+            .init_resource::<SeenShots>()
+            .init_resource::<HeldFireEvents>()
+            .init_resource::<PendingFireEvents>()
+            .init_resource::<crate::net::fire_presentation::OwnFireDiag>()
+            .init_resource::<ReconstructedFireShells>()
+            .add_observer(record_reconstructed_fire_shell);
+        app
+    }
+
+    #[test]
+    fn pending_fire_duplicate_is_suppressed_by_shot_id() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let unmapped = Entity::from_raw_u32(999).expect("non-placeholder entity");
+        let event = fire_event(unmapped, 7, 42);
+        let shot = event.shot_id();
+
+        consume_and_release(world, event.clone(), Tick(42), None, false);
         let root = world.spawn((NetTank, CombatantId(7))).id();
         world
             .run_system_once(
@@ -2634,43 +2956,29 @@ mod tests {
                  tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
+                 mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                 mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                  mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     resolve_pending_fire_events(
                         Tick(42),
+                        None,
+                        false,
                         &locally_fired,
                         &tanks,
                         &mut recoil,
                         &mut pending,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );
                 },
             )
             .expect("pending fire resolves through the production repair path");
-        world
-            .run_system_once(
-                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
-                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
-                      mut recoil: ResMut<PendingRecoilKicks>,
-                      mut seen: ResMut<SeenShots>,
-                      mut pending: ResMut<PendingFireEvents>,
-                      mut commands: Commands| {
-                    let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
-                    consume_fire_event(
-                        &event,
-                        Tick(42),
-                        &locally_fired,
-                        &tanks,
-                        &mut recoil,
-                        &mut seen,
-                        &mut pending,
-                        &mut trace,
-                        &mut commands,
-                    );
-                },
-            )
-            .expect("duplicate crosses the production fire-consumption gate");
+        consume_and_release(world, event, Tick(42), None, false);
 
         assert_eq!(
             world.resource::<PendingFireEvents>().len(),
@@ -2681,6 +2989,100 @@ mod tests {
             world.resource::<ReconstructedFireShells>().0,
             vec![(shot, root)],
             "the real receive gate admits one reconstructed shell across pending repair and echo"
+        );
+    }
+
+    /// THE CURSOR HOLD, over the production receive gate: a fire whose tick is ahead of the
+    /// interpolation cursor presents nothing — however many release passes run at a stalled
+    /// reading — and presents exactly once when the cursor crosses its fire tick.
+    #[test]
+    fn a_fire_ahead_of_the_cursor_presents_only_at_the_crossing() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let event = fire_event(root, 7, 100);
+        let shot = event.shot_id();
+
+        // Arrival: predicted present 108, cursor 93.5 — the fire tick is 6.5 ticks ahead.
+        consume_and_release(world, event, Tick(108), Some((Tick(93), 0.5)), false);
+        for _ in 0..3 {
+            release_at(world, Tick(108), Some((Tick(93), 0.5)), false);
+        }
+        assert!(
+            world.resource::<ReconstructedFireShells>().0.is_empty(),
+            "a stalled cursor holds the presentation, and holds it across repeated drains",
+        );
+
+        release_at(world, Tick(110), Some((Tick(100), 0.0)), false);
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(shot, root)],
+            "the crossing releases the one presentation",
+        );
+
+        release_at(world, Tick(111), Some((Tick(101), 0.0)), false);
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0.len(),
+            1,
+            "a released fire never presents again",
+        );
+    }
+
+    /// A fire whose tick the cursor already crossed presents on the SAME drain it arrived on — the
+    /// late-join / long-RTT case is immediate, exactly as it was at arrival presentation.
+    #[test]
+    fn a_fire_behind_the_cursor_presents_immediately() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let event = fire_event(root, 7, 100);
+        let shot = event.shot_id();
+
+        consume_and_release(world, event, Tick(120), Some((Tick(112), 0.25)), false);
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(shot, root)],
+            "an already-crossed fire presents at arrival",
+        );
+    }
+
+    /// FUSED OWN FIRE: the echo of a locally-fired round is suppressed with the lever unset
+    /// (mode A, pinned) and is the round's one presentation with it set.
+    #[test]
+    fn the_own_echo_presents_only_under_the_fused_lever() {
+        let mut app = fire_receive_app();
+        let world = app.world_mut();
+        let own = world
+            .spawn((
+                NetTank,
+                CombatantId(7),
+                ActionState::<TankCommand>::default(),
+                InputMarker::<TankCommand>::default(),
+            ))
+            .id();
+
+        consume_and_release(world, fire_event(own, 7, 42), Tick(50), None, false);
+        assert!(
+            world.resource::<ReconstructedFireShells>().0.is_empty(),
+            "mode A: the own echo is suppressed — the local fire tick already presented",
+        );
+        assert!(
+            world.resource::<PendingRecoilKicks>().0.is_empty(),
+            "mode A: the own echo queues no barrel kick",
+        );
+
+        let fused_event = fire_event(own, 7, 43);
+        let fused_shot = fused_event.shot_id();
+        consume_and_release(world, fused_event, Tick(50), None, true);
+        assert_eq!(
+            world.resource::<ReconstructedFireShells>().0,
+            vec![(fused_shot, own)],
+            "fused: the echo is the own round's one presentation",
+        );
+        assert_eq!(
+            world.resource::<PendingRecoilKicks>().0,
+            vec![(own, 0)],
+            "fused: the echo carries the barrel kick",
         );
     }
 
@@ -2723,13 +3125,8 @@ mod tests {
     /// spawns once and its sanctioned outcome remains available under that one [`ShotId`].
     #[test]
     fn shot_identity_is_independent_of_entity_mapping() {
-        let mut app = App::new();
-        app.init_resource::<PendingRecoilKicks>()
-            .init_resource::<SeenShots>()
-            .init_resource::<PendingFireEvents>()
-            .init_resource::<SanctionedShots>()
-            .init_resource::<ReconstructedFireShells>()
-            .add_observer(record_reconstructed_fire_shell);
+        let mut app = fire_receive_app();
+        app.init_resource::<SanctionedShots>();
         let world = app.world_mut();
         let mapped_here = world.spawn((NetTank, CombatantId(7))).id();
         let mapped_elsewhere = world.spawn((NetTank, CombatantId(7))).id();
@@ -2750,33 +3147,32 @@ mod tests {
                       tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
+                      mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
                       mut sanctioned: ResMut<SanctionedShots>,
+                      mut own_ledgers: Query<
+                    &mut crate::net::fire_presentation::OwnFirePresentation,
+                >,
+                      mut own_diag: ResMut<crate::net::fire_presentation::OwnFireDiag>,
                       mut commands: Commands| {
                     let mut trace: Option<ResMut<crate::shot_trace::ShotTrace>> = None;
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(here.clone()),
                         Tick(42),
-                        &locally_fired,
-                        &tanks,
-                        &mut recoil,
+                        None,
                         &mut seen,
-                        &mut pending,
+                        &mut held,
                         &mut sanctioned,
                         &mut trace,
-                        &mut commands,
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Fire(elsewhere.clone()),
                         Tick(42),
-                        &locally_fired,
-                        &tanks,
-                        &mut recoil,
+                        None,
                         &mut seen,
-                        &mut pending,
+                        &mut held,
                         &mut sanctioned,
                         &mut trace,
-                        &mut commands,
                     );
                     consume_fire_visual_fact(
                         FireVisualFact::Ricochet(RicochetKeyframe {
@@ -2789,12 +3185,23 @@ mod tests {
                             victim: None,
                         }),
                         Tick(43),
+                        None,
+                        &mut seen,
+                        &mut held,
+                        &mut sanctioned,
+                        &mut trace,
+                    );
+                    release_due_fire_events(
+                        Tick(43),
+                        None,
+                        false,
                         &locally_fired,
                         &tanks,
                         &mut recoil,
-                        &mut seen,
+                        &mut held,
                         &mut pending,
-                        &mut sanctioned,
+                        &mut own_ledgers,
+                        &mut own_diag,
                         &mut trace,
                         &mut commands,
                     );

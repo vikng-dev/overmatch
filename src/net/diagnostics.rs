@@ -8,9 +8,12 @@ use bevy::prelude::*;
 use lightyear::prediction::diagnostics::PredictionDiagnosticsPlugin;
 use lightyear::prelude::*;
 
+use lightyear::prelude::input::native::NativeBuffer;
+
 use super::adoption::ImpactPresentation;
 use super::protocol::NetTank;
 use crate::ballistics::ShellPath;
+use crate::command::TankCommand;
 use crate::tank::{RemoteServos, Rig, ServoIndex, ServoState, Tank, TankRoot, TankServos, Turret};
 use crate::track::sim::TrackContacts;
 
@@ -206,6 +209,87 @@ pub(crate) fn log_sim_evidence(
     }
 }
 
+/// Arrival-margin statistics for client inputs, server side: how many ticks of authored input
+/// stand between the newest arrival and the tick the server is about to simulate. Negative margin
+/// = the server simulates a tick no input was authored for yet — lightyear leaves `ActionState`
+/// untouched (hold-last for movement levels; consumables fail closed via the attestation), and
+/// that path has no upstream counter. This resource is the counter that gates any shrink of the
+/// client's sync margins (`net::sync_margin`).
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputArrival {
+    /// Cumulative late ticks (margin < 0) since startup, across all clients.
+    pub(crate) late_total: u64,
+    /// Current heartbeat window, reset by [`log_input_arrival`].
+    window: ArrivalWindow,
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct ArrivalWindow {
+    ticks: u64,
+    late: u64,
+    min_margin: Option<i32>,
+    max_margin: Option<i32>,
+}
+
+impl InputArrival {
+    /// Fold one buffer's margin for one simulated tick. Margin 0 is on time: the input authored
+    /// for this exact tick has arrived.
+    fn fold(&mut self, margin: i32) {
+        self.window.ticks += 1;
+        if margin < 0 {
+            self.window.late += 1;
+            self.late_total += 1;
+        }
+        self.window.min_margin = Some(self.window.min_margin.map_or(margin, |m| m.min(margin)));
+        self.window.max_margin = Some(self.window.max_margin.map_or(margin, |m| m.max(margin)));
+    }
+
+    fn take_window(&mut self) -> ArrivalWindow {
+        core::mem::take(&mut self.window)
+    }
+}
+
+/// Per fixed tick, before lightyear reads the input buffers (`FixedPreUpdate`, ahead of
+/// `UpdateActionState`): record each client buffer's `last_remote_tick − tick`. A buffer that has
+/// not received its first input yet contributes nothing — there is no authored stream to be late.
+pub(crate) fn sample_input_arrival(
+    timeline: Res<LocalTimeline>,
+    buffers: Query<&NativeBuffer<TankCommand>>,
+    mut stats: ResMut<InputArrival>,
+) {
+    let tick = timeline.tick();
+    for buffer in &buffers {
+        let Some(last) = buffer.last_remote_tick else {
+            continue;
+        };
+        stats.fold(last - tick);
+    }
+}
+
+/// The arrival-margin heartbeat, on the same cadence as the SIM-EVIDENCE lines. `late_total` must
+/// stay 0 (or the startup transient only) for the shrunken sync margins to be certified; the
+/// window min is the number the client's quantization floor must clear.
+pub(crate) fn log_input_arrival(
+    mut stats: ResMut<InputArrival>,
+    mut timer: Local<f32>,
+    time: Res<Time>,
+) {
+    *timer += time.delta_secs();
+    if *timer < 2.0 {
+        return;
+    }
+    *timer = 0.0;
+    let late_total = stats.late_total;
+    let window = stats.take_window();
+    if window.ticks == 0 {
+        return;
+    }
+    info!(
+        "net: INPUT-ARRIVAL margin min={:?} max={:?} late={}/{} (late_total={})",
+        window.min_margin, window.max_margin, window.late, window.ticks, late_total,
+    );
+}
+
 /// Periodically log network-tank positions.
 pub(crate) fn log_positions(
     tanks: Query<(Entity, &Position), With<NetTank>>,
@@ -342,5 +426,37 @@ pub(crate) fn watch_turret_pose(
             }
         }
         watch.last_relative.insert(root, relative_vec);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InputArrival;
+
+    /// Margin 0 is ON TIME (the input authored for this exact tick has arrived); only a negative
+    /// margin is a late tick. Fails if the boundary moves to `<= 0` or the cumulative counter
+    /// stops accumulating across windows.
+    #[test]
+    fn late_is_strictly_negative_margin_and_survives_the_window_reset() {
+        let mut stats = InputArrival::default();
+        stats.fold(2);
+        stats.fold(0);
+        stats.fold(-1);
+        assert_eq!(stats.late_total, 1, "only the -1 margin is late");
+        let window = stats.take_window();
+        assert_eq!((window.ticks, window.late), (3, 1));
+        assert_eq!(
+            (window.min_margin, window.max_margin),
+            (Some(-1), Some(2)),
+            "window extrema"
+        );
+        stats.fold(-3);
+        assert_eq!(stats.late_total, 2, "cumulative count crosses windows");
+        let next = stats.take_window();
+        assert_eq!(
+            (next.ticks, next.late, next.min_margin),
+            (1, 1, Some(-3)),
+            "the window itself must reset"
+        );
     }
 }

@@ -6,6 +6,8 @@
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
 //! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
+//! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
 //! | `SPIKE_COMBAT_STEER` | `f32`; `0.0` | Combat steer at/after its engagement tick; zero preserves straight driving. |
 //! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
@@ -13,6 +15,7 @@
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
 //! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat primary-fire interval; zero disables clicks. |
+//! | `SPIKE_FIRE_RELEASE_TICK` | tick; off | Release the scripted secondary trigger at this tick (default: hold to the end). |
 //! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
 //! | `SPIKE_FRAME_COST` | path; off | Role-qualified raw per-frame wall-clock JSONL (client). |
@@ -48,6 +51,11 @@
 //! only those offsets: it is not simulation state and does not enter messages, replication, or the
 //! protocol fingerprint. Without `SPIKE_JITTER_SEED`, the client keeps Lightyear's stock unseeded
 //! receive conditioner.
+//!
+//! The burst pair (`SPIKE_BURST_MS=60 SPIKE_BURST_PERIOD_TICKS=33` reproduces the measured field
+//! link: 60 ms stalls every ~33 ticks, which a ping EWMA reads as ~3 ms jitter) also activates the
+//! seeded conditioner on its own — latency, jitter, and seed all default to zero, so a pure-burst
+//! run needs no other variables.
 
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
@@ -122,6 +130,10 @@ pub(crate) struct SimulateInput {
     /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
     /// Overrides the drive script (throttle/steer forced to 0). Aim held constant at `aim_point`.
     fire_secondary: bool,
+    /// `SPIKE_FIRE_RELEASE_TICK`: the tick the scripted secondary trigger goes false. `None` holds
+    /// it to the end of the run — the only shape the MG-cost workload ever needed. A capture that
+    /// must observe the RELEASE edge (presentation stopping on the local tick) sets it.
+    fire_release_tick: Option<u32>,
     /// `SPIKE_AIM_POINT="x,y,z"` (hull-local metres): the point every servo chases in the fire/idle
     /// workloads. Default `(200,0,-800)` lays the guns downrange into open ground (rounds strike
     /// terrain — the common spray case); set it at a stationary target's hull so the rounds strike
@@ -158,9 +170,23 @@ impl Default for SimulateInput {
             combat_steer: env_parse("SPIKE_COMBAT_STEER").unwrap_or(0.0),
             combat_steer_tick: env_parse("SPIKE_COMBAT_STEER_TICK").unwrap_or(0),
             fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
+            fire_release_tick: env_parse("SPIKE_FIRE_RELEASE_TICK"),
             aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
             range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
         }
+    }
+}
+
+impl SimulateInput {
+    /// The scripted secondary trigger's held window: from the warmup boundary to
+    /// `SPIKE_FIRE_RELEASE_TICK`, or to the end of the run when that is unset. The warmup boundary
+    /// is shared by the stationary MG-cost workload and the combat script, so an A/B between them
+    /// changes the motion context rather than the burst start tick.
+    fn holding_secondary(&self, t: u32) -> bool {
+        // ~3 s: let the connect handshake, tank spawn, and asset load settle before the burst
+        // starts, and comfortably inside the cost recorder's own 6 s warmup.
+        const FIRE_WARMUP: u32 = 192;
+        t > FIRE_WARMUP && self.fire_release_tick.is_none_or(|release| t < release)
     }
 }
 
@@ -214,26 +240,21 @@ pub(crate) fn buffer_input(
         state.0.fire_primary = sim.fire_interval != 0
             && t >= sim.fire_tick
             && (t - sim.fire_tick).is_multiple_of(sim.fire_interval);
-        // Preserve the stationary MG workload's warmup boundary when secondary fire is combined
-        // with combat, so an A/B changes the motion context rather than the burst start tick.
-        const FIRE_WARMUP: u32 = 192;
-        state.0.fire_secondary = sim.fire_secondary && t > FIRE_WARMUP;
+        state.0.fire_secondary = sim.fire_secondary && sim.holding_secondary(t);
         return;
     }
-    // MG-cost workload (`SPIKE_FIRE_SECONDARY`): stay stationary and hold the secondary trigger from a
-    // short warmup to the end. Stationary + constant aim means the ONLY delta from the `SPIKE_SIM_IDLE`
-    // baseline is the machine-gun fire, so the per-tick cost recorder's idle-vs-fire difference is
-    // exactly the MG march + shell spawn/despawn cost. Returns early — this overrides the drive script.
+    // MG-cost workload (`SPIKE_FIRE_SECONDARY`): stay stationary and hold the secondary trigger over
+    // `holding_secondary`'s window. Stationary + constant aim means the ONLY delta from the
+    // `SPIKE_SIM_IDLE` baseline is the machine-gun fire, so the per-tick cost recorder's
+    // idle-vs-fire difference is exactly the MG march + shell spawn/despawn cost. Returns early —
+    // this overrides the drive script.
     if sim.fire_secondary {
-        // ~3 s: let the connect handshake, tank spawn, and asset load settle before the burst starts,
-        // and comfortably inside the recorder's own 6 s warmup.
-        const FIRE_WARMUP: u32 = 192;
         state.0.throttle = 0.0;
         state.0.steer = 0.0;
         state.0.aim = Some(sim.aim_point);
         state.0.range = sim.range;
         state.0.fire_primary = false;
-        state.0.fire_secondary = t > FIRE_WARMUP;
+        state.0.fire_secondary = sim.holding_secondary(t);
         return;
     }
     // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, the hull
@@ -361,7 +382,36 @@ pub(crate) struct SeededRecvConditioner {
     packet_index: u64,
     latency_ms: u64,
     jitter_ms: u64,
+    burst: Option<BurstSpec>,
     pending: BTreeMap<Instant, VecDeque<RecvPayload>>,
+}
+
+/// Periodic receive stall, phase-anchored to a fixed epoch: every window `[k·period, k·period +
+/// burst)` after the epoch delivers nothing, and a packet whose delay lands it inside a window is
+/// pushed to that window's end — the whole window's packets arrive together, exactly the measured
+/// field signature (bursts, then a batch).
+struct BurstSpec {
+    burst: Duration,
+    period: Duration,
+    epoch: Instant,
+}
+
+impl BurstSpec {
+    /// Defer a ready timestamp out of the burst window it landed in, if any.
+    fn defer(&self, ready_at: Instant) -> Instant {
+        let phase_nanos =
+            ready_at.duration_since(self.epoch).as_nanos() % self.period.as_nanos().max(1);
+        if phase_nanos < self.burst.as_nanos() {
+            ready_at + self.burst - nanos_duration(phase_nanos)
+        } else {
+            ready_at
+        }
+    }
+}
+
+/// `u128` nanos from a modulo over `Duration::as_nanos` — always narrower than one period.
+fn nanos_duration(nanos: u128) -> Duration {
+    Duration::from_nanos(u64::try_from(nanos).expect("a burst period is far below u64 nanos"))
 }
 
 impl SeededRecvConditioner {
@@ -371,8 +421,20 @@ impl SeededRecvConditioner {
             packet_index: 0,
             latency_ms,
             jitter_ms,
+            burst: None,
             pending: BTreeMap::new(),
         }
+    }
+
+    /// Arm the periodic burst, anchored at `epoch` (the conditioner's install instant in
+    /// production; explicit here so tests control the phase).
+    pub(crate) fn with_burst(mut self, burst: Duration, period: Duration, epoch: Instant) -> Self {
+        self.burst = Some(BurstSpec {
+            burst,
+            period,
+            epoch,
+        });
+        self
     }
 
     /// Match the pinned stock conditioner's actual distribution: an integer offset in
@@ -391,7 +453,10 @@ impl SeededRecvConditioner {
     }
 
     fn condition_packet(&mut self, packet: RecvPayload, received_at: Instant) {
-        let ready_at = received_at + self.next_delay();
+        let mut ready_at = received_at + self.next_delay();
+        if let Some(burst) = &self.burst {
+            ready_at = burst.defer(ready_at);
+        }
         self.pending.entry(ready_at).or_default().push_back(packet);
     }
 
@@ -546,11 +611,10 @@ pub(crate) fn jitter_multiple() -> u8 {
 }
 
 /// `SPIKE_JITTER_MARGIN` (default 1.0, lightyear's own default): the FIXED half of the sync
-/// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync
-/// sync.rs:126-128: `jitter * jitter_multiple + tick_duration * jitter_margin`). It moves the
-/// input timeline's objective forward AND the interpolation timeline's objective backward by the
-/// same amount, so raising it buys prediction lead at the price of remote-view lag — the item-4
-/// A/B lever for the 1.0 → 4.0 question.
+/// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync sync.rs:
+/// `jitter * jitter_multiple + tick_duration * jitter_margin`). Reaches the INPUT timeline's
+/// install-time config only, so it is the runtime value exactly where `net::sync_margin`'s derived
+/// law does not rewrite it: predicted mode, and the pre-arm window of an unpredicted session.
 pub(crate) fn jitter_margin() -> f32 {
     env_parse("SPIKE_JITTER_MARGIN").unwrap_or(1.0)
 }
@@ -559,7 +623,9 @@ pub(crate) fn jitter_margin() -> f32 {
 mod tests {
     use core::time::Duration;
 
-    use super::{SeededRecvConditioner, parse_env_flag};
+    use lightyear::core::time::Instant;
+
+    use super::{BurstSpec, SeededRecvConditioner, parse_env_flag};
 
     #[test]
     fn env_flag_value_parsing_truth_table() {
@@ -593,6 +659,29 @@ mod tests {
                 |delay| (Duration::from_millis(70)..Duration::from_millis(90)).contains(delay)
             ),
             "80 ms base plus stock-shaped 10 ms jitter must stay in [70, 90) ms",
+        );
+    }
+
+    /// THE BURST LAW: a ready time inside `[k·period, k·period + burst)` past the epoch defers to
+    /// that window's end; outside passes untouched. The second-window case reds a dropped modulo,
+    /// the in-window case reds an inverted comparison, and the window-end equality reds a defer by
+    /// the full burst instead of the phase remainder.
+    #[test]
+    fn a_burst_window_delivery_defers_to_the_window_end() {
+        let epoch = Instant::now();
+        let spec = BurstSpec {
+            burst: Duration::from_millis(60),
+            period: Duration::from_millis(500),
+            epoch,
+        };
+        let at = |ms: u64| epoch + Duration::from_millis(ms);
+        assert_eq!(spec.defer(at(10)), at(60), "first window: the window end");
+        assert_eq!(spec.defer(at(60)), at(60), "the window end itself is clear");
+        assert_eq!(spec.defer(at(100)), at(100), "between windows: untouched");
+        assert_eq!(
+            spec.defer(at(510)),
+            at(560),
+            "the second window defers by epoch phase, not absolute time",
         );
     }
 }
