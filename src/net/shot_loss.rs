@@ -1278,10 +1278,42 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         observer_spawned.len(),
         fired.len(),
     );
+    // FUSED OWN FIRE: the shooter presents its own rounds from the server echo — exactly once per
+    // shot, over the same loss-repaired transport the observer rides.
+    let mut own_missing = Vec::new();
+    let mut own_duplicated = Vec::new();
+    for shot in &fired {
+        let n = shooter_spawned
+            .iter()
+            .filter(|(seen, _)| seen == shot)
+            .count();
+        match n {
+            1 => {}
+            0 => own_missing.push(*shot),
+            _ => own_duplicated.push((*shot, n)),
+        }
+    }
     assert!(
-        shooter_spawned.is_empty(),
-        "the shooter spawned {} echoed FireShell(s): its ActionState self-echo suppression is absent",
+        own_missing.is_empty(),
+        "{} of {} shots never presented on the SHOOTER at {:.0}% loss ({shooter_dropped} payloads \
+         dropped, {shooter_passed} delivered) — under fused own fire the echo is the shooter's only \
+         presentation path: {own_missing:?}",
+        own_missing.len(),
+        fired.len(),
+        LOSS * 100.0,
+    );
+    assert!(
+        own_duplicated.is_empty(),
+        "{} shooter shot(s) presented MORE THAN ONCE — the ShotId dedup (SeenShots) admitted a \
+         redundancy-window duplicate of the own echo: {own_duplicated:?}",
+        own_duplicated.len(),
+    );
+    assert_eq!(
         shooter_spawned.len(),
+        fired.len(),
+        "the shooter spawned {} shells for {} shots — an unattributed shell got through",
+        shooter_spawned.len(),
+        fired.len(),
     );
 
     // CARRY-THROUGH: every ricochet the authority sanctioned re-seeded the observer's shell. A
