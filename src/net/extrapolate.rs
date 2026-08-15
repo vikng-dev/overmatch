@@ -16,12 +16,15 @@
 //!
 //! - **Gap-filler (`OVERMATCH_EXTRAPOLATE=1`).** Instead of the clamp, hull kinematics are
 //!   projected at constant velocity from the newest confirmed `Position`/`Rotation` using the
-//!   live replicated `LinearVelocity`/`AngularVelocity`, for gaps up to the derived horizon; a
-//!   longer gap presents the clamp exactly. When fresh data ends an extrapolated gap, the residual
-//!   folds by projective velocity blending — the old projection continues and blends into the
-//!   lawful sample over at most one send interval — never a pose snap. Scope is replicated hull
-//!   spatial state only (`NetTank` + `Interpolated` roots); discrete events, gates, and belt state
-//!   are never extrapolated.
+//!   live replicated `LinearVelocity`/`AngularVelocity`, up to the derived horizon; past the
+//!   horizon the HORIZON POSE HOLDS — the presentation never reverts to the clamp mid-gap (the
+//!   ε bound is only honest inside the horizon, so the projection stops advancing there, but a
+//!   backward snap is a worse pose than the held one by the same bound). EVERY gap close —
+//!   overrun closes included — folds the residual by projective velocity blending: the old
+//!   projection continues (held at the horizon if it was held) and blends into the lawful sample
+//!   over the derived window below — never a pose snap. Scope is replicated hull spatial state
+//!   only (`NetTank` + `Interpolated` roots); discrete events, gates, and belt state are never
+//!   extrapolated.
 //!
 //! # DERIVATIONS
 //!
@@ -36,11 +39,21 @@
 //! g*      = sqrt(2·ε_vis / a_max)    the largest gap whose worst-case projection error stays
 //!                                    under ε_vis (≈ 52 ms at μ = 0.9). Beyond g* the bound is
 //!                                    not honest, so the clamp presents instead.
-//! blend   = one send interval        the server replicates every tick (send_interval = 0, the
-//!                                    degenerate `tests/net_interp_delay.rs` pins), so the
-//!                                    interval is one tick. ε_vis folded over one tick is a
-//!                                    0.77 m/s correction rate — under the stream's own travel
-//!                                    at any speed above that, and sub-frame at driving speeds.
+//! interval = one tick                the server replicates every tick (send_interval = 0, the
+//!                                    degenerate `tests/net_interp_delay.rs` pins).
+//! v_ref   = max(|v|, ε_vis/interval) the fold-rate ceiling: the stream's own speed, floored at
+//!                                    the 0.77 m/s rate that folding ε_vis over one interval
+//!                                    already rides (under the stream's travel at any speed
+//!                                    above it).
+//! w       = clamp(residual/v_ref,    the blend window: folding at v_ref, the residual takes
+//!            1, ⌈g*/interval⌉        residual/v_ref — so the per-frame correction never
+//!            intervals)              exceeds the stream's own per-frame travel (the ε-bar law
+//!                                    the blend test pins). The cap is the horizon in whole
+//!                                    intervals (4): the blend is presentation off the lawful
+//!                                    sample, so its duration budget is the same certified
+//!                                    horizon; a residual larger than v_ref·cap (a gap far
+//!                                    beyond the certified burst class) folds proportionally
+//!                                    faster, still never in one frame.
 //! ```
 //!
 //! # SEAM
@@ -101,7 +114,8 @@ pub(super) fn install(app: &mut App) {
     if super::harness::env_flag("OVERMATCH_EXTRAPOLATE", false) {
         info!(
             "net: hull extrapolation ON [OVERMATCH_EXTRAPOLATE] — horizon {:.1} ms = \
-             sqrt(2·ε_vis/μg) (ε_vis {:.2} mm, μg {:.2} m/s²), blend ≤ one send interval",
+             sqrt(2·ε_vis/μg) (ε_vis {:.2} mm, μg {:.2} m/s²), hold at the horizon, \
+             blend w = clamp(residual/v_ref, 1..4 send intervals)",
             horizon_secs() * 1000.0,
             EPSILON_VIS_M * 1000.0,
             a_max(),
@@ -200,9 +214,9 @@ pub(super) struct FrontierDiag {
     gaps: u64,
     /// Gaps with at least one impulse-class tick inside their span.
     coincident: u64,
-    /// Closed gaps that presented extrapolated poses (lever on, horizon never overrun).
+    /// Closed gaps that presented extrapolated poses (the lever was armed).
     extrapolated: u64,
-    /// Closed gaps that overran the horizon (clamp presented for the excess).
+    /// Closed gaps that exceeded the horizon (the horizon pose held for the excess).
     beyond_horizon: u64,
     /// Frames on which at least one hull was starved.
     starved_frames: u64,
@@ -357,12 +371,19 @@ enum Phase {
         /// Newest confirmed tick when the gap opened — the exclusive floor of the gap's span.
         floor: Tick,
         max_gap_ticks: f64,
-        /// The gap exceeded the horizon at some point; the clamp presented for the excess and
-        /// the close is today's step (no blend). Reset when fresh data rebases the projection.
+        /// The gap exceeded the horizon at some point; the horizon pose held for the excess.
         overran: bool,
     },
-    /// Fresh data ended an extrapolated gap; the old projection blends into the lawful sample.
-    Blending { basis: Basis, start: (Tick, f64) },
+    /// Fresh data ended an extrapolated gap; the blend's projection continues from the pose
+    /// presented at close (`basis.pos`/`basis.rot`, held at the horizon when the gap overran)
+    /// at the gap's stream velocities, blending into the lawful sample over `window_secs`.
+    /// Against a same-velocity stream the residual is constant, so the per-frame correction is
+    /// exactly residual/window ≤ v_ref.
+    Blending {
+        basis: Basis,
+        start: (Tick, f64),
+        window_secs: f32,
+    },
 }
 
 /// One closed gap episode, for the diagnostics and the per-gap log line.
@@ -392,10 +413,18 @@ enum Presented {
 struct EdgeParams {
     tick_secs: f32,
     horizon_secs: f32,
-    /// Blend window: one send interval (one tick — the server replicates per tick).
-    blend_secs: f32,
+    /// One send interval (one tick — the server replicates per tick): the blend window's unit.
+    interval_secs: f32,
     /// The lever: false = instruments only, every verdict is `Lawful`.
     extrapolate: bool,
+}
+
+/// The blend-window law (module doc DERIVATIONS): `w = clamp(residual/v_ref, 1 interval,
+/// ⌈g*/interval⌉ intervals)`, `v_ref = max(stream speed, ε_vis/interval)`.
+fn blend_window_secs(params: &EdgeParams, residual: f32, stream_speed: f32) -> f32 {
+    let v_ref = stream_speed.max(EPSILON_VIS_M / params.interval_secs);
+    let cap = (params.horizon_secs / params.interval_secs).ceil() * params.interval_secs;
+    (residual / v_ref).clamp(params.interval_secs, cap)
 }
 
 /// Per-hull edge tracker.
@@ -449,14 +478,14 @@ impl HullEdge {
                 mut basis,
                 floor,
                 max_gap_ticks,
-                mut overran,
+                overran,
             } => {
                 if starving {
                     if basis.tick != newest.0 {
                         // Partial catch-up: data arrived but the cursor is still ahead. Rebase the
-                        // projection on the freshest lawful state; the ε bound is honest again.
+                        // projection on the freshest lawful state; the ε bound is honest again
+                        // (`overran` keeps the episode's diagnostic truth).
                         basis = fresh_basis();
-                        overran = false;
                     }
                     let (presented, overran_now) = starved_pose(params, gap_ticks, &basis);
                     self.phase = Phase::Starved {
@@ -471,20 +500,30 @@ impl HullEdge {
                     floor,
                     ceil: cursor.0,
                     max_gap_ticks,
-                    extrapolated: params.extrapolate && !overran,
+                    extrapolated: params.extrapolate,
                     overran,
                     blend_residual_m: None,
                 };
-                if params.extrapolate && !overran {
-                    // Projective velocity blending: the old projection continues while it blends
-                    // out, so the close frame (α = 0) presents the projection itself — continuous
-                    // with the last starved frame, never a snap.
-                    let dt = projection_age_secs(params, cursor, basis.tick);
-                    let (proj_pos, proj_rot) = project(&basis, dt);
+                if params.extrapolate {
+                    // Projective velocity blending, on EVERY close: the close frame (α = 0)
+                    // presents the pose the last starved frame showed (held at the horizon when
+                    // the gap overran) — continuity, never a snap — and the blend's projection
+                    // continues from it at the gap's stream velocities.
+                    let age =
+                        projection_age_secs(params, cursor, basis.tick).min(params.horizon_secs);
+                    let (proj_pos, proj_rot) = project(&basis, age);
                     let residual = proj_pos.distance(lawful.0);
+                    let window_secs = blend_window_secs(params, residual, vel.length());
                     self.phase = Phase::Blending {
-                        basis,
+                        basis: Basis {
+                            tick: cursor.0,
+                            pos: proj_pos,
+                            rot: proj_rot,
+                            vel: basis.vel,
+                            ang: basis.ang,
+                        },
                         start: cursor,
+                        window_secs,
                     };
                     (
                         Presented::Pose(proj_pos, proj_rot),
@@ -498,10 +537,14 @@ impl HullEdge {
                     (Presented::Lawful, Some(closed))
                 }
             }
-            Phase::Blending { basis, start } => {
+            Phase::Blending {
+                basis,
+                start,
+                window_secs,
+            } => {
                 if starving {
                     // Re-starved mid-blend: open a fresh gap from the freshest lawful state. The
-                    // unblended remainder is bounded by the residual, itself under ε_vis.
+                    // discontinuity is the residual's unfolded fraction.
                     let basis = fresh_basis();
                     let (presented, overran) = starved_pose(params, gap_ticks, &basis);
                     self.phase = Phase::Starved {
@@ -513,15 +556,20 @@ impl HullEdge {
                     return (presented, None);
                 }
                 let elapsed_ticks = f64::from(cursor.0 - start.0) + (cursor.1 - start.1);
-                let alpha =
-                    ((elapsed_ticks as f32 * params.tick_secs) / params.blend_secs).clamp(0.0, 1.0);
+                let elapsed_secs = elapsed_ticks as f32 * params.tick_secs;
+                let alpha = (elapsed_secs / window_secs).clamp(0.0, 1.0);
                 if alpha >= 1.0 {
                     self.phase = Phase::Tracking;
                     return (Presented::Lawful, None);
                 }
-                let dt = projection_age_secs(params, cursor, basis.tick);
-                let (proj_pos, proj_rot) = project(&basis, dt);
-                self.phase = Phase::Blending { basis, start };
+                // `basis` is anchored at the close (`start`): the projection age is the blend's
+                // own elapsed time.
+                let (proj_pos, proj_rot) = project(&basis, elapsed_secs);
+                self.phase = Phase::Blending {
+                    basis,
+                    start,
+                    window_secs,
+                };
                 (
                     Presented::Pose(
                         proj_pos.lerp(lawful.0, alpha),
@@ -538,18 +586,16 @@ fn projection_age_secs(params: &EdgeParams, cursor: (Tick, f64), basis_tick: Tic
     (f64::from(cursor.0 - basis_tick) + cursor.1) as f32 * params.tick_secs
 }
 
-/// The starved-frame verdict: extrapolate inside the horizon, clamp beyond it (and report the
-/// overrun), clamp always with the lever unset.
+/// The starved-frame verdict: extrapolate inside the horizon, HOLD the horizon pose beyond it
+/// (and report the overrun — the presentation never reverts to the clamp mid-gap), clamp always
+/// with the lever unset.
 fn starved_pose(params: &EdgeParams, gap_ticks: f64, basis: &Basis) -> (Presented, bool) {
     if !params.extrapolate {
         return (Presented::Lawful, false);
     }
     let dt = gap_ticks as f32 * params.tick_secs;
-    if dt > params.horizon_secs {
-        return (Presented::Lawful, true);
-    }
-    let (pos, rot) = project(basis, dt);
-    (Presented::Pose(pos, rot), false)
+    let (pos, rot) = project(basis, dt.min(params.horizon_secs));
+    (Presented::Pose(pos, rot), dt > params.horizon_secs)
 }
 
 /// Per-hull [`HullEdge`] states, resource-keyed so replicated entities never change archetype.
@@ -601,7 +647,7 @@ fn drive_hull_edges(
     let params = EdgeParams {
         tick_secs,
         horizon_secs: horizon_secs(),
-        blend_secs: tick_secs,
+        interval_secs: tick_secs,
         extrapolate: lever.is_some(),
     };
     edges.frame += 1;
@@ -692,7 +738,7 @@ mod tests {
         EdgeParams {
             tick_secs: TICK_SECS,
             horizon_secs: horizon_secs(),
-            blend_secs: TICK_SECS,
+            interval_secs: TICK_SECS,
             extrapolate,
         }
     }
@@ -729,7 +775,7 @@ mod tests {
     /// A CRUISE GAP INSIDE THE HORIZON PRESENTS THE CONSTANT-VELOCITY PROJECTION — exactly, and
     /// therefore within ε(t) = ½·a_max·t² of any traction-limited truth. Breaking the projection
     /// (holding the clamp, wrong dt, velocity dropped) reds the exact-pose assert; widening the
-    /// horizon gate is caught by `a_gap_beyond_the_horizon_clamps_exactly`.
+    /// horizon gate is caught by `a_gap_beyond_the_horizon_holds_the_horizon_pose`.
     #[test]
     fn a_cruise_gap_inside_the_horizon_presents_the_constant_velocity_projection() {
         let (newest, vel, ang) = basis_inputs();
@@ -752,37 +798,41 @@ mod tests {
         assert!(worst <= EPSILON_VIS_M, "ε(t) inside the horizon holds");
     }
 
-    /// A GAP BEYOND THE HORIZON CLAMPS EXACTLY — the verdict is `Lawful` (lightyear's clamped
-    /// sample presents untouched), and the eventual close carries no blend. An implementation
-    /// that keeps projecting past g* reds the first assert; one that blends after an overrun
-    /// reds the second.
+    /// A GAP BEYOND THE HORIZON HOLDS THE HORIZON POSE — the projection stops advancing at
+    /// exactly g* and the presentation NEVER reverts to the clamp mid-gap. A revert to `Lawful`
+    /// past the horizon reds the pose assert; a projection that keeps advancing past g* reds the
+    /// frozen assert; dropping the overrun report reds the phase assert.
     #[test]
-    fn a_gap_beyond_the_horizon_clamps_exactly() {
+    fn a_gap_beyond_the_horizon_holds_the_horizon_pose() {
         let (newest, vel, ang) = basis_inputs();
         let mut edge = HullEdge::default();
         let clamp = (newest.1, newest.2);
-        // 5 ticks = 78 ms > g* ≈ 52 ms.
-        let (presented, _) = edge.step(&params(true), (Tick(105), 0.0), newest, vel, ang, clamp);
-        assert_eq!(
-            presented,
-            Presented::Lawful,
-            "beyond the horizon the bound is not honest — the clamp presents",
-        );
-        // Fresh data closes the gap: today's step, no blend.
-        let fresh = (Tick(106), newest.1 + Vec3::X, newest.2);
-        let (presented, closed) = edge.step(
-            &params(true),
-            (Tick(105), 0.5),
-            fresh,
+        let basis = Basis {
+            tick: newest.0,
+            pos: newest.1,
+            rot: newest.2,
             vel,
             ang,
-            (fresh.1, fresh.2),
+        };
+        let horizon_pose = project(&basis, horizon_secs());
+        // 5 ticks = 78 ms > g* ≈ 52 ms.
+        let (presented, _) = edge.step(&params(true), (Tick(105), 0.0), newest, vel, ang, clamp);
+        let Presented::Pose(pos, rot) = presented else {
+            panic!("past the horizon the held pose presents — never the clamp");
+        };
+        assert!(
+            pos.distance(horizon_pose.0) < 1e-6,
+            "the held pose is the projection at exactly g*",
         );
-        assert_eq!(presented, Presented::Lawful, "an overrun close is a step");
-        let gap = closed.expect("the episode closes");
-        assert!(gap.overran);
-        assert!(!gap.extrapolated);
-        assert_eq!(gap.blend_residual_m, None, "no blend after an overrun");
+        assert!(rot.angle_between(horizon_pose.1) < 1e-6, "angular hold");
+        // Deeper into the same gap the pose is FROZEN: no further advance, no revert.
+        let (deeper, closed) = edge.step(&params(true), (Tick(106), 0.25), newest, vel, ang, clamp);
+        assert_eq!(closed, None, "the gap is still open");
+        assert_eq!(deeper, Presented::Pose(pos, rot), "the horizon pose holds");
+        assert!(
+            matches!(edge.phase, Phase::Starved { overran: true, .. }),
+            "the overrun is reported",
+        );
     }
 
     /// THE BOUNDARY FRAME IS NOT STARVED: a cursor exactly ON the newest sample reads the exact
@@ -844,8 +894,9 @@ mod tests {
 
         let frame_secs = frame_ticks as f32 * TICK_SECS;
         let stream_travel = vel.length() * frame_secs;
-        // Δα per frame = frame/blend; the correction per frame is exactly residual · Δα.
-        let blend_rate = residual * (frame_secs / p.blend_secs);
+        // The residual is sub-ε at cruise speed, so the window floors at one interval;
+        // Δα per frame = frame/window and the correction per frame is exactly residual · Δα.
+        let blend_rate = residual * (frame_secs / p.interval_secs);
         let mut first = true;
         let mut blended = 0;
         loop {
@@ -908,6 +959,173 @@ mod tests {
         assert!(
             blended >= 3,
             "at 240 Hz a one-tick blend spans several frames (got {blended})",
+        );
+    }
+
+    /// THE HORIZON CROSSING NEVER SNAPS BACKWARD: walking the cursor in 240 Hz frames from
+    /// inside the horizon to well past it, every frame's pose displacement is non-negative along
+    /// the stream velocity and never exceeds one frame of stream travel. The revert-to-clamp
+    /// law (present the newest sample past g*) is a ~0.26 m backward snap at the crossing and
+    /// reds the non-negative assert; an unclamped projection reds the travel bound only through
+    /// the frozen-hold assert in `a_gap_beyond_the_horizon_holds_the_horizon_pose`, so the
+    /// travel bound here doubles as the monotone ceiling.
+    #[test]
+    fn the_horizon_crossing_never_snaps_backward() {
+        let (newest, vel, _) = basis_inputs();
+        let ang = Vec3::ZERO;
+        let clamp = (newest.1, newest.2);
+        let mut edge = HullEdge::default();
+        let p = params(true);
+        let frame_ticks = 64.0 / 240.0;
+        let frame_secs = frame_ticks as f32 * TICK_SECS;
+        let dir = vel.normalize();
+        let mut cursor_f = 0.0_f64;
+        let mut last_pose = clamp.0;
+        // 6 ticks = 94 ms: the walk crosses g* ≈ 52 ms mid-way.
+        while cursor_f < 6.0 {
+            cursor_f += frame_ticks;
+            let cursor = split_cursor(Tick(100), cursor_f);
+            let (presented, _) = edge.step(&p, cursor, newest, vel, ang, clamp);
+            let pose = match presented {
+                Presented::Pose(pos, _) => pos,
+                Presented::Lawful => clamp.0,
+            };
+            let step = pose - last_pose;
+            // Tolerances are float noise at the 10 m coordinate scale, far under the ~0.26 m
+            // snap the revert law produces at the crossing.
+            assert!(
+                step.dot(dir) >= -1e-5,
+                "the presentation never moves backward (step {} m at {:.2}t)",
+                step.dot(dir),
+                cursor_f,
+            );
+            assert!(
+                step.length() <= vel.length() * frame_secs + 1e-5,
+                "no frame outruns the stream's own travel (step {} m)",
+                step.length(),
+            );
+            last_pose = pose;
+        }
+        // The walk did reach the held region.
+        assert!(matches!(edge.phase, Phase::Starved { overran: true, .. }));
+    }
+
+    /// AN OVERRUN CLOSE FOLDS THE RESIDUAL THROUGH THE WIDENED WINDOW. A 6-tick gap at 5 m/s
+    /// leaves the lawful stream ~0.23 m ahead of the held horizon pose; the close frame must
+    /// present the held pose itself (a step-close — the pre-blend law — is a single-frame
+    /// ~0.23 m snap and reds the continuity assert), the window must stretch to residual/v_ref
+    /// (~2.9 send intervals — a fixed one-interval window folds ~3× too fast and reds the rate
+    /// assert), and every blend frame's correction beyond the stream's own travel holds the
+    /// v_ref fold rate.
+    #[test]
+    fn an_overrun_close_folds_the_residual_through_the_widened_window() {
+        let (newest, _, _) = basis_inputs();
+        let vel = Vec3::new(5.0, 0.0, 0.0);
+        let ang = Vec3::ZERO;
+        let clamp = (newest.1, newest.2);
+        let mut edge = HullEdge::default();
+        let p = params(true);
+
+        // The gap: the cursor walks 6 ticks (94 ms > g* ≈ 52 ms) past the newest sample.
+        let frame_ticks = 64.0 / 240.0;
+        let mut cursor_f = 0.0_f64;
+        let mut last_pose = clamp.0;
+        while cursor_f < 6.0 {
+            cursor_f += frame_ticks;
+            let cursor = split_cursor(Tick(100), cursor_f);
+            let (presented, _) = edge.step(&p, cursor, newest, vel, ang, clamp);
+            if let Presented::Pose(pos, _) = presented {
+                last_pose = pos;
+            }
+        }
+        let held_pose = newest.1 + vel * p.horizon_secs;
+        assert!(
+            last_pose.distance(held_pose) < 1e-5,
+            "precondition: the last starved frame held the horizon pose",
+        );
+
+        // Fresh data: the lawful stream never stalled — it is at newest.1 + vel·t, ahead of the
+        // held pose by vel·(gap − g*). The catch-up burst lands samples far enough past the
+        // cursor that the ~3-interval blend runs to completion without re-starving.
+        let lawful_at = |cursor_f: f64| newest.1 + vel * (cursor_f as f32 * TICK_SECS);
+        let newest_now = (Tick(112), lawful_at(12.0), newest.2);
+
+        let frame_secs = frame_ticks as f32 * TICK_SECS;
+        let stream_travel = vel.length() * frame_secs;
+        let mut first = true;
+        let mut expected_rate = 0.0_f32;
+        let mut expected_window = 0.0_f32;
+        let mut blended = 0;
+        loop {
+            cursor_f += frame_ticks;
+            let cursor = split_cursor(Tick(100), cursor_f);
+            let lawful_pos = lawful_at(cursor_f);
+            let (presented, closed) =
+                edge.step(&p, cursor, newest_now, vel, ang, (lawful_pos, newest.2));
+            let pose = match presented {
+                Presented::Pose(pos, _) => pos,
+                Presented::Lawful => lawful_pos,
+            };
+            // The correction: frame motion beyond the stream's uniform travel.
+            let correction = (pose - last_pose - vel * frame_secs).length();
+            if first {
+                let gap = closed.expect("the gap closes on the first fresh frame");
+                assert!(gap.overran, "the episode overran the horizon");
+                assert!(gap.extrapolated, "the lever was armed for the whole gap");
+                let residual = gap.blend_residual_m.expect("an overrun close still blends");
+                let expected_residual = (lawful_pos - held_pose).length();
+                assert!(
+                    (residual - expected_residual).abs() < 1e-4,
+                    "the close reports the held-pose residual ({residual} vs {expected_residual})",
+                );
+                // Continuity: the close frame presents the held pose itself — the pose the last
+                // starved frame showed, still frozen (a step-close jumps ~0.23 m to lawful).
+                assert!(
+                    pose.distance(last_pose) < 1e-5,
+                    "the close frame presents the held pose — continuity, no snap \
+                     (moved {} m)",
+                    pose.distance(last_pose),
+                );
+                // The window law: residual/v_ref, between one interval and the horizon's ceiling.
+                expected_window = blend_window_secs(&p, residual, vel.length());
+                assert!(
+                    expected_window > 2.0 * p.interval_secs
+                        && expected_window < 4.0 * p.interval_secs,
+                    "this residual must widen the window past two intervals \
+                     (got {expected_window} s)",
+                );
+                expected_rate = residual * (frame_secs / expected_window);
+                first = false;
+            } else if matches!(presented, Presented::Pose(..)) {
+                assert!(
+                    (correction - expected_rate).abs() <= expected_rate * 0.05 + 1e-6,
+                    "the correction folds at residual/window per frame — v_ref, never faster \
+                     (correction {correction}, rate {expected_rate})",
+                );
+                // At this residual the rate sits exactly AT v_ref = the stream speed; the 5%
+                // slack is float noise at the 10 m coordinate scale.
+                assert!(
+                    correction <= stream_travel * 1.05 + 1e-6,
+                    "the fold never outruns the stream's own per-frame travel",
+                );
+            } else {
+                assert!(
+                    correction <= expected_rate * 1.05 + 1e-6,
+                    "the terminal fold stays under one frame's rate (correction {correction})",
+                );
+            }
+            last_pose = pose;
+            blended += 1;
+            if matches!(edge.phase, Phase::Tracking) {
+                break;
+            }
+            assert!(blended < 64, "the blend must terminate");
+        }
+        // The blend's duration IS the window (one frame of slack at each edge).
+        let duration = blended as f32 * frame_secs;
+        assert!(
+            (duration - expected_window).abs() <= 2.0 * frame_secs,
+            "the fold spans the widened window ({duration} s vs {expected_window} s)",
         );
     }
 
