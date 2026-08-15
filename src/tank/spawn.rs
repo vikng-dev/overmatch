@@ -24,7 +24,7 @@ use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
-use crate::track::sim::{TankTransmission, TrackGripElements, TrackGripWake};
+use crate::track::sim::{TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 ///
@@ -210,7 +210,6 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     let mut root = commands.spawn((
         presentation.root_bundle(),
         TrackGripElements::for_links(content.spec().track.link_count),
-        TrackGripWake::default(),
         // Complete REV-14 transmission state, synchronously constructed from spec data before the
         // root can replicate or simulate.
         tank_transmission(content.spec()),
@@ -248,7 +247,6 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
         .spawn((
             Tank,
             TrackGripElements::for_links(content.spec().track.link_count),
-            TrackGripWake::default(),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
             tank_servos(content.spec()),

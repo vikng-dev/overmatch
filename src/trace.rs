@@ -477,10 +477,9 @@ fn record_tick(
         // The world-independent authority-simulation hash. It feeds off tick-truth pose/velocity
         // and carried state already in hand, except the view-only tracer phase documented on
         // `TankStateHash`; costs a few dozen FNV rounds and runs only when tracing is armed.
-        // The owner/server path always selects the reconciled `TankServos`; only an interpolated
-        // remote has `RemoteServos`, which preserves the established public-angle chase. A
-        // late-role replica temporarily has both and still presents from `RemoteServos` until
-        // promotion removes it.
+        // A client replica has `RemoteServos` permanently (the public-angle chase) and it takes
+        // precedence; the server/single-player path falls through to the authoritative
+        // `TankServos` integrator.
         let servo_states = remote_servos
             .map(|servos| servos.0.as_slice())
             .or_else(|| servos.map(|servos| servos.states.as_slice()))

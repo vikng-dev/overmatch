@@ -1224,7 +1224,7 @@ fn integrate_projectiles(
         &'static Collider,
         Option<&'static BallisticSurfaces>,
     )>,
-    mut bodies: Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    mut bodies: Query<Forces>,
     mut health: Query<&mut ComponentHealth>,
     retain: Res<RetainSpentShells>,
     net: ProjectileMarchNet,
@@ -1798,7 +1798,7 @@ fn march_shell_step(
         Option<&'static BallisticSurfaces>,
     )>,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
+    bodies: &mut Query<Forces>,
     sanctioned: Option<&SanctionedShots>,
     // Authority = not a replica: only then does a hit actually mutate health here.
     deposit: bool,
@@ -2351,14 +2351,9 @@ fn throw_spall_burst(
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
 /// immediate velocity write visible to Bevy's scheduler; static or non-rigid owners do not match.
-fn apply_hit_impulse(
-    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
-    body: Entity,
-    impulse: Vec3,
-    point: Vec3,
-) {
-    if let Ok((forces, wake)) = bodies.get_mut(body) {
-        crate::track::sim::apply_explicit_impulse(forces, wake, impulse, point);
+fn apply_hit_impulse(bodies: &mut Query<Forces>, body: Entity, impulse: Vec3, point: Vec3) {
+    if let Ok(forces) = bodies.get_mut(body) {
+        crate::track::sim::apply_explicit_impulse(forces, impulse, point);
     }
 }
 

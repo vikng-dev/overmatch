@@ -133,36 +133,10 @@ pub struct TrackGripEffect {
     pub field_digest: u32,
 }
 
-/// Monotonic notification that an explicit hull impulse was applied this tick.
-///
-/// The server's rest-epoch detector consumes generation changes so recoil and projectile hits wake
-/// a parked field on the impulse tick. This is bookkeeping only: it is neither rollback state nor
-/// an input to the force law, and therefore cannot gate or alter local physics.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub(crate) struct TrackGripWake {
-    generation: u32,
-}
-
-impl TrackGripWake {
-    pub(crate) fn record_impulse(&mut self, impulse: Vec3) {
-        if impulse != Vec3::ZERO {
-            self.generation = self.generation.wrapping_add(1);
-        }
-    }
-}
-
-/// Apply an explicit hull impulse at a world point (retaining its torque arm) and notify the grip
-/// rest detector as one operation.
-pub(crate) fn apply_explicit_impulse(
-    mut forces: ForcesItem<'_, '_>,
-    wake: Option<Mut<'_, TrackGripWake>>,
-    impulse: Vec3,
-    point: Vec3,
-) {
+/// Apply an explicit hull impulse at a world point (retaining its torque arm). Forces-based, so
+/// avian wakes a sleeping body on application.
+pub(crate) fn apply_explicit_impulse(mut forces: ForcesItem<'_, '_>, impulse: Vec3, point: Vec3) {
     forces.apply_linear_impulse_at_point(impulse, point);
-    if let Some(mut wake) = wake {
-        wake.record_impulse(impulse);
-    }
 }
 
 /// Last tick's contact telemetry per side — viz/diagnostics ONLY (debug force arrows, the

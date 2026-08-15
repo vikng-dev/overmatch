@@ -88,9 +88,9 @@ pub struct ServoRest(pub Quat);
 #[derive(Component, Clone, Copy)]
 pub struct ServoIndex(pub usize);
 
-/// Client-local mechanism state for a non-predicted remote tank. Public [`ServoAngles`](crate::net::
-/// protocol::ServoAngles) remains the remote target stream; keeping its integrator separate means a
-/// late `Predicted` marker can wait for an untouched authoritative [`TankServos`] snapshot.
+/// Client-local mechanism state for a replicated remote tank — permanent on replicas. Public
+/// [`ServoAngles`](crate::net::protocol::ServoAngles) is the remote target stream; [`TankServos`]
+/// is the server/single-player integrator and never reaches a client.
 #[derive(Component, Clone, PartialEq, Debug, Default)]
 pub(crate) struct RemoteServos(pub Vec<ServoState>);
 
@@ -145,9 +145,8 @@ pub(super) fn restore_servo_truth(
     remote_servos: Query<&RemoteServos>,
 ) {
     for (mut transform, spec, rest, slot, root) in &mut q {
-        // A late-role replica can temporarily carry both. Its public remote mechanism remains live
-        // until `net::rig` promotes the body and removes `RemoteServos`, leaving the untouched
-        // authority snapshot as the predicted integrator seed.
+        // Replicas carry `RemoteServos` permanently and it takes precedence; the `TankServos` arm
+        // serves the server and single-player, where no `RemoteServos` exists.
         let state = remote_servos
             .get(root.0)
             .ok()
@@ -312,7 +311,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn remote_servo_state_remains_the_view_interpolation_source_during_late_promotion() {
+    fn remote_servo_state_is_the_view_interpolation_source_when_both_integrators_exist() {
         let mut world = World::new();
         let authority = TankServos {
             states: vec![ServoState::test_new(-1.0, -1.0, -1.0)],
