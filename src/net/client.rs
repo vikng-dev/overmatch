@@ -3069,6 +3069,89 @@ mod tests {
         );
     }
 
+    /// CERTIFICATION — the released burst, over the production consume/release gates: a 750-rpm
+    /// MG belt plus cannon rounds arrive ahead of the cursor and release as it sweeps. The
+    /// counters must agree — bang = flash = tracer = consumed rounds — and every round must
+    /// spawn younger than one tick (`catch_up_ticks` 0), which bounds its tracer's spawn
+    /// distance from the muzzle to `catch_up · v · Δt = 0 m`, strictly under one tick of shell
+    /// flight (`v · Δt` = 12.5 m at 800 m/s). The one named shot-skip class — a redundant
+    /// transport copy of an already-presented shot — is probed and presents nothing.
+    #[test]
+    fn released_burst_presents_every_consumed_round_exactly_once() {
+        use crate::ballistics::STALE_FIRE_TICKS;
+
+        #[derive(Resource, Default)]
+        struct Certified(Vec<(u32, bool)>);
+
+        fn certify(fire: On<FireShell>, mut certified: ResMut<Certified>) {
+            if fire.shot_origin == FireShellOrigin::Reconstructed {
+                certified.0.push((fire.catch_up_ticks, fire.tracer));
+            }
+        }
+
+        let mut app = fire_receive_app();
+        app.init_resource::<Certified>();
+        app.add_observer(certify);
+        let world = app.world_mut();
+        let root = world.spawn((NetTank, CombatantId(7))).id();
+
+        // The burst: 20 MG rounds every 5 ticks from tick 100, plus 2 cannon rounds. Every
+        // round is a tracer, so the tracer counter must equal the bang counter.
+        let mut events: Vec<FireEvent> =
+            (0..20).map(|i| fire_event(root, 7, 100 + 5 * i)).collect();
+        for cannon_tick in [103, 158] {
+            let mut cannon = fire_event(root, 7, cannon_tick);
+            cannon.mechanism = crate::spec::FireMechanism::Single;
+            cannon.speed = 773.0;
+            cannon.caliber = 0.088;
+            cannon.mass = 10.2;
+            cannon.weapon = 1;
+            events.push(cannon);
+        }
+        let consumed = events.len();
+        let duplicate = events[0].clone();
+
+        // The link: a round fired at tick f arrives at local present f+8, while the cursor
+        // renders 16 ticks behind the present — ahead of the cursor at arrival, crossed 8
+        // ticks later with the cursor half a tick into f.
+        for now in 100u32..=225 {
+            let cursor = Some((Tick(now - 16), 0.5));
+            let mut arrived = false;
+            for event in events.iter().filter(|e| e.fire_tick.0 + 8 == now) {
+                consume_and_release(world, event.clone(), Tick(now), cursor, false);
+                arrived = true;
+            }
+            if !arrived {
+                release_at(world, Tick(now), cursor, false);
+            }
+        }
+
+        // The shot-skip probe: the redundant transport copy of an already-presented shot is
+        // behind the cursor (would present immediately) and must be swallowed by its ShotId.
+        consume_and_release(world, duplicate, Tick(230), Some((Tick(214), 0.5)), false);
+
+        let certified = &world.resource::<Certified>().0;
+        let bang = certified.len();
+        let flash = certified
+            .iter()
+            .filter(|(catch_up, _)| *catch_up <= STALE_FIRE_TICKS)
+            .count();
+        let tracer = certified.iter().filter(|(_, tracer)| *tracer).count();
+        println!("certification: consumed={consumed} bang={bang} flash={flash} tracer={tracer}",);
+        assert_eq!(
+            (bang, flash, tracer),
+            (consumed, consumed, consumed),
+            "every consumed round presents exactly once, under the flash stale gate, tracer lit",
+        );
+        for &(catch_up, _) in certified {
+            assert_eq!(
+                catch_up, 0,
+                "released at the crossing: age < 1 tick, spawn AT the muzzle — never the \
+                 local timeline's arrival lead",
+            );
+        }
+    }
+
     /// FUSED OWN FIRE: the echo of a locally-fired round is suppressed with the lever unset
     /// (mode A, pinned) and is the round's one presentation with it set.
     #[test]
