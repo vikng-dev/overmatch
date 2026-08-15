@@ -88,7 +88,8 @@ const GROUND_DUST_COUNT: (u32, u32) = (5, 8);
 const GROUND_DUST_SIZE: (f32, f32) = (1.8, 5.0);
 /// Birth-offset range (m) from the ground point under the muzzle, along each puff's own azimuth.
 const GROUND_DUST_SPREAD: (f32, f32) = (0.4, 3.0);
-/// Outward drift speed range (m/s) and the slow lift that keeps the cloud hugging the ground.
+/// Outward drift speed range (m/s) and the slow lift that keeps the cloud hugging the ground; both
+/// scale with the bore like every other metric here.
 const GROUND_DUST_PUSH: (f32, f32) = (1.8, 4.0);
 const GROUND_DUST_RISE: f32 = 0.35;
 /// How far each puff's random azimuth is pulled onto the bore azimuth (0 = radial ring, 1 = all
@@ -353,6 +354,9 @@ pub(super) fn setup_muzzle_assets(
 #[derive(Component)]
 struct MuzzleLight {
     age: f32,
+    /// Cleared until [`decay_muzzle_lights`]'s first visit, which only arms it: the light's first
+    /// rendered frame is the spawn-time peak, and `age` starts advancing the frame after.
+    armed: bool,
     /// Peak intensity (lm) the cubic decay falls from.
     peak: f32,
     /// Seconds from peak to despawn.
@@ -383,6 +387,7 @@ fn spawn_muzzle_light(
         .spawn((
             MuzzleLight {
                 age: 0.0,
+                armed: false,
                 peak,
                 lifetime,
             },
@@ -662,7 +667,7 @@ fn spawn_ground_dust(
                 lifetime: rng.range(GROUND_DUST_LIFETIME.0, GROUND_DUST_LIFETIME.1),
                 // Half a birth diameter up: the puff's lower edge sits ON the surface.
                 origin: base + away * offset + Vec3::Y * (start_size * 0.5),
-                drift: away * push + Vec3::Y * GROUND_DUST_RISE,
+                drift: away * push + Vec3::Y * (GROUND_DUST_RISE * bore),
                 frames: 4,
                 start_frame: rng.range(0.0, 4.0),
                 frame_rate: GROUND_DUST_FRAME_RATE,
@@ -831,13 +836,19 @@ fn on_mg_fire(
 }
 
 /// Decay each muzzle light hard (cubic — most of the drop in the first frames) and despawn at its
-/// own lifetime. One system for every gun's lights; the scale rides on the component.
+/// own lifetime. One system for every gun's lights; the scale rides on the component. A newborn is
+/// only ARMED on the first visit, so the frame a light was spawned in renders at its peak whichever
+/// side of this system the spawn landed on.
 fn decay_muzzle_lights(
     time: Res<Time>,
     mut lights: Query<(Entity, &mut MuzzleLight, &mut PointLight)>,
     mut commands: Commands,
 ) {
     for (entity, mut light, mut point) in &mut lights {
+        if !light.armed {
+            light.armed = true;
+            continue;
+        }
         light.age += time.delta_secs();
         let t = light.age / light.lifetime;
         if t >= 1.0 {
@@ -855,7 +866,7 @@ fn decay_muzzle_lights(
 mod tests {
     use super::*;
     use crate::ballistics::FireShellOrigin;
-    use crate::vfx::billboard::Billboard;
+    use crate::vfx::billboard::{Billboard, age_billboards};
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
     /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing), and NO
@@ -879,7 +890,9 @@ mod tests {
             .insert_resource(ViewRng::seeded(42))
             .add_observer(on_main_gun_fire)
             .add_observer(on_mg_fire)
-            .add_systems(Update, decay_muzzle_lights);
+            // BOTH agers: the dressing's contract is what a layer RENDERS after n frames, and the
+            // billboard half of it is unreadable without `age_billboards` running.
+            .add_systems(Update, (age_billboards, decay_muzzle_lights));
         app.insert_resource(MuzzleVfxAssets {
             quad: Handle::default(),
             core_atlas: Handle::default(),
@@ -949,6 +962,22 @@ mod tests {
             .count()
     }
 
+    /// Run one frame of `secs` through both agers.
+    fn advance(app: &mut App, secs: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(secs));
+        app.update();
+    }
+
+    /// Every live billboard's RENDERED size, keyed by entity (spawn order) — the transform the
+    /// frame actually draws, not the spec it was spawned from.
+    fn scales(app: &mut App) -> std::collections::BTreeMap<Entity, Vec3> {
+        let world = app.world_mut();
+        let mut q = world.query_filtered::<(Entity, &Transform), With<Billboard>>();
+        q.iter(world).map(|(entity, t)| (entity, t.scale)).collect()
+    }
+
     /// An 88 shot over unknown ground spawns the airborne main-gun dressing — core + glow card +
     /// 2 planes + smoke (5 billboards) and 1 light (the ground-dust cloud needs a terrain surface;
     /// see `ground_dust_needs_a_low_barrel_over_known_ground`) — and an MG-calibre round gets the
@@ -1008,15 +1037,20 @@ mod tests {
         );
     }
 
-    /// The ground-dust puffs of the last shot: `(start size, birth position)` each. The flipbook
-    /// rate is the discriminator — no other muzzle layer plays at [`GROUND_DUST_FRAME_RATE`].
-    fn dust_puffs(app: &mut App) -> Vec<(f32, Vec3)> {
+    /// The ground-dust puffs of the last shot in SPAWN order: `(entity, rendered diameter,
+    /// rendered position)` each. The flipbook rate is the discriminator — no other muzzle layer
+    /// plays at [`GROUND_DUST_FRAME_RATE`] — and the entity sort keeps a given puff at a stable
+    /// index across ticks that despawn its neighbours.
+    fn dust_puffs(app: &mut App) -> Vec<(Entity, f32, Vec3)> {
         let world = app.world_mut();
-        let mut q = world.query::<&Billboard>();
-        q.iter(world)
-            .filter(|b| b.frame_rate == GROUND_DUST_FRAME_RATE)
-            .map(|b| (b.start_size, b.origin))
-            .collect()
+        let mut q = world.query::<(Entity, &Billboard, &Transform)>();
+        let mut puffs: Vec<(Entity, f32, Vec3)> = q
+            .iter(world)
+            .filter(|(_, b, _)| b.frame_rate == GROUND_DUST_FRAME_RATE)
+            .map(|(entity, _, t)| (entity, t.scale.x, t.translation))
+            .collect();
+        puffs.sort_unstable_by_key(|(entity, _, _)| *entity);
+        puffs
     }
 
     /// The ground-dust gate: an 88 fired a couple of metres over known terrain lifts a cloud of
@@ -1038,7 +1072,7 @@ mod tests {
             5 + puffs.len(),
             "the airborne dressing plus the cloud"
         );
-        for (size, position) in &puffs {
+        for (_, size, position) in &puffs {
             assert!(
                 position.y >= 0.0 && position.y <= size * 0.5 + 1e-3,
                 "a puff must hug the ground it was lifted from (y = {})",
@@ -1060,65 +1094,107 @@ mod tests {
     }
 
     /// The cloud is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
-    /// doubles every puff's metres.
+    /// doubles every metre the cloud renders — the puff's diameter at birth AND the height it has
+    /// LIFTED after a second of drift (the vertical lift carries the same ratio as the radial
+    /// push, so the cloud keeps its shape at any bore).
     #[test]
     fn ground_dust_scales_with_the_bore() {
-        let mut reference = harness_ground(0.0);
-        fire(&mut reference, GROUND_DUST_CALIBER, 0);
-        let small = dust_puffs(&mut reference)[0].0;
-        assert!((small - GROUND_DUST_SIZE.0).abs() < 1e-4);
+        /// One shot at `caliber`: the first puff's rendered diameter at birth, and how far it has
+        /// risen [`LIFT_SECS`] later.
+        fn puff(caliber: f32) -> (f32, f32) {
+            let mut app = harness_ground(0.0);
+            fire(&mut app, caliber, 0);
+            let (entity, size, born) = dust_puffs(&mut app)[0];
+            // The arming frame, then the drift frame (see `age_billboards`).
+            advance(&mut app, 0.0);
+            advance(&mut app, LIFT_SECS);
+            let lifted = app
+                .world()
+                .get::<Transform>(entity)
+                .expect("alive")
+                .translation;
+            (size, lifted.y - born.y)
+        }
+        const LIFT_SECS: f32 = 1.0;
 
-        let mut big_bore = harness_ground(0.0);
-        fire(&mut big_bore, GROUND_DUST_CALIBER * 2.0, 0);
-        let big = dust_puffs(&mut big_bore)[0].0;
+        let (small, small_lift) = puff(GROUND_DUST_CALIBER);
+        assert!((small - GROUND_DUST_SIZE.0).abs() < 1e-4);
+        assert!(
+            (small_lift - GROUND_DUST_RISE * LIFT_SECS).abs() < 1e-4,
+            "at the authored bore the lift IS GROUND_DUST_RISE (rose {small_lift} m in \
+             {LIFT_SECS} s)"
+        );
+
+        let (big, big_lift) = puff(GROUND_DUST_CALIBER * 2.0);
         assert!(
             (big - small * 2.0).abs() < 1e-4,
             "twice the bore, twice the puff: {small} → {big}"
         );
+        assert!(
+            (big_lift - small_lift * 2.0).abs() < 1e-4,
+            "twice the bore, twice the lift: {small_lift} → {big_lift}"
+        );
     }
 
-    /// The 88's curve contract, read off one real shot: every HOT layer (core, both flame planes,
-    /// glow card) is born maximal and shrinks, each dying on its own beat, and all of them are gone
-    /// before the first MASS layer (gas smoke, ground dust — the ones that grow) expires.
+    /// The 88's curve contract, read off RENDERED state over real frames. Frame one draws every
+    /// layer at its authored birth size — a newborn aged on its spawn frame would first draw a
+    /// 26 ms core two thirds through its life, and below ~38 fps never draw it at all. One frame
+    /// on, the HOT layers are collapsing while the MASS layers billow. Then the flash cluster dies
+    /// on its three beats — core, both flame planes, glow card — with every mass layer still alive
+    /// after the last of them.
     #[test]
     fn the_88_layers_are_staggered() {
+        const FRAME: f32 = 1.0 / 60.0;
         let mut app = harness_ground(0.0);
         fire(&mut app, 0.088, 0);
-        let world = app.world_mut();
-        let mut q = world.query::<&Billboard>();
-        let layers: Vec<(f32, f32, f32)> = q
-            .iter(world)
-            .map(|b| (b.lifetime, b.start_size, b.end_size))
-            .collect();
-        let mut hot: Vec<f32> = layers
-            .iter()
-            .filter(|(_, start, end)| end < start)
-            .map(|(life, _, _)| *life)
-            .collect();
-        let mass: Vec<f32> = layers
-            .iter()
-            .filter(|(_, start, end)| end > start)
-            .map(|(life, _, _)| *life)
-            .collect();
+        let born = scales(&mut app);
+        let layers = born.len();
+
+        advance(&mut app, FRAME);
         assert_eq!(
-            hot.len(),
-            4,
-            "core + 2 flame planes + glow card are born maximal"
+            scales(&mut app),
+            born,
+            "every layer's first rendered frame must be its authored birth size"
         );
-        let last_hot = hot.iter().copied().fold(f32::MIN, f32::max);
-        let first_mass = mass.iter().copied().fold(f32::MAX, f32::min);
-        assert!(
-            last_hot < first_mass,
-            "the flash cluster must be dead ({last_hot} s) before any mass layer fades \
-             ({first_mass} s)"
-        );
-        hot.sort_by(f32::total_cmp);
-        hot.dedup();
+
+        advance(&mut app, FRAME);
+        let aged = scales(&mut app);
         assert_eq!(
-            hot.len(),
-            3,
-            "core, planes and glow card die on three beats"
+            aged.len(),
+            layers,
+            "no layer dies inside its first 2 frames"
         );
+        let hot = aged
+            .iter()
+            .filter(|(entity, scale)| scale.x < born[*entity].x)
+            .count();
+        assert_eq!(
+            hot, 4,
+            "core + 2 flame planes + glow card are born maximal and shrink"
+        );
+        assert_eq!(
+            layers - hot,
+            1 + dust_puffs(&mut app).len(),
+            "the mass layers — gas smoke + ground dust — grow in"
+        );
+
+        // The three beats, each stepped just past its deadline (ages run from the arming frame):
+        // core at 26 ms, both flame planes at 45 ms, glow card at 75 ms.
+        advance(&mut app, 0.02);
+        assert_eq!(billboards(&mut app), layers - 1, "the core dies first");
+        advance(&mut app, 0.02);
+        assert_eq!(billboards(&mut app), layers - 3, "both flame planes next");
+        advance(&mut app, 0.03);
+        assert_eq!(billboards(&mut app), layers - 4, "the glow card last");
+
+        let survivors = scales(&mut app);
+        assert!(!survivors.is_empty(), "the mass layers outlive the flash");
+        for (entity, scale) in &survivors {
+            assert!(
+                scale.x > born[entity].x,
+                "every layer alive past the flash cluster must be one that grows in"
+            );
+        }
     }
 
     /// Per-shot variation is the MG's anti-strobe contract: consecutive shots must differ in core
@@ -1280,7 +1356,8 @@ mod tests {
     }
 
     /// The muzzle light decays monotonically from its first-frame peak and despawns at end of
-    /// life — the "first frame hottest" contract.
+    /// life — the "first frame hottest" contract, which holds through a whole rendered frame: a
+    /// light aged on its spawn frame would first draw a third of the way down its 55 ms envelope.
     #[test]
     fn muzzle_light_decays_then_despawns() {
         let mut app = harness();
@@ -1294,10 +1371,17 @@ mod tests {
             "under the default shadows-On lever the 88 light casts (the 2026-07-12 decision)"
         );
 
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(LIGHT_LIFETIME * 0.5));
-        app.update();
+        // Frame one at 60 fps — a third of the light's whole life, and it is still at peak.
+        advance(&mut app, 1.0 / 60.0);
+        let world = app.world_mut();
+        let mut q = world.query::<&PointLight>();
+        assert_eq!(
+            q.single(world).expect("alive on frame one").intensity,
+            LIGHT_PEAK_LUMENS,
+            "the first RENDERED frame is the peak, not one frame down the decay"
+        );
+
+        advance(&mut app, LIGHT_LIFETIME * 0.5);
         let world = app.world_mut();
         let mut q = world.query::<(&MuzzleLight, &PointLight)>();
         let (_, point) = q.single(world).expect("still alive mid-decay");
@@ -1306,10 +1390,7 @@ mod tests {
             "cubic decay front-loads the drop"
         );
 
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f32(LIGHT_LIFETIME));
-        app.update();
+        advance(&mut app, LIGHT_LIFETIME);
         assert_eq!(lights(&mut app), 0, "expired light must despawn");
     }
 

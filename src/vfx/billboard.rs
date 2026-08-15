@@ -28,9 +28,12 @@ use bevy::transform::TransformSystems;
 /// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
 /// included: they hold no cap of their own and are evicted against this one. Only the long-lived
 /// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
-/// survives a sub-second billboard storm. Steady state is far below this cap (an 88 shot spawns ~4
-/// billboards, each sub-second); it only bites on pathological refire (rollback-replayed fire seams,
-/// spawn storms), evicting oldest-first.
+/// survives a sub-second billboard storm. The stack per 88 event is 10–13 at the muzzle (flash
+/// core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
+/// impact (contact flash + 8–12 ejecta + 1–2 plumes + shock ring + the 8 s haze); both MGs cycling
+/// add ~50/s at sub-second lifetimes. Eviction is FIFO, so the consequence of pressure is that the
+/// OLDEST slot goes first: a sustained storm cuts the multi-second layers (haze, ground dust)
+/// short before any of the flash layers that displaced them.
 pub(super) const BILLBOARD_CAP: usize = 96;
 
 pub(super) fn plugin(app: &mut App) {
@@ -106,6 +109,10 @@ impl Material for VfxBillboardMaterial {
 #[derive(Component)]
 pub(crate) struct Billboard {
     pub age: f32,
+    /// Cleared until [`age_billboards`]'s first visit, which only arms it: every billboard's first
+    /// rendered frame is the age-0 state its spawn wrote, and `age` starts advancing the frame
+    /// after.
+    armed: bool,
     pub lifetime: f32,
     /// Where the billboard was born; drift and accel displace from here
     /// (`origin + drift·age + ½·accel·age²`).
@@ -230,8 +237,8 @@ fn spawn_with_accel(
     accel: Vec3,
 ) -> Entity {
     let mut material = spec.material;
-    // Seed the animated lanes so the first rendered frame is already correct (the ager only
-    // catches it NEXT Update).
+    // Seed the animated lanes: this is the state that renders until the ager's arming visit hands
+    // over (see [`Billboard::armed`]).
     material.params.frame.x =
         flipbook_frame(spec.start_frame, 0.0, spec.frame_rate, spec.frames) as f32;
     material.params.fade.z = 0.0;
@@ -244,6 +251,7 @@ fn spawn_with_accel(
     let mut entity = commands.spawn((
         Billboard {
             age: 0.0,
+            armed: false,
             lifetime: spec.lifetime,
             origin: spec.origin,
             drift: spec.drift,
@@ -286,7 +294,9 @@ pub(crate) fn flipbook_frame(start: f32, age: f32, rate: f32, frames: u32) -> u3
 
 /// Advance every live billboard: flipbook frame, erosion, LUT row, size ease, drift, spin — and
 /// despawn at end of life. One pass, view-only, `Update` (render cadence; ages in wall time).
-fn age_billboards(
+/// A newborn is only ARMED on this system's first visit — the frame it was spawned in renders its
+/// authored age-0 state, whichever side of this system the spawn landed on.
+pub(super) fn age_billboards(
     time: Res<Time>,
     mut materials: ResMut<Assets<VfxBillboardMaterial>>,
     mut billboards: Query<(
@@ -299,6 +309,10 @@ fn age_billboards(
 ) {
     let dt = time.delta_secs();
     for (entity, mut billboard, mut transform, material) in &mut billboards {
+        if !billboard.armed {
+            billboard.armed = true;
+            continue;
+        }
         billboard.age += dt;
         let t = billboard.age / billboard.lifetime;
         if t >= 1.0 {
@@ -507,6 +521,40 @@ mod tests {
         app.update();
     }
 
+    /// A billboard's FIRST rendered frame is its authored age-0 state: the ager's first visit only
+    /// arms it, however long that frame was. A 26 ms flash core aged on its spawn frame would first
+    /// draw two thirds through its life at 60 fps, and at the 30 fps used here would never draw at
+    /// all.
+    #[test]
+    fn a_newborn_billboard_renders_its_first_frame_unaged() {
+        const FRAME: f32 = 1.0 / 30.0;
+        let mut app = harness();
+        let entity = spawn_one(&mut app, 0.026);
+        let born = *app.world().get::<Transform>(entity).expect("spawned");
+
+        advance(&mut app, FRAME);
+        let world = app.world();
+        let transform = world.get::<Transform>(entity).expect("alive on frame one");
+        assert_eq!(
+            (transform.scale, transform.translation),
+            (born.scale, born.translation),
+            "the first visit must leave a newborn at its authored size and origin"
+        );
+        let material = world
+            .get::<MeshMaterial3d<VfxBillboardMaterial>>(entity)
+            .expect("material");
+        let mat = world
+            .resource::<Assets<VfxBillboardMaterial>>()
+            .get(&material.0)
+            .expect("per-instance material asset");
+        assert_eq!(mat.params.fade.x, 0.0, "no erosion on frame one");
+        assert_eq!(mat.params.fade.z, 0.0, "LUT row still the birth row");
+
+        // Armed now: the next frame of the same length carries it past its lifetime.
+        advance(&mut app, FRAME);
+        assert_eq!(count(&mut app), 0, "ageing resumes the frame after arming");
+    }
+
     /// Billboards live exactly their lifetime, and mid-life the ager has visibly animated them:
     /// grown scale, advanced erosion + LUT row, drifted position.
     #[test]
@@ -515,6 +563,8 @@ mod tests {
         let entity = spawn_one(&mut app, 1.0);
         assert_eq!(count(&mut app), 1);
 
+        // The arming frame (pinned by `a_newborn_billboard_renders_its_first_frame_unaged`).
+        advance(&mut app, 0.0);
         advance(&mut app, 0.5);
         let world = app.world();
         let transform = world.get::<Transform>(entity).expect("alive mid-life");
@@ -572,6 +622,8 @@ mod tests {
         assert_eq!(pos(&app, straight), pos(&app, thrown));
 
         let t = 0.5;
+        // The arming frame (pinned by `a_newborn_billboard_renders_its_first_frame_unaged`).
+        advance(&mut app, 0.0);
         advance(&mut app, t);
         let drop = pos(&app, straight).y - pos(&app, thrown).y;
         assert!(
