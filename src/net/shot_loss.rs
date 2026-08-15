@@ -23,8 +23,8 @@ use lightyear::prelude::*;
 
 use super::client::{
     HeldFireEvents, InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage,
-    SeenShots, age_sanctioned_shots, install_input_buffer_guard, publish_predicted_present,
-    receive_damage_confirms, receive_fire_events, shipping_input_delay,
+    SeenShots, age_sanctioned_shots, install_input_buffer_guard, receive_damage_confirms,
+    receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
@@ -829,14 +829,9 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
     app.init_resource::<super::extrapolate::ImpulseTicks>();
-    app.init_resource::<crate::PredictedPresent>();
     app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
-    app.add_systems(
-        FixedUpdate,
-        publish_predicted_present.before(crate::state::GameplaySet),
-    );
 
     app.init_resource::<ClientShells>();
     app.init_resource::<ClientBounces>();
@@ -1283,10 +1278,42 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         observer_spawned.len(),
         fired.len(),
     );
+    // FUSED OWN FIRE: the shooter presents its own rounds from the server echo — exactly once per
+    // shot, over the same loss-repaired transport the observer rides.
+    let mut own_missing = Vec::new();
+    let mut own_duplicated = Vec::new();
+    for shot in &fired {
+        let n = shooter_spawned
+            .iter()
+            .filter(|(seen, _)| seen == shot)
+            .count();
+        match n {
+            1 => {}
+            0 => own_missing.push(*shot),
+            _ => own_duplicated.push((*shot, n)),
+        }
+    }
     assert!(
-        shooter_spawned.is_empty(),
-        "the shooter spawned {} echoed FireShell(s): its ActionState self-echo suppression is absent",
+        own_missing.is_empty(),
+        "{} of {} shots never presented on the SHOOTER at {:.0}% loss ({shooter_dropped} payloads \
+         dropped, {shooter_passed} delivered) — under fused own fire the echo is the shooter's only \
+         presentation path: {own_missing:?}",
+        own_missing.len(),
+        fired.len(),
+        LOSS * 100.0,
+    );
+    assert!(
+        own_duplicated.is_empty(),
+        "{} shooter shot(s) presented MORE THAN ONCE — the ShotId dedup (SeenShots) admitted a \
+         redundancy-window duplicate of the own echo: {own_duplicated:?}",
+        own_duplicated.len(),
+    );
+    assert_eq!(
         shooter_spawned.len(),
+        fired.len(),
+        "the shooter spawned {} shells for {} shots — an unattributed shell got through",
+        shooter_spawned.len(),
+        fired.len(),
     );
 
     // CARRY-THROUGH: every ricochet the authority sanctioned re-seeded the observer's shell. A

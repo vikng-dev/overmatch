@@ -279,10 +279,6 @@ pub fn run() {
     app.add_plugins(ClientPlugins { tick_duration });
     app.add_plugins(super::plugin);
     app.add_plugins(physics::physics_plugins());
-    // The own-hull recoil overlay (client only): the firing kick arrives `RTT/2 + D` after the
-    // flash. This layer presents it at the local fire tick and retires it exactly as the
-    // interpolation cursor crosses that tick.
-    app.add_plugins(super::recoil_overlay::plugin);
     // The own-fire presentation ledger (client only): the arriving gate snapshot is a legality
     // report, not permission to draw. This layer holds the gate the local cadence left, reconciles
     // the snapshot forward, and feeds `shooting::fire` the consumables this client authored rather
@@ -319,9 +315,6 @@ pub fn run() {
     // Shot-lifecycle recorder: public-shot arrivals, owner-private receipt/marker boundaries, and the
     // cosmetic shell lifecycle, all keyed by stable `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set.
     app.add_plugins(crate::shot_trace::client_plugin);
-    // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
-    // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
-    app.add_plugins(super::contact_probe::plugin);
     // (FPS + frame-time diagnostics used to be registered here. They now belong to their SOLE
     // consumer, `net::debug_hud::plugin`, which `NetClientPlugin` mounts.)
 
@@ -390,35 +383,18 @@ pub fn run() {
         }
         RecvConditionerMode::Off => None,
     };
-    // Input delay and jitter margin bound the prediction window; environment values are diagnostic
-    // overrides only.
-    let (input_delay, delay_label) = match harness::input_delay_ticks() {
-        None => (
-            shipping_input_delay(),
-            format!(
-                "fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by design (~{:.0}ms)",
-                f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
-            ),
-        ),
-        Some(0) => (
-            InputDelayConfig::no_input_delay(),
-            "no_input_delay (SPIKE_INPUT_DELAY_TICKS=0 - old max-prediction behavior)".to_string(),
-        ),
-        Some(n) => (
-            InputDelayConfig::fixed_input_delay(n),
-            format!("fixed_input_delay({n}) (SPIKE_INPUT_DELAY_TICKS={n})"),
-        ),
-    };
-    let jitter_multiple = harness::jitter_multiple();
-    let jitter_margin = harness::jitter_margin();
+    let input_delay = shipping_input_delay();
+    // The install-time sync margins hold only over a session's pre-arm window; `net::sync_margin`'s
+    // derived law rewrites both once the link is measured.
     let sync_config = SyncConfig {
-        jitter_multiple,
-        jitter_margin,
+        jitter_multiple: 2,
+        jitter_margin: 1.0,
         ..default()
     };
     info!(
-        "client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}, \
-         jitter_margin = {jitter_margin}"
+        "client: input delay = fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by \
+         design (~{:.0}ms)",
+        f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
     );
     if matches!(conditioner_mode, RecvConditionerMode::Seeded(_)) {
         app.add_systems(
@@ -442,32 +418,8 @@ pub fn run() {
         input_delay,
         interpolation,
     );
-    // Fused own fire, default ON: the own shot presents from the server echo at the cursor
-    // crossing instead of on the local fire tick (see `crate::FusedOwnFire`). Read exactly once;
-    // `OVERMATCH_FUSED_FIRE=0` opts back into local-tick presentation.
-    if harness::env_flag("OVERMATCH_FUSED_FIRE", true) {
-        info!(
-            "net: fused own fire ON (default) — the own shot presents from the server echo at \
-             the interpolation cursor; the recoil overlay stays unarmed [OVERMATCH_FUSED_FIRE=0 \
-             opts out]"
-        );
-        app.insert_resource(crate::FusedOwnFire);
-    } else {
-        info!("net: fused own fire OFF [OVERMATCH_FUSED_FIRE=0] — local-tick presentation");
-    }
-    // Buffer-edge starvation instruments (always on) and the bounded extrapolation gap-filler
-    // (`OVERMATCH_EXTRAPOLATE=1`, read exactly once inside; absent = clamp, bit-identical).
+    // Buffer-edge starvation instruments and the bounded extrapolation gap-filler.
     super::extrapolate::install(&mut app);
-    // `OVERMATCH_CURSOR_HIT_FEEL=1`: the own being-hit cue (camera kick + damage flash) presents at
-    // the interpolation cursor's crossing of the damage tick instead of at arrival. Read exactly
-    // once; absent = arrival presentation, bit-identical.
-    if harness::env_flag("OVERMATCH_CURSOR_HIT_FEEL", false) {
-        info!(
-            "net: cursor hit feel ON [OVERMATCH_CURSOR_HIT_FEEL] — the own being-hit cue \
-             presents at the interpolation cursor crossing of its damage tick"
-        );
-        app.insert_resource(super::hit_feel::CursorHitFeel);
-    }
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
@@ -563,9 +515,7 @@ pub fn run() {
     //     OWN local spec and writes it into `TankSim` on the sim clock, `.before(GameplaySet)` so
     //     `shooting::apply_recoil` (in `GameplaySet`) springs it the same tick. `TankSim` is
     //     fixed-clock sim truth; writing it from Update would be a render→sim leak (non-deterministic
-    //     across 0/1/2-tick frames). Gated `not(is_in_rollback)` like `feed_action_state`: a rollback
-    //     replays `FixedMain` N times, and re-applying a queued one-shot kick per replayed tick would
-    //     multiply it — the queue is drained exactly once, on a real tick.
+    //     across 0/1/2-tick frames).
     app.init_resource::<PendingRecoilKicks>();
     // Client-only shot dedup, deferred fire resolution, private-receipt dedup, and sanctioned
     // outcomes. The ballistics march reads `SanctionedShots` optionally everywhere else.
@@ -574,34 +524,8 @@ pub fn run() {
     app.init_resource::<PendingFireEvents>();
     app.init_resource::<SeenDamage>();
     app.init_resource::<SanctionedShots>();
-    app.add_systems(
-        FixedUpdate,
-        // Gated `not(is_in_rollback)` so a replay (which re-runs `FixedMain` N times) does not
-        // over-age the buffer; expiry is sim-time coarse, so a real tick is the right cadence.
-        age_sanctioned_shots.run_if(not(is_in_rollback)),
-    );
-    // F1 (rollback-safe cosmetics): the net-neutral `crate::Replaying` bridge. The ballistics march
-    // and `shooting::fire`'s own-shell `FireShell` trigger are VIEW-layer, tick-timed cosmetics that
-    // must advance once per FORWARD tick — but they live in `GameplaySet`, which a rollback replays
-    // N times, and the sim layer cannot name lightyear's `Rollback` to gate itself
-    // (`tests/net_boundary`). This writer mirrors the replay state into the sim-visible flag at the
-    // HEAD of every FixedUpdate (`.before(GameplaySet)`, so both consumers read a fresh value the
-    // same tick), and it is the marker's ONLY writer. See `crate::Replaying`.
-    app.init_resource::<crate::Replaying>();
-    app.add_systems(FixedUpdate, mark_replaying.before(GameplaySet));
-    // F3 (tick-triggered consumption): republish the predicted present `P` to the sim layer each
-    // forward tick, so the ballistics march can consume an OVERDUE sanctioned outcome for a shell
-    // that MISSED the plate the server resolved on (see `crate::PredictedPresent`). `.before` the
-    // march in `GameplaySet`; gated `not(is_in_rollback)` so a replay does not stamp `P` backward to
-    // a historical tick (the march is skipped during replay anyway — F1 — so this only keeps the value
-    // clean on the tick the march next reads it forward).
-    app.init_resource::<crate::PredictedPresent>();
-    app.add_systems(
-        FixedUpdate,
-        publish_predicted_present
-            .before(GameplaySet)
-            .run_if(not(is_in_rollback)),
-    );
+    // Expiry is sim-time coarse, so a real tick is the right cadence.
+    app.add_systems(FixedUpdate, age_sanctioned_shots);
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks
@@ -610,8 +534,7 @@ pub fn run() {
             // `GameplaySet` (Playing-only), so the applier that WRITES the kick and the system that
             // SPRINGS it must agree on when they may run — otherwise a `FireEvent` draining outside
             // `Playing` writes a kick into `TankSim` that `apply_recoil` never releases.
-            .run_if(in_state(AppState::Playing))
-            .run_if(not(is_in_rollback)),
+            .run_if(in_state(AppState::Playing)),
     );
     // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
     // clock the own hull moves on is the first thing any capture of this session must state.
@@ -629,11 +552,6 @@ pub fn run() {
         app.add_systems(Update, harness::simulate_watchdog)
             .add_systems(
                 FixedPreUpdate,
-                // Rollback replays re-run FixedPreUpdate too (map §8) — lightyear itself restores
-                // `ActionState` from the `InputBuffer` per replayed tick (and `buffer_action_state`
-                // is `Without<Rollback>`, so the buffer can't be corrupted), but without this gate
-                // the scripted tick counter would count every replayed tick (verified live: 640
-                // "ticks" burned in <5 s wall).
                 // `stamp_input_tick` chained AFTER the writer: it stamps whatever command the writer
                 // just placed, and must be the last word before lightyear buffers it.
                 // `record_own_intent` chains after the stamp: the client's own copy of what it
@@ -644,23 +562,18 @@ pub fn run() {
                     super::fire_presentation::record_own_intent,
                 )
                     .chain()
-                    .in_set(InputSystems::WriteClientInputs)
-                    .run_if(not(is_in_rollback)),
+                    .in_set(InputSystems::WriteClientInputs),
             );
     } else {
         app.add_systems(
             FixedPreUpdate,
-            // Same rollback gate as `buffer_input`: during replay lightyear restores the historical
-            // `ActionState` per tick — overwriting it with the *current* gathered command (or
-            // re-stamping it with the replayed tick) would corrupt the replay's input.
             (
                 feed_action_state,
                 stamp_input_tick,
                 super::fire_presentation::record_own_intent,
             )
                 .chain()
-                .in_set(InputSystems::WriteClientInputs)
-                .run_if(not(is_in_rollback)),
+                .in_set(InputSystems::WriteClientInputs),
         );
     }
     install_input_buffer_guard(&mut app);
@@ -733,8 +646,7 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///   - **not yet initiated** — gate the first `Connect` on the tank assets, exactly as the old
 ///     asset-gate did: the sim body spawns whole from extracted data the moment the replicated root
 ///     lands, and preloading keeps view pop-in to ~a frame. (No local ground spawn: `SimPlugin` →
-///     `world::plugin` builds the real terrain on both sides; rollback replays collide with it and
-///     the track force probes sample it.)
+///     `world::plugin` builds the real terrain on both sides; the track force probes sample it.)
 ///   - **`Connecting`** — a connect is in flight (netcode `SendingConnectionRequest`/
 ///     `ChallengeResponse`); wait it out.
 ///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and
@@ -1302,24 +1214,21 @@ fn reset_shot_receive_state(
 /// [`receive_damage_confirms`].
 ///
 /// This must run in `Update`: Lightyear clears undrained message receivers in `Last`, while a frame
-/// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. `Update` also
-/// stays outside rollback replay; only the `TankSim` recoil write crosses to the fixed clock.
+/// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. Only the
+/// `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
     mut batch_receivers: Query<&mut MessageReceiver<FireVisualBatch>>,
     mut fire_receivers: Query<&mut MessageReceiver<FireEvent>>,
     mut keyframe_receivers: Query<&mut MessageReceiver<RicochetKeyframe>>,
     mut confirm_receivers: Query<&mut MessageReceiver<ImpactConfirm>>,
-    // Locally firing tanks suppress their echoed fire only; their keyframes and terminals still apply.
-    locally_fired: Query<(), With<ActionState<TankCommand>>>,
     // Fire's display/recoil entity must resolve before a cosmetic shell can be created.
     tanks: Query<(Entity, &CombatantId), With<NetTank>>,
-    // Fast-forward remote shells to this client's predicted present.
+    // Fast-forward remote shells to this client's current tick.
     timeline: Res<LocalTimeline>,
-    // The release clock: the same fractional cursor `net::recoil_overlay` compares fire ticks
-    // against. Synced-only — a pre-sync client has no interpolated motion to fuse with, so its
-    // events present at arrival.
+    // The release clock: the fractional interpolation cursor every held announcement compares its
+    // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
+    // so its events present at arrival.
     cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
-    fused: Option<Res<crate::FusedOwnFire>>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut seen: ResMut<SeenShots>,
     mut held: ResMut<HeldFireEvents>,
@@ -1380,8 +1289,6 @@ pub(super) fn receive_fire_events(
     release_due_fire_events(
         now,
         cursor,
-        fused.is_some(),
-        &locally_fired,
         &tanks,
         &mut pending,
         &mut held,
@@ -1394,8 +1301,6 @@ pub(super) fn receive_fire_events(
     resolve_pending_fire_events(
         now,
         cursor,
-        fused.is_some(),
-        &locally_fired,
         &tanks,
         &mut pending,
         &mut pending_fires,
@@ -1582,8 +1487,6 @@ fn resolve_shooter(
 fn release_due_fire_events(
     now: Tick,
     cursor: Option<(Tick, f64)>,
-    fused: bool,
-    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
     pending_recoil: &mut PendingRecoilKicks,
     held: &mut HeldFireEvents,
@@ -1604,8 +1507,6 @@ fn release_due_fire_events(
                 shooter,
                 now,
                 cursor,
-                fused,
-                locally_fired,
                 pending_recoil,
                 own_ledgers,
                 own_diag,
@@ -1634,8 +1535,6 @@ fn release_due_fire_events(
 fn resolve_pending_fire_events(
     now: Tick,
     cursor: Option<(Tick, f64)>,
-    fused: bool,
-    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
     pending_recoil: &mut PendingRecoilKicks,
     pending_fires: &mut PendingFireEvents,
@@ -1666,8 +1565,6 @@ fn resolve_pending_fire_events(
                 shooter,
                 now,
                 cursor,
-                fused,
-                locally_fired,
                 pending_recoil,
                 own_ledgers,
                 own_diag,
@@ -1687,31 +1584,23 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "one presentation boundary owns echo suppression and the release record"
+    reason = "one presentation boundary owns the owed swallow and the release record"
 )]
 fn spawn_reconstructed_fire(
     event: &FireEvent,
     shooter: Entity,
     now: Tick,
     cursor: Option<(Tick, f64)>,
-    fused: bool,
-    locally_fired: &Query<(), With<ActionState<TankCommand>>>,
     pending_recoil: &mut PendingRecoilKicks,
     own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
     own_diag: &mut super::fire_presentation::OwnFireDiag,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     commands: &mut Commands,
 ) {
-    // Self-echo suppression: the shooter presented this round on its own local fire tick. Under
-    // fused own fire the local tick drew nothing and the echo IS the round's one presentation.
-    if locally_fired.contains(shooter) && !fused {
-        return;
-    }
     // An own echo arriving so late the belt-delta fallback already presented its round: one
     // consumption, one bang — swallow the duplicate (matched by weapon slot and wrap-safe
     // fire-tick order against the recorded reveal, so a future round can never match).
-    if fused
-        && let Ok(mut ledger) = own_ledgers.get_mut(shooter)
+    if let Ok(mut ledger) = own_ledgers.get_mut(shooter)
         && ledger.try_swallow_owed(event.weapon as usize, event.fire_tick.0)
     {
         own_diag.swallowed += 1;
@@ -1845,29 +1734,6 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
     sanctioned.age(time.delta_secs());
 }
 
-/// F1 writer for the net-neutral [`crate::Replaying`] marker: mirror lightyear's rollback state into
-/// a sim-visible `bool` each FixedUpdate. `Query<(), With<Rollback>>` is exactly what the
-/// `is_in_rollback` run condition reads (non-empty iff THIS tick is a rollback replay), so the flag
-/// is `true` on replayed ticks and `false` on forward ticks — the sim layer reads it (as
-/// `Option<Res<Replaying>>`) to keep the cosmetic shell march, `Held` aging, and the own-shell
-/// `FireShell` trigger off replayed ticks. Runs unconditionally (a rollback only ever fires during
-/// gameplay; maintaining the flag when the march can't run is harmless).
-fn mark_replaying(mut replaying: ResMut<crate::Replaying>, rollback: Query<(), With<Rollback>>) {
-    replaying.0 = !rollback.is_empty();
-}
-
-/// F3 writer for the net-neutral [`crate::PredictedPresent`] marker: republish this client's
-/// predicted present tick `P` to the sim layer each forward tick. Every cosmetic shell lives at `P`,
-/// so the ballistics march compares an overdue sanctioned outcome's server tick against this one
-/// value. `LocalTimeline::tick()` is the same present `bridge_action_state_to_tank_command` and
-/// `receive_fire_events` read (the tick the own tank is simulated at, ahead of the server).
-pub(super) fn publish_predicted_present(
-    mut present: ResMut<crate::PredictedPresent>,
-    timeline: Res<LocalTimeline>,
-) {
-    present.0 = timeline.tick().0;
-}
-
 /// LOCAL/ARRIVAL-clock shell age: ticks from `fire` to the local present `now`
 /// (`LocalTimeline::tick()`). Two call sites only — the consume-time validity bar (a fire whose
 /// tick is absurd against the local present is dropped before it is held), and the pre-sync
@@ -1883,9 +1749,9 @@ pub(super) fn publish_predicted_present(
 /// the `u32::MAX` boundary), not a naive `u32` subtraction that would underflow. (A `u32` tick never
 /// actually wraps in a session — ~777 days at 64 Hz — but the arithmetic is correct at the boundary
 /// regardless, which is what the wraparound test pins.)
-///   - elapsed < 0: the fire tick is AHEAD of our predicted present. The server fires at a tick ≤ its
-///     own now, and `P` runs ahead of the server, so this only happens on clock skew or a malicious /
-///     wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
+///   - elapsed < 0: the fire tick is AHEAD of our current tick. The server fires at a tick ≤ its
+///     own now, and the local (input) timeline runs ahead of the server, so this only happens on
+///     clock skew or a malicious / wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
 ///   - 0 ≤ elapsed ≤ [`MAX_COSMETIC_CATCH_UP_TICKS`]: fast-forward that many ticks (the normal
 ///     case is DERIVED approximately 10).
 ///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale / wrapped nonsense — reject
@@ -1910,14 +1776,12 @@ fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
 /// `shooting::apply_recoil` then springs the barrel back home from this velocity.
 ///
 /// Scheduled `FixedUpdate`, `.before(GameplaySet)` so `apply_recoil` (in the set) sees the kick the
-/// same tick; gated `in_state(Playing)` to match that consumer (see the registration); and gated
-/// `not(is_in_rollback)`: `TankSim` is fixed-clock sim truth (a render-rate write would be a
-/// render→sim leak, non-deterministic across 0/1/2-tick frames), and a rollback replays `FixedMain`
-/// N times — draining the queue only on a real tick applies each one-shot kick exactly once.
+/// same tick; gated `in_state(Playing)` to match that consumer (see the registration). `TankSim` is
+/// fixed-clock sim truth — a render-rate write would be a render→sim leak, non-deterministic across
+/// 0/1/2-tick frames.
 ///
-/// Public fire facts reach the shooter too. [`receive_fire_events`] suppresses a fact whose shooter
-/// carries `ActionState<TankCommand>` before it enters this queue, so the echoed fact cannot kick the
-/// locally predicted, rollback-tracked `TankSim`.
+/// Public fire facts reach the shooter too: under fused own fire the echo carries the own barrel
+/// kick through this same queue (the local fire tick applied none).
 ///
 /// Skips silently on a missing tank, a slot with no matching muzzle, an out-of-range slot, or a
 /// recoil-less weapon (a coax) — a replica may not have finished spawning its rig, exactly as the
@@ -1946,7 +1810,7 @@ fn apply_pending_recoil_kicks(
 /// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,
 /// `drive_gunner_aim`, the range dial, the crew bar) have already filled the `Controlled` tank's
 /// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
-/// input plugin buffers it for the wire and for rollback replay. The reverse bridge (net::protocol)
+/// input plugin buffers it for the wire. The reverse bridge (net::protocol)
 /// hands it straight back to the sim, so locally the round trip is an identity copy — the buffer is
 /// the point. When input is blocked = a default command: the tank coasts to a stop instead of holding
 /// the last input, and clicks in the menu don't fire.
@@ -1983,17 +1847,12 @@ fn feed_action_state(
 /// the command into — so the stamp names the tick the command will be READ back on, on this client
 /// and on the server alike.
 ///
-/// From here the stamp is inert: it rides the `InputBuffer`, the wire, the server's `InputBuffer`
-/// and rollback replay without ever being rewritten. `net::protocol`'s bridge compares it against
+/// From here the stamp is inert: it rides the `InputBuffer`, the wire, and the server's
+/// `InputBuffer` without ever being rewritten. `net::protocol`'s bridge compares it against
 /// the tick actually being simulated, and any command lightyear inherited, repeated, fabricated or
 /// froze necessarily names a DIFFERENT tick. That is the whole mechanism — see
 /// `bridge_action_state_to_tank_command` for the four ways it happens and
 /// `TankCommand::fail_consumables_closed` for what we refuse to do about them.
-///
-/// Not run during rollback (chained under the same `not(is_in_rollback)` gate as the writers):
-/// lightyear restores the historical `ActionState` per replayed tick, stamp included, and
-/// re-stamping it with the replayed tick would forge attestation for input that was never authored
-/// for it — turning the guard into a rubber stamp. The historical stamp is already correct.
 ///
 /// Pre-sync, `input_delay()` is 0, so the stamp is the current tick and a joining player's first
 /// click attests immediately.
@@ -2461,7 +2320,7 @@ mod tests {
 
     /// The regression guard for the barrel-gate fix: a weapon with a recoil spec but NO barrel node
     /// kicks NOTHING — `apply_recoil` has no `RecoilParams` to step (built on the barrel node), so a
-    /// kick here would accumulate in rollback-tracked `recoil_velocity` and never decay. The gate
+    /// kick here would accumulate in `recoil_velocity` and never decay. The gate
     /// lives in the shared `kick_recoil` so this holds identically on the server's `fire` path too.
     #[test]
     fn barrel_less_weapon_is_noop() {
@@ -2516,31 +2375,21 @@ mod tests {
         );
     }
 
-    /// A shot fired ON our predicted present needs no catch-up: spawn at the muzzle, fly normally.
+    /// A shot fired ON our current tick needs no catch-up: spawn at the muzzle, fly normally.
     #[test]
     fn fire_tick_equal_to_now_is_zero_catch_up() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
     }
 
-    /// The shared cosmetic bound stays coupled to the rollback depth it was derived from.
-    #[test]
-    fn cosmetic_catch_up_horizon_matches_the_default_rollback_policy() {
-        assert_eq!(
-            MAX_COSMETIC_CATCH_UP_TICKS,
-            u32::from(RollbackPolicy::default().max_rollback_ticks),
-            "the cosmetic catch-up horizon must not drift from Lightyear's rollback window"
-        );
-    }
-
-    /// A fire tick AHEAD of our predicted present (only reachable via clock skew / a malicious or
-    /// wrapped tick, since the server fires at a tick <= its now and `P` leads the server) clamps to
-    /// 0, never rewinds the shell.
+    /// A fire tick AHEAD of our current tick (only reachable via clock skew / a malicious or
+    /// wrapped tick, since the server fires at a tick <= its now and the local timeline leads the
+    /// server) clamps to 0, never rewinds the shell.
     #[test]
     fn future_fire_tick_clamps_to_zero() {
         assert_eq!(fire_catch_up_ticks(Tick(503), Tick(500)), Some(0));
     }
 
-    /// A shot fired a few ticks before our predicted present fast-forwards by exactly that many ticks.
+    /// A shot fired a few ticks before our current tick fast-forwards by exactly that many ticks.
     #[test]
     fn elapsed_within_bound_fast_forwards() {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(505)), Some(5));
@@ -2806,12 +2655,10 @@ mod tests {
         event: FireEvent,
         now: Tick,
         cursor: Option<(Tick, f64)>,
-        fused: bool,
     ) {
         world
             .run_system_once(
-                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
-                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
@@ -2826,8 +2673,6 @@ mod tests {
                     release_due_fire_events(
                         now,
                         cursor,
-                        fused,
-                        &locally_fired,
                         &tanks,
                         &mut recoil,
                         &mut held,
@@ -2843,11 +2688,10 @@ mod tests {
     }
 
     /// Run only the release pass at the given cursor.
-    fn release_at(world: &mut World, now: Tick, cursor: Option<(Tick, f64)>, fused: bool) {
+    fn release_at(world: &mut World, now: Tick, cursor: Option<(Tick, f64)>) {
         world
             .run_system_once(
-                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
-                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
@@ -2860,8 +2704,6 @@ mod tests {
                     release_due_fire_events(
                         now,
                         cursor,
-                        fused,
-                        &locally_fired,
                         &tanks,
                         &mut recoil,
                         &mut held,
@@ -2896,12 +2738,11 @@ mod tests {
         let event = fire_event(unmapped, 7, 42);
         let shot = event.shot_id();
 
-        consume_and_release(world, event.clone(), Tick(42), None, false);
+        consume_and_release(world, event.clone(), Tick(42), None);
         let root = world.spawn((NetTank, CombatantId(7))).id();
         world
             .run_system_once(
-                |locally_fired: Query<(), With<ActionState<TankCommand>>>,
-                 tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
                  mut own_ledgers: Query<
@@ -2913,8 +2754,6 @@ mod tests {
                     resolve_pending_fire_events(
                         Tick(42),
                         None,
-                        false,
-                        &locally_fired,
                         &tanks,
                         &mut recoil,
                         &mut pending,
@@ -2926,7 +2765,7 @@ mod tests {
                 },
             )
             .expect("pending fire resolves through the production repair path");
-        consume_and_release(world, event, Tick(42), None, false);
+        consume_and_release(world, event, Tick(42), None);
 
         assert_eq!(
             world.resource::<PendingFireEvents>().len(),
@@ -2952,23 +2791,23 @@ mod tests {
         let shot = event.shot_id();
 
         // Arrival: predicted present 108, cursor 93.5 — the fire tick is 6.5 ticks ahead.
-        consume_and_release(world, event, Tick(108), Some((Tick(93), 0.5)), false);
+        consume_and_release(world, event, Tick(108), Some((Tick(93), 0.5)));
         for _ in 0..3 {
-            release_at(world, Tick(108), Some((Tick(93), 0.5)), false);
+            release_at(world, Tick(108), Some((Tick(93), 0.5)));
         }
         assert!(
             world.resource::<ReconstructedFireShells>().0.is_empty(),
             "a stalled cursor holds the presentation, and holds it across repeated drains",
         );
 
-        release_at(world, Tick(110), Some((Tick(100), 0.0)), false);
+        release_at(world, Tick(110), Some((Tick(100), 0.0)));
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0,
             vec![(shot, root)],
             "the crossing releases the one presentation",
         );
 
-        release_at(world, Tick(111), Some((Tick(101), 0.0)), false);
+        release_at(world, Tick(111), Some((Tick(101), 0.0)));
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0.len(),
             1,
@@ -2986,7 +2825,7 @@ mod tests {
         let event = fire_event(root, 7, 100);
         let shot = event.shot_id();
 
-        consume_and_release(world, event, Tick(120), Some((Tick(112), 0.25)), false);
+        consume_and_release(world, event, Tick(120), Some((Tick(112), 0.25)));
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0,
             vec![(shot, root)],
@@ -3043,17 +2882,17 @@ mod tests {
             let cursor = Some((Tick(now - 16), 0.5));
             let mut arrived = false;
             for event in events.iter().filter(|e| e.fire_tick.0 + 8 == now) {
-                consume_and_release(world, event.clone(), Tick(now), cursor, false);
+                consume_and_release(world, event.clone(), Tick(now), cursor);
                 arrived = true;
             }
             if !arrived {
-                release_at(world, Tick(now), cursor, false);
+                release_at(world, Tick(now), cursor);
             }
         }
 
         // The shot-skip probe: the redundant transport copy of an already-presented shot is
         // behind the cursor (would present immediately) and must be swallowed by its ShotId.
-        consume_and_release(world, duplicate, Tick(230), Some((Tick(214), 0.5)), false);
+        consume_and_release(world, duplicate, Tick(230), Some((Tick(214), 0.5)));
 
         let certified = &world.resource::<Certified>().0;
         let bang = certified.len();
@@ -3077,10 +2916,10 @@ mod tests {
         }
     }
 
-    /// FUSED OWN FIRE: the echo of a locally-fired round is suppressed with the lever unset
-    /// (mode A, pinned) and is the round's one presentation with it set.
+    /// FUSED OWN FIRE: the echo of a locally-fired round is the round's one presentation — the
+    /// local fire tick drew nothing, so the echo must present the shell and carry the kick.
     #[test]
-    fn the_own_echo_presents_only_under_the_fused_lever() {
+    fn the_own_echo_is_the_rounds_one_presentation() {
         let mut app = fire_receive_app();
         let world = app.world_mut();
         let own = world
@@ -3092,19 +2931,9 @@ mod tests {
             ))
             .id();
 
-        consume_and_release(world, fire_event(own, 7, 42), Tick(50), None, false);
-        assert!(
-            world.resource::<ReconstructedFireShells>().0.is_empty(),
-            "mode A: the own echo is suppressed — the local fire tick already presented",
-        );
-        assert!(
-            world.resource::<PendingRecoilKicks>().0.is_empty(),
-            "mode A: the own echo queues no barrel kick",
-        );
-
         let fused_event = fire_event(own, 7, 43);
         let fused_shot = fused_event.shot_id();
-        consume_and_release(world, fused_event, Tick(50), None, true);
+        consume_and_release(world, fused_event, Tick(50), None);
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0,
             vec![(fused_shot, own)],
@@ -3174,8 +3003,7 @@ mod tests {
 
         world
             .run_system_once(
-                move |locally_fired: Query<(), With<ActionState<TankCommand>>>,
-                      tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
@@ -3224,8 +3052,6 @@ mod tests {
                     release_due_fire_events(
                         Tick(43),
                         None,
-                        false,
-                        &locally_fired,
                         &tanks,
                         &mut recoil,
                         &mut held,

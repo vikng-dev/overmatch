@@ -15,7 +15,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::Layer;
-use crate::camera::{CameraKickApplied, GunnerCameraPlaced};
+use crate::camera::GunnerCameraPlaced;
 use crate::command::TankCommand;
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
@@ -180,15 +180,7 @@ pub fn client_plugin(app: &mut App) {
             (update_bore_indicator, update_aim_indicator)
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced)
-                // After the hit-kick has displaced the camera's rendered `GlobalTransform`. The GREEN
-                // bore dot (`update_bore_indicator`) reads that kicked pose, so it jolts with the
-                // rendered view and the whole sight picture shakes together on a hit — matching the
-                // gunner reticles in `sight`. The AMBER intention dot (`update_aim_indicator`)
-                // deliberately reads the un-kicked camera `Transform` instead (see its body), so this
-                // edge is only load-bearing for the bore dot. Vacuous edge in SP/headless (the kick set
-                // is net-client-only, empty there).
-                .after(CameraKickApplied),
+                .after(GunnerCameraPlaced),
         );
 }
 
@@ -444,15 +436,10 @@ fn update_bore_indicator(
 
 fn update_aim_indicator(
     mouse: Res<ButtonInput<MouseButton>>,
-    // The camera's un-kicked `Transform`, NOT its `GlobalTransform`. The amber dot marks the player's
+    // The camera's `Transform`, NOT its `GlobalTransform`. The amber dot marks the player's
     // committed aim *intention*, which `commit_aim` fixes by projecting screen-centre through the
-    // un-kicked (stabilized) camera pose (ADR-0003). `net::hit_feel::apply_camera_kick` displaces only
-    // the rendered `GlobalTransform` — a decaying, re-excited-every-hit recoil offset. Reprojecting a
-    // FROZEN intention (free-look holds `command.aim`) through that shaking pose makes the marker jitter
-    // between two positions and never settle while you are under fire, even though the intention is rock
-    // steady — the regression. The camera is parentless, so its `Transform` IS its un-kicked world pose,
-    // the exact pose `commit_aim` reads, so the dot stays welded to the point it was committed at while
-    // the green bore dot and the gunner reticles still jolt with the kicked view (the sight picture jolt).
+    // camera pose (ADR-0003). The camera is parentless, so its `Transform` IS its world pose,
+    // the exact pose `commit_aim` reads, so the dot stays welded to the point it was committed at.
     camera_query: Single<(&Camera, &Transform), With<Camera3d>>,
     controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,

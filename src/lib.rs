@@ -1,6 +1,6 @@
 //! Shared simulation and runtime composition for Overmatch.
 //!
-//! Product binaries compose this crate as an authoritative server or predicted network client.
+//! Product binaries compose this crate as an authoritative server or network client.
 //! Direct-simulation sandboxes are analytical tools, not alternate player runtimes. See
 //! `.agents/PRODUCT.md` and ADR-0024 for the current product topology.
 
@@ -55,7 +55,7 @@ pub(crate) mod damage;
 #[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
-/// by both the offline and predicted-network client roots.
+/// by both the offline and network client roots.
 mod drive_hud;
 /// Exact integer arithmetic over `f32`-sourced polynomials — the arithmetic the bake's embedding
 /// certificate and the corridor collector's parallel test are decided in, so neither has a
@@ -162,9 +162,8 @@ pub(crate) mod terrain_grid;
 /// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
 /// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
 mod terrain_lod;
-/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs. simulated
-/// pose, rollback events, and correction decay — passive instrumentation for the MP hull-jitter
-/// investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
+/// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs.
+/// simulated pose — passive instrumentation for the MP hull-jitter investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
 /// net-specific rows exist only where the MP client/server plugin registers them, and the net
 /// extras read their resources through `Option`, so they are absent in single-player.
 mod trace;
@@ -498,48 +497,14 @@ mod offline_feel_tests {
 #[derive(Resource, Default)]
 pub(crate) struct ClientReplica;
 
-/// Marker resource: lightyear is REPLAYING a rollback right now — re-running `FixedMain` from a
-/// restored past tick up to the predicted present, N times in one frame. The sim layer reads it (as
-/// `Option<Res<Replaying>>`, `.0` true only mid-replay) to keep VIEW-ONLY, tick-timed cosmetic work
-/// OFF replayed ticks: the cosmetic shell march + `Held` aging advance the shell's picture one step
-/// per FORWARD tick, and the shooter's own-shell `FireShell` trigger fires once per forward fire
-/// tick. Replaying them would double-march every in-flight shell by the rollback depth, over-count
-/// the `Held` grace window (burning it in one frame and corrupting the `present − bounce_tick`
-/// re-seed arithmetic), and re-spawn a DUPLICATE own shell sharing one `ShotId` every time a replay
-/// re-crosses a fire tick. The DETERMINISTIC sim mutations (`TankSim` belt/reload/recoil, hull
-/// impulse) still replay — only the cosmetic reconstruction is skipped.
-///
-/// Net-neutral like [`ClientReplica`]: this crate-root marker is the sim's vocabulary, but only
-/// `net::client` (which alone may name lightyear's `Rollback`) WRITES it — a `bool` re-derived at the
-/// head of every `FixedUpdate` from whether this is a replayed tick. Absent on the authority
-/// (server / SP / sandbox), which never rolls back, so its absence reads as "forward tick" everywhere
-/// the writer is not mounted. Lives at the crate root (not `net`) so the always-compiled `ballistics`
-/// / `shooting` can reference it without the netcode in scope (`tests/net_boundary`).
-#[derive(Resource, Default)]
-pub(crate) struct Replaying(pub bool);
-
-/// Net client's predicted-present tick, republished as net-neutral sim vocabulary. Replica ballistics
-/// uses it to age sanctioned outcomes; authority and sandbox compositions do not install it.
-#[derive(Resource, Default)]
-pub(crate) struct PredictedPresent(pub u32);
-
-/// Fused own fire (`OVERMATCH_FUSED_FIRE=1`): the client's own keyed shot presents from the
-/// server's echoed fire fact when the interpolation cursor crosses the fire tick — the same release
-/// rule every opponent shot follows — so the local fire tick draws no shell, flash, or barrel kick,
-/// and a server-refused fire simply never presents. The sim half of `shooting::fire` (gate, belt,
-/// hull impulse) is mode-independent and still runs every tick. Net-neutral like [`Replaying`]:
-/// only `net::client` inserts it (once, from the env lever), so its absence reads as "present
-/// locally" everywhere — server, single-player, sandbox, and every client not opted in.
-#[derive(Resource, Default)]
-pub(crate) struct FusedOwnFire;
-
 /// Net-neutral current tick published before gameplay. Local network fire uses it to construct a
-/// [`ShotId`] before shell spawn; authority/sandbox shells may be unkeyed.
+/// [`ShotId`] before shell spawn; replica ballistics ages sanctioned outcomes and stamps lifecycle
+/// rows against it; authority/sandbox shells may be unkeyed.
 #[derive(Resource, Default)]
 pub(crate) struct ShotClock(pub u32);
 
 /// Current simulation tick used by the tick-correlated weapon gate. Network compositions publish
-/// `LocalTimeline` into it before gameplay (including rollback replay); non-network compositions
+/// `LocalTimeline` into it before gameplay; non-network compositions
 /// advance it once after each playing fixed tick and saturate at `u32::MAX` like Lightyear.
 #[derive(Resource, Default)]
 pub(crate) struct WeaponClock(pub u32);
@@ -757,14 +722,13 @@ impl Plugin for NetClientPlugin {
             // The death screen + respawn key — net-client only (SP has no respawn flow): shows
             // "YOU DIED" when the player's own tank is knocked out and latches the respawn edge.
             net::death_screen_plugin,
-            // View-layer combat feedback (net-client only): the camera kick + damage flash when the
-            // player is hit, and the hit-marker when the player's shell drops an opponent's health.
+            // View-layer combat feedback (net-client only): the damage flash when the player is
+            // hit, and the hit-marker when the player's shell drops an opponent's health.
             net::hit_feel_plugin,
             // Impact dust puffs — every landed round reads at the target (view-only, ADR-0014; the
             // replica's cosmetic shells spark the same `Impact` seam, so remote fire puffs too).
             vfx::plugin,
-            // Live tracks on the presented pose — own AND remote tanks (one code path;
-            // `net::recoil_overlay` orders the set after its overlay apply).
+            // Live tracks on the presented pose — own AND remote tanks (one code path).
             track::view_plugin,
         ));
         // The live view + the render half of the certificate (see `ClientPlugin`), separate for the

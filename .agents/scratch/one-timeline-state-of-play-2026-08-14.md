@@ -61,6 +61,11 @@ this documents the fork, the rulings, and the decision procedure.
 | effb701 | merge of the two lanes; full suite green on the combination; PUSHED — the morning test tip |
 | 24e39d6 | derived sync-margin laws, both wire directions: uplink floor 0.5 t (mean content phase, structural) + deadband = measured jitter in ticks (rewritten per frame, arms when own hull rides the stream); downlink multiple 2 + 0.5 t floor (static, lightyear reads live jitter). Levers `OVERMATCH_INPUT_MARGIN_MS` / `OVERMATCH_INTERP_MARGIN_MS` pin the whole margin. Server-side INPUT-ARRIVAL instrument (late = strictly negative margin; previously silent hold-last now loud). Measured: click→bang 209.5→159.9 ms @80/10, 156.2→132.2 @40/3, zero late inputs, zero starvation. 6 mutants killed. ONE justified deploy (server sampler) — in flight. |
 
+Demolition pass 2 (2026-08-15) removed every lever the rows above mention: fused own fire and
+the extrapolation gap-filler are now the unconditional defaults, `OVERMATCH_CURSOR_HIT_FEEL`
+and the recoil overlay are deleted, and the INPUT-ARRIVAL instrument is retired (FRONTIER
+remains).
+
 ## Standing rulings (Yan)
 
 - Client owns fire start/stop, looks instant; server owns legality. (Implemented: df57d9c.)
@@ -211,22 +216,14 @@ they need coherence, i.e. fusion to the motion cursor. One cursor, positioned as
 arrival as physics-insurance allows; the continuous group defines how close; every discrete
 group fuses to it.
 
-## Morning test menu (final — branch tip effb701, droplet at 24e39d6, all client combos `cargo run`)
+## Morning test menu (EXECUTED — its verdicts became the pass-2 rulings)
 
-Every run now prints FRONTIER (gap/starvation/blend) and the droplet logs INPUT-ARRIVAL —
-read them after each session; they are the fork-2 evidence.
-
-1. **Margins baseline**: no env vars → A at derived margins. Then `OVERMATCH_FUSED_FIRE=1` → B
-   at derived margins (~35–50 ms faster than last night's taste). The A/B re-audition.
-2. **Arrival pace, conservative**: `OVERMATCH_FUSED_FIRE=1 OVERMATCH_EXTRAPOLATE=1
-   OVERMATCH_INTERP_DELAY_MS=55 OVERMATCH_INTERP_MARGIN_MS=8` — cursor ~15–20 ms past the
-   newest keyframe; extrapolation exercises on jitter spikes only.
-3. **Arrival pace, aggressive (headline)**: same but `OVERMATCH_INTERP_DELAY_MS=40` — cursor
-   essentially AT the arrival edge (headroom ≈ margins only); fuse ≈ 100–110 ms @75 ping.
-   Watch for time-flow warble and blend visibility; FRONTIER numbers decide fork 2.
-4. **Hit feel**: add `OVERMATCH_CURSOR_HIT_FEEL=1` to any leg, damage-heavy session.
-
-Order-counterbalance rule applies to leg 1 (start with B this time — last session ended on B).
+The menu ran; B (fused own fire) and the extrapolation gap-filler won and were made the
+unconditional defaults in demolition pass 2 (2026-08-15), which deleted the A/B levers
+(`OVERMATCH_FUSED_FIRE`, `OVERMATCH_EXTRAPOLATE`, `OVERMATCH_CURSOR_HIT_FEEL`) and the
+INPUT-ARRIVAL instrument. FRONTIER still prints every run. The only surviving pace levers are
+`OVERMATCH_INTERP_DELAY_MS` / `OVERMATCH_INTERP_MARGIN_MS` (pin the derived margins for
+experiments).
 
 ## Decision procedure
 

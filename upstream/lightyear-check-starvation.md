@@ -32,7 +32,8 @@ everything looks healthy (ConfirmedHistory advances, data is fresh).
 Client diverged **35–50 m** from the server with fresh authority arriving every tick and zero
 rollbacks firing (tick-level traces available). One instrumented run: 3,296
 `confirmed_history_future_skip_mismatch` skip events. Falsifier: `SPIKE_INPUT_DELAY_TICKS=0`
-(restoring a real prediction window) capped divergence at 0.015–0.57 m. Margin histogram:
+*[lever removed in the one-timeline demolition; repro requires the pre-pass-2 revision
+317d21e]* (restoring a real prediction window) capped divergence at 0.015–0.57 m. Margin histogram:
 zero frames with margin ≥ 2 ticks after sync settles; 63/63 observed rollbacks coincided with
 the rare early margin-≥2 frames.
 

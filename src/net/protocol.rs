@@ -634,9 +634,7 @@ fn mirror_swap_from_net_crew(
     }
 }
 
-/// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick. It runs
-/// during rollback too: `LocalTimeline` is the replayed tick there, so `shooting::fire` re-derives
-/// the same `ShotId` even though [`crate::Replaying`] suppresses its cosmetic `FireShell` trigger.
+/// Republish the network timeline as net-neutral sim vocabulary before every gameplay tick.
 fn publish_shot_clock(
     mut shot_clock: ResMut<crate::ShotClock>,
     mut weapon_clock: ResMut<crate::WeaponClock>,

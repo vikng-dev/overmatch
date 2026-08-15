@@ -7,9 +7,7 @@ use avian3d::prelude::{Position, RigidBody, Rotation};
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use lightyear::prelude::input::native::{ActionState, NativeStateSequence};
-use lightyear::prelude::input::server::{
-    InputSystems as ServerInputSystems, InputValidationAppExt, authorize_controlled_targets,
-};
+use lightyear::prelude::input::server::{InputValidationAppExt, authorize_controlled_targets};
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
@@ -87,11 +85,6 @@ pub fn run() {
     app.init_resource::<SpawnLane>();
     app.init_resource::<SpawnOverrides>();
     app.init_resource::<CombatantIds>();
-    let config = harness::PerturbConfig {
-        perturb: harness::env_flag("SPIKE_PERTURB", true),
-    };
-    info!("server: SPIKE_PERTURB={}", config.perturb);
-    app.insert_resource(config);
 
     app.add_systems(
         Update,
@@ -107,22 +100,12 @@ pub fn run() {
             open_gameplay_gate,
             diagnostics::log_positions,
             diagnostics::log_sim_evidence,
-            diagnostics::log_input_arrival,
         ),
-    );
-    // The input arrival-margin instrument: sampled per fixed tick BEFORE lightyear consumes the
-    // buffers, so the margin describes exactly the read the server is about to make. The counter
-    // this adds is what certifies the client's derived sync margins (`net::sync_margin`).
-    app.init_resource::<diagnostics::InputArrival>();
-    app.add_systems(
-        FixedPreUpdate,
-        diagnostics::sample_input_arrival.before(ServerInputSystems::UpdateActionState),
     );
     app.add_systems(
         FixedUpdate,
         (
             log_tank_commands,
-            harness::perturb_after_delay,
             // Command writers must run before edge consumption.
             drive_bot.in_set(GameplaySet).before(ConsumeCommandEdges),
             respawn_player_tanks
@@ -572,8 +555,6 @@ fn spawn_pending_tanks(
     mut pending: ResMut<PendingClients>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
-    time: Res<Time<Virtual>>,
-    config: Res<harness::PerturbConfig>,
     mut lane: ResMut<SpawnLane>,
     mut combatants: ResMut<CombatantIds>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
@@ -597,7 +578,7 @@ fn spawn_pending_tanks(
         // join onto a hillside no longer starts inside the terrain.
         let spawn_pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
         lane.0 += 1;
-        let root = spawn_player_tank(
+        spawn_player_tank(
             &mut commands,
             content,
             &assets,
@@ -607,11 +588,6 @@ fn spawn_pending_tanks(
             spawn_rot,
             combatants.player(link),
         );
-        if config.perturb {
-            commands.entity(root).insert(harness::PendingPerturbation {
-                at: time.elapsed() + Duration::from_secs(2),
-            });
-        }
     }
 }
 

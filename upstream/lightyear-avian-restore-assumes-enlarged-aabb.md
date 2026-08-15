@@ -26,7 +26,8 @@ the `init_primitives_to_nodes_if_uninit` guard avian's native update paths use
 
 ## Measured
 
-Instrumented at tick level (SPIKE_CONTACT_PROBE): tree leaves and moved-set faithfully track the
+Instrumented at tick level (SPIKE_CONTACT_PROBE) *[lever removed in the one-timeline
+demolition; repro requires the pre-pass-2 revision 317d21e]*: tree leaves and moved-set faithfully track the
 (wrong, un-restored) component AABBs; contact re-forms at k=1 in 62/69 rollbacks where the
 abandoned timeline still had the pair vs fails in 80/85 where it didn't. NOTE: in our codebase
 the visible symptom was dominated by the ApplyPosToTransform poisoning (separate report) — with
@@ -43,7 +44,8 @@ the init guard before `set_proxy_aabb`.
 ## Our workaround
 
 None needed post-33cc4e4; documenting for upstream correctness. If it ever resurfaces, the
-probe (`SPIKE_CONTACT_PROBE=1`) discriminates it in one run.
+probe (`SPIKE_CONTACT_PROBE=1`) discriminates it in one run *[lever removed; run it from
+317d21e]*.
 
 ## What fixing this unlocks for us
 
@@ -57,5 +59,6 @@ The one forward-looking caveat, stated as a caveat and not a payoff: it goes liv
 child collider's pose can genuinely *diverge* from its root during prediction — an articulated track
 model with its own bodies, or any collider whose local transform stops being an authored constant. If
 that lands and contact starts behaving strangely after rollbacks, this is the first suspect and
-`SPIKE_CONTACT_PROBE=1` discriminates it in one run. Until then: no payoff, and we should not pretend
+`SPIKE_CONTACT_PROBE=1` discriminates it in one run *[lever removed; run it from 317d21e]*.
+Until then: no payoff, and we should not pretend
 otherwise when filing.

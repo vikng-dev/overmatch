@@ -36,11 +36,8 @@ const ENTRY_MIN_M: f32 = 1.0e-3;
 
 pub(super) fn plugin(app: &mut App) {
     // `Update`, so the segment spans exactly one frame of marched motion: the march runs in
-    // `FixedUpdate` (or, in `Demo` mode, this same schedule), and lightyear's rollback replays live
-    // inside `FixedMain` — which is the rollback rail this read rides. The march itself is skipped
-    // on a replayed tick (`crate::Replaying`, F1), so a shell's transform advances once per FORWARD
-    // tick; a per-frame probe of that transform therefore sees each crossing exactly once, whatever
-    // a rollback did inside the frame.
+    // `FixedUpdate` (or, in `Demo` mode, this same schedule) and advances a shell's transform once
+    // per tick, so a per-frame probe of that transform sees each crossing exactly once.
     app.add_systems(Update, read_scatter_crossings);
 }
 

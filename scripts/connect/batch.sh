@@ -40,7 +40,7 @@ for i in $(seq $START $((START + N - 1))); do
   base="$OUT/run$i"
   rm -f "$base".*.jsonl "$base".*.log
 
-  SPIKE_PERTURB=0 SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
+  SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
     ./target/debug/overmatch-server > "$base.server.log" 2>&1 &
   SERVER_PID=$!
   for t in $(seq 1 100); do
