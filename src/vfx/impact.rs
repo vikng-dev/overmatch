@@ -137,7 +137,7 @@ const GROUND_MARK_CAP: usize = 16;
 
 // --- The 88 on ARMOR (caliber ≥ TRACER_MAX_CALIBER, surface Armor): steel is categorically NOT dirt
 // (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
-// spark fan, and a small gray spall/smoke puff — NO plume, NO dust ring, NO ground scar, NO lingering
+// spark fan, and a small gray spall/smoke puff — NO plume, NO shock ring, NO ground scar, NO lingering
 // brown cloud. A brief flame lick is added ONLY when the round bit into the steel (`Impact.penetrated`
 // — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
 // spark / flame) and Blend (spall) pipelines as the terrain read — no new pipeline permutations.
@@ -711,7 +711,7 @@ fn spawn_small_impact(
 }
 
 /// The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): the layered large-caliber soil-strike read.
-/// Contact flash → dirt ejecta → tall dirt plume → low dust ring → lingering cloud on the shared
+/// Contact flash → dirt ejecta → tall dirt plume → ground shock ring → lingering cloud on the shared
 /// ring, plus one flat ground scar in its own ring. Physical scale (module doc), not screen-relative.
 #[allow(clippy::too_many_arguments)]
 fn spawn_big_splash(
@@ -905,7 +905,7 @@ fn spawn_big_splash(
 
 /// The 88 ARMOR read (caliber ≥ TRACER_MAX_CALIBER, surface Armor): the spark-on-steel read — a
 /// white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff, all on the
-/// shared ring. NO plume, NO dust ring, NO lingering cloud, and — deliberately — NO ground scar
+/// shared ring. NO plume, NO shock ring, NO lingering cloud, and — deliberately — NO ground scar
 /// (steel isn't gouged like soil; the armor read touches only the shared billboard ring). A brief
 /// flame lick is appended ONLY when `penetrated` (the round bit into the steel). When `deflection` is
 /// present (a ricochet) the spark fan leans toward the bounce direction; otherwise it splays off the
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     /// The 88 (big caliber) lands the full terrain splash instead: contact flash, 8–12 dirt ejecta,
-    /// 1–2 plumes, a dust ring, and a lingering cloud on the shared ring, PLUS exactly one flat
+    /// 1–2 plumes, a shock ring, and a lingering cloud on the shared ring, PLUS exactly one flat
     /// ground scar in its OWN ring, lying on the surface (its +Z turned onto the normal).
     #[test]
     fn big_caliber_spawns_the_splash_stack() {
