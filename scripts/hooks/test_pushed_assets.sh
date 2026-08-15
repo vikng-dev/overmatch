@@ -155,6 +155,25 @@ commit "the ladder's constants move"
 LOD_LANE=$(at HEAD)
 git -C "$REPO" checkout -q "$MAIN"
 
+# THE CRATE ROOT MOVES, three ways, on a branch of its own: declaring a contract module in,
+# gaining a module that is only game code, and dropping a contract module out. Only the first and
+# last are exposure.
+git -C "$REPO" checkout -q -b liblane "$TWO"
+write src/lib.rs "mod bake;
+mod net;"
+commit "the crate root declares a contract module"
+LIB_WIRED=$(at HEAD)
+write src/lib.rs "mod bake;
+mod net;
+mod hud;"
+commit "the crate root gains a game module"
+LIB_GAME=$(at HEAD)
+write src/lib.rs "mod net;
+mod hud;"
+commit "the crate root drops the contract module"
+LIB_UNWIRED=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
+
 # DELETIONS, on a branch of their own so the revisions the rest of this file reads still hold the
 # trio. Each one removes asset files and nothing puts them back.
 git -C "$REPO" checkout -q -b deletions "$TWO"
@@ -268,8 +287,7 @@ for path in \
     src/spec.rs \
     src/exact.rs \
     src/substances.rs \
-    src/bin/asset_verify.rs \
-    src/lib.rs
+    src/bin/asset_verify.rs
 do
     surface "$path"
     says "$path moves every verdict" yes $?
@@ -300,6 +318,7 @@ for path in \
     assets/tiger_1/tiger_1.blend \
     assets/maps/kalinovo/derived/map_ui.png \
     src/net.rs \
+    src/lib.rs \
     scripts/tank/test_asset_door.py \
     scripts/lod/test_refusals.py \
     README.md
@@ -311,6 +330,36 @@ done
 is "one shared path in a long changed set is enough" \
    "yes" "$(printf 'README.md\nsrc/net.rs\nsrc/substances.rs\nCargo.lock\n' |
             assets_shared_surface && echo yes || echo no)"
+
+group "selection — assets_lib_exposure"
+
+exposure() { printf 'src/lib.rs\n' | assets_lib_exposure "$1" "$2"; }
+
+exposure "$TWO" "$LIB_WIRED"
+says "a contract module declared into the crate root is exposure" yes $?
+
+exposure "$LIB_WIRED" "$LIB_GAME"
+says "a game module joining the crate root is not" no $?
+
+exposure "$LIB_GAME" "$LIB_UNWIRED"
+says "a contract module dropped from the crate root is" yes $?
+
+printf 'src/net.rs\n' | assets_lib_exposure "$LIB_GAME" "$LIB_UNWIRED"
+says "a changed set that does not name lib.rs never reads the diff" no $?
+
+printf 'src/lib.rs\n' | assets_lib_exposure "$ZERO" "$LIB_GAME"
+says "no resolvable baseline fails toward running" yes $?
+
+is "a crate-root game refactor selects no trio" \
+   "" \
+   "$(printf 'refs/heads/liblane %s refs/heads/liblane %s\n' "$LIB_GAME" "$LIB_WIRED" |
+      assets_push_targets origin "$SCRATCH")"
+
+is "a crate-root contract rewire selects every trio, as shared-surface" \
+   "refs/heads/liblane $LIB_UNWIRED assets/panther/panther shared-surface
+refs/heads/liblane $LIB_UNWIRED assets/tiger_1/tiger_1 shared-surface" \
+   "$(printf 'refs/heads/liblane %s refs/heads/liblane %s\n' "$LIB_UNWIRED" "$LIB_GAME" |
+      assets_push_targets origin "$SCRATCH")"
 
 # ── the ref list: every (revision, asset) pair a push must verify ────────────────────────────────
 
