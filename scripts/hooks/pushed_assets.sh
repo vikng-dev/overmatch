@@ -96,12 +96,16 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 # from, and the Rust consumer contract with the modules it certifies against.
 # `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what the shared
 # material data means to the gate and hands the canon file its key list, so it moves every asset's
-# verdict exactly as `assets/materials/` does. `src/bin/asset_verify.rs` and `src/lib.rs` are in it
-# because they are the contract's EXECUTABLE surface: the adapter owns the exit status and the
-# report the lane reads, and the crate root is where the contract is exposed at all — a push that
-# moves only one of them changes every verdict while touching no law. Any of those moving means the
+# verdict exactly as `assets/materials/` does. `src/bin/asset_verify.rs` is in it because it is the
+# contract's EXECUTABLE surface: the adapter owns the exit status and the report the lane reads — a
+# push that moves only it changes every verdict while touching no law. Any of those moving means the
 # door now answers differently about bytes that did not move, so every discovered trio is
 # re-verified rather than none of them.
+#
+# `src/lib.rs` is NOT in this list. The crate root is where the contract modules are wired into the
+# crate at all, but it is also the whole game's root and moves on nearly every refactor — as a path
+# it re-cut every asset for pushes that never went near the contract. It is read by CONTENT instead:
+# `assets_lib_exposure`, below.
 #
 # THE LIST IS THE BUILD'S OWN DECLARED DEPENDENCIES, NOT A SEPARATE OPINION. `scripts/tank/build.py`
 # names them: `PIPELINE_SOURCES` is what `blend_digest` hashes, so anything in it moving makes every
@@ -115,7 +119,24 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 # map's `level.json` rather than resolving the default: which map is default is `src/map.rs`'s
 # answer, and this predicate refuses to be a second reader of it.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$|src/lib\.rs$)'
+    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$)'
+}
+
+# Whether a push rewires the contract in the crate root. Only a diff inside `src/lib.rs` that
+# touches a declaration of one of the four certified modules is contract exposure — swapping
+# `mod bake;` for a cfg-gated or inline stub changes what the door's binary certifies against while
+# touching no path `assets_shared_surface` watches. Everything else lib.rs does is game code, and a
+# change that BREAKS the exposure outright never reaches this lane: clippy compiles the contract
+# binary earlier in the same hook run.
+#
+# FAIL TOWARD RUNNING: a baseline this clone cannot resolve (a branch's first push, a tag) answers
+# yes whenever the changed set names lib.rs at all. A comment line mentioning a declaration trips it
+# too — toward running, which is the cheap direction to be wrong in.
+assets_lib_exposure() {   # <base> <head>; changed paths on stdin
+    grep -q '^src/lib\.rs$' || return 1
+    assets_pushed_commit "${1:-}" || return 0
+    git diff -U0 "$1" "${2:-}" -- src/lib.rs 2>/dev/null |
+        grep -qE '^[+-].*mod[[:space:]]+(bake|exact|spec|substances)[[:space:]]*[;{]'
 }
 
 # EVERY (revision, asset) pair a push must verify, one per line:
@@ -133,7 +154,8 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
         assets_pushed_commit "$_local_sha" || continue
         _changed=$2/changed.$_local_sha
         assets_pushed_paths "$_local_sha" "$_remote_sha" "$1" > "$_changed"
-        if assets_shared_surface < "$_changed"; then
+        if assets_shared_surface < "$_changed" ||
+           assets_lib_exposure "$_remote_sha" "$_local_sha" < "$_changed"; then
             _stems=$(assets_trios "$_local_sha")
             _why=shared-surface
         else
@@ -188,6 +210,11 @@ assets_range_affected() {   # <base> <head> <scratch-dir>
     }
     if assets_shared_surface < "$_changed"; then
         printf 'assets ▸ affected: %s..%s moves the shared surface every verdict is computed from\n' \
+            "$_base" "$2"
+        return 0
+    fi
+    if assets_lib_exposure "$_base" "$2" < "$_changed"; then
+        printf 'assets ▸ affected: %s..%s rewires the contract modules in src/lib.rs\n' \
             "$_base" "$2"
         return 0
     fi
