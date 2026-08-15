@@ -5,9 +5,9 @@
 """Steering-model gate report for track-sandbox harness captures (schema 2).
 
 Consumes the JSONL a scripted `SANDBOX_HARNESS` run writes (src/track_sandbox/
-harness.rs) and verifies the belt drive model's invariants as numbers — the
-steer-feel counterpart to scripts/divergence/analyze.py: instead of eyeballing
-whether the tank "turns right about right", every run is checked against what
+harness.rs) and verifies the belt drive model's invariants as numbers: instead
+of eyeballing whether the tank "turns right about right", every run is checked
+against what
 the model (src/track/forces.rs + drive.rs) promises by construction.
 
 Each file self-describes via its `meta` row (schema:2 — slew, half_tread, mu,
