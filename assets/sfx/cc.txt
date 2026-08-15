@@ -4,24 +4,30 @@ Every line below is a placeholder. Each shipped clip needs its source, author, l
 recorded here (the shape assets/tiger_1/cc.txt and assets/vfx/cc.txt use) before this file is
 anything but a manifest.
 
-Shipped clips (all mono, 48 kHz, Ogg Vorbis -- the only codec this build decodes):
+Shipped clips (all mono Ogg Vorbis -- the only codec this build decodes). Sample rate is stated
+PER FILE, as measured with ffprobe: they are not uniform.
 
-  click/click_1.ogg              -- UI click on the fire press (non-spatial)
+  click/click_1.ogg              -- 44.1 kHz, 0.183 s. UI click on the fire press (non-spatial);
+                                    the one clip that is not tank data.
                                     TODO(yan): source / author / license
-  engine/engine_loop_44hz.ogg    -- seamless 3.000 s engine loop, measured cylinder-pop rate
-                                    44.3 Hz; playback speed is driven from crank rpm
-                                    (src/sfx/mod.rs). The filename records the MEASURED rate.
+  engine/engine_loop_44hz.ogg    -- 48 kHz, seamless 3.000 s engine loop, measured cylinder-pop
+                                    rate 44.3 Hz. The filename records the MEASURED rate; the
+                                    tank sheet authors it (tiger_1.tank.ron, engine.sound), and
+                                    src/sfx derives playback speed from crank rpm.
                                     TODO(yan): source / author / license
-  explosion/88_cannon_1.ogg      -- 88 mm main-gun report, variant 1 of 5
+  explosion/88_cannon_1.ogg      -- 48 kHz, 2.000 s. 88 mm main-gun report, take 1 of 5
                                     TODO(yan): source / author / license
-  explosion/88_cannon_2.ogg      -- 88 mm main-gun report, variant 2 of 5
+  explosion/88_cannon_2.ogg      -- 48 kHz, 2.000 s. 88 mm main-gun report, take 2 of 5
                                     TODO(yan): source / author / license
-  explosion/88_cannon_3.ogg      -- 88 mm main-gun report, variant 3 of 5
+  explosion/88_cannon_3.ogg      -- 48 kHz, 2.000 s. 88 mm main-gun report, take 3 of 5
                                     TODO(yan): source / author / license
-  explosion/88_cannon_4.ogg      -- 88 mm main-gun report, variant 4 of 5
+  explosion/88_cannon_4.ogg      -- 48 kHz, 2.000 s. 88 mm main-gun report, take 4 of 5
                                     TODO(yan): source / author / license
-  explosion/88_cannon_5.ogg      -- 88 mm main-gun report, variant 5 of 5
+  explosion/88_cannon_5.ogg      -- 48 kHz, 2.000 s. 88 mm main-gun report, take 5 of 5
                                     TODO(yan): source / author / license
+
+The five 88 takes are the MainGun's authored report_clips list in tiger_1.tank.ron -- no code
+names them, so a take is added or dropped by editing that list.
 
 Not shipped: engine/diesel_unedited.ogg, the raw recording the engine loop was cut from, is kept
 out of the repository on purpose -- it is source material, not a game asset.
