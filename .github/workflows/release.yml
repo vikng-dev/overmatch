@@ -81,6 +81,13 @@ jobs:
       # `<id>.tank.ron`, `<id>.glb` in one directory — so a second vehicle is gated by the rule that
       # found the first. Only the models are hydrated: a `.blend` in the checkout is a pointer file,
       # which is all discovery reads.
+      # `asset_verify` links the whole crate; without a cache this job rebuilds bevy cold
+      # (~20 min, measured on v0.3.0 and v0.4.0-alpha.1). The cache changes nothing about WHAT
+      # is verified — a lockfile change simply pays the cold build once.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-asset-verify
+          cache-on-failure: true
       - name: Verify every shipped asset
         shell: bash
         run: |
