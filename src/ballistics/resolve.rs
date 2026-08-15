@@ -34,9 +34,9 @@ use super::walk::{
     Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, BallisticSurfaces, ComponentHealth, HullShockLedger, Impact, ImpactSurface,
-    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
-    ShockCause, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
+    ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactSurface, MarchingShell,
+    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, apply_hit_impulse,
+    capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
 /// How far past first contact the first corridor reaches. Most crossings close well inside it; the
@@ -146,11 +146,7 @@ pub(crate) fn resolve_crossing(
     seeds: &[SampleSeed],
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     not_own: &dyn Fn(Entity) -> bool,
     commands: &mut Commands,
 ) -> Result<Crossing, WalkError> {
@@ -466,11 +462,7 @@ fn ricochet(
     radius: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
@@ -496,14 +488,12 @@ fn ricochet(
         .get(struck)
         .ok()
         .map(|owner| owner.tank());
-    let victim = body.and_then(|body| context.world.combatants.get(body).ok().copied());
     if let Some(body) = body {
         apply_hit_impulse(
             bodies,
             body,
             shell.projectile.mass * (v_in - Vec3::from(out) * bled),
             position,
-            ShockCause::Ricochet,
         );
     }
 
@@ -514,7 +504,6 @@ fn ricochet(
         surface: ImpactSurface::Armor,
         penetrated: false,
         deflection: Some(Vec3::from(out)),
-        authority: None,
     });
     shell.marks.ricochets.push(position);
     shell.path.points.push(position);
@@ -527,7 +516,6 @@ fn ricochet(
             direction: Vec3::from(out),
             speed: bled,
             sequence: (shell.marks.ricochets.len() - 1) as u32,
-            victim,
         });
     }
 
@@ -561,11 +549,7 @@ fn perforate_or_embed(
     speed: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<(
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-        Option<&mut HullShockLedger>,
-    )>,
+    bodies: &mut Query<(Forces, Option<&mut crate::track::sim::TrackGripWake>)>,
     commands: &mut Commands,
 ) -> Crossing {
     let mut damage = 0.0;
@@ -582,7 +566,6 @@ fn perforate_or_embed(
         .get(struck)
         .ok()
         .map(|owner| owner.tank());
-    let victim = body.and_then(|body| context.world.combatants.get(body).ok().copied());
     let v_in = Vec3::from(incoming) * speed;
 
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
@@ -614,13 +597,7 @@ fn perforate_or_embed(
             shell.path.points.push(at);
             // Stopped: the entrance surface's body absorbs the whole remaining momentum.
             if let Some(body) = body {
-                apply_hit_impulse(
-                    bodies,
-                    body,
-                    shell.projectile.mass * v_in,
-                    at,
-                    ShockCause::Embed,
-                );
+                apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, at);
             }
             (ArmorCrossing::Embedded { at }, at, Vec::new(), approach + t)
         }
@@ -637,7 +614,6 @@ fn perforate_or_embed(
                     body,
                     shell.projectile.mass * (v_in - Vec3::from(bent) * residual),
                     entrance_position,
-                    ShockCause::Perforation,
                 );
             }
             shell.marks.events.push(PenetrationEvent {
@@ -698,7 +674,6 @@ fn perforate_or_embed(
         surface: ImpactSurface::Armor,
         penetrated: true,
         deflection: None,
-        authority: None,
     });
     if let Some(shot) = shell.shot
         && !*terminal_emitted
@@ -711,7 +686,6 @@ fn perforate_or_embed(
             normal: plan_entrance.normal,
             penetrated: true,
             after_bounces: shell.marks.ricochets.len() as u32,
-            victim,
         });
     }
 

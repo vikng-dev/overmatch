@@ -217,11 +217,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
-        // The REV-22 hull-shock counter starts at "never hit". Like the gate above, it is
-        // authority state a replicated client attachment must not overwrite.
-        crate::ballistics::HullShock::default(),
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
-        // view and never initializes rollback state.
+        // view and never initializes replicated state.
         tank_servos(content.spec()),
         root_bundle,
     ));
@@ -254,7 +251,6 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             TrackGripWake::default(),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
-            crate::ballistics::HullShock::default(),
             tank_servos(content.spec()),
             root_bundle,
         ))
@@ -271,7 +267,6 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root: Entity,
     content: TankContent,
     presentation: TankPresentation,
-    predicted: bool,
     root_bundle: B,
 ) {
     let mut root_commands = commands.entity(root);
@@ -281,18 +276,14 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            // TankTransmission, WeaponGate, HullShock, TankServos, and TrackGripElements arrived in
-            // the predicted replication init snapshot. Do not overwrite current authority state
-            // with fresh spec-derived values.
+            // Replicated authority state (TankTransmission, WeaponGate, servo snapshots) arrived
+            // in the replication init snapshot. Do not overwrite it with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);
-    if !predicted {
-        // Interpolated remotes retain the established public-angle chase without manufacturing the
-        // owner-private component. If this is an owner whose Predicted marker is merely late, this
-        // separate state leaves the arriving TankServos snapshot untouched for promotion.
-        root_commands.insert(RemoteServos::for_count(content.spec().servos.len()));
-    }
+    // Interpolated replicas chase the replicated public angles without manufacturing the
+    // owner-private component.
+    root_commands.insert(RemoteServos::for_count(content.spec().servos.len()));
     assemble_tank_body(commands, root, content);
 }
 
@@ -877,10 +868,6 @@ fn insert_root_components(
         TankSim {
             weapons: vec![WeaponState::default(); weapon_count],
         },
-        // Local, never-replicated bookkeeping beside the replicated `HullShock`: the authority's
-        // episode window on one side, the owner's last-realized mark on the other. It rides every
-        // spawn path — including a replicated attachment, whose `HullShock` arrives instead.
-        crate::ballistics::HullShockLedger::default(),
         rig,
         SimParts(parts),
     ));

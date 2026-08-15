@@ -2,7 +2,6 @@
 
 use bevy::prelude::{Quat, Vec3};
 
-use crate::ballistics::HullShock;
 #[cfg(test)]
 use crate::tank::TankServos;
 use crate::tank::{ServoState, TankSim, WeaponGate};
@@ -92,7 +91,7 @@ pub(super) struct TankStateHash {
     pub(super) av: u64,
     /// The carried-state combination (fixed order: `drv, srv, rld, rec, blt, trn, elm`) — kept so
     /// existing analysis keyed on `hsim` still gets its single "did any carried state differ?"
-    /// boolean. [`TankStateHash::shk`] is deliberately NOT a member; see its own note.
+    /// boolean.
     pub(super) sim: u64,
     /// `TrackDrive` shaped throttle/steer.
     pub(super) drv: u64,
@@ -100,18 +99,6 @@ pub(super) struct TankStateHash {
     pub(super) srv: u64,
     /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order.
     pub(super) rld: u64,
-    /// Hull shock: episode count, the authority tick it closed on, the tick it OPENED on, and the
-    /// cause tag — every field of `HullShock`, held exhaustive by
-    /// `hull_shock_fields_localize_to_the_shock_stream`.
-    ///
-    /// SEPARATE, not folded into [`TankStateHash::sim`] or `combined`. This is the ONE stream a
-    /// predicted owner is EXPECTED to disagree with the authority on: the client cannot know it was
-    /// shot until the message lands, so every delivery window legitimately mismatches here. Folded
-    /// in, those windows read as unexplained carried-state drift and corrupt the divergence rate —
-    /// and `scripts/divergence/analyze.py` cannot even attribute them, because it decodes `hsim`
-    /// from the seven streams that ARE folded and does not consume `hshk`. Kept as its own
-    /// informational stream, a `shk` mismatch names the delivery window and nothing else.
-    pub(super) shk: u64,
     /// Barrel recoil offset/velocity, every weapon in slot order.
     pub(super) rec: u64,
     /// Per-side belt state: speed + phase.
@@ -140,7 +127,6 @@ pub(super) fn hash_tank_state_with_elements(
     elements: Option<&TrackGripElements>,
     transmission: &TankTransmission,
     weapon_gate: Option<&WeaponGate>,
-    shock: Option<&HullShock>,
     servos: &[ServoState],
     sim: &TankSim,
 ) -> TankStateHash {
@@ -201,20 +187,6 @@ pub(super) fn hash_tank_state_with_elements(
     let rld = hrl.finish();
     let rec = hrc.finish();
 
-    let mut hsk = Fnv64::new();
-    hsk.write_bool(shock.is_some());
-    if let Some(shock) = shock {
-        hsk.write_u32(shock.count);
-        hsk.write_u32(shock.tick);
-        // The episode's OPEN tick is part of the claim, not decoration: `net::adoption` correlates a
-        // spark with a shove by membership in `[opened, tick]`, so two peers holding the same count
-        // and close tick over different spans disagree about which hits the episode is made of. A
-        // diagnostic that cannot see that disagreement cannot attribute it.
-        hsk.write_u32(shock.opened);
-        hsk.write_u8(shock.cause as u8);
-    }
-    let shk = hsk.finish();
-
     let mut hbl = Fnv64::new();
     for side in &drive.sides {
         hbl.write_f32(side.speed);
@@ -233,7 +205,7 @@ pub(super) fn hash_tank_state_with_elements(
     // GradeShift tag.
     let mut htr = Fnv64::new();
     for field in transmission_state_projection(&transmission.0) {
-        match field.value {
+        match field {
             TransmissionProjectionValue::U8(value) => htr.write_u8(value),
             TransmissionProjectionValue::I8(value) => htr.write_i8(value),
             TransmissionProjectionValue::Bool(value) => htr.write_bool(value),
@@ -266,8 +238,7 @@ pub(super) fn hash_tank_state_with_elements(
     }
     let elm = hel.finish();
 
-    // `shk` is absent on purpose — see the note on `TankStateHash::shk`. Every other carried-state
-    // stream is a fact both worlds should already agree on tick-for-tick.
+    // Every carried-state stream is a fact both worlds should already agree on tick-for-tick.
     let mut hs = Fnv64::new();
     for sub in [drv, srv, rld, rec, blt, trn, elm] {
         hs.write_u64(sub);
@@ -290,7 +261,6 @@ pub(super) fn hash_tank_state_with_elements(
         drv,
         srv,
         rld,
-        shk,
         rec,
         blt,
         trn,
@@ -308,16 +278,6 @@ fn test_weapon_gate() -> WeaponGate {
             paused_at_tick: None,
             belt_remaining: 47,
         }],
-    }
-}
-
-#[cfg(test)]
-fn test_shock() -> HullShock {
-    HullShock {
-        count: 3,
-        tick: 1_209,
-        opened: 1_197,
-        cause: crate::ballistics::ShockCause::Perforation,
     }
 }
 
@@ -378,7 +338,6 @@ fn hash_tank_state_with_gate_and_servos(
         None,
         transmission,
         Some(weapon_gate),
-        Some(&test_shock()),
         &servos.states,
         sim,
     )
@@ -424,7 +383,6 @@ pub(crate) struct CanonicalTankStateDigest {
     drive: u64,
     servo: u64,
     weapon_gate: u64,
-    shock: u64,
     recoil: u64,
     belts: u64,
     transmission: u64,
@@ -443,7 +401,6 @@ pub(crate) fn canonical_tank_state_digest(
     elements: &TrackGripElements,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
-    shock: Option<&HullShock>,
     servos: &TankServos,
     sim: &TankSim,
 ) -> CanonicalTankStateDigest {
@@ -457,7 +414,6 @@ pub(crate) fn canonical_tank_state_digest(
         Some(elements),
         transmission,
         Some(weapon_gate),
-        shock,
         &servos.states,
         sim,
     );
@@ -479,48 +435,12 @@ pub(crate) fn canonical_tank_state_digest(
         drive: hash.drv,
         servo: hash.srv,
         weapon_gate: hash.rld,
-        shock: hash.shk,
         recoil: hash.rec,
         belts: hash.blt,
         transmission: hash.trn,
         elements: hash.elm,
         rounds_fired,
     }
-}
-
-/// Test-only readout for the exact `helm` stream. Keeping the digest fields private prevents
-/// production callers from depending on its decomposition while the netcode battery can name the
-/// element-hash assertion explicitly.
-#[cfg(test)]
-pub(crate) fn canonical_element_hash(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
-    drive: &TrackDrive,
-    grip: &TrackGrip,
-    elements: &TrackGripElements,
-    transmission: &TankTransmission,
-    weapon_gate: &WeaponGate,
-    shock: Option<&HullShock>,
-    servos: &TankServos,
-    sim: &TankSim,
-) -> u64 {
-    canonical_tank_state_digest(
-        position,
-        rotation,
-        linvel,
-        angvel,
-        drive,
-        grip,
-        elements,
-        transmission,
-        weapon_gate,
-        shock,
-        servos,
-        sim,
-    )
-    .elements
 }
 
 #[cfg(test)]
@@ -597,17 +517,12 @@ mod tests {
         let transmission = sample_transmission();
         let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
         let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        // RE-MEASURED when `shk` was UNFOLDED from the carried-state combination: only `combined`
-        // and `sim` moved, and they moved because the shock stream left them. Every per-family
-        // stream's bytes — `shk` included — were unchanged, which is what made that reading safe.
-        // RE-MEASURED AGAIN when `HullShock::opened` entered the `shk` stream (REV 24 put the
-        // episode's own span on the wire and the hash had not followed). ONLY `shk` moves, which is
-        // the containment property this file exists to keep: a shock-stream change must not touch
-        // `combined`, `sim`, or any other family.
+        // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
+        // never folded into `combined` or `sim`, so every remaining stream's bytes are unchanged.
         assert_eq!(
             [
-                a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.shk, a.rec,
-                a.blt, a.trn, a.elm,
+                a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.rec, a.blt,
+                a.trn, a.elm,
             ],
             [
                 17_496_020_387_936_353_359,
@@ -619,7 +534,6 @@ mod tests {
                 3_269_583_271_824_065_410,
                 14_071_911_453_643_095_408,
                 3_439_918_263_059_415_993,
-                17_404_910_983_234_936_864,
                 12_037_784_973_900_930_602,
                 16_317_528_332_690_472_771,
                 16_561_026_162_406_393_170,
@@ -886,95 +800,6 @@ mod tests {
         }
     }
 
-    /// Every hull-shock field moves the `shk` stream and NOTHING else — not `sim`, not `combined`.
-    /// That containment is the whole point: an owner who has not yet been told it was shot
-    /// disagrees HERE and only here, so the analyzer sees a delivery gap rather than an
-    /// unattributable carried-state drift it has no decode for.
-    ///
-    /// EXHAUSTIVE BY CONSTRUCTION, not by an enumerated list. The list rotted once already: REV 24
-    /// added `HullShock::opened` and this test kept claiming "every hull-shock field" while varying
-    /// three of four, so two peers could disagree about an episode's span and produce identical `shk`
-    /// diagnostics. The variants below are built by DESTRUCTURING the struct and re-forming it field
-    /// by field, so a fifth field stops this file compiling — in the pattern and in every literal —
-    /// until someone decides what it does to the stream.
-    #[test]
-    fn hull_shock_fields_localize_to_the_shock_stream() {
-        let (p, q, lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let transmission = sample_transmission();
-        let hash = |shock: Option<&HullShock>| {
-            hash_tank_state_with_elements(
-                p,
-                q,
-                lv,
-                av,
-                &drive,
-                &grip,
-                None,
-                &transmission,
-                Some(&test_weapon_gate()),
-                shock,
-                &test_servos().states,
-                &sim,
-            )
-        };
-        let base = hash(Some(&test_shock()));
-
-        let HullShock {
-            count,
-            tick,
-            opened,
-            cause,
-        } = test_shock();
-        let variants = [
-            HullShock {
-                count: count.wrapping_add(1),
-                tick,
-                opened,
-                cause,
-            },
-            HullShock {
-                count,
-                tick: tick.wrapping_add(1),
-                opened,
-                cause,
-            },
-            // Narrowed, not widened: `opened <= tick` is the authority's own invariant, and a
-            // fixture that broke it would be perturbing a value the producer cannot publish.
-            HullShock {
-                count,
-                tick,
-                opened: opened.wrapping_add(1),
-                cause,
-            },
-            HullShock {
-                count,
-                tick,
-                opened,
-                cause: crate::ballistics::ShockCause::Ricochet,
-            },
-        ];
-
-        for variant in variants {
-            let moved = hash(Some(&variant));
-            assert_ne!(base.shk, moved.shk, "hull-shock field {variant:?} unhashed");
-            assert_eq!(
-                (base.sim, base.combined),
-                (moved.sim, moved.combined),
-                "a delivery-window shock disagreement must not read as carried-state drift",
-            );
-            assert_eq!(
-                (base.drv, base.srv, base.rld, base.rec, base.blt, base.trn),
-                (
-                    moved.drv, moved.srv, moved.rld, moved.rec, moved.blt, moved.trn,
-                )
-            );
-        }
-
-        // An absent component is not the same fact as a hull that has never been shot.
-        assert_ne!(hash(None).shk, hash(Some(&HullShock::default())).shk);
-    }
-
     /// Element strain and force-affecting contact lifetime are exact state, ordered by side then
     /// flat material `link * 3 + column`, and localize to their own carried-state stream.
     #[test]
@@ -993,7 +818,6 @@ mod tests {
             Some(&elements),
             &transmission,
             Some(&test_weapon_gate()),
-            Some(&test_shock()),
             &test_servos().states,
             &sim,
         );
@@ -1010,7 +834,6 @@ mod tests {
             Some(&strain),
             &transmission,
             Some(&test_weapon_gate()),
-            Some(&test_shock()),
             &test_servos().states,
             &sim,
         );
@@ -1040,7 +863,6 @@ mod tests {
             Some(&dwell),
             &transmission,
             Some(&test_weapon_gate()),
-            Some(&test_shock()),
             &test_servos().states,
             &sim,
         );
@@ -1067,15 +889,11 @@ mod tests {
             &elements,
             &transmission,
             &test_weapon_gate(),
-            Some(&test_shock()),
             &test_servos(),
             &sim,
         );
-        // RE-MEASURED when `shk` was unfolded from the carried-state combination. `simulation` and
-        // `rollback` derive from `combined`, so both moved; the shock stream stays covered here as
-        // its own field, which is why this digest loses no rollback completeness.
-        // RE-MEASURED AGAIN when `HullShock::opened` entered the `shk` stream. Only `shock` moves —
-        // `simulation` and `rollback` are unchanged, because `shk` is not folded into `combined`.
+        // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
+        // never folded into `combined`, so `simulation` and `rollback` are unchanged.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
@@ -1088,7 +906,6 @@ mod tests {
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
                 weapon_gate: 3_439_918_263_059_415_993,
-                shock: 17_404_910_983_234_936_864,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 16_561_026_162_406_393_170,
@@ -1112,7 +929,6 @@ mod tests {
             &elements,
             &transmission,
             &test_weapon_gate(),
-            Some(&test_shock()),
             &test_servos(),
             &phase_shifted,
         );

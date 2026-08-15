@@ -1,5 +1,9 @@
 # Mutual contact resolves on the authority; non-owned tanks stay interpolated
 
+> **Status: subsumed by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15).
+> Contact still resolves on the authority; "non-owned tanks stay interpolated" generalized to
+> ALL tanks, the own hull included.
+
 Tank-tank contact is resolved server-side, and opponents remain `Interpolated` rather than predicted. We reject predicting non-owned tanks: a client's own hull lives at the predicted tick and an opponent's collider at the interpolation tick (`design/timelines-and-shear.md`), so a local ram is sheared by ~RTT/2 + interpolation delay — and closing that gap by predicting both bodies replaces shear with *mutual misprediction*, fed through a contact solver, which is the one part of the simulation that **expands** perturbations rather than damping them ([[0016-replicate-causes-derive-consequences]], test 3).
 
 ## Considered options

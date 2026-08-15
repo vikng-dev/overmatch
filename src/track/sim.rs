@@ -59,9 +59,8 @@ use super::transmission::{
 pub(crate) const MU: f32 = 0.9;
 const SLIP_SATURATION: f32 = 0.4;
 
-/// Per-tank tracked-drivetrain sim state: owner-predicted, replicated to remotes, rolled
-/// back — the `LinearVelocity` registration pattern in `net::protocol` (replicate + predict +
-/// float-threshold rollback condition). Hashed into the determinism trace (`hblt`).
+/// Per-tank tracked-drivetrain sim state: server-authoritative, replicated to every client for
+/// the track view. Hashed into the determinism trace (`hblt`).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct TrackDrive {
     /// The shaped drive signal in [−1, 1]: `TankCommand` targets slewed through
@@ -91,8 +90,7 @@ pub struct TransmissionFeelTest(pub TransmissionMode);
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
 /// stage-C demand/filter/target/hill-hold scheduler state). REV 14 replicates this one atomic root
-/// component: server-authoritative, predicted and rolled back for the owner, visible but not
-/// predicted for remote tanks. Server and owning client both advance it through the same
+/// component: server-authoritative, advanced only where the body is dynamic through the
 /// spec-selected branch of [`apply_track_forces`]. The determinism trace hashes all 16 inventory
 /// fields in stable order, with raw bits for both floats.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -122,8 +120,7 @@ pub struct TrackGrip {
 
 /// Local per-tick rigid-body/belt effect of track traction. The force and torque already include
 /// every per-element damping contribution because they are accumulated from the final emitted
-/// traction applications. Locally rollback-historied so a server anchor can be compared at the
-/// tick that produced it rather than against the client's present.
+/// traction applications.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TrackGripEffect {
     /// Total world-space traction force on the hull (N).
@@ -132,8 +129,7 @@ pub struct TrackGripEffect {
     pub traction_torque: Vec3,
     /// Longitudinal ground reaction on `[left, right]` belts (N).
     pub belt_reaction: [f32; 2],
-    /// Coarse, quantized digest of the complete element field. Diagnostic/request evidence only;
-    /// it never triggers rollback without an exact checkpoint.
+    /// Coarse, quantized digest of the complete element field. Diagnostic evidence only.
     pub field_digest: u32,
 }
 
@@ -152,10 +148,6 @@ impl TrackGripWake {
         if impulse != Vec3::ZERO {
             self.generation = self.generation.wrapping_add(1);
         }
-    }
-
-    pub(crate) fn generation(self) -> u32 {
-        self.generation
     }
 }
 
@@ -294,11 +286,6 @@ impl TrackGear {
     /// the sole owner of how this choice affects simulation.
     pub(crate) fn mode(&self) -> TransmissionMode {
         self.mode
-    }
-
-    /// Per-side reflected belt inertia used by the anchor's physical belt-speed error metric.
-    pub(crate) fn belt_inertia(&self) -> f32 {
-        self.params.inertia
     }
 
     /// The spec-authored material-link count — the station count [`belt_tick`] runs and the
@@ -800,14 +787,12 @@ fn apply_track_forces(
             capture.command = [command.throttle, command.steer];
         }
         // Only dynamic bodies simulate the belt — and the guard sits BEFORE command shaping:
-        // `TrackDrive` is replicated state, and a late-promotion tick that lands while the
-        // body is still Static must not locally slew the replicated throttle/steer once and
-        // hand the first dynamic predicted tick an altered starting value.
-        // Forces are no-ops on kinematic/static bodies, remotes'
-        // `TrackDrive` is replicated for their track view, and interpolated remotes neither
-        // receive nor simulate the private element field (ADR-0027 disclosure). Skipping
-        // them entirely also keeps their replicated belt state from being fought by a
-        // locally-integrated one.
+        // `TrackDrive` is replicated state, and a client tick must not locally slew the
+        // replicated throttle/steer. Forces are no-ops on kinematic/static bodies, replicated
+        // tanks' `TrackDrive` arrives for their track view, and clients neither receive nor
+        // simulate the private element field (ADR-0027 disclosure). Skipping them entirely
+        // also keeps their replicated belt state from being fought by a locally-integrated
+        // one.
         if !matches!(*body, RigidBody::Dynamic) {
             continue;
         }

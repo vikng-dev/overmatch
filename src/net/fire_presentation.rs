@@ -65,10 +65,8 @@
 //!
 //! # SCOPE
 //!
-//! Client-side, own tank, `Interpolated` and not `Predicted` — the same observable role
-//! `net::recoil_overlay` arms on. In predicted mode nothing here arms and the fire path is
-//! bit-identical to what it was: the ledger component is absent, so the gate is untouched and the
-//! attested command reaches `shooting::fire` unmodified.
+//! Client-side, own tank, `Interpolated` — the same observable role `net::recoil_overlay`
+//! arms on.
 //!
 //! Design note: `.agents/scratch/burst-state-fire-stack-map-2026-08-14.md`; the loss-proofing
 //! holes: `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §3.
@@ -81,9 +79,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{
-    Interpolated, IsSynced, LocalTimeline, NetworkTimeline, PingManager, Predicted,
-};
+use lightyear::prelude::{Interpolated, IsSynced, LocalTimeline, NetworkTimeline, PingManager};
 
 use super::protocol::{InputBridge, NetTank};
 use super::sync_margin::ArrivalDelay;
@@ -378,10 +374,7 @@ pub(super) fn present_shot_at_age(
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
 }
 
-/// Arm the own tank once the server stream — not local prediction — owns its gate.
-///
-/// `Without<Predicted>` makes this inert in predicted mode, where the gate is predicted state with
-/// a rollback condition and the sim already owns it.
+/// Arm the own tank once the server stream owns its gate.
 #[expect(clippy::type_complexity, reason = "one arming predicate, spelled out")]
 fn arm_own_fire_presentation(
     tanks: Query<
@@ -390,7 +383,6 @@ fn arm_own_fire_presentation(
             With<NetTank>,
             With<Controlled>,
             With<Interpolated>,
-            Without<Predicted>,
             Without<OwnFirePresentation>,
             Without<ChildOf>,
         ),
@@ -1167,8 +1159,7 @@ mod tests {
         );
     }
 
-    /// PREDICTED MODE IS INERT: the ledger arms only where the server stream owns the gate, so the
-    /// predicted fire path keeps reading its own predicted `WeaponGate` exactly as before.
+    /// The ledger arms only on the own interpolated gate — never an opponent's.
     #[test]
     fn only_the_own_interpolated_gate_arms() {
         let mut app = App::new();
@@ -1179,10 +1170,6 @@ mod tests {
             .world_mut()
             .spawn((NetTank, Controlled, Interpolated, gate()))
             .id();
-        let predicted = app
-            .world_mut()
-            .spawn((NetTank, Controlled, Predicted, gate()))
-            .id();
         let opponent = app.world_mut().spawn((NetTank, Interpolated, gate())).id();
 
         app.world_mut()
@@ -1190,7 +1177,6 @@ mod tests {
             .expect("arming runs");
 
         assert!(app.world().get::<OwnFirePresentation>(own).is_some());
-        assert!(app.world().get::<OwnFirePresentation>(predicted).is_none());
         assert!(app.world().get::<OwnFirePresentation>(opponent).is_none());
     }
 

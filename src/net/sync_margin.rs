@@ -74,9 +74,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{
-    InputTimelineConfig, Interpolated, IsSynced, Predicted, SyncConfig, SyncSystems,
-};
+use lightyear::prelude::{InputTimelineConfig, Interpolated, IsSynced, SyncConfig, SyncSystems};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
@@ -466,7 +464,6 @@ fn derive_input_margins(
             With<Controlled>,
             With<NetTank>,
             With<Interpolated>,
-            Without<Predicted>,
             Without<ChildOf>,
         ),
     >,

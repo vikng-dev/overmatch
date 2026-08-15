@@ -31,9 +31,6 @@ pub(crate) struct SanctionedBounce {
     pub bounce_tick: u32,
     /// Zero-based ordinal, consumed strictly in order.
     pub sequence: u32,
-    /// The combatant whose body the authority gave this bounce's impulse to, if any. Carried so the
-    /// spark this bounce draws can be matched to the `HullShock` episode it belongs to.
-    pub victim: Option<crate::CombatantId>,
 }
 
 /// A server-sanctioned armor terminal consumed by a client cosmetic shell.
@@ -49,9 +46,6 @@ pub(crate) struct SanctionedTerminal {
     pub impact_tick: u32,
     /// Required number of prior bounces before this terminal may be consumed.
     pub after_bounces: u32,
-    /// The combatant whose body the authority gave this terminal's impulse to, if any. See
-    /// [`SanctionedBounce::victim`].
-    pub victim: Option<crate::CombatantId>,
 }
 
 /// Per-shot sanctioned state: ordered bounces + the (at most one) terminal, plus an age for expiry.
@@ -361,7 +355,6 @@ mod tests {
                                 speed: 500.0,
                                 bounce_tick: fire_tick,
                                 sequence: 0,
-                                victim: None,
                             }
                         ),
                         SanctionedBounceInsert::Inserted
@@ -397,7 +390,6 @@ mod tests {
                         speed: 500.0,
                         bounce_tick: fire_tick,
                         sequence: 0,
-                        victim: None,
                     }
                 ),
                 SanctionedBounceInsert::Inserted
@@ -418,7 +410,6 @@ mod tests {
                     speed: 500.0,
                     bounce_tick: incoming.fire_tick,
                     sequence: 0,
-                    victim: None,
                 }
             ),
             SanctionedBounceInsert::Inserted
@@ -463,7 +454,6 @@ mod tests {
                         speed: 500.0,
                         bounce_tick: 100 + sequence,
                         sequence,
-                        victim: None,
                     }
                 ),
                 SanctionedBounceInsert::Inserted
@@ -479,7 +469,6 @@ mod tests {
                     speed: 500.0,
                     bounce_tick: 100 + MAX_COSMETIC_CATCH_UP_TICKS,
                     sequence: MAX_COSMETIC_CATCH_UP_TICKS,
-                    victim: None,
                 }
             ),
             SanctionedBounceInsert::Capacity,
@@ -507,7 +496,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: 100,
             sequence: 0,
-            victim: None,
         };
         let second = SanctionedBounce {
             origin: Vec3::new(3.5, 0.0, 0.0),
@@ -515,7 +503,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: 104,
             sequence: 1,
-            victim: None,
         };
         let terminal = SanctionedTerminal {
             position: Vec3::new(3.5, 3.5, 0.0),
@@ -523,7 +510,6 @@ mod tests {
             penetrated: true,
             impact_tick: 108,
             after_bounces: 2,
-            victim: None,
         };
         let mut sanctioned = SanctionedShots::default();
         sanctioned.insert(shot, first);
@@ -592,7 +578,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: 100,
             sequence: 0,
-            victim: None,
         };
         let sanctioned = SanctionedShots::default();
 
@@ -632,7 +617,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: 100,
             sequence: 0,
-            victim: None,
         };
         let second = SanctionedBounce {
             origin: Vec3::X,
@@ -640,7 +624,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS + 1,
             sequence: 1,
-            victim: None,
         };
         let mut sanctioned = SanctionedShots::default();
         sanctioned.insert(shot, first);
@@ -680,7 +663,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: 100,
             sequence: 0,
-            victim: None,
         };
         let second = SanctionedBounce {
             origin: Vec3::X,
@@ -688,7 +670,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: first.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
             sequence: 1,
-            victim: None,
         };
         let terminal = SanctionedTerminal {
             position: Vec3::ONE,
@@ -696,7 +677,6 @@ mod tests {
             penetrated: false,
             impact_tick: second.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
             after_bounces: 2,
-            victim: None,
         };
         let mut sanctioned = SanctionedShots::default();
         sanctioned.insert(shot, first);
@@ -736,7 +716,6 @@ mod tests {
             speed: 10.0,
             bounce_tick: u32::MAX - 2,
             sequence: 0,
-            victim: None,
         };
         let caught_up = catch_up_sanctioned_chain(
             shot,

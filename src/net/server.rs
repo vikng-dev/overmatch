@@ -14,10 +14,8 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::disclosure::{CombatDisclosure, NetTankStatus};
-use super::grip::GripRestState;
 use super::protocol::{
-    LaunchedTurretPose, NetCrew, NetTank, NetTrackGripAnchor, ServoAngles, SetSpawnPoint,
-    protocol_id,
+    LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
 };
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -51,7 +49,6 @@ pub fn run() {
         tick_duration: Duration::from_secs_f64(1.0 / 64.0),
     });
     app.add_plugins(super::plugin);
-    super::grip::install_server(&mut app);
     super::disclosure::install_server(&mut app);
     app.add_plugins(physics::physics_plugins());
     app.add_plugins(SimPlugin);
@@ -618,15 +615,8 @@ fn spawn_pending_tanks(
     }
 }
 
-/// The shipped drive law, default ON: the owner sits in the interpolation set with everyone else,
-/// so its own hull renders and drives from the server stream exactly like an opponent's.
-/// `OVERMATCH_UNPREDICTED_DRIVE=0` opts back into owner prediction. Server-side only — the wire
-/// surface is unchanged (both markers are lightyear registrations in every build), so a stock
-/// client connects and simply receives `Interpolated` where it used to receive `Predicted`.
-const UNPREDICTED_DRIVE: &str = "OVERMATCH_UNPREDICTED_DRIVE";
-
-/// Construct an authoritative player tank. Initial join and respawn share this exact ownership and
-/// prediction bundle so reacquisition cannot drift from first spawn.
+/// Construct an authoritative player tank. Initial join and respawn share this exact ownership
+/// bundle so reacquisition cannot drift from first spawn.
 fn spawn_player_tank(
     commands: &mut Commands,
     content: TankContent<'_>,
@@ -637,7 +627,6 @@ fn spawn_player_tank(
     spawn_rot: Quat,
     combatant: CombatantId,
 ) -> Entity {
-    let unpredicted = crate::env_flag(UNPREDICTED_DRIVE, true);
     let root = spawn_complete_tank(
         commands,
         content,
@@ -664,19 +653,9 @@ fn spawn_player_tank(
             (
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
-                // Default: every client interpolates, the owner included. The opt-out moves the
-                // owner into the prediction set; both components stay inserted in the same flush
-                // either way, so only the target sets move.
-                PredictionTarget::to_clients(if unpredicted {
-                    NetworkTarget::None
-                } else {
-                    NetworkTarget::Single(client_id)
-                }),
-                InterpolationTarget::to_clients(if unpredicted {
-                    NetworkTarget::All
-                } else {
-                    NetworkTarget::AllExceptSingle(client_id)
-                }),
+                // ONE TIMELINE: every client interpolates every hull, the owner's included — the
+                // own hull renders and drives from the server stream exactly like an opponent's.
+                InterpolationTarget::to_clients(NetworkTarget::All),
                 // The owner marker, and the only one the client's game layer keys on: it rides
                 // `ControlledBy`'s owner-scoped visibility, not the prediction target.
                 ControlledBy {
@@ -684,17 +663,9 @@ fn spawn_player_tank(
                     lifetime: default(),
                 },
             ),
-            (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
     );
-    let mode = if unpredicted {
-        "owner INTERPOLATES (unpredicted drive, default)"
-    } else {
-        "owner predicts (opt-out)"
-    };
-    info!(
-        "server: spawned tank {root} for client {client_id} — {mode} [{UNPREDICTED_DRIVE}=0 opts out]"
-    );
+    info!("server: spawned tank {root} for client {client_id} — owner interpolates");
     root
 }
 
@@ -777,7 +748,6 @@ fn spawn_bot_entity(
                 // No owner or prediction target: every client interpolates this body.
                 InterpolationTarget::to_clients(NetworkTarget::All),
             ),
-            (NetTrackGripAnchor::default(), GripRestState::default()),
         ),
     )
 }

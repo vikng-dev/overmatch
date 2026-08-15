@@ -1,5 +1,10 @@
 # Unpredictable authoritative facts adopt unconditionally
 
+> **Status: superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15,
+> `PROTOCOL_REV = 27`): mechanism and need dissolve. The shove is ordinary stream content; the
+> spark arrives at RTT/2 and the shove at RTT/2 + D, so the ordering this stack policed is
+> structurally impossible.
+
 > **Status: accepted; landed local on `feat/authoritative-facts`, playtest pending. `PROTOCOL_REV`
 > is now 25: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
 > branch, naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it to 23, giving
