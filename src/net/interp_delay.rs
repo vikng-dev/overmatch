@@ -32,8 +32,11 @@
 //! is zeroed by `net::sync_margin` — the quantile subsumes it — keeping the half-tick floor.
 //!
 //! `sync_timelines` re-reads `&InterpolationConfig` every frame with no caching, so writing the
-//! component is the whole mechanism. Lightyear converges the timeline by ±5% clock speed rather
-//! than by a step, so the law needs no smoothing and no hysteresis of its own.
+//! component is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
+//! stepped target is an error step the controller escalates to `Resync` (the live gauge showed
+//! `steady=2` from exactly this). The written value therefore FOLLOWS the law through a slewed
+//! follower — at most [`MAX_SLEW_PER_FRAME_TICKS`] per Update frame — and the steady-state
+//! `SyncEvent` count is ZERO (`net::extrapolate`'s FRONTIER `steady=` counter is the live gauge).
 //!
 //! Derivation and the contract constants behind `Q_p`:
 //! `net::sync_margin`'s module doc and `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1.
@@ -50,6 +53,22 @@ use super::sync_margin::{ArrivalDelay, ArrivalStats};
 /// Log-rate guard, not a term of the law: `rtt()` and the quantile spread move continuously, so an
 /// unconditional log is per-frame spam.
 const LOG_STEP: Duration = Duration::from_millis(5);
+
+/// The written `min_delay` moves at most this far per Update frame toward the law's value: half
+/// the sync controller's ±1-tick deadband (`SyncConfig::error_margin` = 1.0 tick, which
+/// `net::sync_margin::derived_interp_sync` keeps), so target motion alone can never exit the
+/// proportional regime and reach `Resync`.
+const MAX_SLEW_PER_FRAME_TICKS: f64 = 0.5;
+
+/// One step of the slewed follower: from `current` at most `step` toward `target`, landing
+/// exactly on it inside the step — a rate-limited pursuit, never the target's step.
+fn slewed(current: Duration, target: Duration, step: Duration) -> Duration {
+    if target > current {
+        (current + step).min(target)
+    } else {
+        current.saturating_sub(step).max(target)
+    }
+}
 
 /// `OVERMATCH_INTERP_DELAY_MS`: SET pins `min_delay` for the session — the certification instrument
 /// needs deliberately-undersized runs (report §5.3) and the A/B against the retired 100 ms pin.
@@ -102,9 +121,10 @@ pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     defaults.with_min_delay(initial)
 }
 
-/// Rewrite `min_delay` from the measured link every frame, ahead of the frame's timeline sync
-/// (and after `net::sync_margin` refreshes the estimator digest). The `!=` guard keeps change
-/// detection quiet while the estimate is settled.
+/// Follow the measured link every frame, ahead of the frame's timeline sync (and after
+/// `net::sync_margin` refreshes the estimator digest): the written `min_delay` slews at most
+/// [`MAX_SLEW_PER_FRAME_TICKS`] per frame toward the law's value. The `!=` guard keeps change
+/// detection quiet while the follower sits on its target.
 pub(super) fn derive_interpolation_delay(
     mode: Res<DelayMode>,
     tick: Res<TickDuration>,
@@ -116,20 +136,25 @@ pub(super) fn derive_interpolation_delay(
         return;
     }
     for (mut config, pings) in &mut clients {
-        let derived = derived_min_delay(pings.rtt(), &estimator.stats, tick.0);
-        if config.min_delay == derived {
+        let target = derived_min_delay(pings.rtt(), &estimator.stats, tick.0);
+        let next = slewed(
+            config.min_delay,
+            target,
+            tick.0.mul_f64(MAX_SLEW_PER_FRAME_TICKS),
+        );
+        if config.min_delay == next {
             continue;
         }
-        if logged.is_none_or(|last| last.abs_diff(derived) >= LOG_STEP) {
+        if logged.is_none_or(|last| last.abs_diff(target) >= LOG_STEP) {
             info!(
-                "net: interpolation min_delay {:.1} ms (rtt {:.1} ms, {})",
-                millis(derived),
+                "net: interpolation min_delay → {:.1} ms (rtt {:.1} ms, {})",
+                millis(target),
                 millis(pings.rtt()),
                 estimator.describe(),
             );
-            *logged = Some(derived);
+            *logged = Some(target);
         }
-        config.min_delay = derived;
+        config.min_delay = next;
     }
 }
 
@@ -141,7 +166,13 @@ fn millis(duration: Duration) -> f64 {
 mod tests {
     use core::time::Duration;
 
-    use super::{ArrivalStats, derived_min_delay};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::World;
+    use lightyear::core::tick::TickDuration;
+    use lightyear::interpolation::timeline::InterpolationConfig;
+    use lightyear::prelude::PingManager;
+
+    use super::{ArrivalDelay, ArrivalStats, derived_min_delay, slewed};
 
     /// The game's fixed tick (64 Hz), spelled out rather than read from the config —
     /// `tests/net_interp_delay.rs` is what fires when lightyear moves its config shape, and this
@@ -229,5 +260,86 @@ mod tests {
         let narrow = derived_min_delay(rtt, &spread(60.0), TICK);
         let wide = derived_min_delay(rtt, &spread(95.0), TICK);
         assert_close(wide - narrow, Duration::from_millis(35), "excess slope");
+    }
+
+    /// THE FOLLOWER IS RATE-LIMITED IN BOTH DIRECTIONS AND LANDS EXACTLY: every step is at most
+    /// `step`, monotone toward the target, and the final step is the remainder — no overshoot, no
+    /// dither around the target. A follower that writes the target directly reds the per-step
+    /// bound; one that always steps the full `step` reds the exact landing.
+    #[test]
+    fn the_follower_steps_at_most_the_bound_and_lands_exactly() {
+        let step = Duration::from_micros(7_812);
+        for (from, to) in [
+            (Duration::from_millis(15), Duration::from_millis(160)),
+            (Duration::from_millis(160), Duration::from_millis(15)),
+        ] {
+            let mut current = from;
+            let mut steps = 0;
+            while current != to {
+                let next = slewed(current, to, step);
+                assert!(
+                    next.abs_diff(current) <= step,
+                    "one frame moves at most one step"
+                );
+                assert!(
+                    next.abs_diff(to) < current.abs_diff(to),
+                    "every step is toward the target"
+                );
+                current = next;
+                steps += 1;
+                assert!(
+                    steps <= 20,
+                    "145 ms at 7.812 ms/frame lands within 19 frames"
+                );
+            }
+            assert_eq!(steps, 19, "⌈145 / 7.812⌉ frames, the last one partial");
+        }
+        // On target the follower is a fixed point — the `!=` write guard stays quiet.
+        let settled = Duration::from_millis(60);
+        assert_eq!(slewed(settled, settled, step), settled);
+    }
+
+    /// A STEP TARGET NEVER STEPS THE WRITTEN CONFIG: the writer walks `min_delay` toward a
+    /// suddenly-large law value at most half a tick per frame (half the sync controller's ±1-tick
+    /// deadband), and converges exactly. A writer that assigns the law's value directly — the
+    /// steady=2 Resync defect this law retires — reds the per-frame bound on its first frame.
+    #[test]
+    fn a_step_target_walks_to_the_law_inside_the_deadband() {
+        let mut world = World::new();
+        world.insert_resource(super::DelayMode::Derived);
+        world.insert_resource(TickDuration(TICK));
+        let mut estimator = ArrivalDelay::default();
+        // A beyond-horizon spread appearing at once: the law's value steps ~47.7 ms upward.
+        estimator.stats = spread(100.0);
+        world.insert_resource(estimator);
+        let installed = Duration::from_nanos(15_625_000);
+        let client = world
+            .spawn((
+                InterpolationConfig::default().with_min_delay(installed),
+                PingManager::default(),
+            ))
+            .id();
+        let target = derived_min_delay(Duration::ZERO, &spread(100.0), TICK);
+        let step = TICK / 2;
+        let mut last = installed;
+        for _ in 0..64 {
+            world
+                .run_system_once(super::derive_interpolation_delay)
+                .expect("writer runs");
+            let now = world
+                .get::<InterpolationConfig>(client)
+                .expect("client config")
+                .min_delay;
+            assert!(
+                now.abs_diff(last) <= step,
+                "one frame moves min_delay at most half a tick (moved {:?})",
+                now.abs_diff(last)
+            );
+            last = now;
+            if now == target {
+                break;
+            }
+        }
+        assert_eq!(last, target, "the follower converges on the law exactly");
     }
 }
