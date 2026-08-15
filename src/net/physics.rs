@@ -1,9 +1,7 @@
 //! Physics configuration shared by the network client and server.
 
 use avian3d::physics_transform::PhysicsTransformSystems;
-use avian3d::prelude::{
-    IslandPlugin, IslandSleepingPlugin, PhysicsInterpolationPlugin, PhysicsTransformPlugin,
-};
+use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsTransformPlugin};
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
@@ -16,13 +14,11 @@ pub(crate) fn plugin(app: &mut App) {
     );
 }
 
-/// Plugin set required by `LightyearAvianPlugin`; Lightyear owns frame interpolation and rollback
-/// must not sleep islands.
+/// Plugin set required by `LightyearAvianPlugin`: transform sync and interpolation belong to
+/// Lightyear, so Avian's own transform and interpolation plugins stay disabled.
 pub fn physics_plugins() -> bevy::app::PluginGroupBuilder {
     avian3d::prelude::PhysicsPlugins::default()
         .build()
         .disable::<PhysicsTransformPlugin>()
         .disable::<PhysicsInterpolationPlugin>()
-        .disable::<IslandPlugin>()
-        .disable::<IslandSleepingPlugin>()
 }
