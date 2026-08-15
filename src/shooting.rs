@@ -565,6 +565,7 @@ mod tests {
                 fire: Vec::new(),
                 load,
                 trigger: Trigger::Secondary,
+                report_clips: Vec::new(),
             },
         ));
         (root, loader)
@@ -607,6 +608,7 @@ mod tests {
                 fire: Vec::new(),
                 load: Vec::new(),
                 trigger: Trigger::Primary,
+                report_clips: Vec::new(),
             },
         ));
         root

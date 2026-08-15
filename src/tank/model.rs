@@ -70,6 +70,25 @@ pub struct Weapon {
     pub load: Requirement,
     /// Command channel for this weapon; independent of its mechanism.
     pub trigger: Trigger,
+    /// Authored report clips (asset-relative paths); empty = a silent weapon. `sfx` rolls one per
+    /// round off this list.
+    pub report_clips: Vec<String>,
+}
+
+/// The tank's engine recording and the facts its playback speed is derived from — spec data on the
+/// root, carried by every tank with an authored `engine.sound` (local, headless, and replicated
+/// alike). Its absence is silence. The rpm→playback-speed law lives in `sfx`.
+#[derive(Component, Clone)]
+pub struct EngineSound {
+    /// Asset-relative path to the seamless loop.
+    pub clip: String,
+    /// Cylinder pops per second in the recording at playback speed 1.0 (MEASURED).
+    pub clip_pop_hz: f32,
+    /// Cylinders in the engine — with the four-stroke cycle, the crank's firing rate.
+    pub cylinders: u32,
+    /// The crank band the recording is mapped across.
+    pub idle_rpm: f32,
+    pub governed_rpm: f32,
 }
 
 /// Which track a roadwheel drives (for differential thrust). Left wheels sit at −X, right at +X.

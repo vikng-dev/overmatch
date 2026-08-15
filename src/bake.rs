@@ -1875,6 +1875,7 @@ mod tests {
         speed: 1.0, caliber: 0.1, mass: 1.0,
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
+        report_clips: [],
     )},
     views: {Gunner: (node: "Sight", fov: 0.5)},"#,
         );
