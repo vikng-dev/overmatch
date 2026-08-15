@@ -13,11 +13,16 @@ use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, spawn_billboard,
-    spawn_billboard_ring, unit_quad,
+    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut,
+    spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
 };
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
+
+/// Acceleration on everything an impact THROWS — dirt ejecta, the armor spark fan, the spall puff:
+/// they leave the surface at launch speed and fall. Smoke, dust, haze and flashes are buoyant or
+/// static and keep their straight drift.
+const DEBRIS_GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 
 /// Dust billow lifetime range (s): a short kicked cloud, not a smoke column; at the MG's cyclic rate
 /// anything longer stacks into fog. The RANGE is the per-impact variation.
@@ -71,19 +76,22 @@ const SPARK_SPREAD: (f32, f32) = (0.15, 0.9);
 // the rise) — no new systems, no new pipelines (every layer is the already-warmed Add flash or Blend
 // smoke pipeline). Physical scale from period gun-camera / range footage of big-AP soil strikes:
 // dirt fountains in the ~4–10 m band with ~1.5–2 s hang. Chosen here: a ~7.7 m plume (5.5 m size ×
-// 1.4 aspect) rising ~4.5 m/s over 1.8 s — mid-band, honest, NOT scaled to screen or range.
+// 1.4 aspect) rising ~4.5 m/s over 1.5 s — mid-band, honest, NOT scaled to screen or range.
+//
+// The layers' lifetimes are staggered so they end one at a time — flash first, the lingering haze
+// seconds after everything else.
 
 /// Contact flash: a bright additive bloom at the instant of the strike (the round's kinetic flash +
-/// dust ignition). Big and brief — size (m), lifetime (s).
+/// dust ignition). Big and brief — size (m), lifetime (s). Maximal on frame one, shrinking after.
 const SPLASH_FLASH_SIZE: f32 = 2.3;
-const SPLASH_FLASH_LIFETIME: f32 = 0.05;
+const SPLASH_FLASH_LIFETIME: f32 = 0.04;
 
 /// Ejecta streaks: the spark-streak geometry recolored to dirt (Blend, not hot), thrown in an
 /// up-biased cone — clods and grit kicked off the strike. Count range, speed (m/s), lifetime (s),
 /// and how strongly the launch cone is pulled toward straight up (0 = along the normal, 1 = up).
 const EJECTA_COUNT: (u32, u32) = (8, 12);
 const EJECTA_SPEED: (f32, f32) = (7.0, 18.0);
-const EJECTA_LIFETIME: (f32, f32) = (0.25, 0.4);
+const EJECTA_LIFETIME: (f32, f32) = (0.19, 0.3);
 const EJECTA_UP_BIAS: f32 = 0.55;
 /// Ejecta streak stretch (seconds-of-travel → length) and width fraction — chunkier than the metal
 /// sparks (soil clods, not needles).
@@ -97,19 +105,26 @@ const SPLASH_PLUME_COUNT: (u32, u32) = (1, 2);
 const SPLASH_PLUME_SIZE: (f32, f32) = (1.6, 5.5);
 const SPLASH_PLUME_ASPECT: Vec3 = Vec3::new(0.7, 1.4, 1.0);
 const SPLASH_PLUME_RISE: f32 = 4.5;
-const SPLASH_PLUME_LIFETIME: f32 = 1.8;
+const SPLASH_PLUME_LIFETIME: f32 = 1.5;
 
-/// Low dust ring: a wide, ground-hugging billboard that blooms outward along the surface — the dust
-/// skirt thrown flat off the strike. Size ease (m), lifetime (s), low alpha.
-const SPLASH_RING_SIZE: (f32, f32) = (1.0, 5.0);
-const SPLASH_RING_LIFETIME: f32 = 0.8;
+/// Ground shock ring: the ground-lying billboard that races outward flat along the surface at the
+/// strike instant — the pressure wave, not the dust that follows it. Size ease (m: birth diameter →
+/// ~8 m across, most of it inside the first fifth of its life on the ease-out), lifetime (s), alpha,
+/// and the erosion sharpness that gives the front a hard edge instead of a soft dust blur (the
+/// dirt masses use [`ImpactAssets::dirt_material`]'s 2.2). The lingering haze below carries the slow
+/// dust read, so this layer is free to be purely the wave.
+const SPLASH_RING_SIZE: (f32, f32) = (1.2, 8.0);
+const SPLASH_RING_LIFETIME: f32 = 0.6;
 const SPLASH_RING_ALPHA: f32 = 0.4;
+const SPLASH_RING_SHARPNESS: f32 = 6.0;
 
 /// Lingering dust cloud: the large, low-alpha brown haze that hangs after the fountain falls — the
-/// slowest layer. Size ease (m), lifetime (s), alpha.
-const SPLASH_CLOUD_SIZE: (f32, f32) = (3.0, 6.0);
-const SPLASH_CLOUD_LIFETIME: f32 = 3.0;
+/// slowest layer, still thinning long after every other layer is gone. Size ease (m — it dissipates
+/// by spreading, not by blinking out), lifetime (s), alpha, and its slow settle-height rise (m/s).
+const SPLASH_CLOUD_SIZE: (f32, f32) = (3.0, 9.0);
+const SPLASH_CLOUD_LIFETIME: f32 = 8.0;
 const SPLASH_CLOUD_ALPHA: f32 = 0.35;
+const SPLASH_CLOUD_RISE: f32 = 0.35;
 
 /// Ground scar: one flat, ground-oriented disturbed-earth mark an 88 AP strike gouges. Footprint
 /// (m, square), lifetime (s, the slowest-fading layer). Lives in its OWN ring ([`GroundMarkRing`],
@@ -130,7 +145,7 @@ const GROUND_MARK_CAP: usize = 16;
 /// Armor contact flash: bigger and hotter than the terrain splash flash ([`SPLASH_FLASH_SIZE`] 2.3)
 /// — the welding-bright instant of steel-on-steel. Size (m), lifetime (s), emissive boost.
 const ARMOR_FLASH_SIZE: f32 = 2.7;
-const ARMOR_FLASH_LIFETIME: f32 = 0.06;
+const ARMOR_FLASH_LIFETIME: f32 = 0.045;
 const ARMOR_FLASH_GLOW: f32 = 13.0;
 
 /// Dense spark fan: many fast hot streaks off the steel (scaled up from the MG garnish's 2–4). Count
@@ -139,7 +154,7 @@ const ARMOR_FLASH_GLOW: f32 = 13.0;
 /// renormalizing; 0 = straight along the fan axis, ~1 ≈ 45°).
 const ARMOR_SPARK_COUNT: (u32, u32) = (14, 20);
 const ARMOR_SPARK_SPEED: (f32, f32) = (16.0, 34.0);
-const ARMOR_SPARK_LIFETIME: (f32, f32) = (0.12, 0.22);
+const ARMOR_SPARK_LIFETIME: (f32, f32) = (0.09, 0.165);
 const ARMOR_SPARK_STRETCH: (f32, f32) = (0.03, 0.05);
 const ARMOR_SPARK_WIDTH_RATIO: f32 = 0.08;
 const ARMOR_SPARK_GLOW: f32 = 14.0;
@@ -152,14 +167,15 @@ const ARMOR_SPARK_DEFLECT_BIAS: f32 = 0.6;
 /// Small gray spall/smoke puff: one short low-alpha gray mass (steel spall, NOT a dirt cloud). Size
 /// ease (m — blooms to ~1.3 m), lifetime (s), alpha, and a gentle rise + normal push (m/s).
 const SPALL_PUFF_SIZE: (f32, f32) = (0.4, 1.3);
-const SPALL_PUFF_LIFETIME: (f32, f32) = (0.3, 0.5);
+const SPALL_PUFF_LIFETIME: (f32, f32) = (0.22, 0.38);
 const SPALL_PUFF_ALPHA: f32 = 0.5;
 const SPALL_PUFF_RISE: f32 = 0.6;
 
 /// Flame lick (penetration only): one brief warm additive flame off the breach — the round's hot
-/// metal igniting as it bites in. Size ease (m), lifetime (s), emissive boost, and a rise (m/s).
-const FLAME_LICK_SIZE: (f32, f32) = (0.6, 1.4);
-const FLAME_LICK_LIFETIME: f32 = 0.16;
+/// metal igniting as it bites in. Size ease (m, birth → death: full width on frame one, collapsing
+/// after), lifetime (s), emissive boost, and a rise (m/s).
+const FLAME_LICK_SIZE: (f32, f32) = (1.5, 0.8);
+const FLAME_LICK_LIFETIME: f32 = 0.12;
 const FLAME_LICK_GLOW: f32 = 8.0;
 const FLAME_LICK_RISE: f32 = 1.2;
 
@@ -282,6 +298,15 @@ impl ImpactAssets {
             lut: self.dirt_lut.clone(),
             alpha_mode: AlphaMode::Blend,
         }
+    }
+
+    /// The ground shock-ring material: the dirt mass at [`SPLASH_RING_ALPHA`] with the erosion lane
+    /// sharpened ([`SPLASH_RING_SHARPNESS`]) so the racing front cuts a hard edge instead of the
+    /// soft dust blur the plume and haze want.
+    fn shock_ring_material(&self) -> VfxBillboardMaterial {
+        let mut material = self.dirt_material(SPLASH_RING_ALPHA);
+        material.params.fade.y = SPLASH_RING_SHARPNESS;
+        material
     }
 
     /// The dirt-ejecta material: the spark-streak geometry recolored to dirt (Blend, no glow — soil
@@ -727,7 +752,9 @@ fn spawn_big_splash(
     );
 
     // --- Ejecta streaks: soil clods thrown in an up-biased cone (blend the normal toward straight up
-    // by EJECTA_UP_BIAS, then spread), each a dirt-recolored stretched streak flying at launch speed.
+    // by EJECTA_UP_BIAS, then spread), each a dirt-recolored stretched streak launched at speed and
+    // falling under DEBRIS_GRAVITY. The streak's ORIENTATION is baked at spawn from the launch
+    // direction, so it holds the ballistic-initial heading for its ~0.3 s life.
     let up_axis = (normal * (1.0 - EJECTA_UP_BIAS) + Vec3::Y * EJECTA_UP_BIAS)
         .try_normalize()
         .unwrap_or(Vec3::Y);
@@ -739,7 +766,7 @@ fn spawn_big_splash(
         let dir = (up_axis + (tan_a * theta.cos() + tan_b * theta.sin()) * spread).normalize();
         let speed = rng.range(EJECTA_SPEED.0, EJECTA_SPEED.1);
         let length = speed * rng.range(EJECTA_STRETCH.0, EJECTA_STRETCH.1);
-        spawn_billboard(
+        spawn_ballistic_billboard(
             commands,
             materials,
             ring,
@@ -760,6 +787,7 @@ fn spawn_big_splash(
                 erosion_end: 1.0,
                 rotation: Some(spark_orientation(dir, to_camera)),
             },
+            DEBRIS_GRAVITY,
         );
     }
 
@@ -792,14 +820,15 @@ fn spawn_big_splash(
         );
     }
 
-    // --- Low dust ring: a wide, ground-oriented skirt blooming outward flat off the strike.
+    // --- Ground shock ring: a hard-edged, ground-oriented front racing outward flat off the strike
+    // and gone well before the fountain lands — the pressure wave, distinct from the haze below.
     spawn_billboard(
         commands,
         materials,
         ring,
         assets.quad.clone(),
         BillboardSpec {
-            material: assets.dirt_material(SPLASH_RING_ALPHA),
+            material: assets.shock_ring_material(),
             lifetime: SPLASH_RING_LIFETIME,
             origin: position + normal * 0.1,
             drift: Vec3::ZERO,
@@ -819,7 +848,8 @@ fn spawn_big_splash(
         },
     );
 
-    // --- Lingering cloud: the large, low-alpha brown haze that hangs after the fountain falls.
+    // --- Lingering cloud: the large, low-alpha brown haze that hangs after the fountain falls,
+    // spreading and thinning for seconds after every other layer has ended.
     spawn_billboard(
         commands,
         materials,
@@ -829,7 +859,7 @@ fn spawn_big_splash(
             material: assets.dirt_material(SPLASH_CLOUD_ALPHA),
             lifetime: SPLASH_CLOUD_LIFETIME,
             origin: position + normal * (SPLASH_CLOUD_SIZE.0 * 0.5) + Vec3::Y * 0.5,
-            drift: Vec3::Y * (SPLASH_PLUME_RISE * 0.15),
+            drift: Vec3::Y * SPLASH_CLOUD_RISE,
             frames: 4,
             start_frame: rng.range(0.0, 4.0),
             frame_rate: 0.0,
@@ -928,7 +958,8 @@ fn spawn_big_armor(
     );
 
     // --- Dense hot spark fan: many fast white-hot streaks in a cone around the fan axis, each a
-    // fixed-orientation billboard elongated along its own flight direction.
+    // fixed-orientation billboard elongated along its own flight direction and falling under
+    // DEBRIS_GRAVITY (the orientation is baked at spawn, so a streak holds its launch heading).
     let count = ARMOR_SPARK_COUNT.0
         + (rng.next_f32() * (ARMOR_SPARK_COUNT.1 - ARMOR_SPARK_COUNT.0 + 1) as f32) as u32;
     for _ in 0..count.min(ARMOR_SPARK_COUNT.1) {
@@ -937,7 +968,7 @@ fn spawn_big_armor(
         let dir = (axis + (tan_a * theta.cos() + tan_b * theta.sin()) * spread).normalize();
         let speed = rng.range(ARMOR_SPARK_SPEED.0, ARMOR_SPARK_SPEED.1);
         let length = speed * rng.range(ARMOR_SPARK_STRETCH.0, ARMOR_SPARK_STRETCH.1);
-        spawn_billboard(
+        spawn_ballistic_billboard(
             commands,
             materials,
             ring,
@@ -958,13 +989,14 @@ fn spawn_big_armor(
                 erosion_end: 1.0,
                 rotation: Some(spark_orientation(dir, to_camera)),
             },
+            DEBRIS_GRAVITY,
         );
     }
 
     // --- Small gray spall puff: one short gray smoke mass off the strike (steel spall, never dirt),
-    // pushed gently out along the normal and rising.
+    // pushed gently out along the normal, rising, then settling down the plate under DEBRIS_GRAVITY.
     let puff_size = rng.range(SPALL_PUFF_SIZE.0, SPALL_PUFF_SIZE.1);
-    spawn_billboard(
+    spawn_ballistic_billboard(
         commands,
         materials,
         ring,
@@ -985,10 +1017,12 @@ fn spawn_big_armor(
             erosion_end: 1.0,
             rotation: None,
         },
+        DEBRIS_GRAVITY,
     );
 
     // --- Flame lick: penetration ONLY (the round bit into the steel — embed-that-defeats or a clean
-    // perforation, never a ricochet). One brief warm additive flame off the breach, rising.
+    // perforation, never a ricochet). One brief warm additive flame off the breach, rising. Full
+    // width on frame one; it collapses rather than blooms (the burn is at the instant of the bite).
     if penetrated {
         spawn_billboard(
             commands,
@@ -998,7 +1032,7 @@ fn spawn_big_armor(
             BillboardSpec {
                 material: assets.flame_material(),
                 lifetime: FLAME_LICK_LIFETIME,
-                origin: position + normal * (FLAME_LICK_SIZE.0 * 0.5),
+                origin: position + normal * (FLAME_LICK_SIZE.1 * 0.5),
                 drift: normal * 0.5 + Vec3::Y * FLAME_LICK_RISE,
                 frames: 4,
                 start_frame: rng.range(0.0, 4.0),
@@ -1178,6 +1212,90 @@ mod tests {
         );
         // Total billboards = the shared stack plus the one scar (its own ring).
         assert_eq!(billboards(&mut app), shared + 1, "stack + the ground scar");
+    }
+
+    /// Stretched streaks of any width — the metal sparks (0.08–0.09) and the chunkier dirt ejecta
+    /// (0.28), against the aspect-1 masses. Wider than [`sparks`]'s needle-only filter.
+    fn streaks(app: &mut App) -> usize {
+        let world = app.world_mut();
+        let mut q = world.query::<&Billboard>();
+        q.iter(world).filter(|b| b.aspect.x < 0.5).count()
+    }
+
+    /// Billboards carrying a downward acceleration — the thrown mass, as opposed to the gas layers
+    /// that hold a straight drift line.
+    fn falling(app: &mut App) -> usize {
+        let world = app.world_mut();
+        let mut q = world.query::<&Billboard>();
+        q.iter(world)
+            .filter(|b| b.accel != Vec3::ZERO)
+            .inspect(|b| assert_eq!(b.accel, DEBRIS_GRAVITY, "thrown mass falls at g"))
+            .count()
+    }
+
+    /// Every layer an impact THROWS arcs under gravity: the terrain's dirt ejecta streaks, and on
+    /// armor the spark fan plus the spall puff. The gas layers — contact flash, plume, shock ring,
+    /// lingering haze, ground scar — keep their straight drift.
+    #[test]
+    fn thrown_layers_arc_and_gas_layers_do_not() {
+        let mut terrain = harness();
+        trigger_impact(&mut terrain, Vec3::Y, BIG_CALIBER);
+        let ejecta = streaks(&mut terrain);
+        assert!(
+            (EJECTA_COUNT.0 as usize..=EJECTA_COUNT.1 as usize).contains(&ejecta),
+            "ejecta count {ejecta} outside {EJECTA_COUNT:?}"
+        );
+        assert_eq!(
+            falling(&mut terrain),
+            ejecta,
+            "on terrain exactly the dirt ejecta falls"
+        );
+
+        let mut armor = harness();
+        trigger_surface(
+            &mut armor,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Armor,
+            false,
+            None,
+        );
+        assert_eq!(
+            falling(&mut armor),
+            streaks(&mut armor) + 1,
+            "on armor the spark fan falls, and the spall puff with it"
+        );
+    }
+
+    /// The splash's layers end one at a time rather than all together: the contact flash is the
+    /// first gone and the brown haze the long tail, outliving every other shared-ring layer by
+    /// seconds so the strike stays readable after the fountain has fallen.
+    #[test]
+    fn splash_layers_end_staggered_with_the_haze_last() {
+        let mut app = harness();
+        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
+        let shared = app.world().resource::<BillboardRing>().0.clone();
+        let mut lifetimes: Vec<f32> = shared
+            .iter()
+            .map(|e| app.world().get::<Billboard>(*e).expect("live").lifetime)
+            .collect();
+        lifetimes.sort_by(f32::total_cmp);
+
+        assert_eq!(
+            lifetimes.first().copied(),
+            Some(SPLASH_FLASH_LIFETIME),
+            "the contact flash is the first layer gone"
+        );
+        let last = lifetimes.pop().expect("a populated stack");
+        assert_eq!(
+            last, SPLASH_CLOUD_LIFETIME,
+            "the lingering haze is the last layer standing"
+        );
+        let previous = lifetimes.pop().expect("a layer under the haze");
+        assert!(
+            last - previous > 3.0,
+            "the haze must hang seconds past the layer under it ({previous} s)"
+        );
     }
 
     /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP — insulated from the

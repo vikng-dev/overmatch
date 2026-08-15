@@ -107,10 +107,15 @@ impl Material for VfxBillboardMaterial {
 pub(crate) struct Billboard {
     pub age: f32,
     pub lifetime: f32,
-    /// Where the billboard was born; drift displaces from here (`origin + drift·age`).
+    /// Where the billboard was born; drift and accel displace from here
+    /// (`origin + drift·age + ½·accel·age²`).
     pub origin: Vec3,
     /// World-space drift velocity (smoke rise, muzzle-gas push).
     pub drift: Vec3,
+    /// World-space acceleration (m/s²). `Vec3::ZERO` — every spawn path but
+    /// [`spawn_ballistic_billboard`] — leaves the drift a straight line; thrown mass carries gravity
+    /// here and arcs.
+    pub accel: Vec3,
     /// Flipbook playback: `frame = (start_frame + age·frame_rate) mod frames`.
     pub frames: u32,
     pub start_frame: f32,
@@ -161,7 +166,8 @@ pub(crate) struct BillboardSpec {
 
 /// Spawn one billboard from a spec into the shared [`BillboardRing`] (cap [`BILLBOARD_CAP`]): the
 /// path every sub-second effect uses. See [`spawn_billboard_ring`] for effects that need their own
-/// eviction ring (e.g. long-lived ground marks that would be evicted early under an MG storm).
+/// eviction ring (e.g. long-lived ground marks that would be evicted early under an MG storm), and
+/// [`spawn_ballistic_billboard`] for thrown mass that must arc under gravity.
 pub(crate) fn spawn_billboard(
     commands: &mut Commands,
     materials: &mut Assets<VfxBillboardMaterial>,
@@ -185,6 +191,44 @@ pub(crate) fn spawn_billboard_ring(
     mesh: Handle<Mesh>,
     spec: BillboardSpec,
 ) -> Entity {
+    spawn_with_accel(commands, materials, ring, cap, mesh, spec, Vec3::ZERO)
+}
+
+/// Spawn one billboard into the shared ring under a constant `accel` (m/s²): its position follows
+/// `origin + drift·age + ½·accel·age²` instead of the straight drift line. The path for thrown mass
+/// — soil clods, sparks, spall — which falls; gas and smoke keep the straight drift.
+///
+/// The acceleration is a spawn argument rather than a [`BillboardSpec`] field: only these few call
+/// sites carry one, and the spec stays the flat data bundle every other effect reads as literals.
+pub(crate) fn spawn_ballistic_billboard(
+    commands: &mut Commands,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut BillboardRing,
+    mesh: Handle<Mesh>,
+    spec: BillboardSpec,
+    accel: Vec3,
+) -> Entity {
+    spawn_with_accel(
+        commands,
+        materials,
+        &mut ring.0,
+        BILLBOARD_CAP,
+        mesh,
+        spec,
+        accel,
+    )
+}
+
+/// The one spawn body behind all three entry points above.
+fn spawn_with_accel(
+    commands: &mut Commands,
+    materials: &mut Assets<VfxBillboardMaterial>,
+    ring: &mut VecDeque<Entity>,
+    cap: usize,
+    mesh: Handle<Mesh>,
+    spec: BillboardSpec,
+    accel: Vec3,
+) -> Entity {
     let mut material = spec.material;
     // Seed the animated lanes so the first rendered frame is already correct (the ager only
     // catches it NEXT Update).
@@ -203,6 +247,7 @@ pub(crate) fn spawn_billboard_ring(
             lifetime: spec.lifetime,
             origin: spec.origin,
             drift: spec.drift,
+            accel,
             frames: spec.frames,
             start_frame: spec.start_frame,
             frame_rate: spec.frame_rate,
@@ -271,7 +316,9 @@ fn age_billboards(
         let ease = 1.0 - (1.0 - t) * (1.0 - t);
         let size = billboard.start_size + (billboard.end_size - billboard.start_size) * ease;
         transform.scale = billboard.aspect * size;
-        transform.translation = billboard.origin + billboard.drift * billboard.age;
+        let age = billboard.age;
+        transform.translation =
+            billboard.origin + billboard.drift * age + billboard.accel * (0.5 * age * age);
         if let Some(mut mat) = materials.get_mut(&material.0) {
             mat.params.frame.x = flipbook_frame(
                 billboard.start_frame,
@@ -491,6 +538,46 @@ mod tests {
 
         advance(&mut app, 0.6);
         assert_eq!(count(&mut app), 0, "an expired billboard must despawn");
+    }
+
+    /// A ballistic billboard falls exactly `½·g·t²` below the straight drift line its zero-accel
+    /// twin holds, and both share the same start point — the arc thrown mass rides.
+    #[test]
+    fn ballistic_billboards_fall_under_gravity() {
+        const G: Vec3 = Vec3::new(0.0, -9.81, 0.0);
+        let mut app = harness();
+        let straight = spawn_one(&mut app, 2.0);
+        let thrown = {
+            let spec = test_spec(2.0);
+            let world = app.world_mut();
+            let entity =
+                world.resource_scope(|world, mut materials: Mut<Assets<VfxBillboardMaterial>>| {
+                    world.resource_scope(|world, mut ring: Mut<BillboardRing>| {
+                        let mut commands = world.commands();
+                        spawn_ballistic_billboard(
+                            &mut commands,
+                            &mut materials,
+                            &mut ring,
+                            Handle::default(),
+                            spec,
+                            G,
+                        )
+                    })
+                });
+            app.world_mut().flush();
+            entity
+        };
+        // Born together: the arc term is zero at age 0.
+        let pos = |app: &App, e: Entity| app.world().get::<Transform>(e).unwrap().translation;
+        assert_eq!(pos(&app, straight), pos(&app, thrown));
+
+        let t = 0.5;
+        advance(&mut app, t);
+        let drop = pos(&app, straight).y - pos(&app, thrown).y;
+        assert!(
+            (drop - 0.5 * 9.81 * t * t).abs() < 1e-3,
+            "a thrown billboard must fall ½·g·t² below the straight line (dropped {drop})"
+        );
     }
 
     /// The eviction ring bounds live billboards at the cap, oldest first — the leak bound under

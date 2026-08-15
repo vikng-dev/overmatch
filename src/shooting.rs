@@ -21,8 +21,8 @@ use crate::tank::{
 use crate::track::sim::apply_explicit_impulse;
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
-/// is a gentle rock by design; bump this if the firing kick should read more dramatically.
-const RECOIL_FEEL: f32 = 1.0;
+/// is a gentle rock; this is the one deliberate exaggeration over physical, so the firing kick reads.
+const RECOIL_FEEL: f32 = 2.5;
 
 /// THE single expression of the recoil reaction a fired round puts on its hull: the shell's
 /// momentum, opposite the bore. Applied at the muzzle point by [`fire`] (the derive-the-consequence
