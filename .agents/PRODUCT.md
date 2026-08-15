@@ -32,9 +32,9 @@ After a Battle produces a winner, the player returns to the **Garage**. The Gara
 
 Player-hosted online Battles are deferred. The foundation does not need listen-server mode, host migration, or NAT traversal.
 
-## Authority, prediction, and feedback
+## Authority, presentation, and feedback
 
-The client predicts causes; the server confirms consequences.
+The client sends intent; the server simulates and confirms consequences (one timeline, ADR-0037).
 
 - Controls, weapon response, recoil, audio, muzzle effects, and the beginning of a local shot happen immediately.
 - Penetration, ricochet, damage, crew and tank-module effects, knockout, and Progression consequences are authoritative.

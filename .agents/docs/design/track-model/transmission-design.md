@@ -1,5 +1,10 @@
 # Transmission declaration — design brief (codex, 2026-07-18)
 
+> **2026-08-15, [ADR-0037](../../adr/0037-one-authoritative-timeline-and-view-overlays.md):** the
+> as-built sections below are REV-scoped records; "predicts and rolls it back" is retired —
+> `TankTransmission` replicates on the one timeline. The declaration model and the atomic-snapshot
+> contract stand.
+
 ## As built at REV-14/15
 
 REV 14 landed the declared transmission behind one joint two-output seam. Its complete

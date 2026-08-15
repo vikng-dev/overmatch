@@ -1,5 +1,10 @@
 # Sim/view split: the tank is built from data at spawn, the glb is a view
 
+> **Status: the split and spawn-complete construction stand; the prediction-era framing is
+> superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15). Nothing
+> predicts or rolls back, and both addenda's correction-smoothing layer (`render_error`) is
+> deleted. Read the bind-window hazard record below in its era's terms.
+
 The tank's sim body — servo frames, wheel stations, collision hulls, armor trimeshes,
 `Rig`/`TankSim`/indices, and mass properties — is built synchronously from extracted data
 (`bake::TankGeometry`). Authority and analytical routes create the root and complete body together

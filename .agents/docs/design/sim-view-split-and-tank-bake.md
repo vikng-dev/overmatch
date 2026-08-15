@@ -1,5 +1,9 @@
 # Design sketch: sim/view split & the tank bake (tier 3)
 
+> **2026-08-15, [ADR-0037](../adr/0037-one-authoritative-timeline-and-view-overlays.md):**
+> prediction and rollback are retired; the bind-window hazard class below is named in its era's
+> terms. The split, spawn-complete construction, and §8 step 4 stand.
+
 **Status: PHASE 1 IMPLEMENTED & GRADUATED (ADR-0014); phase 2 (the offline bake, §8 step 4)
 remains governed by this sketch.** Recorded 2026-07-05 from the MP-overhaul follow-up session
 (agent + Yan); research folded into §7 the same day. Steps 0–3 of §8 landed 2026-07-05

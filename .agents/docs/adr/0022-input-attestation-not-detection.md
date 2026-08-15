@@ -1,5 +1,10 @@
 # Input attestation: a consumable commits only on a tick the command can PROVE it was authored for
 
+> **Status: the attestation invariant stands; the prediction-era clauses are superseded by
+> [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): nothing predicts fire and
+> no rollback replays inputs. The stamp still rides the buffer and the server still refuses to
+> commit a discrete action on a command that cannot attest its tick.
+
 A value read out of an input buffer cannot be trusted to belong to the tick that read it. lightyear's `InputBuffer` hands back an ordinary-looking `TankCommand` for ticks the player authored nothing for — hold-last extrapolation past the buffered range, a `SameAsPrecedent` gap-fill written into the buffer *as data*, a stale entry the server was forbidden to overwrite, an `Absent`-anchored freeze that pins the server's `ActionState` at its last value. On a server-authoritative build that means the server spends ammo and deals damage for input nobody gave (the observed symptom: 1–2 unrequested MG rounds after the player releases fire). The decision, shipped in `PROTOCOL_REV 5` (`da1857d`, merged `8fea8fc`; clippy follow-up `64fa0d0`): **`TankCommand` carries the tick it was authored for, and the sim refuses to commit any *discrete* action on a command that cannot attest that tick is the tick being simulated.** Levels stay on hold-last, deliberately. The invariant is ours, not canon — that is the interesting part, and it is argued below.
 
 ## The mechanism: one stamp, one comparison

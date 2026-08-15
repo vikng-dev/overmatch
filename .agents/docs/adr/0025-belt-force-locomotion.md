@@ -1,5 +1,9 @@
 # Belt-force locomotion: the sandbox track model is the drive sim
 
+> **Status: the locomotion model stands; the netcode bullet (owner-predicted, rolled back) is
+> superseded by [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15): belt state
+> replicates on the one timeline, nothing predicts it.
+
 Tanks drive on the **track model's belt forces** — the field-belt model developed and
 feel-proven in the track sandbox, promoted wholesale. Per side, the closed rest pin-line loop
 (the same `build_route` circles the view's feasibility gate uses) is resampled into

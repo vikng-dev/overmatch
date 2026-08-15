@@ -139,12 +139,13 @@ precisely to avoid that. So a hand-rolled dirty flag may have been written by so
 exact behaviour. Before calling one redundant, check whether `set_if_neq` would serve — and check
 whether the author already tried it.
 
-**The sharp counter-rule.** In a rollback-networked sim, "derived" and "stored" are not
-interchangeable. A value stored in a rollback-registered component is *restored* on rollback; the
-same value recomputed from inputs is *recomputed*. That is a different program. ADR-0016
-(`replicate-causes-derive-consequences`) settles which side things sit on. **Before converting
-stored → derived anywhere under `src/net/` or `src/track/`, check whether the component is
-rollback-registered. If it is, this is a design change, not a simplification — stop and report.**
+**The sharp counter-rule.** In a server-replicated sim, "derived" and "stored" are not
+interchangeable. A value stored in a replicated component is *overwritten by the authority's
+stream*; the same value recomputed from inputs is *recomputed*. That is a different program.
+ADR-0016 (`replicate-causes-derive-consequences`) settles which side things sit on. **Before
+converting stored → derived anywhere under `src/net/` or `src/track/`, check whether the
+component is replicated. If it is, this is a design change, not a simplification — stop and
+report.**
 
 ### A3. Duplicated knowledge
 
@@ -450,7 +451,7 @@ either does not compile — the good case — or compiles and means something el
 Do not guess. Report it and move to the next item. Automatically a judgement call, never a
 simplification:
 
-- anything touching a type in `WIRE_SURFACE`, or a rollback-registered component
+- anything touching a type in `WIRE_SURFACE`, or a replicated component
 - anything that would add a row to `fn_length.rs`'s `ALLOWED`
 - anything contradicting an ADR
 - converting stored state to derived inside `src/net/` or `src/track/`

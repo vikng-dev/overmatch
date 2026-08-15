@@ -1,5 +1,9 @@
 # Static friction as a first-class regime of the belt law — design brief
 
+> **2026-08-15, [ADR-0037](../../adr/0037-one-authoritative-timeline-and-view-overlays.md):**
+> the rollback/prediction contracts below (element-field local-rollback, ADR-0027's netcode) are
+> retired with the grip netcode; the physics derivation stands.
+
 Status: SETTLED as the **per-element isotropic shear law**. This brief is the physics-derivation
 record: the shear-modulus provenance, the elasto-plastic drift fix, the damping choice, and the
 budget-on-elastic-load rationale below are the law's foundations and stand. Two things the brief

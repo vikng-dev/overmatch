@@ -1,5 +1,9 @@
 # Replicate causes, derive consequences
 
+> **Status: stands under [[0037-one-authoritative-timeline-and-view-overlays]]** (2026-08-15)
+> with one term retired: nothing predicts, so "may be predicted" reads "may present as a view
+> overlay". The three tests, the pump invariants, and the latch rules are unchanged.
+
 The wire carries the minimal set of facts a client cannot work out for itself; every other machine re-derives the rest by running the same simulation. A consequence is derivable iff **its cause is available to us** and **its dynamics tolerate that cause's staleness** — barrel recoil derives from a replicated fire event because a fire event is a complete cause and a damped spring is contractive; health does not derive, because a hit resolution is neither.
 
 ## The three tests

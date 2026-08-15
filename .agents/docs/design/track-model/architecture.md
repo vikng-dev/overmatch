@@ -1,5 +1,10 @@
 # Track module architecture — promoting the sandbox model into the game
 
+> **2026-08-15, [ADR-0037](../../adr/0037-one-authoritative-timeline-and-view-overlays.md):**
+> the netcode contracts named below (owner-predicted, `local_rollback`, rollback smoothing) are
+> retired; state replicates on the one timeline and the wrap view rides the interpolated cursor.
+> The track model, the sim/view boundary, and the belt law stand.
+
 Status: v5 (2026-07-26) — the VIEW settled: the memory-enabled kinematic wrap
 (`src/track/wrap.rs`) is the one and only track view, in the game AND the sandbox; the simulated
 chain tier, its `V` toggle and its feel switches are DELETED (see §1a). v4 (step 27, 2026-07-17)
@@ -434,7 +439,8 @@ ships. (Grip and support have since settled further: per-element strain grip
   the naive drawn pitch drifts a pin onto a tooth).
 - Sandbox harness stays the feel/regression lab; scenarios become CI-runnable with numeric
   gates (step-24 metrics + perf probes).
-- Phase A adds a presented-pose torture scenario (scripted rollback corrections + teleports →
+- Phase A adds a presented-pose torture scenario (scripted pose discontinuities — teleports,
+  respawns →
   bounded belt-vs-ground error; tearing is unrepresentable now that the view is a filter over a
   fitted curve).
 - Phase B adds A/B harness parity + MP soak gates.
