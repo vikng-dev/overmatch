@@ -11,7 +11,6 @@
 //! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
 //! | `SPIKE_COMBAT_STEER` | `f32`; `0.0` | Combat steer at/after its engagement tick; zero preserves straight driving. |
 //! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
-//! | `SPIKE_CONTACT_PROBE` | flag; off | Client contact-graph diagnostic. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
 //! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat primary-fire interval; zero disables clicks. |

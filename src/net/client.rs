@@ -315,9 +315,6 @@ pub fn run() {
     // Shot-lifecycle recorder: public-shot arrivals, owner-private receipt/marker boundaries, and the
     // cosmetic shell lifecycle, all keyed by stable `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set.
     app.add_plugins(crate::shot_trace::client_plugin);
-    // Diagnostic contact probe: per-tick broad/narrow-phase state for the predicted tank's
-    // hull-vs-terrain pairs. Idle (nothing registered) unless `SPIKE_CONTACT_PROBE` is set.
-    app.add_plugins(super::contact_probe::plugin);
     // (FPS + frame-time diagnostics used to be registered here. They now belong to their SOLE
     // consumer, `net::debug_hud::plugin`, which `NetClientPlugin` mounts.)
 

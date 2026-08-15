@@ -4,7 +4,6 @@ use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
 mod client;
-mod contact_probe;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;
