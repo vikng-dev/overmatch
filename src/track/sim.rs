@@ -151,29 +151,15 @@ impl TrackGripWake {
     }
 }
 
-/// The two physically distinct explicit hull-impulse operations. Point impulses retain their
-/// torque arm; center impulses do not synthesize one.
-pub(crate) enum ExplicitImpulse {
-    Center(Vec3),
-    AtPoint { impulse: Vec3, point: Vec3 },
-}
-
-/// Apply an explicit hull impulse and notify the grip rest detector as one operation.
+/// Apply an explicit hull impulse at a world point (retaining its torque arm) and notify the grip
+/// rest detector as one operation.
 pub(crate) fn apply_explicit_impulse(
     mut forces: ForcesItem<'_, '_>,
     wake: Option<Mut<'_, TrackGripWake>>,
-    explicit: ExplicitImpulse,
+    impulse: Vec3,
+    point: Vec3,
 ) {
-    let impulse = match explicit {
-        ExplicitImpulse::Center(impulse) => {
-            forces.apply_linear_impulse(impulse);
-            impulse
-        }
-        ExplicitImpulse::AtPoint { impulse, point } => {
-            forces.apply_linear_impulse_at_point(impulse, point);
-            impulse
-        }
-    };
+    forces.apply_linear_impulse_at_point(impulse, point);
     if let Some(mut wake) = wake {
         wake.record_impulse(impulse);
     }

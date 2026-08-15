@@ -18,7 +18,7 @@ use crate::state::{AppState, GameplaySet, SimPhase};
 use crate::tank::{
     Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponIndex, rig_world_pose,
 };
-use crate::track::sim::{ExplicitImpulse, TrackGripWake, apply_explicit_impulse};
+use crate::track::sim::{TrackGripWake, apply_explicit_impulse};
 
 /// Feel multiplier on the hull recoil impulse (1.0 = physical momentum). On a 57 t hull true momentum
 /// is a gentle rock by design; bump this if the firing kick should read more dramatically.
@@ -350,14 +350,7 @@ fn fire(
         // own momentum, so the MGs barely register.
         if let Ok((forces, wake)) = bodies.get_mut(root.0) {
             let impulse = recoil_impulse(bore, weapon.mass, weapon.speed);
-            apply_explicit_impulse(
-                forces,
-                wake,
-                ExplicitImpulse::AtPoint {
-                    impulse,
-                    point: muzzle_position,
-                },
-            );
+            apply_explicit_impulse(forces, wake, impulse, muzzle_position);
         }
         // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
         // one belt round, then arm either the crew-gated swap or the ungated cyclic interval.

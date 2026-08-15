@@ -1,4 +1,4 @@
-//! Reproducible workload levers for rollback/feel measurements and the shared `SPIKE_*` environment
+//! Reproducible workload levers for feel and cost measurements and the shared `SPIKE_*` environment
 //! parser. Boolean/value switches treat `0`, `false` (case-insensitive), and the empty string as
 //! off; every other non-numeric value is on. Numeric values retain ordinary parsing (including a
 //! meaningful zero) and ignore an empty string.
@@ -18,13 +18,10 @@
 //! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
 //! | `SPIKE_FRAME_COST` | path; off | Role-qualified raw per-frame wall-clock JSONL (client). |
-//! | `SPIKE_INPUT_DELAY_TICKS` | ticks; shipping default | Input-delay A/B override; zero is meaningful. |
 //! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |
 //! | `SPIKE_JITTER_SEED` | `u64`; off | Make active receive jitter reproducible by packet index. |
-//! | `SPIKE_JITTER_MULTIPLE` | integer; `2` | Sync safety-margin multiplier. |
 //! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
 //! | `SPIKE_MG_SHORTCIRCUIT` | flag; off | Experimental MG march short-circuit. |
-//! | `SPIKE_PERTURB` | flag; on | Server-only forced rollback impulse. |
 //! | `SPIKE_RENDER_COST` | path; off | Role-qualified per-render-pass CPU/GPU-time JSONL (client). |
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
 //! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness. |
@@ -59,7 +56,6 @@
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
 
-use avian3d::prelude::Forces;
 use bevy::prelude::*;
 use lightyear::core::time::Instant;
 use lightyear::link::RecvPayload;
@@ -67,19 +63,17 @@ use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 
 use crate::command::TankCommand;
-use crate::track::sim::{ExplicitImpulse, apply_explicit_impulse};
 
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
-/// clean exit once enough time has passed to observe the forced rollback + convergence.
-/// `fire_tick` defaults to 300 (mid-drive, well clear of the perturbation); `SPIKE_FIRE_TICK`
-/// overrides it for the forced-rollback-with-fire pass (~110 lands beside the ~2 s perturbation).
-/// `SPIKE_SIM_LONG=1` (rollback-storm diagnostic): drive straight at full throttle for ~15 s —
-/// from spawn that crosses the speed bump (z≈−70) and the washboard (z≈−82…−90), the terrain the
-/// user's rollback-stream report singled out; the default 4 s arc never leaves the flat pad.
+/// clean exit once the script has played out.
+/// `fire_tick` defaults to 300 (mid-drive); `SPIKE_FIRE_TICK` overrides it.
+/// `SPIKE_SIM_LONG=1` (long-drive diagnostic): drive straight at full throttle for ~15 s —
+/// from spawn that crosses the speed bump (z≈−70) and the washboard (z≈−82…−90); the default 4 s
+/// arc never leaves the flat pad.
 /// `SPIKE_SIM_IDLE=1` (beached-rest diagnostic): hold zero throttle/steer, never fire, aim
 /// constant, for the whole default ~600-tick run — a pure idle observation window, so a tank
 /// spawned onto a resting contact (`SPIKE_SPAWN_POSE`) is watched settling, with no drive input
-/// perturbing the contact state the client must re-form each rollback.
+/// perturbing the resting contact state.
 /// `SPIKE_SIM_REVERSE=1` (minimal-divergence diagnostic): the mirror of the forward course run —
 /// drive dead straight at throttle −1.0, steer 0, no fire, and NO turret slew (aim `None`, so
 /// `drive_aim_servos` holds every servo at rest). From spawn the obstacles lie down −Z ahead, so
@@ -114,7 +108,7 @@ pub(crate) struct SimulateInput {
     forward: bool,
     /// `SPIKE_SIM_COMBAT`: follow the forward drive window while aiming and firing. This reproduces
     /// fire-event divergence under link jitter: recoil, shell spawn, and reload all run while the
-    /// tank is driving under prediction. Overrides every other scripted workload.
+    /// tank is driving. Overrides every other scripted workload.
     combat: bool,
     /// `SPIKE_COMBAT_NOAIM`: hold the combat-script turret servos at rest instead of slewing toward
     /// `aim_point`. Ignored outside the combat script.
@@ -218,7 +212,7 @@ pub(crate) fn buffer_input(
     // Combat script (`SPIKE_SIM_COMBAT`): drive the forward window while the servos chase the
     // downrange aim and both weapons operate. Optional steering engages only at its configured tick,
     // after a straight run can build speed. It exists to reproduce fire-event divergence under link
-    // jitter — recoil + shell spawn + reload while driving under prediction. This branch deliberately
+    // jitter — recoil + shell spawn + reload while driving. This branch deliberately
     // precedes every other workload so combinations cannot fall back to the stationary MG-cost or
     // minimal-divergence scripts.
     if sim.combat {
@@ -256,13 +250,13 @@ pub(crate) fn buffer_input(
         state.0.fire_secondary = sim.holding_secondary(t);
         return;
     }
-    // Step-7 script, exercising the real sim under prediction: 2 s idle (rig binds, the hull
-    // settles onto the belt) → 4 s throttle 1.0 + steer 0.3 (belt forces + skid-steer, spanning
-    // the ~2 s server perturbation) → coast to rest. The aim intention + range are held from
-    // tick 0 so the turret/gun servos slew (drive_aim_servos → drive_servos) while driving;
-    // one fire click at tick 300 (Reload starts ready) exercises fire + recoil + reload.
+    // The default script, exercising the real sim: 2 s idle (rig binds, the hull settles onto the
+    // belt) → 4 s throttle 1.0 + steer 0.3 (belt forces + skid-steer) → coast to rest. The aim
+    // intention + range are held from tick 0 so the turret/gun servos slew (drive_aim_servos →
+    // drive_servos) while driving; one fire click at tick 300 (Reload starts ready) exercises
+    // fire + recoil + reload.
     // Idle window (`SPIKE_SIM_IDLE`): never drive — the tank just sits on whatever contact it
-    // spawned onto, so the trace isolates the beached-rest rollback storm from any drive churn.
+    // spawned onto, so the trace isolates beached rest from any drive churn.
     let driving = !sim.idle && (128..sim.drive_until).contains(&t);
     // Reverse (`SPIKE_SIM_REVERSE`) mirrors the drive up the flat slab: throttle −1.0 instead of
     // +1.0, heading up +Z away from the −Z obstacles — the minimal-divergence straight-flat run.
@@ -283,7 +277,7 @@ pub(crate) fn buffer_input(
     };
     // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
     // superelevation from the weapon's range table.
-    // SPIKE_SIM_AIM_SWEEP (rollback-storm diagnostic): instead of the constant point, sweep the
+    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the
     // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
     // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
     // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
@@ -306,9 +300,8 @@ pub(crate) fn buffer_input(
     state.0.fire_primary = !sim.idle && !sim.reverse && !sim.forward && t == sim.fire_tick;
 }
 
-/// Simulate mode: exit cleanly once the script has played out (long enough to cover the ~2s
-/// server perturbation and settle afterward), or bail on a wall-clock timeout if the connection
-/// never came up.
+/// Simulate mode: exit cleanly once the script has played out, or bail on a wall-clock timeout if
+/// the connection never came up.
 pub(crate) fn simulate_watchdog(
     simulate: Res<SimulateInput>,
     time: Res<Time<Real>>,
@@ -325,13 +318,6 @@ pub(crate) fn simulate_watchdog(
         error!("client: watchdog timeout — never got an input slot");
         exit.write(AppExit::error());
     }
-}
-
-/// Server levers, read once at boot. `SPIKE_PERTURB=0` drops the forced-rollback impulse — pure
-/// noise during a feel test; on by default so the step-7 evidence runs stay reproducible.
-#[derive(Resource)]
-pub(crate) struct PerturbConfig {
-    pub(crate) perturb: bool,
 }
 
 fn value_is_enabled(value: &str) -> bool {
@@ -522,52 +508,12 @@ fn seeded_delay_ms(seed: u64, packet_index: u64, latency_ms: u64, jitter_ms: u64
     delay_ms.clamp(0, i128::from(u64::MAX)) as u64
 }
 
-/// Per-client one-shot: fires ~2 s after connect, applying a large lateral impulse the client
-/// cannot have predicted (server-only side effect) — guarantees a misprediction and thus a
-/// rollback (increment 5 success criterion).
-#[derive(Component)]
-pub(crate) struct PendingPerturbation {
-    pub(crate) at: Duration,
-}
-
-/// Applies the forced-rollback perturbation once, ~2 s after spawn — a lateral impulse only the
-/// server applies, so the client's prediction (which never saw it coming) mispredicts and must
-/// roll back when the replicated `Position` disagrees.
-pub(crate) fn perturb_after_delay(
-    mut tanks: Query<(
-        Entity,
-        &PendingPerturbation,
-        Forces,
-        Option<&mut crate::track::sim::TrackGripWake>,
-    )>,
-    time: Res<Time<Virtual>>,
-    mut commands: Commands,
-) {
-    for (entity, pending, forces, wake) in &mut tanks {
-        if time.elapsed() < pending.at {
-            continue;
-        }
-        // Sized for ~3 m/s of lateral delta-v on the 57 t tank (`tiger_1.tank.ron`'s
-        // `mass: 57000.0`) — comfortably above the 0.01 m/s-equivalent rollback threshold (forces
-        // exactly one misprediction) but small next to the ~4-15 m/s cruise speed, so the resulting
-        // one-tick displacement stays under the ROLLBACK-SNAP detector's 0.5 m bar. The previous
-        // 4,000,000 N*s value injected ~70 m/s instantly — legitimate per-tick motion at that speed
-        // (~1.1 m/tick) was tripping the snap detector on its own, misread as rollback oscillation
-        // (see spike log).
-        const IMPULSE: f32 = 171_000.0;
-        let impulse = Vec3::X * IMPULSE;
-        apply_explicit_impulse(forces, wake, ExplicitImpulse::Center(impulse));
-        info!("server: {entity} perturbation impulse applied (forced rollback trigger)");
-        commands.entity(entity).remove::<PendingPerturbation>();
-    }
-}
-
 /// `SPIKE_SPAWN_POSE="x,y,z,qx,qy,qz,qw"` (server): override the spawned tank's initial
 /// `Position`/`Rotation` — parsed once at boot, applied in `spawn_pending_tanks`. Seven
 /// comma-separated f32s (translation metres, then an xyzw quaternion, normalized on read); any
 /// malformed value logs and falls back to the default spawn. Used to place the tank onto a known
 /// resting contact (the field-captured beached pose on the §2 side-slope slab edge) so the
-/// rollback storm reproduces deterministically. Inert when unset.
+/// beached-rest repro is deterministic. Inert when unset.
 pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
     let raw = env_value("SPIKE_SPAWN_POSE")?;
     let nums: Vec<f32> = raw
@@ -586,36 +532,6 @@ pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
     let rot = Quat::from_xyzw(nums[3], nums[4], nums[5], nums[6]).normalize();
     info!("server: SPIKE_SPAWN_POSE pos={pos:?} rot={rot:?}");
     Some((pos, rot))
-}
-
-/// `SPIKE_INPUT_DELAY_TICKS`: the input-delay A/B lever for the reconciliation-DEPTH work — input
-/// delay is the primary knob on how far prediction runs ahead, and thus on rollback replay depth.
-/// `None` (unset) selects the shipping fixed delay from `net::client::shipping_input_delay`.
-/// `Some(0)` forces `no_input_delay()` — the pre-change max-prediction behavior, so the harness can
-/// A/B the old and new depths from the SAME binary. `Some(n>0)` pins `fixed_input_delay(n)`. Kept as
-/// an `Option` precisely so "unset" (shipping fixed delay) and "explicitly 0" (no delay) stay
-/// distinguishable.
-pub(crate) fn input_delay_ticks() -> Option<u16> {
-    env_parse("SPIKE_INPUT_DELAY_TICKS")
-}
-
-/// `SPIKE_JITTER_MULTIPLE` (default 2): the sync-margin A/B lever, the depth work's second knob.
-/// `SyncConfig::jitter_multiple` scales measured jitter into the timeline's safety margin — how far
-/// ahead prediction runs purely to cover jitter, i.e. baked-in rollback depth (1→65% packet
-/// coverage, 2→95%, 3→99.7%; lightyear_sync sync.rs). lightyear defaults to 4 (99.7%), which with
-/// the 20 ms test conditioner is ~5 ticks of pure margin; we ship 2 (95%). The lever restores 4 (or
-/// any value) to A/B the old margin against the new from one binary.
-pub(crate) fn jitter_multiple() -> u8 {
-    env_parse("SPIKE_JITTER_MULTIPLE").unwrap_or(2)
-}
-
-/// `SPIKE_JITTER_MARGIN` (default 1.0, lightyear's own default): the FIXED half of the sync
-/// margin, in fractional ticks, added on top of the jitter-derived one (lightyear_sync sync.rs:
-/// `jitter * jitter_multiple + tick_duration * jitter_margin`). Reaches the INPUT timeline's
-/// install-time config only, so it is the runtime value exactly where `net::sync_margin`'s derived
-/// law does not rewrite it: the pre-arm window of a session.
-pub(crate) fn jitter_margin() -> f32 {
-    env_parse("SPIKE_JITTER_MARGIN").unwrap_or(1.0)
 }
 
 #[cfg(test)]

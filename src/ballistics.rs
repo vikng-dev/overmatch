@@ -2356,11 +2356,7 @@ fn apply_hit_impulse(
     point: Vec3,
 ) {
     if let Ok((forces, wake)) = bodies.get_mut(body) {
-        crate::track::sim::apply_explicit_impulse(
-            forces,
-            wake,
-            crate::track::sim::ExplicitImpulse::AtPoint { impulse, point },
-        );
+        crate::track::sim::apply_explicit_impulse(forces, wake, impulse, point);
     }
 }
 

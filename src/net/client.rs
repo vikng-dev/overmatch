@@ -383,35 +383,18 @@ pub fn run() {
         }
         RecvConditionerMode::Off => None,
     };
-    // Input delay and jitter margin bound the prediction window; environment values are diagnostic
-    // overrides only.
-    let (input_delay, delay_label) = match harness::input_delay_ticks() {
-        None => (
-            shipping_input_delay(),
-            format!(
-                "fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by design (~{:.0}ms)",
-                f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
-            ),
-        ),
-        Some(0) => (
-            InputDelayConfig::no_input_delay(),
-            "no_input_delay (SPIKE_INPUT_DELAY_TICKS=0 - old max-prediction behavior)".to_string(),
-        ),
-        Some(n) => (
-            InputDelayConfig::fixed_input_delay(n),
-            format!("fixed_input_delay({n}) (SPIKE_INPUT_DELAY_TICKS={n})"),
-        ),
-    };
-    let jitter_multiple = harness::jitter_multiple();
-    let jitter_margin = harness::jitter_margin();
+    let input_delay = shipping_input_delay();
+    // The install-time sync margins hold only over a session's pre-arm window; `net::sync_margin`'s
+    // derived law rewrites both once the link is measured.
     let sync_config = SyncConfig {
-        jitter_multiple,
-        jitter_margin,
+        jitter_multiple: 2,
+        jitter_margin: 1.0,
         ..default()
     };
     info!(
-        "client: input delay = {delay_label}; sync jitter_multiple = {jitter_multiple}, \
-         jitter_margin = {jitter_margin}"
+        "client: input delay = fixed_input_delay({SHIPPING_INPUT_DELAY_TICKS}) — CONSTANT by \
+         design (~{:.0}ms)",
+        f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
     );
     if matches!(conditioner_mode, RecvConditionerMode::Seeded(_)) {
         app.add_systems(
