@@ -413,11 +413,11 @@ mod tests {
         }
     }
 
-    /// The shipped sheet's authored audio data reaches the law and yields a sane band. Pins that
-    /// the data PARSES and derives finite speeds — never a magic number, which would only be this
-    /// test copying the RON back out of itself.
+    /// The shipped sheet parses and deliberately authors NO engine sound (the loop was pulled
+    /// until a recording worthy of the HL230 exists). This trips when a new loop is authored —
+    /// update it to run the law against the new data.
     #[test]
-    fn the_shipped_tank_authors_engine_audio_the_law_accepts() {
+    fn the_shipped_tank_is_deliberately_engine_silent() {
         let spec: crate::spec::TankSpec =
             ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
                 .expect("the shipped sheet parses");
@@ -428,23 +428,10 @@ mod tests {
             .as_ref()
             .and_then(|transmission| transmission.engine.as_ref())
             .expect("the Tiger declares an engine");
-        let sound = engine
-            .sound
-            .as_ref()
-            .expect("the Tiger authors engine sound");
-        let law = EngineSpeedLaw::for_engine(&EngineSound {
-            clip: sound.clip.clone(),
-            clip_pop_hz: sound.clip_pop_hz,
-            cylinders: engine.cylinders,
-            idle_rpm: engine.idle_rpm,
-            governed_rpm: engine.governed_rpm,
-        });
-        let idle = law.speed(engine.idle_rpm);
-        let governed = law.speed(engine.governed_rpm);
-        assert!(idle.is_finite() && governed.is_finite());
-        // A tape shift the ear reads as an engine rather than a chipmunk or a landslide.
-        assert!((0.25..4.0).contains(&idle), "idle speed {idle}");
-        assert!((governed - 2.0 * idle).abs() < 1e-5);
+        assert!(
+            engine.sound.is_none(),
+            "engine sound returned without updating this test"
+        );
     }
 
     #[test]

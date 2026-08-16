@@ -1071,15 +1071,10 @@ mod tests {
         // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
         assert_eq!(engine.inertia_kgm2, 4.0);
         assert_eq!(engine.clutch_capacity_nm, 2400.0);
-        // Engine AUDIO data — the recording and the two facts the `sfx` playback law reads it
-        // against. The HL230 is a V-12, and 44.3 Hz is the pop rate measured off the shipped loop.
+        // Engine AUDIO data. The HL230 is a V-12; the `sound` block is deliberately absent —
+        // the loop was pulled until a recording worthy of the engine exists.
         assert_eq!(engine.cylinders, 12);
-        let sound = engine
-            .sound
-            .as_ref()
-            .expect("the Tiger authors engine sound");
-        assert_eq!(sound.clip, "sfx/engine/engine_loop_44hz.ogg");
-        assert_eq!(sound.clip_pop_hz, 44.3);
+        assert!(engine.sound.is_none());
         assert_eq!(gearbox.forward_speeds_kmh.len(), 8);
         assert_eq!(gearbox.reverse_speeds_kmh.len(), 4);
         assert_eq!(gearbox.shift_addressing, ShiftAddressing::Direct);
@@ -1419,11 +1414,18 @@ mod tests {
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
             ("cylinders", |tr| engine(tr).cylinders = 0),
+            // The shipped sheet is engine-silent, so the bad block is INSERTED, not mutated.
             ("clip_pop_hz", |tr| {
-                engine(tr).sound.as_mut().expect("authored").clip_pop_hz = 0.0;
+                engine(tr).sound = Some(EngineSoundSpec {
+                    clip: "sfx/engine/engine_loop_44hz.ogg".into(),
+                    clip_pop_hz: 0.0,
+                });
             }),
             ("clip_pop_hz", |tr| {
-                engine(tr).sound.as_mut().expect("authored").clip_pop_hz = f32::NAN;
+                engine(tr).sound = Some(EngineSoundSpec {
+                    clip: "sfx/engine/engine_loop_44hz.ogg".into(),
+                    clip_pop_hz: f32::NAN,
+                });
             }),
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
             // BOTH directions — the lower bounds matter too: the coupling divides by J
