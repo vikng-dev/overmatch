@@ -3,13 +3,12 @@
 #
 #     sh scripts/hooks/test_pushed_assets.sh
 #
-# RUN BY HAND AND BY THE CI ASSETS JOB, which invokes it beside the door's own suites. The pre-push
-# hook does not run it: a lane that tested itself on every push would pay a scratch repository per
-# push to learn nothing about that push.
+# RUN BY HAND AND BY THE CI ASSETS JOB, which invokes it beside the door's own suites.
 #
-# It sources `scripts/hooks/pushed_assets.sh` and drives the REAL functions the hook drives — the
-# same file, the same shell — because a copy of the discovery rule tested here would be a second
-# rule, and the one that ships would be the untested one.
+# It sources `scripts/hooks/pushed_assets.sh` and drives the REAL functions that ship — the same
+# file, the same shell — because a copy of the discovery rule tested here would be a second rule,
+# and the one that ships would be the untested one. It also drives the real `pre-push`, whose whole
+# remaining claim is that it is the git-lfs upload and nothing else.
 #
 # HERMETIC, with ONE named exception. Every run builds its own git repository under `mktemp -d` and
 # deletes it: no network, no remote, no LFS daemon, and nothing read out of this work tree.
@@ -540,13 +539,15 @@ is "a push whose range moves nothing a verdict reads is not" \
 is "…and the step reads that decision off GITHUB_OUTPUT, not off stdout" \
    "affected=false" "$(scope push "$BASE" "$PARTIAL" >/dev/null; cat "$SCRATCH/github-output")"
 
-# The weekly cron is what bounds how long a defect the gate could not see survives, so it never
-# consults a range at all — there is no baseline on a scheduled run, and it must not need one.
-is "a scheduled run is affected with no range whatsoever" \
-   "true" "$(scope schedule "" "")"
-
-is "a hand-started run is too" \
+# A hand-started run is what bounds how long a defect the gate could not see survives (the weekly
+# cron that used to is retired), so it never consults a range at all — there is no baseline on a
+# dispatch, and it must not need one. `schedule` keeps answering the same way: no cron triggers CI
+# today, and the answer must not become "skip" if one is ever added back.
+is "a hand-started run is affected with no range whatsoever" \
    "true" "$(scope workflow_dispatch "" "")"
+
+is "a scheduled run would be too" \
+   "true" "$(scope schedule "" "")"
 
 # ── hydration: the bytes of the pushed revision, never of the work tree ──────────────────────────
 
@@ -739,11 +740,14 @@ done
 # ── the hook itself: the LFS transport, and nothing else ─────────────────────────────────────────
 #
 # The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list, and
-# what is measured is which commands it ran. The claim is now a closed one: the hook is the git-lfs
+# what is measured is which commands it ran. The claim is a closed one: the hook is the git-lfs
 # upload alone. Every other verdict — fmt, clippy, the asset door, the suite — is CI's, post-hoc,
-# on the pushed commit; a lane reappearing here would show up as a second line below.
+# on the pushed commit.
 #
 # `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
+# A SHIM ONLY SEES WHAT IT STANDS IN FOR, so the behavioural cases below catch the lanes that were
+# retired and nothing else — a `curl` or a bare `git status` added to the hook would run unseen.
+# The last case closes that: it reads the hook's own TEXT and allows exactly four executable lines.
 
 group "the hook — the LFS transport, and nothing else"
 
@@ -786,6 +790,19 @@ is "…and says which transport it is" \
    "yes" \
    "$(hook OVERMATCH_LANE_PROBE=1 >/dev/null
       grep -q 'pre-push ▸ git lfs pre-push' "$WORK/hook.out" && echo yes || echo no)"
+
+# THE CLOSED HALF, and the reason it is a text test: the shims above can only report commands they
+# were written to stand in for. This lists every line of the hook that is not a comment and not
+# blank, minus the exactly four the contract allows — the `set -e`, the announcement, the upload,
+# and the shebang (a comment by shape). Anything else a lane brings back, shimmed or not, prints
+# here and fails. A deliberate fourth line means editing this list and saying why.
+is "the hook's TEXT holds nothing but those four lines" \
+   "" \
+   "$(grep -v '^[[:space:]]*#' "$_here/pre-push" |
+      grep -v '^[[:space:]]*$' |
+      grep -vx 'set -e' |
+      grep -vx 'echo "pre-push ▸ git lfs pre-push"' |
+      grep -vx 'git lfs pre-push "$@"')"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 
