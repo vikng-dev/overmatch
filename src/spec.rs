@@ -1020,175 +1020,243 @@ fn report_failed_spec(asset_server: Res<AssetServer>, tank: Query<&TankSpecHandl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::damage::{GradedGroup, Group, Part};
+    use std::collections::HashSet;
 
-    /// The shipped spec sheet must always deserialize into `TankSpec`. This catches schema drift —
-    /// a renamed/removed field, a changed type, a bad enum variant — at `cargo test` time, before
-    /// the bad file ever ships (where `report_failed_spec` would catch it at runtime instead, but
-    /// only after a player already has it). With `deny_unknown_fields`, a stray/typo'd key fails
-    /// here too instead of being silently ignored.
+    /// Every [`Part`] a requirement names, flattened through its graded groups.
+    fn requirement_parts(requirement: &Requirement) -> Vec<Part> {
+        requirement
+            .iter()
+            .flat_map(|group| match group {
+                Group::Single(part) => vec![*part],
+                Group::Graded(GradedGroup::Pool(members) | GradedGroup::Backup(members)) => members
+                    .iter()
+                    .flat_map(|(_, parts)| parts.iter().copied())
+                    .collect(),
+            })
+            .collect()
+    }
+
+    /// The certificate on the SHIPPED sheet: it deserializes (so schema drift — a renamed field, a
+    /// changed type, a stray key under `deny_unknown_fields` — fails at `cargo test` time rather
+    /// than in a player's hands), `validate()` accepts it, and the cross-field relations the
+    /// schema's own meaning implies hold.
+    ///
+    /// It pins NO authored magnitude. The RON is the one home of every tuning number, and every
+    /// invariant `validate()` already enforces is asserted here exactly once — by calling it.
     #[test]
-    fn tiger_1_spec_sheet_matches_schema() {
-        let ron = include_str!("../assets/tiger_1/tiger_1.tank.ron");
-        let spec: TankSpec =
-            ron::de::from_str(ron).expect("tiger_1.tank.ron must deserialize into TankSpec");
-        // Spot-check values across sections so the test exercises real field wiring, not just "it
-        // parsed".
-        assert_eq!(spec.mass, 57000.0);
-        assert_eq!(spec.inertia_extents, (3.0, 2.0, 6.3));
-        // Grip-limit gearing rule (≈ μ·W/2; see the RON comment — the 100 kN placeholder cap
-        // could not break a neutral steer under the element grip law).
-        assert_eq!(spec.track.powertrain.force, 250_000.0);
-        // The ride model the envelope law derives from (spring/damper are NOT authored).
-        assert_eq!(spec.track.suspension.ride_frequency, 1.2);
-        assert_eq!(spec.track.suspension.damping_ratio, 0.35);
-        assert_eq!(spec.track.suspension.bump_stop, 0.200);
-        assert_eq!(spec.track.suspension.engage, 0.02);
-        // The declared transmission block (phase 2.5 — DELIBERATE pin update with the new
-        // powertrain field): the Tiger authors the L600 fixed-radius regenerative box from
-        // the anchored tables (tiger-transmission-data.md). Spot-check the anchors: the 8F/4R
-        // speed ladder ends at 45.4 km/h @ 3000, the radii table is anchored at both corners
-        // (3.44 m F1-tight, 165 m F8-wide), and the fleet governor sits at 2500 rpm.
-        let tr = spec
+    fn the_shipped_sheet_parses_validates_and_is_self_consistent() {
+        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("tiger_1.tank.ron must deserialize into TankSpec");
+        spec.validate()
+            .expect("the shipped sheet must be semantically valid");
+
+        // Bulk: the mass divides every acceleration, and each extent is a moment-arm factor.
+        assert!(spec.mass.is_finite() && spec.mass > 0.0, "{}", spec.mass);
+        let (ex, ey, ez) = spec.inertia_extents;
+        for extent in [ex, ey, ez] {
+            assert!(
+                extent.is_finite() && extent > 0.0,
+                "inertia_extents must be positive full dimensions (got {extent})"
+            );
+        }
+
+        // Every node the sheet names, in every role — a blank name addresses nothing in the model.
+        for reference in spec.node_references() {
+            assert!(
+                !reference.node.trim().is_empty(),
+                "{} names an empty node",
+                reference.field
+            );
+        }
+
+        // A collision proxy is a physics stand-in, never armour and never an actuator mount, so
+        // its node cannot also carry a component facet or a servo.
+        for collider in &spec.colliders {
+            assert!(
+                !spec.volumes.contains_key(collider),
+                "collider `{collider}` is also a component volume"
+            );
+            assert!(
+                !spec.servos.contains_key(collider),
+                "collider `{collider}` is also a servo mount"
+            );
+        }
+
+        // The declared drivetrain. `architecture: Governor` is legally TABLELESS, so the table
+        // laws run only where the tables exist — `validate()` owns the architecture↔tables
+        // contract, and which architecture a sheet selects is authored content. The GEARBOX
+        // carries no law: the scheduler bands signed geared SHAFT rpm
+        // (`transmission::run_shift_decision`), which clutch slip, back-drive and the governor's
+        // cut band put outside the crank's idle..governed band; and the reverse ladder may outrun
+        // the forward one — both κ lookups clamp the gear index into the forward radii table
+        // (`transmission::steering_force`, `drive_hud::steering_hud_line`).
+        let transmission = spec
             .track
             .powertrain
             .transmission
             .as_ref()
-            .expect("the Tiger authors a transmission block");
-        assert_eq!(tr.architecture, TransmissionArchitecture::FixedRadii);
-        // The regenerative tables are Option only for `architecture: Governor`'s sake — a
-        // FixedRadii sheet must author all of them (params() enforces it; see
-        // `governor_architecture_is_explicit_and_tableless`).
-        let engine = tr
-            .engine
-            .as_ref()
-            .expect("FixedRadii requires engine tables");
-        let gearbox = tr.gearbox.as_ref().expect("FixedRadii requires a gearbox");
-        let steering = tr.steering.as_ref().expect("FixedRadii requires steering");
-        assert_eq!(engine.governed_rpm, 2500.0);
-        assert_eq!(engine.rated_rpm, 3000.0);
-        // DELIBERATE pin update (stage B, engine crank state): the crank block is now
-        // required authoring. J = 4.0 kg·m² (INFERRED, 2.5–6 class band, flywheel-
-        // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
-        assert_eq!(engine.inertia_kgm2, 4.0);
-        assert_eq!(engine.clutch_capacity_nm, 2400.0);
-        // Engine AUDIO data. The HL230 is a V-12; the `sound` block is deliberately absent —
-        // the loop was pulled until a recording worthy of the engine exists.
-        assert_eq!(engine.cylinders, 12);
-        assert!(engine.sound.is_none());
-        assert_eq!(gearbox.forward_speeds_kmh.len(), 8);
-        assert_eq!(gearbox.reverse_speeds_kmh.len(), 4);
-        assert_eq!(gearbox.shift_addressing, ShiftAddressing::Direct);
-        assert_eq!(*gearbox.forward_speeds_kmh.last().unwrap(), 45.4);
-        assert_eq!(steering.radii[0].0, 3.44);
-        assert_eq!(steering.radii[7].1, 165.0);
-        // DELIBERATE pin: brake_force re-anchored from the circular grip-limit sizing (250 kN — sized
-        // against the very μ it was meant to test, and energy-impossible for two 1940s
-        // discs) to the DUAL anchor: the settled 20° park hold (W·sin 20°/2 ≈ 95.6
-        // kN/side) and 0.343 g total service decel (inside the 0.2–0.35 g WWII heavy-tank
-        // band) → 96 kN/side.
-        assert_eq!(tr.brake_force, Some(96_000.0));
-        // Static breakaway is distinct from dynamic dissipation: the 1.5 INFERRED multiplier makes
-        // 96 kN/side × 1.5 = 144 kN/side DERIVED, enough for the DERIVED 139.7925 kN/side demand
-        // at 30°.
-        assert_eq!(tr.brake_static_factor, Some(1.5));
-        // Track: links per side (the material loop closes at MEASURED pitch × this count); the
-        // sprocket's tooth count locks link advance to tooth advance. Geometry (pitch, plane_x,
-        // sprocket/idler/wheel circles) is no longer authored — it is measured off the glb markers.
-        assert_eq!(spec.track.link_count, 97);
-        // 20 = the model-verified tooth count. Feel-neutral for the transmission: reductions
-        // derive against the measured sprocket radius, so the radius cancels out of both
-        // thrust (τ·gear/R) and per-gear speed (ω·R/gear) — the anchored speeds are the truth.
-        assert_eq!(spec.track.sprocket.teeth, 20);
-        // DELIBERATE pin (2026-07-23): the symmetric 0.6109 rad stop became a HAND-MEASURED
-        // asymmetric pair authored in degrees. The measurement is a fact about the shoe, so it
-        // stays authored (and validated) even though the solver that consumed it is gone.
-        assert_eq!(spec.track.link_angle.inward_deg, 40.0);
-        assert_eq!(spec.track.link_angle.outward_deg, 18.0);
-        // Servos are a node-keyed map now (not fixed turret/gun fields); the yaw + pitch mounts must
-        // be declared for the rig to bind.
-        assert!(spec.servos.contains_key("Turret_Yaw"));
-        assert!(spec.servos.contains_key("Main_Gun_Pitch"));
-        // Weapons: the main gun's ballistics live in data now, with its muzzle/barrel node refs.
-        assert_eq!(spec.weapons["MainGun"].muzzle, "Main_Gun_Muzzle");
+            .expect("validate() requires an explicit transmission architecture");
+        if let (Some(engine), Some(steering)) =
+            (transmission.engine.as_ref(), transmission.steering.as_ref())
+        {
+            // The rpm band, in the order the three anchors mean: the engine idles below its
+            // governor, and the governor cannot sit above the rpm the gear speeds are quoted at.
+            assert!(
+                engine.idle_rpm < engine.governed_rpm,
+                "idle_rpm ({}) must sit below governed_rpm ({})",
+                engine.idle_rpm,
+                engine.governed_rpm
+            );
+            assert!(
+                engine.governed_rpm <= engine.rated_rpm,
+                "governed_rpm ({}) cannot exceed the rated_rpm ({}) the ladder is anchored at",
+                engine.governed_rpm,
+                engine.rated_rpm
+            );
+            // The curve is end-clamped, so authoring that stops short of the governor makes the
+            // whole governed band one extrapolated flat — the operating point must be bracketed
+            // by real data.
+            let (first_rpm, _) = engine.torque_curve[0];
+            let (last_rpm, _) = *engine
+                .torque_curve
+                .last()
+                .expect("the torque curve is non-empty");
+            assert!(
+                first_rpm < engine.governed_rpm && engine.governed_rpm <= last_rpm,
+                "the torque curve ({first_rpm}..{last_rpm} rpm) must bracket governed_rpm ({})",
+                engine.governed_rpm
+            );
+            let peak_torque = engine
+                .torque_curve
+                .iter()
+                .fold(0.0f32, |peak, &(_, torque)| peak.max(torque));
+            // `torque_at` scales the whole curve: an all-zero curve is an engine that makes no
+            // torque at any rpm — a drivetrain that can never turn its own sprocket, under an
+            // idle governor whose recovery torque (`torque_at(idle_rpm)`) is zero too.
+            assert!(
+                peak_torque > 0.0,
+                "engine.torque_curve peaks at {peak_torque} N·m — a declared engine must make torque"
+            );
+            // The coupling clamps at the clutch capacity: below the engine's own peak, the clutch
+            // slips at every torque the engine can make and the crank never couples.
+            assert!(
+                engine.clutch_capacity_nm >= peak_torque,
+                "clutch_capacity_nm ({}) must carry the curve's peak torque ({peak_torque})",
+                engine.clutch_capacity_nm
+            );
+            // The recording is a file reference, and the loader resolves it verbatim.
+            if let Some(sound) = engine.sound.as_ref() {
+                assert!(
+                    sound.clip.ends_with(".ogg"),
+                    "engine.sound.clip must name an .ogg (got `{}`)",
+                    sound.clip
+                );
+            }
+            // Each detent pair is named for its geometry: the tight radius is the tighter one. A
+            // pair the other way round is the swap this naming exists to prevent.
+            for (gear, &(tight, wide)) in steering.radii.iter().enumerate() {
+                assert!(
+                    tight <= wide,
+                    "steering.radii[{gear}]: tight ({tight} m) is wider than wide ({wide} m)"
+                );
+            }
+        }
+
+        // Armament. The single `Primary` is also the rig's main-bore handle, so exactly one weapon
+        // wears it; the recoil spring is authored iff the barrel that reciprocates is; and the
+        // ballistics scalars all divide or scale the penetration march.
+        assert!(!spec.weapons.is_empty(), "a tank declares its armament");
+        let primaries = spec
+            .weapons
+            .iter()
+            .filter(|(_, weapon)| weapon.trigger == Trigger::Primary)
+            .count();
         assert_eq!(
-            spec.weapons["MainGun"].barrel.as_deref(),
-            Some("Main_Gun_Recoil")
+            primaries, 1,
+            "exactly one weapon is Primary — it supplies the rig's main-bore handles"
         );
-        assert_eq!(spec.weapons["MainGun"].speed, 773.0);
-        // Fire mechanisms: the 88 is single-shot with a crew-gated reload (and authors NO belt
-        // fields — the enum makes that combo unrepresentable); the MGs are belt-fed automatics
-        // with a one-in-five tracer belt.
-        assert_eq!(
-            spec.weapons["MainGun"].fire_mode,
-            FireMode::Single { reload_secs: 3.0 }
+        for (name, weapon) in &spec.weapons {
+            assert_eq!(
+                weapon.recoil.is_some(),
+                weapon.barrel.is_some(),
+                "weapon `{name}`: the recoil spring is authored iff the recoiling barrel is"
+            );
+            for (field, value) in [
+                ("speed", weapon.speed),
+                ("caliber", weapon.caliber),
+                ("mass", weapon.mass),
+            ] {
+                assert!(
+                    value.is_finite() && value > 0.0,
+                    "weapon `{name}`: {field} must be finite and > 0 (got {value})"
+                );
+            }
+            for clip in &weapon.report_clips {
+                assert!(
+                    clip.ends_with(".ogg"),
+                    "weapon `{name}`: report clip `{clip}` must name an .ogg"
+                );
+            }
+        }
+
+        // The gunner's view node is how the binder finds the gunner's chain for the rig.
+        assert!(
+            spec.views.contains_key(&ViewKind::Gunner),
+            "the sheet must declare a Gunner view"
         );
-        let mg_mode = FireMode::Automatic {
-            rpm: 750.0,
-            belt_size: 150,
-            belt_swap_secs: 3.5,
-            tracer_every: 5,
-        };
-        assert_eq!(spec.weapons["Coax"].fire_mode, mg_mode);
-        assert_eq!(spec.weapons["HullMG"].fire_mode, mg_mode);
-        // Components: the map is FACETS ONLY now — one entry per damageable thing, and no
-        // `material_factor` anywhere (resistance moved to the substance registry, keyed by the
-        // material each primitive wears). A module, a crewman, an ammo rack and an inert
-        // smoke launcher exercise every facet shape.
-        assert_eq!(spec.volumes["Main_Gun_Barrel"].hp, 8.0);
-        assert_eq!(
-            spec.volumes["Main_Gun_Barrel"].function,
-            Some(FunctionRole::GunBarrel)
-        );
-        assert_eq!(spec.volumes["Commander"].crew, Some(CrewStation::Commander));
-        assert!(spec.volumes["Ammo_L_0"].ammo);
-        assert_eq!(spec.volumes["Smoke_Launcher_0"].function, None);
-        assert!(!spec.volumes["Smoke_Launcher_0"].ammo);
-        // Pure armour has no entry at all — its membership is its material.
-        assert!(!spec.volumes.contains_key("Hull_UFP_Upper"));
-        // The two explicit node-list declarations that replaced the name scans.
-        assert_eq!(spec.colliders, ["Hull_Collider", "Turret_Collider"]);
-        assert_eq!(spec.roadwheels.len(), 16);
-        assert_eq!(spec.roadwheels[0].node, "Wheel_L_0");
-        assert_eq!(spec.roadwheels[0].side, crate::tank::TrackSide::Left);
-        assert_eq!(spec.roadwheels[15].node, "Wheel_R_7");
-        assert_eq!(spec.roadwheels[15].side, crate::tank::TrackSide::Right);
-        // Capability requirements: the flat RON shape deserializes into requirement groups. Drive =
-        // [Driver, Engine, Transmission] (all mandatory `Single`s); Traverse = [Gunner]. Exercises
-        // the `#[serde(untagged)]` bare-`Part` parse.
-        use crate::damage::{Group, Part};
-        assert_eq!(
-            spec.capabilities[&Capability::Drive],
-            vec![
-                Group::Single(Part::Driver),
-                Group::Single(Part::Engine),
-                Group::Single(Part::Transmission),
-            ]
-        );
-        // Fire/Load are no longer global capabilities — they're each weapon's own gates.
-        assert_eq!(
-            spec.weapons["MainGun"].fire,
-            vec![
-                Group::Single(Part::Gunner),
-                Group::Single(Part::Breech),
-                Group::Single(Part::GunBarrel),
-            ]
-        );
-        assert_eq!(
-            spec.weapons["MainGun"].load,
-            vec![Group::Single(Part::Loader), Group::Single(Part::Breech)]
-        );
-        // Traverse is no longer a global capability — it's each servo's `requires` (slew gate).
-        assert_eq!(
-            spec.servos["Turret_Yaw"].requires,
-            vec![Group::Single(Part::Gunner)]
-        );
-        // Views carry the camera FOV + their own gate — the per-view successors to the old
-        // GunnerSight/CommanderView capabilities, which no longer exist on the global map.
-        assert_eq!(spec.views[&ViewKind::Gunner].fov, 0.12);
-        assert_eq!(
-            spec.views[&ViewKind::Gunner].requires,
-            vec![Group::Single(Part::Gunner)]
-        );
+
+        // A crew swap addresses a seat BY STATION on the wire (`command::CrewSwap::Start`), and
+        // both the authority (`damage::apply_crew_swap_commands`) and the replica mirror
+        // (`net::protocol::mirror_swap_from_net_crew`) resolve it to the FIRST seat wearing it:
+        // two seats under one station are not separately addressable, and the two sides can
+        // resolve one command to different seats. Duplicate FUNCTIONS carry no such vocabulary
+        // and stay legal — `damage::part_qualities` max-combines every provider of a role.
+        let mut seats: HashSet<CrewStation> = HashSet::new();
+        for (node, volume) in &spec.volumes {
+            if let Some(seat) = volume.crew {
+                assert!(
+                    seats.insert(seat),
+                    "`{node}`: crew station {seat:?} is served by two volumes"
+                );
+            }
+        }
+
+        // Damage gates close: every Part any requirement names must be something a volume actually
+        // provides, or the gate references a quality nothing on this tank can ever have.
+        let provided: HashSet<Part> = spec
+            .volumes
+            .values()
+            .flat_map(|volume| {
+                volume
+                    .crew
+                    .map(Part::from)
+                    .into_iter()
+                    .chain(volume.function.map(Part::from))
+            })
+            .collect();
+        let mut requirements: Vec<(String, &Requirement)> = Vec::new();
+        for (capability, requirement) in &spec.capabilities {
+            requirements.push((format!("capabilities[{capability:?}]"), requirement));
+        }
+        for (name, weapon) in &spec.weapons {
+            requirements.push((format!("weapons[\"{name}\"].fire"), &weapon.fire));
+            requirements.push((format!("weapons[\"{name}\"].load"), &weapon.load));
+        }
+        for (node, servo) in &spec.servos {
+            requirements.push((format!("servos[\"{node}\"].requires"), &servo.requires));
+        }
+        for (kind, view) in &spec.views {
+            requirements.push((format!("views[{kind:?}].requires"), &view.requires));
+        }
+        for (field, requirement) in &requirements {
+            for part in requirement_parts(requirement) {
+                assert!(
+                    provided.contains(&part),
+                    "{field} requires {part:?}, which no volume provides"
+                );
+            }
+        }
     }
 
     /// Older/unspecified vehicle sheets get the mechanically conservative crash-box behavior:
@@ -1216,14 +1284,125 @@ mod tests {
         );
     }
 
-    /// The shipped sheet must pass semantic validation, not just parse — the CI-time twin of the
-    /// load-time `validate()` gate.
+    /// The MUTATION BATTERY's subject: a fictional vehicle that authors every block a rejection
+    /// case flips, and nothing else. The shipped sheet is deliberately NOT the subject — a
+    /// mutation battery riding on it turns every deliberate tuning or content edit (a pulled
+    /// sound block, a re-anchored ladder) into a test break, which is friction with no bug behind
+    /// it. Its numbers are round and meaningless; the only thing asserted about them is that
+    /// `validate()` accepts the sheet unmutated (`the_fixture_sheet_is_valid_unmutated`), which is
+    /// what makes each mutation's rejection attributable to the mutation.
+    const FIXTURE_RON: &str = r#"#![enable(implicit_some)]
+TankSpec(
+    mass: 30_000.0,
+    inertia_extents: (3.0, 2.0, 6.0),
+    track: (
+        link_count: 80,
+        link_mass: 20.0,
+        hinge_torque: 30.0,
+        link_angle: (inward_deg: 40.0, outward_deg: 18.0),
+        sprocket: (teeth: 16),
+        powertrain: (
+            max_speed: 8.0,
+            power: 200_000.0,
+            force: 200_000.0,
+            governor_gain: 50_000.0,
+            inertia: 10_000.0,
+            transmission: (
+                architecture: FixedRadii,
+                engine: (
+                    idle_rpm: 600.0,
+                    governed_rpm: 2000.0,
+                    rated_rpm: 2400.0,
+                    cylinders: 6,
+                    sound: (clip: "sfx/engine/fixture_loop.ogg", clip_pop_hz: 40.0),
+                    torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
+                    drag_fraction: 0.25,
+                    inertia_kgm2: 3.0,
+                    clutch_capacity_nm: 1600.0,
+                ),
+                gearbox: (
+                    forward_speeds_kmh: [5.0, 8.0, 12.0, 18.0],
+                    reverse_speeds_kmh: [5.0, 8.0],
+                    shift_up_rpm: 2000.0,
+                    shift_down_rpm: 900.0,
+                    shift_secs: 0.3,
+                    shift_addressing: Direct,
+                ),
+                steering: (
+                    radii: [(4.0, 12.0), (6.0, 18.0), (9.0, 27.0), (14.0, 42.0)],
+                    capacity: 100_000.0,
+                    recirculation: 0.9,
+                ),
+                brake_force: 50_000.0,
+                brake_static_factor: 1.5,
+            ),
+        ),
+        suspension: (
+            ride_frequency: 1.2,
+            damping_ratio: 0.35,
+            bump_stop: 0.2,
+            engage: 0.02,
+        ),
+    ),
+    servos: {
+        "Turret_Yaw": (role: Yaw, max_speed: 30.0, accel: 60.0, travel: Continuous, requires: [Gunner]),
+    },
+    volumes: {
+        "Gunner": (hp: 3.0, crew: Gunner),
+        "Breech": (hp: 8.0, function: Breech),
+    },
+    colliders: ["Hull_Collider"],
+    roadwheels: [
+        (node: "Wheel_L_0", side: Left),
+        (node: "Wheel_R_0", side: Right),
+    ],
+    weapons: {
+        "Cannon": (
+            trigger: Primary,
+            muzzle: "Cannon_Muzzle",
+            barrel: "Cannon_Recoil",
+            speed: 700.0, caliber: 0.05, mass: 5.0,
+            fire_mode: Single(reload_secs: 3.0),
+            recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
+            fire: [Gunner, Breech],
+            load: [Gunner],
+            report_clips: ["sfx/fixture/report.ogg"],
+        ),
+        "MG": (
+            trigger: Secondary,
+            muzzle: "MG_Muzzle",
+            speed: 700.0, caliber: 0.008, mass: 0.012,
+            fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
+            report_clips: [],
+        ),
+    },
+    views: {
+        Gunner: (node: "Cannon_Sight", fov: 0.12, requires: [Gunner]),
+    },
+)
+"#;
+
+    /// A fresh, unmutated [`FIXTURE_RON`] sheet.
+    fn fixture() -> TankSpec {
+        ron::de::from_str(FIXTURE_RON).expect("the fixture sheet must parse")
+    }
+
+    /// The fixture's declared transmission block, for the mutation closures to flip a field in.
+    fn fixture_transmission(spec: &mut TankSpec) -> &mut TransmissionSpec {
+        spec.track
+            .powertrain
+            .transmission
+            .as_mut()
+            .expect("the fixture authors a transmission block")
+    }
+
+    /// The mutation battery's one baseline: unmutated, the fixture passes. Without this, a
+    /// rejection proves nothing — it could be the fixture rather than the mutation.
     #[test]
-    fn tiger_1_spec_passes_validation() {
-        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("tiger_1.tank.ron must parse");
-        spec.validate()
-            .expect("the shipped sheet must be semantically valid");
+    fn the_fixture_sheet_is_valid_unmutated() {
+        fixture()
+            .validate()
+            .expect("the mutation fixture must be valid before any mutation");
     }
 
     /// `validate()` rejects a FOV that would silently delete the picture instead of showing a wrong
@@ -1234,8 +1413,7 @@ mod tests {
     #[test]
     fn validate_rejects_a_fov_that_is_not_an_angle() {
         let with_fov = |fov: f32| {
-            let mut spec: TankSpec =
-                ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+            let mut spec = fixture();
             spec.views.get_mut(&ViewKind::Gunner).unwrap().fov = fov;
             spec
         };
@@ -1253,7 +1431,7 @@ mod tests {
                 .to_string();
             assert!(err.contains("fov") && err.contains("Gunner"), "{err}");
         }
-        // The authored value, and the widest legal field, still pass.
+        // A magnified optic, a middling one, and the widest legal field all pass.
         for fov in [0.12, core::f32::consts::FRAC_PI_4, 3.0] {
             with_fov(fov)
                 .validate()
@@ -1267,13 +1445,12 @@ mod tests {
     /// dead gun discovered mid-match.
     #[test]
     fn validate_rejects_bricked_fire_modes() {
-        // Start from a valid shipped sheet, then swap in one bad weapon at a time.
+        // Swap one bad weapon at a time into an otherwise-valid sheet.
         let with_weapon = |name: &str, mode: FireMode| {
-            let mut spec: TankSpec =
-                ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
-            let mut w = spec.weapons["Coax"].clone();
-            w.fire_mode = mode;
-            spec.weapons.insert(name.to_string(), w);
+            let mut spec = fixture();
+            let mut weapon = spec.weapons["MG"].clone();
+            weapon.fire_mode = mode;
+            spec.weapons.insert(name.to_string(), weapon);
             spec
         };
 
@@ -1339,17 +1516,13 @@ mod tests {
         // Track: a non-positive link_mass parses but yields zero-inverse-mass chain constraints —
         // validate() rejects it and names the field (the one surviving track dimension check now
         // that all geometry is measured off the glb, not authored).
-        let mut spec: TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        let mut spec = fixture();
         spec.track.link_mass = 0.0;
         let err = spec.validate().unwrap_err().to_string();
         assert!(err.contains("track.link_mass"), "{err}");
 
         // Force-law scalars: each mutation must be rejected BY NAME — a NaN or zero here
         // reaches a division in `track::forces` and dissolves the belt state in one tick.
-        let fresh = || -> TankSpec {
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
-        };
         let cases: [(&str, fn(&mut TankSpec)); 6] = [
             ("powertrain.max_speed", |s| {
                 s.track.powertrain.max_speed = f32::NAN;
@@ -1363,7 +1536,7 @@ mod tests {
             ("suspension.engage", |s| s.track.suspension.engage = 0.0),
         ];
         for (field, mutate) in cases {
-            let mut spec = fresh();
+            let mut spec = fixture();
             mutate(&mut spec);
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(field), "expected `{field}` in: {err}");
@@ -1395,37 +1568,36 @@ mod tests {
     /// Transmission-block runtime invariants: non-finite capacities NaN out the
     /// brake engagement scaling, hunting shift bands and unordered ladders break the shift
     /// logic's assumptions, and the u8 gear index must be able to address every gear. Each
-    /// rejection is named; the shipped Tiger sheet passes (see
-    /// `tiger_1_spec_passes_validation`).
+    /// rejection is named.
     #[test]
     fn validate_rejects_broken_transmission_blocks() {
-        let fresh = || -> TankSpec {
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
-        };
-        // The table fields are Option (for `architecture: Governor`); the Tiger authors all of
+        // The table fields are Option (for `architecture: Governor`); the fixture authors all of
         // them, so the mutation closures unwrap through these helpers.
         fn engine(tr: &mut TransmissionSpec) -> &mut EngineSpec {
-            tr.engine.as_mut().expect("the Tiger authors engine tables")
+            tr.engine
+                .as_mut()
+                .expect("the fixture authors engine tables")
         }
         fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
-            tr.gearbox.as_mut().expect("the Tiger authors a gearbox")
+            tr.gearbox.as_mut().expect("the fixture authors a gearbox")
         }
         let cases: [(&str, fn(&mut TransmissionSpec)); 19] = [
             // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
             // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
             ("cylinders", |tr| engine(tr).cylinders = 0),
-            // The shipped sheet is engine-silent, so the bad block is INSERTED, not mutated.
             ("clip_pop_hz", |tr| {
-                engine(tr).sound = Some(EngineSoundSpec {
-                    clip: "sfx/engine/engine_loop_44hz.ogg".into(),
-                    clip_pop_hz: 0.0,
-                });
+                engine(tr)
+                    .sound
+                    .as_mut()
+                    .expect("the fixture authors a sound block")
+                    .clip_pop_hz = 0.0;
             }),
             ("clip_pop_hz", |tr| {
-                engine(tr).sound = Some(EngineSoundSpec {
-                    clip: "sfx/engine/engine_loop_44hz.ogg".into(),
-                    clip_pop_hz: f32::NAN,
-                });
+                engine(tr)
+                    .sound
+                    .as_mut()
+                    .expect("the fixture authors a sound block")
+                    .clip_pop_hz = f32::NAN;
             }),
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
             // BOTH directions — the lower bounds matter too: the coupling divides by J
@@ -1448,7 +1620,7 @@ mod tests {
             ("steering capacity", |tr| {
                 tr.steering
                     .as_mut()
-                    .expect("the Tiger authors steering")
+                    .expect("the fixture authors steering")
                     .capacity = f32::INFINITY;
             }),
             ("brake_force", |tr| tr.brake_force = Some(f32::INFINITY)),
@@ -1461,9 +1633,9 @@ mod tests {
             ("brake_static_factor", |tr| {
                 tr.brake_static_factor = Some(2.51)
             }),
-            // Post-upshift rpm = 2300 × v_g/v_g+1 ≈ 1494 at the Tiger's widest step — a
-            // 2200 down band re-downshifts immediately: hunting on a boundary speed.
-            ("hysteresis", |tr| gearbox(tr).shift_down_rpm = 2200.0),
+            // Post-upshift rpm is `shift_up × v_g/v_g+1` at the widest step; a down band that
+            // close re-downshifts immediately: hunting on a boundary speed.
+            ("hysteresis", |tr| gearbox(tr).shift_down_rpm = 1900.0),
             ("ladder shape", |tr| {
                 gearbox(tr).forward_speeds_kmh.swap(2, 3);
             }),
@@ -1475,24 +1647,16 @@ mod tests {
             ("drag_fraction", |tr| engine(tr).drag_fraction = 1.5),
         ];
         for (needle, mutate) in cases {
-            let mut spec = fresh();
-            mutate(
-                spec.track
-                    .powertrain
-                    .transmission
-                    .as_mut()
-                    .expect("the Tiger authors a transmission block"),
-            );
+            let mut spec = fixture();
+            mutate(fixture_transmission(&mut spec));
             let err = spec.validate().unwrap_err().to_string();
             assert!(err.contains(needle), "expected `{needle}` in: {err}");
         }
         // A regenerative block missing one of its (serde-optional, Governor-only-optional)
-        // tables must fail VALIDATION by name — the field parses as absent now, so the
+        // tables must fail VALIDATION by name — the field parses as absent, so the
         // per-architecture contract in `TransmissionSpec::params` is the gate.
-        let missing_static_factor = include_str!("../assets/tiger_1/tiger_1.tank.ron")
-            .replace("                brake_static_factor: 1.5,\n", "");
-        let spec = ron::de::from_str::<TankSpec>(&missing_static_factor)
-            .expect("a Governor-optional field may be absent at parse time");
+        let mut spec = fixture();
+        fixture_transmission(&mut spec).brake_static_factor = None;
         let err = spec.validate().unwrap_err().to_string();
         assert!(
             err.contains("brake_static_factor") && err.contains("FixedRadii"),
@@ -1501,7 +1665,7 @@ mod tests {
         // Belt-inertia floor: with a transmission declared the coupling divides by
         // 2 × powertrain.inertia — a tiny-but-positive value passes the generic finite/> 0
         // check and must be caught by the transmission-block floor.
-        let mut spec = fresh();
+        let mut spec = fixture();
         spec.track.powertrain.inertia = 0.5;
         let err = spec.validate().unwrap_err().to_string();
         assert!(
@@ -1514,16 +1678,11 @@ mod tests {
     /// an authoring omission — the field is optional and validation passes without it.
     #[test]
     fn an_engine_without_a_sound_block_is_legal_silence() {
-        let mut spec: TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
-        spec.track
-            .powertrain
-            .transmission
-            .as_mut()
-            .expect("the Tiger authors a transmission block")
+        let mut spec = fixture();
+        fixture_transmission(&mut spec)
             .engine
             .as_mut()
-            .expect("the Tiger authors engine tables")
+            .expect("the fixture authors engine tables")
             .sound = None;
         spec.validate()
             .expect("a vehicle may declare no engine recording");
@@ -1533,8 +1692,7 @@ mod tests {
     /// Governor fallback is retired. The error names the block and the fix.
     #[test]
     fn validate_requires_an_explicit_transmission_selection() {
-        let mut spec: TankSpec =
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        let mut spec = fixture();
         spec.track.powertrain.transmission = None;
         let err = spec.validate().unwrap_err().to_string();
         assert!(
@@ -1550,14 +1708,10 @@ mod tests {
     /// smuggling regenerative tables, or a regenerative block missing one, is rejected by name.
     #[test]
     fn governor_architecture_is_explicit_and_tableless() {
-        let fresh = || -> TankSpec {
-            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap()
-        };
-
         // The bare explicit-Governor block: parses, validates, selects no joint params.
         let block: TransmissionSpec = ron::de::from_str("(architecture: Governor)")
             .expect("a tableless Governor block must parse");
-        let mut spec = fresh();
+        let mut spec = fixture();
         spec.track.powertrain.transmission = Some(block);
         spec.validate()
             .expect("an explicit Governor selection is valid without tables");
@@ -1567,13 +1721,8 @@ mod tests {
         );
 
         // Governor + authored tables = dead data hiding a selection bug — rejected by name.
-        let mut spec = fresh();
-        spec.track
-            .powertrain
-            .transmission
-            .as_mut()
-            .unwrap()
-            .architecture = TransmissionArchitecture::Governor;
+        let mut spec = fixture();
+        fixture_transmission(&mut spec).architecture = TransmissionArchitecture::Governor;
         let err = spec.validate().unwrap_err().to_string();
         assert!(
             err.contains("Governor") && err.contains("engine"),
@@ -1581,8 +1730,8 @@ mod tests {
         );
 
         // A regenerative architecture missing a table is named with its architecture.
-        let mut spec = fresh();
-        spec.track.powertrain.transmission.as_mut().unwrap().engine = None;
+        let mut spec = fixture();
+        fixture_transmission(&mut spec).engine = None;
         let err = spec.validate().unwrap_err().to_string();
         assert!(
             err.contains("transmission.engine") && err.contains("FixedRadii"),
