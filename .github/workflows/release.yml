@@ -180,6 +180,19 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
+      # The handshake tag digests shipped assets as raw bytes (protocol_id, ADR-0018): a checkout
+      # that rewrites line endings ships a client whose connect token the server cannot decrypt.
+      # `.gitattributes` pins `* -text`; this trips if that pin is ever lost.
+      - name: Shipped assets are byte-identical to the commit (eol guard)
+        shell: bash
+        run: |
+          converted="$(git ls-files --eol -- assets | grep -E 'w/crlf' || true)"
+          if [ -n "${converted}" ]; then
+            echo "::error::checkout rewrote line endings in assets/ — the map digest diverges from the server's"
+            echo "${converted}"
+            exit 1
+          fi
+
       # Ship only runtime assets: the game loads .glb meshes, so drop the build-time Blender sources
       # (.blend1 is gitignored, but prune defensively).
       - name: Prune non-runtime assets
