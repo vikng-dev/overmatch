@@ -81,11 +81,16 @@ jobs:
             libwayland-dev libxkbcommon-dev libx11-dev jq time
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # clippy is check-only (writes .rmeta, no codegen); a cache it saves leaves
+          # every codegen lane recompiling all deps each run, so the check-only lane
+          # and the codegen lanes never share a key.
+          key: ${{ matrix.task == 'clippy' && 'check-only' || 'codegen' }}
 
-      # `--profile ci` compiles dependencies at opt-level 0 (see Cargo.toml) — far
-      # faster to build cold and a smaller cache than the dev profile's opt-level-3
-      # deps. `--locked` builds against the committed Cargo.lock, so CI is reproducible
-      # and fails loudly if the lockfile drifts from Cargo.toml.
+      # The default dev profile: opt-3 deps run the lib suite ~6.7× faster than the
+      # retired opt-0 `ci` profile paid for once at cache-cold. `--locked` builds
+      # against the committed Cargo.lock, so CI is reproducible and fails loudly if
+      # the lockfile drifts from Cargo.toml.
       # One feature variant: lightyear compiles unconditionally (the PVP client is the product), and
       # `--all-targets` covers the client, server, and both sandbox bins. `dev_tools` is default-on.
       # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
@@ -93,7 +98,7 @@ jobs:
       # with no netcode mounted) — no second full build required.
       - name: Clippy
         if: matrix.task == 'clippy'
-        run: cargo clippy --profile ci --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # The LOD lane's math, before the Cargo lane so a broken ladder fails fast and cheaply. Stdlib
       # + numpy, no Blender and no corpus: every named refusal, every declared gate limit, the
@@ -113,7 +118,7 @@ jobs:
       - name: Tests
         if: matrix.task == 'tests'
         run: |
-          cargo test --profile ci --locked -- \
+          cargo test --locked -- \
             --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
 
       - name: Build shot stress test
@@ -122,7 +127,7 @@ jobs:
           set -euo pipefail
           artifacts="${RUNNER_TEMP}/overmatch-test-artifacts.jsonl"
           manifest="$(realpath Cargo.toml)"
-          cargo test --profile ci --locked --lib --no-run --message-format=json > "${artifacts}"
+          cargo test --locked --lib --no-run --message-format=json > "${artifacts}"
           mapfile -t executables < <(
             jq -r --arg manifest "${manifest}" \
               'select(.reason == "compiler-artifact" and .manifest_path == $manifest and .target.kind == ["lib"] and .profile.test and .executable != null) | .executable' \
@@ -353,7 +358,7 @@ jobs:
 
       - name: The Rust consumer contract
         if: steps.scope.outputs.affected == 'true'
-        run: "cargo test --profile ci --locked --lib bake::"
+        run: "cargo test --locked --lib bake::"
 
       - name: Asset reports
         if: ${{ !cancelled() && steps.scope.outputs.affected == 'true' }}
