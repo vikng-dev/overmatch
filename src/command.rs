@@ -21,7 +21,9 @@ pub struct TankCommand {
     pub fire_primary: bool,
     /// Secondary fire level. It is a consumable and must be attested for the current tick.
     pub fire_secondary: bool,
-    /// Hull-local aim point chased by every servo; `None` means no commitment yet.
+    /// World aim point chased by every servo (ADR-0038 — the frame latency cannot rotate;
+    /// `aim::drive_aim_servos` drops it into the hull frame of the tick it lays). `None` means no
+    /// commitment yet.
     pub aim: Option<Vec3>,
     /// Player-dialed range (m) for superelevation.
     pub range: f32,

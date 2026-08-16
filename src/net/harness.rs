@@ -5,7 +5,7 @@
 //!
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
-//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
+//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted world aim point. |
 //! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
 //! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
@@ -127,7 +127,7 @@ pub(crate) struct SimulateInput {
     /// it to the end of the run — the only shape the MG-cost workload ever needed. A capture that
     /// must observe the RELEASE edge (presentation stopping on the local tick) sets it.
     fire_release_tick: Option<u32>,
-    /// `SPIKE_AIM_POINT="x,y,z"` (hull-local metres): the point every servo chases in the fire/idle
+    /// `SPIKE_AIM_POINT="x,y,z"` (world metres): the point every servo chases in the fire/idle
     /// workloads. Default `(200,0,-800)` lays the guns downrange into open ground (rounds strike
     /// terrain — the common spray case); set it at a stationary target's hull so the rounds strike
     /// ARMOR instead, exercising the full penetration march (thickness/span probes, spall). Ignored by
@@ -183,7 +183,7 @@ impl SimulateInput {
     }
 }
 
-/// Parse `SPIKE_AIM_POINT="x,y,z"` into a hull-local aim point; `None` (unset or malformed) falls
+/// Parse `SPIKE_AIM_POINT="x,y,z"` into a world aim point; `None` (unset or malformed) falls
 /// back to the downrange default. Three comma-separated f32s.
 fn parse_aim_point() -> Option<Vec3> {
     let raw = env_value("SPIKE_AIM_POINT")?;
@@ -275,10 +275,10 @@ pub(crate) fn buffer_input(
     } else {
         0.0
     };
-    // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
+    // Far off-axis so the yaw servo visibly slews; range 800 m dials in real
     // superelevation from the weapon's range table.
     // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the
-    // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
+    // aim around the world origin at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
     // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
     // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
     // its rest pose. The point is zero moving parts above the hull, so a servo slew can't feed the

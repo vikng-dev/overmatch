@@ -362,9 +362,8 @@ fn orbit_camera(
 fn reaim_orbit_on_optic_exit(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
-    controlled: Query<(Entity, &Rig), With<Controlled>>,
+    controlled: Query<Entity, With<Controlled>>,
     tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
-    hull: Query<&GlobalTransform, With<Hull>>,
     pivot: Res<TurretPivot>,
     camera: Single<&mut Transform, With<Camera3d>>,
 ) {
@@ -373,22 +372,16 @@ fn reaim_orbit_on_optic_exit(
     if *mode != SightMode::ThirdPerson {
         return;
     }
-    let Ok((tank_entity, rig)) = controlled.single() else {
+    let Ok(tank_entity) = controlled.single() else {
         return;
     };
-    let Some(local) = committed.get(tank_entity) else {
+    let Some(target) = committed.get(tank_entity) else {
         return;
     };
     let (Some(turret_local), Ok(tank_transform)) = (pivot.0, tank.single()) else {
         return;
     };
-    let Ok(hull_transform) = hull.get(rig.hull) else {
-        return;
-    };
 
-    // The target uses the propagated hull pose while the pivot uses the current rendered root pose;
-    // this view-only transition can therefore span one render frame while moving.
-    let target = hull_transform.affine().transform_point3(local);
     let pivot_point = orbit_pivot(tank_transform, turret_local);
     // Fallible: a zero/non-finite span (a poisoned pose on the toggle frame) must not NaN the
     // camera rotation — keep the current direction instead.
@@ -583,12 +576,11 @@ fn elastic_bore_camera(
 
     let hull_affine = hull.affine();
     let eye = gun.translation();
-    let mount_local = hull_affine.inverse().transform_point3(eye);
 
-    // Target look = the committed-aim (intent) bearing from the mount, hull-local; fall back to the
-    // gun's own bore before the first commit exists.
+    // Target look = the committed-aim (intent) bearing from the mount, in the hull frame the spring
+    // integrates in; fall back to the gun's own bore before the first commit exists.
     let target = match committed.get(tank).filter(|point| point.is_finite()) {
-        Some(point) => yaw_pitch_of(point - mount_local),
+        Some(point) => yaw_pitch_of(hull_affine.inverse().transform_vector3(point - eye)),
         None => yaw_pitch_of(
             hull_affine
                 .inverse()
@@ -653,10 +645,10 @@ fn lead_optic_camera(
     let (mut transform, mut global_transform, mut projection) = camera.into_inner();
 
     let eye = gun.translation();
-    // Look at the committed intent point (the orange dot), hull-local → world; before the first commit
-    // exists, fall back to the gun's own bore.
+    // Look at the committed intent point (the orange dot); before the first commit exists, fall back
+    // to the gun's own bore.
     let dir = match committed.get(tank).filter(|point| point.is_finite()) {
-        Some(point) => hull.affine().transform_point3(point) - eye,
+        Some(point) => point - eye,
         None => gun.rotation() * Vec3::NEG_Z,
     };
     let up = hull.rotation() * Vec3::Y;

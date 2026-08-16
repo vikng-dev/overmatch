@@ -120,7 +120,15 @@ use crate::{CombatantId, ShotId};
 /// integrate `RemoteServos` from the `ServoAngles` stream, so the replicated snapshot had no
 /// reader. Surface and own-type graph move; the change rides the undeployed bump — the
 /// REV-19/REV-26 precedent above.
-pub const PROTOCOL_REV: u32 = 27;
+///
+/// REV 28 (the aim intention travels in world space — ADR-0038): NO wire-format change.
+/// `TankCommand::aim` stays an `Option<Vec3>` and every hash over the surface and the type graph is
+/// identical, but the frame the three floats are measured in moved from the hull to the world.
+/// Two peers on opposite sides of this change lay the same command's servos at different bearings
+/// whenever the hull is not at yaw zero — the silent sim skew REV exists to refuse, and the sharpest
+/// case yet of a REV that only a semantic bump can carry (the REV-25 precedent). Only the REV (and
+/// with it the manifest fingerprint) moves.
+pub const PROTOCOL_REV: u32 = 28;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1271,9 +1279,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 26 (map2 terrain + 1500 m extent: same registrations, same own-type
-        // definitions — the REV itself is what moved).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x565b_f8e1_2bfa_c694;
+        // Re-pinned for REV 28 (the aim intention travels in world space: same registrations, same
+        // own-type definitions — the REV itself is what moved).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x49ad_15b6_aeab_5c31;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

@@ -17,7 +17,7 @@ use crate::firecontrol::{RangeTable, Ranging};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Hull, Rig, TankViews};
+use crate::tank::{Controlled, Rig, TankViews};
 use crate::ui_font::UiFonts;
 
 use super::{SightMode, view_available};
@@ -383,8 +383,7 @@ fn update_intent_reticle(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    controlled: Query<(Entity, &Rig), With<Controlled>>,
-    hull: Query<&GlobalTransform, With<Hull>>,
+    controlled: Query<Entity, With<Controlled>>,
     mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
 ) {
     let Ok((mut node, mut visibility)) = reticle.single_mut() else {
@@ -394,20 +393,15 @@ fn update_intent_reticle(
         *visibility = Visibility::Hidden;
         return;
     }
-    let Ok((tank, rig)) = controlled.single() else {
+    let Ok(tank) = controlled.single() else {
         *visibility = Visibility::Hidden;
         return;
     };
-    let Ok(hull) = hull.get(rig.hull) else {
-        return;
-    };
-    let Some(local) = committed.get(tank) else {
+    let Some(point) = committed.get(tank) else {
         *visibility = Visibility::Hidden;
         return;
     };
     let (camera, cam_transform) = *camera;
-
-    let point = hull.affine().transform_point3(local);
 
     match camera.world_to_viewport(cam_transform, point) {
         Ok(screen) => {
