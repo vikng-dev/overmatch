@@ -36,6 +36,13 @@ use crate::tank::{
 /// (`sight::drive_gunner_aim`) — so "the sky" is one far point in all of them.
 pub(crate) const MAX_RANGE: f32 = 10_000.0;
 
+/// Per-axis magnitude a commanded aim point may not exceed, checked where the command meets the sim
+/// (`drive_aim_servos`). A legitimate pick is a point inside the world — [`crate::world::VIEW_CAST_MAX_M`]
+/// covers its diagonal from any in-world origin — or the [`MAX_RANGE`] sky fallback out from one, so
+/// their sum bounds every author with headroom to spare while leaving a poisoned command nowhere near
+/// the magnitudes at which the hull composition overflows f32.
+pub(crate) const AIM_LIMIT: f32 = crate::world::VIEW_CAST_MAX_M + MAX_RANGE;
+
 /// Distance along an aim ray to the first surface a shell would meet: terrain or a tank's ballistic
 /// volumes — the same `Terrain | Armor` mask the live shell marches against
 /// (`ballistics::integrate_projectiles`), so the dots predict the shell's truth, tanks included.
@@ -335,8 +342,14 @@ fn commit_aim(
     // the green bore dot ends up the superelevation above it. The memory is a BEARING, so it is
     // stored hull-local; a frame whose hull will not compose still authors the pick, and leaves the
     // memory holding the last bearing it could measure rather than one measured in nothing.
-    if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(AimIntent::World(point));
+    let aim = Some(AimIntent::World(point));
+    if let Ok(mut command) = tank_commands.get_mut(tank)
+        // Same-value writes skipped, as in the hold arm above: a parked player looking at a fixed
+        // place re-picks the same world point every frame, and must not churn change detection on
+        // the replicated input for it.
+        && command.aim != aim
+    {
+        command.aim = aim;
     }
     if let Some(hull) = hull {
         committed.set(tank, hull.inverse().transform_point3(point));
@@ -367,11 +380,16 @@ fn drive_aim_servos(
         let Some(intent) = command.aim else {
             continue; // no commitment yet — servos hold
         };
-        // A non-finite intention would NaN the servo targets and cascade into the physics state —
-        // and under MP the command crosses a trust boundary (a client with a zeroed camera/hull
-        // transform, or a hostile one, must not be able to poison the authority's sim). Hold, like
-        // no-commitment.
-        if !intent.point().is_finite() {
+        // The command crosses a trust boundary unvalidated (`net::protocol` bridges the action
+        // state whole), so this gate is the sim's only guard against a poisoned aim. Finiteness
+        // alone does not cover it: a merely LARGE point survives every `is_finite` and then
+        // overflows to NaN inside the hull composition below, which reaches the servo targets and
+        // the physics state. Bound the magnitude at the same envelope the aim rays already resolve
+        // in ([`MAX_RANGE`]) — no legitimate author can name a point outside the one every pick
+        // falls back to — with the hull's own world position added, since the point is named in
+        // world coordinates and the tank is not at the origin. Hold, like no-commitment.
+        let commanded = intent.point();
+        if !commanded.is_finite() || commanded.abs().max_element() > AIM_LIMIT {
             continue;
         }
         // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
@@ -546,7 +564,7 @@ mod tests {
     use bevy::input::mouse::AccumulatedMouseMotion;
 
     use super::*;
-    use crate::firecontrol::Ranging;
+    use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
 
@@ -574,6 +592,10 @@ mod tests {
     const HULL_OFFSET: Vec3 = Vec3::new(0.3, 0.8, -0.4);
     /// Where the third-person camera watches the tank from.
     const EYE: Vec3 = Vec3::new(150.0, 16.0, -496.0);
+    /// The superelevation the fixture's muzzle lobs by, at every range (radians). Non-zero so the
+    /// lob is never the identity and its frame is under measurement in every law below; large
+    /// enough that a lob taken in the wrong frame moves the bore by degrees, not by noise.
+    const SUPERELEVATION: f32 = 0.05;
 
     /// A tank driven by the SHIPPED systems: `commit_aim` or `sight::drive_gunner_aim` authors the
     /// intention, `drive_aim_servos` bridges it to servo targets, `tank::drive_servos` integrates
@@ -591,6 +613,7 @@ mod tests {
     struct AimRig {
         world: World,
         tank: Entity,
+        hull: Entity,
         turret: Entity,
         gun: Entity,
         camera: Entity,
@@ -640,7 +663,9 @@ mod tests {
             let hull = world.spawn(Transform::from_translation(HULL_OFFSET)).id();
             let turret = world.spawn(Transform::IDENTITY).id();
             let gun = world.spawn(Transform::IDENTITY).id();
-            let muzzle = world.spawn(Transform::IDENTITY).id();
+            let muzzle = world
+                .spawn((Transform::IDENTITY, RangeTable::test_fixed(SUPERELEVATION)))
+                .id();
             let tank = world
                 .spawn((
                     Tank,
@@ -682,6 +707,7 @@ mod tests {
             Self {
                 world,
                 tank,
+                hull,
                 turret,
                 gun,
                 camera,
@@ -693,9 +719,35 @@ mod tests {
         /// Stand the physics root at `yaw_deg`. Both the authoring pass and the laying pass go
         /// through here, with the pose each of them actually sees.
         fn stand_at(&mut self, yaw_deg: f32) {
+            self.stand_with(Quat::from_rotation_y(yaw_deg.to_radians()));
+        }
+
+        /// Stand the physics root at an arbitrary attitude — a hull off the level, where the hull's
+        /// up and the world's up are different axes.
+        fn stand_with(&mut self, attitude: Quat) {
+            self.world.entity_mut(self.tank).insert(Rotation(attitude));
+        }
+
+        /// The hull's world attitude — the frame the servos solve in, and the frame the lob claims.
+        fn hull_attitude(&mut self) -> Quat {
+            let (tank, hull) = (self.tank, self.hull);
+            self.pose_of(hull, tank).1
+        }
+
+        /// `rig_world_pose` for one rig node, run as the shipped composer rather than re-derived.
+        fn pose_of(&mut self, node: Entity, tank: Entity) -> (Vec3, Quat) {
             self.world
-                .entity_mut(self.tank)
-                .insert(Rotation(Quat::from_rotation_y(yaw_deg.to_radians())));
+                .run_system_once(
+                    move |poses: Query<(&Position, &Rotation)>,
+                          parents: Query<&ChildOf>,
+                          locals: Query<&Transform>| {
+                        let (position, rotation) =
+                            poses.get(tank).expect("the root carries a physics pose");
+                        rig_world_pose(node, tank, position.0, rotation.0, &parents, &locals)
+                            .expect("the node hangs under the root")
+                    },
+                )
+                .expect("the pose probe runs")
         }
 
         /// Point the third-person camera at `target` — the world-locked orbit view, whose
@@ -745,12 +797,17 @@ mod tests {
         /// authoring — the authority's half alone, which is also what a starved input buffer does
         /// with the last command it received.
         fn relay(&mut self, intent: AimIntent, true_yaw: f32) {
+            self.relay_with(intent, Quat::from_rotation_y(true_yaw.to_radians()));
+        }
+
+        /// [`Self::relay`] against an arbitrary hull attitude.
+        fn relay_with(&mut self, intent: AimIntent, attitude: Quat) {
             self.world
                 .entity_mut(self.tank)
                 .get_mut::<TankCommand>()
                 .expect("the tank carries a command")
                 .aim = Some(intent);
-            self.stand_at(true_yaw);
+            self.stand_with(attitude);
             self.run(drive_aim_servos);
             self.run(drive_servos);
         }
@@ -799,28 +856,29 @@ mod tests {
             self.hull_relative_bearing_deg() + hull_yaw.to_degrees()
         }
 
-        /// How far the bore misses `target`, in degrees — the whole angle between where the gun
-        /// points and where the target actually is.
-        fn bore_error_deg(&mut self, target: Vec3) -> f32 {
+        /// How far the bore misses `target`, decomposed IN `frame` into `(azimuth, elevation)`
+        /// degrees — the same two angles the servos are commanded in, so a miss reads back as the
+        /// mount that owns it.
+        ///
+        /// Which frame is the question, not a detail. The lay is solved in the HULL's frame and the
+        /// superelevation lob is a rotation in that frame, so a converged bore owes zero azimuth and
+        /// exactly the superelevation of elevation THERE. Pass `Quat::IDENTITY` to ask the same
+        /// question of the world, which answers differently the moment the hull leaves the level.
+        ///
+        /// Both angles are `atan2`-based, never `acos` of a dot product: near 1 that loses most of
+        /// the f32 mantissa, and these are angles that should be zero.
+        fn bore_miss_deg(&mut self, target: Vec3, frame: Quat) -> (f32, f32) {
             let (tank, gun) = (self.tank, self.gun);
-            let (position, rotation) = self
-                .world
-                .run_system_once(
-                    move |poses: Query<(&Position, &Rotation)>,
-                          parents: Query<&ChildOf>,
-                          locals: Query<&Transform>| {
-                        let (position, rotation) =
-                            poses.get(tank).expect("the root carries a physics pose");
-                        rig_world_pose(gun, tank, position.0, rotation.0, &parents, &locals)
-                            .expect("the gun hangs under the root")
-                    },
-                )
-                .expect("the pose probe runs");
-            // `atan2(|a×b|, a·b)`, not `acos` — an `acos` of a dot product near 1 loses most of
-            // its f32 mantissa, and this measures angles that should be zero.
-            let bore = rotation * Vec3::NEG_Z;
-            let line = (target - position).normalize();
-            bore.cross(line).length().atan2(bore.dot(line)).to_degrees()
+            let (position, rotation) = self.pose_of(gun, tank);
+            let to_frame = frame.inverse();
+            let bore = to_frame * (rotation * Vec3::NEG_Z);
+            let line = to_frame * (target - position).normalize();
+            let azimuth = |v: Vec3| (-v.x).atan2(-v.z);
+            let elevation = |v: Vec3| v.y.atan2(v.xz().length());
+            (
+                (azimuth(bore) - azimuth(line)).to_degrees(),
+                (elevation(bore) - elevation(line)).to_degrees(),
+            )
         }
     }
 
@@ -868,12 +926,20 @@ mod tests {
         for _ in 0..256 {
             rig.relay(intent, TURN_DEG);
         }
-        let error = rig.bore_error_deg(at_rest);
+        let hull = rig.hull_attitude();
+        let (azimuth, elevation) = rig.bore_miss_deg(at_rest, hull);
         assert!(
-            error < 0.02,
-            "a converged bore must sit on the place the player picked; missing by {error:.3}° \
-             means the intention rode the hull round (a hull-local transport misses by the full \
-             {TURN_DEG}° heading change)",
+            azimuth.abs() < 0.02,
+            "a converged bore must sit on the place the player picked; missing its bearing by \
+             {azimuth:.3}° means the intention rode the hull round (a hull-local transport misses \
+             by the full {TURN_DEG}° heading change)",
+        );
+        let lobbed = SUPERELEVATION.to_degrees();
+        assert!(
+            (elevation - lobbed).abs() < 0.02,
+            "the bore must sit exactly the commanded superelevation above the intention — the lob \
+             is the only thing entitled to move it off the line of sight — got {elevation:.3}° \
+             against {lobbed:.3}°",
         );
     }
 
@@ -913,7 +979,8 @@ mod tests {
                 let yaw = omega * t as f32 * TICK;
                 rig.frame(yaw, yaw, Author::ThirdPerson);
             }
-            let residual = rig.bore_error_deg(place);
+            let hull = rig.hull_attitude();
+            let residual = rig.bore_miss_deg(place, hull).0.abs();
             assert!(
                 (residual - lag).abs() < 0.05,
                 "at ω = {omega}°/s the standing lag must be the mount's own ω²/2a − |ω|·dt = \
@@ -1073,6 +1140,133 @@ mod tests {
              through the world imports from the {hull_step:.3}° gap between the client's rendered \
              hull and the authority's",
         );
+    }
+
+    /// **A hold names the place it was picked at.** The laws above measure how the lay MOVES, and a
+    /// span is blind to the value it moves around: a memory that took the pick through the wrong
+    /// transform — `transform_vector3` dropping the hull's translation, or a world point stored
+    /// straight into the hull-local slot — holds a CONSTANT bearing, hundreds of metres from
+    /// anything the player looked at, and every span law still passes. So pin the value at both ends
+    /// of the memory.
+    ///
+    /// At rest, releasing the pick must change nothing: the re-authored intention is the picked
+    /// place itself. Under a pivot it must be that same bearing swept rigidly round the hull — which
+    /// is the closed form of ADR-0001, and also what the third-person → optic handover resumes onto
+    /// (`sight::resume_commit` reads this memory, and a garbage bearing there is a gun that jumps on
+    /// the toggle).
+    #[test]
+    fn a_held_intention_still_names_the_place_it_was_picked_at() {
+        const TURN_DEG: f32 = 20.0;
+        let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
+        /// Where the hull's origin stands at a given heading — the point the held bearing is
+        /// measured FROM, which is not the physics root and not the world origin.
+        fn hull_origin(yaw_deg: f32) -> Vec3 {
+            ROOT + Quat::from_rotation_y(yaw_deg.to_radians()) * HULL_OFFSET
+        }
+
+        let mut rig = AimRig::new();
+        rig.watch(target);
+        rig.frame(0.0, 0.0, Author::ThirdPerson);
+        let place = rig.picked();
+
+        rig.right_mouse(true);
+        rig.frame(0.0, 0.0, Author::ThirdPerson);
+        let slip = rig.picked().distance(place);
+        assert!(
+            slip < 1e-2,
+            "letting go of the pick may not move the intention: the hold re-authored {slip:.3} m \
+             from the place it was committed at, so the memory took it through the wrong transform",
+        );
+
+        rig.frame(TURN_DEG, TURN_DEG, Author::ThirdPerson);
+        let swept = rig.picked();
+        let rigid = Quat::from_rotation_y(TURN_DEG.to_radians()) * (place - hull_origin(0.0))
+            + hull_origin(TURN_DEG);
+        let error = swept.distance(rigid);
+        assert!(
+            error < 1e-2,
+            "a hold is a bearing off the hull, so a {TURN_DEG}° pivot must carry it rigidly round: \
+             the re-authored place stands {error:.3} m off where that bearing points",
+        );
+    }
+
+    /// **The lob is a rotation in the HULL's frame.** Superelevation raises the bore above the line
+    /// of sight in the gun's own plane of elevation — the plane the pitch mount swings in, spanned
+    /// by hull up — so on a tank standing on a slope the lob tilts with the tank.
+    ///
+    /// Level, the hull's up and the world's up are the same axis and the claim is untestable. Rolled
+    /// and pitched, they are not: the same lay taken in the world frame puts the bore somewhere the
+    /// mount cannot even reach without traversing, and the two answers separate by degrees.
+    #[test]
+    fn the_superelevation_lob_rides_the_hull_not_the_world() {
+        /// The hull's roll — the whole reason the two frames have different answers. Tilting the
+        /// plane of elevation by this projects the lob onto the world's vertical as `cos ROLL`.
+        const ROLL: f32 = 0.45;
+        let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
+        let attitude = Quat::from_euler(EulerRot::YXZ, 0.35, 0.0, ROLL);
+
+        let mut rig = AimRig::new();
+        for _ in 0..512 {
+            rig.relay_with(AimIntent::World(target), attitude);
+        }
+
+        let lobbed = SUPERELEVATION.to_degrees();
+        let hull = rig.hull_attitude();
+        let (azimuth, in_hull) = rig.bore_miss_deg(target, hull);
+        assert!(
+            azimuth.abs() < 0.02 && (in_hull - lobbed).abs() < 0.02,
+            "in the hull's frame a converged bore owes zero bearing error and exactly the \
+             {lobbed:.3}° lob, got {azimuth:.3}° and {in_hull:.3}°",
+        );
+
+        // The tilt's own prediction, halved: the sighting geometry perturbs it, so hold the frames
+        // to separating by the order the roll demands rather than to a fitted number.
+        let separation = lobbed * (1.0 - ROLL.cos());
+        let (_, in_world) = rig.bore_miss_deg(target, Quat::IDENTITY);
+        assert!(
+            lobbed - in_world > separation * 0.5,
+            "the two frames must actually disagree on a hull rolled {ROLL} rad, or the law above \
+             proves nothing: the world frame reads {in_world:.3}° against the hull frame's \
+             {in_hull:.3}°, a separation of {separation:.3}° short",
+        );
+    }
+
+    /// **A poisoned aim cannot reach a servo.** `net::protocol`'s bridge copies the action state
+    /// into the command whole, unvalidated, so an aim authored by a hostile or broken client arrives
+    /// at `drive_aim_servos` exactly as sent — and that gate is the sim's only guard.
+    ///
+    /// Finiteness is not the whole of it. A merely LARGE point passes every `is_finite` and then
+    /// overflows inside the hull composition, so the bound is on magnitude too, and it binds BOTH
+    /// frames: the tag is a claim about a frame, never a warrant. What must survive is the last good
+    /// lay — the servo target unmoved, and every pose still finite.
+    #[test]
+    fn a_poisoned_aim_moves_no_servo() {
+        let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
+        let huge = AIM_LIMIT * 1.01;
+
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, huge, -huge] {
+            for framed in [AimIntent::World, AimIntent::HullLocal] {
+                let mut rig = AimRig::new();
+                for _ in 0..256 {
+                    rig.relay(AimIntent::World(target), 0.0);
+                }
+                let good = rig.hull_relative_bearing_deg();
+
+                rig.relay(framed(Vec3::splat(poison)), 0.0);
+                assert_eq!(
+                    rig.hull_relative_bearing_deg(),
+                    good,
+                    "a {poison} aim in {:?} moved the turret's target off its last good lay",
+                    framed(Vec3::ZERO),
+                );
+                let (_, rotation) = rig.pose_of(rig.gun, rig.tank);
+                assert!(
+                    rotation.is_finite(),
+                    "a {poison} aim in {:?} poisoned the gun's pose",
+                    framed(Vec3::ZERO),
+                );
+            }
+        }
     }
 
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a

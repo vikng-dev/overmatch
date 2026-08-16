@@ -89,8 +89,10 @@ pub enum AimIntent {
 }
 
 impl AimIntent {
-    /// The point as authored, whichever frame it names — the subject of the finiteness check every
-    /// consumer owes the sim before a poisoned value can reach a servo target.
+    /// The point as authored, whichever frame it names — the subject of the finiteness and
+    /// magnitude checks every consumer owes the sim before a poisoned value can reach a servo
+    /// target (`aim::AIM_LIMIT`). The variants share one bound: this crosses a trust boundary, so
+    /// the tag is a claim about a frame, never a warrant.
     pub fn point(self) -> Vec3 {
         match self {
             Self::World(point) | Self::HullLocal(point) => point,

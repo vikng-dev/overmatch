@@ -98,6 +98,16 @@ impl RangeTable {
         }
         self.points.last().map_or(0.0, |&(_, a)| a)
     }
+
+    /// A table that lobs by `theta` at every range — one row, so the clamp at either end of the scan
+    /// returns it. Lets a test hold the superelevation as a known constant instead of reading one
+    /// off a swept ballistic table.
+    #[cfg(test)]
+    pub(crate) fn test_fixed(theta: f32) -> Self {
+        Self {
+            points: vec![(0.0, theta)],
+        }
+    }
 }
 
 /// Simulate one shot in the vertical plane: launch at `angle` above horizontal at `speed`, step the

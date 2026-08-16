@@ -879,7 +879,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x4572_3752_61df_ec87;
+const WIRE_TYPES_HASH: u64 = 0x7926_3814_03fc_ca61;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1280,7 +1280,7 @@ mod tests {
         );
         // Re-pinned for REV 28 (`TankCommand::aim` carries its frame: the own-type graph moved
         // with the new `AimIntent` variant).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xe818_32ad_fb11_c3e7;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x13f6_0491_39b9_3915;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1497,8 +1497,11 @@ mod tests {
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
     /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
-    /// `TankCommand`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`. External wire
-    /// types (avian/lightyear) are covered by dependency version.
+    /// `TankCommand`/`AimIntent`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`.
+    /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
+    /// earns its own row: bincode encodes the variant as its declaration index, so reordering
+    /// variants changes what the bytes mean without touching one character of the type that embeds
+    /// it.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
@@ -1531,6 +1534,7 @@ mod tests {
         ("src/net/protocol.rs", "SetSpawnPoint"),
         ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
+        ("src/command.rs", "AimIntent"),
         ("src/command.rs", "CrewSwap"),
         ("src/damage.rs", "CrewStation"),
     ];
