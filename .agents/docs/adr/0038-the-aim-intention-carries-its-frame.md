@@ -93,12 +93,13 @@ variants — the frame tag is a claim about a frame, never a warrant.
 
 ## The regression net
 
-Nine laws in `aim`, driving the SHIPPED systems — `commit_aim` and `sight::drive_gunner_aim` author,
-`drive_aim_servos` bridges, `tank::drive_servos` integrates the real mechanism at the seed vehicle's
-authored rates — across the two hulls the seam actually has (the client's rendered one authors, the
-authority's true one lays). Every hull in the net is rotated AND translated, and away from the
-origin, so a `transform_vector3` standing in for a `transform_point3` cannot cancel; the fixture's
-muzzle carries a non-zero superelevation, so the lob is never the identity.
+Ten laws in `aim`, driving the SHIPPED systems — `commit_aim`, `sight::drive_gunner_aim` and
+`sight::drive_free_aim` author, `drive_aim_servos` bridges, `tank::drive_servos` integrates the real
+mechanism at the seed vehicle's authored rates — across the two hulls the seam actually has (the
+client's rendered one authors, the authority's true one lays). Every hull in the net is rotated AND
+translated, and away from the origin, so a `transform_vector3` standing in for a `transform_point3`
+cannot cancel; the fixture's muzzle carries a non-zero superelevation, so the lob is never the
+identity.
 
 | law | superseded transport | now |
 |---|---|---|
@@ -111,6 +112,18 @@ muzzle carries a non-zero superelevation, so the lob is never the identity.
 | the held bearing's VALUE, at rest and swept | — | names the picked place to 1e-2 m |
 | the lob's frame, on a hull rolled 0.45 rad | — | 2.865° in the hull's frame, 2.609° in the world's |
 | a poisoned aim (NaN, ±inf, over-magnitude, both frames) | — | no servo moves, no pose goes non-finite |
+| steering the optic and free-aim past a staircasing client hull | 0.781° imported | 0.000° |
+
+Every arm that authors an intention has a law. An arm without one is a place a refactor can ship the
+world round trip with a green suite, which is how the publish and free-aim arms were found unwatched:
+
+| author | arm | frame | guarded by |
+|---|---|---|---|
+| `aim::commit_aim` | fresh pick | `World` | the place, pivot, freeze-step and held-value laws |
+| `aim::commit_aim` | free-look hold | `World` of the held bearing | the doctrine guard, the held-value law |
+| `sight::drive_gunner_aim` | hold (mouse still) | `HullLocal` | the optic gap law |
+| `sight::drive_gunner_aim` | publish (steering) | `HullLocal` | the steering law |
+| `sight::drive_free_aim` | its only arm | `HullLocal` | the steering law |
 
 Four seam sites convert between the frames, and each is guarded by mutation:
 
@@ -126,8 +139,9 @@ is blind to the value it moves around: a memory holding a constant, wrong bearin
 exactly like a correct one.
 
 Also confirmed red: third person authoring hull-local (4 laws), a world-space hold (2), a world round
-trip on the optic (the optic law), a variant reorder on the wire enum (`wire_types_are_pinned`), the
-poison gate skipping the `World` variant, and the poison gate dropping its magnitude bound.
+trip on each of the optic's two arms and on free-aim, a variant reorder on the wire enum
+(`wire_types_are_pinned`), the poison gate skipping the `World` variant, and the poison gate dropping
+its magnitude bound.
 
 ## Wire
 

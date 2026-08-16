@@ -730,7 +730,7 @@ fn invalidate_gunner_view_state(mut free: ResMut<GunnerFreeAim>, mut elastic: Re
 /// system stays under Bevy's 16-argument limit (it mirrors the fields [`drive_gunner_aim`] takes
 /// loose).
 #[derive(SystemParam)]
-struct FreeAimServos<'w, 's> {
+pub(crate) struct FreeAimServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     specs: Query<'w, 's, &'static ServoSpec>,
     states: Query<'w, 's, &'static TankServos>,
@@ -740,7 +740,7 @@ struct FreeAimServos<'w, 's> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_free_aim(
+pub(crate) fn drive_free_aim(
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     scheme: Res<GunnerScheme>,

@@ -565,7 +565,7 @@ mod tests {
 
     use super::*;
     use crate::firecontrol::{RangeTable, Ranging};
-    use crate::sight::drive_gunner_aim;
+    use crate::sight::{GunnerFreeAim, GunnerScheme, drive_free_aim, drive_gunner_aim};
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
 
     /// The fixed clock the servos integrate on.
@@ -631,6 +631,8 @@ mod tests {
             time.advance_by(Duration::from_secs_f32(TICK));
             world.insert_resource(time);
             world.init_resource::<CommittedAim>();
+            world.init_resource::<GunnerScheme>();
+            world.init_resource::<GunnerFreeAim>();
             world.init_resource::<Ranging>();
             world.init_resource::<ButtonInput<MouseButton>>();
             world.init_resource::<AccumulatedMouseMotion>();
@@ -760,6 +762,18 @@ mod tests {
                 ));
         }
 
+        /// Move the mouse this frame, in raw counts — the input the optic and free-aim authors
+        /// steer on, and what takes the optic off its hold arm and onto the publish arm.
+        fn mouse_motion(&mut self, delta: Vec2) {
+            self.world.insert_resource(AccumulatedMouseMotion { delta });
+        }
+
+        /// Which gunner scheme the free-aim author runs under; `drive_free_aim` serves the two that
+        /// the `V` cycle reaches.
+        fn use_scheme(&mut self, scheme: GunnerScheme) {
+            self.world.insert_resource(scheme);
+        }
+
         fn right_mouse(&mut self, held: bool) {
             let mut mouse = self.world.resource_mut::<ButtonInput<MouseButton>>();
             if held {
@@ -777,6 +791,7 @@ mod tests {
             match author {
                 Author::ThirdPerson => self.run(commit_aim),
                 Author::Optic => self.run(drive_gunner_aim),
+                Author::FreeAim => self.run(drive_free_aim),
             }
 
             self.authored = self.command_aim();
@@ -883,12 +898,17 @@ mod tests {
     }
 
     /// Which shipped commit system authors a frame.
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Author {
         /// `commit_aim` — the world-locked orbit view.
         ThirdPerson,
-        /// `sight::drive_gunner_aim` — the hull-anchored optic.
+        /// `sight::drive_gunner_aim` — the hull-anchored optic. With the mouse still it re-authors
+        /// the held commitment (the fast arm); with the mouse moving it resolves a fresh sight line
+        /// and publishes that (the publish arm).
         Optic,
+        /// `sight::drive_free_aim` — the free-reticle and decoupled-optic schemes, hull-anchored the
+        /// same way and reached in shipping through the `V` cycle.
+        FreeAim,
     }
 
     /// **The transport law, third person: a pick is a PLACE.** The orbit camera does not turn with
@@ -1140,6 +1160,65 @@ mod tests {
              through the world imports from the {hull_step:.3}° gap between the client's rendered \
              hull and the authority's",
         );
+    }
+
+    /// **A hull-anchored author cannot see the rendered hull at all.** The law above holds the sight
+    /// still, which is the optic's fast arm. A gunner actually STEERING takes the other arm —
+    /// `drive_gunner_aim` resolves a fresh sight line and publishes it every frame — and so does
+    /// `sight::drive_free_aim` for the schemes the `V` cycle reaches. Those are the arms running when
+    /// the fired lay matters most.
+    ///
+    /// Both work entirely in the hull's frame, so the hull's WORLD pose is not an input to either:
+    /// the resolve's ray direction only picks what it meets, and here it meets nothing. Steer the
+    /// same mouse through the same delivery gap twice — once against a client hull that turns
+    /// smoothly, once against one that freezes and steps under lightyear's clamp — and every
+    /// commanded bearing must agree EXACTLY. A world round trip makes the rendered hull an input and
+    /// the two runs separate by the clamp's step, which is precisely the noise ADR-0038 keeps out of
+    /// the optic.
+    #[test]
+    fn steering_the_sight_never_lets_the_rendered_hull_in() {
+        const OMEGA: f32 = 10.0;
+        const FREEZE_TICKS: u32 = 6;
+        /// A steady mouse drag, in raw counts per frame — off-axis, so both servos move.
+        const STEER: Vec2 = Vec2::new(3.0, -1.0);
+        const RUN: u32 = 256;
+
+        let trace = |author, staircase: bool| {
+            let mut rig = AimRig::new();
+            rig.use_scheme(GunnerScheme::FreeReticle);
+            let mut bearings = Vec::with_capacity(RUN as usize);
+            for t in 0..RUN {
+                rig.mouse_motion(STEER);
+                let shown = if staircase {
+                    (t / FREEZE_TICKS * FREEZE_TICKS) as f32
+                } else {
+                    t as f32
+                };
+                rig.frame(OMEGA * shown * TICK, OMEGA * t as f32 * TICK, author);
+                assert!(
+                    matches!(rig.authored, Some(AimIntent::HullLocal(_))),
+                    "a hull-anchored view authors in the frame it is anchored to, steering or not",
+                );
+                bearings.push(rig.hull_relative_bearing_deg());
+            }
+            bearings
+        };
+
+        for author in [Author::Optic, Author::FreeAim] {
+            let (smooth, stepped) = (trace(author, false), trace(author, true));
+            let worst = smooth
+                .iter()
+                .zip(&stepped)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let hull_step = OMEGA * FREEZE_TICKS as f32 * TICK;
+            assert!(
+                worst < 1e-4,
+                "{author:?} let the client's rendered hull into the lay: the same steering \
+                 commanded bearings {worst:.4}° apart depending only on whether that hull \
+                 staircased, against the {hull_step:.3}° step it staircases by",
+            );
+        }
     }
 
     /// **A hold names the place it was picked at.** The laws above measure how the lay MOVES, and a
