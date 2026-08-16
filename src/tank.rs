@@ -26,7 +26,11 @@ pub use model::{
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;
+// The servo mechanism itself, for the aim regression net: `aim`'s transport tests converge real
+// servos at authored Tiger rates rather than asserting on a target angle.
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
+#[cfg(test)]
+pub(crate) use servo::{ServoRest, drive_servos};
 #[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{

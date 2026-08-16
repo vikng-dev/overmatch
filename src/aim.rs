@@ -516,7 +516,265 @@ fn update_aim_indicator(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
+    use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
+
+    /// The fixed clock the servos integrate on.
+    const TICK: f32 = 1.0 / 64.0;
+    /// The delivery gap the intention crosses between authoring and consumption, in ticks: the
+    /// shipping input delay (`net::client::SHIPPING_INPUT_DELAY_TICKS`) plus the render frame the
+    /// commit is authored in — the client's own view before the local lay closed it, and the floor
+    /// of what the authority sees.
+    const DELIVERY_TICKS: usize = 5;
+    /// The seed vehicle's authored turret traverse (`assets/tiger_1/tiger_1.tank.ron`): the numbers
+    /// are the fixture's, never a law — every assertion below is stated as a formula over them.
+    const YAW_SPEED: f32 = 34.0;
+    const YAW_ACCEL: f32 = 70.0;
+    const PITCH_SPEED: f32 = 23.0;
+    const PITCH_ACCEL: f32 = 70.0;
+
+    /// A tank whose servos are the real mechanism at the seed vehicle's authored rates, driven by
+    /// the real bridge — [`drive_aim_servos`] writing targets and `tank::drive_servos` integrating
+    /// them — across a modelled delivery gap.
+    ///
+    /// Every local transform is identity, so the yaw mount, the pitch mount and the bore share one
+    /// origin: a converged bore then points EXACTLY at the point it was commanded to, and any
+    /// residual measured here is a fact about the aim transport or the servo, never rig parallax.
+    struct AimRig {
+        world: World,
+        tank: Entity,
+        turret: Entity,
+        gun: Entity,
+        /// The delivery gap, as the queue it is: what the servos consume this tick is what the
+        /// player authored [`DELIVERY_TICKS`] ticks ago.
+        in_flight: VecDeque<Vec3>,
+    }
+
+    impl AimRig {
+        /// `held` primes the delivery queue, so the first tick consumes an intention rather than a
+        /// hole.
+        fn new(held: Vec3) -> Self {
+            let mut world = World::new();
+            let mut time = Time::<()>::default();
+            time.advance_by(Duration::from_secs_f32(TICK));
+            world.insert_resource(time);
+
+            let hull = world.spawn(Transform::IDENTITY).id();
+            let turret = world.spawn(Transform::IDENTITY).id();
+            let gun = world.spawn(Transform::IDENTITY).id();
+            let muzzle = world.spawn(Transform::IDENTITY).id();
+            let tank = world
+                .spawn((
+                    Tank,
+                    TankCommand::default(),
+                    Position::default(),
+                    Rotation::default(),
+                    Rig {
+                        hull,
+                        turret,
+                        gun,
+                        muzzle,
+                    },
+                    TankServos::for_count(2),
+                ))
+                .id();
+            world.entity_mut(hull).insert(ChildOf(tank));
+            world.entity_mut(turret).insert(ChildOf(hull));
+            world.entity_mut(gun).insert(ChildOf(turret));
+            world.entity_mut(muzzle).insert(ChildOf(gun));
+            // One ballistic volume, so the root carries the `TankVolumes` the servo's requirement
+            // gate resolves through; the authored requirement is empty, so effectiveness is full.
+            world.spawn(VolumeOf(tank));
+
+            let mut mount = |servo: Entity, role: ServoRole, slot: usize, speed, accel| {
+                world.entity_mut(servo).insert((
+                    ServoSpec::test_continuous(role, speed, accel),
+                    ServoRest(Quat::IDENTITY),
+                    ServoIndex(slot),
+                    TankRoot(tank),
+                    ServoCommand::default(),
+                    role,
+                ));
+            };
+            mount(turret, ServoRole::Yaw, 0, YAW_SPEED, YAW_ACCEL);
+            mount(gun, ServoRole::Pitch, 1, PITCH_SPEED, PITCH_ACCEL);
+
+            Self {
+                world,
+                tank,
+                turret,
+                gun,
+                in_flight: VecDeque::from(vec![held; DELIVERY_TICKS]),
+            }
+        }
+
+        /// One fixed tick: the hull stands at `hull_yaw_deg`, the player authors `intent`, and the
+        /// servos consume whatever left the player [`DELIVERY_TICKS`] ticks ago.
+        fn tick(&mut self, hull_yaw_deg: f32, intent: Vec3) {
+            self.world
+                .entity_mut(self.tank)
+                .insert(Rotation(Quat::from_rotation_y(hull_yaw_deg.to_radians())));
+            self.in_flight.push_back(intent);
+            let delivered = self.in_flight.pop_front().expect("the queue is primed");
+            self.world
+                .entity_mut(self.tank)
+                .get_mut::<TankCommand>()
+                .expect("the tank carries a command")
+                .aim = Some(delivered);
+            self.world
+                .run_system_once(drive_aim_servos)
+                .expect("the servo bridge runs");
+            self.world
+                .run_system_once(drive_servos)
+                .expect("the servo mechanism runs");
+        }
+
+        /// The world bearing the turret is COMMANDED to — its parent-local target composed with
+        /// the hull heading that target was solved against. This is what the player's intention
+        /// becomes once it has crossed the delivery gap, before the mount's own lag touches it.
+        fn commanded_bearing_deg(&self) -> f32 {
+            let target = self
+                .world
+                .get::<ServoCommand>(self.turret)
+                .expect("the turret carries a servo command")
+                .target;
+            let (hull_yaw, _, _) = self
+                .world
+                .get::<Rotation>(self.tank)
+                .expect("the root carries a physics rotation")
+                .to_euler(EulerRot::YXZ);
+            (target + hull_yaw).to_degrees()
+        }
+
+        /// How far the bore misses `target`, in degrees — the whole angle between where the gun
+        /// points and where the target actually is.
+        fn bore_error_deg(&mut self, target: Vec3) -> f32 {
+            let (tank, gun) = (self.tank, self.gun);
+            let (position, rotation) = self
+                .world
+                .run_system_once(
+                    move |poses: Query<(&Position, &Rotation)>,
+                          parents: Query<&ChildOf>,
+                          locals: Query<&Transform>| {
+                        let (position, rotation) =
+                            poses.get(tank).expect("the root carries a physics pose");
+                        rig_world_pose(gun, tank, position.0, rotation.0, &parents, &locals)
+                            .expect("the gun hangs under the root")
+                    },
+                )
+                .expect("the pose probe runs");
+            (rotation * Vec3::NEG_Z)
+                .angle_between(target - position)
+                .to_degrees()
+        }
+    }
+
+    /// **The transport law.** The player's intention travels in a frame latency cannot rotate: an
+    /// aim authored while the hull sat at one heading and consumed while it sits at another must
+    /// still name the same spot on the world.
+    ///
+    /// Authored at hull yaw 0°, where the hull frame and the world frame coincide — so the test
+    /// need not know which frame the commit writes in — and consumed at 20°. A hull-local
+    /// intention re-applied to the later hull yaws with it: the converged bore misses by exactly
+    /// the heading change, 20°.
+    #[test]
+    fn an_intention_survives_the_hull_turning_under_it() {
+        const TARGET: Vec3 = Vec3::new(0.0, 0.0, -500.0);
+        const TURN_DEG: f32 = 20.0;
+
+        let mut rig = AimRig::new(TARGET);
+        // One tick at the authoring heading, then the hull is round at the new one for the whole
+        // slew: the intention crosses the delivery gap and is laid against a hull it never saw.
+        rig.tick(0.0, TARGET);
+        for _ in 0..256 {
+            rig.tick(TURN_DEG, TARGET);
+        }
+
+        let error = rig.bore_error_deg(TARGET);
+        assert!(
+            error < 0.02,
+            "a converged bore must sit on the committed world point; missing by {error:.3}° means \
+             the intention rode the hull round (a hull-local transport misses by the full \
+             {TURN_DEG}° heading change)",
+        );
+    }
+
+    /// **The pivot residual is the servo's, and only the servo's.** Holding the crosshair on a
+    /// fixed spot while the hull pivots at ω, the bore must trail by exactly what a rate-limited
+    /// mount costs and by nothing else.
+    ///
+    /// The mechanism's own floor is its braking envelope's fixed point: `drive_servos` commands
+    /// `v = sqrt(2·a·ε)`, so sustaining ω needs a standing error of `ω²/2a`, plus the tick the
+    /// target moves before the mount answers. A transport that rotates with the hull adds
+    /// `ω·(delivery gap)` on top — of the same order, and pure error.
+    #[test]
+    fn a_steady_pivot_leaves_only_the_mount_s_rate_limited_lag() {
+        const TARGET: Vec3 = Vec3::new(0.0, 0.0, -500.0);
+        /// Hull yaw rate, degrees/second — a brisk neutral-steer pivot.
+        const OMEGA: f32 = 10.0;
+
+        let mut rig = AimRig::new(TARGET);
+        for t in 0..512 {
+            rig.tick(OMEGA * t as f32 * TICK, TARGET);
+        }
+        let residual = rig.bore_error_deg(TARGET);
+
+        // The mount's braking envelope commands `v = sqrt(2·a·ε)`, so holding ω needs a standing
+        // error of ω²/2a; the reading is taken one integrated step past that fixed point.
+        let lag = OMEGA * OMEGA / (2.0 * YAW_ACCEL) - OMEGA * TICK;
+        let transport = OMEGA * DELIVERY_TICKS as f32 * TICK;
+        assert!(
+            (residual - lag).abs() < 0.05,
+            "the standing lag must be the mount's own ω²/2a − ω·dt = {lag:.3}°, got {residual:.3}°; \
+             an intention that rotates in flight adds ω·delivery = {transport:.3}° on top of it",
+        );
+    }
+
+    /// **The comb filter.** An interpolated hull does not turn smoothly — under jitter lightyear's
+    /// clamp freezes it, then steps it. A hull-local intention beats against that step: the
+    /// authoring hull and the consuming hull sit on different stairs, so the bearing the servos are
+    /// commanded to swings by the whole step and back, every period, while the player holds
+    /// perfectly still. That swing is what the own turret's bore oscillation is made of.
+    ///
+    /// The intention is a world point, so the commanded bearing is simply where the player put it:
+    /// no hull pose enters it, and no jitter in one can move it. What the mount still cannot undo —
+    /// the hull's own step carrying the whole tank with it — is the hull's to answer for, not the
+    /// aim transport's.
+    #[test]
+    fn a_frozen_then_stepped_hull_does_not_beat_the_commanded_bearing() {
+        const TARGET: Vec3 = Vec3::new(0.0, 0.0, -500.0);
+        const OMEGA: f32 = 10.0;
+        /// Ticks the interpolated hull holds still before it catches up in one jump.
+        const FREEZE_TICKS: u32 = 6;
+
+        let mut rig = AimRig::new(TARGET);
+        let mut swing = (f32::MAX, f32::MIN);
+        for t in 0..512u32 {
+            // The clamp's staircase: the yaw the hull SHOWS is held at the last window boundary
+            // until the next arrival steps it on.
+            let held = (t / FREEZE_TICKS * FREEZE_TICKS) as f32;
+            rig.tick(OMEGA * held * TICK, TARGET);
+            // Past the priming ticks, so every sample is of a fully delivered intention.
+            if t >= 64 {
+                let bearing = rig.commanded_bearing_deg();
+                swing = (swing.0.min(bearing), swing.1.max(bearing));
+            }
+        }
+
+        let peak_to_peak = swing.1 - swing.0;
+        let hull_step = OMEGA * FREEZE_TICKS as f32 * TICK;
+        assert!(
+            peak_to_peak < 1e-3,
+            "the commanded bearing must not move while the intention stands still, whatever the \
+             hull's rendered pose does — got {peak_to_peak:.4}° of swing, against the \
+             {hull_step:.3}° square wave a hull-local transport beats out at the clamp's period",
+        );
+    }
 
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a
     /// commitment ONLY for the tank it was set on — a different entity (a possession change:
