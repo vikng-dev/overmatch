@@ -82,13 +82,23 @@ needs no machinery. The optic's `HullLocal` recirculates as a bearing and is not
 Menus are not this case: blocked input sends `aim: None`, on which `drive_aim_servos` holds the last
 parent-local servo target — hull-relative, and honest.
 
+## The trust boundary
+
+`net::protocol`'s input bridge copies the action state into the command whole and unvalidated, so
+`drive_aim_servos` is the only guard between an aim a client authored and the authority's physics
+state. Finiteness alone does not close it: a merely LARGE point passes `is_finite` and then overflows
+inside the hull composition, poisoning the servo targets and the turret pose. The gate bounds
+magnitude too (`aim::AIM_LIMIT`, the world's diagonal plus the sky fallback), and it bounds BOTH
+variants — the frame tag is a claim about a frame, never a warrant.
+
 ## The regression net
 
-Six laws in `aim`, driving the SHIPPED systems — `commit_aim` and `sight::drive_gunner_aim` author,
+Nine laws in `aim`, driving the SHIPPED systems — `commit_aim` and `sight::drive_gunner_aim` author,
 `drive_aim_servos` bridges, `tank::drive_servos` integrates the real mechanism at the seed vehicle's
 authored rates — across the two hulls the seam actually has (the client's rendered one authors, the
 authority's true one lays). Every hull in the net is rotated AND translated, and away from the
-origin, so a `transform_vector3` standing in for a `transform_point3` cannot cancel.
+origin, so a `transform_vector3` standing in for a `transform_point3` cannot cancel; the fixture's
+muzzle carries a non-zero superelevation, so the lob is never the identity.
 
 | law | superseded transport | now |
 |---|---|---|
@@ -98,10 +108,26 @@ origin, so a `transform_vector3` standing in for a `transform_point3` cannot can
 | freeze-then-step, third-person commanded bearing | 0.784° swing | 0.003° (the turret ring's own parallax) |
 | optic held through the same freeze-step | 0.782° imported | 0.000° |
 | free-look held through a pivot | the gun sweeps with the hull | unchanged, and guarded |
+| the held bearing's VALUE, at rest and swept | — | names the picked place to 1e-2 m |
+| the lob's frame, on a hull rolled 0.45 rad | — | 2.865° in the hull's frame, 2.609° in the world's |
+| a poisoned aim (NaN, ±inf, over-magnitude, both frames) | — | no servo moves, no pose goes non-finite |
 
-Confirmed red against six mutations: third person authoring hull-local (3 laws), a world-space hold
-(the doctrine guard), a world round trip on the optic (the optic law), and `transform_vector3` /
-`transform_point3` swapped at each of the three seam sites (5, 3 and 1 laws).
+Four seam sites convert between the frames, and each is guarded by mutation:
+
+| site | swapping `transform_point3` / `transform_vector3` | laws red |
+|---|---|---|
+| `aim::drive_aim_servos`'s servo direction | — | 6 |
+| `AimIntent::in_hull` | drops the hull's translation on the way in | 4 + the conversion law |
+| `AimIntent::in_world` | drops it on the way out (view-only) | the conversion law |
+| `aim::commit_aim`'s store into `CommittedAim` | stores a bearing measured from nothing | the held-value law |
+
+That last site is why the held-value law exists. The other laws measure how the lay MOVES, and a span
+is blind to the value it moves around: a memory holding a constant, wrong bearing sweeps and holds
+exactly like a correct one.
+
+Also confirmed red: third person authoring hull-local (4 laws), a world-space hold (2), a world round
+trip on the optic (the optic law), a variant reorder on the wire enum (`wire_types_are_pinned`), the
+poison gate skipping the `World` variant, and the poison gate dropping its magnitude bound.
 
 ## Wire
 
@@ -111,3 +137,9 @@ the same command's servos at different bearings the moment the hull leaves yaw z
 skew as much as a format change — exactly what
 [[0018-wire-surface-fingerprinted-and-refused]]'s REV exists to refuse. **Deploying this requires
 deploying the server**: a REV-27 droplet turns REV-28 clients away at the handshake.
+
+`AimIntent` earns its OWN row in the definition-text graph, not just cover from the type that embeds
+it. bincode encodes the variant as its declaration index, so reordering `World` and `HullLocal` makes
+a skewed peer read a place as a bearing without changing one character of `TankCommand` — the exact
+skew the tripwire exists to refuse, and it would have gone unpinned. Every embedded enum on the wire
+is in the same position.
