@@ -179,6 +179,14 @@ pub fn run() {
         }))
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
         .init_resource::<harness::SimulateInput>();
+        // UPSTREAM WORKAROUND, same as every other GPU-less boot of the tank glb: without it,
+        // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
+        // `CompressedImageFormats::NONE`, and `tank::spawn` then aborts on the required view
+        // artifact — MEASURED here 2026-08-16 against a packaged client. Canonical mechanism
+        // comment + retirement tripwire: the identical insertion in `headless_test`.
+        app.insert_resource(bevy::image::CompressedImageFormatSupport(
+            bevy::image::CompressedImageFormats::ASTC_LDR,
+        ));
     } else {
         // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
         // also inserts the values and the boot report into the app.

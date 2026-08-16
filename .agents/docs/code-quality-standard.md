@@ -43,7 +43,8 @@ If a candidate needs a design conversation, it is not this brief's work. Hand it
 
 Establish this before hunting, or you will file findings the compiler already rejects.
 
-`scripts/hooks/pre-push` and CI both run (VERIFIED, read from the hook):
+CI runs, on every push and every PR (`.github/workflows/ci.yml`; the local `pre-push` hook is the
+git-lfs upload and nothing else):
 
 ```
 cargo fmt --all --check

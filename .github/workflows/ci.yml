@@ -8,11 +8,10 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The assets job is path-gated (see below) and therefore skips most pushes. This is what bounds
-  # how long a defect it could not see survives: every Monday it re-cuts every trio from Blender,
-  # whatever changed.
-  schedule:
-    - cron: '17 4 * * 1'
+  # The assets job is path-gated (see below) and therefore skips most pushes. The unconditional
+  # re-cut of every trio is a `workflow_dispatch` away — RUN IT BEFORE A RELEASE. The weekly cron
+  # that used to run it is retired: at one to two developers and no players, a defect the path gate
+  # could not see is bounded by the next release, not by a calendar.
   workflow_dispatch:
 
 # Supersede in-flight runs on the same ref.
@@ -45,15 +44,14 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
-  # Compile-heavy checks share one matrix but run independently. In particular, the
-  # 30-receiver UDP probe must not contend with another libtest thread.
+  # Compile-heavy checks share one matrix but run independently.
   checks:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        task: [clippy, tests, shot-stress]
+        task: [clippy, tests]
     name: check (${{ matrix.task }})
     steps:
       # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
@@ -121,8 +119,50 @@ jobs:
           cargo test --locked -- \
             --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
 
+  # The isolated 30-receiver UDP probe with its memory telemetry, ON DEMAND ONLY
+  # (`workflow_dispatch`). It is a DIAGNOSTIC, not a gate: it is the lane the ordinary `tests` lane
+  # explicitly `--skip`s, it must not contend with another libtest thread, and it pays a docker
+  # build on top of a codegen build for a verdict about a probe no push has ever broken. Run it
+  # from the Actions tab when the shot-loss path is what changed.
+  #
+  # It shares the `codegen` rust-cache key with the `tests` lane above on purpose: same profile,
+  # same targets, one cache entry — a dispatch off a warm `tests` cache does not recompile the
+  # dependency graph, and a check-only (clippy) cache is still never mixed in.
+  #
+  # NOT a `needs` of the `check` summary below: a job that normally skips can never be a required
+  # context.
+  shot-stress:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
+      # `.lfsconfig` and still hits GitHub — so pull after checkout.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Bevy needs these to compile on Linux (alsa/udev + windowing), same as the
+      # release build.
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev jq time
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codegen
+
       - name: Build shot stress test
-        if: matrix.task == 'shot-stress'
         run: |
           set -euo pipefail
           artifacts="${RUNNER_TEMP}/overmatch-test-artifacts.jsonl"
@@ -138,7 +178,6 @@ jobs:
           printf '%s\n' "${executables[0]}" > "${RUNNER_TEMP}/overmatch-libtest"
 
       - name: Build shot stress runtime image
-        if: matrix.task == 'shot-stress'
         run: |
           docker build --pull \
             --file scripts/ci/shot-stress.Dockerfile \
@@ -146,7 +185,6 @@ jobs:
             scripts/ci
 
       - name: Shot stress test with memory telemetry
-        if: matrix.task == 'shot-stress'
         env:
           # DERIVED: four GiB is about ten times the MEASURED prior normal macOS-arm peak while
           # leaving the hosted runner headroom to report a cgroup OOM instead of losing the VM.
@@ -177,7 +215,8 @@ jobs:
   # verdict that could not have moved. The first step asks whether anything in the push's range
   # touches an asset trio or the shared surface, using the SAME two predicates the pre-push lane
   # selects with, and every step below is conditioned on the answer. It fails toward running: an
-  # unresolvable range, a missing baseline, a force-push and a scheduled run all verify everything.
+  # unresolvable range, a missing baseline, a force-push and a manual dispatch all verify
+  # everything.
   #
   # The job still RUNS when it skips — it succeeds as a no-op that says why — so the aggregate
   # `check` context below stays green without learning what the assets lane is.
@@ -370,7 +409,9 @@ jobs:
           # second red step here would only hide which one failed.
           if-no-files-found: warn
 
-  # Preserve the branch-protection context while requiring every matrix lane above.
+  # Preserve the branch-protection context while requiring every lane that runs on a push or a PR.
+  # `shot-stress` is deliberately absent: it is dispatch-only, so waiting on it would make this
+  # context depend on a job that normally skips.
   check:
     name: check
     needs: [checks, assets]

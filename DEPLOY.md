@@ -73,16 +73,21 @@ systemctl stop overmatch-server          # stop the meter when not testing
 exact artifact* to `/opt`, extracts it into `/opt/overmatch-server`, `systemctl restart
 overmatch-server`, and verifies (`systemctl is-active` + echoes the deployed git SHA into the run
 log via a baked `DEPLOYED_SHA` marker). The GitHub Release is created as a **draft** and is
-un-drafted only after that deploy succeeds, so the latest visible release and the running droplet
-are always the same build; a failed deploy leaves no new release visible.
+un-drafted only after that deploy succeeds *and* both archive smoke lanes have extracted a
+packaged client and driven it through a full connect, so the latest visible release and the running
+droplet are always the same build — and never one whose client cannot boot or connect. A failed
+deploy or a failed smoke leaves no new release visible.
 
 - **Auth:** the workflow uses the `DROPLET_SSH_KEY` repo Actions secret (a dedicated ed25519
   key whose public half is in the droplet's `authorized_keys`). The droplet's host key is
   **pinned** in the workflow (no `StrictHostKeyChecking=no`); if you ever rebuild the droplet,
   update the pinned `known_hosts` line in `release.yml` to match its new host key.
 - **Only tag pushes deploy.** Pushes to `main` run CI only — the droplet does not track `main`.
-  `workflow_dispatch` is build-only smoke mode: it builds the full matrix off the dispatched ref
-  and touches neither the droplet nor any release.
+  `workflow_dispatch` with no `tag` input is build-only smoke mode: server + both clients + the
+  archive smoke off the dispatched ref, touching neither the droplet nor any release.
+- **A tag builds Windows + Linux + server.** The macOS `.dmg` is cut on demand — dispatch the
+  `Release` workflow with the `tag` input set, and it builds, signs, notarizes and attaches the
+  arm64 `.dmg` to that tag's existing Release.
 - **Serialized:** a `concurrency` group queues overlapping deploys (never cancels a run that may
   be mid-scp/restart on the droplet).
 - **Heads-up:** the restart is automatic, so **tagging a release mid-playtest will bounce the live
