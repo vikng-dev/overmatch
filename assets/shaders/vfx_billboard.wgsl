@@ -1,7 +1,7 @@
 // Flipbook billboard fragment (src/vfx/billboard.rs — `VfxBillboardMaterial`).
 //
 // One grayscale atlas + a per-effect gradient LUT, three craft tricks in one pass:
-//   * flipbook cell select — the CPU picks the (wrapped, random-start-offset) frame index and
+//   * flipbook cell select — the CPU resolves the frame index (looping or once-through) and
 //     writes it into `params.frame.x`; the shader only does the cell-UV arithmetic;
 //   * alpha EROSION, never a uniform fade: alpha = saturate((signal - erosion) * sharpness), the
 //     erosion threshold driven by particle age on the CPU — smoke dissolves with detail instead of
@@ -19,12 +19,13 @@
 // clients (vfx::plugin), never the headless server.
 
 #import bevy_pbr::forward_io::VertexOutput
+#import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::prepass_utils::prepass_depth
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
 
 struct VfxParams {
-    // x: current flipbook frame (already wrapped on the CPU), y: atlas columns, z: atlas rows,
-    // w: unused (frame count lives CPU-side where the wrap happens).
+    // x: current flipbook frame (already resolved on the CPU), y: atlas columns, z: atlas rows,
+    // w: unused (the frame count lives CPU-side, with the playback law).
     frame: vec4<f32>,
     // x: erosion threshold 0..1, y: erosion sharpness, z: life fraction 0..1 (gradient LUT row),
     // w: overall alpha multiplier.
@@ -67,7 +68,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // written by the OPAQUE geometry only: these translucent sprites opt out of it
     // (`VfxBillboardMaterial::enable_prepass`), so a puff never fades against another puff.
     if params.glow.z > 0.0 {
-        let scene_z = depth_ndc_to_view_z(prepass_depth(in.position, 0u));
+        var scene_z = depth_ndc_to_view_z(prepass_depth(in.position, 0u));
+#ifdef MULTISAMPLED
+        // Under MSAA the prepass depth is per SAMPLE while this fragment shades once for every
+        // sample it covers, so one sample's depth would decide the whole pixel — along a silhouette
+        // that is a thin foreground sliver fading a puff that is nowhere near it, and it speckles
+        // as coverage flickers between neighbouring pixels. Resolve to the FARTHEST sample: the
+        // fade is then never harder than some covered sample warrants.
+        let samples = textureNumSamples(view_bindings::depth_prepass_texture);
+        for (var sample = 1u; sample < samples; sample += 1u) {
+            scene_z = min(scene_z, depth_ndc_to_view_z(prepass_depth(in.position, sample)));
+        }
+#endif
         let fragment_z = depth_ndc_to_view_z(in.position.z);
         cover *= saturate((fragment_z - scene_z) / params.glow.z);
     }
