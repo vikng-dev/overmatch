@@ -39,11 +39,14 @@ const FLASH_GLOW: f32 = 14.0;
 // and scales LINEARLY with the firing bore (ADR-0023). The flash core above stays the frame-one
 // blinding spike inside it; the flame planes stay the directional jets.
 
-/// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
-/// (`scripts/vfx/blast_atlas.py`).
+/// Atlas grid and frame count — every [`MuzzleVfxAssets::blast_atlas`] sheet shares it
+/// (`scripts/vfx/blast_atlas.py` authors the one output shape).
 const BLAST_COLS: f32 = 4.0;
 const BLAST_ROWS: f32 = 3.0;
 const BLAST_FRAMES: u32 = 12;
+/// How many baked sheets are in the rotation — [`MuzzleVfxAssets::blast_atlas`]'s length and
+/// [`blast_pick`]'s range.
+const BLAST_SHEETS: usize = 6;
 /// The bore (m) the metres and seconds below are authored against; the blast scales `caliber / this`.
 const BLAST_CALIBER: f32 = 0.088;
 /// Quad diameter range (m). The sprite's fireball spans ~a third of its cell on frame one and ~three
@@ -260,13 +263,13 @@ pub(super) struct MuzzleVfxAssets {
     pub(super) quad: Handle<Mesh>,
     /// The 88's flash core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
     pub(super) core_atlas: Handle<Image>,
-    /// The 88's blast core: two 4×3 explosion flipbooks, one picked per shot. Two sheets rather
-    /// than one is the anti-repetition trick at sprite scale — the sequence inside a sheet is
-    /// fixed (it starts on its most violent frame and plays once), so the variation has to come
+    /// The 88's blast core: [`BLAST_SHEETS`] 4×3 explosion flipbooks, one picked per shot. More
+    /// sheets than one is the anti-repetition trick at sprite scale — the sequence inside a sheet
+    /// is fixed (it starts on its most violent frame and plays once), so the variation has to come
     /// from WHICH fireball plays. KTX2, unlike every other sprite here: this one is the only
     /// billboard drawn at unbounded range, so it is the only one that needs a mip chain (bevy's
     /// PNG loader produces a single level) — see `scripts/vfx/blast_atlas.py`.
-    blast_atlas: [Handle<Image>; 2],
+    blast_atlas: [Handle<Image>; BLAST_SHEETS],
     /// The MG's flash core: a single small round glow (`light_01`) — a rifle-scale pop, not the 88's
     /// starburst.
     mg_core: Handle<Image>,
@@ -415,6 +418,10 @@ pub(super) fn setup_muzzle_assets(
         blast_atlas: [
             asset_server.load("vfx/blast_core_a.ktx2"),
             asset_server.load("vfx/blast_core_b.ktx2"),
+            asset_server.load("vfx/blast_core_c.ktx2"),
+            asset_server.load("vfx/blast_core_d.ktx2"),
+            asset_server.load("vfx/blast_core_e.ktx2"),
+            asset_server.load("vfx/blast_core_f.ktx2"),
         ],
         mg_core: asset_server.load("vfx/mg_core.png"),
         flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
@@ -727,11 +734,11 @@ fn on_main_gun_fire(
     );
 }
 
-/// Which of the two blast sheets this shot plays. A sheet's own sequence is fixed — it opens on
-/// its most violent frame and runs once — so consecutive shots are kept apart by the pick, not by
-/// the start frame the other layers randomize.
+/// Which of the [`BLAST_SHEETS`] blast sheets this shot plays. A sheet's own sequence is fixed —
+/// it opens on its most violent frame and runs once — so consecutive shots are kept apart by the
+/// pick, not by the start frame the other layers randomize.
 fn blast_pick(rng: &mut ViewRng) -> usize {
-    usize::from(rng.next_f32() < 0.5)
+    (rng.next_f32() * BLAST_SHEETS as f32) as usize
 }
 
 /// The ground height (m) under `muzzle` when a shot there lifts dust, else `None`: no decoded
@@ -1027,13 +1034,13 @@ mod tests {
             // BOTH agers: the dressing's contract is what a layer RENDERS after n frames, and the
             // billboard half of it is unreadable without `age_billboards` running.
             .add_systems(Update, (age_billboards, decay_muzzle_lights));
-        // The two blast sheets get DISTINCT handles (everything else can share the default one):
+        // The blast sheets get DISTINCT handles (everything else can share the default one):
         // which sheet a shot picked is only readable off its material, so the pick test needs
         // them to be tellable apart.
         let blast_atlas = app
             .world_mut()
             .resource_scope(|_, mut images: Mut<Assets<Image>>| {
-                [(); 2].map(|()| images.add(Image::default()))
+                [(); BLAST_SHEETS].map(|()| images.add(Image::default()))
             });
         app.insert_resource(MuzzleVfxAssets {
             quad: Handle::default(),
@@ -1412,13 +1419,20 @@ mod tests {
     /// The SHIPPED sheets, read off disk: [`BLAST_COLS`]×[`BLAST_ROWS`] cells of the size
     /// `scripts/vfx/blast_atlas.py` authors, and a mip chain — the grid constants above are what
     /// the shader divides the atlas by, and the sheet is what it divides, so nothing else in the
-    /// suite can catch the two disagreeing. The chain is the whole reason these two sprites are
+    /// suite can catch the two disagreeing. The chain is the whole reason these sprites are
     /// KTX2: a mipless blast shimmers at the ranges it is drawn at.
     #[test]
     fn the_shipped_blast_sheets_are_the_grid_the_shader_divides() {
         /// Output cell size in texels (`CELL_PX` in `scripts/vfx/blast_atlas.py`).
         const CELL_PX: u32 = 256;
-        for sheet in ["blast_core_a.ktx2", "blast_core_b.ktx2"] {
+        for sheet in [
+            "blast_core_a.ktx2",
+            "blast_core_b.ktx2",
+            "blast_core_c.ktx2",
+            "blast_core_d.ktx2",
+            "blast_core_e.ktx2",
+            "blast_core_f.ktx2",
+        ] {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/vfx")
                 .join(sheet);
@@ -1489,21 +1503,27 @@ mod tests {
         }
     }
 
-    /// Which of the two sheets plays is the blast's anti-repetition trick (its own sequence is
-    /// fixed), so a burst of shots must draw both.
+    /// Which of the sheets plays is the blast's anti-repetition trick (its own sequence is
+    /// fixed), so a run of shots must draw all [`BLAST_SHEETS`]. Shots are spaced past every
+    /// layer's lifetime so the billboard ring never evicts mid-count (seeded rng: deterministic).
     #[test]
-    fn blast_core_draws_both_sheets() {
+    fn blast_core_draws_every_sheet() {
         let mut app = harness();
-        for _ in 0..12 {
+        let mut sheets = std::collections::BTreeSet::new();
+        for _ in 0..48 {
             fire(&mut app, 0.088, 0);
+            let cores = blast_cores(&mut app);
+            assert_eq!(cores.len(), 1, "one blast core per shot, the last expired");
+            sheets.insert(material_of(&app, cores[0]).atlas.id());
+            // Two frames past every layer's lifetime: the first only arms the newborn latch.
+            advance(&mut app, 2.0);
+            advance(&mut app, 2.0);
         }
-        let cores = blast_cores(&mut app);
-        assert_eq!(cores.len(), 12, "one blast core per shot, none evicted");
-        let sheets: std::collections::BTreeSet<_> = cores
-            .iter()
-            .map(|core| material_of(&app, *core).atlas.id())
-            .collect();
-        assert_eq!(sheets.len(), 2, "both blast sheets must reach the screen");
+        assert_eq!(
+            sheets.len(),
+            BLAST_SHEETS,
+            "every blast sheet must reach the screen"
+        );
     }
 
     /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber

@@ -23,5 +23,14 @@ transparent region, encoded UASTC KTX2 with a box-filtered mip chain):
   blast_core_a.ktx2      — Explosion00_5x5 (88 blast core)
   blast_core_b.ktx2      — Explosion01_5x5 (88 blast core, the alternate sheet)
 
+Flipbook atlases generated in-repo (codex/image-gen, 2026-08-16; sources in
+.agents/scratch/flipbook-gen/, 1256 px 4x4 opaque-RGB sheets). No license obligation; noted for
+provenance. Same blast_atlas.py bake as above (source frames 0-11 into the 4x3 grid of 256 px
+cells):
+  blast_core_c.ktx2      — fireball_atlas_v1 (88 blast core, rounded cohesive blast)
+  blast_core_d.ktx2      — fireball_atlas_v2 (88 blast core, asymmetric petaled silhouette)
+  blast_core_e.ktx2      — fireball_atlas_v3 (88 blast core, compact spiked flash)
+  blast_core_f.ktx2      — fireball_atlas_grey (88 blast core, v3's pre-greyed variant)
+
 All are grayscale-with-alpha on purpose: the VFX materials recolor them through per-effect
 gradient LUTs (src/vfx/billboard.rs), so one neutral sprite set serves every palette.
