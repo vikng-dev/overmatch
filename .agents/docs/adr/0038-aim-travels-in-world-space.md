@@ -3,78 +3,85 @@
 Status: ACCEPTED 2026-08-16. Shipped as declared `PROTOCOL_REV = 28` (no byte change: the three
 floats are the same three floats, measured in a different frame).
 
-Supersedes [[0001-aim-stored-hull-local]] — the storage-frame half of it, wholly. Applies
-[[0037-one-authoritative-timeline-and-view-overlays]]'s overlay discipline to the own turret; the
-one-timeline ruling itself is untouched.
+Scoped strictly to the TRANSPORT. [[0001-aim-stored-hull-local]] stands untouched and unsuperseded:
+the intention is still HELD hull-locally, the gun is still unstabilized, and a storage-frame change
+is still the lever the two stabilization regimes will be built on.
 
 ## Ruling
 
-**`TankCommand::aim` and `aim::CommittedAim` carry a point in the WORLD.** The player's intention is
-a place, and a place cannot go stale.
+**`TankCommand::aim` carries a point in the WORLD; `aim::CommittedAim` keeps holding a point in the
+HULL.** The intention decays where a WW2 lay decays and travels where nothing can rotate it.
 
-The hull-local form a servo angle is measured in is not a storage decision at all — it is a
-mechanical fact, derived by whoever drives the servo, from the hull pose of the tick it drives it
-(`aim::drive_aim_servos`, upstream of the superelevation lob, which stays a rotation in the hull
-frame). The gunner optic decomposes the same world point through the live hull rotation for its
-yaw/pitch working form, and its resolve round-trips exactly as before.
+Every frame, the active commit system names the held bearing as the world point it stands on under
+the hull pose that stands NOW (`aim::CommittedAim::in_world`, `sight::drive_gunner_aim`'s publish)
+and authors THAT. The value on the wire is therefore never older than the frame it was authored in,
+so no delay downstream of the author — the input delay, the link, the interpolation delay — has an
+angle to rotate it through. `aim::drive_aim_servos` drops it back into the hull frame of the tick it
+lays, upstream of the superelevation lob, which stays a rotation in the hull frame.
 
-**The client lays its own gun from the intention that stands now, not from the wire's echo of it**
-(`aim::lay_own_aim_from_the_live_intention`). The own turret is the channel 0037 exempts from the
-delivery wait; only the authority's servos wait.
+The hull-local form a servo angle is measured in was never a storage decision: it is a mechanical
+fact, derived by whoever drives the servo from the hull pose of the tick it drives it.
 
 ## Why
 
-Latency is a rotation. A hull-local point is a bearing off a body that turns, so every consumer that
-re-applies it to a LATER hull pose silently rotates the world intent by ω × (age of the value):
+Latency is a rotation. A hull-local point put on the wire is a bearing off a body that turns, so
+every consumer that re-applies it to a LATER hull pose silently rotates the world intent by
+ω × (age of the value):
 
 | consumer | age | error at ω = 10–20 °/s |
 |---|---|---|
 | the client's own turret | ~5 ticks (input delay + the authoring frame), ~78 ms | 0.8–1.6° |
 | the authority that actually fires | rtt/2 + interp delay, ~110–160 ms | 0.7–2.2° |
 
-At 300–500 m that is 4–19 m of divergence between the green bore dot the player is holding on a
-target and the shell the server echoes back — invisible while parked (ω = 0), absent in
-single-player (no bridge, no delay), and therefore never diagnosed from the feel of it.
+At 300–500 m that is 4–19 m between the target the player is holding the crosshair on and the shell
+the server echoes back — invisible while parked (ω = 0), absent in single-player (no bridge, no
+delay), and therefore never diagnosed from the feel of it.
 
-The own-turret half is worse than a bias. The hull it is laid against is the interpolated stream's,
-and lightyear's clamp freezes then steps that hull under jitter; a stale intention beats against the
-step, so the commanded bearing swings by the whole step and back every period while the player holds
-perfectly still. The regression net measures it: 0.938° of square wave, the clamp's step exactly.
+## What a hold still means
 
-## What the player gets that is different
+**Free-look (RMB, and the optic's zero-input hold) holds a BEARING, and the gun rides the hull
+round.** Stop picking while the hull pivots and the lay sweeps off target at the hull's own rate —
+0001's unstabilized WW2 lay, unchanged and now guarded by a test that fails against a world-space
+hold. Nothing here gives the mount authority it did not have: it spends its authored slew rate and
+loses to a pivot exactly the ground that rate cannot make up.
 
-**Free-look (RMB, and the optic's zero-input hold) now holds a spot on the world.** Free-look moves
-the camera, not the gun.
+## What this does NOT fix
 
-This is the whole behavioural surface of the change, because the camera is the aiming device
-([[0003-camera-is-the-aiming-device]]) and the orbit camera is world-oriented: while the player is
-actively aiming, the screen-centre ray already re-picked a world point every frame and the hull-local
-storage never survived a frame. Only a HELD value ever showed the frame it was stored in.
+**The rendered bore still staircases when the interpolated hull does.** Under jitter lightyear's
+clamp freezes the hull, then steps it; the step carries the whole tank, and a rate-limited mount can
+only walk the lay back over the following ticks. Measured on the seed vehicle at ω = 10 °/s with
+six-tick freezes: 0.773° peak-to-peak before this change, 0.790° after — the transport was never
+what produced it. That is the interpolated hull's smoothness to answer for, and no line of this
+change is entitled to claim it.
 
-## What 0001 got right, and where it was wrong
+What the transport does own is the COMMANDED bearing, and that is now flat: 0.938° of square wave
+before, 0.000° after.
 
-Right: the gun is unstabilized, and it stays unstabilized. The mount has exactly its authored slew
-rate and never gets a fraction more; nothing counter-rotates the turret against the hull for free;
-the bore trails a pivoting hull by the mount's own braking envelope (ω²/2a) and the player feels
-every degree of it.
+## The residual, named
 
-Wrong: that this is a property of the **storage frame**. Stabilization is a MECHANISM — a mount
-spending its own authority to cancel hull motion — and its absence is a fact about
-`tank::drive_servos`, which knows nothing about any of this. What the storage frame decided was only
-what a HELD intention means, and "the gun sweeps while you look around" was never the WW2 fact it
-was recorded as; it was the aim point silently rotating, which is the same defect this ADR removes
-everywhere else.
+Under genuine input starvation lightyear recirculates the last command it received, and the last
+command is now a world point — so the authority holds that spot for the starvation interval instead
+of sweeping with the hull, by ω × (starvation): about 4° at 20 °/s over 200 ms. It is bounded by the
+starvation, it costs a frame of unstabilized honesty and never a frame of accuracy, and it needs no
+machinery. Menus are not this case: blocked input sends `aim: None`, on which `drive_aim_servos`
+holds the last parent-local servo target — hull-relative, and honest.
+
+The free-look sweep also trails the hull by the delivery gap, ω × delivery (0.781° at 10 °/s), since
+the point that arrives names the bearing as it stood when it was authored. That is the trade the
+ruling makes deliberately: an intention's age shows as phase on a sweep the player is not sighting
+along, instead of as a rotation on the target they are.
 
 ## The regression net
 
-`aim`'s three transport laws, over the real bridge and the real mechanism at the seed vehicle's
-authored rates. Each was confirmed red against the superseded transport before it was kept:
+`aim`'s four laws, over the real bridge and the real mechanism at the seed vehicle's authored rates.
+Each was confirmed red against the superseded transport before it was kept:
 
 | law | superseded | now |
 |---|---|---|
 | authored at hull yaw 0°, consumed at 20° | misses by 20.000° | 0.000° |
-| 10 °/s pivot, held crosshair | 1.339° | 0.558° = ω²/2a − ω·dt, the mount's own |
-| freeze-then-step clamp, held crosshair | 0.938° swing in the commanded bearing | 0.000° |
+| 10 °/s pivot, crosshair held on a target | 1.339° | 0.558° = ω²/2a − ω·dt, the mount's own |
+| freeze-then-step clamp, commanded bearing | 0.938° swing | 0.000° |
+| free-look held through a 10 °/s pivot | the gun sweeps with the hull | unchanged, and guarded |
 
 ## Wire
 

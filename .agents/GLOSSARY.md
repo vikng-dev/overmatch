@@ -38,7 +38,7 @@ The camera's view direction, marked by the fixed dot at screen center. Where the
 _Avoid_: crosshair, cursor
 
 **Aim point**:
-The ground point the gun is *commanded* to hit, resolved from the camera's screen-center ray and stored in the hull's local frame. Intent — where we've told the gun to go, not where it actually points.
+The ground point the gun is *commanded* to hit, resolved from the camera's screen-center ray. Intent — where we've told the gun to go, not where it actually points. Held in the hull's local frame, so a hold is a bearing off the tank (ADR-0001); carried on the wire as the world point that bearing names this frame, so no latency can rotate it (ADR-0038).
 _Avoid_: target, aim target
 
 **Bore axis**:
