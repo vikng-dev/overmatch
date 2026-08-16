@@ -79,13 +79,10 @@ TankSpec(
                     // V-12 [ANCHOR]. Four-stroke, so the crank fires 6 times per revolution:
                     // 60 Hz at idle, 250 Hz at the governor.
                     cylinders: 12,
-                    // The engine loop, and the pop rate MEASURED off that file at playback speed
-                    // 1.0 (the filename records the same measurement). `sfx` derives the whole
-                    // rpm→playback-speed mapping from these two numbers and the rpm band above.
-                    sound: (
-                        clip: "sfx/engine/engine_loop_44hz.ogg",
-                        clip_pop_hz: 44.3,
-                    ),
+                    // No `sound` block: the engine is silent until a loop worthy of the HL230
+                    // exists (a `sound` is `(clip, clip_pop_hz)` — the pop rate MEASURED off the
+                    // file at playback speed 1.0; `sfx` derives the rpm→playback-speed mapping
+                    // from those two numbers and the rpm band above).
                     // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
                     // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
                     torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
