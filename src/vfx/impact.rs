@@ -13,8 +13,8 @@ use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut,
-    spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
+    BillboardRing, BillboardSpec, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
+    gradient_lut, spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
 };
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
@@ -246,7 +246,7 @@ impl ImpactAssets {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 // Moderate sharpness for soft dissolve edges; DUST_ALPHA overall.
                 fade: Vec4::new(0.0, 2.4, 0.0, DUST_ALPHA),
-                glow: Vec4::new(DUST_GLOW, 0.0, 0.0, 0.0),
+                glow: Vec4::new(DUST_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dust_lut.clone(),
@@ -292,7 +292,7 @@ impl ImpactAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, alpha),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dirt_lut.clone(),
@@ -303,9 +303,15 @@ impl ImpactAssets {
     /// The ground shock-ring material: the dirt mass at [`SPLASH_RING_ALPHA`] with the erosion lane
     /// sharpened ([`SPLASH_RING_SHARPNESS`]) so the racing front cuts a hard edge instead of the
     /// soft dust blur the plume and haze want.
+    ///
+    /// The soft-particle fade the other dirt masses carry is CLEARED here: the ring is a flat quad
+    /// laid 0.1 m over the surface, so its whole area sits inside the fade band and the layer would
+    /// scale itself out of existence (the same reason the ground scar never carries one — see
+    /// [`SOFT_PARTICLE_DEPTH`]).
     fn shock_ring_material(&self) -> VfxBillboardMaterial {
         let mut material = self.dirt_material(SPLASH_RING_ALPHA);
         material.params.fade.y = SPLASH_RING_SHARPNESS;
+        material.params.glow.z = 0.0;
         material
     }
 
@@ -348,7 +354,7 @@ impl ImpactAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.4, 0.0, alpha),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.spall_lut.clone(),
@@ -1095,6 +1101,34 @@ mod tests {
             .add_observer(spawn_impact_read);
         app.insert_resource(ImpactAssets::test_stub());
         app
+    }
+
+    /// Soft-particle classification. The billowing masses fade where they close on the surface they
+    /// were thrown off; the hot additive layers do not (they are airborne), and neither do the two
+    /// layers that LIE on the ground — a shock ring 0.1 m over the terrain and a scar flat on it sit
+    /// wholly inside the fade band, so a fade would scale them out of existence.
+    #[test]
+    fn only_the_impact_mass_layers_fade_against_the_scene() {
+        let assets = ImpactAssets::test_stub();
+        for (layer, material) in [
+            ("dust billow", assets.dust_material()),
+            ("dirt mass", assets.dirt_material(1.0)),
+            ("spall puff", assets.spall_material(1.0)),
+        ] {
+            assert_eq!(
+                material.params.glow.z, SOFT_PARTICLE_DEPTH,
+                "{layer} is mass — it must soften where it meets a surface"
+            );
+        }
+        for (layer, material) in [
+            ("shock ring", assets.shock_ring_material()),
+            ("ground scar", assets.ground_mark_material()),
+            ("spark", assets.spark_material()),
+            ("ping", assets.ping_material()),
+            ("ejecta", assets.ejecta_material()),
+        ] {
+            assert_eq!(material.params.glow.z, 0.0, "{layer} must stay hard-edged");
+        }
     }
 
     /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-

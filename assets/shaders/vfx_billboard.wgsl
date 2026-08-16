@@ -10,10 +10,17 @@
 //     life fraction indexes Y; the LUT's alpha channel is a HEAT term that multiplies the color
 //     above 1.0 (params.glow.x) so young/hot pixels ride into bloom.
 //
+// Plus SOFT PARTICLES (params.glow.z): mass layers fade out as they close on whatever is behind
+// them, so a ground-hugging dust puff meets terrain in a gradient instead of along the quad's own
+// intersection line. Needs `DepthPrepass` on the camera (`camera::spawn_camera`) — without it the
+// DEPTH_PREPASS def is absent, the depth binding does not exist, and every layer stays hard-edged.
+//
 // Vertex stage is Bevy's default mesh vertex shader; the material is mounted only by the windowed
 // clients (vfx::plugin), never the headless server.
 
 #import bevy_pbr::forward_io::VertexOutput
+#import bevy_pbr::prepass_utils::prepass_depth
+#import bevy_pbr::view_transformations::depth_ndc_to_view_z
 
 struct VfxParams {
     // x: current flipbook frame (already wrapped on the CPU), y: atlas columns, z: atlas rows,
@@ -23,7 +30,8 @@ struct VfxParams {
     // w: overall alpha multiplier.
     fade: vec4<f32>,
     // x: emissive boost at LUT heat 1.0 (rgb *= 1 + heat * boost), y: BLEND CONTRACT flag —
-    // >0.5 = additive glow, else alpha-over mass (see the fragment output note), z/w: reserved.
+    // >0.5 = additive glow, else alpha-over mass (see the fragment output note), z: soft-particle
+    // fade depth in METRES (0 = hard-edged), w: reserved.
     glow: vec4<f32>,
 }
 
@@ -51,7 +59,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Gradient map: X = grayscale signal, Y = life fraction. LUT alpha = heat.
     let g = textureSample(lut_texture, lut_sampler, vec2(signal, params.fade.z));
     let rgb = g.rgb * (1.0 + g.a * params.glow.x);
-    let cover = alpha * params.fade.w;
+    var cover = alpha * params.fade.w;
+#ifdef DEPTH_PREPASS
+    // Soft particles. Both depths go to VIEW space (negative ahead of the camera, so the fragment's
+    // is the LESS negative of the two when something is behind it) and the difference is a real
+    // world-space metre count — the quad dissolves over params.glow.z of approach. The prepass is
+    // written by the OPAQUE geometry only: these translucent sprites opt out of it
+    // (`VfxBillboardMaterial::enable_prepass`), so a puff never fades against another puff.
+    if params.glow.z > 0.0 {
+        let scene_z = depth_ndc_to_view_z(prepass_depth(in.position, 0u));
+        let fragment_z = depth_ndc_to_view_z(in.position.z);
+        cover *= saturate((fragment_z - scene_z) / params.glow.z);
+    }
+#endif
     // BOTH blend modes ride Bevy's premultiplied-alpha blend state — `AlphaMode::Add` and
     // `AlphaMode::Blend` map to `BLEND_PREMULTIPLIED_ALPHA` / `BLEND_ALPHA`, and the two differ
     // ONLY in what this fragment must output (Bevy's own PBR premultiplies in `pbr_functions.wgsl`;

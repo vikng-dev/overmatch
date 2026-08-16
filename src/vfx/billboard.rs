@@ -60,9 +60,20 @@ pub(crate) struct VfxParams {
     /// x: emissive boost at LUT heat 1.0, y: BLEND CONTRACT flag the shader reads — `1.0` = additive
     /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
     /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
-    /// lane tells it which (see `vfx_billboard.wgsl`).
+    /// lane tells it which (see `vfx_billboard.wgsl`). z: soft-particle fade depth in metres
+    /// ([`SOFT_PARTICLE_DEPTH`]), `0.0` = hard-edged. w: reserved.
     pub glow: Vec4,
 }
+
+/// How far (m) a soft-particle layer fades over as it closes on the geometry behind it — the lane
+/// `vfx_billboard.wgsl` reads out of `VfxParams::glow.z`, and the whole cure for a dust puff meeting
+/// terrain along the quad's own intersection line.
+///
+/// Two classes never carry it. HOT layers (flashes, sparks, the blast core) are airborne and
+/// additive: fading them at a surface would dim a muzzle flash for standing near a wall. And a
+/// ground SCAR is a decal lying on the terrain — its whole quad is at zero approach, so a fade
+/// erases it outright.
+pub(crate) const SOFT_PARTICLE_DEPTH: f32 = 0.75;
 
 /// The flipbook + erosion + gradient-map billboard material (fragment: `vfx_billboard.wgsl`;
 /// vertex: Bevy's default mesh path — facing is done on the entity's `Transform`, not in the

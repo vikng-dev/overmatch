@@ -11,8 +11,8 @@ use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, smoothstep,
-    spawn_billboard, unit_quad,
+    BillboardRing, BillboardSpec, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
+    gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
 /// Flash core lifetime in seconds. The 88's hot layers are STAGGERED — core dies first, then the
@@ -329,7 +329,7 @@ impl MuzzleVfxAssets {
                 // (nudged up from 0.85 so early smoke has more presence for the flash to hand off to);
                 // the MG puff overrides it down to `MG_SMOKE_ALPHA`.
                 fade: Vec4::new(0.0, 2.6, 0.0, 0.92),
-                glow: Vec4::new(SMOKE_GLOW, 0.0, 0.0, 0.0),
+                glow: Vec4::new(SMOKE_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.smoke_atlas.clone(),
             lut: self.smoke_lut.clone(),
@@ -345,7 +345,7 @@ impl MuzzleVfxAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, GROUND_DUST_ALPHA),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dust_lut.clone(),
@@ -1475,6 +1475,39 @@ mod tests {
             (big_rate * 2.0 - small_rate).abs() < 1e-3,
             "the sheet is stretched over the longer life, not replayed: {small_rate} → {big_rate}"
         );
+    }
+
+    /// Soft-particle classification: the muzzle's MASS layers fade where they close on the geometry
+    /// behind them, the HOT ones never do. A flash dimming because the tank parked near a wall is
+    /// exactly the artifact this lane must not introduce.
+    #[test]
+    fn only_the_muzzle_mass_layers_fade_against_the_scene() {
+        let app = harness();
+        let assets = app.world().resource::<MuzzleVfxAssets>();
+        for (layer, material) in [
+            ("gas smoke", assets.smoke_material()),
+            ("ground dust", assets.dust_material()),
+        ] {
+            assert_eq!(
+                material.params.glow.z, SOFT_PARTICLE_DEPTH,
+                "{layer} is mass — it must soften where it meets a surface"
+            );
+        }
+        for (layer, material) in [
+            (
+                "flash core",
+                assets.flash_material(assets.core_atlas.clone(), 2.0),
+            ),
+            (
+                "blast core",
+                assets.blast_material(assets.blast_atlas[0].clone()),
+            ),
+        ] {
+            assert_eq!(
+                material.params.glow.z, 0.0,
+                "{layer} is airborne and additive — no depth fade"
+            );
+        }
     }
 
     /// Per-shot variation is the MG's anti-strobe contract: consecutive shots must differ in core
