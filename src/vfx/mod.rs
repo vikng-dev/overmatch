@@ -69,6 +69,8 @@ fn verify_vfx_assets(asset_server: Res<AssetServer>, mut done: Local<bool>) {
     /// Every texture the vfx layer draws (the LUTs/noise are procedural, so not here).
     const VFX_TEXTURES: &[&str] = &[
         "vfx/flash_core_atlas.png",
+        "vfx/blast_core_a.png",
+        "vfx/blast_core_b.png",
         "vfx/mg_core.png",
         "vfx/flash_flames_atlas.png",
         "vfx/smoke_atlas.png",

@@ -28,8 +28,8 @@ use bevy::transform::TransformSystems;
 /// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
 /// included: they hold no cap of their own and are evicted against this one. Only the long-lived
 /// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
-/// survives a sub-second billboard storm. The stack per 88 event is 10–13 at the muzzle (flash
-/// core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
+/// survives a sub-second billboard storm. The stack per 88 event is 11–14 at the muzzle (blast
+/// core + flash core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
 /// impact (contact flash + 8–12 ejecta + 1–2 plumes + shock ring + the 8 s haze); both MGs cycling
 /// add ~50/s at sub-second lifetimes. Eviction is FIFO, so the consequence of pressure is that the
 /// OLDEST slot goes first: a sustained storm cuts the multi-second layers (haze, ground dust)
