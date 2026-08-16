@@ -176,6 +176,15 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
+        // The local view's own-gun lay, on the fixed clock, ahead of the servo bridge that consumes
+        // it. `GameplaySet` puts it after the net input bridge, which writes the delayed echo this
+        // replaces.
+        .add_systems(
+            FixedUpdate,
+            lay_own_aim_from_the_live_intention
+                .before(drive_aim_servos)
+                .in_set(GameplaySet),
+        )
         // HUD markers reproject through the camera, so they run after the camera's pose is final
         // for the frame — after propagation and after the gunner camera places itself — or they
         // lag/jitter against the rendered view (worst at the gunner optic's high zoom).
@@ -295,6 +304,29 @@ fn commit_aim(
     if let Ok(mut command) = tank_commands.get_mut(tank) {
         command.aim = Some(point);
         committed.set(tank, point);
+    }
+}
+
+/// Lay the player's OWN gun from the intention that stands right now, not from the wire's echo of
+/// it. The command a client reads back for its own tank is the value lightyear filed
+/// `net::client::SHIPPING_INPUT_DELAY_TICKS` ticks ago and hands back at the tick it was stamped
+/// for (`net::protocol::bridge_action_state_to_tank_command`); the server reads it later still.
+/// The own turret is the one channel ADR-0037 exempts from that wait — click-immediate client view
+/// state — so the local lay reads [`CommittedAim`] directly and only the authority's servos wait.
+///
+/// No commitment for this tank (fresh spawn, or right after a possession change — the entity-keyed
+/// read is `None`): author nothing, exactly the pre-first-commit state. Single-player has no bridge
+/// and no delay, so the value is already this one and the write is skipped.
+fn lay_own_aim_from_the_live_intention(
+    committed: Res<CommittedAim>,
+    mut controlled: Query<(Entity, &mut TankCommand), With<Controlled>>,
+) {
+    for (tank, mut command) in &mut controlled {
+        if let Some(aim) = committed.get(tank)
+            && command.aim != Some(aim)
+        {
+            command.aim = Some(aim);
+        }
     }
 }
 
