@@ -2,6 +2,7 @@
 
 use bevy::ecs::entity::{EntityMapper, MapEntities};
 use bevy::ecs::lifecycle::Remove;
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -21,10 +22,9 @@ pub struct TankCommand {
     pub fire_primary: bool,
     /// Secondary fire level. It is a consumable and must be attested for the current tick.
     pub fire_secondary: bool,
-    /// World aim point chased by every servo (ADR-0038 — the frame latency cannot rotate;
-    /// `aim::drive_aim_servos` drops it into the hull frame of the tick it lays). `None` means no
-    /// commitment yet.
-    pub aim: Option<Vec3>,
+    /// Aim intention chased by every servo, in the frame its authoring view is anchored to
+    /// ([`AimIntent`]). `None` means no commitment yet.
+    pub aim: Option<AimIntent>,
     /// Player-dialed range (m) for superelevation.
     pub range: f32,
     /// Crew-swap edge, validated against the tank's seats by simulation authority.
@@ -62,6 +62,55 @@ impl TankCommand {
     /// touch (and its change-detection churn) on a command with no edge to clear.
     pub fn has_edge(&self) -> bool {
         self.fire_primary || self.crew_swap.is_some() || self.respawn
+    }
+}
+
+/// An aim intention and the frame it is measured in (ADR-0038).
+///
+/// **The intention travels in the frame its authoring view is anchored to**, and only the author
+/// knows which that is — so the frame rides the wire with the point instead of being inferred.
+///
+/// A world-anchored view names a PLACE: the orbit camera does not turn with the hull, so the
+/// player's pick is a spot on the ground, and the delivery gap must not rotate that spot out from
+/// under them. A hull-anchored view names a BEARING off the tank: in the gunner optic and free-aim
+/// the camera, the working yaw/pitch intent and the gun itself all ride the hull, so a hull-local
+/// point is already invariant across the gap — naming it through the client's INTERPOLATED hull
+/// only to have the authority decompose it against the TRUE hull would import the difference
+/// between the two as noise in the fired lay.
+///
+/// Either way a HOLD decays hull-locally: the memory behind both (`aim::CommittedAim`) is
+/// hull-local, so stopping picking never becomes stabilization (ADR-0001).
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Reflect)]
+pub enum AimIntent {
+    /// A place on the world.
+    World(Vec3),
+    /// A bearing off the hull, as the point it names in the hull's frame.
+    HullLocal(Vec3),
+}
+
+impl AimIntent {
+    /// The point as authored, whichever frame it names — the subject of the finiteness check every
+    /// consumer owes the sim before a poisoned value can reach a servo target.
+    pub fn point(self) -> Vec3 {
+        match self {
+            Self::World(point) | Self::HullLocal(point) => point,
+        }
+    }
+
+    /// The point this names in the hull's frame, given that hull's inverse.
+    pub fn in_hull(self, to_local: &Affine3A) -> Vec3 {
+        match self {
+            Self::World(point) => to_local.transform_point3(point),
+            Self::HullLocal(point) => point,
+        }
+    }
+
+    /// The point this names in the world, given the hull's pose.
+    pub fn in_world(self, hull: &Affine3A) -> Vec3 {
+        match self {
+            Self::World(point) => point,
+            Self::HullLocal(point) => hull.transform_point3(point),
+        }
     }
 }
 
@@ -345,7 +394,7 @@ mod tests {
             throttle: 0.5,
             steer: -0.5,
             fire_secondary: true,
-            aim: Some(Vec3::X),
+            aim: Some(AimIntent::World(Vec3::X)),
             range: 800.0,
             fire_primary: true,
             crew_swap: Some(CrewSwap::Cancel),
@@ -356,9 +405,40 @@ mod tests {
         assert_eq!(command.throttle, 0.5);
         assert_eq!(command.steer, -0.5);
         assert!(command.fire_secondary);
-        assert_eq!(command.aim, Some(Vec3::X));
+        assert_eq!(command.aim, Some(AimIntent::World(Vec3::X)));
         assert_eq!(command.range, 800.0);
         assert!(!command.has_edge(), "all edges cleared");
+    }
+
+    /// One intention, two frames, one point: [`AimIntent`]'s conversions are the seam every
+    /// consumer of the wire goes through, so they must agree exactly with the hull pose they are
+    /// handed — under a hull that is ROTATED AND TRANSLATED, where a `transform_vector3` standing in
+    /// for a `transform_point3` (or the reverse) silently drops or adds the whole translation.
+    #[test]
+    fn an_aim_intent_names_the_same_point_in_either_frame() {
+        // A hull well away from the origin and off every axis, so no term can cancel by luck.
+        let hull = Affine3A::from_rotation_translation(
+            Quat::from_euler(EulerRot::YXZ, 0.7, -0.2, 0.13),
+            Vec3::new(137.0, 4.0, -512.0),
+        );
+        let to_local = hull.inverse();
+        let local = Vec3::new(61.0, -3.0, -498.0);
+        let world = hull.transform_point3(local);
+
+        assert!(
+            AimIntent::World(world).in_hull(&to_local).distance(local) < 1e-2,
+            "a world place named in the hull frame is the bearing it stands on",
+        );
+        assert!(
+            AimIntent::HullLocal(local).in_world(&hull).distance(world) < 1e-2,
+            "a hull bearing named in the world is the place it points at",
+        );
+        // The identity arms: an intention already in the frame asked for is handed back untouched,
+        // whatever pose comes with it.
+        assert_eq!(AimIntent::World(world).in_world(&hull), world);
+        assert_eq!(AimIntent::HullLocal(local).in_hull(&to_local), local);
+        assert_eq!(AimIntent::World(world).point(), world);
+        assert_eq!(AimIntent::HullLocal(local).point(), local);
     }
 
     /// Serializes the tests that write `SPIKE_AUTO_FIRE` — the variable is process-global, so two

@@ -121,13 +121,12 @@ use crate::{CombatantId, ShotId};
 /// reader. Surface and own-type graph move; the change rides the undeployed bump — the
 /// REV-19/REV-26 precedent above.
 ///
-/// REV 28 (the aim intention travels in world space — ADR-0038): NO wire-format change.
-/// `TankCommand::aim` stays an `Option<Vec3>` and every hash over the surface and the type graph is
-/// identical, but the frame the three floats are measured in moved from the hull to the world.
-/// Two peers on opposite sides of this change lay the same command's servos at different bearings
-/// whenever the hull is not at yaw zero — the silent sim skew REV exists to refuse, and the sharpest
-/// case yet of a REV that only a semantic bump can carry (the REV-25 precedent). Only the REV (and
-/// with it the manifest fingerprint) moves.
+/// REV 28 (the aim intention carries its own frame — ADR-0038): `TankCommand::aim` becomes an
+/// `Option<AimIntent>`, a tagged `World`/`HullLocal` point instead of a bare `Vec3` whose frame was
+/// convention. Own-type graph and REV move. Two peers on opposite sides lay the same command's
+/// servos at different bearings the moment the hull leaves yaw zero, so this is a sim skew as much
+/// as a format change; the tag exists so a consumer can never again be wrong about which frame it
+/// was handed.
 pub const PROTOCOL_REV: u32 = 28;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -880,7 +879,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xc2eb_bad5_a206_7c75;
+const WIRE_TYPES_HASH: u64 = 0x4572_3752_61df_ec87;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1068,7 +1067,7 @@ mod tests {
     use lightyear::prelude::Tick;
 
     use super::*;
-    use crate::command::CrewSwap;
+    use crate::command::{AimIntent, CrewSwap};
     use crate::damage::CrewStation;
 
     #[test]
@@ -1279,9 +1278,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 28 (the aim intention travels in world space: same registrations, same
-        // own-type definitions — the REV itself is what moved).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x49ad_15b6_aeab_5c31;
+        // Re-pinned for REV 28 (`TankCommand::aim` carries its frame: the own-type graph moved
+        // with the new `AimIntent` variant).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xe818_32ad_fb11_c3e7;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1857,7 +1856,7 @@ mod tests {
                 throttle: 0.7,
                 steer: -0.3,
                 fire_secondary: true,
-                aim: Some(Vec3::new(1.0, 2.0, 3.0)),
+                aim: Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
                 range: 850.0,
                 fire_primary: true,
                 crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
@@ -1876,7 +1875,11 @@ mod tests {
         let cmd = *world.get::<TankCommand>(entity).unwrap();
         assert_eq!(cmd.throttle, 0.7, "throttle level held through starvation");
         assert_eq!(cmd.steer, -0.3, "steer level held through starvation");
-        assert_eq!(cmd.aim, Some(Vec3::new(1.0, 2.0, 3.0)), "aim absolute held");
+        assert_eq!(
+            cmd.aim,
+            Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
+            "aim absolute held"
+        );
         assert_eq!(cmd.range, 850.0, "range absolute held");
         // …and every consumable fails closed.
         assert!(
@@ -2098,11 +2101,10 @@ mod tests {
     /// `u8` tick-LSB, or a fire-fields-only sub-struct carrying the stamp), not to drop attestation.
     ///
     /// Context for the number: this is UPSTREAM traffic only (client → server), one message per
-    /// frame. The comparison is also somewhat theoretical — `aim` is an `Option<Vec3>` of a
-    /// HULL-LOCAL point, so it changes every tick whenever the player is aiming OR the hull is
-    /// moving OR the turret is slewing. Run-compression was already dead in all of those; it only
-    /// ever paid off for a tank sitting perfectly still doing nothing, which is exactly when nobody
-    /// cares about bandwidth.
+    /// frame. The comparison is also somewhat theoretical — the `for_tick` stamp alone differs
+    /// every tick (`net::client::stamp_input_tick`), so run-compression is dead in the shipping
+    /// configuration whatever `aim` does. It only ever paid off unstamped, for a tank sitting
+    /// perfectly still doing nothing, which is exactly when nobody cares about bandwidth.
     #[test]
     fn input_message_wire_cost() {
         use lightyear::prelude::input::native::NativeStateSequence;
@@ -2130,7 +2132,7 @@ mod tests {
             ActionState(TankCommand {
                 throttle: 1.0,
                 fire_secondary: true,
-                aim: Some(Vec3::new(0.0, 1.5, -40.0)),
+                aim: Some(AimIntent::World(Vec3::new(0.0, 1.5, -40.0))),
                 range: 800.0,
                 for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
                 ..default()
@@ -2160,13 +2162,13 @@ mod tests {
             up_bytes_per_s as f64 / 1024.0,
         );
 
-        // The REALISTIC regime: the player is aiming, so the hull-local `aim` point already differs
-        // every tick and every slot was ALREADY a full command. The stamp adds only its own bytes.
+        // The REALISTIC regime: the player is aiming, so the `aim` point already differs every tick
+        // and every slot was ALREADY a full command. The stamp adds only its own bytes.
         let aiming = |tick: i32, stamped: bool| {
             ActionState(TankCommand {
                 throttle: 1.0,
                 fire_secondary: true,
-                aim: Some(Vec3::new(0.01 * tick as f32, 1.5, -40.0)),
+                aim: Some(AimIntent::World(Vec3::new(0.01 * tick as f32, 1.5, -40.0))),
                 range: 800.0,
                 for_tick: if stamped { Tick(tick as u32).0 } else { 0 },
                 ..default()
@@ -2182,8 +2184,8 @@ mod tests {
         let aim_after = encoded_len(&aim_stamped, Tick((T0 + 9) as u32));
         let aim_delta = aim_after - aim_before;
         println!(
-            "AIMING (the realistic regime — `aim` is a hull-local point, so it already changed \
-             every tick and compression was already dead): {aim_before} B -> {aim_after} B \
+            "AIMING (the realistic regime — the `aim` point already changed every tick and \
+             compression was already dead): {aim_before} B -> {aim_after} B \
              (+{aim_delta} B/message) = +{:.1} KB/s upstream per client at {TICK_HZ} Hz",
             (aim_delta * TICK_HZ) as f64 / 1024.0,
         );

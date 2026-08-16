@@ -5,7 +5,7 @@
 //!
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
-//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted world aim point. |
+//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
 //! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
 //! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COMBAT_NOAIM` | flag; off | Hold combat turret servos at rest instead of chasing the aim point. |
@@ -62,7 +62,7 @@ use lightyear::link::RecvPayload;
 use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 
-use crate::command::TankCommand;
+use crate::command::{AimIntent, TankCommand};
 
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once the script has played out.
@@ -127,7 +127,7 @@ pub(crate) struct SimulateInput {
     /// it to the end of the run — the only shape the MG-cost workload ever needed. A capture that
     /// must observe the RELEASE edge (presentation stopping on the local tick) sets it.
     fire_release_tick: Option<u32>,
-    /// `SPIKE_AIM_POINT="x,y,z"` (world metres): the point every servo chases in the fire/idle
+    /// `SPIKE_AIM_POINT="x,y,z"` (hull-local metres): the point every servo chases in the fire/idle
     /// workloads. Default `(200,0,-800)` lays the guns downrange into open ground (rounds strike
     /// terrain — the common spray case); set it at a stationary target's hull so the rounds strike
     /// ARMOR instead, exercising the full penetration march (thickness/span probes, spall). Ignored by
@@ -183,7 +183,7 @@ impl SimulateInput {
     }
 }
 
-/// Parse `SPIKE_AIM_POINT="x,y,z"` into a world aim point; `None` (unset or malformed) falls
+/// Parse `SPIKE_AIM_POINT="x,y,z"` into a hull-local aim point; `None` (unset or malformed) falls
 /// back to the downrange default. Three comma-separated f32s.
 fn parse_aim_point() -> Option<Vec3> {
     let raw = env_value("SPIKE_AIM_POINT")?;
@@ -227,7 +227,7 @@ pub(crate) fn buffer_input(
         state.0.aim = if sim.combat_noaim {
             None
         } else {
-            Some(sim.aim_point)
+            Some(AimIntent::HullLocal(sim.aim_point))
         };
         state.0.range = sim.range;
         state.0.fire_primary = sim.fire_interval != 0
@@ -244,7 +244,7 @@ pub(crate) fn buffer_input(
     if sim.fire_secondary {
         state.0.throttle = 0.0;
         state.0.steer = 0.0;
-        state.0.aim = Some(sim.aim_point);
+        state.0.aim = Some(AimIntent::HullLocal(sim.aim_point));
         state.0.range = sim.range;
         state.0.fire_primary = false;
         state.0.fire_secondary = sim.holding_secondary(t);
@@ -275,12 +275,10 @@ pub(crate) fn buffer_input(
     } else {
         0.0
     };
-    // Far off-axis so the yaw servo visibly slews; range 800 m dials in real superelevation from
-    // the weapon's range table. A scripted point is world (the wire's frame), so under the drive
-    // scripts the servos re-lay as the hull moves — more churn than a player's hold, which is what
-    // a perf workload wants.
-    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the aim
-    // around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
+    // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
+    // superelevation from the weapon's range table.
+    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the
+    // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
     // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
     // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
     // its rest pose. The point is zero moving parts above the hull, so a servo slew can't feed the
@@ -289,11 +287,15 @@ pub(crate) fn buffer_input(
         None
     } else if env_flag("SPIKE_SIM_AIM_SWEEP", false) {
         let theta = 0.02 * t as f32;
-        Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
+        Some(AimIntent::HullLocal(Vec3::new(
+            800.0 * theta.sin(),
+            0.0,
+            -800.0 * theta.cos(),
+        )))
     } else {
         // The idle/drive baseline aims at the SAME point the fire workload uses, so an idle-vs-fire
         // A/B differs only by the trigger (the aim/servo pose is identical in both).
-        Some(sim.aim_point)
+        Some(AimIntent::HullLocal(sim.aim_point))
     };
     state.0.range = sim.range;
     // No fire in the idle window — a recoil impulse would disturb the resting contact under study —
