@@ -9,7 +9,9 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldAssetRoot;
 
 use super::ViewRng;
-use super::billboard::{BillboardRing, BillboardSpec, VfxBillboardMaterial, spawn_billboard};
+use super::billboard::{
+    BillboardRing, BillboardSpec, Flipbook, VfxBillboardMaterial, spawn_billboard,
+};
 use super::ember::EmberAssets;
 use super::impact::ImpactAssets;
 use super::muzzle::MuzzleVfxAssets;
@@ -87,8 +89,10 @@ pub(super) fn spawn_prewarm_rig(
                 origin: PREWARM_POSITION,
                 drift: Vec3::ZERO,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 1.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 1.0,
+                },
                 start_size: 1.0,
                 end_size: 1.0,
                 aspect: Vec3::ONE,

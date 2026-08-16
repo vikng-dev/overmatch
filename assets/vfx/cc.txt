@@ -19,9 +19,9 @@ CC0 1.0. No attribution required; noted for provenance.
 Source files (the 1024 px 5x5 TGA sheets, re-atlased by scripts/vfx/blast_atlas.py: source frames
 0-11 — the fireball from ignition to the beat it rolls into smoke — into a row-major 4x3 grid of
 256 px cells, RGB collapsed to luminance, frames re-centred, RGB edge-extended out of the
-transparent region):
-  blast_core_a.png       — Explosion00_5x5 (88 blast core)
-  blast_core_b.png       — Explosion01_5x5 (88 blast core, the alternate sheet)
+transparent region, encoded UASTC KTX2 with a box-filtered mip chain):
+  blast_core_a.ktx2      — Explosion00_5x5 (88 blast core)
+  blast_core_b.ktx2      — Explosion01_5x5 (88 blast core, the alternate sheet)
 
 All are grayscale-with-alpha on purpose: the VFX materials recolor them through per-effect
 gradient LUTs (src/vfx/billboard.rs), so one neutral sprite set serves every palette.

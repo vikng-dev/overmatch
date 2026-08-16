@@ -11,7 +11,7 @@ use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
+    BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
     gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
@@ -53,13 +53,9 @@ const BLAST_SIZE: (f32, f32) = (8.0, 9.5);
 const BLAST_GROWTH: f32 = 1.12;
 /// Standoff down the bore (m) of the fireball's centre from the muzzle.
 const BLAST_STANDOFF: f32 = 1.8;
-/// Billboard lifetime (s), and the seconds the [`BLAST_FRAMES`] frames would take at the rate
-/// derived from it. The playthrough is deliberately the LONGER of the two: `flipbook_frame` wraps
-/// modulo the frame count, so the sequence has to still be inside its last cell when
-/// `age_billboards` despawns the quad — a playthrough at or under the lifetime hands back frame 0
-/// for the closing instant, and the fireball re-ignites as it dies.
+/// Billboard lifetime (s) — and, through [`Flipbook::Once`], the window the whole sheet plays in:
+/// one cell per 60 Hz frame at the reference bore.
 const BLAST_LIFETIME: f32 = 0.2;
-const BLAST_PLAYTHROUGH: f32 = 0.205;
 /// Overall alpha, erosion sharpness and emissive boost. The boost sits under [`FLASH_GLOW`] — a
 /// fireball with volume, not a second blinding spike — and the soft sharpness keeps the smoke fringe
 /// as fringe.
@@ -267,7 +263,9 @@ pub(super) struct MuzzleVfxAssets {
     /// The 88's blast core: two 4×3 explosion flipbooks, one picked per shot. Two sheets rather
     /// than one is the anti-repetition trick at sprite scale — the sequence inside a sheet is
     /// fixed (it starts on its most violent frame and plays once), so the variation has to come
-    /// from WHICH fireball plays.
+    /// from WHICH fireball plays. KTX2, unlike every other sprite here: this one is the only
+    /// billboard drawn at unbounded range, so it is the only one that needs a mip chain (bevy's
+    /// PNG loader produces a single level) — see `scripts/vfx/blast_atlas.py`.
     blast_atlas: [Handle<Image>; 2],
     /// The MG's flash core: a single small round glow (`light_01`) — a rifle-scale pop, not the 88's
     /// starburst.
@@ -415,8 +413,8 @@ pub(super) fn setup_muzzle_assets(
         quad: unit_quad(&mut meshes),
         core_atlas: asset_server.load("vfx/flash_core_atlas.png"),
         blast_atlas: [
-            asset_server.load("vfx/blast_core_a.png"),
-            asset_server.load("vfx/blast_core_b.png"),
+            asset_server.load("vfx/blast_core_a.ktx2"),
+            asset_server.load("vfx/blast_core_b.ktx2"),
         ],
         mg_core: asset_server.load("vfx/mg_core.png"),
         flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
@@ -545,8 +543,10 @@ fn on_main_gun_fire(
             origin: origin + dir * 1.0,
             drift: Vec3::ZERO,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0).floor(),
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0).floor(),
+                rate: 0.0,
+            },
             start_size: core_size,
             end_size: core_size * FLASH_CORE_SHRINK,
             aspect: Vec3::ONE,
@@ -574,10 +574,10 @@ fn on_main_gun_fire(
             origin: origin + dir * (BLAST_STANDOFF * bore),
             drift: Vec3::ZERO,
             frames: BLAST_FRAMES,
-            // Frame 0 is the ignition frame — no random start offset here: the sheet is a real
-            // sequence, and the per-shot variation is which sheet plays.
-            start_frame: 0.0,
-            frame_rate: BLAST_FRAMES as f32 / (BLAST_PLAYTHROUGH * bore),
+            // A real sequence from its ignition frame — no random start offset and no wrap: the
+            // per-shot variation is which sheet plays. `Once` spreads the sheet over `lifetime`,
+            // which already carries the bore scale, so the playback rate needs no separate one.
+            flipbook: Flipbook::Once,
             start_size: blast_size,
             end_size: blast_size * BLAST_GROWTH,
             aspect: Vec3::ONE,
@@ -610,8 +610,10 @@ fn on_main_gun_fire(
                 origin: origin + dir * 1.0,
                 drift: Vec3::ZERO,
                 frames: 1,
-                start_frame: 0.0,
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: 0.0,
+                    rate: 0.0,
+                },
                 start_size: glow_size,
                 end_size: glow_size * FLASH_GLOW_CARD_SHRINK,
                 aspect: Vec3::ONE,
@@ -649,8 +651,10 @@ fn on_main_gun_fire(
                     origin: origin + dir * (length * 0.45),
                     drift: Vec3::ZERO,
                     frames: 4,
-                    start_frame: (plane_frame + i as f32) % 4.0,
-                    frame_rate: 0.0,
+                    flipbook: Flipbook::Loop {
+                        start: (plane_frame + i as f32) % 4.0,
+                        rate: 0.0,
+                    },
                     start_size: length,
                     end_size: length * FLASH_PLANE_SHRINK,
                     aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
@@ -677,8 +681,10 @@ fn on_main_gun_fire(
                 origin: origin + dir * 1.6,
                 drift: Vec3::Y * SMOKE_RISE + dir * SMOKE_PUSH,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: SMOKE_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: SMOKE_FRAME_RATE,
+                },
                 start_size: SMOKE_SIZE.0,
                 end_size: SMOKE_SIZE.1,
                 aspect: Vec3::ONE,
@@ -789,8 +795,10 @@ fn spawn_ground_dust(
                 origin: base + away * offset + Vec3::Y * (start_size * 0.5),
                 drift: away * push + Vec3::Y * (GROUND_DUST_RISE * bore),
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: GROUND_DUST_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: GROUND_DUST_FRAME_RATE,
+                },
                 start_size,
                 end_size,
                 aspect: Vec3::ONE,
@@ -862,8 +870,10 @@ fn on_mg_fire(
             origin: origin + dir * 0.15,
             drift: Vec3::ZERO,
             frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
             start_size: core_size,
             end_size: core_size * 1.2,
             aspect: Vec3::ONE,
@@ -891,8 +901,10 @@ fn on_mg_fire(
                 origin: origin + dir * (length * 0.45),
                 drift: Vec3::ZERO,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0).floor(),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0).floor(),
+                    rate: 0.0,
+                },
                 start_size: length,
                 end_size: length * 1.1,
                 aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
@@ -920,8 +932,10 @@ fn on_mg_fire(
                 origin: origin + dir * 0.4,
                 drift: Vec3::Y * MG_SMOKE_RISE + dir * MG_SMOKE_PUSH,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: SMOKE_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: SMOKE_FRAME_RATE,
+                },
                 start_size: MG_SMOKE_SIZE.0,
                 end_size: MG_SMOKE_SIZE.1,
                 aspect: Vec3::ONE,
@@ -1050,9 +1064,12 @@ mod tests {
         app
     }
 
+    /// The muzzle every test shot leaves from.
+    const FIRE_ORIGIN: Vec3 = Vec3::new(1.0, 2.0, 3.0);
+
     fn fire_round(app: &mut App, caliber: f32, catch_up_ticks: u32, tracer: bool) {
         app.world_mut().trigger(FireShell {
-            origin: Vec3::new(1.0, 2.0, 3.0),
+            origin: FIRE_ORIGIN,
             direction: Dir3::X,
             speed: 773.0,
             caliber,
@@ -1177,7 +1194,9 @@ mod tests {
         let mut q = world.query::<(Entity, &Billboard, &Transform)>();
         let mut puffs: Vec<(Entity, f32, Vec3)> = q
             .iter(world)
-            .filter(|(_, b, _)| b.frame_rate == GROUND_DUST_FRAME_RATE)
+            .filter(|(_, b, _)| {
+                matches!(b.flipbook, Flipbook::Loop { rate, .. } if rate == GROUND_DUST_FRAME_RATE)
+            })
             .map(|(entity, _, t)| (entity, t.scale.x, t.translation))
             .collect();
         puffs.sort_unstable_by_key(|(entity, _, _)| *entity);
@@ -1390,45 +1409,84 @@ mod tests {
         );
     }
 
-    /// The blast plays ONCE: frame one renders the ignition frame unaged (the newborn-armed latch),
-    /// the index only ever advances, and it is still inside the last cell when the quad dies — a
-    /// wrap would re-ignite the fireball on its way out.
+    /// The SHIPPED sheets, read off disk: [`BLAST_COLS`]×[`BLAST_ROWS`] cells of the size
+    /// `scripts/vfx/blast_atlas.py` authors, and a mip chain — the grid constants above are what
+    /// the shader divides the atlas by, and the sheet is what it divides, so nothing else in the
+    /// suite can catch the two disagreeing. The chain is the whole reason these two sprites are
+    /// KTX2: a mipless blast shimmers at the ranges it is drawn at.
+    #[test]
+    fn the_shipped_blast_sheets_are_the_grid_the_shader_divides() {
+        /// Output cell size in texels (`CELL_PX` in `scripts/vfx/blast_atlas.py`).
+        const CELL_PX: u32 = 256;
+        for sheet in ["blast_core_a.ktx2", "blast_core_b.ktx2"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/vfx")
+                .join(sheet);
+            let bytes = std::fs::read(&path).unwrap_or_else(|err| panic!("{sheet}: {err}"));
+            // KTX2 header (§3.1): a 12-byte identifier, then u32 LE fields — pixelWidth at 20,
+            // pixelHeight at 24, levelCount at 40.
+            let field = |offset: usize| {
+                u32::from_le_bytes(
+                    bytes[offset..offset + 4]
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("{sheet} is truncated")),
+                )
+            };
+            assert_eq!(&bytes[1..7], b"KTX 20", "{sheet} is not a KTX2 file");
+            assert_eq!(
+                (field(20), field(24)),
+                (BLAST_COLS as u32 * CELL_PX, BLAST_ROWS as u32 * CELL_PX),
+                "{sheet} is not the grid the blast material divides it by"
+            );
+            assert!(
+                field(40) > 1,
+                "{sheet} carries no mip chain ({} level)",
+                field(40)
+            );
+        }
+    }
+
+    /// The blast plays ONCE, wired end to end: frame one renders the ignition frame unaged (the
+    /// newborn-armed latch), the index only ever advances, and the closing cell is on screen when
+    /// the quad dies. Run at the DISPLAY cadences rather than a fine sub-step, because that is
+    /// where a playback rate raced against the lifetime falls short: it used to close on cell 10 at
+    /// 60 Hz and cell 9 at 30 Hz.
+    ///
+    /// [`BLAST_LIFETIME`] holds [`BLAST_FRAMES`] cells, so 60 Hz resolves one cell per frame and
+    /// closes on the last; 30 Hz resolves two, and its final sample necessarily lands one cell
+    /// short — six renders cannot show twelve cells under any index law. What the clamp guarantees
+    /// at every cadence is the rest: no step backwards, and no return to the ignition cell.
     #[test]
     fn blast_core_plays_its_sheet_once() {
-        const STEP: f32 = 1.0 / 240.0;
-        let mut app = harness();
-        fire(&mut app, 0.088, 0);
-        let core = blast_cores(&mut app)[0];
-        assert_eq!(
-            material_of(&app, core).params.frame.x,
-            0.0,
-            "the sheet opens on its most violent frame"
-        );
-
-        // The arming frame leaves it there; ageing starts after (see `age_billboards`).
-        advance(&mut app, STEP);
-        assert_eq!(material_of(&app, core).params.frame.x, 0.0);
-
-        let mut seen = vec![0.0f32];
-        while app.world().get::<Billboard>(core).is_some() {
-            advance(&mut app, STEP);
-            if app.world().get::<Billboard>(core).is_none() {
-                break;
+        /// Every flipbook index the blast RENDERS at `hz`, birth frame first.
+        fn rendered(hz: f32) -> Vec<f32> {
+            let mut app = harness();
+            fire(&mut app, 0.088, 0);
+            let core = blast_cores(&mut app)[0];
+            let mut seen = vec![material_of(&app, core).params.frame.x];
+            while app.world().get::<Billboard>(core).is_some() {
+                advance(&mut app, 1.0 / hz);
+                if app.world().get::<Billboard>(core).is_some() {
+                    seen.push(material_of(&app, core).params.frame.x);
+                }
             }
-            let frame = material_of(&app, core).params.frame.x;
-            assert!(
-                frame >= *seen.last().expect("seeded"),
-                "the flipbook wrapped ({} after {})",
-                frame,
-                seen.last().expect("seeded")
-            );
-            seen.push(frame);
+            seen
         }
-        assert_eq!(
-            *seen.last().expect("seeded"),
-            (BLAST_FRAMES - 1) as f32,
-            "the sheet must reach its last cell before the quad dies"
-        );
+
+        for (hz, closing) in [(60.0, BLAST_FRAMES - 1), (30.0, BLAST_FRAMES - 2)] {
+            let seen = rendered(hz);
+            // Index 0 twice at the head: the spawn's own frame, then the arming visit.
+            assert_eq!(seen[..2], [0.0, 0.0], "{hz} Hz: opens on the ignition cell");
+            assert!(
+                seen.windows(2).all(|pair| pair[1] >= pair[0]),
+                "{hz} Hz: the flipbook wrapped — {seen:?}"
+            );
+            assert_eq!(
+                *seen.last().expect("the birth frame at least"),
+                closing as f32,
+                "{hz} Hz: the wrong cell is on screen when the quad dies — {seen:?}"
+            );
+        }
     }
 
     /// Which of the two sheets plays is the blast's anti-repetition trick (its own sequence is
@@ -1449,32 +1507,32 @@ mod tests {
     }
 
     /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
-    /// doubles the quad and the lifetime, and the flipbook rate halves with it so the sheet still
-    /// plays exactly once.
+    /// doubles the quad, the standoff and the lifetime — and because [`Flipbook::Once`] spreads the
+    /// sheet over that lifetime, the playthrough scales with it and needs no rate of its own.
     #[test]
     fn blast_core_scales_with_the_bore() {
-        fn core(caliber: f32) -> (f32, f32, f32) {
+        fn core(caliber: f32) -> (f32, f32, f32, Flipbook) {
             let mut app = harness();
             fire(&mut app, caliber, 0);
             let entity = blast_cores(&mut app)[0];
             let core = app.world().get::<Billboard>(entity).expect("blast core");
-            (core.start_size, core.lifetime, core.frame_rate)
+            let standoff = core.origin.distance(FIRE_ORIGIN);
+            (core.start_size, core.lifetime, standoff, core.flipbook)
         }
 
-        let (small, small_life, small_rate) = core(BLAST_CALIBER);
-        let (big, big_life, big_rate) = core(BLAST_CALIBER * 2.0);
-        assert!(
-            (big - small * 2.0).abs() < 1e-3,
-            "twice the bore, twice the fireball: {small} → {big}"
-        );
-        assert!(
-            (big_life - small_life * 2.0).abs() < 1e-4,
-            "twice the bore, twice the burn: {small_life} → {big_life}"
-        );
-        assert!(
-            (big_rate * 2.0 - small_rate).abs() < 1e-3,
-            "the sheet is stretched over the longer life, not replayed: {small_rate} → {big_rate}"
-        );
+        let (small, small_life, small_standoff, book) = core(BLAST_CALIBER);
+        let (big, big_life, big_standoff, _) = core(BLAST_CALIBER * 2.0);
+        assert_eq!(book, Flipbook::Once, "the sheet is a sequence, not a loop");
+        for (what, small, big) in [
+            ("fireball", small, big),
+            ("burn", small_life, big_life),
+            ("standoff", small_standoff, big_standoff),
+        ] {
+            assert!(
+                (big - small * 2.0).abs() < 1e-3,
+                "twice the bore must be twice the {what}: {small} → {big}"
+            );
+        }
     }
 
     /// Soft-particle classification: the muzzle's MASS layers fade where they close on the geometry
