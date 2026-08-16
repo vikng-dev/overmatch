@@ -155,12 +155,10 @@ corrections restore at the authority sample's producing tick and replay forward 
 _Avoid_: reload timer (the gate also covers cyclic readiness and belt swaps), belt snapshot
 
 **Stabilization**:
-Keeping the gun's lay steady against hull motion. The aim intention is always a world point
-(ADR-0038); what separates the regimes is what the MOUNT is authorized to do about it, never where
-the intention is stored. Three regimes, by what is held fixed:
-- *Unstabilized* — the mount has its authored slew rate and nothing else: it chases the commanded lay and loses to a pivoting hull exactly the ground its rate cannot make up (WW2).
-- *Directional stabilization* — a stabilizer holds a fixed world *direction* (bearing + elevation) against hull motion, but does not track a point through translation (the modern two-plane stabilizer; fire-on-the-move).
-- *Point stabilization* — the lay tracks a fixed world *point*, re-laying as the hull rotates *and* translates so it holds the spot through parallax (lock-on / FCS auto-tracker).
+Keeping the gun's lay steady against hull motion. Three regimes, by what is held fixed:
+- *Unstabilized* — the gun holds a hull-relative bearing and sweeps as the hull moves (WW2). Aim stored hull-local.
+- *Directional stabilization* — the gun holds a fixed world *direction* (a ray: bearing + elevation), counter-rotating against hull motion but not tracking a point while driving (the modern two-plane stabilizer; fire-on-the-move). Aim stored as a world ray.
+- *Point stabilization* — the gun holds a fixed world *point* (a position), re-laying as the hull rotates *and* translates so it tracks the spot through parallax (lock-on / FCS auto-tracker). Aim stored as a world point.
 Today's default is unstabilized; the other two are deliberate later mechanics.
 _Avoid_: "stab" (write it out)
 

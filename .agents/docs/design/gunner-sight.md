@@ -14,7 +14,7 @@ wastes the offset). Parallax math + the A/B/C/D rationale: chat 2026-06-26.
 ### The three lines (the core relationship)
 
 ```
-intent      ← committed world aim POINT, steered by the mouse   (see §2026-07-10, ADR-0038)
+intent      ← committed world (hull-local) aim POINT, steered by the mouse   (see §2026-07-10)
 sight line  ← the gun's BASE lay; camera looks along this; reticle centre   (= intent, lagged)
 bore        ← sight line + superelevation(range)   ← the barrel; sits ABOVE the reticle
 ```

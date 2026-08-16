@@ -275,10 +275,12 @@ pub(crate) fn buffer_input(
     } else {
         0.0
     };
-    // Far off-axis so the yaw servo visibly slews; range 800 m dials in real
-    // superelevation from the weapon's range table.
-    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the
-    // aim around the world origin at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
+    // Far off-axis so the yaw servo visibly slews; range 800 m dials in real superelevation from
+    // the weapon's range table. A scripted point is world (the wire's frame), so under the drive
+    // scripts the servos re-lay as the hull moves — more churn than a player's hold, which is what
+    // a perf workload wants.
+    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the aim
+    // around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
     // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
     // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
     // its rest pose. The point is zero moving parts above the hull, so a servo slew can't feed the

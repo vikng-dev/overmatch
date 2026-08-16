@@ -8,6 +8,7 @@ mod reticle;
 use avian3d::prelude::{Position, Rotation, SpatialQuery};
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
+use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
@@ -215,8 +216,7 @@ pub fn yaw_pitch_of(dir: Vec3) -> (f32, f32) {
     )
 }
 
-/// Per-frame yaw/pitch working form of the committed aim point, in the hull frame the servo angles
-/// are measured in.
+/// Per-frame yaw/pitch working form of the committed aim point.
 ///
 /// Invariant: decompose `point - mount`, never the hull origin, to keep the optic and servo target
 /// at the same parallax origin. [`CommittedAim`] remains the sole persistent state.
@@ -417,7 +417,8 @@ fn sight_pitch_limits(lay_limits: Option<(f32, f32)>, lob: f32) -> Option<(f32, 
 
 /// Values published by `drive_gunner_aim` for this frame.
 struct AimPublish {
-    /// Command aim re-authored every optic frame.
+    /// The point to author this frame, hull-local like the memory it comes from; the caller names
+    /// it in the world for [`TankCommand`].
     command_aim: Vec3,
     /// Updated committed point; `None` preserves existing memory.
     store: Option<Vec3>,
@@ -464,7 +465,8 @@ fn live_servo_angle(
         .map(ServoState::current)
 }
 
-/// Resolve optic input into the shared [`aim::CommittedAim`] and `TankCommand`, in world space.
+/// Resolve optic input into the shared hull-local [`aim::CommittedAim`], and author the world
+/// point it names this frame into `TankCommand`.
 ///
 /// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
 /// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
@@ -496,12 +498,36 @@ fn drive_gunner_aim(
     let committed_point = committed.get(tank).filter(|point| point.is_finite());
     let moved = motion.delta != Vec2::ZERO;
 
-    // Fast path before pose guards so [`resume_commit`]'s preserved point is always re-authored.
+    // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the frame
+    // the committed point is measured in, and the frame the world point authored below is named
+    // from. Both arms need it, so it precedes even the hold; a poisoned or unbound pose authors
+    // nothing this frame.
+    let Ok((root_position, root_rotation)) = poses.get(tank) else {
+        return;
+    };
+    let Some((hull_position, hull_rotation)) = rig_world_pose(
+        rig.hull,
+        tank,
+        root_position.0,
+        root_rotation.0,
+        &parents,
+        &locals,
+    ) else {
+        return;
+    };
+    if !(hull_position.is_finite() && hull_rotation.is_finite()) {
+        return;
+    }
+    let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
+
+    // The hold, ahead of the remaining pose and servo guards so [`resume_commit`]'s preserved point
+    // is always re-authored — as the world point that held bearing names NOW, so the gun rides the
+    // hull round (`aim::CommittedAim::in_world`).
     if let Some(point) = committed_point
         && !moved
     {
         if let Ok(mut command) = tank_commands.get_mut(tank) {
-            command.aim = Some(point);
+            command.aim = Some(hull_affine.transform_point3(point));
         }
         return;
     }
@@ -542,24 +568,9 @@ fn drive_gunner_aim(
         .get(rig.muzzle)
         .map_or(0.0, |table| table.superelevation(ranging.range));
 
-    // The sight's origin: the gun mount (elevation pivot), from the SAME physics-truth chain
-    // `aim::drive_aim_servos` lays from (`rig_world_pose`, never `GlobalTransform`), so the
-    // decomposition below, the clamps against the live lay, and the servo convergence all measure
-    // their angles from one origin. The hull rotation carries the bearing between world and the
-    // frame the servo angles live in.
-    let Ok((root_position, root_rotation)) = poses.get(tank) else {
-        return;
-    };
-    let Some((_, hull_rotation)) = rig_world_pose(
-        rig.hull,
-        tank,
-        root_position.0,
-        root_rotation.0,
-        &parents,
-        &locals,
-    ) else {
-        return;
-    };
+    // The sight's origin: the gun mount (elevation pivot), from the SAME physics-truth chain the
+    // hull pose above came from, so the decomposition below, the clamps against the live lay, and
+    // the servo convergence all measure their angles from one origin.
     let Some((mount_world, _)) = rig_world_pose(
         rig.gun,
         tank,
@@ -570,11 +581,13 @@ fn drive_gunner_aim(
     ) else {
         return;
     };
+    let mount_local = hull_affine.inverse().transform_point3(mount_world);
     // NaN discipline for the resolve inputs: a poisoned pose frame must reach neither the raycast
     // nor the store — a non-finite resolve would poison the shared memory itself. Skip the frame
-    // (the fast path above has already re-authored a held commitment; a fresh tank skips one seed
-    // frame), so `dir_world` below stays finite whenever these pass.
-    if !(mount_world.is_finite() && hull_rotation.is_finite()) {
+    // (the hold above has already re-authored a held commitment; a fresh tank skips one seed
+    // frame). `mount_local` finite implies the hull affine is too, so `dir_world` below stays
+    // finite whenever these pass.
+    if !(mount_world.is_finite() && mount_local.is_finite()) {
         return;
     }
 
@@ -588,9 +601,7 @@ fn drive_gunner_aim(
     // commander aim is simply continued, only an absent commitment falls back to the lay. Seed from
     // the sight line (lay − lob), not the raised bore, or the view jumps θ on handover.
     let mut intent = committed_point
-        .map(|point| {
-            GunnerIntent::from_hull_local_dir(hull_rotation.inverse() * (point - mount_world))
-        })
+        .map(|point| GunnerIntent::from_hull_local_dir(point - mount_local))
         .unwrap_or(GunnerIntent {
             yaw: t_current,
             pitch: g_current - theta,
@@ -638,10 +649,11 @@ fn drive_gunner_aim(
     // Resolve the (possibly moved) sight line against the world: a ray from the mount along the
     // intent bearing, hitting whatever a shell would meet — terrain or another tank's armor, own
     // tank excluded (the ray starts inside the mantlet volume) — with the shared far fallback in
-    // the sky. `point = mount + dir·t` is the committed world form; decomposing it next frame
-    // through the hull rotation recovers these exact angles, so the resolve round-trips and the
-    // intent never drifts. Raw sight-line point; `drive_aim_servos` lobs it by the superelevation,
-    // raising the bore above the line of sight, so this stays the intention.
+    // the sky. `point = mount + dir·t` is the committed hull-local form; decomposing it next frame
+    // (`point − mount`) recovers these exact angles, so the resolve round-trips and the intent
+    // never drifts. Raw sight-line point, hull-local so it rides with the tank (unstabilized);
+    // `drive_aim_servos` lobs it by the superelevation, raising the bore above the line of sight,
+    // so this stays the intention.
     let dir_local = intent.local_dir();
     // Fallible direction: a NaN-poisoned pose or committed value this frame (rollback edge) must
     // not be resolved and re-stored — that would poison the shared memory itself. Skip the frame,
@@ -657,7 +669,7 @@ fn drive_gunner_aim(
         &volumes,
         &parents,
     );
-    let resolved = mount_world + dir_world * distance;
+    let resolved = mount_local + dir_local * distance;
 
     // Publish. [`resume_commit`] is the full decision (its no-motion arm was short-circuited at the
     // top of the system, before the pose work); reaching here means the OWNING transition — mouse
@@ -670,7 +682,7 @@ fn drive_gunner_aim(
         committed.set(tank, point);
     }
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(publish.command_aim);
+        command.aim = Some(hull_affine.transform_point3(publish.command_aim));
     }
 }
 
@@ -773,7 +785,7 @@ fn drive_free_aim(
     let Ok((root_position, root_rotation)) = poses.get(tank) else {
         return;
     };
-    let Some((_, hull_rotation)) = rig_world_pose(
+    let Some((hull_position, hull_rotation)) = rig_world_pose(
         rig.hull,
         tank,
         root_position.0,
@@ -793,7 +805,9 @@ fn drive_free_aim(
     ) else {
         return;
     };
-    if !(mount_world.is_finite() && hull_rotation.is_finite()) {
+    let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
+    let mount_local = hull_affine.inverse().transform_point3(mount_world);
+    if !(mount_world.is_finite() && mount_local.is_finite()) {
         return;
     }
 
@@ -807,7 +821,7 @@ fn drive_free_aim(
     // current lay (sight line = lay − lob).
     if !free.seeded {
         let (yaw, pitch) = match committed.get(tank).filter(|point| point.is_finite()) {
-            Some(point) => yaw_pitch_of(hull_rotation.inverse() * (point - mount_world)),
+            Some(point) => yaw_pitch_of(point - mount_local),
             None => {
                 let angle = |servo| {
                     servos.slots.get(servo).ok().and_then(|slot| {
@@ -861,9 +875,9 @@ fn drive_free_aim(
         free.pitch = free.target_pitch;
     }
 
-    // Resolve the look ray from the mount → world hit (or far fallback), store the world point as
-    // the shared committed aim, and re-author the command every frame (recirculation). The look
-    // itself is hull-local — the camera rides the hull here, so screen centre sweeps with it.
+    // Resolve the look ray from the mount → world hit (or far fallback), store hull-local as the
+    // shared committed aim, and author the world point it names into the command every frame
+    // (recirculation).
     let dir_local = hull_local_dir(free.yaw, free.pitch);
     let Ok(dir_world) = Dir3::new(hull_rotation * dir_local) else {
         return;
@@ -876,13 +890,13 @@ fn drive_free_aim(
         &volumes,
         &parents,
     );
-    let resolved = mount_world + dir_world * distance;
+    let resolved = mount_local + dir_local * distance;
     if !resolved.is_finite() {
         return;
     }
     committed.set(tank, resolved);
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(resolved);
+        command.aim = Some(hull_affine.transform_point3(resolved));
     }
 }
 
