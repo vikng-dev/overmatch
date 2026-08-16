@@ -1,146 +1,20 @@
 #!/bin/sh
-# pre-push — the gates worth a solo dev's wall clock, before a push leaves the machine.
+# pre-push — the git-lfs upload, and NOTHING ELSE.
 #
-# BY DEFAULT: the git-lfs upload, then fmt, clippy, and the asset door over the trios this push
-# changed. Tens of seconds on a warm cache, plus a Blender launch and a MEASURED minute of texture
-# encode per changed asset — and most pushes change none.
+# This hook is the ONLY git-lfs transport: `core.hooksPath` replaces `.git/hooks`, so the pre-push
+# hook git-lfs installs there never runs, and without the line below a push ships the pointers but
+# not the objects (CI then dies at "Git LFS pull (R2)" with "object not found" — the alpha.9
+# outage). NEVER BYPASS WITH `git push --no-verify`. Recovery from a bypassed push requires
+# `git lfs push --all origin`; the plain per-branch form computes an empty delta and uploads
+# nothing.
 #
-# BEHIND `OVERMATCH_FULL=1`: the full `cargo test` run. It is not in the default because CI runs it
-# on every push anyway and CI is the ratified backstop — a hook that re-runs it buys minutes of
-# local wall clock for a second opinion arriving ten minutes later. Run it here when the push is the
-# last thing before a release, or when the network is not something you can wait on:
+# Every verdict this hook used to reach — fmt, clippy, the asset door — is now CI's, post-hoc, on
+# the pushed commit. At one to two developers and no players, a local gate that delays the push by
+# minutes to pre-empt a red CI badge is the expensive way to learn the same thing.
 #
-#     OVERMATCH_FULL=1 git push
-#
-# NEVER BYPASS WITH `git push --no-verify`. This hook is the ONLY git-lfs transport
-# (core.hooksPath replaces .git/hooks, so the hook git-lfs installs there never runs):
-# skipping the whole hook ships pointers without objects. Recovery requires
-# `git lfs push --all origin` — the plain per-branch form computes an empty delta and
-# uploads nothing.
-#
-# To skip a failing gate, name it:  OVERMATCH_SKIP=clippy git push
-# Comma-separate several: OVERMATCH_SKIP=assets,clippy — lanes: assets, fmt, clippy, and, under
-# OVERMATCH_FULL, test. The LFS upload is not a lane and cannot be named. CI re-runs skipped lanes
-# on the pushed commit.
-#
-# Commands mirror .github/workflows/ci.yml (minus `--profile ci`, which only speeds CI's
-# cold builds — it does not change lint/test pass-fail, and omitting it reuses your warm
-# dev target dir). `--locked` catches Cargo.lock drift exactly as CI does.
+# `git lfs pre-push` reads the ref list from STDIN; the hook must therefore pass its own stdin and
+# arguments through untouched.
 set -e
-cd "$(git rev-parse --show-toplevel)"
-
-# What a push contains, read as assets: discovery, the changed set, and hydration out of the pushed
-# revision. Its own file so the exercise script drives the same functions this hook does.
-. scripts/hooks/pushed_assets.sh
-
-# `trap ... EXIT` is ONE slot: a second lane registering its own silently unregisters the first's,
-# so every lane's scratch is torn down from here.
-trap 'rm -rf ${assets_tmp:-}' EXIT
-
-# A lane is skipped iff its name appears in comma-separated $OVERMATCH_SKIP.
-skipped() {
-    case ",${OVERMATCH_SKIP:-}," in
-        *",$1,"*) printf '\033[33mpre-push ▸ SKIPPED %s (OVERMATCH_SKIP) — CI still runs it\033[0m\n' "$1"; return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# A lane that runs only under OVERMATCH_FULL. It is announced when it does not run, because a gate
-# that is silently absent is one nobody remembers exists.
-full() {
-    [ -n "${OVERMATCH_FULL:-}" ] && return 0
-    printf 'pre-push ▸ %s is behind OVERMATCH_FULL=1 — CI runs it on this push\n' "$1"
-    return 1
-}
-
-# git-lfs upload. `core.hooksPath` REPLACES .git/hooks, so the hook git-lfs installs there
-# never runs — without this line a push ships the pointers but not the objects, and CI dies
-# at "Git LFS pull (R2)" with "object not found" (the alpha.9 outage). First, before the
-# cargo lanes: `git lfs pre-push` reads the ref list from STDIN, which must reach it intact.
-# STDIN carries the ref list and is READ ONCE, then replayed to everything that needs it. The
-# upload and the assets lane each consume it, and every reader after the first would otherwise get
-# an empty stream and silently check nothing.
-refs=$(cat)
 
 echo "pre-push ▸ git lfs pre-push"
-printf '%s\n' "$refs" | git lfs pre-push "$@"
-
-if ! skipped fmt; then
-echo "pre-push ▸ cargo fmt --all --check"
-cargo fmt --all --check >/dev/null || { printf '\033[31m  unformatted\033[0m — run: cargo fmt --all\n' >&2; exit 1; }
-fi
-
-if ! skipped clippy; then
-echo "pre-push ▸ cargo clippy --locked --all-targets -- -D warnings"
-cargo clippy --quiet --locked --all-targets -- -D warnings
-fi
-
-# Tank assets. `build.py verify` re-cuts each asset from its own stored source through the door and
-# proves the tracked model is, section by section, what that source, that spec sheet and the pinned
-# toolchain produce — byte for byte wherever the chain is deterministic, and by stated KTX2 header
-# facts over the texture payloads, which `basisu` cuts differently on different architectures. That
-# one verdict is why this lane replaces the old mip gate rather than joining it: a tracked glb the
-# compare law holds against a candidate the derivation verifier passed is mipped KTX2 by
-# construction, and it is also L1-clean and L2-certified, which the mip gate never said.
-#
-# IT VERIFIES THE TRIO (ADR 0035): the tracked model with its certified rung records STRIPPED is
-# what the door's comparison runs on, the sim artifact is re-derived from the tracked view artifact
-# and compared byte for byte, and the certificate's three digests are held against the bytes beside
-# it. No search runs here — the certificate is what carries the measurements forward.
-#
-# IT VERIFIES THE PUSHED REVISIONS, not the work tree: a dirty-but-coherent tree blesses a different
-# commit, and pushing a branch that is not HEAD, a tag, or several refs at once was not covered at
-# all by the HEAD-shaped gate this replaces. The assets are DISCOVERED there too, as sibling trios
-# (`scripts/hooks/pushed_assets.sh`), so a second vehicle is gated by the rule that found the first
-# and no path is written down here.
-#
-# WHAT IT VERIFIES: the trios the push CHANGED. Change the shared surface instead — the material
-# library, the toolchain pin, the source pass, the door, the encoder, the derivation verifier, the
-# LOD lane's library, the map the right wall is cut from, the Rust contract — and every discovered
-# trio is verified, because the build now answers differently about bytes that did not move.
-#
-# WHAT IT CANNOT TAKE FROM THE PUSHED REVISION: the CODE. The consumer contract is a binary compiled
-# from THIS work tree and the encoder resolves its paths against it, so the lane runs this tree's
-# door over the pushed revision's bytes; CI, which checks the commit out, is where a revision's own
-# rules meet its own bytes.
-#
-# The DATA is a different question and is not conceded: the trio, the material library and the
-# substance registry are all hydrated out of the pushed revision, and the door hands the registry to
-# the contract as `--registry`. A push that moves `materials.ron` is verified against the numbers it
-# moves them to, not against the ones this work tree happens to hold.
-#
-# It costs a Blender launch, a full re-export and a MEASURED minute of texture encode per changed
-# asset. `OVERMATCH_SKIP=assets` exists for that, and only because CI re-runs it.
-if ! skipped assets; then
-echo "pre-push ▸ tank build (verify, per pushed revision)"
-command -v python3 >/dev/null ||
-    { printf '\033[31m  no python3\033[0m — the tank build is a python program\n' >&2; exit 1; }
-assets_tmp=$(mktemp -d)
-# Before any verdict about a trio: every blend the revision holds is a canonical source. Discovery
-# finds trios, so a blend of any other shape is one nothing would ever look at again.
-printf '%s\n' "$refs" |
-    while read -r local_ref local_sha remote_ref remote_sha; do
-        assets_pushed_commit "$local_sha" || continue
-        assets_blend_shape "$local_sha" || exit 1
-    done || exit 1
-printf '%s\n' "$refs" |
-    assets_push_targets "${1:-origin}" "$assets_tmp" |
-    while read -r local_ref local_sha stem why; do
-        echo "  ▸ $stem at ${local_sha} ($local_ref, $why)"
-        blend=$(assets_hydrate "$local_sha" "$stem" "$assets_tmp/$local_sha") || exit 1
-        python3 scripts/tank/build.py verify "$blend" ||
-            { printf '\033[31m  the tank build refused %s at %s\033[0m\n' "$stem" "$local_sha" >&2
-              exit 1; }
-    done || exit 1
-fi
-
-# BEHIND OVERMATCH_FULL: the suite CI runs on every push, at the cost this hook is least willing to
-# pay — a full compile and run of everything, on the machine you are trying to leave. Nothing about
-# a push is decided by it that CI does not decide ten minutes later on the same commit.
-if full test && ! skipped test; then
-echo "pre-push ▸ cargo test --locked (skip isolated 30-receiver stress)"
-cargo test --quiet --locked -- \
-  --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss
-fi
-
-echo "pre-push ▸ ok"
+git lfs pre-push "$@"

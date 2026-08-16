@@ -736,18 +736,16 @@ do
     says "$path is authoring scratch" yes $?
 done
 
-# ── the hook itself: which lanes a push actually pays for ────────────────────────────────────────
+# ── the hook itself: the LFS transport, and nothing else ─────────────────────────────────────────
 #
-# The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list — so no
-# revision is examined and no asset is verified, and what is measured is only which lanes ran. That
-# is the claim being made: the default is the cheap set, and the expensive one is behind
-# `OVERMATCH_FULL=1` because CI runs it on every push regardless.
+# The REAL `scripts/hooks/pre-push`, run over the scratch repository with an EMPTY ref list, and
+# what is measured is which commands it ran. The claim is now a closed one: the hook is the git-lfs
+# upload alone. Every other verdict — fmt, clippy, the asset door, the suite — is CI's, post-hoc,
+# on the pushed commit; a lane reappearing here would show up as a second line below.
 #
 # `cargo`, `python3` and `git-lfs` are stood in for by shims that record their arguments and exit 0.
-# The lanes' CONTENTS are proven elsewhere — by CI and by the door's own suites — and re-running them
-# here would cost a compile to learn nothing about the hook.
 
-group "the hook — which lanes run by default"
+group "the hook — the LFS transport, and nothing else"
 
 HOOK_BIN=$WORK/bin
 LANE_LOG=$WORK/lanes.log
@@ -770,60 +768,24 @@ hook() {   # <env assignment>…
     cut -d' ' -f1-2 < "$LANE_LOG"
 }
 
-is "the default runs lfs, fmt and clippy" \
-   "git-lfs pre-push
-cargo fmt
-cargo clippy" "$(hook OVERMATCH_SKIP= )"
+is "the hook runs the lfs upload and nothing else" \
+   "git-lfs pre-push" "$(hook OVERMATCH_LANE_PROBE=1)"
 
-# The asset lane runs but examines nothing here: the ref list is empty, so it discovers no revision
-# and verifies no trio. That it ANNOUNCED itself is the whole claim — which trios it then picks is
-# `assets_push_targets`, driven above.
-is "…and the tank build, which this empty push gives no asset to verify" \
-   "yes" \
-   "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
-
-is "…and not the tank build when it is skipped" \
-   "no" \
-   "$(hook OVERMATCH_SKIP=assets >/dev/null
-      grep -q 'pre-push ▸ tank build' "$WORK/hook.out" && echo yes || echo no)"
-
-is "…and it says the one it did not run and where it is" \
-   "yes" \
-   "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -c 'behind OVERMATCH_FULL=1' "$WORK/hook.out" | grep -q '^1$' && echo yes || echo no)"
-
-is "…and ends green" \
-   "yes" \
-   "$(hook OVERMATCH_SKIP= >/dev/null
-      grep -q 'pre-push ▸ ok' "$WORK/hook.out" && echo yes || echo no)"
-
-group "the hook — OVERMATCH_FULL and OVERMATCH_SKIP"
-
-is "OVERMATCH_FULL=1 adds the cargo test lane" \
-   "git-lfs pre-push
-cargo fmt
-cargo clippy
-cargo test" "$(hook OVERMATCH_FULL=1)"
-
-is "a skipped lane is not run" \
-   "git-lfs pre-push
-cargo fmt" "$(hook OVERMATCH_SKIP=clippy,assets)"
-
-is "…and says so loudly" \
-   "yes" \
-   "$(hook OVERMATCH_SKIP=clippy >/dev/null
-      grep -q 'SKIPPED clippy (OVERMATCH_SKIP)' "$WORK/hook.out" && echo yes || echo no)"
-
-is "OVERMATCH_SKIP names the full lane too, when it is the one running" \
-   "git-lfs pre-push
-cargo fmt
-cargo clippy" "$(hook OVERMATCH_FULL=1 OVERMATCH_SKIP=test)"
-
-# The LFS upload is not a lane: it is the only transport, and naming it must not turn it off.
-is "the lfs upload cannot be skipped" \
+# The transport is not a lane and cannot be named off: the retired switches are inert vocabulary
+# now, and a push that sets them still uploads its objects.
+is "…even when the retired lane switches are set" \
    "git-lfs pre-push" \
-   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,test | head -1)"
+   "$(hook OVERMATCH_SKIP=lfs,fmt,clippy,assets,test OVERMATCH_FULL=1)"
+
+# `git lfs pre-push` takes the remote as its argument; the hook passes its own through untouched.
+is "…and hands git-lfs the remote it was called with" \
+   "git-lfs pre-push origin" \
+   "$(hook OVERMATCH_LANE_PROBE=1 >/dev/null; cut -d' ' -f1-3 < "$LANE_LOG")"
+
+is "…and says which transport it is" \
+   "yes" \
+   "$(hook OVERMATCH_LANE_PROBE=1 >/dev/null
+      grep -q 'pre-push ▸ git lfs pre-push' "$WORK/hook.out" && echo yes || echo no)"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 

@@ -1,8 +1,6 @@
 # Git hooks
 
-Local pre-commit / pre-push gates that mirror CI's ordinary checks, so formatting/lint drift is
-caught before it reaches `main`. (MEASURED: CI sat red for two days in July 2026 from formatting
-drift that a pre-commit hook would have blocked at the source.)
+Two local hooks, and between them they hold exactly one thing CI cannot: the git-lfs upload.
 
 ## One-time setup (per clone)
 
@@ -17,74 +15,41 @@ travel with the repo instead of living in the un-versioned `.git/hooks`.
 
 ## What runs
 
-| Hook | Command | Mirrors | Cost |
-|------|---------|---------|------|
-| pre-commit | `cargo fmt --all --check` | CI `fmt` job | no compile |
-| pre-push | the git-lfs upload, then fmt + clippy + the asset door over the trios this push changed | CI's fmt, clippy and asset lanes | warm cache = tens of seconds; plus a Blender launch and a MEASURED minute of texture encode per changed asset, and most pushes change none |
-| pre-push, `OVERMATCH_FULL=1` | the above, plus the full `cargo test` (excluding the exact 30-receiver stress probe) | CI's ordinary-test lane too | a full compile and test run |
+| Hook | Command | Cost |
+|------|---------|------|
+| pre-commit | `cargo fmt --all --check` | no compile |
+| pre-push | `git lfs pre-push` — the LFS upload, and nothing else | the objects' upload time |
 
-**Why the full suite is not the default.** CI runs `cargo test` on every push, and CI is the
-ratified backstop — running it here too buys a few minutes of local wall clock for a second opinion
-that arrives ten minutes later on the same commit. What stays in the default is what CI is slow or
-unable to save you from: the LFS transport (CI cannot upload objects it never received), and the
-cheap gates whose failures are pure waste to discover remotely. Use
-`OVERMATCH_FULL=1 git push` before a release, or when you will not be watching CI.
+**Everything else is CI's, post-hoc, on the pushed commit**: fmt, clippy, the test suite, and the
+asset door. The local gates that used to run here (fmt, clippy, the door, and `OVERMATCH_FULL=1`'s
+full `cargo test`, all steerable with `OVERMATCH_SKIP`) are retired — at one to two developers and
+no players, minutes of local wall clock to pre-empt a red badge is the expensive way to learn what
+CI says anyway.
 
-The **asset lane** runs `scripts/tank/build.py verify` — the one tank build, which drives the asset
-door as its certification step — on every asset the push changes, and on every asset it discovers
-when the push changes the shared surface that verdict is computed from. That surface is the build's
-own declared dependency list (`build.py`'s `PIPELINE_SOURCES`, which `blend_digest` hashes): the
-material library, the toolchain pin, the source pass, the build, the door, the encoder, the
-derivation verifier, the LOD lane's library — plus the Rust consumer contract, and the map the
-ladder's right wall is parsed from. `verify` re-cuts the asset from its own stored source and holds
-the tracked model, with its certified rung records stripped, against the result section by section —
-byte for byte wherever the chain is deterministic, and by stated KTX2 header facts over the payloads,
-whose bytes `basisu` varies with the SIMD it was built for. That subsumes the mip gate this lane
-replaced: a tracked glb the compare law holds against a candidate the derivation verifier passed is
-mipped KTX2 by construction. It also re-derives the sim artifact from the tracked view artifact and
-holds the certificate's three digests against the bytes beside it (ADR 0035); no LOD search runs
-here, because the certificate is what carries the measurements forward.
+## Never `git push --no-verify`
 
-Assets are **discovered**, never listed: an asset is a sibling trio `<id>.blend`, `<id>.tank.ron`,
-`<id>.glb` in one directory, hydrated with the two artifacts the build publishes beside the model
-(`<id>.sim.glb`, `<id>.lod.json`). Adding a second vehicle needs no hook edit. Discovery, selection
-and hydration live in `scripts/hooks/pushed_assets.sh`, sourced by the hook — and by CI's assets job,
-which asks the same two predicates over the push's whole range to decide whether to run its ~35
-minute re-cut at all. All of it is driven over synthetic revisions, and the hook itself over
-synthetic pushes, by `sh scripts/hooks/test_pushed_assets.sh`.
-
-It reads the **pushed revisions**, not the work tree: the trio's bytes come out of the pushed commit
-(its git-lfs pointers resolved against this clone's object store), because the work tree is a
-different, mutable thing from what the remote is about to receive. If an object or the linked
-`assets/materials/materials.blend` is not there, the lane REFUSES and names what is missing — it
-never falls back to the work tree and never passes on absence.
-
-A green pre-push does not certify the separately bounded CI stress lane; CI remains authoritative.
-
-## Escape hatch — name the lane, never `--no-verify`
-
-```sh
-OVERMATCH_SKIP=clippy git push          # skip one gate lane
-OVERMATCH_SKIP=assets,clippy git push   # or several: assets, fmt, clippy — and test under FULL
-```
-
-Every skip prints loudly, and CI re-runs the skipped lane on the pushed commit.
-
-**Do not use `git push --no-verify`**: the pre-push hook is the only git-lfs transport
-(`core.hooksPath` replaces `.git/hooks`, so the hook git-lfs installs never runs). Skipping the
-whole hook pushes pointers without objects. Recovery: `git lfs push --all origin` — the plain
-per-branch form computes an empty delta and uploads nothing.
+The pre-push hook is the only git-lfs transport (`core.hooksPath` replaces `.git/hooks`, so the
+hook git-lfs installs there never runs). Skipping the whole hook pushes pointers without objects,
+and CI then dies at "Git LFS pull (R2)" with "object not found". Recovery: `git lfs push --all
+origin` — the plain per-branch form computes an empty delta and uploads nothing.
 
 (`git commit --no-verify` remains fine — pre-commit is only a format check.)
 
+## `pushed_assets.sh`
+
+Asset discovery, selection and hydration — an asset is a sibling trio `<id>.blend`,
+`<id>.tank.ron`, `<id>.glb` in one directory, so adding a second vehicle needs no edit anywhere.
+It lives here for historical reasons and its remaining consumer is **CI's assets job**, which asks
+its two predicates over a push's whole range to decide whether to run the ~35 minute re-cut at all.
+`sh scripts/hooks/test_pushed_assets.sh` drives all of it over synthetic revisions, plus the
+pre-push hook over a synthetic push.
+
 ## Trimming
 
-Already trimmed twice, deliberately: the `cargo test` and LOD lanes moved behind `OVERMATCH_FULL=1`
-(2026-08-10) because CI runs them on every push anyway, and the LOD lane retired outright (ADR 0035)
-with the global manifest it verified — `build.py verify` in the assets lane is the surviving verdict
-about a shipped ladder. If clippy-on-every-push still feels heavy, `OVERMATCH_SKIP=clippy` per push,
-or drop its lane and let CI own it — the fmt check alone still prevents the drift class that
-actually bit us.
+Trimmed three times, deliberately: `cargo test` and the LOD lane moved behind `OVERMATCH_FULL=1`
+(2026-08-10), the LOD lane retired outright with the global manifest it verified (ADR 0035), and
+then every gate but the transport was cut (2026-08-16) when release confidence moved to the
+release pipeline's own artifact smoke.
 
 The inventory of checks is **closed**. A new gate here or in CI needs a paid incident or a
 demonstrated hole, not a plausible risk.
