@@ -70,25 +70,19 @@ jobs:
           fi
       # Every asset ships inside every client archive, and every build job DELETES the `.blend`
       # before packaging — after which nothing downstream can re-derive the model or say what it
-      # was cut from. So the committed bytes answer for themselves here, once, in the job the
-      # client jobs `need`: the consumer contract on the tracked glb/spec pair, and the derivation
-      # verifier on the tracked glb. Full re-derivation from the source is CI's, with the pinned
-      # Blender. This half is the one that must not be skippable, because `scripts/hooks/pre-push`
-      # is one `--no-verify` away. `asset_verify` links the whole crate, so this job carries an
-      # uncached bevy build and the linux system libs that build needs.
+      # was cut from. What this job must establish is IDENTITY, not semantics: the trio
+      # certificate beside each model (`<id>.lod.json`, ADR-0035) records the sha256 of both
+      # tracked artifacts as the door certified them, and the door itself — consumer contract,
+      # KTX2 derivation, full re-cut under the pinned Blender — runs post-hoc in CI whenever a
+      # trio changes. Bytes that match the certificate are bytes the door passed; re-proving
+      # semantics here linked the whole crate, ~20 min cold on EVERY tag, because a release bumps
+      # the lockfile and the lockfile was the cache key.
       #
       # The assets are DISCOVERED, by the same trio rule the door and the hook use — `<id>.blend`,
-      # `<id>.tank.ron`, `<id>.glb` in one directory — so a second vehicle is gated by the rule that
-      # found the first. Only the models are hydrated: a `.blend` in the checkout is a pointer file,
-      # which is all discovery reads.
-      # `asset_verify` links the whole crate; without a cache this job rebuilds bevy cold
-      # (~20 min, measured on v0.3.0 and v0.4.0-alpha.1). The cache changes nothing about WHAT
-      # is verified — a lockfile change simply pays the cold build once.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: release-asset-verify
-          cache-on-failure: true
-      - name: Verify every shipped asset
+      # `<id>.tank.ron`, `<id>.glb` in one directory — so a second vehicle is gated by the rule
+      # that found the first. Only the models are hydrated: a `.blend` in the checkout is a
+      # pointer file, which is all discovery reads.
+      - name: Every shipped model is the byte-exact artifact its certificate names
         shell: bash
         run: |
           set -euo pipefail
@@ -108,13 +102,21 @@ jobs:
           fi
           printf 'asset: %s\n' "${stems[@]}"
           git lfs install --local
-          git lfs pull --include="$(IFS=,; echo "${stems[*]/%/.glb}")"
-          # The linker needs the same system libs the Linux client build does.
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
-          cargo run --locked --quiet --bin asset_verify -- "${stems[@]/%/.glb}"
+          git lfs pull --include="$(IFS=,; echo "${stems[*]/%/.glb}"),$(IFS=,; echo "${stems[*]/%/.sim.glb}")"
+          python3 - "${stems[@]}" <<'PYEOF'
+          import hashlib, json, sys
+          failed = False
+          for stem in sys.argv[1:]:
+              cert = json.load(open(stem + ".lod.json"))
+              for suffix, key in ((".glb", "view_glb_sha"), (".sim.glb", "sim_glb_sha")):
+                  sha = hashlib.sha256(open(stem + suffix, "rb").read()).hexdigest()
+                  if sha != cert[key]:
+                      print(f"::error::{stem}{suffix} is {sha} but its certificate records {key} {cert[key]}")
+                      failed = True
+                  else:
+                      print(f"identity: {stem}{suffix} == certificate {key}")
+          sys.exit(1 if failed else 0)
+          PYEOF
           for stem in "${stems[@]}"; do
             python3 scripts/tank/glb_ktx2.py verify "$stem.glb"
           done
