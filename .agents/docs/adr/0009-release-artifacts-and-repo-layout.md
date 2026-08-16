@@ -24,7 +24,7 @@ Why this shape, and not the obvious alternatives:
 
 ## Consequences
 
-- **Release flow:** bump `version` in `Cargo.toml` → commit → `git tag vX.Y.Z` → `git push --tags`. The tag triggers `.github/workflows/release.yml`, which builds Linux/Windows/macOS in a matrix and publishes per-platform archives named `overmatch-<tag>-<target>.{tar.gz,zip}` (+ `.sha256`) to a GitHub Release. Regular pushes to `main` do **not** release.
+- **Release flow:** bump `version` in `Cargo.toml` → commit → `git tag vX.Y.Z` → `git push --tags`. The tag triggers `.github/workflows/release.yml`, which builds Linux and Windows (+ the dedicated server), proves each packaged archive boots and connects, and publishes per-platform archives named `overmatch-<tag>-<target>.{tar.gz,zip}` (+ `.sha256`) to a GitHub Release; the macOS `.dmg` is cut on demand by dispatching that workflow with a `tag` input (2026-08-16 — it gated every tag for ~1h20m and no playtester was on it). Regular pushes to `main` do **not** release.
 - **Versioning:** loose semver while `0.x`. A breaking **on-disk format** change (saves/replays) is the trigger to reserve a `MAJOR` bump; artifacts should carry their own embedded format version for the actual compatibility check (app version ≠ format version).
 - **Binary size:** `[profile.release]` uses `strip = true` + `lto = "thin"` + `codegen-units = 1` (smaller/faster at the cost of slow, LTO-heavy CI builds — acceptable for an infrequent release cadence).
 - **CI must fetch LFS** (`actions/checkout` with `lfs: true`) in the bundling job, or assets ship as broken pointer files.

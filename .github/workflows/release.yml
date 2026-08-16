@@ -4,24 +4,37 @@ name: Release
 # the `overmatch-server` (dedicated server).
 #
 # INVARIANT: the visible latest GitHub Release and the running droplet server are the same build —
-# the Release stays a DRAFT until the server artifact this run built is live on the droplet.
+# the Release stays a DRAFT until the server artifact this run built is live on the droplet AND
+# both packaged clients have been unpacked and driven through a real connect.
 #
-# Two triggers:
+# A `vX.Y.Z` TAG runs the whole pipeline from the tag SHA:
 #
-#   - A `vX.Y.Z` tag runs the whole pipeline from the tag SHA: build the server + all three
-#     clients, deploy the built server artifact to the droplet, then publish the draft Release:
-#       * Windows  `overmatch`        — the PVP client, server address baked to the droplet.
-#       * Linux    `overmatch`        — the PVP client, server address baked to the droplet.
-#       * macOS    `overmatch`        — the client, as a signed + notarized arm64 .dmg (Apple Silicon only).
-#       * Linux    `overmatch-server` — the dedicated server, tar with assets/.
-#     Cut one by bumping `version` through a PR, then tagging the merged main SHA. A failed deploy
-#     leaves the draft unpublished, so no new Release becomes visible.
+#     create-release (draft) ─┬─ build-client (windows, linux) ─┬─ smoke (win, linux) ─┐
+#                             └─ build-server (linux) ──────────┘                      │
+#                             upload-client / upload-server / deploy-server ───────────┴─ publish
 #
-#   - `workflow_dispatch` is BUILD-ONLY SMOKE MODE: the same build matrix (server + all three
-#     clients) from the dispatched ref, with the deploy and publish jobs skipped, so pipeline
-#     changes and pre-flight checks run without cutting a tag. The server tarball is also kept as
-#     a plain artifact for `scp` redeploys to the test droplet (see DEPLOY.md). Nothing here
-#     touches the droplet or any Release, even when the dispatch is launched from a tag ref.
+#   * Windows `overmatch`        — the PVP client (zip), server address baked to the droplet.
+#   * Linux   `overmatch`        — the PVP client (tar.gz), server address baked to the droplet.
+#   * Linux   `overmatch-server` — the dedicated server, tar with its asset allowlist.
+#
+#   THE SMOKE GATES THE PUBLISH. Each lane extracts the archives a user downloads, with no path
+#   surgery, and drives the packaged client through a full connect against the packaged server
+#   (`scripts/ci/archive-smoke.sh`). This is the one catastrophe this pipeline exists to prevent: a
+#   published release whose client cannot boot or connect — which shipped three times in August
+#   2026, when the runner's checkout rewrote `assets/maps/*/level.json` to CRLF and the map digest
+#   inside the handshake's `protocol_id` (ADR-0018) stopped matching the server's.
+#
+#   Cut a release by bumping `version` through a PR, then tagging the merged main SHA (the tag must
+#   be an ancestor of `origin/main`). Any failure upstream leaves the draft unpublished, so no
+#   broken Release becomes visible.
+#
+# macOS IS ON DEMAND, not on the tag path: `workflow_dispatch` with a `tag` input builds the arm64
+# client from that tag, signs + notarizes it, and attaches the .dmg to that tag's existing Release.
+# It is a ~1h20m job on the only platform nobody currently playtests on, and holding every tag
+# behind it bought nothing. A dispatch with NO tag is build-only smoke mode: server + both clients
+# + the archive smoke off the dispatched ref, the unsigned .app built and kept as an artifact, and
+# neither the droplet nor any Release touched. The server tarball is kept as a plain artifact on
+# both paths for `scp` redeploys to the test droplet (see DEPLOY.md).
 #
 # Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
@@ -31,6 +44,13 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+'      # stable, e.g. v0.1.0
       - 'v[0-9]+.[0-9]+.[0-9]+-*'    # prerelease, e.g. v0.3.0-alpha.1
   workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Existing vX.Y.Z tag to build the macOS .dmg from and attach to its Release. Leave empty
+          for a build-only smoke run off the dispatched ref (nothing is signed, nothing published).
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -54,7 +74,11 @@ jobs:
       contents: write
     runs-on: ubuntu-latest
     steps:
+      # Full history: the ancestry check below asks whether the tag's commit is reachable from
+      # main, and a depth-1 checkout holds neither side's history.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       # CARGO_PKG_VERSION participates in the network protocol fingerprint. Reject label/handshake
       # skew and a stale lockfile before creating an empty or misleading GitHub Release shell.
       - name: Verify release versions and tag agree
@@ -121,18 +145,26 @@ jobs:
             python3 scripts/tank/glb_ktx2.py verify "$stem.glb"
           done
 
-      # Releases are cut from `main` only.
-      - name: Verify the tag names current main
+      # Releases are cut from `main` only — but from a commit ON main, not from its tip. Requiring
+      # the tag to BE the tip loses a race it cannot win: a PR merged while the tag build runs
+      # moves the tip, and a tag cut minutes earlier off a perfectly good main is then refused for
+      # something that happened after it. Ancestry is the property actually wanted, and it holds
+      # forever once true.
+      #
+      # The checkout above is `fetch-depth: 0` for this step: `merge-base` over a depth-1 history
+      # answers about a history it does not have.
+      - name: Verify the tag is an ancestor of main
         shell: bash
         run: |
           set -euo pipefail
-          git fetch --depth=1 --no-tags origin +main:refs/remotes/origin/main
+          git fetch --no-tags origin main
           tag_sha="$(git rev-parse "${GITHUB_SHA}^{commit}")"
-          main_sha="$(git rev-parse origin/main)"
-          if [[ "${tag_sha}" != "${main_sha}" ]]; then
-            echo "::error::Release tag ${GITHUB_REF_NAME} points to ${tag_sha}, but origin/main is ${main_sha}"
+          main_sha="$(git rev-parse FETCH_HEAD)"
+          if ! git merge-base --is-ancestor "${tag_sha}" "${main_sha}"; then
+            echo "::error::Release tag ${GITHUB_REF_NAME} points to ${tag_sha}, which is not an ancestor of origin/main (${main_sha})"
             exit 1
           fi
+          echo "${GITHUB_REF_NAME} (${tag_sha}) is an ancestor of origin/main (${main_sha})"
 
       # Draft: the Release is invisible (and is not "latest") until `publish-release` un-drafts it.
       - uses: taiki-e/create-gh-release-action@v1
@@ -314,6 +346,148 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
+  # THE ARCHIVE SMOKE, Linux lane: the tarballs a user downloads, extracted the way a user extracts
+  # them, connected to each other. Nothing here is rebuilt and no path is edited — the shipped
+  # server tar boots the shipped server, the shipped client tar runs the shipped client, and the
+  # only thing overridden is the server address (`scripts/ci/archive-smoke.sh` documents the whole
+  # env contract and the assertions).
+  #
+  # WHAT IT CATCHES that no earlier gate can: the packaged BYTES. The handshake's `protocol_id`
+  # digests shipped assets raw (ADR-0018), so a `level.json` line-ending rewrite, a truncated LFS
+  # pointer, or an asset that never made it into the archive all mint a client the server refuses —
+  # and every one of those happens downstream of the last thing CI looked at. Three releases
+  # shipped exactly that in August 2026.
+  #
+  # It runs on dispatches too (build-only smoke mode), which is what makes a pipeline change
+  # testable without cutting a tag.
+  smoke-linux:
+    needs: [build-client, build-server]
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # Only `scripts/ci/archive-smoke.sh` is wanted from the repo — no assets, no LFS. Everything
+      # under test arrives as an artifact.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-client-x86_64-unknown-linux-gnu
+          path: dist
+
+      # The Linux runtime floor, which a player's machine has and a bare runner image may not:
+      # bevy's audio backend links `libasound.so.2` (`DT_NEEDED`, so a missing one is a failure to
+      # exec, not a warning). The rendering stack is NOT needed — the simulated client selects the
+      # GPU-less root, so wgpu enumerates no adapter and winit is never mounted. The package was
+      # renamed in the 64-bit-time_t transition, hence the fallback.
+      - name: Install the Linux runtime floor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2t64 ||
+            sudo apt-get install -y --no-install-recommends libasound2
+
+      # Exactly what a user does: `tar xzf`, in a directory of their choosing. No `--strip`, no
+      # rename, no file touched afterwards.
+      - name: Extract both archives
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          tar -xzf dist/overmatch-server.tar.gz -C smoke
+          tar -xzf dist/overmatch-*-x86_64-unknown-linux-gnu.tar.gz -C smoke
+          find smoke -maxdepth 2 -type f -name 'overmatch*' -print
+
+      - name: The packaged client connects to the packaged server
+        run: |
+          set -euo pipefail
+          client="$(find smoke -maxdepth 2 -type f -name overmatch -perm -u+x | head -1)"
+          test -n "${client}"
+          bash scripts/ci/archive-smoke.sh smoke/overmatch-server/overmatch-server "${client}"
+
+  # THE ARCHIVE SMOKE, Windows lane — the platform the CRLF defect actually shipped on, and the
+  # only client anyone but the author runs.
+  #
+  # ONE DEVIATION, and it is forced: there is no Windows server artifact and a Windows runner
+  # cannot execute the Linux one (GitHub's Windows runners run Windows containers only, so there is
+  # no Linux sandbox to borrow either). So the server EXECUTABLE is built here from the same
+  # commit, while its ASSETS are the shipped server tarball's, unpacked and handed to it through
+  # `BEVY_ASSET_ROOT` exactly as the droplet's unit does. That keeps the whole claim intact: the
+  # client under test is the shipped archive, byte for byte, and both halves of the `protocol_id`
+  # still have to agree — the compile-time fingerprint (same commit) and the runtime map digest
+  # (the shipped map bytes on the server side, the archive's own on the client's).
+  #
+  # It builds `--release --target x86_64-pc-windows-msvc` under `build-client`'s cache key on
+  # purpose: that job saved a warm dependency cache for this exact target and profile minutes ago,
+  # so only this crate's own artifacts are compiled here.
+  smoke-windows:
+    needs: [build-client, build-server]
+    permissions:
+      contents: read
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      # The server is compiled here, so this checkout is a real one — but still no LFS: nothing the
+      # server binary needs to COMPILE is an LFS object (`build/icons/window_icon.png` is tracked
+      # plainly; the assets it opens arrive in the tarball).
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-client-x86_64-pc-windows-msvc
+          path: dist
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-pc-windows-msvc
+
+      - name: Build the Windows server executable
+        shell: bash
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --bin overmatch-server
+
+      # What a Windows user does with a downloaded zip is Explorer's "Extract All", which is
+      # `Expand-Archive` — no `tar`, no path surgery, no post-extraction fixups. The server tarball
+      # is unpacked with the `tar` that ships in the Windows image, for its assets only.
+      - name: Extract both archives
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          $zip = Get-ChildItem dist -Filter 'overmatch-*-x86_64-pc-windows-msvc.zip' | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath smoke -Force
+          tar -xzf dist/overmatch-server.tar.gz -C smoke
+          Get-ChildItem -Recurse -Depth 1 smoke | Select-Object FullName
+
+      - name: The packaged client connects to the server
+        shell: bash
+        run: |
+          set -euo pipefail
+          client="$(find smoke -maxdepth 2 -type f -name 'overmatch.exe' | head -1)"
+          test -n "${client}"
+          # `BEVY_ASSET_ROOT` is read by a native Windows process, so it must be a Windows path —
+          # `pwd -W` is git-bash's translation of its own POSIX view.
+          root="$(pwd -W 2>/dev/null || pwd)"
+          # The server binary is this run's build; its asset root is the shipped tarball's tree.
+          SMOKE_SERVER_ASSET_ROOT="${root}/smoke/overmatch-server" \
+            bash scripts/ci/archive-smoke.sh \
+              target/x86_64-pc-windows-msvc/release/overmatch-server.exe \
+              "${client}"
+
   # Tag pushes only: put the server artifact built above on the droplet, before any Release becomes
   # visible. No checkout and no compilation — the deployed bytes are the artifact `build-server`
   # produced, never a rebuild here or on the droplet. Auth is the `DROPLET_SSH_KEY` repo secret.
@@ -422,18 +596,22 @@ jobs:
   # cannot reach the Developer ID cert or notary key, because they are never materialized on this
   # runner. It inherits the workflow-level OVERMATCH_DEFAULT_SERVER, baking the droplet address in.
   # If you ever add an Apple secret here, STOP — it belongs in sign-macos below.
-  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
-  # Release shell on tags, and still runs in dispatch smoke mode where create-release is skipped.
+  #
+  # ON DEMAND ONLY. A tag no longer waits on this job: ~1h20m of arm64 build + notarization for the
+  # platform with no playtesters, in front of every release, was the single largest cost in the
+  # pipeline and it gated nothing anyone was waiting for. Dispatch with the `tag` input to cut the
+  # .dmg for an existing release; dispatch without it to smoke-build the unsigned .app off any ref.
   build-macos:
-    needs: create-release
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
+    if: github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
     runs-on: macos-latest
     steps:
       # LFS on R2 via `.lfsconfig` — pull after checkout (checkout `lfs: true` hits GitHub).
+      # With a `tag` input, THAT tag's tree is what is built and signed — not the dispatched ref.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
           lfs: false
       - name: Git LFS pull (R2)
@@ -452,12 +630,14 @@ jobs:
         with:
           key: macos-aarch64
 
-      # Off a tag the bundle version is the tag; in dispatch smoke mode VERSION stays unset and the
+      # With a `tag` input the bundle version is that tag; without one VERSION stays unset and the
       # script falls back to the Cargo.toml version.
       - name: Build the unsigned .app (arm64)
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
-            export VERSION="${GITHUB_REF_NAME#v}"
+          if [[ -n "${TAG}" ]]; then
+            export VERSION="${TAG#v}"
           fi
           ./scripts/package-macos.sh --build-only
 
@@ -478,11 +658,14 @@ jobs:
   # macOS client, part 2 of 2: the TRUSTED sign. This job holds the Apple signing secrets (Developer
   # ID cert + notary key) but runs NO `cargo build` — it only operates on the pre-built .app from
   # build-macos. It produces the signed + notarized arm64 .dmg (the .app inside is also the future
-  # Steam macOS depot) and attaches it to the draft Release. Tag pushes only: dispatch smoke mode
-  # builds the .app but never signs it, so no Apple secret is materialized outside a release.
+  # Steam macOS depot) and attaches it to the named tag's EXISTING Release — which by then is
+  # published, because the tag pipeline never waited for macOS.
+  #
+  # It runs only for a dispatch that named a `tag`: a smoke dispatch builds the .app and stops, so
+  # no Apple secret is ever materialized outside a deliberate release cut.
   sign-macos:
     needs: build-macos
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
     permissions:
       contents: write
     runs-on: macos-latest
@@ -490,6 +673,8 @@ jobs:
       # Only the entitlements plist, icon, and the sign script are needed here — no LFS assets (they
       # are already baked into the downloaded .app), so a plain checkout is enough.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -519,25 +704,33 @@ jobs:
           NOTARY_KEY: ${{ runner.temp }}/notary/AuthKey.p8
           NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
           NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          TAG: ${{ inputs.tag }}
         run: |
-          tag="${GITHUB_REF_NAME}"
-          export VERSION="${tag#v}"
+          export VERSION="${TAG#v}"
           ./scripts/package-macos.sh --sign-only
 
+      # `--clobber` so a re-run replaces the .dmg rather than failing on the existing asset.
       - name: Upload .dmg to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
         run: |
-          gh release upload "${GITHUB_REF_NAME}" \
+          gh release upload "${TAG}" \
             dist/overmatch-*-aarch64-apple-darwin.dmg \
             dist/overmatch-*-aarch64-apple-darwin.dmg.sha256 \
-            --repo "${GITHUB_REPOSITORY}"
+            --repo "${GITHUB_REPOSITORY}" --clobber
 
   # The invariant's hinge: the draft becomes visible only here, downstream of a live droplet running
-  # this run's server artifact and of every client archive being attached. Any failure upstream
-  # leaves the draft unpublished, so the latest visible Release still matches the droplet.
+  # this run's server artifact, of every client archive being attached, AND of both smoke lanes
+  # having connected a freshly extracted client to a server. Any failure upstream leaves the draft
+  # unpublished, so the latest visible Release still matches the droplet — and cannot be one whose
+  # client never booted.
+  #
+  # `sign-macos` is deliberately NOT a need: it never runs on a tag, and a skipped need would skip
+  # this job with it. Every job named below runs on every tag push, so the plain `if` is enough —
+  # no `always()` is needed, and none is wanted (it would publish over a failed deploy).
   publish-release:
-    needs: [deploy-server, upload-client, upload-server, sign-macos]
+    needs: [deploy-server, upload-client, upload-server, smoke-linux, smoke-windows]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
