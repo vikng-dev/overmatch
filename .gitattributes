@@ -1,3 +1,9 @@
+# No eol conversion, ever: the handshake tag digests shipped files as RAW BYTES
+# (`map::content_digest` → `net::protocol::protocol_id`, ADR-0018). Git for Windows
+# defaults core.autocrlf=true, and a CRLF-rewritten level.json inside a release zip
+# mints a protocol id the server cannot decrypt (v0.5.0 Windows clients, 2026-08-16).
+* -text
+
 *.blend filter=lfs diff=lfs merge=lfs -text
 *.glb filter=lfs diff=lfs merge=lfs -text
 *.dae filter=lfs diff=lfs merge=lfs -text
