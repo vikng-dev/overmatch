@@ -1479,6 +1479,7 @@ mod tests {
                 fire: vec![],
                 load: vec![],
                 trigger: crate::spec::Trigger::Primary,
+                report_clips: vec![],
             },
         ));
         (app, root)

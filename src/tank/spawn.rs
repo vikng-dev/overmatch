@@ -10,8 +10,9 @@ use bevy::prelude::*;
 
 use super::integrity::authored_attachment;
 use super::model::{
-    Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim, TankViews,
-    TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponState,
+    EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
+    TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
+    WeaponState,
 };
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
@@ -583,6 +584,7 @@ fn insert_weapons(
             fire: weapon.fire.clone(),
             load: weapon.load.clone(),
             trigger: weapon.trigger,
+            report_clips: weapon.report_clips.clone(),
         };
         let range_table = RangeTable::for_weapon(
             weapon_component.speed,
@@ -869,6 +871,30 @@ fn insert_root_components(
         rig,
         SimParts(parts),
     ));
+    if let Some(sound) = engine_sound(spec) {
+        commands.entity(root).insert(sound);
+    }
+}
+
+/// The engine's recording and the crank facts its playback speed derives from, lifted out of the
+/// declared transmission. `None` for a vehicle with no declared engine (`architecture: Governor`)
+/// or one whose engine authors no `sound` — either way the tank runs silent.
+fn engine_sound(spec: &TankSpec) -> Option<EngineSound> {
+    let engine = spec
+        .track
+        .powertrain
+        .transmission
+        .as_ref()?
+        .engine
+        .as_ref()?;
+    let sound = engine.sound.as_ref()?;
+    Some(EngineSound {
+        clip: sound.clip.clone(),
+        clip_pop_hz: sound.clip_pop_hz,
+        cylinders: engine.cylinders,
+        idle_rpm: engine.idle_rpm,
+        governed_rpm: engine.governed_rpm,
+    })
 }
 
 /// Assemble only simulation-relevant geometry under `root`. Declared nodes resolve fail-fast, and

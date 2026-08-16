@@ -672,7 +672,7 @@ impl Plugin for ClientPlugin {
         ));
         app.add_plugins(drive_hud::plugin);
         // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
-        // the 88's report on the fire seam, and the per-tank engine loop.
+        // each weapon's authored report on the fire seam, and the per-tank engine loop.
         app.add_plugins(sfx::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
@@ -767,8 +767,9 @@ impl Plugin for NetClientPlugin {
             // declarer that makes it visible.
             settings::plugin(settings::PageEntry::OverlayMenu),
         ));
-        // View-layer audio (see `ClientPlugin`): the trigger click, the 88's report, and the engine
-        // loop on own AND remote tanks — `TankTransmission` is replicated, so one code path.
+        // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
+        // and the engine loop on own AND remote tanks — `TankTransmission` is replicated, so one
+        // code path.
         app.add_plugins(sfx::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP

@@ -76,6 +76,16 @@ TankSpec(
                     idle_rpm: 600.0,
                     governed_rpm: 2500.0,
                     rated_rpm: 3000.0,
+                    // V-12 [ANCHOR]. Four-stroke, so the crank fires 6 times per revolution:
+                    // 60 Hz at idle, 250 Hz at the governor.
+                    cylinders: 12,
+                    // The engine loop, and the pop rate MEASURED off that file at playback speed
+                    // 1.0 (the filename records the same measurement). `sfx` derives the whole
+                    // rpm→playback-speed mapping from these two numbers and the rpm band above.
+                    sound: (
+                        clip: "sfx/engine/engine_loop_44hz.ogg",
+                        clip_pop_hz: 44.3,
+                    ),
                     // (rpm, N·m): 800→1300 INFERRED (~0.70 × peak); 2100→1850 ANCHOR
                     // (medium); 2500→1686 DERIVED (600 PS); 3000→1639 DERIVED (700 PS).
                     torque_curve: [(800.0, 1300.0), (2100.0, 1850.0), (2500.0, 1686.0), (3000.0, 1639.0)],
@@ -299,6 +309,16 @@ TankSpec(
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],
             load: [Loader, Breech],
+            // Five takes of the 88's report, one rolled per round (never the same take twice in
+            // a row). The list is the weapon's sound: adding a take is a line here, and a weapon
+            // with no takes is silent.
+            report_clips: [
+                "sfx/explosion/88_cannon_1.ogg",
+                "sfx/explosion/88_cannon_2.ogg",
+                "sfx/explosion/88_cannon_3.ogg",
+                "sfx/explosion/88_cannon_4.ogg",
+                "sfx/explosion/88_cannon_5.ogg",
+            ],
         ),
         "Coax": (
             trigger: Secondary,
@@ -309,6 +329,8 @@ TankSpec(
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
             load: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
+            // No MG recording in the library yet — silent until one is cut and listed here.
+            report_clips: [],
         ),
         "HullMG": (
             trigger: Secondary,
@@ -320,6 +342,7 @@ TankSpec(
             fire: [BowGunner],
             // Same rule as the coax: the swap needs the gun's crew.
             load: [BowGunner],
+            report_clips: [],
         ),
     },
     views: {

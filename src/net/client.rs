@@ -2258,6 +2258,7 @@ mod tests {
             fire: Vec::new(),
             load: Vec::new(),
             trigger: Trigger::Primary,
+            report_clips: Vec::new(),
         }
     }
 

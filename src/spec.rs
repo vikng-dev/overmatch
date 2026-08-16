@@ -151,6 +151,10 @@ pub struct WeaponSpec {
     /// per-weapon successor to the old global `Load`. Empty = always loading.
     #[serde(default)]
     pub load: Requirement,
+    /// Report clips (asset-relative paths), one rolled per round fired. An EXPLICIT list — no glob,
+    /// no name derivation — and required authoring: `[]` is a silent weapon, which is a decision,
+    /// not an omission.
+    pub report_clips: Vec<String>,
 }
 
 /// A weapon's procedural barrel-recoil spring (a 1-DOF damped spring along the bore).
@@ -431,6 +435,13 @@ pub struct EngineSpec {
     pub idle_rpm: f32,
     /// Fuel-governor rpm — the fleet operating condition (Tiger: 2500 from Nov 1943).
     pub governed_rpm: f32,
+    /// Cylinder count (Tiger: the HL230 P45 is a V-12). Engine data like the rpm band beside it;
+    /// the audio law reads it as the four-stroke firing rate `rpm × cylinders / 2 / 60`.
+    pub cylinders: u32,
+    /// The recording this engine runs on, and the measured rate that anchors it. Absent = a silent
+    /// engine — the vehicle simply carries no loop.
+    #[serde(default)]
+    pub sound: Option<EngineSoundSpec>,
     /// The rpm the per-gear speed anchors are quoted at (Tiger: 3000).
     pub rated_rpm: f32,
     /// `(rpm, N·m)` authoring points, ascending rpm.
@@ -458,6 +469,19 @@ pub struct EngineSpec {
 /// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
 fn default_drag_fraction() -> f32 {
     0.25
+}
+
+/// One engine's loop recording: the clip, and the cylinder-pop rate MEASURED off it. Both are facts
+/// about the file — the playback-speed law that consumes them lives in `sfx`, and holds no tank
+/// numbers of its own.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct EngineSoundSpec {
+    /// Asset-relative path to the seamless loop.
+    pub clip: String,
+    /// Cylinder pops per second in the recording as it sits on disk (playback speed 1.0). MEASURED
+    /// off the audio, never read off the filename.
+    pub clip_pop_hz: f32,
 }
 
 /// The gear ladders as authored per-gear top belt speeds (km/h) at `rated_rpm`, plus the
@@ -849,6 +873,28 @@ impl TankSpec {
         // without a transmission architecture fails here, loudly, instead of silently running
         // the governor.
         t.transmission_params(1.0, 1.0).map(|_| ())?;
+        // Engine audio data: the firing rate divides by neither, but both are DIVISORS in the
+        // playback law (`sfx`) — a 0-cylinder engine pops at 0 Hz and a 0 Hz recording makes the
+        // anchor infinite.
+        if let Some(engine) = t
+            .powertrain
+            .transmission
+            .as_ref()
+            .and_then(|transmission| transmission.engine.as_ref())
+        {
+            if engine.cylinders < 1 {
+                return Err("engine.cylinders must be >= 1 (got 0)".into());
+            }
+            if let Some(sound) = engine.sound.as_ref()
+                && !(sound.clip_pop_hz.is_finite() && sound.clip_pop_hz > 0.0)
+            {
+                return Err(format!(
+                    "engine.sound.clip_pop_hz must be finite and > 0 (got {})",
+                    sound.clip_pop_hz
+                )
+                .into());
+            }
+        }
         for (name, weapon) in &self.weapons {
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -1025,6 +1071,15 @@ mod tests {
         // dominant); clutch capacity 2400 N·m ≈ 1.3 × the 1850 N·m peak.
         assert_eq!(engine.inertia_kgm2, 4.0);
         assert_eq!(engine.clutch_capacity_nm, 2400.0);
+        // Engine AUDIO data — the recording and the two facts the `sfx` playback law reads it
+        // against. The HL230 is a V-12, and 44.3 Hz is the pop rate measured off the shipped loop.
+        assert_eq!(engine.cylinders, 12);
+        let sound = engine
+            .sound
+            .as_ref()
+            .expect("the Tiger authors engine sound");
+        assert_eq!(sound.clip, "sfx/engine/engine_loop_44hz.ogg");
+        assert_eq!(sound.clip_pop_hz, 44.3);
         assert_eq!(gearbox.forward_speeds_kmh.len(), 8);
         assert_eq!(gearbox.reverse_speeds_kmh.len(), 4);
         assert_eq!(gearbox.shift_addressing, ShiftAddressing::Direct);
@@ -1360,7 +1415,16 @@ mod tests {
         fn gearbox(tr: &mut TransmissionSpec) -> &mut GearboxSpec {
             tr.gearbox.as_mut().expect("the Tiger authors a gearbox")
         }
-        let cases: [(&str, fn(&mut TransmissionSpec)); 16] = [
+        let cases: [(&str, fn(&mut TransmissionSpec)); 19] = [
+            // Engine audio data: both are DIVISORS in the playback law — a 0-cylinder engine pops
+            // at 0 Hz (silence played at speed 0) and a 0 Hz recording makes the anchor infinite.
+            ("cylinders", |tr| engine(tr).cylinders = 0),
+            ("clip_pop_hz", |tr| {
+                engine(tr).sound.as_mut().expect("authored").clip_pop_hz = 0.0;
+            }),
+            ("clip_pop_hz", |tr| {
+                engine(tr).sound.as_mut().expect("authored").clip_pop_hz = f32::NAN;
+            }),
             // Stage-B crank block: absurd-but-finite values must be refused outright, in
             // BOTH directions — the lower bounds matter too: the coupling divides by J
             // and the capacity gates every transmitted torque.
@@ -1442,6 +1506,25 @@ mod tests {
             err.contains("powertrain.inertia floor"),
             "expected the belt-inertia floor in: {err}"
         );
+    }
+
+    /// Silence is authorable: an engine with no `sound` block is a vehicle that runs no loop, not
+    /// an authoring omission — the field is optional and validation passes without it.
+    #[test]
+    fn an_engine_without_a_sound_block_is_legal_silence() {
+        let mut spec: TankSpec =
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        spec.track
+            .powertrain
+            .transmission
+            .as_mut()
+            .expect("the Tiger authors a transmission block")
+            .engine
+            .as_mut()
+            .expect("the Tiger authors engine tables")
+            .sound = None;
+        spec.validate()
+            .expect("a vehicle may declare no engine recording");
     }
 
     /// A spec WITHOUT a transmission block must fail validation loudly — the old silent
