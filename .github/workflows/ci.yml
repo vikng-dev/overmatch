@@ -197,13 +197,13 @@ jobs:
 
   # THE ASSET DOOR, over every trio the commit holds, with the toolchain the door pins.
   #
-  # `scripts/hooks/pre-push` runs the same door — but on the trios a push CHANGED, with this work
-  # tree's Rust binary, and behind `OVERMATCH_SKIP=assets`, which is only allowed because of this
-  # lane. Here the commit's own rules meet the commit's own bytes: the checkout is the pushed tree,
-  # `git lfs pull` hydrates the pointers into real blends and models, and every discovered asset is
-  # re-cut from its stored source and compared with the tracked glb byte for byte.
+  # THE ONLY PLACE THE DOOR RUNS. The local pre-push hook is the git-lfs upload and nothing else,
+  # so this lane is not a backstop for a cheaper local one — it is the verdict. The commit's own
+  # rules meet the commit's own bytes: the checkout is the pushed tree, `git lfs pull` hydrates the
+  # pointers into real blends and models, and every discovered asset is re-cut from its stored
+  # source and compared with the tracked glb byte for byte.
   #
-  # DISCOVERY, not a list — the one trio rule, sourced from the file the hook sources
+  # DISCOVERY, not a list — the one trio rule, sourced from `scripts/hooks/pushed_assets.sh`
   # (`assets_trios`), so a second vehicle is gated by the rule that found the first and no path is
   # written down here. Zero trios is a failure: a lane that verified nothing would report success.
   #
@@ -213,10 +213,9 @@ jobs:
   #
   # PATH-GATED, because that cost — MEASURED ~35 min — was being paid by every netcode push for a
   # verdict that could not have moved. The first step asks whether anything in the push's range
-  # touches an asset trio or the shared surface, using the SAME two predicates the pre-push lane
-  # selects with, and every step below is conditioned on the answer. It fails toward running: an
-  # unresolvable range, a missing baseline, a force-push and a manual dispatch all verify
-  # everything.
+  # touches an asset trio or the shared surface (`assets_ci_scope`), and every step below is
+  # conditioned on the answer. It fails toward running: an unresolvable range, a missing baseline,
+  # a force-push and a manual dispatch all verify everything.
   #
   # The job still RUNS when it skips — it succeeds as a no-op that says why — so the aggregate
   # `check` context below stays green without learning what the assets lane is.
@@ -232,8 +231,8 @@ jobs:
           lfs: false
           fetch-depth: 0
 
-      # The decision, and the whole of it, in the file the pre-push lane sources — a workflow step
-      # that decides anything is a step no suite can run, which is how a broken one ships green.
+      # The decision, and the whole of it, in a sourced shell file — a workflow step that decides
+      # anything is a step no suite can run, which is how a broken one ships green.
       # `scripts/hooks/test_pushed_assets.sh` drives this over synthetic ranges.
       - name: Does this range touch an asset verdict
         id: scope
@@ -409,20 +408,25 @@ jobs:
           # second red step here would only hide which one failed.
           if-no-files-found: warn
 
-  # Preserve the branch-protection context while requiring every lane that runs on a push or a PR.
-  # `shot-stress` is deliberately absent: it is dispatch-only, so waiting on it would make this
-  # context depend on a job that normally skips.
+  # One context that is green iff EVERY lane a push or a PR runs is green — `fmt` included, because
+  # a summary that omits a lane is a summary that can go green over its failure, whatever branch
+  # protection happens to require alongside it today.
+  #
+  # `shot-stress` is deliberately absent, and is the one exception: it is dispatch-only, so needing
+  # it would make this context depend on a job that normally skips.
   check:
     name: check
-    needs: [checks, assets]
+    needs: [fmt, checks, assets]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require all check lanes
         env:
+          FMT_RESULT: ${{ needs.fmt.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           ASSETS_RESULT: ${{ needs.assets.result }}
         run: |
+          test "${FMT_RESULT}" = success
           test "${CHECKS_RESULT}" = success
           test "${ASSETS_RESULT}" = success

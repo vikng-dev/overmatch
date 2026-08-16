@@ -73,10 +73,16 @@ systemctl stop overmatch-server          # stop the meter when not testing
 exact artifact* to `/opt`, extracts it into `/opt/overmatch-server`, `systemctl restart
 overmatch-server`, and verifies (`systemctl is-active` + echoes the deployed git SHA into the run
 log via a baked `DEPLOYED_SHA` marker). The GitHub Release is created as a **draft** and is
-un-drafted only after that deploy succeeds *and* both archive smoke lanes have extracted a
-packaged client and driven it through a full connect, so the latest visible release and the running
-droplet are always the same build — and never one whose client cannot boot or connect. A failed
-deploy or a failed smoke leaves no new release visible.
+un-drafted only after that deploy succeeds *and* both archive smoke lanes have extracted a packaged
+client and driven it through a full connect. So no visible release is ever ahead of the droplet, and
+none ships a client that cannot boot or connect.
+
+> **The reverse is not guaranteed, on purpose.** The deploy runs *before* the publish and nothing
+> rolls it back, so a run whose deploy succeeded and whose smoke then failed leaves the **droplet on
+> the new build with the release unpublished** — the latest visible release is then older than the
+> droplet, and a client downloaded from it is refused at the handshake until the next tag lands. The
+> fix would be rollback machinery on a droplet that ephemeral per-version servers (Edgegap) are
+> about to replace, so at zero players this window is accepted and handled by saying so in chat.
 
 - **Auth:** the workflow uses the `DROPLET_SSH_KEY` repo Actions secret (a dedicated ed25519
   key whose public half is in the droplet's `authorized_keys`). The droplet's host key is

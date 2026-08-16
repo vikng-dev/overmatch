@@ -3,9 +3,16 @@ name: Release
 # The single build + deploy + publish pipeline for the PRODUCT (`overmatch`, the PVP client) and
 # the `overmatch-server` (dedicated server).
 #
-# INVARIANT: the visible latest GitHub Release and the running droplet server are the same build —
-# the Release stays a DRAFT until the server artifact this run built is live on the droplet AND
-# both packaged clients have been unpacked and driven through a real connect.
+# WHAT IS GUARANTEED: no Release becomes visible unless the droplet is already running this run's
+# server artifact AND both packaged clients have been unpacked and driven through a real connect.
+# The Release stays a DRAFT until every one of those has passed.
+#
+# WHAT IS NOT: the reverse. `deploy-server` precedes `publish-release` and nothing rolls it back,
+# so a run whose deploy succeeded and whose smoke then failed leaves the DROPLET on the new build
+# with the new Release unpublished — the visible Release is then older than the droplet, and a
+# client downloaded from it is refused at the handshake until the next tag lands. ACCEPTED, not
+# overlooked: the fix would be rollback machinery on a droplet that ephemeral per-version servers
+# are about to replace, and at zero players the cost of that window is a message in chat.
 #
 # A `vX.Y.Z` TAG runs the whole pipeline from the tag SHA:
 #
@@ -28,13 +35,20 @@ name: Release
 #   be an ancestor of `origin/main`). Any failure upstream leaves the draft unpublished, so no
 #   broken Release becomes visible.
 #
-# macOS IS ON DEMAND, not on the tag path: `workflow_dispatch` with a `tag` input builds the arm64
-# client from that tag, signs + notarizes it, and attaches the .dmg to that tag's existing Release.
-# It is a ~1h20m job on the only platform nobody currently playtests on, and holding every tag
-# behind it bought nothing. A dispatch with NO tag is build-only smoke mode: server + both clients
-# + the archive smoke off the dispatched ref, the unsigned .app built and kept as an artifact, and
-# neither the droplet nor any Release touched. The server tarball is kept as a plain artifact on
-# both paths for `scp` redeploys to the test droplet (see DEPLOY.md).
+# macOS IS ON DEMAND, not on the tag path. It is a ~1h20m job on the only platform nobody
+# currently playtests on, and holding every tag behind it bought nothing. So a dispatch does one of
+# two disjoint things, decided by the `tag` input:
+#
+#   * `tag` SET — the attach path: build the arm64 client from THAT TAG, sign + notarize it, and
+#     attach the .dmg to that tag's existing Release. Nothing else runs. The Windows/Linux/server
+#     builds and the smoke are gated OFF here on purpose: they would run from the dispatched ref,
+#     which is not the commit being attached to, and their verdict about it means nothing.
+#   * `tag` EMPTY — build-only smoke mode: server + both clients + the archive smoke off the
+#     dispatched ref, plus the unsigned .app as an artifact. Neither the droplet nor any Release is
+#     touched, and no Apple secret is materialized.
+#
+# The server tarball is kept as a plain artifact on both build paths for `scp` redeploys to the
+# test droplet (see DEPLOY.md).
 #
 # Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
@@ -176,11 +190,15 @@ jobs:
   # upload-client job below publishes the sealed archives. macOS has the equivalent
   # untrusted-build/trusted-sign split further down.
   # Linux runtime floor follows the current ubuntu-latest runner glibc and requires a Vulkan driver.
-  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
-  # Release shell on tags, and still runs in dispatch smoke mode where create-release is skipped.
+  # `needs: create-release` + `always()` so it WAITS for the draft Release shell on tags without
+  # being gated out by it on a dispatch, where that job is skipped — and then runs on exactly two
+  # occasions: a tag whose draft was created, and a dispatch with NO tag input (build-only smoke
+  # mode). A dispatch that NAMES a tag is the macOS attach path: it would otherwise build and smoke
+  # the dispatched ref, which is a different commit from the tag being attached to, and redden a
+  # run whose only job was cutting a .dmg.
   build-client:
     needs: create-release
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
+    if: ${{ always() && (needs.create-release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
     permissions:
       contents: read
     strategy:
@@ -307,15 +325,15 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
-  # Build and package the Linux dedicated server without a release-write token. Runs on BOTH
-  # triggers and always uploads a plain workflow artifact for scp redeploys (DEPLOY.md).
-  # `needs: create-release` + `if: always()` so it waits for (but isn't gated out by) the draft
-  # Release shell on tags, and still runs when create-release is skipped on a dispatch.
+  # Build and package the Linux dedicated server without a release-write token. Always uploads a
+  # plain workflow artifact for scp redeploys (DEPLOY.md). Runs on the same two occasions as
+  # `build-client` above, for the same reason and by the same condition: a tag, or a dispatch with
+  # no tag input.
   # This one tarball is the ONLY server build in the run: `deploy-server` ships these exact bytes
   # to the droplet and `upload-server` attaches them to the Release.
   build-server:
     needs: create-release
-    if: ${{ always() && (needs.create-release.result == 'success' || needs.create-release.result == 'skipped') }}
+    if: ${{ always() && (needs.create-release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -358,10 +376,13 @@ jobs:
   # and every one of those happens downstream of the last thing CI looked at. Three releases
   # shipped exactly that in August 2026.
   #
-  # It runs on dispatches too (build-only smoke mode), which is what makes a pipeline change
-  # testable without cutting a tag.
+  # It runs on a tag-less dispatch too (build-only smoke mode), which is what makes a pipeline
+  # change testable without cutting a tag. The `if` only restates what the skipped `needs` already
+  # decide on the macOS attach path — a job condition is the readable place to say when a lane is
+  # meant to run.
   smoke-linux:
     needs: [build-client, build-server]
+    if: github.event_name != 'workflow_dispatch' || inputs.tag == ''
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -428,6 +449,7 @@ jobs:
   # so only this crate's own artifacts are compiled here.
   smoke-windows:
     needs: [build-client, build-server]
+    if: github.event_name != 'workflow_dispatch' || inputs.tag == ''
     permissions:
       contents: read
     runs-on: windows-latest
