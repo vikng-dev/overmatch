@@ -285,8 +285,12 @@ def harvest(out: str, cache: str) -> None:
     that rename is within one filesystem — across two it is a copy, and a copy can be observed
     half-done.
 
-    A destination that already exists is another build that won the race with an identical chain;
-    the loser drops its copy rather than replacing bytes someone may be reading.
+    A destination holding a RECORD is another build that won the race with an identical chain; the
+    loser drops its copy rather than replacing bytes someone may be reading. Record-present is the
+    whole winner test: a chain crosses in complete, so nothing that landed is ever recordless, and
+    no two workers of one build share a digest — the buckets partition them. So a recordless
+    destination is debris (a restored cache, an interrupted delete) and the fresh cut takes its
+    place, because a chain nobody can read is one nobody can be reading.
     """
     if not os.path.isdir(out):
         return
@@ -295,34 +299,44 @@ def harvest(out: str, cache: str) -> None:
         if not os.path.isdir(source) or not os.path.isfile(os.path.join(source, RECORD)):
             continue
         destination = os.path.join(cache, name)
-        if os.path.exists(destination):
+        if os.path.isfile(os.path.join(destination, RECORD)):
             shutil.rmtree(source, ignore_errors=True)
             continue
+        shutil.rmtree(destination, ignore_errors=True)
         os.replace(source, destination)
+
+
+def read_record(path: str):
+    """`(record, None)`, or `(None, why)` when that path is not a chain record this build can read.
+
+    The probe both halves use: the cut asks it which entries are a MISS, and `cached_record` asks it
+    the same question with a refusal attached.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError) as error:
+        return None, str(error)
+    if not isinstance(record, dict) or not isinstance(record.get("rungs"), list):
+        return None, "the record is not a chain: {}".format(type(record).__name__)
+    return record, None
 
 
 def cached_record(cache: str, digest: str) -> dict:
     """One chain's record, or a loud refusal naming the file that cannot be read.
 
-    A cache entry is written by a program that can be killed. An unreadable one is a bug in this
-    build's own scratch, and it must say WHICH file and how to be rid of it — an uncaught
+    THE LAST-RESORT TRIPWIRE, not the cache's integrity policy: `cut_chains` deletes and re-cuts
+    every entry that fails to read, so what reaches this is an entry the cut itself was supposed to
+    produce and did not. It must say WHICH file and how to be rid of it — an uncaught
     `JSONDecodeError` names a line and column of a path nobody printed.
     """
     path = os.path.join(cache, digest, RECORD)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            record = json.load(handle)
-    except (OSError, ValueError) as error:
+    record, why = read_record(path)
+    if record is None:
         raise Refused("chains", [finding(
-            CACHE_CORRUPT, Subject(SubjectKind.FILE, path), str(error),
+            CACHE_CORRUPT, Subject(SubjectKind.FILE, path), why,
             "delete {} and build again — the cache is scratch, and a chain that cannot be read is "
             "one that has to be cut again".format(os.path.join(cache, digest)),
-        )]) from error
-    if not isinstance(record, dict) or not isinstance(record.get("rungs"), list):
-        raise Refused("chains", [finding(
-            CACHE_CORRUPT, Subject(SubjectKind.FILE, path),
-            "the record is not a chain: {}".format(type(record).__name__),
-            "delete {} and build again".format(os.path.join(cache, digest)),
         )])
     return record
 
@@ -335,9 +349,23 @@ def cut_chains(root: str, blender: str, candidate: str, digests: List[str],
     rung glbs under (digest, search fingerprint); a worker writes into a private directory and each
     of its COMPLETE chains is harvested as it exits, whether it exited clean or not — a chain that
     finished is a chain that never has to be cut again, and one that did not leaves nothing behind.
+
+    A CORRUPT ENTRY IS A MISS, NEVER A REFUSAL. The cache is scratch under `target/`, and something
+    that restores it — CI's — can hand one back with its record gone or unreadable. Every candidate
+    is read here, before anything is cut; one that does not read has its whole entry deleted and its
+    digest cut again, because a refusal over restored scratch is one every rerun restores.
     """
     os.makedirs(cache, exist_ok=True)
-    missing = [d for d in digests if not os.path.isfile(os.path.join(cache, d, RECORD))]
+    missing = []
+    for digest in digests:
+        entry = os.path.join(cache, digest)
+        record, why = read_record(os.path.join(entry, RECORD))
+        if record is not None:
+            continue
+        if os.path.exists(entry):
+            shutil.rmtree(entry, ignore_errors=True)
+            print("build ▸ chains: healed {} — {}".format(entry, why), flush=True)
+        missing.append(digest)
     print("build ▸ chains: {} unique source geometries, {} cached, {} to cut".format(
         len(digests), len(digests) - len(missing), len(missing)), flush=True)
     if missing:

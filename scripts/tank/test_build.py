@@ -16,6 +16,7 @@ import ast
 import io
 import json
 import os
+import stat
 import sys
 import tempfile
 import types
@@ -887,24 +888,29 @@ class CacheIntegrity(unittest.TestCase):
         self.assertTrue(any(self.digest in row.subject.name
                             for row in raised.exception.findings))
 
-    def test_a_record_a_worker_was_killed_mid_write_is_refused_loudly(self):
+    def test_an_entry_the_cut_owed_and_did_not_write_is_refused_by_the_tripwire(self):
+        """What is left of the old refusal law. `cut_chains` deletes and re-cuts every entry it
+        cannot read BEFORE any of them is asked for, so the only unreadable entry that can reach
+        `cached_record` is one this build's own cut was supposed to produce and did not — a worker
+        that exited clean having cut nothing. It still names the file rather than raising a
+        `JSONDecodeError` at a line and column of a path nobody printed.
+        """
         path = os.path.join(self.cache, self.digest, build.RECORD)
         with open(path, encoding="utf-8") as handle:
             whole = handle.read()
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(whole[: len(whole) // 2])
-        with self.assertRaises(build.Refused) as raised:
-            build.cached_record(self.cache, self.digest)
-        self.assertEqual({row.check.id for row in raised.exception.findings},
-                         {"build.cache-corrupt"})
-        self.assertIn(path, raised.exception.findings[0].subject.name)
-
-    def test_a_record_that_is_not_a_chain_is_refused(self):
-        path = os.path.join(self.cache, self.digest, build.RECORD)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write("[]\n")
-        with self.assertRaises(build.Refused):
-            build.cached_record(self.cache, self.digest)
+        for shape, text in (("absent", None), ("torn", whole[: len(whole) // 2]),
+                            ("not a chain", "[]\n")):
+            with self.subTest(record=shape):
+                if text is None:
+                    os.remove(path)
+                else:
+                    with open(path, "w", encoding="utf-8") as handle:
+                        handle.write(text)
+                with self.assertRaises(build.Refused) as raised:
+                    build.cached_record(self.cache, self.digest)
+                self.assertEqual({row.check.id for row in raised.exception.findings},
+                                 {"build.cache-corrupt"})
+                self.assertIn(path, raised.exception.findings[0].subject.name)
 
     def test_harvest_moves_a_finished_chain_and_leaves_an_unfinished_one(self):
         out = tempfile.mkdtemp(prefix="trio-harvest-out-", dir=self.cache)
@@ -933,6 +939,186 @@ class CacheIntegrity(unittest.TestCase):
         with open(os.path.join(cache, "shared", build.RECORD), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), '{"first": true}')
         self.assertEqual(os.listdir(out), [])
+
+    def test_harvest_replaces_a_destination_that_holds_no_record(self):
+        """THE LIVELOCK'S SECOND HALF. A restored cache can hand back a digest directory whose
+        record is gone; the old test was mere existence, so the fresh chain was dropped as a race
+        loser and the recordless entry survived every rerun. A chain crosses into the cache
+        complete, so nothing that landed is ever recordless: what is there is debris, and debris is
+        not bytes a reader can be reading.
+        """
+        out = tempfile.mkdtemp(prefix="trio-harvest-out-", dir=self.cache)
+        cache = tempfile.mkdtemp(prefix="trio-harvest-cache-", dir=self.cache)
+        os.makedirs(os.path.join(out, "shared"))
+        with open(os.path.join(out, "shared", "rung1.glb"), "wb") as handle:
+            handle.write(rung())
+        with open(os.path.join(out, "shared", build.RECORD), "w", encoding="utf-8") as handle:
+            handle.write('{"fresh": true}')
+        os.makedirs(os.path.join(cache, "shared"))
+        with open(os.path.join(cache, "shared", "rung1.glb"), "wb") as handle:
+            handle.write(rung(0.5))
+        build.harvest(out, cache)
+        with open(os.path.join(cache, "shared", build.RECORD), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), '{"fresh": true}')
+        with open(os.path.join(cache, "shared", "rung1.glb"), "rb") as handle:
+            self.assertEqual(handle.read(), rung(), "the debris' rungs go with its directory")
+        self.assertEqual(os.listdir(out), [])
+
+
+# ── the cache a CI restore hands back ────────────────────────────────────────────────────────────
+
+#: A stand-in for the Blender half of the cut: every `--select` digest written into `--out` the way
+#: a worker leaves one — the rung glbs first, the record last. `{rung}` is the file it copies.
+CUTTING_SHIM = '''#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import sys
+
+argv = sys.argv[sys.argv.index("--") + 1:]
+out = argv[argv.index("--out") + 1]
+with open({rung!r}, "rb") as handle:
+    blob = handle.read()
+for index, argument in enumerate(argv):
+    if argument != "--select":
+        continue
+    directory = os.path.join(out, argv[index + 1])
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "rung1.glb"), "wb") as handle:
+        handle.write(blob)
+    record = {{
+        "source": {{"origin_radius_m": 7.0}},
+        "rungs": [{{"rung": 1, "glb": "rung1.glb", "sha256": hashlib.sha256(blob).hexdigest(),
+                   "deviation_mm": 3.9, "origin_radius_m": 7.0}}],
+    }}
+    with open(os.path.join(directory, "chain.json"), "w") as handle:
+        json.dump(record, handle)
+'''
+
+
+class CacheSelfHeal(unittest.TestCase):
+    """THE CI LIVELOCK, driven end to end: `rust-cache` restores `target/tank-build/` with a
+    digest directory whose record is unreadable or gone, and the build refused over its own
+    scratch — identically on every rerun, because the rerun restored the same scratch.
+
+    The cut is driven with a stand-in for Blender, so what runs here is the whole loop the defect
+    lived in: the miss predicate, the harvest, and the read that assembles. The fresh record is
+    marked (`origin_radius_m` 7.0) so a case can tell a re-cut chain from a survivor.
+    """
+
+    def setUp(self):
+        self.rows = TRIO.census(*parsed(document()))
+        self.digests = sorted(TRIO.chains_by_digest(self.rows))
+        self.candidate = TRIO.embed_rungs(document(), [])[0]
+        self.cache = tempfile.mkdtemp(prefix="trio-selfheal-cache-")
+        work = tempfile.mkdtemp(prefix="trio-selfheal-work-")
+        self.glb = os.path.join(work, "candidate.glb")
+        with open(self.glb, "wb") as handle:
+            handle.write(self.candidate)
+        rung_path = os.path.join(work, "rung.glb")
+        with open(rung_path, "wb") as handle:
+            handle.write(rung())
+        self.blender = os.path.join(work, "blender")
+        with open(self.blender, "w", encoding="utf-8") as handle:
+            handle.write(CUTTING_SHIM.format(rung=rung_path))
+        self.idle = os.path.join(work, "blender-that-cuts-nothing")
+        with open(self.idle, "w", encoding="utf-8") as handle:
+            handle.write("#!/usr/bin/env python3\n")
+        for path in (self.blender, self.idle):
+            os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
+
+    def seed(self, digest, record=None):
+        """A cache entry the way a mangled restore leaves one: rung glbs of an older generation,
+        and a record that is missing (`None`) or whatever text is handed in."""
+        directory = os.path.join(self.cache, digest)
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, "rung1.glb"), "wb") as handle:
+            handle.write(rung(0.5))
+        if record is not None:
+            with open(os.path.join(directory, build.RECORD), "w", encoding="utf-8") as handle:
+                handle.write(record)
+
+    def valid_record(self):
+        """A record measuring the bytes `seed` writes — an entry with nothing wrong with it."""
+        blob = rung(0.5)
+        return json.dumps({
+            "source": {"origin_radius_m": 1.0},
+            "rungs": [{"rung": 1, "glb": "rung1.glb", "sha256": TRIO.sha256_bytes(blob),
+                       "deviation_mm": 3.9, "origin_radius_m": 1.0}],
+        })
+
+    def cut(self, blender=None):
+        """`cut_chains` over the whole census, and everything it printed."""
+        captured, real = io.StringIO(), sys.stdout
+        sys.stdout = captured
+        try:
+            records = build.cut_chains(ROOT, blender or self.blender, self.glb, self.digests, {},
+                                       self.cache, 1)
+        finally:
+            sys.stdout = real
+        return records, captured.getvalue()
+
+    def test_a_restored_entry_whose_record_is_gone_is_a_miss_and_the_build_lands(self):
+        """THE REGRESSION. The entry was neither cut (its directory was there, so `harvest` read
+        the fresh chain as a race loser and dropped it) nor readable, so `assemble` refused."""
+        healed = self.digests[0]
+        self.seed(healed)
+        records, printed = self.cut()
+        self.assertIn("healed", printed)
+        self.assertIn(healed, printed)
+        self.assertEqual(records[healed]["source"]["origin_radius_m"], 7.0,
+                         "the entry is the one this cut wrote")
+        for digest in self.digests:
+            self.assertEqual(records[digest]["source"]["origin_radius_m"], 7.0)
+        view_blob, _mesh_count, chains = build.assemble(self.candidate, self.rows, records,
+                                                        self.cache)
+        self.assertTrue(view_blob)
+        self.assertTrue(chains)
+
+    def test_every_unreadable_shape_is_healed_rather_than_refused(self):
+        """A restore mangles bytes, not only names: the entry is a miss whatever the record is."""
+        for shape, text in (("garbage", "{not json at all"),
+                            ("torn", '{"source": {"origin_radius'),
+                            ("not a chain", "[]\n"),
+                            ("empty", "")):
+            with self.subTest(record=shape):
+                self.seed(self.digests[0], text)
+                records, printed = self.cut()
+                self.assertIn("healed", printed)
+                self.assertEqual(records[self.digests[0]]["source"]["origin_radius_m"], 7.0)
+                build.assemble(self.candidate, self.rows, records, self.cache)
+
+    def test_a_readable_entry_is_never_cut_again(self):
+        """The other half of the predicate: healing reads the record, so an entry that reads is
+        untouched. Blender does not exist here, so a cut of any kind is a `FileNotFoundError`."""
+        for digest in self.digests:
+            self.seed(digest, self.valid_record())
+        records, printed = self.cut(blender=os.path.join(self.cache, "no-blender-here"))
+        self.assertIn("{} cached, 0 to cut".format(len(self.digests)), printed)
+        self.assertNotIn("healed", printed)
+        for digest in self.digests:
+            self.assertEqual(records[digest]["source"]["origin_radius_m"], 1.0)
+
+    def test_a_healed_entry_carries_the_rungs_the_fresh_record_measured(self):
+        """A rung glb of an older generation left beside a fresh record is exactly the
+        mixed-generation cache `assemble` refuses, so the heal must take the entry's whole
+        contents with it."""
+        self.seed(self.digests[0])
+        records, _printed = self.cut()
+        path = os.path.join(self.cache, self.digests[0], "rung1.glb")
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(), rung())
+        self.assertEqual(records[self.digests[0]]["rungs"][0]["sha256"],
+                         TRIO.sha256_bytes(rung()))
+
+    def test_a_miss_is_deleted_where_it_is_classified(self):
+        """The heal deletes the ENTRY rather than the record it could not read: a cut that then
+        lands nothing leaves no half of the old chain behind, and the entry the tripwire names is
+        one nothing is in."""
+        self.seed(self.digests[0], "{not json")
+        with self.assertRaises(build.Refused):
+            self.cut(blender=self.idle)
+        self.assertFalse(os.path.exists(os.path.join(self.cache, self.digests[0])))
 
 
 # ── the shipped trio ─────────────────────────────────────────────────────────────────────────────
