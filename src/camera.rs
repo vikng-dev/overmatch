@@ -8,6 +8,7 @@
 
 use avian3d::prelude::{PhysicsSystems, SpatialQuery};
 use bevy::camera::Hdr;
+use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -247,6 +248,11 @@ fn spawn_camera(mut commands: Commands) {
         // Tracer emissive values require HDR and bloom to produce the intended highlight.
         Hdr,
         Bloom::NATURAL,
+        // The opaque geometry's depth, one pass ahead of the main pass — the scene depth the VFX
+        // billboards read for their soft-particle fade (`assets/shaders/vfx_billboard.wgsl`).
+        // Without this component the shader's DEPTH_PREPASS def is absent and every sprite is
+        // hard-edged again; the translucent sprites themselves opt out of writing to it.
+        DepthPrepass,
         Transform::from_xyz(10.0, 7.0, -7.0).looking_at(Vec3::new(10.0, 1.0, 5.0), Vec3::Y),
         OrbitCamera {
             zoom: 0.0,

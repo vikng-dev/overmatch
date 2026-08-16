@@ -69,6 +69,8 @@ fn verify_vfx_assets(asset_server: Res<AssetServer>, mut done: Local<bool>) {
     /// Every texture the vfx layer draws (the LUTs/noise are procedural, so not here).
     const VFX_TEXTURES: &[&str] = &[
         "vfx/flash_core_atlas.png",
+        "vfx/blast_core_a.ktx2",
+        "vfx/blast_core_b.ktx2",
         "vfx/mg_core.png",
         "vfx/flash_flames_atlas.png",
         "vfx/smoke_atlas.png",
@@ -143,18 +145,119 @@ impl ViewRng {
 mod gpu_layout_tests {
     use std::mem::size_of;
 
+    use bevy::math::Vec4;
     use bevy::render::render_resource::ShaderType;
 
     use super::{billboard::VfxParams, trail::TrailParams};
 
+    /// A `Vec4` lane, both sides of the wire.
+    const LANE_BYTES: usize = 16;
+    const LANE_WGSL: &str = "vec4<f32>";
+
+    /// The field names of a derived-`Debug` struct, in DECLARATION order. Neither uniform type is
+    /// `Reflect`, and `Debug` is generated from the same field list the uniform is packed from, so
+    /// it is the field order — reordering, adding or removing one moves this list.
+    fn rust_lanes<T: std::fmt::Debug>(value: &T) -> Vec<String> {
+        let text = format!("{value:?}");
+        let body = text
+            .split_once('{')
+            .and_then(|(_, rest)| rest.rsplit_once('}'))
+            .expect("a derived struct Debug")
+            .0;
+        let mut lanes = Vec::new();
+        let mut token = String::new();
+        let mut depth = 0usize;
+        for ch in body.chars() {
+            match ch {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    token.clear();
+                }
+                ')' | ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    token.clear();
+                }
+                ':' if depth == 0 => lanes.push(std::mem::take(&mut token).trim().to_owned()),
+                ',' if depth == 0 => token.clear(),
+                _ => token.push(ch),
+            }
+        }
+        lanes
+    }
+
+    /// The `(name, type)` of every field of `struct <name>` in a WGSL source, in declaration order.
+    fn wgsl_lanes(source: &str, name: &str) -> Vec<(String, String)> {
+        let block = source
+            .split_once(&format!("struct {name} {{"))
+            .and_then(|(_, rest)| rest.split_once('}'))
+            .unwrap_or_else(|| panic!("no `struct {name}` block in the shader"))
+            .0;
+        block
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or_default().trim())
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let (field, ty) = line
+                    .trim_end_matches(',')
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("`{line}` is not a `field: type` declaration"));
+                (field.trim().to_owned(), ty.trim().to_owned())
+            })
+            .collect()
+    }
+
+    fn shader(file: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets/shaders")
+            .join(file);
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+    }
+
+    /// The uniform-layout LAW: each vfx uniform's WGSL block and its Rust struct declare the same
+    /// lanes, in the same order, all of them `vec4`, and the Rust size is that lane count. The two
+    /// halves are uploaded through Encase against a WGSL block nothing else validates, so a field
+    /// added, dropped or reordered on one side alone silently reinterprets every lane after it.
     #[test]
-    fn project_vfx_uniform_rust_and_shader_sizes_stay_pinned() {
-        // DERIVED from three Vec4 lanes in VfxParams and two in TrailParams. These uniforms use
-        // Encase writers rather than raw Rust uploads, but they are the project's scalar-Vec4
-        // canaries for future layout-sensitive paths.
-        assert_eq!(size_of::<VfxParams>(), 48);
-        assert_eq!(VfxParams::min_size().get(), 48);
-        assert_eq!(size_of::<TrailParams>(), 32);
-        assert_eq!(TrailParams::min_size().get(), 32);
+    fn project_vfx_uniforms_agree_with_their_shaders() {
+        // Written as LITERALS, so a lane added to either struct is a compile error here before it
+        // is a mismatch below.
+        let billboard = VfxParams {
+            frame: Vec4::ZERO,
+            fade: Vec4::ZERO,
+            glow: Vec4::ZERO,
+        };
+        let trail = TrailParams {
+            shape: Vec4::ZERO,
+            glow: Vec4::ZERO,
+        };
+        for (rust, wgsl, file, size) in [
+            (
+                rust_lanes(&billboard),
+                wgsl_lanes(&shader("vfx_billboard.wgsl"), "VfxParams"),
+                "vfx_billboard.wgsl",
+                (size_of::<VfxParams>(), VfxParams::min_size().get() as usize),
+            ),
+            (
+                rust_lanes(&trail),
+                wgsl_lanes(&shader("vfx_trail.wgsl"), "TrailParams"),
+                "vfx_trail.wgsl",
+                (
+                    size_of::<TrailParams>(),
+                    TrailParams::min_size().get() as usize,
+                ),
+            ),
+        ] {
+            let names: Vec<String> = wgsl.iter().map(|(name, _)| name.clone()).collect();
+            assert_eq!(rust, names, "{file}: lane names/order must match Rust");
+            for (name, ty) in &wgsl {
+                assert_eq!(ty, LANE_WGSL, "{file}: lane `{name}` must stay a vec4");
+            }
+            assert_eq!(
+                size,
+                (rust.len() * LANE_BYTES, rust.len() * LANE_BYTES),
+                "{file}: the Rust struct must be exactly its {} lanes",
+                rust.len()
+            );
+        }
     }
 }

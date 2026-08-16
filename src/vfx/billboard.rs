@@ -5,7 +5,7 @@
 //! LUT whose alpha channel is a HEAT term that pushes young pixels above 1.0 for bloom).
 //!
 //! Anti-repetition comes from per-instance randomness: random flipbook START frame
-//! (`frame = (start + age·rate) mod count` — [`flipbook_frame`]), random roll/spin, random size.
+//! ([`Flipbook::Loop`] — [`flipbook_frame`]), random roll/spin, random size.
 //! That per-instance mutation is why each billboard clones its own material asset (the same
 //! trade the impact puffs already make); the clones are bounded by [`BILLBOARD_CAP`]'s ring, and
 //! everything short-lived, so the batching cost stays a handful of draws.
@@ -28,8 +28,8 @@ use bevy::transform::TransformSystems;
 /// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
 /// included: they hold no cap of their own and are evicted against this one. Only the long-lived
 /// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
-/// survives a sub-second billboard storm. The stack per 88 event is 10–13 at the muzzle (flash
-/// core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
+/// survives a sub-second billboard storm. The stack per 88 event is 11–14 at the muzzle (blast
+/// core + flash core + glow card + 2 flame planes + smoke, plus 5–8 ground-dust puffs) and 12–17 at a terrain
 /// impact (contact flash + 8–12 ejecta + 1–2 plumes + shock ring + the 8 s haze); both MGs cycling
 /// add ~50/s at sub-second lifetimes. Eviction is FIFO, so the consequence of pressure is that the
 /// OLDEST slot goes first: a sustained storm cuts the multi-second layers (haze, ground dust)
@@ -52,7 +52,7 @@ pub(super) fn plugin(app: &mut App) {
 /// for the lane map) — kept dumb so the WGSL and this struct can be compared at a glance.
 #[derive(ShaderType, Debug, Clone, Default)]
 pub(crate) struct VfxParams {
-    /// x: current flipbook frame (wrapped CPU-side by [`flipbook_frame`]), y: atlas cols,
+    /// x: current flipbook frame (resolved CPU-side by [`flipbook_frame`]), y: atlas cols,
     /// z: atlas rows, w: unused.
     pub frame: Vec4,
     /// x: erosion threshold, y: erosion sharpness, z: life fraction (LUT row), w: overall alpha.
@@ -60,9 +60,22 @@ pub(crate) struct VfxParams {
     /// x: emissive boost at LUT heat 1.0, y: BLEND CONTRACT flag the shader reads — `1.0` = additive
     /// glow (`AlphaMode::Add`), `0.0` = alpha-over mass (`AlphaMode::Blend`). Both alpha modes share
     /// the premultiplied blend state, so the shader must premultiply the additive path itself; this
-    /// lane tells it which (see `vfx_billboard.wgsl`).
+    /// lane tells it which (see `vfx_billboard.wgsl`). z: soft-particle fade depth in metres
+    /// ([`SOFT_PARTICLE_DEPTH`]), `0.0` = hard-edged. w: reserved.
     pub glow: Vec4,
 }
+
+/// How far (m) a soft-particle layer fades over as it closes on the geometry behind it — the lane
+/// `vfx_billboard.wgsl` reads out of `VfxParams::glow.z`, and the whole cure for a dust puff meeting
+/// terrain along the quad's own intersection line.
+///
+/// Exactly one class carries it: the diffuse MASS volumes (impact dust, dirt, spall; the muzzle's
+/// gas smoke and ground dust). Every other layer is 0.0, for three separate mechanisms — additive
+/// HOT layers (flashes, sparks, flame licks, the blast core) are airborne, so their approach to a
+/// wall is not an intersection to hide; the two layers that LIE on a surface (ground scar, shock
+/// ring) have their whole quad inside the band, which scales them out of existence; and ejecta is
+/// solid thrown mass whose silhouette is its own edge, not a gas boundary.
+pub(crate) const SOFT_PARTICLE_DEPTH: f32 = 0.75;
 
 /// The flipbook + erosion + gradient-map billboard material (fragment: `vfx_billboard.wgsl`;
 /// vertex: Bevy's default mesh path — facing is done on the entity's `Transform`, not in the
@@ -103,6 +116,20 @@ impl Material for VfxBillboardMaterial {
     }
 }
 
+/// How a billboard walks its atlas — one axis, two laws, no redundant state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Flipbook {
+    /// `floor(start + age·rate) mod frames` — cells picked out of a set, wrapping. A random `start`
+    /// is the anti-repetition trick (survey trick 2); `rate` 0 freezes the cell on it.
+    Loop { start: f32, rate: f32 },
+    /// `min(floor(frames · age/lifetime), frames - 1)` — a SEQUENCE, spread across the whole
+    /// lifetime and clamped on its last cell. The law for a sheet that would re-ignite if it
+    /// wrapped. Driven by life fraction rather than a rate, so the walk cannot fall behind the
+    /// lifetime: one render per cell reaches every cell and closes on the last, and a coarser
+    /// cadence drops cells but still never steps backwards nor returns to the opening cell.
+    Once,
+}
+
 /// A live billboard's animation state. [`age_billboards`] drives everything visible from `age`:
 /// flipbook frame, erosion threshold, LUT row, size ease, drift, spin — and despawns it at
 /// `lifetime`.
@@ -123,10 +150,9 @@ pub(crate) struct Billboard {
     /// [`spawn_ballistic_billboard`] — leaves the drift a straight line; thrown mass carries gravity
     /// here and arcs.
     pub accel: Vec3,
-    /// Flipbook playback: `frame = (start_frame + age·frame_rate) mod frames`.
+    /// Atlas cell count and the law that walks them (see [`flipbook_frame`]).
     pub frames: u32,
-    pub start_frame: f32,
-    pub frame_rate: f32,
+    pub flipbook: Flipbook,
     /// Uniform size (m) eased from `start` to `end` over life; `aspect` shapes it per axis
     /// (directional flame planes are taller than wide).
     pub start_size: f32,
@@ -159,8 +185,7 @@ pub(crate) struct BillboardSpec {
     pub origin: Vec3,
     pub drift: Vec3,
     pub frames: u32,
-    pub start_frame: f32,
-    pub frame_rate: f32,
+    pub flipbook: Flipbook,
     pub start_size: f32,
     pub end_size: f32,
     pub aspect: Vec3,
@@ -239,8 +264,7 @@ fn spawn_with_accel(
     let mut material = spec.material;
     // Seed the animated lanes: this is the state that renders until the ager's arming visit hands
     // over (see [`Billboard::armed`]).
-    material.params.frame.x =
-        flipbook_frame(spec.start_frame, 0.0, spec.frame_rate, spec.frames) as f32;
+    material.params.frame.x = flipbook_frame(spec.flipbook, 0.0, spec.lifetime, spec.frames) as f32;
     material.params.fade.z = 0.0;
     let material = materials.add(material);
     let transform = Transform {
@@ -257,8 +281,7 @@ fn spawn_with_accel(
             drift: spec.drift,
             accel,
             frames: spec.frames,
-            start_frame: spec.start_frame,
-            frame_rate: spec.frame_rate,
+            flipbook: spec.flipbook,
             start_size: spec.start_size,
             end_size: spec.end_size,
             aspect: spec.aspect,
@@ -280,16 +303,24 @@ fn spawn_with_accel(
     id
 }
 
-/// The flipbook frame for a particle of `age` that started at `start` — the random-start-offset
-/// anti-repetition trick (survey trick 2): `floor(start + age·rate) mod frames`. This IS the live
-/// implementation ([`age_billboards`] writes its result into the material); the shader only does
-/// cell-UV arithmetic from the resolved index.
-pub(crate) fn flipbook_frame(start: f32, age: f32, rate: f32, frames: u32) -> u32 {
-    if frames == 0 {
+/// The atlas cell a particle of `age` out of `lifetime` draws, under its [`Flipbook`] law. This IS
+/// the live implementation ([`age_billboards`] writes its result into the material); the shader
+/// only does cell-UV arithmetic from the resolved index.
+pub(crate) fn flipbook_frame(book: Flipbook, age: f32, lifetime: f32, frames: u32) -> u32 {
+    let Some(last) = frames.checked_sub(1) else {
         return 0;
+    };
+    match book {
+        Flipbook::Loop { start, rate } => {
+            ((start + age * rate).floor() as i64).rem_euclid(frames as i64) as u32
+        }
+        // Clamped, not wrapped: the caller's contract is that the last cell is the one on screen
+        // when the quad despawns, whatever the frame cadence rounded `age` to.
+        Flipbook::Once if lifetime > 0.0 => {
+            ((frames as f32 * (age / lifetime)).floor().max(0.0) as u32).min(last)
+        }
+        Flipbook::Once => 0,
     }
-    let raw = (start + age * rate).floor();
-    (raw as i64).rem_euclid(frames as i64) as u32
 }
 
 /// Advance every live billboard: flipbook frame, erosion, LUT row, size ease, drift, spin — and
@@ -335,9 +366,9 @@ pub(super) fn age_billboards(
             billboard.origin + billboard.drift * age + billboard.accel * (0.5 * age * age);
         if let Some(mut mat) = materials.get_mut(&material.0) {
             mat.params.frame.x = flipbook_frame(
-                billboard.start_frame,
+                billboard.flipbook,
                 billboard.age,
-                billboard.frame_rate,
+                billboard.lifetime,
                 billboard.frames,
             ) as f32;
             mat.params.fade.x = t * billboard.erosion_end;
@@ -421,36 +452,62 @@ pub(crate) fn unit_quad(meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
 mod tests {
     use super::*;
 
-    /// The anti-repetition frame math: wraps modulo the frame count, honors fractional starts, and
-    /// never panics on degenerate inputs.
+    /// [`Flipbook::Loop`] — the anti-repetition frame math: wraps modulo the frame count, honors
+    /// fractional starts, and never panics on degenerate inputs.
     #[test]
-    fn flipbook_frame_wraps_and_offsets() {
+    fn a_looping_flipbook_wraps_and_offsets() {
+        let at = |start, rate, age| flipbook_frame(Flipbook::Loop { start, rate }, age, 1.0, 4);
         // 4-frame atlas at 10 fps from frame 0: 0,1,2,3,0,1...
-        assert_eq!(flipbook_frame(0.0, 0.0, 10.0, 4), 0);
-        assert_eq!(flipbook_frame(0.0, 0.15, 10.0, 4), 1);
-        assert_eq!(flipbook_frame(0.0, 0.35, 10.0, 4), 3);
-        assert_eq!(
-            flipbook_frame(0.0, 0.45, 10.0, 4),
-            0,
-            "wraps past the last frame"
-        );
+        assert_eq!(at(0.0, 10.0, 0.0), 0);
+        assert_eq!(at(0.0, 10.0, 0.15), 1);
+        assert_eq!(at(0.0, 10.0, 0.35), 3);
+        assert_eq!(at(0.0, 10.0, 0.45), 0, "wraps past the last frame");
         // A random start offset shifts the whole sequence — two particles born together differ.
-        assert_eq!(flipbook_frame(2.0, 0.0, 10.0, 4), 2);
-        assert_eq!(
-            flipbook_frame(2.0, 0.25, 10.0, 4),
-            0,
-            "offset sequence wraps too"
-        );
+        assert_eq!(at(2.0, 10.0, 0.0), 2);
+        assert_eq!(at(2.0, 10.0, 0.25), 0, "offset sequence wraps too");
         // Degenerate inputs stay in range instead of panicking.
+        assert!(at(0.0, 1000.0, 100.0) < 4);
         assert_eq!(
-            flipbook_frame(0.0, 100.0, 1000.0, 4).min(3),
-            flipbook_frame(0.0, 100.0, 1000.0, 4)
-        );
-        assert_eq!(
-            flipbook_frame(0.0, 1.0, 1.0, 0),
+            flipbook_frame(
+                Flipbook::Loop {
+                    start: 0.0,
+                    rate: 1.0
+                },
+                1.0,
+                1.0,
+                0
+            ),
             0,
             "zero frames is frame 0"
         );
+    }
+
+    /// [`Flipbook::Once`] over 12 cells in 0.2 s (the 88 blast's shape), with the whole live
+    /// sequence pinned at both bracketing cadences: one render per cell (60 Hz) walks every cell
+    /// and closes on the last; half that drops every other cell — twelve cells cannot render in six
+    /// frames — and still never steps backwards nor returns to cell 0.
+    #[test]
+    fn a_once_flipbook_ends_on_its_last_cell() {
+        const FRAMES: u32 = 12;
+        const LIFE: f32 = 0.2;
+        // The live ages `age_billboards` visits at `hz`: birth, then a step per frame until the
+        // one that reaches `LIFE` and despawns instead.
+        fn live(hz: f32) -> Vec<u32> {
+            (0..)
+                .map(|step| step as f32 / hz)
+                .take_while(|age| *age < LIFE)
+                .map(|age| flipbook_frame(Flipbook::Once, age, LIFE, FRAMES))
+                .collect()
+        }
+        assert_eq!(live(60.0), (0..FRAMES).collect::<Vec<_>>());
+        assert_eq!(live(30.0), vec![0, 2, 4, 6, 8, 10]);
+
+        // Past its life (the ager despawns first) and degenerate inputs stay clamped in range.
+        let at = |age| flipbook_frame(Flipbook::Once, age, LIFE, FRAMES);
+        assert_eq!(at(LIFE), FRAMES - 1);
+        assert_eq!(at(LIFE * 100.0), FRAMES - 1);
+        assert_eq!(flipbook_frame(Flipbook::Once, 1.0, 0.0, FRAMES), 0);
+        assert_eq!(flipbook_frame(Flipbook::Once, 1.0, 1.0, 0), 0);
     }
 
     fn harness() -> App {
@@ -475,8 +532,10 @@ mod tests {
             origin: Vec3::ZERO,
             drift: Vec3::Y,
             frames: 4,
-            start_frame: 1.0,
-            frame_rate: 8.0,
+            flipbook: Flipbook::Loop {
+                start: 1.0,
+                rate: 8.0,
+            },
             start_size: 1.0,
             end_size: 3.0,
             aspect: Vec3::ONE,

@@ -13,8 +13,8 @@ use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut,
-    spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
+    BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
+    gradient_lut, spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
 };
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
@@ -246,7 +246,7 @@ impl ImpactAssets {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 // Moderate sharpness for soft dissolve edges; DUST_ALPHA overall.
                 fade: Vec4::new(0.0, 2.4, 0.0, DUST_ALPHA),
-                glow: Vec4::new(DUST_GLOW, 0.0, 0.0, 0.0),
+                glow: Vec4::new(DUST_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dust_lut.clone(),
@@ -292,7 +292,7 @@ impl ImpactAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, alpha),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dirt_lut.clone(),
@@ -303,9 +303,15 @@ impl ImpactAssets {
     /// The ground shock-ring material: the dirt mass at [`SPLASH_RING_ALPHA`] with the erosion lane
     /// sharpened ([`SPLASH_RING_SHARPNESS`]) so the racing front cuts a hard edge instead of the
     /// soft dust blur the plume and haze want.
+    ///
+    /// The soft-particle fade the other dirt masses carry is CLEARED here: the ring is a flat quad
+    /// laid 0.1 m over the surface, so its whole area sits inside the fade band and the layer would
+    /// scale itself out of existence (the same reason the ground scar never carries one — see
+    /// [`SOFT_PARTICLE_DEPTH`]).
     fn shock_ring_material(&self) -> VfxBillboardMaterial {
         let mut material = self.dirt_material(SPLASH_RING_ALPHA);
         material.params.fade.y = SPLASH_RING_SHARPNESS;
+        material.params.glow.z = 0.0;
         material
     }
 
@@ -348,7 +354,7 @@ impl ImpactAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.4, 0.0, alpha),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.spall_lut.clone(),
@@ -636,8 +642,10 @@ fn spawn_small_impact(
             origin: position + normal * (DUST_SIZE.0 * 0.5),
             drift: normal * DUST_NORMAL_PUSH + Vec3::Y * DUST_RISE,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0),
-            frame_rate: DUST_FRAME_RATE,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0),
+                rate: DUST_FRAME_RATE,
+            },
             start_size: DUST_SIZE.0,
             end_size: dust_size,
             aspect: Vec3::ONE,
@@ -660,8 +668,10 @@ fn spawn_small_impact(
             origin: position + normal * 0.05,
             drift: Vec3::ZERO,
             frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
             start_size: PING_SIZE,
             end_size: PING_SIZE * 0.7,
             aspect: Vec3::ONE,
@@ -696,8 +706,10 @@ fn spawn_small_impact(
                 origin: position + dir * (length * 0.5),
                 drift: dir * speed,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 0.0,
+                },
                 start_size: length,
                 end_size: length * 0.6,
                 aspect: Vec3::new(SPARK_WIDTH_RATIO, 1.0, 1.0),
@@ -739,8 +751,10 @@ fn spawn_big_splash(
             origin: position + normal * 0.1,
             drift: Vec3::ZERO,
             frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
             start_size: SPLASH_FLASH_SIZE,
             end_size: SPLASH_FLASH_SIZE * 0.8,
             aspect: Vec3::ONE,
@@ -777,8 +791,10 @@ fn spawn_big_splash(
                 origin: position + dir * (length * 0.5),
                 drift: dir * speed,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 0.0,
+                },
                 start_size: length,
                 end_size: length * 0.7,
                 aspect: Vec3::new(EJECTA_WIDTH_RATIO, 1.0, 1.0),
@@ -807,8 +823,10 @@ fn spawn_big_splash(
                 origin: position + normal * (SPLASH_PLUME_SIZE.0 * 0.5),
                 drift: Vec3::Y * SPLASH_PLUME_RISE,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 0.0,
+                },
                 start_size: SPLASH_PLUME_SIZE.0,
                 end_size: SPLASH_PLUME_SIZE.1,
                 aspect: SPLASH_PLUME_ASPECT,
@@ -833,8 +851,10 @@ fn spawn_big_splash(
             origin: position + normal * 0.1,
             drift: Vec3::ZERO,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0),
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0),
+                rate: 0.0,
+            },
             start_size: SPLASH_RING_SIZE.0,
             end_size: SPLASH_RING_SIZE.1,
             aspect: Vec3::ONE,
@@ -861,8 +881,10 @@ fn spawn_big_splash(
             origin: position + normal * (SPLASH_CLOUD_SIZE.0 * 0.5) + Vec3::Y * 0.5,
             drift: Vec3::Y * SPLASH_CLOUD_RISE,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0),
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0),
+                rate: 0.0,
+            },
             start_size: SPLASH_CLOUD_SIZE.0,
             end_size: SPLASH_CLOUD_SIZE.1,
             aspect: Vec3::ONE,
@@ -887,8 +909,10 @@ fn spawn_big_splash(
             origin: position + normal * 0.05,
             drift: Vec3::ZERO,
             frames: 4,
-            start_frame: 3.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 3.0,
+                rate: 0.0,
+            },
             start_size: GROUND_MARK_SIZE,
             end_size: GROUND_MARK_SIZE * 1.1,
             aspect: Vec3::ONE,
@@ -945,8 +969,10 @@ fn spawn_big_armor(
             origin: position + normal * 0.1,
             drift: Vec3::ZERO,
             frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
             start_size: ARMOR_FLASH_SIZE,
             end_size: ARMOR_FLASH_SIZE * 0.8,
             aspect: Vec3::ONE,
@@ -979,8 +1005,10 @@ fn spawn_big_armor(
                 origin: position + dir * (length * 0.5),
                 drift: dir * speed,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 0.0,
+                },
                 start_size: length,
                 end_size: length * 0.6,
                 aspect: Vec3::new(ARMOR_SPARK_WIDTH_RATIO, 1.0, 1.0),
@@ -1007,8 +1035,10 @@ fn spawn_big_armor(
             origin: position + normal * (SPALL_PUFF_SIZE.0 * 0.5),
             drift: normal * 0.3 + Vec3::Y * SPALL_PUFF_RISE,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0),
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0),
+                rate: 0.0,
+            },
             start_size: SPALL_PUFF_SIZE.0,
             end_size: puff_size,
             aspect: Vec3::ONE,
@@ -1035,8 +1065,10 @@ fn spawn_big_armor(
                 origin: position + normal * (FLAME_LICK_SIZE.1 * 0.5),
                 drift: normal * 0.5 + Vec3::Y * FLAME_LICK_RISE,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: 0.0,
+                },
                 start_size: FLAME_LICK_SIZE.0,
                 end_size: FLAME_LICK_SIZE.1,
                 aspect: Vec3::ONE,
@@ -1095,6 +1127,36 @@ mod tests {
             .add_observer(spawn_impact_read);
         app.insert_resource(ImpactAssets::test_stub());
         app
+    }
+
+    /// Soft-particle classification, over EVERY impact material — the enumeration is the point, so
+    /// a new layer cannot pick up (or silently miss) the fade without a line here. The classes and
+    /// the mechanism behind each are on [`SOFT_PARTICLE_DEPTH`].
+    #[test]
+    fn only_the_impact_mass_layers_fade_against_the_scene() {
+        let assets = ImpactAssets::test_stub();
+        for (layer, material) in [
+            ("dust billow", assets.dust_material()),
+            ("dirt mass", assets.dirt_material(1.0)),
+            ("spall puff", assets.spall_material(1.0)),
+        ] {
+            assert_eq!(
+                material.params.glow.z, SOFT_PARTICLE_DEPTH,
+                "{layer} is mass — it must soften where it meets a surface"
+            );
+        }
+        for (layer, material) in [
+            ("shock ring", assets.shock_ring_material()),
+            ("ground scar", assets.ground_mark_material()),
+            ("spark", assets.spark_material()),
+            ("ping", assets.ping_material()),
+            ("ejecta", assets.ejecta_material()),
+            ("armor flash", assets.armor_flash_material()),
+            ("armor spark", assets.armor_spark_material()),
+            ("flame lick", assets.flame_material()),
+        ] {
+            assert_eq!(material.params.glow.z, 0.0, "{layer} must stay hard-edged");
+        }
     }
 
     /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-

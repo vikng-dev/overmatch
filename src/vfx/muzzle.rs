@@ -11,8 +11,8 @@ use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, VfxBillboardMaterial, VfxParams, gradient_lut, smoothstep,
-    spawn_billboard, unit_quad,
+    BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
+    gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
 /// Flash core lifetime in seconds. The 88's hot layers are STAGGERED — core dies first, then the
@@ -33,6 +33,40 @@ const FLASH_PLANE_LENGTH: (f32, f32) = (4.3, 6.4);
 const FLASH_PLANE_WIDTH_RATIO: f32 = 0.55;
 /// Emissive boost on the flash LUT's heat lane — well above 1.0 so bloom catches the whole flash.
 const FLASH_GLOW: f32 = 14.0;
+
+// --- The 88's BLAST CORE: a real 12-frame explosion flipbook, played once, that carries the
+// fireball the whole muzzle moment is built around. Every metric is authored at [`BLAST_CALIBER`]
+// and scales LINEARLY with the firing bore (ADR-0023). The flash core above stays the frame-one
+// blinding spike inside it; the flame planes stay the directional jets.
+
+/// Atlas grid and frame count — [`MuzzleVfxAssets::blast_atlas`]'s two sheets share it
+/// (`scripts/vfx/blast_atlas.py`).
+const BLAST_COLS: f32 = 4.0;
+const BLAST_ROWS: f32 = 3.0;
+const BLAST_FRAMES: u32 = 12;
+/// The bore (m) the metres and seconds below are authored against; the blast scales `caliber / this`.
+const BLAST_CALIBER: f32 = 0.088;
+/// Quad diameter range (m). The sprite's fireball spans ~a third of its cell on frame one and ~three
+/// quarters by the last, so the rendered ball runs ~3 m at ignition through ~5 m at its hottest.
+const BLAST_SIZE: (f32, f32) = (8.0, 9.5);
+/// Quad growth over life: the gas keeps pushing outward past the sprite's own expansion.
+const BLAST_GROWTH: f32 = 1.12;
+/// Standoff down the bore (m) of the fireball's centre from the muzzle.
+const BLAST_STANDOFF: f32 = 1.8;
+/// Billboard lifetime (s) — and, through [`Flipbook::Once`], the window the whole sheet plays in:
+/// one cell per 60 Hz frame at the reference bore.
+const BLAST_LIFETIME: f32 = 0.2;
+/// Overall alpha, erosion sharpness and emissive boost. The boost sits under [`FLASH_GLOW`] — a
+/// fireball with volume, not a second blinding spike — and the soft sharpness keeps the smoke fringe
+/// as fringe.
+const BLAST_ALPHA: f32 = 0.85;
+const BLAST_SHARPNESS: f32 = 1.3;
+const BLAST_GLOW: f32 = 6.0;
+/// Erosion threshold at death. Low, unlike every other muzzle layer: the sheet ALREADY animates its
+/// own dissolution, and the die-off is the blast LUT's cooling term (which reaches black at the last
+/// LUT row, so the layer is gone before it despawns). Erosion here only thins the fringe — ramped to
+/// 1.0 it instead eats the fireball into confetti through the middle of the sequence.
+const BLAST_EROSION: f32 = 0.3;
 
 /// The 88's fireball glow card: ONE soft additive billboard behind the starburst core — the classic
 /// card that sells fireball VOLUME between the 2-frame flash and the lingering smoke. Camera-facing,
@@ -226,6 +260,13 @@ pub(super) struct MuzzleVfxAssets {
     pub(super) quad: Handle<Mesh>,
     /// The 88's flash core: a 2×2 scorch-starburst atlas (a spiky radial star per shot).
     pub(super) core_atlas: Handle<Image>,
+    /// The 88's blast core: two 4×3 explosion flipbooks, one picked per shot. Two sheets rather
+    /// than one is the anti-repetition trick at sprite scale — the sequence inside a sheet is
+    /// fixed (it starts on its most violent frame and plays once), so the variation has to come
+    /// from WHICH fireball plays. KTX2, unlike every other sprite here: this one is the only
+    /// billboard drawn at unbounded range, so it is the only one that needs a mip chain (bevy's
+    /// PNG loader produces a single level) — see `scripts/vfx/blast_atlas.py`.
+    blast_atlas: [Handle<Image>; 2],
     /// The MG's flash core: a single small round glow (`light_01`) — a rifle-scale pop, not the 88's
     /// starburst.
     mg_core: Handle<Image>,
@@ -235,6 +276,10 @@ pub(super) struct MuzzleVfxAssets {
     /// the GPU texture) — the mass sprite the ground-dust cloud is drawn from.
     dust_atlas: Handle<Image>,
     flash_lut: Handle<Image>,
+    /// The blast core's own palette — the flash LUT drives nearly the whole signal band to
+    /// white-hot, which is the read a 2-frame starburst wants and the wrong one for a 12-frame
+    /// sheet whose MID-tones are the fire.
+    blast_lut: Handle<Image>,
     smoke_lut: Handle<Image>,
     /// Earth palette for the ground-dust cloud — brown lifted soil, never the smoke gray.
     dust_lut: Handle<Image>,
@@ -261,6 +306,18 @@ impl MuzzleVfxAssets {
         }
     }
 
+    /// The blast-core material template: one of the two flipbook sheets through the blast LUT.
+    /// Rides the flash's additive pipeline (no new permutation), with its own 4×3 grid lanes,
+    /// softer erosion and a lower boost.
+    fn blast_material(&self, atlas: Handle<Image>) -> VfxBillboardMaterial {
+        let mut material = self.flash_material(atlas, BLAST_SHARPNESS);
+        material.params.frame = Vec4::new(0.0, BLAST_COLS, BLAST_ROWS, 0.0);
+        material.params.fade.w = BLAST_ALPHA;
+        material.params.glow.x = BLAST_GLOW;
+        material.lut = self.blast_lut.clone();
+        material
+    }
+
     /// The smoke material template (alpha-blend — smoke is mass, it darkens and occludes).
     pub(super) fn smoke_material(&self) -> VfxBillboardMaterial {
         VfxBillboardMaterial {
@@ -270,7 +327,7 @@ impl MuzzleVfxAssets {
                 // (nudged up from 0.85 so early smoke has more presence for the flash to hand off to);
                 // the MG puff overrides it down to `MG_SMOKE_ALPHA`.
                 fade: Vec4::new(0.0, 2.6, 0.0, 0.92),
-                glow: Vec4::new(SMOKE_GLOW, 0.0, 0.0, 0.0),
+                glow: Vec4::new(SMOKE_GLOW, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.smoke_atlas.clone(),
             lut: self.smoke_lut.clone(),
@@ -286,7 +343,7 @@ impl MuzzleVfxAssets {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, GROUND_DUST_ALPHA),
-                glow: Vec4::new(0.0, 0.0, 0.0, 0.0),
+                glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
             lut: self.dust_lut.clone(),
@@ -313,6 +370,23 @@ pub(super) fn setup_muzzle_assets(
             LinearRgba::rgb(0.9 + 0.1 * x, 0.35 + 0.6 * x * x, 0.08 + 0.5 * x * x * x) * floor;
         (color, (0.3 + 0.7 * x) * floor)
     });
+    // Blast LUT: a fire ramp rather than the flash's white-out — black through deep red into
+    // orange, white-hot only in the top of the signal band. Heat rides the white-hot fraction, so
+    // only the core blooms while the fireball's orange body stays readable as fire. The life axis
+    // is this layer's whole die-off: `cool` holds through the fireball's first half and reaches
+    // ZERO at the last LUT row, so the blast is dark before its quad despawns.
+    let blast_lut = gradient_lut(&mut images, |x, y| {
+        let floor = smoothstep(0.04, 0.28, x);
+        let hot = smoothstep(0.35, 1.0, x);
+        let cool = 1.0 - smoothstep(0.25, 1.0, y);
+        let lum = (0.18 + 0.82 * x) * floor;
+        let color = LinearRgba::rgb(
+            lum,
+            lum * (0.18 + 0.72 * hot),
+            lum * (0.03 + 0.60 * hot * hot),
+        ) * cool;
+        (color, hot * cool)
+    });
     // Smoke LUT: warm powder-gray at birth cooling to a pale neutral, luminance riding the sprite
     // signal; heat only in the young, bright texels (flash-lit smoke blooms for the first instants,
     // then it is inert mass).
@@ -338,11 +412,16 @@ pub(super) fn setup_muzzle_assets(
     commands.insert_resource(MuzzleVfxAssets {
         quad: unit_quad(&mut meshes),
         core_atlas: asset_server.load("vfx/flash_core_atlas.png"),
+        blast_atlas: [
+            asset_server.load("vfx/blast_core_a.ktx2"),
+            asset_server.load("vfx/blast_core_b.ktx2"),
+        ],
         mg_core: asset_server.load("vfx/mg_core.png"),
         flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
         smoke_atlas: asset_server.load("vfx/smoke_atlas.png"),
         dust_atlas: asset_server.load("vfx/impact_dust.png"),
         flash_lut,
+        blast_lut,
         smoke_lut,
         dust_lut,
     });
@@ -413,8 +492,9 @@ fn spawn_muzzle_light(
     crate::push_capped_entity(commands, &mut ring.0, light, LIGHT_CAP);
 }
 
-/// Dress a main-gun shot: flash cluster + muzzle light + lingering smoke + the ground-dust cloud a
-/// low barrel lifts, all view entities hung off the `FireShell` geometry (origin + bore direction).
+/// Dress a main-gun shot: blast core + flash cluster + muzzle light + lingering smoke + the
+/// ground-dust cloud a low barrel lifts, all view entities hung off the `FireShell` geometry
+/// (origin + bore direction).
 /// MG-calibre rounds pass through untouched — their dressing is slice B, on this same machinery.
 fn on_main_gun_fire(
     fire: On<FireShell>,
@@ -463,14 +543,47 @@ fn on_main_gun_fire(
             origin: origin + dir * 1.0,
             drift: Vec3::ZERO,
             frames: 4,
-            start_frame: rng.range(0.0, 4.0).floor(),
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: rng.range(0.0, 4.0).floor(),
+                rate: 0.0,
+            },
             start_size: core_size,
             end_size: core_size * FLASH_CORE_SHRINK,
             aspect: Vec3::ONE,
             roll: rng.range(0.0, std::f32::consts::TAU),
             spin: 0.0,
             erosion_end: 0.0,
+            rotation: None,
+        },
+    );
+
+    // --- Blast core: the fireball flipbook, played ONCE from its most violent frame. Not gated on
+    // `near`: it is the shot's primary read at any range, and one quad on the main gun's ~3 s
+    // cadence is not the near-field overdraw the LOD gate bounds.
+    let bore = fire.caliber / BLAST_CALIBER;
+    let blast_size = rng.range(BLAST_SIZE.0, BLAST_SIZE.1) * bore;
+    let blast_lifetime = BLAST_LIFETIME * bore;
+    spawn_billboard(
+        &mut commands,
+        &mut materials,
+        &mut ring,
+        assets.quad.clone(),
+        BillboardSpec {
+            material: assets.blast_material(assets.blast_atlas[blast_pick(&mut rng)].clone()),
+            lifetime: blast_lifetime,
+            origin: origin + dir * (BLAST_STANDOFF * bore),
+            drift: Vec3::ZERO,
+            frames: BLAST_FRAMES,
+            // A real sequence from its ignition frame — no random start offset and no wrap: the
+            // per-shot variation is which sheet plays. `Once` spreads the sheet over `lifetime`,
+            // which already carries the bore scale, so the playback rate needs no separate one.
+            flipbook: Flipbook::Once,
+            start_size: blast_size,
+            end_size: blast_size * BLAST_GROWTH,
+            aspect: Vec3::ONE,
+            roll: rng.range(0.0, std::f32::consts::TAU),
+            spin: 0.0,
+            erosion_end: BLAST_EROSION,
             rotation: None,
         },
     );
@@ -497,8 +610,10 @@ fn on_main_gun_fire(
                 origin: origin + dir * 1.0,
                 drift: Vec3::ZERO,
                 frames: 1,
-                start_frame: 0.0,
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: 0.0,
+                    rate: 0.0,
+                },
                 start_size: glow_size,
                 end_size: glow_size * FLASH_GLOW_CARD_SHRINK,
                 aspect: Vec3::ONE,
@@ -536,8 +651,10 @@ fn on_main_gun_fire(
                     origin: origin + dir * (length * 0.45),
                     drift: Vec3::ZERO,
                     frames: 4,
-                    start_frame: (plane_frame + i as f32) % 4.0,
-                    frame_rate: 0.0,
+                    flipbook: Flipbook::Loop {
+                        start: (plane_frame + i as f32) % 4.0,
+                        rate: 0.0,
+                    },
                     start_size: length,
                     end_size: length * FLASH_PLANE_SHRINK,
                     aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
@@ -564,8 +681,10 @@ fn on_main_gun_fire(
                 origin: origin + dir * 1.6,
                 drift: Vec3::Y * SMOKE_RISE + dir * SMOKE_PUSH,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: SMOKE_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: SMOKE_FRAME_RATE,
+                },
                 start_size: SMOKE_SIZE.0,
                 end_size: SMOKE_SIZE.1,
                 aspect: Vec3::ONE,
@@ -606,6 +725,13 @@ fn on_main_gun_fire(
         0.4,
         shadows.main_gun_casts(),
     );
+}
+
+/// Which of the two blast sheets this shot plays. A sheet's own sequence is fixed — it opens on
+/// its most violent frame and runs once — so consecutive shots are kept apart by the pick, not by
+/// the start frame the other layers randomize.
+fn blast_pick(rng: &mut ViewRng) -> usize {
+    usize::from(rng.next_f32() < 0.5)
 }
 
 /// The ground height (m) under `muzzle` when a shot there lifts dust, else `None`: no decoded
@@ -669,8 +795,10 @@ fn spawn_ground_dust(
                 origin: base + away * offset + Vec3::Y * (start_size * 0.5),
                 drift: away * push + Vec3::Y * (GROUND_DUST_RISE * bore),
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: GROUND_DUST_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: GROUND_DUST_FRAME_RATE,
+                },
                 start_size,
                 end_size,
                 aspect: Vec3::ONE,
@@ -742,8 +870,10 @@ fn on_mg_fire(
             origin: origin + dir * 0.15,
             drift: Vec3::ZERO,
             frames: 1,
-            start_frame: 0.0,
-            frame_rate: 0.0,
+            flipbook: Flipbook::Loop {
+                start: 0.0,
+                rate: 0.0,
+            },
             start_size: core_size,
             end_size: core_size * 1.2,
             aspect: Vec3::ONE,
@@ -771,8 +901,10 @@ fn on_mg_fire(
                 origin: origin + dir * (length * 0.45),
                 drift: Vec3::ZERO,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0).floor(),
-                frame_rate: 0.0,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0).floor(),
+                    rate: 0.0,
+                },
                 start_size: length,
                 end_size: length * 1.1,
                 aspect: Vec3::new(FLASH_PLANE_WIDTH_RATIO, 1.0, 1.0),
@@ -800,8 +932,10 @@ fn on_mg_fire(
                 origin: origin + dir * 0.4,
                 drift: Vec3::Y * MG_SMOKE_RISE + dir * MG_SMOKE_PUSH,
                 frames: 4,
-                start_frame: rng.range(0.0, 4.0),
-                frame_rate: SMOKE_FRAME_RATE,
+                flipbook: Flipbook::Loop {
+                    start: rng.range(0.0, 4.0),
+                    rate: SMOKE_FRAME_RATE,
+                },
                 start_size: MG_SMOKE_SIZE.0,
                 end_size: MG_SMOKE_SIZE.1,
                 aspect: Vec3::ONE,
@@ -893,14 +1027,24 @@ mod tests {
             // BOTH agers: the dressing's contract is what a layer RENDERS after n frames, and the
             // billboard half of it is unreadable without `age_billboards` running.
             .add_systems(Update, (age_billboards, decay_muzzle_lights));
+        // The two blast sheets get DISTINCT handles (everything else can share the default one):
+        // which sheet a shot picked is only readable off its material, so the pick test needs
+        // them to be tellable apart.
+        let blast_atlas = app
+            .world_mut()
+            .resource_scope(|_, mut images: Mut<Assets<Image>>| {
+                [(); 2].map(|()| images.add(Image::default()))
+            });
         app.insert_resource(MuzzleVfxAssets {
             quad: Handle::default(),
             core_atlas: Handle::default(),
+            blast_atlas,
             mg_core: Handle::default(),
             flame_atlas: Handle::default(),
             smoke_atlas: Handle::default(),
             dust_atlas: Handle::default(),
             flash_lut: Handle::default(),
+            blast_lut: Handle::default(),
             smoke_lut: Handle::default(),
             dust_lut: Handle::default(),
         });
@@ -920,9 +1064,12 @@ mod tests {
         app
     }
 
+    /// The muzzle every test shot leaves from.
+    const FIRE_ORIGIN: Vec3 = Vec3::new(1.0, 2.0, 3.0);
+
     fn fire_round(app: &mut App, caliber: f32, catch_up_ticks: u32, tracer: bool) {
         app.world_mut().trigger(FireShell {
-            origin: Vec3::new(1.0, 2.0, 3.0),
+            origin: FIRE_ORIGIN,
             direction: Dir3::X,
             speed: 773.0,
             caliber,
@@ -978,8 +1125,9 @@ mod tests {
         q.iter(world).map(|(entity, t)| (entity, t.scale)).collect()
     }
 
-    /// An 88 shot over unknown ground spawns the airborne main-gun dressing — core + glow card +
-    /// 2 planes + smoke (5 billboards) and 1 light (the ground-dust cloud needs a terrain surface;
+    /// An 88 shot over unknown ground spawns the airborne main-gun dressing — blast core + flash
+    /// core + glow card + 2 planes + smoke (6 billboards) and 1 light (the ground-dust cloud needs
+    /// a terrain surface;
     /// see `ground_dust_needs_a_low_barrel_over_known_ground`) — and an MG-calibre round gets the
     /// MG dressing instead: core +
     /// 1 flame plane (no smoke on the first round — the ration counts from 1) at a fraction of the
@@ -991,8 +1139,8 @@ mod tests {
         fire(&mut app, 0.088, 0);
         assert_eq!(
             billboards(&mut app),
-            5,
-            "88: core + glow card + 2 planes + smoke"
+            6,
+            "88: blast core + flash core + glow card + 2 planes + smoke"
         );
         assert_eq!(lights(&mut app), 1);
 
@@ -1012,10 +1160,10 @@ mod tests {
         }
     }
 
-    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the core + light spawn — the glow
-    /// card, flame planes and smoke are all near-only. A camera parked well past the cutoff must
-    /// leave the 88 with exactly ONE billboard (the core) and its light. Guards the glow card
-    /// against silently re-escaping the gate.
+    /// Distance LOD contract: beyond `FAR_FULL_DRESSING` only the two cores + light spawn — the
+    /// glow card, flame planes and smoke are all near-only. A camera parked well past the cutoff
+    /// must leave the 88 with exactly TWO billboards (blast core + flash core) and its light.
+    /// Guards the glow card against silently re-escaping the gate.
     #[test]
     fn far_88_shot_drops_to_core_and_light() {
         let mut app = harness();
@@ -1027,8 +1175,8 @@ mod tests {
         fire(&mut app, 0.088, 0);
         assert_eq!(
             billboards(&mut app),
-            1,
-            "far 88: core only (no glow card, planes, or smoke)"
+            2,
+            "far 88: blast core + flash core only (no glow card, planes, or smoke)"
         );
         assert_eq!(
             lights(&mut app),
@@ -1046,7 +1194,9 @@ mod tests {
         let mut q = world.query::<(Entity, &Billboard, &Transform)>();
         let mut puffs: Vec<(Entity, f32, Vec3)> = q
             .iter(world)
-            .filter(|(_, b, _)| b.frame_rate == GROUND_DUST_FRAME_RATE)
+            .filter(|(_, b, _)| {
+                matches!(b.flipbook, Flipbook::Loop { rate, .. } if rate == GROUND_DUST_FRAME_RATE)
+            })
             .map(|(entity, _, t)| (entity, t.scale.x, t.translation))
             .collect();
         puffs.sort_unstable_by_key(|(entity, _, _)| *entity);
@@ -1069,7 +1219,7 @@ mod tests {
         );
         assert_eq!(
             billboards(&mut low),
-            5 + puffs.len(),
+            6 + puffs.len(),
             "the airborne dressing plus the cloud"
         );
         for (_, size, position) in &puffs {
@@ -1084,7 +1234,7 @@ mod tests {
         let mut high = harness_ground(-6.0);
         fire(&mut high, 0.088, 0);
         assert!(dust_puffs(&mut high).is_empty(), "a high barrel lifts none");
-        assert_eq!(billboards(&mut high), 5);
+        assert_eq!(billboards(&mut high), 6);
 
         // The MG's dressing has no ground layer at any height.
         let mut mg = harness_ground(0.0);
@@ -1170,12 +1320,12 @@ mod tests {
             .count();
         assert_eq!(
             hot, 4,
-            "core + 2 flame planes + glow card are born maximal and shrink"
+            "flash core + 2 flame planes + glow card are born maximal and shrink"
         );
         assert_eq!(
             layers - hot,
-            1 + dust_puffs(&mut app).len(),
-            "the mass layers — gas smoke + ground dust — grow in"
+            2 + dust_puffs(&mut app).len(),
+            "the layers that grow — the blast fireball, gas smoke, ground dust"
         );
 
         // The three beats, each stepped just past its deadline (ages run from the arming frame):
@@ -1193,6 +1343,227 @@ mod tests {
             assert!(
                 scale.x > born[entity].x,
                 "every layer alive past the flash cluster must be one that grows in"
+            );
+        }
+    }
+
+    /// The blast cores alive right now, in spawn order. [`BLAST_FRAMES`] is the discriminator — no
+    /// other muzzle layer runs a 12-frame sheet.
+    fn blast_cores(app: &mut App) -> Vec<Entity> {
+        let world = app.world_mut();
+        let mut q = world.query::<(Entity, &Billboard)>();
+        let mut found: Vec<Entity> = q
+            .iter(world)
+            .filter(|(_, b)| b.frames == BLAST_FRAMES)
+            .map(|(entity, _)| entity)
+            .collect();
+        found.sort_unstable();
+        found
+    }
+
+    /// A billboard's per-instance material — the RENDERED atlas and flipbook frame live here, not
+    /// on the [`Billboard`] component.
+    fn material_of(app: &App, entity: Entity) -> &VfxBillboardMaterial {
+        let handle = app
+            .world()
+            .get::<MeshMaterial3d<VfxBillboardMaterial>>(entity)
+            .expect("material");
+        app.world()
+            .resource::<Assets<VfxBillboardMaterial>>()
+            .get(&handle.0)
+            .expect("per-instance material asset")
+    }
+
+    /// The blast core is the muzzle moment's dominant fireball: one per 88 shot, wider and
+    /// longer-lived than the flash core it sits over, on the atlas's 4×3 grid.
+    #[test]
+    fn blast_core_dominates_the_flash_cluster() {
+        let mut app = harness();
+        fire(&mut app, 0.088, 0);
+        let cores = blast_cores(&mut app);
+        assert_eq!(cores.len(), 1, "one blast core per 88 shot");
+        let core = app.world().get::<Billboard>(cores[0]).expect("blast core");
+        assert!(
+            core.start_size > FLASH_CORE_SIZE.1,
+            "the blast must be wider than the widest flash core ({} m vs {} m)",
+            core.start_size,
+            FLASH_CORE_SIZE.1
+        );
+        assert!(
+            core.lifetime > FLASH_GLOW_CARD_LIFETIME,
+            "the blast must outlive the whole flash cluster ({} s vs {FLASH_GLOW_CARD_LIFETIME} s)",
+            core.lifetime
+        );
+        let params = &material_of(&app, cores[0]).params;
+        assert_eq!(
+            (params.frame.y, params.frame.z),
+            (BLAST_COLS, BLAST_ROWS),
+            "the shader's cell arithmetic must read the atlas's real grid"
+        );
+        // An MG round never lifts a blast core — the fireball is the main gun's.
+        let mut mg = harness();
+        fire_round(&mut mg, MG_CALIBER, 0, true);
+        assert!(
+            blast_cores(&mut mg).is_empty(),
+            "no fireball off a rifle bore"
+        );
+    }
+
+    /// The SHIPPED sheets, read off disk: [`BLAST_COLS`]×[`BLAST_ROWS`] cells of the size
+    /// `scripts/vfx/blast_atlas.py` authors, and a mip chain — the grid constants above are what
+    /// the shader divides the atlas by, and the sheet is what it divides, so nothing else in the
+    /// suite can catch the two disagreeing. The chain is the whole reason these two sprites are
+    /// KTX2: a mipless blast shimmers at the ranges it is drawn at.
+    #[test]
+    fn the_shipped_blast_sheets_are_the_grid_the_shader_divides() {
+        /// Output cell size in texels (`CELL_PX` in `scripts/vfx/blast_atlas.py`).
+        const CELL_PX: u32 = 256;
+        for sheet in ["blast_core_a.ktx2", "blast_core_b.ktx2"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/vfx")
+                .join(sheet);
+            let bytes = std::fs::read(&path).unwrap_or_else(|err| panic!("{sheet}: {err}"));
+            // KTX2 header (§3.1): a 12-byte identifier, then u32 LE fields — pixelWidth at 20,
+            // pixelHeight at 24, levelCount at 40.
+            let field = |offset: usize| {
+                u32::from_le_bytes(
+                    bytes[offset..offset + 4]
+                        .try_into()
+                        .unwrap_or_else(|_| panic!("{sheet} is truncated")),
+                )
+            };
+            assert_eq!(&bytes[1..7], b"KTX 20", "{sheet} is not a KTX2 file");
+            assert_eq!(
+                (field(20), field(24)),
+                (BLAST_COLS as u32 * CELL_PX, BLAST_ROWS as u32 * CELL_PX),
+                "{sheet} is not the grid the blast material divides it by"
+            );
+            assert!(
+                field(40) > 1,
+                "{sheet} carries no mip chain ({} level)",
+                field(40)
+            );
+        }
+    }
+
+    /// The blast plays ONCE, wired end to end: frame one renders the ignition frame unaged (the
+    /// newborn-armed latch), the index only ever advances, and the closing cell is on screen when
+    /// the quad dies. Run at the DISPLAY cadences rather than a fine sub-step, because that is
+    /// where a playback rate raced against the lifetime falls short: it used to close on cell 10 at
+    /// 60 Hz and cell 9 at 30 Hz.
+    ///
+    /// [`BLAST_LIFETIME`] holds [`BLAST_FRAMES`] cells, so 60 Hz resolves one cell per frame and
+    /// closes on the last; 30 Hz resolves two, and its final sample necessarily lands one cell
+    /// short — six renders cannot show twelve cells under any index law. What the clamp guarantees
+    /// at every cadence is the rest: no step backwards, and no return to the ignition cell.
+    #[test]
+    fn blast_core_plays_its_sheet_once() {
+        /// Every flipbook index the blast RENDERS at `hz`, birth frame first.
+        fn rendered(hz: f32) -> Vec<f32> {
+            let mut app = harness();
+            fire(&mut app, 0.088, 0);
+            let core = blast_cores(&mut app)[0];
+            let mut seen = vec![material_of(&app, core).params.frame.x];
+            while app.world().get::<Billboard>(core).is_some() {
+                advance(&mut app, 1.0 / hz);
+                if app.world().get::<Billboard>(core).is_some() {
+                    seen.push(material_of(&app, core).params.frame.x);
+                }
+            }
+            seen
+        }
+
+        for (hz, closing) in [(60.0, BLAST_FRAMES - 1), (30.0, BLAST_FRAMES - 2)] {
+            let seen = rendered(hz);
+            // Index 0 twice at the head: the spawn's own frame, then the arming visit.
+            assert_eq!(seen[..2], [0.0, 0.0], "{hz} Hz: opens on the ignition cell");
+            assert!(
+                seen.windows(2).all(|pair| pair[1] >= pair[0]),
+                "{hz} Hz: the flipbook wrapped — {seen:?}"
+            );
+            assert_eq!(
+                *seen.last().expect("the birth frame at least"),
+                closing as f32,
+                "{hz} Hz: the wrong cell is on screen when the quad dies — {seen:?}"
+            );
+        }
+    }
+
+    /// Which of the two sheets plays is the blast's anti-repetition trick (its own sequence is
+    /// fixed), so a burst of shots must draw both.
+    #[test]
+    fn blast_core_draws_both_sheets() {
+        let mut app = harness();
+        for _ in 0..12 {
+            fire(&mut app, 0.088, 0);
+        }
+        let cores = blast_cores(&mut app);
+        assert_eq!(cores.len(), 12, "one blast core per shot, none evicted");
+        let sheets: std::collections::BTreeSet<_> = cores
+            .iter()
+            .map(|core| material_of(&app, *core).atlas.id())
+            .collect();
+        assert_eq!(sheets.len(), 2, "both blast sheets must reach the screen");
+    }
+
+    /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
+    /// doubles the quad, the standoff and the lifetime — and because [`Flipbook::Once`] spreads the
+    /// sheet over that lifetime, the playthrough scales with it and needs no rate of its own.
+    #[test]
+    fn blast_core_scales_with_the_bore() {
+        fn core(caliber: f32) -> (f32, f32, f32, Flipbook) {
+            let mut app = harness();
+            fire(&mut app, caliber, 0);
+            let entity = blast_cores(&mut app)[0];
+            let core = app.world().get::<Billboard>(entity).expect("blast core");
+            let standoff = core.origin.distance(FIRE_ORIGIN);
+            (core.start_size, core.lifetime, standoff, core.flipbook)
+        }
+
+        let (small, small_life, small_standoff, book) = core(BLAST_CALIBER);
+        let (big, big_life, big_standoff, _) = core(BLAST_CALIBER * 2.0);
+        assert_eq!(book, Flipbook::Once, "the sheet is a sequence, not a loop");
+        for (what, small, big) in [
+            ("fireball", small, big),
+            ("burn", small_life, big_life),
+            ("standoff", small_standoff, big_standoff),
+        ] {
+            assert!(
+                (big - small * 2.0).abs() < 1e-3,
+                "twice the bore must be twice the {what}: {small} → {big}"
+            );
+        }
+    }
+
+    /// Soft-particle classification: the muzzle's MASS layers fade where they close on the geometry
+    /// behind them, the HOT ones never do. A flash dimming because the tank parked near a wall is
+    /// exactly the artifact this lane must not introduce.
+    #[test]
+    fn only_the_muzzle_mass_layers_fade_against_the_scene() {
+        let app = harness();
+        let assets = app.world().resource::<MuzzleVfxAssets>();
+        for (layer, material) in [
+            ("gas smoke", assets.smoke_material()),
+            ("ground dust", assets.dust_material()),
+        ] {
+            assert_eq!(
+                material.params.glow.z, SOFT_PARTICLE_DEPTH,
+                "{layer} is mass — it must soften where it meets a surface"
+            );
+        }
+        for (layer, material) in [
+            (
+                "flash core",
+                assets.flash_material(assets.core_atlas.clone(), 2.0),
+            ),
+            (
+                "blast core",
+                assets.blast_material(assets.blast_atlas[0].clone()),
+            ),
+        ] {
+            assert_eq!(
+                material.params.glow.z, 0.0,
+                "{layer} is airborne and additive — no depth fade"
             );
         }
     }
@@ -1352,7 +1723,7 @@ mod tests {
         assert_eq!(lights(&mut app), 0);
         // At or under the boundary the dressing still plays (~150 ms catch-up is the normal case).
         fire(&mut app, 0.088, STALE_FIRE_TICKS);
-        assert_eq!(billboards(&mut app), 5);
+        assert_eq!(billboards(&mut app), 6);
     }
 
     /// The muzzle light decays monotonically from its first-frame peak and despawns at end of
