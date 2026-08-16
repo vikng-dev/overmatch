@@ -62,7 +62,7 @@ use lightyear::link::RecvPayload;
 use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
 
-use crate::command::TankCommand;
+use crate::command::{AimIntent, TankCommand};
 
 /// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once the script has played out.
@@ -227,7 +227,7 @@ pub(crate) fn buffer_input(
         state.0.aim = if sim.combat_noaim {
             None
         } else {
-            Some(sim.aim_point)
+            Some(AimIntent::HullLocal(sim.aim_point))
         };
         state.0.range = sim.range;
         state.0.fire_primary = sim.fire_interval != 0
@@ -244,7 +244,7 @@ pub(crate) fn buffer_input(
     if sim.fire_secondary {
         state.0.throttle = 0.0;
         state.0.steer = 0.0;
-        state.0.aim = Some(sim.aim_point);
+        state.0.aim = Some(AimIntent::HullLocal(sim.aim_point));
         state.0.range = sim.range;
         state.0.fire_primary = false;
         state.0.fire_secondary = sim.holding_secondary(t);
@@ -287,11 +287,15 @@ pub(crate) fn buffer_input(
         None
     } else if env_flag("SPIKE_SIM_AIM_SWEEP", false) {
         let theta = 0.02 * t as f32;
-        Some(Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos()))
+        Some(AimIntent::HullLocal(Vec3::new(
+            800.0 * theta.sin(),
+            0.0,
+            -800.0 * theta.cos(),
+        )))
     } else {
         // The idle/drive baseline aims at the SAME point the fire workload uses, so an idle-vs-fire
         // A/B differs only by the trigger (the aim/servo pose is identical in both).
-        Some(sim.aim_point)
+        Some(AimIntent::HullLocal(sim.aim_point))
     };
     state.0.range = sim.range;
     // No fire in the idle window — a recoil impulse would disturb the resting contact under study —

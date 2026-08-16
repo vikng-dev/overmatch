@@ -501,13 +501,22 @@ fn sweep() {
 /// changes, the client encodes a real `Compressed::Input`, `update_buffer` writes it (it is past
 /// `last_remote_tick`), `get_predict` resolves it — and the `ActionState` un-freezes.
 ///
-/// Which bounds the hazard sharply for us: `TankCommand::aim` is a HULL-LOCAL point, so it changes
-/// every tick whenever the player moves the mouse, or the hull moves, or the hull rotates, or the
-/// turret slews. In any gameplay that could run a tank away, the command already differs every tick
-/// and the chain cannot form. And when the command IS bit-identical — parked, not aiming, not
-/// touching anything — the frozen command is the command the player is still holding, so freezing it
-/// is a no-op. Hold-last on the levels is lightyear's intended semantics and ours (see
-/// `bridge_action_state_to_tank_command`); only the CONSUMABLES are gated, by `for_tick`.
+/// Which bounds the hazard sharply for us, and the bound is `for_tick`, not the aim.
+/// `net::client::stamp_input_tick` writes `local_tick + input_delay` into every command it buffers,
+/// so in the SHIPPING configuration no two consecutive commands are ever byte-identical and the
+/// `SameAsPrecedent` chain cannot form at all. The scenario below is therefore the unstamped shape,
+/// kept because the freeze itself is a property of the buffer, not of our stamp.
+///
+/// Do not lean on `aim` for this. It used to differ every tick because it was a hull-local point
+/// that moved whenever the hull did; under ADR-0038 the third-person view authors a WORLD place from
+/// a world-locked camera, so a player pivoting on the spot with a still mouse emits the same point
+/// tick after tick. The gunner optic still authors hull-local and still changes as the sight is
+/// steered, but nothing about the aim field is load-bearing here any more.
+///
+/// And when the command IS bit-identical — parked, not touching anything — the frozen command is the
+/// command the player is still holding, so freezing it is a no-op. Hold-last on the levels is
+/// lightyear's intended semantics and ours (see `bridge_action_state_to_tank_command`); only the
+/// CONSUMABLES are gated, by `for_tick`.
 #[test]
 fn a_changed_command_unfreezes_the_absent_anchored_buffer() {
     let mut buf: Buf = Buf::default();

@@ -13,7 +13,7 @@ use bevy::prelude::*;
 
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
 use crate::camera::{GUNNER_FOV_FALLBACK, view_fov};
-use crate::command::{TankCommand, gather_commands};
+use crate::command::{AimIntent, TankCommand, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::render_policy::{CameraProfile, VisualScope};
@@ -466,11 +466,14 @@ fn live_servo_angle(
 
 /// Resolve optic input into the shared hull-local [`aim::CommittedAim`] and `TankCommand`.
 ///
+/// The optic is a hull-anchored view — camera, working intent and gun all ride the hull — so
+/// its intention travels hull-local, unchanged across the delivery gap (ADR-0038).
+///
 /// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
 /// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
 /// circular [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
 /// following the current servo lay.
-fn drive_gunner_aim(
+pub(crate) fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     spatial: SpatialQuery,
     mut committed: ResMut<CommittedAim>,
@@ -501,7 +504,7 @@ fn drive_gunner_aim(
         && !moved
     {
         if let Ok(mut command) = tank_commands.get_mut(tank) {
-            command.aim = Some(point);
+            command.aim = Some(AimIntent::HullLocal(point));
         }
         return;
     }
@@ -671,7 +674,7 @@ fn drive_gunner_aim(
         committed.set(tank, point);
     }
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(publish.command_aim);
+        command.aim = Some(AimIntent::HullLocal(publish.command_aim));
     }
 }
 
@@ -727,7 +730,7 @@ fn invalidate_gunner_view_state(mut free: ResMut<GunnerFreeAim>, mut elastic: Re
 /// system stays under Bevy's 16-argument limit (it mirrors the fields [`drive_gunner_aim`] takes
 /// loose).
 #[derive(SystemParam)]
-struct FreeAimServos<'w, 's> {
+pub(crate) struct FreeAimServos<'w, 's> {
     slots: Query<'w, 's, &'static ServoIndex>,
     specs: Query<'w, 's, &'static ServoSpec>,
     states: Query<'w, 's, &'static TankServos>,
@@ -737,7 +740,7 @@ struct FreeAimServos<'w, 's> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_free_aim(
+pub(crate) fn drive_free_aim(
     motion: Res<AccumulatedMouseMotion>,
     time: Res<Time>,
     scheme: Res<GunnerScheme>,
@@ -884,7 +887,7 @@ fn drive_free_aim(
     }
     committed.set(tank, resolved);
     if let Ok(mut command) = tank_commands.get_mut(tank) {
-        command.aim = Some(resolved);
+        command.aim = Some(AimIntent::HullLocal(resolved));
     }
 }
 

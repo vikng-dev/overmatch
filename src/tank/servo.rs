@@ -164,7 +164,7 @@ pub(super) fn restore_servo_truth(
     }
 }
 
-pub(super) fn drive_servos(
+pub(crate) fn drive_servos(
     mut q: Query<(
         &mut Transform,
         &ServoSpec,

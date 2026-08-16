@@ -38,7 +38,7 @@ The camera's view direction, marked by the fixed dot at screen center. Where the
 _Avoid_: crosshair, cursor
 
 **Aim point**:
-The ground point the gun is *commanded* to hit, resolved from the camera's screen-center ray and stored in the hull's local frame. Intent — where we've told the gun to go, not where it actually points.
+The ground point the gun is *commanded* to hit, resolved from the camera's screen-center ray. Intent — where we've told the gun to go, not where it actually points. Held in the hull's local frame, so a hold is a bearing off the tank (ADR-0001); carried on the wire tagged with the frame its authoring view is anchored to, so no latency can rotate it out from under that view (ADR-0038).
 _Avoid_: target, aim target
 
 **Bore axis**:
@@ -159,8 +159,13 @@ Keeping the gun's lay steady against hull motion. Three regimes, by what is held
 - *Unstabilized* — the gun holds a hull-relative bearing and sweeps as the hull moves (WW2). Aim stored hull-local.
 - *Directional stabilization* — the gun holds a fixed world *direction* (a ray: bearing + elevation), counter-rotating against hull motion but not tracking a point while driving (the modern two-plane stabilizer; fire-on-the-move). Aim stored as a world ray.
 - *Point stabilization* — the gun holds a fixed world *point* (a position), re-laying as the hull rotates *and* translates so it tracks the spot through parallax (lock-on / FCS auto-tracker). Aim stored as a world point.
-Today's default is unstabilized; the other two are deliberate later mechanics.
-_Avoid_: "stab" (write it out)
+The mechanism is unstabilized, and the other two regimes are deliberate later mechanics. But the lay
+follows the aiming view and the player owns the view (ADR-0038), so a player holding the crosshair in
+third person — a world-locked orbit camera, re-picking live every frame — does keep the gun on a
+world point, rate-limited by the mount. That is the crew answering live input, not a stabilizer:
+stop steering and it is gone. A hold, free-look, silence, and the whole hull-anchored gunner optic
+are all hull-rigid.
+_Avoid_: "stab" (write it out); calling the third-person track a stabilizer
 
 ## Driving
 
