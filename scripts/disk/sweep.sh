@@ -1,7 +1,7 @@
 #!/bin/sh
 # sweep.sh — reap stale build artifacts across every overmatch checkout on this box.
 #
-# The dev/ci profiles are slimmed for debuginfo (see [profile.*] in Cargo.toml), but a
+# The dev profile is slimmed for debuginfo (see [profile.*] in Cargo.toml), but a
 # long-lived target dir still accumulates fingerprints for dependency versions and rustc
 # releases we no longer use. `cargo sweep --maxsize` keeps each target dir under a ceiling
 # by evicting the least-recently-used artifacts, so an idle checkout can't creep back into
