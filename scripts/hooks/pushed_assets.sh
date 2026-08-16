@@ -1,9 +1,16 @@
 # pushed_assets.sh — what a push contains, read as ASSETS.
 #
-# Sourced by `scripts/hooks/pre-push` and by CI's assets job, and by nothing else that ships. Every
-# function here answers a question about a REVISION or a RANGE OF REVISIONS, never about the work
-# tree: the work tree is a different, mutable thing from the bytes the remote is about to receive,
-# and a hook that blesses the former while shipping the latter certifies nothing.
+# Sourced by CI's assets job, and by nothing else that ships. Every function here answers a
+# question about a REVISION or a RANGE OF REVISIONS, never about the work tree: the work tree is a
+# different, mutable thing from the bytes a commit holds, and a gate that blesses the former while
+# shipping the latter certifies nothing.
+#
+# The pre-push hook USED to source this file for a local asset lane; that lane is retired and the
+# hook is the git-lfs upload alone. The per-push selection and hydration functions
+# (`assets_pushed_commit`, `assets_pushed_paths`, `assets_push_targets`, `assets_hydrate`)
+# therefore have no caller today outside `test_pushed_assets.sh`, which still drives them: they are
+# what a lane that verifies only what a push CHANGED is built from, and the CI lane's own scoping
+# is the same two predicates asked over a range.
 #
 # The vocabulary is one word: a STEM. An asset is a sibling trio in one directory —
 # `<id>.blend`, `<id>.tank.ron`, `<id>.glb` — and the stem is their common path prefix,
@@ -174,7 +181,7 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
 
 # Whether anything an asset verdict is a function of changed between two revisions.
 #
-# The SAME two predicates the pre-push lane selects with — `assets_shared_surface` and the trio
+# The SAME two predicates the per-push selection above uses — `assets_shared_surface` and the trio
 # rule — asked over a range instead of over one push's refs. What is answered here is only "is this
 # lane's work possibly affected", never "which trios": a lane that runs, runs whole.
 #
@@ -235,10 +242,11 @@ assets_range_affected() {   # <base> <head> <scratch-dir>
 
 # The same decision, as the CI lane asks it: off the event, into `$GITHUB_OUTPUT`.
 #
-# A SCHEDULED OR HAND-STARTED RUN IS ALWAYS AFFECTED, and that is what makes the gate safe to have:
-# the weekly cron re-cuts every trio from Blender whatever changed, so a defect a range-gated lane
-# could not see has a bounded life. `GITHUB_EVENT_NAME` is empty outside a runner, where this file
-# is being driven by the suite over ranges it built itself.
+# A HAND-STARTED RUN IS ALWAYS AFFECTED, and that is what bounds the gate: a `workflow_dispatch`
+# re-cuts every trio from Blender whatever changed, which is the move before a release. (`schedule`
+# is still answered because the vocabulary costs nothing to keep, but no cron triggers CI any more
+# — it was retired 2026-08-16.) `GITHUB_EVENT_NAME` is empty outside a runner, where this file is
+# being driven by the suite over ranges it built itself.
 #
 # It writes `affected=true|false` and nothing else, because a workflow step that decides anything is
 # a step no suite can run.
@@ -271,9 +279,8 @@ assets_lfs_object() {   # <oid>
 # The refusal. Named twice — what is missing, and what that makes impossible — because a gate that
 # cannot run is not a gate that passed.
 assets_refuse() {   # <missing> <consequence>
-    printf '\033[31m  the asset door cannot verify this push\033[0m — %s\n' "$1" >&2
+    printf '\033[31m  the asset door cannot verify this revision\033[0m — %s\n' "$1" >&2
     printf '  %s\n' "$2" >&2
-    printf '  to push anyway: OVERMATCH_SKIP=assets (CI re-runs this lane on the pushed commit)\n' >&2
 }
 
 # One file of a revision, on disk, with its REAL bytes.

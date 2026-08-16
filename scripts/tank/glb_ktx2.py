@@ -1,7 +1,7 @@
 """glb_ktx2.py — the texture derivation's halves, and the three laws that judge what it produced.
 
 Four subcommands. The first three are driven by `scripts/encode-tank-ktx2.sh`; `verify` is the
-standalone gate the asset door and the pre-push hook run (`scripts/hooks/pre-push`):
+standalone gate the asset door runs, and the release workflow with it (`.github/workflows/`):
 
     unpack <in.glb> <work>          split the glb, write every embedded image to <work>/src and
                                     derive each one's colour ROLE from the materials that sample it

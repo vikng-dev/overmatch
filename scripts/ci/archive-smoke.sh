@@ -48,11 +48,14 @@ mkdir -p "$logs"
 server_log="$logs/server.log"
 client_log="$logs/client.log"
 
+# PREFLIGHT, and the one class of failure that prints no logs — there are none yet. A missing or
+# non-executable binary (a lost exec bit, an archive that unpacked to a different shape) is fully
+# described by the line it prints.
 [ -x "$server_bin" ] || { echo "smoke: $server_bin is not executable" >&2; exit 1; }
 [ -x "$client_bin" ] || { echo "smoke: $client_bin is not executable" >&2; exit 1; }
 
-# Both logs, whatever happened — the runner is gone the moment this job ends, and a failure whose
-# evidence was not printed is a failure nobody can diagnose.
+# From here on, both logs on every failure — the runner is gone the moment this job ends, and a
+# failure whose evidence was not printed is a failure nobody can diagnose.
 dump() {
     echo "===== server.log ====="
     cat "$server_log" 2>/dev/null
