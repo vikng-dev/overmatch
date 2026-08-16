@@ -1083,101 +1083,84 @@ mod tests {
             );
         }
 
+        // The declared drivetrain. `architecture: Governor` is legally TABLELESS, so the table
+        // laws run only where the tables exist — `validate()` owns the architecture↔tables
+        // contract, and which architecture a sheet selects is authored content. The GEARBOX
+        // carries no law: the scheduler bands signed geared SHAFT rpm
+        // (`transmission::run_shift_decision`), which clutch slip, back-drive and the governor's
+        // cut band put outside the crank's idle..governed band; and the reverse ladder may outrun
+        // the forward one — both κ lookups clamp the gear index into the forward radii table
+        // (`transmission::steering_force`, `drive_hud::steering_hud_line`).
         let transmission = spec
             .track
             .powertrain
             .transmission
             .as_ref()
-            .expect("the sheet declares a transmission architecture");
-        let engine = transmission
-            .engine
-            .as_ref()
-            .expect("a regenerative architecture authors engine tables");
-        let gearbox = transmission
-            .gearbox
-            .as_ref()
-            .expect("a regenerative architecture authors a gearbox");
-        let steering = transmission
-            .steering
-            .as_ref()
-            .expect("a regenerative architecture authors steering");
-
-        // The rpm band, in the order the three anchors mean: the engine idles below its governor,
-        // and the governor cannot sit above the rpm the gear speeds are quoted at.
-        assert!(
-            engine.idle_rpm < engine.governed_rpm,
-            "idle_rpm ({}) must sit below governed_rpm ({})",
-            engine.idle_rpm,
-            engine.governed_rpm
-        );
-        assert!(
-            engine.governed_rpm <= engine.rated_rpm,
-            "governed_rpm ({}) cannot exceed the rated_rpm ({}) the ladder is anchored at",
-            engine.governed_rpm,
-            engine.rated_rpm
-        );
-        // The curve is end-clamped, so authoring that stops short of the governor makes the whole
-        // governed band one extrapolated flat — the operating point must be bracketed by real data.
-        let (first_rpm, _) = engine.torque_curve[0];
-        let (last_rpm, _) = *engine
-            .torque_curve
-            .last()
-            .expect("the torque curve is non-empty");
-        assert!(
-            first_rpm < engine.governed_rpm && engine.governed_rpm <= last_rpm,
-            "the torque curve ({first_rpm}..{last_rpm} rpm) must bracket governed_rpm ({})",
-            engine.governed_rpm
-        );
-        // The coupling clamps at the clutch capacity: below the engine's own peak, the clutch
-        // slips at every torque the engine can make and the crank never couples.
-        let peak_torque = engine
-            .torque_curve
-            .iter()
-            .fold(0.0f32, |peak, &(_, torque)| peak.max(torque));
-        assert!(
-            engine.clutch_capacity_nm >= peak_torque,
-            "clutch_capacity_nm ({}) must carry the curve's peak torque ({peak_torque})",
-            engine.clutch_capacity_nm
-        );
-
-        // Both shift bands are rpm the crank actually reaches: an up band past the governor never
-        // triggers, a down band under idle can never be fallen through to.
-        assert!(
-            gearbox.shift_up_rpm <= engine.governed_rpm,
-            "shift_up_rpm ({}) is unreachable above governed_rpm ({})",
-            gearbox.shift_up_rpm,
-            engine.governed_rpm
-        );
-        assert!(
-            gearbox.shift_down_rpm > engine.idle_rpm,
-            "shift_down_rpm ({}) must sit above idle_rpm ({})",
-            gearbox.shift_down_rpm,
-            engine.idle_rpm
-        );
-        // Reverse gears index the FORWARD steering table (R1–R4 mirror F1–F4), so the reverse
-        // ladder cannot be the longer of the two.
-        assert!(
-            gearbox.reverse_speeds_kmh.len() <= gearbox.forward_speeds_kmh.len(),
-            "{} reverse gears index a {}-gear steering table",
-            gearbox.reverse_speeds_kmh.len(),
-            gearbox.forward_speeds_kmh.len()
-        );
-        // Each detent pair is named for its geometry: the tight radius is the tighter one. A pair
-        // the other way round is the swap this naming exists to prevent.
-        for (gear, &(tight, wide)) in steering.radii.iter().enumerate() {
+            .expect("validate() requires an explicit transmission architecture");
+        if let (Some(engine), Some(steering)) =
+            (transmission.engine.as_ref(), transmission.steering.as_ref())
+        {
+            // The rpm band, in the order the three anchors mean: the engine idles below its
+            // governor, and the governor cannot sit above the rpm the gear speeds are quoted at.
             assert!(
-                tight <= wide,
-                "steering.radii[{gear}]: tight ({tight} m) is wider than wide ({wide} m)"
+                engine.idle_rpm < engine.governed_rpm,
+                "idle_rpm ({}) must sit below governed_rpm ({})",
+                engine.idle_rpm,
+                engine.governed_rpm
             );
-        }
-
-        // The recording is a file reference, and the loader resolves it verbatim.
-        if let Some(sound) = engine.sound.as_ref() {
             assert!(
-                sound.clip.ends_with(".ogg"),
-                "engine.sound.clip must name an .ogg (got `{}`)",
-                sound.clip
+                engine.governed_rpm <= engine.rated_rpm,
+                "governed_rpm ({}) cannot exceed the rated_rpm ({}) the ladder is anchored at",
+                engine.governed_rpm,
+                engine.rated_rpm
             );
+            // The curve is end-clamped, so authoring that stops short of the governor makes the
+            // whole governed band one extrapolated flat — the operating point must be bracketed
+            // by real data.
+            let (first_rpm, _) = engine.torque_curve[0];
+            let (last_rpm, _) = *engine
+                .torque_curve
+                .last()
+                .expect("the torque curve is non-empty");
+            assert!(
+                first_rpm < engine.governed_rpm && engine.governed_rpm <= last_rpm,
+                "the torque curve ({first_rpm}..{last_rpm} rpm) must bracket governed_rpm ({})",
+                engine.governed_rpm
+            );
+            let peak_torque = engine
+                .torque_curve
+                .iter()
+                .fold(0.0f32, |peak, &(_, torque)| peak.max(torque));
+            // `torque_at` scales the whole curve: an all-zero curve is an engine that makes no
+            // torque at any rpm — a drivetrain that can never turn its own sprocket, under an
+            // idle governor whose recovery torque (`torque_at(idle_rpm)`) is zero too.
+            assert!(
+                peak_torque > 0.0,
+                "engine.torque_curve peaks at {peak_torque} N·m — a declared engine must make torque"
+            );
+            // The coupling clamps at the clutch capacity: below the engine's own peak, the clutch
+            // slips at every torque the engine can make and the crank never couples.
+            assert!(
+                engine.clutch_capacity_nm >= peak_torque,
+                "clutch_capacity_nm ({}) must carry the curve's peak torque ({peak_torque})",
+                engine.clutch_capacity_nm
+            );
+            // The recording is a file reference, and the loader resolves it verbatim.
+            if let Some(sound) = engine.sound.as_ref() {
+                assert!(
+                    sound.clip.ends_with(".ogg"),
+                    "engine.sound.clip must name an .ogg (got `{}`)",
+                    sound.clip
+                );
+            }
+            // Each detent pair is named for its geometry: the tight radius is the tighter one. A
+            // pair the other way round is the swap this naming exists to prevent.
+            for (gear, &(tight, wide)) in steering.radii.iter().enumerate() {
+                assert!(
+                    tight <= wide,
+                    "steering.radii[{gear}]: tight ({tight} m) is wider than wide ({wide} m)"
+                );
+            }
         }
 
         // Armament. The single `Primary` is also the rig's main-bore handle, so exactly one weapon
@@ -1223,21 +1206,18 @@ mod tests {
             "the sheet must declare a Gunner view"
         );
 
-        // Component facets: a station or a function served by two volumes is an ambiguous gate —
-        // `capability_effectiveness` resolves a Part to one quality, not a set.
+        // A crew swap addresses a seat BY STATION on the wire (`command::CrewSwap::Start`), and
+        // both the authority (`damage::apply_crew_swap_commands`) and the replica mirror
+        // (`net::protocol::mirror_swap_from_net_crew`) resolve it to the FIRST seat wearing it:
+        // two seats under one station are not separately addressable, and the two sides can
+        // resolve one command to different seats. Duplicate FUNCTIONS carry no such vocabulary
+        // and stay legal — `damage::part_qualities` max-combines every provider of a role.
         let mut seats: HashSet<CrewStation> = HashSet::new();
-        let mut functions: HashSet<FunctionRole> = HashSet::new();
         for (node, volume) in &spec.volumes {
             if let Some(seat) = volume.crew {
                 assert!(
                     seats.insert(seat),
                     "`{node}`: crew station {seat:?} is served by two volumes"
-                );
-            }
-            if let Some(function) = volume.function {
-                assert!(
-                    functions.insert(function),
-                    "`{node}`: function {function:?} is served by two volumes"
                 );
             }
         }
