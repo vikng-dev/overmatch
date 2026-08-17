@@ -54,10 +54,10 @@ use bevy::text::LineHeight;
 use bevy::ui::{ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
+use super::displays::DisplayLadder;
 use super::{
-    DisplaySelection, FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel,
-    SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent,
-    VsyncMode, WindowModeSetting,
+    FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel, SaveSettings, Settings,
+    ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode, WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -92,8 +92,10 @@ enum Row {
     /// Windowed / borderless fullscreen. Reflects OS-side toggles too — see
     /// `settings::observe_window_placement`.
     WindowMode,
-    /// Which monitor the window is centred on — see `settings::DisplaySelection`, including why a
-    /// rung naming an unplugged display falls back rather than being written back.
+    /// Which monitor the window is centred on. Gated like vsync, but by the machine's own display
+    /// list: the rungs are `settings::displays::DisplayLadder`, one per attached monitor and named
+    /// by the OS. See `settings::DisplaySelection` for why a rung naming an unplugged display falls
+    /// back rather than being written back.
     Display,
     /// How far shadows reach, `OFF` included — see [`ShadowDistance`] for why this is its own row.
     ShadowDistance,
@@ -181,8 +183,8 @@ impl Row {
             // States the fallback, because unplugging a monitor is the common case and a row that
             // silently did something else would read as broken.
             Row::Display => {
-                "Which monitor the window opens on. \
-                 A display that is not attached falls back to the primary one."
+                "Which monitor the window opens on, * marking your main display. \
+                 One that is not attached falls back to it."
             }
             // Honest about the cut-off, because that is what a player actually sees when they lower
             // it: shadows simply stop at a radius. The OFF caveat is stated at the point of contact
@@ -230,6 +232,16 @@ impl Row {
         }
     }
 
+    /// How wide the row's value well is, in logical px. Wider for the display row alone: its values
+    /// are display NAMES, and every other stepper's are two to six characters.
+    const fn value_well_px(self) -> f32 {
+        match (self, self.kind()) {
+            (Row::Display, _) => DISPLAY_VALUE_WELL_PX,
+            (_, RowKind::Stepper) => STEPPER_VALUE_WELL_PX,
+            (_, RowKind::Slider) => SLIDER_VALUE_WELL_PX,
+        }
+    }
+
     /// Whether the row currently responds at all. A disabled row renders dim and is skipped by the
     /// keyboard walk, the hover, and every click path. The frame cap is the only conditional row:
     /// its gate is the SAME fact `Settings::frame_limit_period` limits by, so the grey row and the
@@ -262,14 +274,17 @@ impl Row {
             .unwrap_or_default()
     }
 
-    /// The row's current value, as rendered. ASCII only — it reaches `Text`. A `String` since the
-    /// scalar rows format live numbers.
-    fn value(self, settings: &Settings) -> String {
+    /// The row's current value, as rendered. ASCII plus the verified typographic set — it reaches
+    /// `Text`. A `String` since the scalar rows format live numbers.
+    ///
+    /// `ladder` is to the display row what `caps` is to vsync: the machine's own answer, so the row
+    /// renders the DISPLAY a rung names rather than the rung's position in a list.
+    fn value(self, settings: &Settings, ladder: &DisplayLadder) -> String {
         match self {
             Row::RenderScale => settings.render_scale.label().to_string(),
             Row::LodPixelBudget => settings.lod_pixel_budget.label(),
             Row::WindowMode => settings.window_mode.label().to_string(),
-            Row::Display => settings.display.label().to_string(),
+            Row::Display => ladder.label(settings.display).to_string(),
             Row::ShadowDistance => settings.shadow_distance.label().to_string(),
             Row::ShadowResolution => settings.shadow_resolution.label().to_string(),
             Row::ShadowCascades => settings.shadow_cascades.label().to_string(),
@@ -287,9 +302,10 @@ impl Row {
     /// with `OFF` the floor of the shadow-distance ladder, a wrap would put "no shadows at all"
     /// one keypress past the most expensive setting.
     ///
-    /// `caps` gates the vsync ladder: the walk happens INSIDE the offered rungs, so a Metal surface
-    /// steps ON <-> OFF without ever visiting the unoffered FAST.
-    fn step(self, settings: &mut Settings, delta: i32, caps: PresentCaps) {
+    /// `caps` gates the vsync ladder and `ladder` the display one: both walks happen INSIDE the
+    /// offered rungs, so a Metal surface steps ON <-> OFF without ever visiting the unoffered FAST,
+    /// and a two-display machine never steps onto a third display.
+    fn step(self, settings: &mut Settings, delta: i32, caps: PresentCaps, ladder: &DisplayLadder) {
         match self {
             Row::RenderScale => {
                 settings.render_scale =
@@ -302,9 +318,7 @@ impl Row {
                 settings.window_mode =
                     step_in(&WindowModeSetting::ORDER, settings.window_mode, delta);
             }
-            Row::Display => {
-                settings.display = step_in(&DisplaySelection::ORDER, settings.display, delta);
-            }
+            Row::Display => settings.display = ladder.step(settings.display, delta),
             Row::ShadowDistance => {
                 settings.shadow_distance =
                     step_in(&ShadowDistance::ORDER, settings.shadow_distance, delta);
@@ -557,6 +571,13 @@ const TRACK_WIDTH_PX: f32 = 150.0;
 const TRACK_HIT_HEIGHT_PX: f32 = 18.0;
 const TRACK_BAR_HEIGHT_PX: f32 = 6.0;
 const STEPPER_VALUE_WELL_PX: f32 = 110.0;
+/// The display row's own well — its values are OS display NAMES, not two-character rungs. MEASURED
+/// against the shipped Barlow Condensed SemiBold at the row's 18 px: `* BUILT-IN RETINA DISPLAY`
+/// draws 143 px, and 26 solid `M` (the `LABEL_MAX_CHARS` ceiling `settings::displays` truncates to)
+/// draw 210 px. Sized for names, so that worst case overhangs the arrows rather than reflowing the
+/// row. DERIVED: the widest row label plus this well plus both arrows is ~370 px inside the card's
+/// 512 px interior, so no stepper row has to give up width for it.
+const DISPLAY_VALUE_WELL_PX: f32 = 190.0;
 const SLIDER_VALUE_WELL_PX: f32 = 64.0;
 
 /// The footer hint's type block, and the FIXED slot it is drawn into.
@@ -630,7 +651,10 @@ const WHEEL_LINE_PX: f32 = 40.0;
 /// are the one thing the two windowed roots do differently, which is why they are that plugin's
 /// single parameter rather than a system each root must remember.
 pub(super) fn plugin(app: &mut App) {
-    app.init_resource::<SettingsPageVisible>()
+    // The display row's offered rungs. Mounted here rather than beside the other settings plugins
+    // because this page is the only thing that reads them.
+    app.add_plugins(super::displays::plugin)
+        .init_resource::<SettingsPageVisible>()
         .init_resource::<Selection>()
         .init_resource::<SliderDrag>()
         .add_systems(Startup, spawn_page)
@@ -686,7 +710,12 @@ pub(super) fn declare_from_pause_state(
     ));
 }
 
-fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Settings>) {
+fn spawn_page(
+    mut commands: Commands,
+    fonts: Res<UiFonts>,
+    settings: Res<Settings>,
+    ladder: Res<DisplayLadder>,
+) {
     // A full-screen, centring wrapper holding the card — the same shape `ui_font::spawn_overlay`
     // uses, so the page centres itself without depending on a parent container that neither pause
     // surface provides. The wrapper draws nothing (no `BackgroundColor`): the menu's scrim is the
@@ -768,7 +797,7 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
                     ))
                     .with_children(|viewport| {
                         for row in Row::ORDER {
-                            spawn_row(viewport, &fonts, &settings, row);
+                            spawn_row(viewport, &fonts, &settings, &ladder, row);
                         }
                     });
 
@@ -828,7 +857,13 @@ fn spawn_page(mut commands: Commands, fonts: Res<UiFonts>, settings: Res<Setting
 /// One row: `LABEL` on the left; on the right either `< VALUE >` (stepper) or `[track] VALUE`
 /// (slider). The value sits in a fixed-width well so the arrows and track do not shuffle as the
 /// value text's width changes.
-fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settings, row: Row) {
+fn spawn_row(
+    card: &mut ChildSpawnerCommands,
+    fonts: &UiFonts,
+    settings: &Settings,
+    ladder: &DisplayLadder,
+    row: Row,
+) {
     card.spawn((
         RowLine(row),
         // Opts the line into picking's hover tracking — see [`mouse_input`].
@@ -868,8 +903,8 @@ fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settin
                     controls,
                     fonts,
                     settings,
+                    ladder,
                     row,
-                    STEPPER_VALUE_WELL_PX,
                     JustifyContent::Center,
                 );
                 spawn_arrow(controls, fonts, row, 1, ">");
@@ -914,8 +949,8 @@ fn spawn_row(card: &mut ChildSpawnerCommands, fonts: &UiFonts, settings: &Settin
                     controls,
                     fonts,
                     settings,
+                    ladder,
                     row,
-                    SLIDER_VALUE_WELL_PX,
                     JustifyContent::FlexEnd,
                 );
             }
@@ -952,25 +987,26 @@ fn spawn_arrow(
     ));
 }
 
-/// The row's value, in a fixed-width well so the control beside it does not shuffle as the value
-/// text's width changes. `width`/`justify` are the only things the two row kinds disagree about.
+/// The row's value, in a fixed-width well ([`Row::value_well_px`]) so the control beside it does not
+/// shuffle as the value text's width changes. `justify` is the only other thing the two row kinds
+/// disagree about.
 fn spawn_value_well(
     controls: &mut ChildSpawnerCommands,
     fonts: &UiFonts,
     settings: &Settings,
+    ladder: &DisplayLadder,
     row: Row,
-    width: f32,
     justify: JustifyContent,
 ) {
     controls
         .spawn(Node {
-            width: Val::Px(width),
+            width: Val::Px(row.value_well_px()),
             justify_content: justify,
             ..default()
         })
         .with_child((
             RowValueText(row),
-            Text::new(row.value(settings)),
+            Text::new(row.value(settings, ladder)),
             TextFont {
                 // SemiBold: the value is what the eye goes to.
                 font: fonts.hud.clone().into(),
@@ -986,6 +1022,7 @@ fn keyboard_input(
     visible: Res<SettingsPageVisible>,
     keys: Res<ButtonInput<KeyCode>>,
     caps: Res<PresentCaps>,
+    ladder: Res<DisplayLadder>,
     mut selection: ResMut<Selection>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
@@ -1004,7 +1041,14 @@ fn keyboard_input(
     let delta = i32::from(keys.just_pressed(KeyCode::ArrowRight))
         - i32::from(keys.just_pressed(KeyCode::ArrowLeft));
     if delta != 0 && selection.row().enabled(&settings, *caps) {
-        change_row(selection.row(), delta, &mut settings, &mut save, *caps);
+        change_row(
+            selection.row(),
+            delta,
+            &mut settings,
+            &mut save,
+            *caps,
+            &ladder,
+        );
     }
 }
 
@@ -1027,6 +1071,7 @@ fn page_pressed(
     tracks: Query<(&SliderTrack, &ComputedNode, &UiGlobalTransform)>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     caps: Res<PresentCaps>,
+    ladder: Res<DisplayLadder>,
     mut selection: ResMut<Selection>,
     mut drag: ResMut<SliderDrag>,
     mut settings: ResMut<Settings>,
@@ -1035,7 +1080,14 @@ fn page_pressed(
     if let Ok(arrow) = arrows.get(press.entity) {
         press.propagate(false);
         if press.button == PointerButton::Primary && arrow.row.enabled(&settings, *caps) {
-            change_row(arrow.row, arrow.delta, &mut settings, &mut save, *caps);
+            change_row(
+                arrow.row,
+                arrow.delta,
+                &mut settings,
+                &mut save,
+                *caps,
+                &ladder,
+            );
         }
     } else if let Ok((track, node, transform)) = tracks.get(press.entity) {
         press.propagate(false);
@@ -1086,6 +1138,7 @@ fn mouse_input(
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     rows: Query<(&RowLine, &Hovered), Changed<Hovered>>,
     caps: Res<PresentCaps>,
+    ladder: Res<DisplayLadder>,
     mut selection: ResMut<Selection>,
     mut drag: ResMut<SliderDrag>,
     mut settings: ResMut<Settings>,
@@ -1102,7 +1155,7 @@ fn mouse_input(
             info!(
                 "settings: {} -> {}",
                 active.row.label(),
-                active.row.value(&settings)
+                active.row.value(&settings, &ladder)
             );
         } else if let Some(cursor) = window.and_then(|window| window.physical_cursor_position()) {
             scrub(active, cursor.x, &mut settings);
@@ -1141,17 +1194,18 @@ fn change_row(
     settings: &mut ResMut<Settings>,
     save: &mut MessageWriter<SaveSettings>,
     caps: PresentCaps,
+    ladder: &DisplayLadder,
 ) {
     let before = **settings;
     let mut next = before;
-    row.step(&mut next, delta, caps);
+    row.step(&mut next, delta, caps, ladder);
     if next == before {
         return;
     }
     // Through `ResMut`'s `DerefMut` so change detection fires and `apply_settings` runs.
     **settings = next;
     save.write(SaveSettings);
-    info!("settings: {} -> {}", row.label(), row.value(&next));
+    info!("settings: {} -> {}", row.label(), row.value(&next, ladder));
 }
 
 /// How far one wheel message asks the list to travel, in the CSS pixels [`ScrollPosition`] is
@@ -1279,6 +1333,7 @@ fn refresh_page(
     settings: Res<Settings>,
     // The greying reads the EFFECTIVE vsync rung, not the stored one — see [`Row::enabled`].
     caps: Res<PresentCaps>,
+    ladder: Res<DisplayLadder>,
     selection: Res<Selection>,
     // A scrubbing hand is not pointing at anything: an arrow the cursor crosses mid-drag must not
     // light up, the same way hover does not move the selection then.
@@ -1326,7 +1381,7 @@ fn refresh_page(
 
     let selected = selection.row();
     for (value, mut text, mut color) in &mut values {
-        let rendered = value.0.value(&settings);
+        let rendered = value.0.value(&settings, &ladder);
         if text.0 != rendered {
             text.0 = rendered;
         }
@@ -1375,10 +1430,17 @@ fn refresh_page(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DisplaySelection, displays};
     use super::*;
 
     /// The unprobed capability state every pure test steps under: all rungs offered.
     const ALL_RUNGS: PresentCaps = PresentCaps::Unprobed;
+
+    /// The display ladder of a world whose monitors have not been synchronised — every variant a
+    /// file can hold, which is what the rows that are not the display row want to step under.
+    fn unlearned() -> DisplayLadder {
+        DisplayLadder::default()
+    }
 
     /// Stepping saturates rather than wrapping — the property that keeps "hold right" from dropping
     /// a player from the highest setting to the lowest.
@@ -1390,10 +1452,10 @@ mod tests {
             shadow_distance: top,
             ..default()
         };
-        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS);
+        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         assert_eq!(settings.shadow_distance, top, "top stays put");
         for _ in 0..ShadowDistance::ORDER.len() {
-            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS);
+            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(settings.shadow_distance, bottom, "bottom stays put");
     }
@@ -1405,9 +1467,9 @@ mod tests {
         for row in Row::ORDER {
             let mut settings = Settings::default();
             for delta in [1, -1, 1, 1, -1, -1] {
-                row.step(&mut settings, delta, ALL_RUNGS);
+                row.step(&mut settings, delta, ALL_RUNGS, &unlearned());
                 assert!(
-                    !row.value(&settings).is_empty(),
+                    !row.value(&settings, &unlearned()).is_empty(),
                     "{row:?} produced an unrenderable value"
                 );
             }
@@ -1421,11 +1483,11 @@ mod tests {
     fn msaa_can_reach_off_and_the_top() {
         let mut settings = Settings::default();
         for _ in 0..5 {
-            Row::Msaa.step(&mut settings, -1, ALL_RUNGS);
+            Row::Msaa.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(settings.msaa, MsaaLevel::Off);
         for _ in 0..5 {
-            Row::Msaa.step(&mut settings, 1, ALL_RUNGS);
+            Row::Msaa.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(settings.msaa, MsaaLevel::X4);
     }
@@ -1439,7 +1501,7 @@ mod tests {
         let mut settings = Settings::default();
         let resolution_before = settings.shadow_resolution;
         for _ in 0..ShadowDistance::ORDER.len() {
-            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS);
+            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         }
         assert!(
             !settings.shadow_distance.casts(),
@@ -1449,11 +1511,11 @@ mod tests {
             settings.shadow_resolution, resolution_before,
             "the distance row must not move the resolution row"
         );
-        assert_eq!(Row::ShadowDistance.value(&settings), "OFF");
+        assert_eq!(Row::ShadowDistance.value(&settings, &unlearned()), "OFF");
 
         let distance_before = settings.shadow_distance;
         for _ in 0..ShadowResolution::ORDER.len() {
-            Row::ShadowResolution.step(&mut settings, 1, ALL_RUNGS);
+            Row::ShadowResolution.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(
             settings.shadow_resolution,
@@ -1467,7 +1529,7 @@ mod tests {
         );
 
         // And OFF is not a one-way door from the page either.
-        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS);
+        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         assert!(settings.shadow_distance.casts());
     }
 
@@ -1476,7 +1538,7 @@ mod tests {
     #[test]
     fn the_render_scale_row_walks_the_ladder_and_saturates_at_native() {
         let mut settings = Settings::default();
-        assert_eq!(Row::RenderScale.value(&settings), "100%");
+        assert_eq!(Row::RenderScale.value(&settings, &unlearned()), "100%");
         for expected in [
             RenderScaleLevel::Percent85,
             RenderScaleLevel::Percent75,
@@ -1484,11 +1546,11 @@ mod tests {
             RenderScaleLevel::Percent50,
             RenderScaleLevel::Percent50,
         ] {
-            Row::RenderScale.step(&mut settings, -1, ALL_RUNGS);
+            Row::RenderScale.step(&mut settings, -1, ALL_RUNGS, &unlearned());
             assert_eq!(settings.render_scale, expected);
         }
         for _ in 0..8 {
-            Row::RenderScale.step(&mut settings, 1, ALL_RUNGS);
+            Row::RenderScale.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(
             settings.render_scale,
@@ -1497,14 +1559,53 @@ mod tests {
         );
     }
 
+    /// **The row can only reach displays this machine has.** Two attached monitors, one of them the
+    /// primary: holding RIGHT stops at the second display, and the rung for the first stores
+    /// `Primary` — the variant window CREATION can honour — rather than its ordinal name. Everything
+    /// the row renders is the display's own name.
+    #[test]
+    fn the_display_row_offers_only_the_attached_monitors() {
+        let ladder = displays::attached(&["Built-in Retina Display", "ARZOPA"], Some(0));
+        let mut settings = Settings::default();
+        assert_eq!(Row::Display.value(&settings, &ladder), "AUTO");
+
+        Row::Display.step(&mut settings, 1, ALL_RUNGS, &ladder);
+        assert_eq!(settings.display, DisplaySelection::Primary);
+        assert_eq!(
+            Row::Display.value(&settings, &ladder),
+            "* BUILT-IN RETINA DISPLAY",
+        );
+
+        for _ in 0..4 {
+            Row::Display.step(&mut settings, 1, ALL_RUNGS, &ladder);
+        }
+        assert_eq!(
+            settings.display,
+            DisplaySelection::Display2,
+            "holding right must stop at the last ATTACHED display",
+        );
+        assert_eq!(Row::Display.value(&settings, &ladder), "ARZOPA");
+
+        // And a file naming a display that is not here renders and steps as the one it falls back
+        // to, rather than as a rung nobody can see.
+        settings.display = DisplaySelection::Display3;
+        assert_eq!(
+            Row::Display.value(&settings, &ladder),
+            "* BUILT-IN RETINA DISPLAY",
+        );
+    }
+
     /// The display row walks the whole ladder and saturates at AUTO — which is the property that
     /// matters, because AUTO is the only rung that hands placement back to the window manager. A
     /// player who picked a display that then went away must be able to hold LEFT and get out; a
     /// wrapping ladder would put "display 3" one keypress past it.
+    ///
+    /// Under the UNSYNCHRONISED ladder, which offers every variant: nothing has been learned about
+    /// this world's monitors, so nothing is narrowed away.
     #[test]
     fn the_display_row_walks_the_ladder_and_saturates_at_auto() {
         let mut settings = Settings::default();
-        assert_eq!(Row::Display.value(&settings), "AUTO");
+        assert_eq!(Row::Display.value(&settings, &unlearned()), "AUTO");
         for expected in [
             DisplaySelection::Primary,
             DisplaySelection::Display1,
@@ -1512,11 +1613,11 @@ mod tests {
             DisplaySelection::Display3,
             DisplaySelection::Display3,
         ] {
-            Row::Display.step(&mut settings, 1, ALL_RUNGS);
+            Row::Display.step(&mut settings, 1, ALL_RUNGS, &unlearned());
             assert_eq!(settings.display, expected);
         }
         for _ in 0..DisplaySelection::ORDER.len() + 2 {
-            Row::Display.step(&mut settings, -1, ALL_RUNGS);
+            Row::Display.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(
             settings.display,
@@ -1532,18 +1633,18 @@ mod tests {
     fn the_detail_budget_row_steps_toward_a_coarser_picture() {
         assert_eq!(Row::LodPixelBudget.kind(), RowKind::Slider);
         let mut settings = Settings::default();
-        assert_eq!(Row::LodPixelBudget.value(&settings), "1.0 PX");
-        Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS);
+        assert_eq!(Row::LodPixelBudget.value(&settings, &unlearned()), "1.0 PX");
+        Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         assert!(
             settings.lod_pixel_budget.pixels() > PixelBudget::default().pixels(),
             "the right arrow must raise the ERROR budget — see the row's hint",
         );
         for _ in 0..64 {
-            Row::LodPixelBudget.step(&mut settings, -1, ALL_RUNGS);
+            Row::LodPixelBudget.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MIN);
         for _ in 0..64 {
-            Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS);
+            Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS, &unlearned());
         }
         assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MAX);
     }
@@ -1579,10 +1680,10 @@ mod tests {
                 for direction in [-1, 1] {
                     let mut walked = settings;
                     for _ in 0..64 {
-                        row.step(&mut walked, direction, ALL_RUNGS);
+                        row.step(&mut walked, direction, ALL_RUNGS, &unlearned());
                     }
                     let saturated = walked;
-                    row.step(&mut walked, direction, ALL_RUNGS);
+                    row.step(&mut walked, direction, ALL_RUNGS, &unlearned());
                     assert_eq!(
                         walked, saturated,
                         "{row:?} stepping {direction} past the end of its ladder must compare \
@@ -1612,21 +1713,21 @@ mod tests {
         };
         let mut settings = Settings::default();
         assert_eq!(settings.vsync, VsyncMode::On);
-        Row::VSync.step(&mut settings, -1, metal);
+        Row::VSync.step(&mut settings, -1, metal, &unlearned());
         assert_eq!(
             settings.vsync,
             VsyncMode::Off,
             "one step down on Metal must skip the unoffered FAST"
         );
-        Row::VSync.step(&mut settings, 1, metal);
+        Row::VSync.step(&mut settings, 1, metal, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::On);
 
         let mut settings = Settings::default();
-        Row::VSync.step(&mut settings, -1, ALL_RUNGS);
+        Row::VSync.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::Fast, "unprobed offers all rungs");
-        Row::VSync.step(&mut settings, -1, ALL_RUNGS);
+        Row::VSync.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::Off);
-        Row::VSync.step(&mut settings, -1, ALL_RUNGS);
+        Row::VSync.step(&mut settings, -1, ALL_RUNGS, &unlearned());
         assert_eq!(settings.vsync, VsyncMode::Off, "the floor saturates");
 
         // A stored FAST on a Metal surface: not offered, so a step resolves into the offered set.
@@ -1634,7 +1735,7 @@ mod tests {
             vsync: VsyncMode::Fast,
             ..default()
         };
-        Row::VSync.step(&mut settings, 1, metal);
+        Row::VSync.step(&mut settings, 1, metal, &unlearned());
         assert!(
             metal.offers(settings.vsync),
             "stepping an unoffered value must land inside the offered set, got {:?}",
@@ -1788,7 +1889,7 @@ mod tests {
                 ..default()
             };
             for _ in 0..64 {
-                row.step(&mut settings, -1, ALL_RUNGS);
+                row.step(&mut settings, -1, ALL_RUNGS, &unlearned());
             }
             loop {
                 let fraction = row
@@ -1802,7 +1903,7 @@ mod tests {
                     "{row:?}: a drag to the current handle position must be a no-op",
                 );
                 let mut next = settings;
-                row.step(&mut next, 1, ALL_RUNGS);
+                row.step(&mut next, 1, ALL_RUNGS, &unlearned());
                 if next == settings {
                     break;
                 }

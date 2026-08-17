@@ -53,6 +53,9 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/hud.rs",
     "src/crew_ui.rs",
     "src/drive_hud.rs",
+    // Builds the display row's values — the one place a rendered string is derived from an OS
+    // string rather than written here, which is why it carries a sanitizer.
+    "src/settings/displays.rs",
     "src/settings/ui.rs",
     "src/sight/reticle.rs",
     "src/state.rs",
