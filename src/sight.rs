@@ -415,17 +415,16 @@ pub(crate) fn drive_gunner_aim(
         return;
     }
 
-    // The field the view's authored optic derives (`spec::Optics`) sets both the magnification and
-    // the cursor's reach — the margin is a fixed fraction of the half-FOV, so the travel circle IS
-    // the drawn optic rim. Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews`
-    // lands.
+    // The field the view's authored optic frames (`spec::Optics`) sets the cursor's reach — the
+    // margin is a fixed fraction of the half-FOV, so the travel circle IS the drawn optic rim.
+    // Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews` lands.
     let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
     let margin = optic_margin(fov);
 
     // Radians of commanded aim per mouse count, per radian of vertical FOV. What the knob tunes is
     // the cursor's SCREEN travel, so scaling with the field holds the count of mouse-counts needed
-    // to cross the optic the same at every magnification (a narrower field magnifies, so the same
-    // screen move is a smaller angle). TUNED at 0.0005 rad/count against a 0.12 rad field.
+    // to cross the optic the same in every instrument (a narrower field puts the same screen move
+    // over a smaller angle). TUNED at 0.0005 rad/count against a 0.12 rad field.
     const SENSITIVITY_PER_FOV: f32 = 0.0005 / 0.12;
     let sensitivity = SENSITIVITY_PER_FOV * fov;
 
@@ -809,27 +808,32 @@ mod tests {
         assert!((optic_margin(0.24) - 2.0 * optic_margin(0.12)).abs() < 1e-9);
     }
 
-    /// **The deflection bound is DERIVED from the magnification, never a stored angle.** Halving a
-    /// sight's magnification doubles the field it frames and so doubles the reach the cursor is
-    /// clamped to — a bound that carried its own constant would sit still through all of it, and a
-    /// bound that read the magnification directly would move the wrong way.
+    /// **The deflection bound is DERIVED from the field the optic frames, never a stored angle and
+    /// never its magnification.** A sight framing twice the field gives the cursor twice the reach;
+    /// a bound that carried its own constant would sit still through all of it.
     #[test]
-    fn the_deflection_bound_follows_the_magnification() {
-        let bound =
-            |magnification: f32| optic_margin(Optics::Magnified(magnification).vertical_fov());
-        for magnification in [1.0_f32, 2.5, 4.0, 8.0] {
-            // Inversely proportional, which is the apparent-field law carried through the fraction.
+    fn the_deflection_bound_follows_the_field() {
+        let bound = |magnification: f32, field_deg: f32| {
+            optic_margin(
+                Optics::Magnified {
+                    magnification,
+                    field_deg,
+                }
+                .vertical_fov(),
+            )
+        };
+        for field_deg in [6.25_f32, 12.5, 25.0, 50.0] {
+            // Proportional, which is the fixed fraction of the half-field carried through.
             assert!(
-                (bound(magnification) * magnification - bound(1.0)).abs() < 1e-6,
-                "the bound at {magnification}× is not the 1× bound divided by the magnification",
+                (bound(2.5, field_deg) * 25.0 - bound(2.5, 25.0) * field_deg).abs() < 1e-6,
+                "the bound over {field_deg}° is not the 25° bound scaled by the field",
             );
+            // And the instrument's power is not a term in it.
+            assert_eq!(bound(2.5, field_deg), bound(12.0, field_deg));
         }
-        assert!(
-            bound(2.5) > 2.0 * bound(8.0),
-            "a 2.5× sight must reach far wider than an 8× one",
-        );
-        // One worked instance, as fixture data: 2.5× frames 25°, so the cursor reaches 0.9 × 12.5°.
-        assert!((bound(2.5).to_degrees() - 11.25).abs() < 1e-3);
+        // One worked instance, as fixture data: the TZF 9b frames 25°, so the cursor reaches
+        // 0.9 × 12.5°.
+        assert!((bound(2.5, 25.0).to_degrees() - 11.25).abs() < 1e-3);
     }
 
     /// The yaw/pitch ↔ hull-local direction conversion round-trips: decomposing `local_dir`'s output

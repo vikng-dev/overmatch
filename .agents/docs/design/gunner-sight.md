@@ -102,34 +102,35 @@ alternatives: they are the two ends of one continuous knob.
   can never leave the drawn glass at any `k` — the property the mask's coherence rests on, tested
   across the whole ladder.
 
-## 2026-08-17 revision: the sight is authored by magnification
+## 2026-08-17 revision: a view is authored as the instrument it is
 
-An optic is specified by its magnification, so that is what the asset authors — `2.5` for the
-Tiger's TZF 9b, not the angle a camera happens to want. Magnification is a ratio and needs a
-reference: the eyepiece's **apparent field**, the angular width of the sight picture as it fills the
-eye, related to the field the camera frames by `apparent = magnification × true`. One constant
-(`spec::APPARENT_FIELD_DEG`, 62.5° — the TZF 9b's verified 2.5× / 25° pair) is the reference for
-every optic on every vehicle, and `spec::Optics::vertical_fov` is the one place the ratio becomes an
-angle.
+A view carries `spec::Optics`, not a bare angle: `Magnified(magnification, field_deg)` for an
+instrument, `Unaided(°)` for the naked eye a commander's hatch gives. Two variants because they are
+two different eyes, and a hatch has no magnification to state.
 
-A view therefore carries `spec::Optics`, not a field: `Magnified(×)` for an instrument, `Unaided(°)`
-for the naked eye a commander's hatch gives. Two variants because they are two different facts, not
-two spellings of one — an optic that authored both its magnification and its field could contradict
-itself, and a hatch has no magnification to state. A selectable magnification ladder is this same
-variant carrying its steps.
+**An optic authors both of its numbers, off the data sheet, and neither derives the other.** The
+Tiger's TZF 9b is `2.5×` over a `25°` true field, both measured. Deriving the field from the
+magnification through one game-wide eyepiece constant was rejected — real instruments share no such
+constant — and nothing cross-checks the pair, because there is no reference left to check it
+against. Magnification is authored truth about the instrument, field is authored truth about what it
+frames, and `spec::Optics::vertical_fov` is the one place the authored degrees become radians.
 
-Everything downstream already read the field rather than a stored angle, so the 2.5× authoring moved
-with it and nothing needed a second edit: the cursor's deflection bound is
-`OPTIC_RADIUS_FRACTION × fov/2` (3.1° → 11.25°), the drawn glass is that bound measured through the
-camera's own projection, and the mask's on-screen radius is unchanged — the two magnification terms
-cancel, leaving only the projection's `tan` (MEASURED: under 2% of the radius across 1×–12×).
+Only `validate()` reads the magnification today, and that is correct. It is the instrument's
+identity and the seat a selectable ladder sits in; a consumer invented before that ladder exists
+would be a consumer invented to satisfy a lint.
 
-The range scale is angles and did not move, but it now sits in a field 3.7× wider: the whole
-200–4000 m graticule spans **3.37° ≈ 145 px on a 1080-tall viewport** (MEASURED, 88 mm at 773 m/s),
-inside a glass 970 px across. It used to overflow the glass and be clipped; it now fits with room
-over. The one consequence to watch is the numbered 400 m graduations, which near the dialed range
-stand ~10–15 px apart — legible marks, crowded labels. Thinning the numbering (or shortening the
-scale) is a sight-design decision, not a consequence of the derivation.
+Everything downstream already read the field rather than a stored angle, so nothing needed a second
+edit: the cursor's deflection bound is `OPTIC_RADIUS_FRACTION × fov/2` (3.1° → 11.25°), the drawn
+glass is that bound measured through the camera's own projection, and the mask's on-screen radius is
+invariant under the field — the two field terms cancel, leaving only the projection's `tan`
+(MEASURED: under 2% of the radius across a 5.2°–62.5° spread).
+
+The range scale is angles and did not move, but it now sits in a field 3.7× wider than the old
+authored angle: the whole 200–4000 m graticule spans **3.37° ≈ 145 px on a 1080-tall viewport**
+(MEASURED, 88 mm at 773 m/s), inside a glass 970 px across. It used to overflow the glass and be
+clipped; it now fits with room over. The one consequence to watch is the numbered 400 m graduations,
+which near the dialed range stand ~10–15 px apart — legible marks, crowded labels. Thinning the
+numbering (or shortening the scale) is a sight-design decision.
 
 ## 2026-08-17 revision: the mask is a style, and one style is only framing
 

@@ -343,15 +343,12 @@ TankSpec(
         ),
     },
     views: {
-        // The gunner looks through an INSTRUMENT, so his view is authored the way an instrument is
-        // specified — by magnification. The field it frames follows from the eyepiece's apparent
-        // field (`spec::APPARENT_FIELD_DEG`): 2.5× → 25°. The commander looks through a hatch, so
-        // his view authors the field itself, in degrees like every other angle here.
-        //
-        // The gunner's sight is the TZF 9b: 2.5× over a 25° field (both MEASURED off the
-        // instrument's data sheet). `requires` gates the view — a dead crewman blacks it out.
-        Gunner:    (node: "Main_Gun_Pitch", optics: Magnified(2.5), requires: [Gunner]),
-        Commander: (node: "Turret_Yaw",     optics: Unaided(45.0),  requires: [Commander]),
+        // The gunner's sight is the TZF 9b: 2.5× over a 25° true field, both MEASURED off the
+        // instrument's data sheet. The commander looks through a hatch, so his view has no
+        // magnification to state and authors the field alone. `requires` gates the view — a dead
+        // crewman blacks it out.
+        Gunner:    (node: "Main_Gun_Pitch", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
+        Commander: (node: "Turret_Yaw",     optics: Unaided(45.0), requires: [Commander]),
     },
     capabilities: {
         Drive: [Driver, Engine, Transmission],

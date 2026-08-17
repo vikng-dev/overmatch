@@ -880,8 +880,11 @@ mod tests {
     /// The fixture's viewport, in px.
     const VIEWPORT: UVec2 = UVec2::new(1280, 720);
     /// The instrument every fixture below looks through — fixture data, a middling gunnery sight.
-    const OPTICS: Optics = Optics::Magnified(2.5);
-    /// The field it frames (rad), through the one derivation the client uses: one milliradian of lay
+    const OPTICS: Optics = Optics::Magnified {
+        magnification: 2.5,
+        field_deg: 25.0,
+    };
+    /// The field it frames (rad), through the one conversion the client uses: one milliradian of lay
     /// is a pixel here, so a mark placed on the bore instead of the sight line lands tens out.
     const FOV: f32 = OPTICS.vertical_fov();
     /// Where the gun node stands: far from the world origin, so a placement that composes the wrong
@@ -1386,7 +1389,7 @@ mod tests {
 
         /// The same picture seen through an arbitrary instrument — the camera's projection and the
         /// sight's bound both come off the one authored `optics`, exactly as the client derives
-        /// them, so a test can change the magnification and nothing else.
+        /// them, so a test can change the instrument and nothing else.
         fn through(optics: Optics, viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
             let fov = optics.vertical_fov();
             let hull = hull();
@@ -1634,33 +1637,37 @@ mod tests {
         assert_eq!(start, MaskStyle::Aperture);
     }
 
-    /// **The `Aperture` glass is the same size on screen at every magnification.** Its rim is
-    /// `OPTIC_RADIUS_FRACTION` of the half-field measured through that field's own projection, so
-    /// the two magnification terms cancel and the circle is furniture, not a zoom readout. A radius
-    /// that moved with the magnification would mean something in this path had coupled to an
-    /// absolute angle instead of a fraction of the view. (The `Framed` rim carries no angle at all,
-    /// so it is invariant by construction.)
+    /// **The `Aperture` glass is the same size on screen whatever field the optic frames.** Its rim
+    /// is `OPTIC_RADIUS_FRACTION` of the half-field measured through that field's own projection, so
+    /// the two field terms cancel and the circle is furniture, not a zoom readout. A radius that
+    /// moved with the field would mean something in this path had coupled to an absolute angle
+    /// instead of a fraction of the view. (The `Framed` rim carries no angle at all, so it is
+    /// invariant by construction.)
     ///
     /// The cancellation is exact only in the small-angle limit — the projection carries `tan`, the
-    /// bound does not — so what is left is the `tan` term alone. MEASURED across a 1×–12× spread of
-    /// instruments it moves the radius by under 2%, against the 12× a coupled radius would move by,
+    /// bound does not — so what is left is the `tan` term alone. MEASURED across a 5.2°–62.5° spread
+    /// of fields it moves the radius by under 2%, against the 12× a coupled radius would move by,
     /// which is what makes the bound below a statement about the law rather than about floats.
     #[test]
-    fn the_drawn_radius_is_invariant_under_magnification() {
+    fn the_drawn_radius_is_invariant_under_the_field() {
         /// The `tan` residual, as a fraction of the radius. MEASURED over the sweep below.
         const TAN_RESIDUAL: f32 = 0.02;
 
-        let radius = |magnification: f32| {
-            OpticPicture::through(Optics::Magnified(magnification), VIEWPORT, None, 0.0)
+        let radius = |field_deg: f32| {
+            let optics = Optics::Magnified {
+                magnification: 2.5,
+                field_deg,
+            };
+            OpticPicture::through(optics, VIEWPORT, None, 0.0)
                 .glass(MaskStyle::Aperture)
                 .radius
         };
-        let reference = radius(2.5);
-        for magnification in [1.0_f32, 2.5, 4.0, 8.0, 12.0] {
-            let drawn = radius(magnification);
+        let reference = radius(25.0);
+        for field_deg in [62.5_f32, 25.0, 15.625, 7.8125, 5.208_333] {
+            let drawn = radius(field_deg);
             assert!(
                 (drawn - reference).abs() < TAN_RESIDUAL * reference,
-                "a {magnification}× sight draws its glass at {drawn} of the viewport height, \
+                "a sight framing {field_deg}° draws its glass at {drawn} of the viewport height, \
                  against {reference} for the fixture — the rim has coupled to the field",
             );
         }

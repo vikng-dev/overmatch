@@ -187,51 +187,47 @@ impl ViewKind {
     }
 }
 
-/// The eyepiece's **apparent field** (DEGREES): the angular width of the sight picture as it fills
-/// the observer's eye. An optic trades that fixed field against the scene it frames —
-/// `apparent = magnification × true` — so the TRUE field, which is the camera's, is
-/// `APPARENT_FIELD_DEG / magnification`.
+/// How a view's vertical field is authored — the two kinds of eye a crewman uses.
 ///
-/// A property of the instrument CLASS, not of a vehicle: one eyepiece constant is what makes a bare
-/// magnification mean something, and it is the only reference any optic on any tank is read against.
-/// MEASURED: the TZF 9b is 2.5× over a 25° true field.
-pub const APPARENT_FIELD_DEG: f32 = 62.5;
-
-/// How a view's vertical field is authored — the two kinds of eye a crewman uses, and the reason a
-/// view carries one number rather than two.
-///
-/// An OPTIC is authored by what an optic is specified by: its magnification. The field it frames is
-/// derived through [`APPARENT_FIELD_DEG`], never authored beside it, so a sight cannot claim a
-/// magnification its field contradicts. A NAKED EYE has no magnification to speak of, so it authors
-/// the field itself. One source of truth per view either way, and no per-vehicle branch: which
+/// An OPTIC authors BOTH numbers off the instrument's data sheet: its magnification, which is the
+/// instrument's identity and the seat a selectable ladder sits in, and the field it frames, which is
+/// the camera's. Neither derives the other and nothing cross-checks them. A NAKED EYE has no
+/// magnification to state, so it authors the field alone. No per-vehicle branch either way: which
 /// variant a view uses is a property of the instrument the data names.
-///
-/// A selectable magnification ladder is this same variant carrying its steps.
 #[derive(Deserialize, Clone, Copy, Debug)]
 pub enum Optics {
-    /// A magnified instrument, by its MAGNIFICATION (×) — `2.5` is a 2.5× sight.
-    Magnified(f32),
+    /// A magnified instrument: its MAGNIFICATION (×) and the vertical field it frames in DEGREES.
+    Magnified { magnification: f32, field_deg: f32 },
     /// The naked eye, by its vertical field in DEGREES.
     Unaided(f32),
 }
 
 impl Optics {
-    /// The vertical field of view the camera frames (RADIANS) — the one place magnification becomes
-    /// an angle, and where these authored degrees convert.
+    /// The vertical field of view the camera frames (RADIANS) — where these authored degrees
+    /// convert, once.
     pub const fn vertical_fov(self) -> f32 {
         match self {
-            Optics::Magnified(magnification) => (APPARENT_FIELD_DEG / magnification).to_radians(),
-            Optics::Unaided(field_deg) => field_deg.to_radians(),
+            Optics::Magnified { field_deg, .. } | Optics::Unaided(field_deg) => {
+                field_deg.to_radians()
+            }
         }
     }
 
-    /// The authored magnitude and the unit it was typed in, so a rejection quotes the author's own
-    /// number back at them rather than a derived one.
-    fn authored(self) -> (f32, &'static str) {
+    /// Every authored magnitude with the unit it was typed in, so a rejection quotes the author's
+    /// own number back at them rather than a derived one.
+    fn authored(self) -> impl Iterator<Item = (f32, &'static str)> {
         match self {
-            Optics::Magnified(magnification) => (magnification, "magnification (×)"),
-            Optics::Unaided(field_deg) => (field_deg, "field (degrees)"),
+            Optics::Magnified {
+                magnification,
+                field_deg,
+            } => [
+                Some((magnification, "magnification (×)")),
+                Some((field_deg, "field (degrees)")),
+            ],
+            Optics::Unaided(field_deg) => [Some((field_deg, "field (degrees)")), None],
         }
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -976,31 +972,31 @@ impl TankSpec {
                 }
             }
         }
-        // Every view's derived FOV is a DIVISOR downstream, not merely a camera setting: both LOD
-        // ladders derive every switch distance through `2·tan(fov/2)`
+        // Every view's FOV is a DIVISOR downstream, not merely a camera setting: both LOD ladders
+        // derive every switch distance through `2·tan(fov/2)`
         // (`view::ViewFacts::sub_pixel_distance_m`) and the sight derives its cursor-travel margin
         // and sensitivity from it. A NaN authored here propagates into NaN range boundaries, which
         // compare false against every distance and silently delete the ground; a negative one
-        // inverts the range chain, and a magnification is a divisor of its own before any of that.
-        // None is a picture bug that leads back to a spec sheet, so the sheet refuses them.
+        // inverts the range chain. None is a picture bug that leads back to a spec sheet, so the
+        // sheet refuses them.
         for (kind, view) in &self.views {
-            // Checked in the AUTHORED unit, so the error quotes what the author typed; the derived
-            // field is checked separately below because a magnification is legal long after the
-            // field it implies has stopped being one.
-            let (authored, unit) = view.optics.authored();
-            if !authored.is_finite() || authored <= 0.0 {
-                return Err(format!(
-                    "view `{}`: {unit} must be finite and > 0 (got {authored})",
-                    kind.label(),
-                )
-                .into());
+            // Every authored number, each in its own unit, so the error quotes what the author
+            // typed. A magnification reaches nothing downstream, but a sheet that states an
+            // impossible one is a sheet whose instrument is wrong.
+            for (authored, unit) in view.optics.authored() {
+                if !authored.is_finite() || authored <= 0.0 {
+                    return Err(format!(
+                        "view `{}`: {unit} must be finite and > 0 (got {authored})",
+                        kind.label(),
+                    )
+                    .into());
+                }
             }
             let fov = view.optics.vertical_fov();
             if fov <= 0.0 || fov >= core::f32::consts::PI {
                 return Err(format!(
-                    "view `{}`: the derived fov must be in (0, π) radians — a perspective \
-                     projection has no half-angle at or past 90°, and none at zero (got {fov} rad \
-                     from {unit} {authored})",
+                    "view `{}`: the field must be in (0, π) radians — a perspective projection has \
+                     no half-angle at or past 90°, and none at zero (got {fov} rad)",
                     kind.label(),
                 )
                 .into());
@@ -1423,7 +1419,7 @@ TankSpec(
         ),
     },
     views: {
-        Gunner: (node: "Cannon_Sight", optics: Magnified(2.5), requires: [Gunner]),
+        Gunner: (node: "Cannon_Sight", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
     },
 )
 "#;
@@ -1451,32 +1447,46 @@ TankSpec(
             .expect("the mutation fixture must be valid before any mutation");
     }
 
-    /// **Magnification is a ratio against the eyepiece's apparent field, and that is the whole
-    /// derivation.** `apparent = magnification × true`, so doubling the magnification halves the
-    /// field the camera frames and the product is the eyepiece constant at every step of any ladder.
+    /// **A view frames the field it authors, and the magnification is not a term in it.** Both
+    /// variants pass their own degrees through the one conversion; two instruments of different
+    /// power over the same field frame the same angle.
     #[test]
-    fn magnification_derives_the_true_field() {
-        for magnification in [1.0_f32, 2.5, 4.0, 5.0, 8.0, 12.0] {
-            let true_field = Optics::Magnified(magnification).vertical_fov().to_degrees();
+    fn the_authored_field_is_the_framed_field() {
+        for field_deg in [6.25_f32, 12.5, 25.0, 45.0] {
+            let framed = Optics::Magnified {
+                magnification: 2.5,
+                field_deg,
+            }
+            .vertical_fov()
+            .to_degrees();
             assert!(
-                (magnification * true_field - APPARENT_FIELD_DEG).abs() < 1e-3,
-                "{magnification}× frames {true_field}°, which is not the {APPARENT_FIELD_DEG}° \
-                 apparent field",
+                (framed - field_deg).abs() < 1e-3,
+                "an optic authoring {field_deg}° frames {framed}°",
             );
         }
-        // The verified pair the eyepiece constant is set from, and its double.
-        assert!((Optics::Magnified(2.5).vertical_fov().to_degrees() - 25.0).abs() < 1e-3);
-        assert!((Optics::Magnified(5.0).vertical_fov().to_degrees() - 12.5).abs() < 1e-3);
+        assert_eq!(
+            Optics::Magnified {
+                magnification: 12.0,
+                field_deg: 25.0,
+            }
+            .vertical_fov(),
+            Optics::Magnified {
+                magnification: 2.5,
+                field_deg: 25.0,
+            }
+            .vertical_fov(),
+        );
         // A naked eye passes its own field through, converted from the authored degrees.
         assert!((Optics::Unaided(45.0).vertical_fov() - core::f32::consts::FRAC_PI_4).abs() < 1e-6);
     }
 
     /// `validate()` rejects optics that would silently delete the picture instead of showing a wrong
-    /// one. The derived field is a DIVISOR downstream — the terrain LOD ladder derives every switch
-    /// distance from `dev / fov` — so `NaN` propagates into `NaN` range boundaries, which compare
-    /// false against every distance and simply stop drawing the ground, with nothing anywhere
-    /// pointing back at a spec sheet. Negative inverts the chain; a magnification small enough to
-    /// spread the apparent field past π has no perspective half-angle.
+    /// one. The field is a DIVISOR downstream — the terrain LOD ladder derives every switch distance
+    /// from `dev / fov` — so `NaN` propagates into `NaN` range boundaries, which compare false
+    /// against every distance and simply stop drawing the ground, with nothing anywhere pointing
+    /// back at a spec sheet. Negative inverts the chain; a field at or past 180° has no perspective
+    /// half-angle. **Both of a magnified optic's numbers are checked**, the magnification included:
+    /// it reaches nothing downstream, but an impossible one means the sheet's instrument is wrong.
     #[test]
     fn validate_rejects_optics_that_are_not_a_view() {
         let with_optics = |optics: Optics| {
@@ -1484,12 +1494,18 @@ TankSpec(
             spec.views.get_mut(&ViewKind::Gunner).unwrap().optics = optics;
             spec
         };
+        let magnified = |magnification, field_deg| Optics::Magnified {
+            magnification,
+            field_deg,
+        };
         for optics in [
-            Optics::Magnified(0.0),
-            Optics::Magnified(-2.5),
-            Optics::Magnified(f32::NAN),
-            // Finite and positive, but it spreads the apparent field over more than π.
-            Optics::Magnified(0.3),
+            magnified(0.0, 25.0),
+            magnified(-2.5, 25.0),
+            magnified(f32::NAN, 25.0),
+            magnified(2.5, 0.0),
+            magnified(2.5, -25.0),
+            magnified(2.5, f32::INFINITY),
+            magnified(2.5, 180.0),
             Optics::Unaided(0.0),
             Optics::Unaided(f32::INFINITY),
             Optics::Unaided(180.0),
@@ -1499,8 +1515,8 @@ TankSpec(
         }
         // A magnified optic, a barely-magnified one, and a wide naked eye all pass.
         for optics in [
-            Optics::Magnified(2.5),
-            Optics::Magnified(1.0),
+            magnified(2.5, 25.0),
+            magnified(1.0, 60.0),
             Optics::Unaided(45.0),
         ] {
             with_optics(optics)

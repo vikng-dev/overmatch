@@ -431,8 +431,8 @@ pub(crate) fn blended_look(
 /// Parked at the **Gun node** (the elevation pivot / mantlet) — the coaxial sight's natural home.
 /// The camera drops the `ViewSubjectBody` channel in gunner view (`sight`'s
 /// `apply_sight_camera_profile`), so parking inside the mantlet clips no own geometry. The FOV is
-/// the one the view's authored optic derives (`spec::Optics`) — narrow in proportion to its
-/// magnification, against a naked-eye commander view.
+/// the field the view's authored optic frames (`spec::Optics`) — narrow, against a naked-eye
+/// commander view.
 ///
 /// The gun end of the blend is the **sight line**, the bore depressed by the current superelevation
 /// (`sight::sight_line`, shared with the ranging reticle and the optic mask so the three cannot
