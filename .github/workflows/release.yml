@@ -288,6 +288,26 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # The Windows smoke lane's server EXECUTABLE — a test fixture, never a shipped artifact: that
+      # lane needs a server its runner can exec and the shipped server is a Linux ELF
+      # (`smoke-windows` below carries the whole deviation). Its PLACEMENT is load-bearing. This leg
+      # has just compiled the same crate from the same commit for the same target and profile, so
+      # the target dir is warm and only this second binary is codegen'd. Anywhere downstream it is a
+      # cold `lto = "thin"` + `codegen-units = 1` link of the whole crate — MEASURED at 32 min on
+      # v0.5.2, and in `smoke-windows` that lands serially on the release critical path.
+      - name: Build the Windows server executable (smoke fixture)
+        if: contains(matrix.target, 'windows')
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin overmatch-server
+
+      - uses: actions/upload-artifact@v4
+        if: contains(matrix.target, 'windows')
+        with:
+          name: smoke-fixture-server-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/overmatch-server.exe
+          retention-days: 1
+          if-no-files-found: error
+
   # Tag pushes only: attach the archives produced above to the draft Release. This job has
   # release-write permission but performs no checkout, compilation, build script, or proc-macro
   # execution.
@@ -437,27 +457,26 @@ jobs:
   #
   # ONE DEVIATION, and it is forced: there is no Windows server artifact and a Windows runner
   # cannot execute the Linux one (GitHub's Windows runners run Windows containers only, so there is
-  # no Linux sandbox to borrow either). So the server EXECUTABLE is built here from the same
-  # commit, while its ASSETS are the shipped server tarball's, unpacked and handed to it through
-  # `BEVY_ASSET_ROOT` exactly as the droplet's unit does. That keeps the whole claim intact: the
-  # client under test is the shipped archive, byte for byte, and both halves of the `protocol_id`
-  # still have to agree — the compile-time fingerprint (same commit) and the runtime map digest
-  # (the shipped map bytes on the server side, the archive's own on the client's).
+  # no Linux sandbox to borrow either). So the server EXECUTABLE is the `smoke-fixture-server-*`
+  # artifact — this same commit, compiled for MSVC on `build-client`'s Windows leg where the target
+  # dir is warm — while its ASSETS are the shipped server tarball's, unpacked and handed to it
+  # through `BEVY_ASSET_ROOT` exactly as the droplet's unit does. That keeps the whole claim intact:
+  # the client under test is the shipped archive, byte for byte, and both halves of the
+  # `protocol_id` still have to agree — the compile-time fingerprint (same commit) and the runtime
+  # map digest (the shipped map bytes on the server side, the archive's own on the client's).
   #
-  # It builds `--release --target x86_64-pc-windows-msvc` under `build-client`'s cache key on
-  # purpose: that job saved a warm dependency cache for this exact target and profile minutes ago,
-  # so only this crate's own artifacts are compiled here.
+  # `build-server` stays a `needs` for that ASSET tree: this lane downloads the shipped Linux
+  # tarball and runs the fixture against its unpacked assets. Nothing is compiled here.
   smoke-windows:
     needs: [build-client, build-server]
     if: github.event_name != 'workflow_dispatch' || inputs.tag == ''
     permissions:
       contents: read
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
-      # The server is compiled here, so this checkout is a real one — but still no LFS: nothing the
-      # server binary needs to COMPILE is an LFS object (`build/icons/window_icon.png` is tracked
-      # plainly; the assets it opens arrive in the tarball).
+      # Only `scripts/ci/archive-smoke.sh` is wanted from the repo — no assets, no LFS. Everything
+      # under test arrives as an artifact.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -471,17 +490,12 @@ jobs:
         with:
           name: overmatch-client-x86_64-pc-windows-msvc
           path: dist
-
-      - uses: dtolnay/rust-toolchain@stable
+      # Kept out of `dist`: that directory holds the archives a user downloads, and this is a
+      # fixture that ships to nobody.
+      - uses: actions/download-artifact@v4
         with:
-          targets: x86_64-pc-windows-msvc
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: x86_64-pc-windows-msvc
-
-      - name: Build the Windows server executable
-        shell: bash
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc --bin overmatch-server
+          name: smoke-fixture-server-x86_64-pc-windows-msvc
+          path: fixture
 
       # What a Windows user does with a downloaded zip is Explorer's "Extract All", which is
       # `Expand-Archive` — no `tar`, no path surgery, no post-extraction fixups. The server tarball
@@ -507,7 +521,7 @@ jobs:
           # The server binary is this run's build; its asset root is the shipped tarball's tree.
           SMOKE_SERVER_ASSET_ROOT="${root}/smoke/overmatch-server" \
             bash scripts/ci/archive-smoke.sh \
-              target/x86_64-pc-windows-msvc/release/overmatch-server.exe \
+              fixture/overmatch-server.exe \
               "${client}"
 
   # Tag pushes only: put the server artifact built above on the droplet, before any Release becomes
