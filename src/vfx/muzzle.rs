@@ -173,13 +173,16 @@ const FAR_FULL_DRESSING: f32 = 400.0;
 
 pub(super) fn plugin(app: &mut App) {
     let shadows = MuzzleShadows::from_env();
+    let blast_sheet = BlastSheet::from_env();
     // The RESOLVED policy, logged verbatim as the token the env knob accepts — an A/B runner
     // (`scripts/perf/run-fire-capture.sh`) greps this per condition and fails on a mismatch, so a
     // typo'd or dropped `OVERMATCH_MUZZLE_SHADOWS` cannot silently measure the default arm twice.
     info!("muzzle_shadows: resolved {}", shadows.token());
+    info!("blast_sheet: resolved {}", blast_sheet.token());
     app.init_resource::<MuzzleLightRing>()
         .init_resource::<MgSmokeCadence>()
         .insert_resource(shadows)
+        .insert_resource(blast_sheet)
         .add_systems(Startup, setup_muzzle_assets)
         .add_observer(on_main_gun_fire)
         .add_observer(on_mg_fire)
@@ -253,6 +256,56 @@ impl MuzzleShadows {
     /// Whether the main gun's muzzle light casts.
     fn main_gun_casts(self) -> bool {
         self != Self::Off
+    }
+}
+
+/// One token per sheet index, in [`MuzzleVfxAssets::blast_atlas`] order — the same suffixes the
+/// atlases are loaded under in [`setup_muzzle_assets`], so the resolved log line names the file.
+const BLAST_SHEET_TOKENS: [&str; BLAST_SHEETS] = ["a", "b", "c", "d", "e", "f"];
+
+/// Which of the [`BLAST_SHEETS`] blast sheets a shot plays, read once at plugin setup.
+///
+/// The shipped rotation picks uniformly per shot, which is what makes a sheet unjudgeable on its
+/// own: nothing on screen says which fireball just played, and two sheets cannot be put against
+/// each other deliberately. Pinning one is that lever.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(super) enum BlastSheet {
+    /// The shipped behaviour: a uniform draw per shot over all [`BLAST_SHEETS`].
+    #[default]
+    Rotate,
+    /// Every shot plays this sheet index.
+    Pinned(usize),
+}
+
+impl BlastSheet {
+    /// Parse `OVERMATCH_BLAST_SHEET`. Every variant has an EXPLICIT token, the shipped rotation
+    /// included: a judging pass that wants the rotation back has to be able to NAME it rather than
+    /// rely on whatever the default happens to be on the day.
+    fn from_env() -> Self {
+        Self::parse(std::env::var("OVERMATCH_BLAST_SHEET").ok().as_deref())
+    }
+
+    /// The knob's whole grammar, split out so it is testable without writing process-global state.
+    fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("rotate") => Self::Rotate,
+            Some(token) => BLAST_SHEET_TOKENS
+                .iter()
+                .position(|sheet| *sheet == token)
+                .map_or(Self::Rotate, Self::Pinned),
+            // Unset or unrecognized: the shipped rotation. An unrecognized value is visible in the
+            // resolved-policy log line rather than in a parse failure.
+            None => Self::Rotate,
+        }
+    }
+
+    /// The token this policy is named by — the same string [`Self::from_env`] accepts, so the
+    /// logged value round-trips back through the knob.
+    fn token(self) -> &'static str {
+        match self {
+            Self::Rotate => "rotate",
+            Self::Pinned(sheet) => BLAST_SHEET_TOKENS[sheet],
+        }
     }
 }
 
@@ -510,6 +563,7 @@ fn on_main_gun_fire(
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
     shadows: Res<MuzzleShadows>,
+    blast_sheet: Res<BlastSheet>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
     // The decoded terrain surface, when the world has one — the ground-dust gate's only query.
@@ -576,7 +630,8 @@ fn on_main_gun_fire(
         &mut ring,
         assets.quad.clone(),
         BillboardSpec {
-            material: assets.blast_material(assets.blast_atlas[blast_pick(&mut rng)].clone()),
+            material: assets
+                .blast_material(assets.blast_atlas[blast_pick(*blast_sheet, &mut rng)].clone()),
             lifetime: blast_lifetime,
             origin: origin + dir * (BLAST_STANDOFF * bore),
             drift: Vec3::ZERO,
@@ -737,8 +792,15 @@ fn on_main_gun_fire(
 /// Which of the [`BLAST_SHEETS`] blast sheets this shot plays. A sheet's own sequence is fixed —
 /// it opens on its most violent frame and runs once — so consecutive shots are kept apart by the
 /// pick, not by the start frame the other layers randomize.
-fn blast_pick(rng: &mut ViewRng) -> usize {
-    (rng.next_f32() * BLAST_SHEETS as f32) as usize
+///
+/// The draw happens under EVERY policy: [`ViewRng`] is one shared stream, so a pinned sheet that
+/// skipped it would shift every later random value the shot's other layers take.
+fn blast_pick(policy: BlastSheet, rng: &mut ViewRng) -> usize {
+    let rolled = (rng.next_f32() * BLAST_SHEETS as f32) as usize;
+    match policy {
+        BlastSheet::Rotate => rolled,
+        BlastSheet::Pinned(sheet) => sheet,
+    }
 }
 
 /// The ground height (m) under `muzzle` when a shot there lifts dust, else `None`: no decoded
@@ -1023,6 +1085,7 @@ mod tests {
         app.init_resource::<BillboardRing>()
             .init_resource::<MuzzleLightRing>()
             .init_resource::<MgSmokeCadence>()
+            .init_resource::<BlastSheet>()
             .insert_resource(mode)
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
@@ -1055,6 +1118,13 @@ mod tests {
             smoke_lut: Handle::default(),
             dust_lut: Handle::default(),
         });
+        app
+    }
+
+    /// The harness with the blast-sheet knob pinned — the judging lever's arm.
+    fn harness_sheet(sheet: BlastSheet) -> App {
+        let mut app = harness();
+        app.insert_resource(sheet);
         app
     }
 
@@ -1524,6 +1594,66 @@ mod tests {
             BLAST_SHEETS,
             "every blast sheet must reach the screen"
         );
+    }
+
+    /// The judging lever: a pinned sheet is the only one a run of shots plays (the rotation's
+    /// spread is `blast_core_draws_every_sheet`), and pinning changes NOTHING else about the shot —
+    /// the pick's draw is still taken, so every later value the other layers pull off the shared
+    /// [`ViewRng`] is the one the rotation would have given them.
+    #[test]
+    fn pinned_blast_sheet_plays_only_that_sheet() {
+        for sheet in 0..BLAST_SHEETS {
+            let mut app = harness_sheet(BlastSheet::Pinned(sheet));
+            let pinned = app.world().resource::<MuzzleVfxAssets>().blast_atlas[sheet].id();
+            for _ in 0..12 {
+                fire(&mut app, 0.088, 0);
+                let cores = blast_cores(&mut app);
+                assert_eq!(cores.len(), 1, "one blast core per shot, the last expired");
+                assert_eq!(
+                    material_of(&app, cores[0]).atlas.id(),
+                    pinned,
+                    "sheet {sheet} is pinned: no other sheet may reach the screen"
+                );
+                // Two frames past every layer's lifetime: the first only arms the newborn latch.
+                advance(&mut app, 2.0);
+                advance(&mut app, 2.0);
+            }
+        }
+
+        /// The blast core's own roll on the first shot — drawn AFTER the pick, so a skipped draw
+        /// would move it (and everything the shot randomizes after it).
+        fn roll(app: &mut App) -> f32 {
+            fire(app, 0.088, 0);
+            let core = blast_cores(app)[0];
+            app.world().get::<Billboard>(core).expect("blast core").roll
+        }
+        assert_eq!(
+            roll(&mut harness_sheet(BlastSheet::Pinned(0))),
+            roll(&mut harness()),
+            "the pin must still consume the pick's draw — one shared RNG stream"
+        );
+    }
+
+    /// EVERY policy is nameable, and the name the client LOGS is the name the knob ACCEPTS — the
+    /// rotation included, so a judging pass can name the shipped behaviour instead of inheriting
+    /// whatever the default is that day. The pinned tokens are the atlas suffixes
+    /// [`setup_muzzle_assets`] loads, so the log line names the file on disk.
+    #[test]
+    fn every_blast_sheet_policy_has_a_token_that_round_trips() {
+        for policy in
+            std::iter::once(BlastSheet::Rotate).chain((0..BLAST_SHEETS).map(BlastSheet::Pinned))
+        {
+            assert_eq!(
+                BlastSheet::parse(Some(policy.token())),
+                policy,
+                "the logged token must parse back to the policy that logged it",
+            );
+        }
+        // Unset (the shipped rotation), a sheet past the last one, and a value in the wrong grammar
+        // all land on the default — each visible as `rotate` in the resolved log line.
+        assert_eq!(BlastSheet::parse(None), BlastSheet::default());
+        assert_eq!(BlastSheet::parse(Some("g")), BlastSheet::Rotate);
+        assert_eq!(BlastSheet::parse(Some("0")), BlastSheet::Rotate);
     }
 
     /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
