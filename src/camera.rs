@@ -19,7 +19,7 @@ use crate::hud::HudCamera;
 use crate::sight::{
     ElasticCam, FREE_RETICLE_FOV, GunnerFreeAim, GunnerScheme, SightMode, SightToggled,
     hull_local_dir, in_gunner_bound, in_gunner_elastic, in_gunner_free_look, in_gunner_lead,
-    in_third_person, yaw_pitch_of,
+    in_third_person, sight_line, yaw_pitch_of,
 };
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
@@ -432,19 +432,17 @@ fn gunner_camera(
         p.fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
     }
 
-    // The gun's propagated frame: bore = local −Z, right = local +X, hull-up = local +Y. The sight
-    // line is the bore depressed by the superelevation about the gun's right axis — exactly undoing
-    // the lob the aim commit applied, so the reticle holds the target while the barrel sits raised.
-    // Pitching about `right` keeps (sight_dir, right, up) orthonormal; up stays hull-up (not world up
-    // — a hull-mounted sight rolls *with* the tank rather than drifting off the bore on a side-slope).
+    // Look along the gun's SIGHT LINE (`sight::sight_line`, shared with the ranging reticle): the
+    // bore depressed by the superelevation, exactly undoing the lob the aim commit applied, so the
+    // reticle holds the target while the barrel sits raised. Up stays the gun node's own +Y — hull-up
+    // rather than world up, so a hull-mounted sight rolls *with* the tank on a side-slope instead of
+    // drifting off the bore — and the sight line stays orthonormal to it.
     let theta = tables
         .get(rig.muzzle)
         .map_or(0.0, |table| table.superelevation(ranging.range));
     let rot = gun.rotation();
-    let bore = rot * Vec3::NEG_Z;
-    let right = rot * Vec3::X;
     let up = rot * Vec3::Y;
-    let sight_dir = Quat::from_axis_angle(right, -theta) * bore;
+    let sight_dir = sight_line(rot, theta);
 
     // Park at the pivot, look along the sight line.
     let pose = Transform::from_translation(gun.translation()).looking_to(sight_dir, up);

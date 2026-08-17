@@ -108,6 +108,16 @@ impl RangeTable {
             points: vec![(0.0, theta)],
         }
     }
+
+    /// A table over explicit ascending `(range, superelevation)` rows — for a test whose subject is
+    /// how the lob VARIES with range (the ranging reticle's scale spacing), where the one-row
+    /// [`Self::test_fixed`] would collapse every graduation onto one angle.
+    #[cfg(test)]
+    pub(crate) fn test_rows(rows: &[(f32, f32)]) -> Self {
+        Self {
+            points: rows.to_vec(),
+        }
+    }
 }
 
 /// Simulate one shot in the vertical plane: launch at `angle` above horizontal at `speed`, step the

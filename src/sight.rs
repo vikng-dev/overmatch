@@ -415,6 +415,18 @@ fn sight_pitch_limits(lay_limits: Option<(f32, f32)>, lob: f32) -> Option<(f32, 
     lay_limits.map(|(min, max)| (min - lob, max - lob))
 }
 
+/// The gun's SIGHT LINE as a world direction: its bore (the gun node's −Z) depressed by the
+/// superelevation `theta` about that node's own right axis (+X), undoing the lob
+/// `aim::drive_aim_servos` laid on for the dialed range. This is the line the shell arcs back down
+/// onto, so it — not the raised bore — is the optic's centre (`camera::gunner_camera`) and the
+/// ranging reticle's zero mark (`reticle`); both take it from here so the two cannot drift apart.
+///
+/// Pitching about the node's right axis keeps the sight line, that right axis and the node's up
+/// mutually orthonormal, so a caller may use the same frame's up unchanged.
+pub(crate) fn sight_line(gun_rotation: Quat, theta: f32) -> Vec3 {
+    Quat::from_axis_angle(gun_rotation * Vec3::X, -theta) * (gun_rotation * Vec3::NEG_Z)
+}
+
 /// Values published by `drive_gunner_aim` for this frame.
 struct AimPublish {
     /// Command aim re-authored every optic frame.
