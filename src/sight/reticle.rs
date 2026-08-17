@@ -9,9 +9,11 @@
 //! needs to raise ("X unavailable" on a refused view switch).
 
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 
 use crate::aim::CommittedAim;
-use crate::camera::GunnerCameraPlaced;
+use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::overlay::{self, Overlay, Overlays};
@@ -20,7 +22,7 @@ use crate::state::GameplaySet;
 use crate::tank::{Controlled, Hull, Rig, TankViews, ViewNode};
 use crate::ui_font::UiFonts;
 
-use super::{SightMode, sight_line, view_available};
+use super::{SightMode, optic_margin, sight_line, view_available};
 
 /// The on-screen intent cursor — the marker the gun chases. It moves immediately with the mouse
 /// (position control) and drifts back to centre as the gun's lay catches up.
@@ -81,6 +83,9 @@ struct RangeScaleTick {
 /// Mount the presentation layer: spawn every HUD node once, then keep them in step with the sight.
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<Toast>()
+        // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
+        // fragment punches the glass out of it.
+        .add_plugins(UiMaterialPlugin::<OpticMaskMaterial>::default())
         .add_systems(
             Startup,
             (
@@ -89,6 +94,7 @@ pub(super) fn plugin(app: &mut App) {
                 spawn_toast,
                 spawn_range_readout,
                 spawn_ranging_reticle,
+                spawn_optic_mask,
             ),
         )
         .add_systems(
@@ -119,7 +125,11 @@ pub(super) fn plugin(app: &mut App) {
         // aliasing.
         .add_systems(
             PostUpdate,
-            (update_intent_reticle, update_ranging_reticle)
+            (
+                update_intent_reticle,
+                update_ranging_reticle,
+                update_optic_mask,
+            )
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced),
@@ -272,8 +282,8 @@ fn tick_width(major: bool) -> f32 {
 
 /// Spawn the ranging reticle: the zero mark and the pool of range graduations (200 m steps, majors
 /// numbered in hundreds of metres). Every mark is absolutely positioned — the whole graticule is
-/// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
-/// centre outside scheme A. All hidden until shown in the optic.
+/// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is screen
+/// centre only at `sight::GunnerBlend` 0. All hidden until shown in the optic.
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         ReticleLine,
@@ -349,9 +359,9 @@ fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>
 /// (`super::sight_line`: the gun's lay minus the dialed superelevation), which is the line the shell
 /// arcs back down onto and so the only line the dialed-range mark can name. That is NOT the green
 /// bore dot, which is the barrel axis and by design rides the same superelevation ABOVE the sight
-/// line. Only in scheme A does the anchor coincide with screen centre — there the camera IS bolted
-/// to this sight line (`camera::gunner_camera`), so anchoring here is identity; in every other
-/// scheme the camera rides the intent or the player's look and the scale correctly lags with the gun.
+/// line. Only at `sight::GunnerBlend` 0 does the anchor coincide with screen centre — there the
+/// camera IS welded to this sight line (`camera::gunner_camera`), so anchoring here is identity;
+/// above it the camera rides toward the intent and the scale correctly lags with the gun.
 ///
 /// The sight line is read off the VIEW gun node — the render-smoothed chain (`interpolate_servos`,
 /// `Update`), the same node the optic camera bolts to and the same discipline the bore dot follows
@@ -394,10 +404,10 @@ fn update_ranging_reticle(
                 camera
                     .world_to_viewport(cam_transform, origin + dir)
                     .ok()
-                    // A mark past the viewport's edge is HIDDEN, never clamped onto it: schemes B
-                    // and C put no bound on the lead, so the sight line does leave the screen, and
-                    // `world_to_viewport` answers off-screen coordinates for anything in front of
-                    // the camera (it only fails behind the near plane / past the far plane).
+                    // A mark past the viewport's edge is HIDDEN, never clamped onto it: the scale
+                    // runs out to 4 km, far beyond the optic's reach, and `world_to_viewport`
+                    // answers off-screen coordinates for anything in front of the camera (it only
+                    // fails behind the near plane / past the far plane).
                     .filter(|screen| viewport.contains(*screen))
             })
         })
@@ -413,6 +423,173 @@ fn update_ranging_reticle(
         let screen = mark.as_ref().and_then(|mark| mark(tick.range));
         place_mark(&mut node, &mut visibility, screen, tick_width(tick.major));
     }
+}
+
+/// How opaque the surround outside the glass is. `1.0` is what looking down an optic actually looks
+/// like; lower dims the world around the sight picture instead of blanking it.
+const OPTIC_SURROUND_OPACITY: f32 = 1.0;
+
+/// Half-width of the glass edge's feather, as a fraction of the viewport height (~1 px at 720p).
+/// Enough to take the aliased staircase off the rim; a wide one would read as a vignette rather
+/// than the hard aperture of a scope.
+const OPTIC_EDGE_FEATHER: f32 = 0.0015;
+
+/// The uniform block `assets/shaders/optic_mask.wgsl` reads (lane map in the shader).
+#[derive(ShaderType, Clone, Copy, Debug)]
+struct OpticMaskParams {
+    /// xy: the glass centre in node UV. z: its radius, w: the edge feather's half-width — both as
+    /// fractions of the node's HEIGHT.
+    glass: Vec4,
+    /// What lies outside the glass, linear RGBA.
+    surround: Vec4,
+}
+
+/// The optic surround: a full-screen node whose fragment shader punches the glass out of it, so the
+/// hole is a true circle at any centre and any aspect ratio (which is why it is a shader and not a
+/// stack of rectangles — the centre leaves the node's own centre at every blend but `0`).
+#[derive(Asset, TypePath, AsBindGroup, Clone, Debug)]
+struct OpticMaskMaterial {
+    #[uniform(0)]
+    params: OpticMaskParams,
+}
+
+impl UiMaterial for OpticMaskMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/optic_mask.wgsl".into()
+    }
+}
+
+/// Marks the one full-screen mask node, so [`update_optic_mask`] can find its material and its
+/// visibility.
+#[derive(Component)]
+struct OpticMask;
+
+/// Spawn the optic surround once, hidden. It sits on the overlay ladder's own sight-furniture rung
+/// (`overlay::Overlay::SIGHT_FURNITURE_Z`), below the graticule and the intent cursor it surrounds
+/// and below every overlay that has to cover the sight picture whole.
+fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMaskMaterial>>) {
+    commands.spawn((
+        OpticMask,
+        MaterialNode(materials.add(OpticMaskMaterial {
+            // Placed by `update_optic_mask` before it is ever shown; a fully open glass is the
+            // harmless pre-placement state.
+            params: OpticMaskParams {
+                glass: Vec4::new(0.5, 0.5, f32::MAX, OPTIC_EDGE_FEATHER),
+                surround: Vec4::new(0.0, 0.0, 0.0, OPTIC_SURROUND_OPACITY),
+            },
+        })),
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        GlobalZIndex(Overlay::SIGHT_FURNITURE_Z),
+        Visibility::Hidden,
+    ));
+}
+
+/// The drawn glass, in the units the mask shader wants: a centre in node UV and a radius as a
+/// fraction of the node's HEIGHT.
+struct OpticGlass {
+    centre: Vec2,
+    radius: f32,
+}
+
+/// Where the optic's glass lands on screen, measured through the camera's ACTUAL projection.
+///
+/// The centre is the gun's `sight` line reprojected — neither the viewport's centre nor the camera
+/// axis, which coincide with it only at `sight::GunnerBlend` 0; above that the glass slides as the
+/// gun lags, which is the whole point of the knob. It may land OUTSIDE the viewport rect and is
+/// passed through unclamped: the visible arc is still the right arc, and clamping would drag the
+/// glass off the sight line. Only a sight line BEHIND the camera has no answer, and
+/// `world_to_viewport` reports exactly that case (it answers off-rect coordinates for anything in
+/// front) — there the mask stands down rather than drawing at a garbage coordinate.
+///
+/// The radius is `margin`, the same angle `sight::optic_margin` bounds the intent by — that shared
+/// number is why the intent can never leave the drawn glass — carried through the projection rather
+/// than assumed to be some fraction of the screen: it is measured as the pixel distance this camera
+/// itself puts between its own axis and a direction `margin` off it. That stays correct under a
+/// re-authored optic FOV, a different aspect ratio and any viewport scale.
+fn optic_glass(
+    camera: &Camera,
+    cam_transform: &GlobalTransform,
+    sight: Vec3,
+    margin: f32,
+) -> Option<OpticGlass> {
+    let viewport = camera.logical_viewport_size()?;
+    let rotation = cam_transform.rotation();
+    let eye = cam_transform.translation();
+    // Sample each ray a whole eye-distance out rather than one metre out. The projection is
+    // scale-invariant along a ray, so the reach names no bearing of its own — but f32 spacing at
+    // the eye's own magnitude is what quantizes `eye + dir`, and a unit step off a mount standing
+    // a kilometre from the world origin loses enough of the direction to move the measured rim a
+    // fifth of a pixel. Scaling the step with the eye holds that error at one f32 epsilon of angle
+    // anywhere on the map.
+    let reach = eye.length().max(1.0);
+    let project = |dir: Vec3| {
+        camera
+            .world_to_viewport(cam_transform, eye + dir * reach)
+            .ok()
+    };
+    let axis = rotation * Vec3::NEG_Z;
+    let rim = Quat::from_axis_angle(rotation * Vec3::X, margin) * axis;
+    let (axis, rim, centre) = (project(axis)?, project(rim)?, project(sight)?);
+    Some(OpticGlass {
+        centre: centre / viewport,
+        radius: rim.distance(axis) / viewport.y,
+    })
+}
+
+/// Put the glass on the gun's sight line and show the surround; hidden outside the optic, and
+/// whenever the sight picture has no place on screen at all.
+///
+/// Reads the same VIEW gun node and the same [`sight_line`] the graticule and the optic camera do,
+/// after the camera has placed itself this frame — the mask, the zero mark and the view are one
+/// pose, so the glass cannot drift against the marks inside it.
+fn update_optic_mask(
+    mode: Res<SightMode>,
+    ranging: Res<Ranging>,
+    controlled: Query<&Rig, With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
+    view_nodes: Query<&ViewNode>,
+    gun: Query<&GlobalTransform>,
+    tables: Query<&RangeTable>,
+    camera: Single<(&Camera, &GlobalTransform)>,
+    mut materials: ResMut<Assets<OpticMaskMaterial>>,
+    mut mask: Query<(&MaterialNode<OpticMaskMaterial>, &mut Visibility), With<OpticMask>>,
+) {
+    let Ok((node, mut visibility)) = mask.single_mut() else {
+        return;
+    };
+    let (camera, cam_transform) = *camera;
+    let glass = (*mode == SightMode::Gunner)
+        .then(|| {
+            let rig = controlled.single().ok()?;
+            let gun = gun
+                .get(ViewNode::resolve(view_nodes.get(rig.gun).ok(), rig.gun))
+                .ok()?;
+            let theta = tables
+                .get(rig.muzzle)
+                .map_or(0.0, |table| table.superelevation(ranging.range));
+            let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
+            optic_glass(
+                camera,
+                cam_transform,
+                sight_line(gun.rotation(), theta),
+                optic_margin(fov),
+            )
+        })
+        .flatten();
+
+    let Some(glass) = glass else {
+        visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
+    if let Some(mut material) = materials.get_mut(&node.0) {
+        material.params.glass = glass.centre.extend(glass.radius).extend(OPTIC_EDGE_FEATHER);
+    }
+    visibility.set_if_neq(Visibility::Visible);
 }
 
 /// Place the intent cursor at the reprojection of the committed aim point — a resolved point on
@@ -562,8 +739,10 @@ fn update_toast(
 mod tests {
     use bevy::camera::{ComputedCameraValues, RenderTargetInfo};
     use bevy::ecs::system::RunSystemOnce;
+    use bevy::math::Affine3A;
 
     use super::*;
+    use crate::sight::{hull_local_dir, yaw_pitch_of};
 
     /// The fixture's viewport, in px.
     const VIEWPORT: UVec2 = UVec2::new(1280, 720);
@@ -599,8 +778,9 @@ mod tests {
     }
 
     /// The sight picture as the client draws it: the shipped graticule pool, a gun node laid where
-    /// the test puts it, and a camera the test poses per scheme (bolted to the sight line for A, off
-    /// it for B–E). Nothing here re-implements the placement law — the shipped system runs.
+    /// the test puts it, and a camera the test poses where the blend would put it (on the sight line
+    /// at `k = 0`, off it above). Nothing here re-implements the placement law — the shipped system
+    /// runs.
     struct SightPicture {
         world: World,
         camera: Entity,
@@ -688,8 +868,8 @@ mod tests {
                 .insert(GlobalTransform::from(pose));
         }
 
-        /// Pose the camera at the gun mount (where every gunner-scheme camera parks) looking along
-        /// `look` — the schemes differ only in what that look is.
+        /// Pose the camera at the gun mount (where the optic camera parks) looking along `look` —
+        /// the blend decides only what that look is.
         fn look_along(&mut self, look: Quat) {
             self.world
                 .entity_mut(self.camera)
@@ -700,8 +880,8 @@ mod tests {
                 }));
         }
 
-        /// Scheme A's camera, built exactly as `camera::gunner_camera` builds it: parked at the gun
-        /// node, looking along the sight line, up = the node's own +Y.
+        /// The `k = 0` camera, built exactly as `camera::gunner_camera` builds it there: parked at
+        /// the gun node, looking along the sight line, up = the node's own +Y.
         fn bolt_to_sight_line(&mut self) {
             let rotation = self.gun_rotation();
             let pose = Transform::from_translation(GUN)
@@ -812,9 +992,9 @@ mod tests {
         }
     }
 
-    /// **The ruling: the range bar rides the GUN, not the view.** Hold the camera still — outside
-    /// scheme A it tracks the player's intent or look, not the gun — and elevate the gun. Every mark
-    /// must travel by exactly the lay change; a graticule anchored to the camera's forward axis (the
+    /// **The ruling: the range bar rides the GUN, not the view.** Hold the camera still — above
+    /// `k = 0` it tracks the player's intent, not the gun — and elevate the gun. Every mark must
+    /// travel by exactly the lay change; a graticule anchored to the camera's forward axis (the
     /// behaviour this replaces) does not move at all.
     #[test]
     fn the_graticule_travels_with_the_gun() {
@@ -846,12 +1026,12 @@ mod tests {
     /// dialed graduation belongs; the green bore dot is the barrel axis and sits θ higher by design.
     /// Pinning the bar's centre on the bore would put every mark that whole angle high.
     ///
-    /// Measured with the camera OFF the sight line (schemes B–E), so a camera-anchored placement
-    /// cannot pass by coincidence.
+    /// Measured with the camera OFF the sight line (any `k` above 0), so a camera-anchored
+    /// placement cannot pass by coincidence.
     #[test]
     fn the_zero_mark_is_the_sight_line_a_superelevation_below_the_bore() {
         let mut picture = SightPicture::new(Quat::from_rotation_y(0.03));
-        // The camera leads the gun, as scheme E's lock to the intent cursor leaves it.
+        // The camera leads the gun, as a blend toward the intent cursor leaves it.
         picture.look_along(Quat::from_rotation_y(0.05) * Quat::from_rotation_x(0.01));
         picture.run();
 
@@ -925,12 +1105,12 @@ mod tests {
         );
     }
 
-    /// **Scheme A is untouched.** Its camera is bolted to the same sight line
-    /// (`camera::gunner_camera`), so anchoring the graticule to the gun is identity there: the zero
-    /// mark holds the viewport centre and every graduation lands where the camera-anchored law this
+    /// **The `k = 0` picture is untouched.** There the camera is welded to the same sight line
+    /// (`camera::gunner_camera`), so anchoring the graticule to the gun is identity: the zero mark
+    /// holds the viewport centre and every graduation lands where the camera-anchored law this
     /// replaces put it, recomputed here from the camera pose alone.
     #[test]
-    fn the_bolted_scheme_a_picture_is_unchanged() {
+    fn the_welded_picture_is_unchanged() {
         /// Placement tolerance in px — sub-pixel, so the two laws are the same picture.
         const PIXEL: f32 = 0.05;
 
@@ -955,7 +1135,7 @@ mod tests {
             let was = picture.camera_anchored(angle);
             assert!(
                 mark.distance(was) < PIXEL,
-                "scheme A must be a no-op: the {range} m graduation moved from {was} to {mark}",
+                "k = 0 must be a no-op: the {range} m graduation moved from {was} to {mark}",
             );
             checked += 1;
         }
@@ -965,11 +1145,12 @@ mod tests {
         );
     }
 
-    /// **The graticule hides rather than smears.** Schemes B and C bound the lead by nothing, so the
-    /// sight line does leave the viewport — off the side (still in front of the camera, which
-    /// `world_to_viewport` answers with off-screen coordinates rather than an error) and behind it.
-    /// A mark that cannot be drawn where it belongs is not drawn at all, and outside the optic
-    /// nothing is drawn at all.
+    /// **The graticule hides rather than smears.** A mark that cannot be drawn where it belongs is
+    /// not drawn at all — off the side of the viewport (still in front of the camera, which
+    /// `world_to_viewport` answers with off-screen coordinates rather than an error) and behind it —
+    /// and outside the optic nothing is drawn at all. The blend keeps the sight line itself well
+    /// inside the glass, so this is the far graduations' law; it is measured on the whole graticule
+    /// by pushing the camera off the sight line further than any blend can.
     #[test]
     fn the_graticule_hides_whole_rather_than_smearing() {
         let mut picture = SightPicture::new(Quat::IDENTITY);
@@ -1004,6 +1185,247 @@ mod tests {
                 && picture.graduations().iter().all(|(_, mark)| mark.is_none()),
             "third person has no ranging reticle",
         );
+    }
+
+    /// The optic surround's fixture: a hull far from the origin AND off the level, so a placement
+    /// that composed the wrong frame — or dropped the hull's translation — moves instead of
+    /// cancelling. Fixture data, never a law.
+    const HULL_ORIGIN: Vec3 = Vec3::new(137.0, 4.6, -512.0);
+    const HULL_ATTITUDE: Vec3 = Vec3::new(0.7, 0.11, 0.23);
+    /// The gun mount in the hull's frame: the elevation pivot, well above the hull origin, so a
+    /// bearing measured from the hull origin instead reads a different angle.
+    const MOUNT: Vec3 = Vec3::new(0.0, 2.2171, -1.100);
+    /// The gun's lay under the hull (turret yaw, elevation) and the superelevation dialed onto it.
+    const LAY: Vec2 = Vec2::new(0.35, 0.08);
+    const LOB: f32 = 0.02;
+
+    fn hull() -> Affine3A {
+        Affine3A::from_rotation_translation(
+            Quat::from_euler(
+                EulerRot::YXZ,
+                HULL_ATTITUDE.x,
+                HULL_ATTITUDE.y,
+                HULL_ATTITUDE.z,
+            ),
+            HULL_ORIGIN,
+        )
+    }
+
+    /// The gun node's world attitude: the hull's, carried through the turret's yaw and the gun's
+    /// elevation — the chain whose −Z is the bore and whose +X is the trunnion.
+    fn gun_rotation() -> Quat {
+        Quat::from_mat3a(
+            &(hull().matrix3
+                * Mat3A::from_quat(Quat::from_rotation_y(LAY.x))
+                * Mat3A::from_quat(Quat::from_rotation_x(LAY.y))),
+        )
+    }
+
+    /// A committed point at `offset` (yaw, pitch) radians off the gun's sight line, `range` metres
+    /// from the mount, hull-local — the exact form `super::drive_gunner_aim` publishes, and at
+    /// `offset.length() == optic_margin(FOV)` the exact form its circular clamp saturates to.
+    fn intent_at(offset: Vec2, range: f32) -> Vec3 {
+        let (yaw, pitch) = yaw_pitch_of(
+            hull()
+                .inverse()
+                .transform_vector3(sight_line(gun_rotation(), LOB)),
+        );
+        MOUNT + hull_local_dir(yaw + offset.x, pitch + offset.y) * range
+    }
+
+    /// The optic as the client assembles it at one blend rung: the shipped `camera::blended_look`
+    /// places the camera on the gun's sight line and the committed intent, and the shipped
+    /// [`optic_glass`] places the glass. Nothing here re-implements either.
+    struct OpticPicture {
+        camera: Camera,
+        pose: GlobalTransform,
+        viewport: Vec2,
+        sight: Vec3,
+        margin: f32,
+    }
+
+    impl OpticPicture {
+        /// `intent` is the hull-local committed point; `None` is a tank with nothing committed.
+        fn new(viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
+            let hull = hull();
+            let rotation = gun_rotation();
+            let eye = hull.transform_point3(MOUNT);
+            let sight = sight_line(rotation, LOB);
+            let look = crate::camera::blended_look(&hull, eye, sight, intent, k);
+            Self {
+                camera: Camera {
+                    computed: ComputedCameraValues {
+                        clip_from_view: Mat4::perspective_infinite_reverse_rh(
+                            FOV,
+                            viewport.x as f32 / viewport.y as f32,
+                            0.1,
+                        ),
+                        target_info: Some(RenderTargetInfo {
+                            physical_size: viewport,
+                            scale_factor: 1.0,
+                        }),
+                        ..default()
+                    },
+                    ..default()
+                },
+                pose: GlobalTransform::from(
+                    Transform::from_translation(eye).looking_to(look, rotation * Vec3::Y),
+                ),
+                viewport: viewport.as_vec2(),
+                sight,
+                margin: optic_margin(FOV),
+            }
+        }
+
+        fn glass(&self) -> OpticGlass {
+            optic_glass(&self.camera, &self.pose, self.sight, self.margin)
+                .expect("the shipped placement answers for a camera with a viewport")
+        }
+
+        /// The camera's own axis — screen centre, which is what the cutout must NOT be pinned to.
+        fn axis(&self) -> Vec3 {
+            self.pose.rotation() * Vec3::NEG_Z
+        }
+
+        /// Where a world point falls relative to the glass centre, in the units
+        /// `assets/shaders/optic_mask.wgsl` compares against the radius: node UV, stretched by the
+        /// node's aspect on x so the hole is a circle at any aspect ratio.
+        fn glass_offset(&self, glass: &OpticGlass, world: Vec3) -> Vec2 {
+            let uv = self
+                .camera
+                .world_to_viewport(&self.pose, world)
+                .expect("a point in front of the camera projects")
+                / self.viewport;
+            (uv - glass.centre) * Vec2::new(self.viewport.x / self.viewport.y, 1.0)
+        }
+
+        /// The inverse: the bearing named by a point `offset` glass-units from the glass centre —
+        /// the shader's metric run backwards through the same projection, so every law below is
+        /// stated in angles the sight owns rather than in pixels.
+        fn bearing_at(&self, glass: &OpticGlass, offset: Vec2) -> Vec3 {
+            let uv = glass.centre + offset / Vec2::new(self.viewport.x / self.viewport.y, 1.0);
+            self.camera
+                .viewport_to_world(&self.pose, uv * self.viewport)
+                .expect("a point on the drawn glass unprojects")
+                .direction
+                .into()
+        }
+    }
+
+    /// **The drawn rim is the angular bound, through the projection the camera actually has.** The
+    /// radius is never a fraction of the screen: every point of the drawn circle must unproject to
+    /// exactly `optic_margin(fov)` off the camera's axis, all the way round — which is also the test
+    /// that the aspect correction is real, since a radius carried in width units instead of height
+    /// units passes on the vertical and fails on the horizontal.
+    ///
+    /// Measured at three aspect ratios, one of them square and one ultrawide.
+    #[test]
+    fn the_drawn_rim_is_the_angular_bound_at_any_aspect() {
+        for viewport in [
+            UVec2::new(1280, 720),
+            UVec2::new(1024, 1024),
+            UVec2::new(2560, 1080),
+        ] {
+            let picture = OpticPicture::new(viewport, None, 0.0);
+            let glass = picture.glass();
+            for step in 0..8 {
+                let phi = step as f32 * std::f32::consts::FRAC_PI_4;
+                let (sin, cos) = phi.sin_cos();
+                let rim = picture.bearing_at(&glass, Vec2::new(cos, sin) * glass.radius);
+                let angle = angle_between(rim, picture.axis());
+                assert!(
+                    (angle - picture.margin).abs() < EPS,
+                    "the rim at {phi} rad round a {viewport} viewport stands {angle} rad off the \
+                     axis, against the {} rad the sight bounds the cursor by",
+                    picture.margin,
+                );
+            }
+        }
+    }
+
+    /// **The glass is cut around the GUN, not around the screen.** Its centre is the sight line
+    /// reprojected: welded to the camera axis only at `k = 0`, and at `k = 1` — the camera locked
+    /// to an intent held out at the bound — displaced by the full radius, which puts screen centre
+    /// on the rim. A cutout pinned to the node's centre passes the first case and fails the second.
+    #[test]
+    fn the_cutout_tracks_the_sight_line_not_the_screen_centre() {
+        let margin = optic_margin(FOV);
+        let welded = OpticPicture::new(VIEWPORT, Some(intent_at(Vec2::ZERO, 900.0)), 0.0);
+        let welded_glass = welded.glass();
+        let welded_drift = welded
+            .glass_offset(&welded_glass, welded.pose.translation() + welded.sight)
+            .length();
+        assert!(
+            welded_drift < 1e-3 && (welded_glass.centre - Vec2::splat(0.5)).length() < 1e-3,
+            "at k = 0 the sight line IS the camera axis, so the glass is centred on the node — the \
+             cutout sits {welded_drift} glass-units off the sight line",
+        );
+
+        // The camera on the intent, the gun a full optic radius behind it.
+        let led = OpticPicture::new(
+            VIEWPORT,
+            Some(intent_at(Vec2::new(margin, 0.0), 900.0)),
+            1.0,
+        );
+        let led_glass = led.glass();
+        let on_sight = angle_between(led.bearing_at(&led_glass, Vec2::ZERO), led.sight);
+        assert!(
+            on_sight < EPS,
+            "the glass centre must name the gun's sight line, off by {on_sight} rad",
+        );
+        let screen_centre = led
+            .glass_offset(&led_glass, led.pose.translation() + led.axis())
+            .length();
+        assert!(
+            screen_centre > 0.9 * led_glass.radius,
+            "with the camera led out to the bound the node's centre lands on the rim — it sits \
+             {screen_centre} glass-units out against a {} radius, and anything near zero means the \
+             cutout was pinned to the screen",
+            led_glass.radius,
+        );
+    }
+
+    /// **The intent can never leave the drawn glass, at any rung of the ladder.** The one property
+    /// that makes the mask coherent, and it is a property of a SHARED NUMBER:
+    /// `super::OPTIC_RADIUS_FRACTION` bounds the cursor's deflection off the sight line and draws
+    /// the circle, so the two cannot disagree — and the blend puts the camera ON the segment between
+    /// the sight line and the intent, so no rung can push the intent past a rim it is measured
+    /// against.
+    ///
+    /// Driven at the bound itself (where the commit's circular clamp saturates), all the way round
+    /// the circle, at ranges from point-blank to the scale's end, through the shipped blend and the
+    /// shipped placement, and measured in the shader's own metric.
+    #[test]
+    fn the_intent_stays_inside_the_drawn_glass_at_every_rung() {
+        /// Float slack, in glass units (~0.007 px at the fixture's viewport). The containment is an
+        /// EXACT equality on the pitch axis — a pitch offset is a great-circle angle, so an intent
+        /// held out there lands precisely on the rim — and the two sides of it reach the screen by
+        /// different paths. Three orders under the ~0.6% a camera placed off the segment between
+        /// the two bearings would overshoot by.
+        const RIM_SLACK: f32 = 1e-5;
+
+        let margin = optic_margin(FOV);
+        for k in crate::sight::GUNNER_BLEND_LADDER {
+            for step in 0..12 {
+                let phi = step as f32 * std::f32::consts::TAU / 12.0;
+                let (sin, cos) = phi.sin_cos();
+                for range in [45.0, 900.0, 4000.0] {
+                    let point = intent_at(Vec2::new(cos, sin) * margin, range);
+                    let picture = OpticPicture::new(VIEWPORT, Some(point), k);
+                    let glass = picture.glass();
+                    let out = picture
+                        .glass_offset(&glass, hull().transform_point3(point))
+                        .length();
+                    assert!(
+                        out <= glass.radius + RIM_SLACK,
+                        "at k = {k} the intent at the bound ({phi} rad round, {range} m out) drew \
+                         {out} glass-units from the centre, past the {} radius the same constant \
+                         cut",
+                        glass.radius,
+                    );
+                }
+            }
+        }
     }
 
     /// `update_view_death_overlay` must declare `ViewDead` presence even when the overlay node is

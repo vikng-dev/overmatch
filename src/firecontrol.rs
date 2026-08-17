@@ -148,6 +148,11 @@ fn simulate_range(speed: f32, angle: f32, k: f32, dt: f32, max_time: f32) -> Opt
 /// Rotate a vector by `theta` radians in its own vertical plane (about the horizontal axis
 /// perpendicular to it): positive lobs it up, negative depresses it. The aim commit lobs the aim point
 /// up by the superelevation so the bore elevates; length is preserved, so the point keeps its range.
+///
+/// `sight::sight_line` is the inverse, about the gun node's own +X (the trunnion) instead of
+/// `v × Y`: the two axes coincide in the hull's frame, where the turret's yaw keeps `v × Y` on the
+/// trunnion, and diverge in world space under hull roll — so this form belongs where the aim is
+/// solved (hull-local) and that one where the barrel's physical pitch axis is what matters.
 pub fn lob(v: Vec3, theta: f32) -> Vec3 {
     match Dir3::new(v.cross(Vec3::Y)) {
         Ok(right) => Quat::from_axis_angle(right.into(), theta) * v,

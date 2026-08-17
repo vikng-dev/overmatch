@@ -18,7 +18,7 @@ the point instead of being a convention a consumer has to guess right.
 | view | anchored to | travels as | what a player holding still gets |
 |---|---|---|---|
 | third person | the world (the orbit camera does not turn with the hull) | `World` | the lay stays on the place they are looking at, rate-limited by the mount |
-| gunner optic, free-aim | the hull (camera, working intent and gun all ride it) | `HullLocal` | the lay is hull-rigid: it sweeps with the tank |
+| gunner optic | the hull (camera, working intent and gun all ride it) | `HullLocal` | the lay is hull-rigid: it sweeps with the tank |
 
 `aim::drive_aim_servos` names whichever arrives in the hull frame of the tick it lays, upstream of
 the superelevation lob (which stays a rotation in the hull frame). A servo angle is parent-local, so
@@ -59,7 +59,7 @@ Naming it in the world would compose it with the hull the CLIENT is rendering (t
 stream, which lightyear's clamp freezes then steps) and decompose it against the hull the AUTHORITY
 has, importing the difference between the two as noise in the FIRED lay, for nothing. Measured on the
 same fixture at ω = 10 °/s with six-tick freezes: **0.782° peak-to-peak, against 0.000° hull-local.**
-The default optic is scheme A at ~6.9° FOV, so that is over a tenth of the optic's height.
+The optic's authored FOV is ~6.9°, so that is over a tenth of its height.
 
 ## What this does NOT fix
 
@@ -93,8 +93,8 @@ variants — the frame tag is a claim about a frame, never a warrant.
 
 ## The regression net
 
-Ten laws in `aim`, driving the SHIPPED systems — `commit_aim`, `sight::drive_gunner_aim` and
-`sight::drive_free_aim` author, `drive_aim_servos` bridges, `tank::drive_servos` integrates the real
+Ten laws in `aim`, driving the SHIPPED systems — `commit_aim` and `sight::drive_gunner_aim` author,
+`drive_aim_servos` bridges, `tank::drive_servos` integrates the real
 mechanism at the seed vehicle's authored rates — across the two hulls the seam actually has (the
 client's rendered one authors, the authority's true one lays). Every hull in the net is rotated AND
 translated, and away from the origin, so a `transform_vector3` standing in for a `transform_point3`
@@ -112,10 +112,10 @@ identity.
 | the held bearing's VALUE, at rest and swept | — | names the picked place to 1e-2 m |
 | the lob's frame, on a hull rolled 0.45 rad | — | 2.865° in the hull's frame, 2.609° in the world's |
 | a poisoned aim (NaN, ±inf, over-magnitude, both frames) | — | no servo moves, no pose goes non-finite |
-| steering the optic and free-aim past a staircasing client hull | 0.781° imported | 0.000° |
+| steering the optic past a staircasing client hull | 0.781° imported | 0.000° |
 
 Every arm that authors an intention has a law. An arm without one is a place a refactor can ship the
-world round trip with a green suite, which is how the publish and free-aim arms were found unwatched:
+world round trip with a green suite, which is how the optic's publish arm was found unwatched:
 
 | author | arm | frame | guarded by |
 |---|---|---|---|
@@ -123,7 +123,6 @@ world round trip with a green suite, which is how the publish and free-aim arms 
 | `aim::commit_aim` | free-look hold | `World` of the held bearing | the doctrine guard, the held-value law |
 | `sight::drive_gunner_aim` | hold (mouse still) | `HullLocal` | the optic gap law |
 | `sight::drive_gunner_aim` | publish (steering) | `HullLocal` | the steering law |
-| `sight::drive_free_aim` | its only arm | `HullLocal` | the steering law |
 
 Four seam sites convert between the frames, and each is guarded by mutation:
 
@@ -139,7 +138,7 @@ is blind to the value it moves around: a memory holding a constant, wrong bearin
 exactly like a correct one.
 
 Also confirmed red: third person authoring hull-local (4 laws), a world-space hold (2), a world round
-trip on each of the optic's two arms and on free-aim, a variant reorder on the wire enum
+trip on each of the optic's two arms, a variant reorder on the wire enum
 (`wire_types_are_pinned`), the poison gate skipping the `World` variant, and the poison gate dropping
 its magnitude bound.
 

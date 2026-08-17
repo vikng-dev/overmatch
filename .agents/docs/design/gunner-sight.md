@@ -76,3 +76,28 @@ Revised model (implemented; see `aim::CommittedAim`'s four-invariant doc block, 
   pivot, camera body, and point are collinear, so the white reticle lands on the committed point and
   an RMB-up recommit re-picks the SAME point — the transition is identity on the aim in both
   directions.
+
+## 2026-08-17 revision: one camera on a knob, and the glass is drawn
+
+The five gunner *schemes* (A `BoundOptic`, B `FreeReticle`, C `DecoupledOptic`, D `ElasticBore`,
+E `LeadOptic`) collapsed. A and E commanded the gun **identically** — both through
+`sight::drive_gunner_aim` — and differed only in where the camera rode, so they were never
+alternatives: they are the two ends of one continuous knob.
+
+- **`sight::GunnerBlend(k)`** is that knob. The optic camera's look is a geometric blend, fraction
+  `k`, between the gun's **sight line** and the **committed intent**, taken as a plain interpolation
+  of the two bearings in the HULL's frame (shortest-angle on yaw — a continuous turret's yaw
+  coordinate wraps). `k = 0` is A, `k = 1` is E, and both are pinned as regressions in `camera`'s
+  tests. Instantaneous, stateless, bounded: no damping and no spring, so the aperture cannot
+  overshoot or wobble. Damping is a later decision, not a lost one.
+- **`V` cycles `k`** through `[0.0, 0.35, 0.5, 0.65, 1.0]`, defaulting to the interior `0.5`.
+- **B and C are cut.** They were a genuinely different commit path — the mouse steering the camera
+  and the gun chasing it, with no optic circle — and the free-look commit, its servos param, its
+  camera and its wide gunnery FOV went with them. D's spring is cut too, recoverable from git.
+- **The optic mask** (`sight::reticle`) draws the surround: an opaque field with a circular hole
+  centred on the gun's **sight line reprojected** — not screen centre, which it only coincides with
+  at `k = 0`. Its angular radius is `sight::OPTIC_RADIUS_FRACTION × fov/2`, the SAME number that
+  bounds the cursor's deflection, carried to pixels through the camera's actual projection. That
+  shared number plus the blend's position on the segment between the two bearings is why the intent
+  can never leave the drawn glass at any `k` — the property the mask's coherence rests on, tested
+  across the whole ladder.

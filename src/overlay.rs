@@ -63,6 +63,19 @@ impl Overlay {
     /// no backdrop. The menu owns all of that; this is only where the menu's content draws.
     pub(crate) const MENU_CONTENT_Z: i32 = Overlay::Menu.zindex() + 10;
 
+    /// The z-layer for the gunner sight's own FURNITURE — today the optic mask, the blackout with
+    /// the glass cut out of it (`sight::reticle`). Negative, so it draws below every rung above
+    /// (`ViewDead`'s 50 is the lowest) AND below the unindexed HUD nodes at 0, including the sight's
+    /// own graticule and intent cursor: an optic surround is the bottom of the UI, not a layer over
+    /// it. Every overlay therefore covers it whole — a dead gunner's black, a death screen, a map, a
+    /// menu, a connect screen.
+    ///
+    /// A rung of THIS ladder rather than a literal in that module, for the same reason
+    /// [`Overlay::MENU_CONTENT_Z`] is. It carries no [`OverlayNode`]: it declares no presence,
+    /// captures no input, owns no scrim, and is never suppressed by the one-scrim rule — it is part
+    /// of the VIEW the overlays cover, not one of them.
+    pub(crate) const SIGHT_FURNITURE_Z: i32 = -10;
+
     /// Whether this overlay CAPTURES input while active — play stops and the cursor frees. The menu is
     /// the obvious one; connect status too (there is no tank to drive until the link is up, and a
     /// visible cursor over "CONNECTING…" is the honest state). Death and view-death do NOT block: the
