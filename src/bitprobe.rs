@@ -865,7 +865,7 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
 fn transmission_state_payload(transmission: &TankTransmission) -> Vec<u32> {
     let mut output = Vec::with_capacity(TRANSMISSION_STATE_FIELDS.len());
     for field in transmission_state_projection(&transmission.0) {
-        match field.value {
+        match field {
             TransmissionProjectionValue::U8(value) => output.push(u32::from(value)),
             TransmissionProjectionValue::I8(value) => output.push((value as i32) as u32),
             TransmissionProjectionValue::Bool(value) => bool_word(&mut output, value),
