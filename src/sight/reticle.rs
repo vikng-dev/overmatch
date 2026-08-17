@@ -434,6 +434,12 @@ const OPTIC_SURROUND_OPACITY: f32 = 1.0;
 /// than the hard aperture of a scope.
 const OPTIC_EDGE_FEATHER: f32 = 0.0015;
 
+/// The glass radius before [`update_optic_mask`] has measured one: wider than the node's own
+/// diagonal at any aspect, so the surround is fully open. Bounded well below the precision at which
+/// `radius ± OPTIC_EDGE_FEATHER` stops being representable — the shader's `smoothstep` across those
+/// two edges is undefined where they collapse to one float.
+const OPTIC_GLASS_UNPLACED: f32 = 16.0;
+
 /// The uniform block `assets/shaders/optic_mask.wgsl` reads (lane map in the shader).
 #[derive(ShaderType, Clone, Copy, Debug)]
 struct OpticMaskParams {
@@ -474,7 +480,7 @@ fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMa
             // Placed by `update_optic_mask` before it is ever shown; a fully open glass is the
             // harmless pre-placement state.
             params: OpticMaskParams {
-                glass: Vec4::new(0.5, 0.5, f32::MAX, OPTIC_EDGE_FEATHER),
+                glass: Vec4::new(0.5, 0.5, OPTIC_GLASS_UNPLACED, OPTIC_EDGE_FEATHER),
                 surround: Vec4::new(0.0, 0.0, 0.0, OPTIC_SURROUND_OPACITY),
             },
         })),
