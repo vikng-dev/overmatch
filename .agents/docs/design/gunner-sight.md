@@ -130,3 +130,30 @@ inside a glass 970 px across. It used to overflow the glass and be clipped; it n
 over. The one consequence to watch is the numbered 400 m graduations, which near the dialed range
 stand ~10–15 px apart — legible marks, crowded labels. Thinning the numbering (or shortening the
 scale) is a sight-design decision, not a consequence of the derivation.
+
+## 2026-08-17 revision: the mask is a style, and one style is only framing
+
+War Thunder's surround is not a scope aperture. It is a circle spanning most of the display's
+**larger axis** with a broad blurred edge, and it says nothing about where the gun can be laid.
+Which of the two reads better is a question for play, so both ship behind one knob.
+
+- **`reticle::MaskStyle`**, cycled by **`B`**, is the knob. It is presentation-only and private to
+  the presentation half: no style is an input to the aiming law, and there is no path by which one
+  could become one.
+  - **`Aperture`** (default) is the mask as built above — rim on the deflection bound through the
+    camera's own projection, ~1 px feather at 720p (0.4486 of the viewport height at 2.5×, DERIVED).
+  - **`Framed`** takes its radius from the viewport instead: the drawn circle spans
+    `FRAMED_SPAN_FRACTION` (0.9) of the larger axis, feathered by 10% of its own radius — a broad
+    gradient, which is what reads as a blur rather than an anti-alias.
+- **`Framed` deliberately breaks the shared-number invariant** the section above rests on. A circle
+  off the larger axis is bigger than the angular bound (78% bigger at 16:9, DERIVED), so its glass
+  stops indicating where the intent stops and becomes framing. `sight::OPTIC_RADIUS_FRACTION` is
+  still the ONE aiming bound, identical in both styles; what a style owns is the rim.
+- What survives the break is **containment**: every style's rim must sit outside the bound. Asserted
+  in `MaskStyle::rim` and tested at every blend rung across four aspect ratios, rather than argued
+  from a constant only one style shares. Its floor is a viewport no wider than it is tall, where
+  `Framed` spans 0.9 of the height against a bound the projection's `tan` keeps under it — 0.3% of
+  clearance at 2.5× (DERIVED), which is why the assertion is worth having.
+- **Ultrawide is the honest cost of the larger-axis rule**: at 21:9 the framed circle is 2.13× the
+  viewport height (DERIVED), so only the corners darken. That is what the style *is* — framing, not
+  an aperture — and a per-axis cap would be a second law bought for nothing.

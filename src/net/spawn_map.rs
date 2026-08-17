@@ -18,8 +18,9 @@ use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
 /// Opens / closes the map. Free in the game client: W/A/S/D + Space drive, R respawns, T cycles,
-/// V/Lshift switch view, Tab is SP-only, F/G/X are the dev-tools toggles, 1–5 are crew stations,
-/// F3 is the debug panel, Esc is the menu. (The track sandbox's `M` is a different binary.)
+/// V/B are the optic's playtest knobs, Lshift switches view, Tab is SP-only, F/G/X are the
+/// dev-tools toggles, 1–5 are crew stations, F3 is the debug panel, Esc is the menu. (The track
+/// sandbox's `M` is a different binary.)
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
 /// Half-extent of the terrain square, metres — the LIVE world's, read off the decoded grid
