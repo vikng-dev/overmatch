@@ -63,44 +63,41 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// **Where the optic camera rides between the gun and the player's intent** — one knob per AXIS,
-/// consulted ONLY while [`SightMode::Gunner`], and a pure VIEW parameter: the gun is commanded by
-/// [`drive_gunner_aim`] and laid by `aim::drive_aim_servos` at every value, identically.
+/// **Where the optic camera rides between the gun and the player's intent** — one continuous knob
+/// on both axes, consulted ONLY while [`SightMode::Gunner`], and a pure VIEW parameter: the gun is
+/// commanded by [`drive_gunner_aim`] and laid by `aim::drive_aim_servos` at every value,
+/// identically.
 ///
-/// `0` welds that axis of the look to the gun's SIGHT LINE (lay − superelevation), so the intent
-/// cursor leads inside the optic glass and drifts back as the gun catches up. `1` welds it to the
-/// committed intent, so the cursor holds the glass centre on that axis and the bore visibly lags
-/// behind it. Everything between is a geometric blend of the two bearings — no damping and no
-/// spring, so the view is instantaneous, stateless, and cannot overshoot.
+/// `0` welds the look to the gun's SIGHT LINE (lay − superelevation), so the intent cursor leads
+/// inside the optic glass and drifts back as the gun catches up. `1` welds it to the committed
+/// intent, so the cursor holds the glass centre and the bore visibly lags behind it. Everything
+/// between is a geometric blend of the two bearings — no damping and no spring, so the view is
+/// instantaneous, stateless, and cannot overshoot.
 ///
-/// Cycle the ladder live: `V` steps [`yaw`](Self::yaw), `B` steps [`pitch`](Self::pitch).
+/// Cycle the ladder live with `V`.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
-pub struct GunnerBlend {
-    pub yaw: f32,
-    pub pitch: f32,
-}
+pub struct GunnerBlend(pub f32);
 
-/// The rungs both hotkeys step, gun-end first. Playtest knob: `1` is the intent end this collapsed
-/// from, the interior is the hypothesis.
-pub(crate) const GUNNER_BLEND_LADDER: [f32; 4] = [0.5, 0.65, 0.8, 1.0];
+/// The `V` hotkey's rungs, gun-end first. The endpoints are the two cameras this knob collapsed;
+/// the interior is the playtest hypothesis.
+pub(crate) const GUNNER_BLEND_LADDER: [f32; 6] = [0.0, 0.35, 0.5, 0.65, 0.8, 1.0];
 
 impl Default for GunnerBlend {
     fn default() -> Self {
-        Self {
-            yaw: GUNNER_BLEND_LADDER[1],
-            pitch: GUNNER_BLEND_LADDER[3],
-        }
+        Self(GUNNER_BLEND_LADDER[2])
     }
 }
 
-/// The next rung after `k`, wrapping. A value off the ladder (only reachable by a caller that set
-/// one) resumes at the gun end.
-fn next_rung(k: f32) -> f32 {
-    let next = GUNNER_BLEND_LADDER
-        .iter()
-        .position(|&rung| rung == k)
-        .map_or(0, |rung| (rung + 1) % GUNNER_BLEND_LADDER.len());
-    GUNNER_BLEND_LADDER[next]
+impl GunnerBlend {
+    /// The next rung, wrapping. A value off the ladder (only reachable by a caller that set one)
+    /// resumes at the gun end.
+    fn next(self) -> Self {
+        let next = GUNNER_BLEND_LADDER
+            .iter()
+            .position(|&rung| rung == self.0)
+            .map_or(0, |rung| (rung + 1) % GUNNER_BLEND_LADDER.len());
+        Self(GUNNER_BLEND_LADDER[next])
+    }
 }
 
 /// Hull-local unit direction for a `(yaw, pitch)` sight bearing — the shared decomposition
@@ -163,9 +160,8 @@ pub fn plugin(app: &mut App) {
                 .in_set(SightToggled)
                 .in_set(GameplaySet),
         )
-        // Playtest knob: cycle where the optic camera rides between gun and intent, per axis (`V`
-        // yaw, `B` pitch). The camera reads it fresh every frame and holds no state, so a change
-        // needs no reseed.
+        // Playtest knob: cycle where the optic camera rides between gun and intent (`V`). The
+        // camera reads it fresh every frame and holds no state, so a change needs no reseed.
         .add_systems(
             Update,
             cycle_gunner_blend
@@ -283,44 +279,23 @@ fn apply_sight_camera_profile(
     }
 }
 
-/// The fraction of the viewport's half-extent the cursor reaches, on each axis and in the camera's
-/// PROJECTED space. The one aiming bound; the surround (`reticle`) reads the same number for the
-/// circle it draws, which is what inscribes the reachable set in the drawn glass.
+/// The fraction of the viewport's LARGER half-extent the cursor reaches, in the camera's PROJECTED
+/// space. The one aiming bound; the surround (`reticle`) spans the same fraction of the same axis
+/// for the circle it draws, so the reachable set and the drawn glass are one circle.
 pub const OPTIC_RADIUS_FRACTION: f32 = 0.9;
 
-/// Viewport aspect (width / height) before the camera's render target has one — square, so the
-/// pre-bind bound is the circle both axes share.
+/// Viewport aspect (width / height) before the camera's render target has one — square, the aspect
+/// at which the two half-extents coincide.
 const OPTIC_ASPECT_FALLBACK: f32 = 1.0;
 
-/// The cursor's angular reach off the gun's sight line, per axis: an ELLIPSE, `yaw` on the
-/// horizontal and `pitch` on the vertical.
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct OpticMargin {
-    pub(crate) yaw: f32,
-    pub(crate) pitch: f32,
-}
-
-/// The bound for vertical field `fov` over a viewport of `aspect` (width / height).
+/// The cursor's angular reach off the gun's sight line for vertical field `fov` over a viewport of
+/// `aspect` (width / height): ONE angle, equal at every bearing.
 ///
-/// `OPTIC_RADIUS_FRACTION` of the half-extent on each axis, taken through the projection —
-/// `atan(f · tan(half-field))` — so both margins land at that fraction of the viewport's own
-/// half-width and half-height. The horizontal field is the one the aspect implies:
-/// `tan(hfov/2) = aspect · tan(vfov/2)`.
-pub(crate) fn optic_margin(fov: f32, aspect: f32) -> OpticMargin {
-    let half = (fov / 2.0).tan();
-    OpticMargin {
-        yaw: (OPTIC_RADIUS_FRACTION * half * aspect).atan(),
-        pitch: (OPTIC_RADIUS_FRACTION * half).atan(),
-    }
-}
-
-impl OpticMargin {
-    /// The factor that brings a `(yaw, pitch)` offset onto the bounding ellipse, or `1.0` for one
-    /// already inside it. Direction is preserved; only the magnitude is capped.
-    fn containing(self, yaw: f32, pitch: f32) -> f32 {
-        let reach = ((yaw / self.yaw).powi(2) + (pitch / self.pitch).powi(2)).sqrt();
-        if reach > 1.0 { 1.0 / reach } else { 1.0 }
-    }
+/// `OPTIC_RADIUS_FRACTION` of the LARGER axis' half-extent, taken through the projection —
+/// `atan(f · tan(half-field))`. In height units that half-extent is `max(aspect, 1)` times the
+/// vertical one, and the drawn rim (`reticle`) spans the same fraction of the same axis.
+pub(crate) fn optic_margin(fov: f32, aspect: f32) -> f32 {
+    (OPTIC_RADIUS_FRACTION * aspect.max(1.0) * (fov / 2.0).tan()).atan()
 }
 
 /// Clamp `value` to a servo's authored travel `limits` (radians); a `None` (continuous) mount passes
@@ -417,7 +392,7 @@ impl LiveServos<'_, '_> {
 ///
 /// Invariants: decomposition, clamping, and ray resolution share the gun-mount origin;
 /// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
-/// elliptical [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
+/// circular [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
 /// following the current servo lay.
 pub(crate) fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
@@ -566,17 +541,18 @@ pub(crate) fn drive_gunner_aim(
     intent.pitch = clamp_to_travel(intent.pitch, pitch_limits);
     intent.yaw = clamp_to_travel(intent.yaw, yaw_limits);
 
-    // Bound 2 — the elliptical optic margin. Lead as a 2D angular vector from the gun chain's
-    // current *sight line* (lay − lob). Yaw uses shortest-angle difference so continuous traverse
-    // doesn't wind up. `drive_servos` steps on the fixed clock, so `current` here is the latest
-    // tick's integrated angle — the clamp chases the sim truth, ≤1 tick behind the render pose the
-    // optic shows. Preserve direction, cap magnitude on the ellipse; within it the intent is
-    // untouched (see the doc comment — re-pinning would make the target recede with the gun). The
+    // Bound 2 — the circular optic margin. Lead as a 2D angular vector from the gun chain's current
+    // *sight line* (lay − lob). Yaw uses shortest-angle difference so continuous traverse doesn't
+    // wind up. `drive_servos` steps on the fixed clock, so `current` here is the latest tick's
+    // integrated angle — the clamp chases the sim truth, ≤1 tick behind the render pose the optic
+    // shows. Preserve direction, cap magnitude at the margin; within it the intent is untouched
+    // (see the doc comment — re-pinning would make the target recede with the gun). The
     // interpolation stays inside the travel window (both endpoints are, and scale ∈ [0, 1]).
     let yaw_offset = shortest_angle(intent.yaw - t_current);
     let pitch_offset = intent.pitch - sight_now;
-    let scale = margin.containing(yaw_offset, pitch_offset);
-    if scale < 1.0 {
+    let reach = yaw_offset.hypot(pitch_offset);
+    if reach > margin {
+        let scale = margin / reach;
         intent.yaw = t_current + yaw_offset * scale;
         intent.pitch = sight_now + pitch_offset * scale;
     }
@@ -621,8 +597,7 @@ pub(crate) fn drive_gunner_aim(
     }
 }
 
-/// Live playtest knob: step [`GunnerBlend`] along its ladder — `V` the yaw axis, `B` the pitch —
-/// and name both values on-screen.
+/// Live playtest knob: step [`GunnerBlend`] along its ladder with `V` and name the value on-screen.
 ///
 /// The blend only *matters* in gunner view, but cycling is allowed from anywhere so a playtester can
 /// pre-pick; the toast is the feedback. The camera reads the resource fresh each frame and keeps no
@@ -632,21 +607,11 @@ fn cycle_gunner_blend(
     mut blend: ResMut<GunnerBlend>,
     mut toast: ResMut<Toast>,
 ) {
-    let yaw = keys.just_pressed(KeyCode::KeyV);
-    let pitch = keys.just_pressed(KeyCode::KeyB);
-    if !(yaw || pitch) {
+    if !keys.just_pressed(KeyCode::KeyV) {
         return;
     }
-    if yaw {
-        blend.yaw = next_rung(blend.yaw);
-    }
-    if pitch {
-        blend.pitch = next_rung(blend.pitch);
-    }
-    toast.show(format!(
-        "Optic blend  yaw {:.2}  pitch {:.2}",
-        blend.yaw, blend.pitch
-    ));
+    *blend = blend.next();
+    toast.show(format!("Optic blend k = {:.2}", blend.0));
 }
 
 #[cfg(test)]
@@ -822,21 +787,21 @@ mod tests {
         );
     }
 
-    /// Both hotkeys walk ONE ladder, and each walk is a cycle: it visits every rung once and
-    /// returns to where it started, so a playtester can step in one direction and land back where
-    /// they began without hunting. `V` steps the yaw fraction, `B` the pitch, and neither touches
-    /// the other's value.
+    /// The `V` walk is a cycle: it visits every rung once and returns to where it started, so a
+    /// playtester can step in one direction and land back where they began without hunting. Both
+    /// endpoints are on it — `0` welded to the gun's sight line, `1` holding the intent — and so is
+    /// the `0.35` the ladder was extended down to.
     #[test]
-    fn both_blend_knobs_cycle_the_one_ladder() {
+    fn the_blend_ladder_cycles_through_every_rung() {
         for start in GUNNER_BLEND_LADDER {
             let mut walk = vec![start];
-            let mut k = start;
+            let mut blend = GunnerBlend(start);
             for _ in 1..GUNNER_BLEND_LADDER.len() {
-                k = next_rung(k);
-                walk.push(k);
+                blend = blend.next();
+                walk.push(blend.0);
             }
             assert_eq!(
-                next_rung(k),
+                blend.next().0,
                 start,
                 "the ladder closes on its starting rung"
             );
@@ -844,60 +809,46 @@ mod tests {
             assert_eq!(walk, GUNNER_BLEND_LADDER, "the walk visits every rung once");
         }
 
-        // Stepping one axis leaves the other's rung alone — the two knobs share a ladder, not a
-        // value.
-        let mut blend = GunnerBlend::default();
-        let held = blend.pitch;
-        blend.yaw = next_rung(blend.yaw);
-        assert_eq!(blend.pitch, held);
-
+        for rung in [0.0, 0.35, 1.0] {
+            assert!(
+                GUNNER_BLEND_LADDER.contains(&rung),
+                "{rung} must be reachable by pressing V",
+            );
+        }
         assert!(
-            GUNNER_BLEND_LADDER.iter().all(|&k| k > 0.0 && k <= 1.0),
-            "0 left the ladder: a camera welded to the gun is not a rung the knob offers",
-        );
-        let default = GunnerBlend::default();
-        assert!(
-            GUNNER_BLEND_LADDER.contains(&default.yaw)
-                && GUNNER_BLEND_LADDER.contains(&default.pitch),
-            "both defaults must be rungs, or the first press jumps",
-        );
-        assert!(
-            default.yaw < default.pitch,
-            "the traverse lag is the large one, so yaw ships nearer the gun than pitch does",
+            GUNNER_BLEND_LADDER.contains(&GunnerBlend::default().0),
+            "the default must be a rung, or the first press jumps",
         );
     }
 
-    /// **The bound is an ELLIPSE: `OPTIC_RADIUS_FRACTION` of the viewport's half-extent on each
-    /// axis, taken through the projection.** Stated where the shape lives — in the tangents — so a
-    /// bound that went back to being linear in the angle, or that dropped the aspect, moves a
-    /// number here.
+    /// **The bound is a CIRCLE of `OPTIC_RADIUS_FRACTION` of the LARGER axis' half-extent, taken
+    /// through the projection.** Stated in the tangents, where the shape lives, so a bound that
+    /// went back to being linear in the angle — or that took the vertical axis when the horizontal
+    /// one is larger — moves a number here.
     ///
-    /// One worked instance as fixture data: the TZF 9b frames 25°, so at 16:9 the cursor reaches
-    /// 19.53° in yaw and 11.28° in pitch.
+    /// Worked instances as fixture data: the TZF 9b frames 25°, so at 16:9 the cursor reaches
+    /// 19.53° in every direction, and on a portrait or square viewport 11.28°.
     #[test]
-    fn the_deflection_bound_is_the_projected_fraction_on_each_axis() {
+    fn the_deflection_bound_is_the_projected_fraction_of_the_larger_axis() {
         let fov = Optics::Magnified {
             magnification: 2.5,
             field_deg: 25.0,
         }
         .vertical_fov();
+        let half = (fov / 2.0).tan();
         for aspect in [16.0 / 9.0, 21.0 / 9.0, 4.0 / 3.0, 0.5625, 1.0] {
             let margin = optic_margin(fov, aspect);
-            let half = (fov / 2.0).tan();
+            let larger = aspect.max(1.0);
             assert!(
-                (margin.pitch.tan() - OPTIC_RADIUS_FRACTION * half).abs() < 1e-7,
-                "the pitch bound is not {OPTIC_RADIUS_FRACTION} of the vertical half-extent",
-            );
-            assert!(
-                (margin.yaw.tan() - OPTIC_RADIUS_FRACTION * half * aspect).abs() < 1e-7,
-                "the yaw bound is not {OPTIC_RADIUS_FRACTION} of the horizontal half-extent at \
-                 aspect {aspect}",
+                (margin.tan() - OPTIC_RADIUS_FRACTION * half * larger).abs() < 1e-7,
+                "the bound at aspect {aspect} is not {OPTIC_RADIUS_FRACTION} of the larger axis' \
+                 half-extent",
             );
         }
 
-        let worked = optic_margin(fov, 16.0 / 9.0);
-        assert!((worked.yaw.to_degrees() - 19.53).abs() < 5e-3);
-        assert!((worked.pitch.to_degrees() - 11.28).abs() < 5e-3);
+        assert!((optic_margin(fov, 16.0 / 9.0).to_degrees() - 19.53).abs() < 5e-3);
+        assert!((optic_margin(fov, 0.5625).to_degrees() - 11.28).abs() < 5e-3);
+        assert!((optic_margin(fov, 1.0).to_degrees() - 11.28).abs() < 5e-3);
     }
 
     /// **The deflection bound is DERIVED from the field the optic frames, never a stored angle and
@@ -919,41 +870,39 @@ mod tests {
         for field_deg in [6.25_f32, 12.5, 25.0, 50.0] {
             let margin = bound(2.5, field_deg);
             assert!(
-                margin.pitch > widest && margin.yaw > margin.pitch,
+                margin > widest,
                 "a {field_deg}° field must reach further than every narrower one",
             );
-            widest = margin.pitch;
+            widest = margin;
             // And the instrument's power is not a term in it.
-            let other = bound(12.0, field_deg);
-            assert_eq!((margin.yaw, margin.pitch), (other.yaw, other.pitch));
+            assert_eq!(margin, bound(12.0, field_deg));
         }
     }
 
-    /// The clamp saturates ON the ellipse and leaves anything inside it untouched, preserving the
-    /// offset's direction in the bound's own normalized space.
+    /// **The reach is the same at every bearing.** The clamp saturates ON the margin circle
+    /// whatever direction the cursor is driven, and leaves anything inside it untouched — an
+    /// anisotropic bound would cap the diagonals short of the axes.
     #[test]
-    fn the_margin_clamps_onto_its_ellipse() {
+    fn the_bound_is_isotropic() {
+        // The clamp `drive_gunner_aim` applies, as a factor on the offset.
+        let contain = |margin: f32, offset: Vec2| {
+            let reach = offset.x.hypot(offset.y);
+            if reach > margin { margin / reach } else { 1.0 }
+        };
         let margin = optic_margin(25.0_f32.to_radians(), 16.0 / 9.0);
-        // Inside: identity.
-        assert_eq!(margin.containing(0.5 * margin.yaw, 0.0), 1.0);
-        assert_eq!(margin.containing(0.0, -0.5 * margin.pitch), 1.0);
-        // On each semi-axis: exactly at the limit, so no scaling.
-        assert!((margin.containing(margin.yaw, 0.0) - 1.0).abs() < 1e-6);
-        assert!((margin.containing(0.0, margin.pitch) - 1.0).abs() < 1e-6);
-        // Outside, in every quadrant: scaled back onto the ellipse.
-        for (yaw, pitch) in [(3.0, 0.0), (0.0, -3.0), (2.0, 2.0), (-2.0, 1.0)] {
-            let (yaw, pitch) = (yaw * margin.yaw, pitch * margin.pitch);
-            let scale = margin.containing(yaw, pitch);
-            let reach = ((yaw * scale / margin.yaw).powi(2)
-                + (pitch * scale / margin.pitch).powi(2))
-            .sqrt();
+        for step in 0..32 {
+            let phi = step as f32 * std::f32::consts::TAU / 32.0;
+            let bearing = Vec2::from_angle(phi);
+            // Inside: identity, at every bearing.
+            assert_eq!(contain(margin, bearing * 0.5 * margin), 1.0);
+            // Outside: scaled back onto the same reach, whatever the bearing.
+            let out = bearing * 3.0 * margin;
+            let reached = (out * contain(margin, out)).length();
             assert!(
-                (reach - 1.0).abs() < 1e-6,
-                "an offset outside the bound must land on it, and landed at {reach}",
+                (reached - margin).abs() < 1e-6,
+                "an offset {phi} rad round the bound landed at {reached}, not {margin}",
             );
         }
-        // A circular clamp would cap the yaw axis at the pitch bound — the bug this shape fixes.
-        assert!(margin.containing(0.9 * margin.yaw, 0.0) == 1.0 && margin.yaw > margin.pitch);
     }
 
     /// The yaw/pitch ↔ hull-local direction conversion round-trips: decomposing `local_dir`'s output

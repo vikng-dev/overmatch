@@ -13,7 +13,7 @@ use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
 use crate::aim::CommittedAim;
-use crate::camera::GunnerCameraPlaced;
+use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::overlay::{self, Overlay, Overlays};
@@ -359,9 +359,8 @@ fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>
 /// (`super::sight_line`: the gun's lay minus the dialed superelevation), which is the line the shell
 /// arcs back down onto and so the only line the dialed-range mark can name. That is NOT the green
 /// bore dot, which is the barrel axis and by design rides the same superelevation ABOVE the sight
-/// line. The anchor coincides with screen centre only where a `sight::GunnerBlend` axis is 0, and
-/// no rung of that ladder is: the camera rides toward the intent on both axes, and the scale
-/// correctly lags with the gun.
+/// line. The anchor coincides with screen centre only at `sight::GunnerBlend`'s `0` rung; above it
+/// the camera rides toward the intent and the scale correctly lags with the gun.
 ///
 /// The sight line is read off the VIEW gun node — the render-smoothed chain (`interpolate_servos`,
 /// `Update`), the same node the optic camera bolts to and the same discipline the bore dot follows
@@ -429,10 +428,10 @@ fn update_ranging_reticle(
 /// like; lower dims the world around the sight picture instead of blanking it.
 const OPTIC_SURROUND_OPACITY: f32 = 1.0;
 
-/// The drawn circle's DIAMETER, as a fraction of the viewport's LARGER axis. Read against
-/// `sight::OPTIC_RADIUS_FRACTION`, which is the same fraction of each axis' half-extent: the
-/// cursor's bounding ellipse is inscribed in this circle at every aspect, touching it at the sides
-/// of a landscape viewport and at the top and bottom of a portrait one.
+/// The drawn circle's DIAMETER, as a fraction of the viewport's LARGER axis. `MASK_SPAN_FRACTION`
+/// and `sight::OPTIC_RADIUS_FRACTION` are read off the same axis, so at equal values the cursor's
+/// bound IS this rim; a smaller span here would draw a glass the cursor can leave, which
+/// [`mask_rim`] asserts against.
 const MASK_SPAN_FRACTION: f32 = 0.9;
 
 /// Half-width of the rim's feather, as a fraction of its OWN radius: a broad gradient rather than
@@ -441,13 +440,26 @@ const MASK_SPAN_FRACTION: f32 = 0.9;
 /// onto one float is undefined) and far enough from `1` that the gradient cannot reach the centre.
 const MASK_EDGE_FEATHER: f32 = 0.10;
 
-/// The drawn rim for a viewport: `(radius, feather half-width)`, both as fractions of the viewport
-/// HEIGHT — the shader's units.
-fn mask_rim(viewport: Vec2) -> (f32, f32) {
+/// The cursor's angular bound carried into the mask's own units — a fraction of the viewport HEIGHT
+/// — through the perspective divide the glass itself is measured through.
+fn projected_bound(fov: f32, aspect: f32) -> f32 {
+    0.5 * super::optic_margin(fov, aspect).tan() / (fov / 2.0).tan()
+}
+
+/// The drawn rim for a viewport framing `fov`: `(radius, feather half-width)`, both as fractions of
+/// the viewport HEIGHT — the shader's units.
+///
+/// **The rim must contain the bound**: a smaller radius would draw a glass the cursor can leave.
+fn mask_rim(viewport: Vec2, fov: f32) -> (f32, f32) {
     // The larger axis as a comparison, never as an assumption about which one it is: in height
     // units a landscape viewport frames off its width and a portrait one off its height, through
     // this one line.
     let radius = 0.5 * MASK_SPAN_FRACTION * viewport.max_element() / viewport.y;
+    debug_assert!(
+        radius >= projected_bound(fov, viewport.x / viewport.y) - 1e-6,
+        "the mask draws a {radius} rim inside the bound the cursor is clamped to, so the intent \
+         can leave the glass",
+    );
     (radius, MASK_EDGE_FEATHER * radius)
 }
 
@@ -526,21 +538,21 @@ struct OpticGlass {
 /// Where the optic's glass lands on screen, measured through the camera's ACTUAL projection.
 ///
 /// The centre is the gun's `sight` line reprojected — neither the viewport's centre nor the camera
-/// axis, which coincide with it only where a `sight::GunnerBlend` axis is 0; above that the glass
+/// axis, which coincide with it only at `sight::GunnerBlend`'s `0` rung; above that the glass
 /// slides as the gun lags, which is the whole point of the knob. It may land OUTSIDE the rect and is
 /// passed through unclamped: the visible arc is still the right arc, and clamping would drag the
 /// glass off the sight line. Only a sight line BEHIND the camera has no answer, and
 /// `world_to_viewport` reports exactly that case (it answers off-rect coordinates for anything in
 /// front) — there the mask stands down rather than drawing at a garbage coordinate.
 ///
-/// The rim is pure viewport ([`mask_rim`]) — no angle enters it, so it says nothing about where the
-/// intent stops and is framing. What keeps it coherent is that the cursor's bound is
-/// `sight::OPTIC_RADIUS_FRACTION` of each axis' half-extent in the SAME projected space this circle
-/// spans a fraction of, so the reachable ellipse is inscribed in the drawn glass at any aspect.
+/// The rim is pure viewport ([`mask_rim`]), and the cursor's bound is the same fraction of the same
+/// axis carried through this same projection, so the reachable circle IS the drawn glass at any
+/// aspect. `fov` is the field the optic frames, the bound's other term.
 fn optic_glass(
     camera: &Camera,
     cam_transform: &GlobalTransform,
     sight: Vec3,
+    fov: f32,
 ) -> Option<OpticGlass> {
     let viewport = camera.logical_viewport_size()?;
     // Height is the unit every measurement below is in, so a viewport without one has no answer —
@@ -560,7 +572,7 @@ fn optic_glass(
     let centre = camera
         .world_to_viewport(cam_transform, eye + sight * reach)
         .ok()?;
-    let (radius, feather) = mask_rim(viewport);
+    let (radius, feather) = mask_rim(viewport, fov);
     Some(OpticGlass {
         centre: centre / viewport,
         radius,
@@ -578,6 +590,7 @@ fn update_optic_mask(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
     controlled: Query<&Rig, With<Controlled>>,
+    views: Query<&TankViews, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
@@ -598,7 +611,14 @@ fn update_optic_mask(
             let theta = tables
                 .get(rig.muzzle)
                 .map_or(0.0, |table| table.superelevation(ranging.range));
-            optic_glass(camera, cam_transform, sight_line(gun.rotation(), theta))
+            // The same field the camera's projection was set to and the cursor's bound was taken
+            // against, from the same authored optic.
+            optic_glass(
+                camera,
+                cam_transform,
+                sight_line(gun.rotation(), theta),
+                view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK),
+            )
         })
         .flatten();
 
@@ -762,7 +782,7 @@ mod tests {
     use bevy::math::Affine3A;
 
     use super::*;
-    use crate::sight::{GunnerBlend, OpticMargin, hull_local_dir, optic_margin, yaw_pitch_of};
+    use crate::sight::{GUNNER_BLEND_LADDER, hull_local_dir, optic_margin, yaw_pitch_of};
     use crate::spec::Optics;
 
     /// The fixture's viewport, in px.
@@ -1248,7 +1268,7 @@ mod tests {
 
     /// A committed point at `offset` (yaw, pitch) radians off the gun's sight line, `range` metres
     /// from the mount, hull-local — the exact form `super::drive_gunner_aim` publishes, and on the
-    /// margin's own ellipse the exact form its clamp saturates to.
+    /// margin's own circle the exact form its clamp saturates to.
     fn intent_at(offset: Vec2, range: f32) -> Vec3 {
         let (yaw, pitch) = yaw_pitch_of(
             hull()
@@ -1266,31 +1286,27 @@ mod tests {
         pose: GlobalTransform,
         viewport: Vec2,
         sight: Vec3,
-        margin: OpticMargin,
+        fov: f32,
+        margin: f32,
     }
 
     impl OpticPicture {
         /// `intent` is the hull-local committed point; `None` is a tank with nothing committed.
-        fn new(viewport: UVec2, intent: Option<Vec3>, blend: GunnerBlend) -> Self {
-            Self::through(OPTICS, viewport, intent, blend)
+        fn new(viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
+            Self::through(OPTICS, viewport, intent, k)
         }
 
         /// The same picture seen through an arbitrary instrument — the camera's projection and the
         /// sight's bound both come off the one authored `optics` and the one viewport, exactly as
         /// the client derives them, so a test can change the instrument and nothing else.
-        fn through(
-            optics: Optics,
-            viewport: UVec2,
-            intent: Option<Vec3>,
-            blend: GunnerBlend,
-        ) -> Self {
+        fn through(optics: Optics, viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
             let fov = optics.vertical_fov();
             let aspect = viewport.x as f32 / viewport.y as f32;
             let hull = hull();
             let rotation = gun_rotation();
             let eye = hull.transform_point3(MOUNT);
             let sight = sight_line(rotation, LOB);
-            let look = crate::camera::blended_look(&hull, eye, sight, intent, blend);
+            let look = crate::camera::blended_look(&hull, eye, sight, intent, k);
             Self {
                 camera: Camera {
                     computed: ComputedCameraValues {
@@ -1308,22 +1324,14 @@ mod tests {
                 ),
                 viewport: viewport.as_vec2(),
                 sight,
+                fov,
                 margin: optic_margin(fov, aspect),
             }
         }
 
         fn glass(&self) -> OpticGlass {
-            optic_glass(&self.camera, &self.pose, self.sight)
+            optic_glass(&self.camera, &self.pose, self.sight, self.fov)
                 .expect("the shipped placement answers for a camera with a viewport")
-        }
-
-        /// Where a world point falls in the viewport, as a fraction of it: inside `[0, 1]²` is
-        /// on-screen. The glass may hang off the edge, but the intent may never.
-        fn viewport_uv(&self, world: Vec3) -> Vec2 {
-            self.camera
-                .world_to_viewport(&self.pose, world)
-                .expect("a point in front of the camera projects")
-                / self.viewport
         }
 
         /// The camera's own axis — screen centre, which is what the cutout must NOT be pinned to.
@@ -1367,16 +1375,10 @@ mod tests {
         UVec2::new(1024, 1024),
     ];
 
-    /// Both blend fractions at one value.
-    fn both(k: f32) -> GunnerBlend {
-        GunnerBlend { yaw: k, pitch: k }
-    }
-
-    /// The bound's own ellipse, `phi` radians round it — where `super::drive_gunner_aim`'s clamp
+    /// The bound's own circle, `phi` radians round it — where `super::drive_gunner_aim`'s clamp
     /// saturates, and the set every containment law below is driven on.
-    fn on_the_bound(margin: OpticMargin, phi: f32) -> Vec2 {
-        let (sin, cos) = phi.sin_cos();
-        Vec2::new(margin.yaw * cos, margin.pitch * sin)
+    fn on_the_bound(margin: f32, phi: f32) -> Vec2 {
+        Vec2::from_angle(phi) * margin
     }
 
     /// **The drawn rim spans the viewport's LARGER axis, whichever axis that is.** Its radius is
@@ -1387,7 +1389,7 @@ mod tests {
     fn the_rim_spans_the_larger_axis_whichever_axis_that_is() {
         for viewport in ASPECTS {
             let size = viewport.as_vec2();
-            let drawn = OpticPicture::new(viewport, None, both(0.5)).glass().radius;
+            let drawn = OpticPicture::new(viewport, None, 0.5).glass().radius;
             // Height units, the shader's: a circle spanning that fraction of the longer side.
             let span = 0.5 * MASK_SPAN_FRACTION * size.max_element() / size.y;
             assert!(
@@ -1406,92 +1408,101 @@ mod tests {
         }
     }
 
-    /// **The bound lands on the same fraction of the viewport whatever field the optic frames.**
-    /// `OPTIC_RADIUS_FRACTION` is a fraction of each axis' half-extent in PROJECTED space, and the
-    /// margin's `atan` is the inverse of the projection's `tan`, so the field cancels and the
-    /// reachable set is furniture rather than a zoom readout. A bound coupled to an absolute angle
-    /// would move by the 12× this sweep spans.
+    /// **The travel circle IS the drawn glass, exactly, at every aspect and every field.** Both
+    /// sides are the same fraction of the viewport's LARGER half-extent in the camera's projected
+    /// space — `sight::OPTIC_RADIUS_FRACTION` reaching it through an `atan` the projection's `tan`
+    /// undoes, `MASK_SPAN_FRACTION` spanning it as a diameter — so the equality holds to float
+    /// noise rather than approximately, and the `debug_assert` in [`mask_rim`] guards it on every
+    /// drawn frame.
     ///
-    /// Measured on the two semi-axes in the shader's own units, where the half-extents are the
-    /// aspect over two and a half.
+    /// The field cancels out of both sides, so a sight of any power reaches the same rim: a bound
+    /// coupled to an absolute angle would move by the 12× this sweep spans.
     #[test]
-    fn the_bound_lands_on_the_same_fraction_of_the_viewport_at_any_field() {
-        /// What the FIXTURE's own attitude leaves, as a fraction of the semi-axis: the bound is
-        /// stated in the hull's yaw/pitch and the screen measures the camera's, and the gun's
-        /// elevation puts a small angle between the two frames. MEASURED at 0.36% over the sweep
-        /// below, three orders under the 12× a coupling to the field would move it by.
-        const FRAME_RESIDUAL: f32 = 0.005;
-
-        let mut worst = 0.0_f32;
+    fn the_bound_is_the_drawn_rim() {
         for viewport in ASPECTS {
-            let aspect = viewport.x as f32 / viewport.y as f32;
+            let size = viewport.as_vec2();
+            let aspect = size.x / size.y;
             for field_deg in [62.5_f32, 25.0, 15.625, 7.8125, 5.208_333] {
-                let optics = Optics::Magnified {
+                let fov = Optics::Magnified {
                     magnification: 2.5,
                     field_deg,
-                };
-                let picture = OpticPicture::through(optics, viewport, None, both(0.5));
-                let glass = picture.glass();
-                // The two semi-axes, projected: the intent held out on the yaw axis, then on pitch.
-                for (half_extent, phi) in [(0.5 * aspect, 0.0), (0.5, std::f32::consts::FRAC_PI_2)]
-                {
-                    let point = intent_at(on_the_bound(picture.margin, phi), 900.0);
-                    let semi = picture
-                        .glass_offset(&glass, hull().transform_point3(point))
-                        .length();
-                    let want = crate::sight::OPTIC_RADIUS_FRACTION * half_extent;
-                    worst = worst.max((semi - want).abs() / want);
                 }
+                .vertical_fov();
+                let (rim, _) = mask_rim(size, fov);
+                let bound = projected_bound(fov, aspect);
+                assert!(
+                    (rim - bound).abs() < 1e-6,
+                    "on a {viewport} viewport framing {field_deg}° the cursor reaches {bound} of \
+                     the height against a {rim} rim",
+                );
             }
         }
-        assert!(
-            worst < FRAME_RESIDUAL,
-            "the bound drifted {worst} of its own semi-axis across a 5.2°–62.5° spread of fields \
-             and every aspect — it has coupled to the field",
-        );
     }
 
-    /// **The yaw bound is the wider one on any landscape viewport, and the two are equal on a
-    /// square.** The whole point of the ellipse: a fraction of the HORIZONTAL half-extent is a
-    /// wider angle than the same fraction of the vertical one wherever the viewport is wider than
-    /// it is tall, and the two collapse to the circle this replaced exactly at 1:1.
+    /// **The intent driven round the bound FILLS the glass: it touches the rim on the four axes and
+    /// never comes in more than a couple of percent between them.** The property that makes the
+    /// drawn circle mean something: a bound off the vertical field alone would leave 44% of the
+    /// glass unreachable at 16:9.
     ///
-    /// One worked instance as fixture data: the TZF 9b frames 25°, and at 16:9 that reaches 19.53°
-    /// in yaw against 11.28° in pitch.
+    /// The dip between the axes is the bound's own shape: it is a circle in the sight's yaw/pitch
+    /// ANGLES, and the perspective divide maps that to a slightly flattened curve on screen —
+    /// MEASURED at 1.6% on the diagonals, entirely INSIDE the rim.
     #[test]
-    fn the_yaw_bound_outreaches_the_pitch_bound_wherever_the_viewport_is_wide() {
+    fn the_bound_fills_the_drawn_glass_at_every_bearing() {
         for viewport in ASPECTS {
-            let aspect = viewport.x as f32 / viewport.y as f32;
-            let margin = optic_margin(FOV, aspect);
-            if (aspect - 1.0).abs() < EPS {
+            let picture = OpticPicture::new(viewport, None, 0.0);
+            let glass = picture.glass();
+            for step in 0..24 {
+                let phi = step as f32 * std::f32::consts::TAU / 24.0;
+                let point = intent_at(on_the_bound(picture.margin, phi), 900.0);
+                let reach = picture
+                    .glass_offset(&glass, hull().transform_point3(point))
+                    .length()
+                    / glass.radius;
                 assert!(
-                    (margin.yaw - margin.pitch).abs() < EPS,
-                    "on a square viewport the ellipse is the circle: {} yaw against {} pitch",
-                    margin.yaw,
-                    margin.pitch,
+                    (0.98..=1.000_01).contains(&reach),
+                    "on a {viewport} viewport the bound {phi} rad round reached {reach} of the \
+                     drawn radius",
                 );
-            } else if aspect > 1.0 {
+            }
+        }
+    }
+
+    /// **The bound takes the LARGER axis, whichever axis that is.** A bound off the vertical field
+    /// alone would be far tighter than the rim on any landscape viewport; one off the width would
+    /// be tighter than the rim on a portrait one, where the height is the larger axis.
+    ///
+    /// Worked instances as fixture data: the TZF 9b frames 25°, reaching 19.53° at 16:9 and 11.28°
+    /// on a portrait or square viewport.
+    #[test]
+    fn the_bound_is_sized_by_the_larger_axis() {
+        let vertical = optic_margin(FOV, 1.0);
+        for viewport in ASPECTS {
+            let size = viewport.as_vec2();
+            let aspect = size.x / size.y;
+            let margin = optic_margin(FOV, aspect);
+            if aspect > 1.0 {
                 assert!(
-                    margin.yaw > margin.pitch,
+                    margin > vertical,
                     "a {viewport} viewport is wider than it is tall, so the cursor must reach \
-                     further sideways — {} yaw against {} pitch",
-                    margin.yaw,
-                    margin.pitch,
+                     further than the {vertical} rad the vertical field alone gives",
                 );
             } else {
-                assert!(margin.yaw < margin.pitch);
+                assert!(
+                    (margin - vertical).abs() < EPS,
+                    "on a {viewport} viewport the height is the larger axis, so the reach is the \
+                     vertical one — {margin} rad against {vertical}",
+                );
             }
-            // The pitch bound owes the aspect nothing — only the vertical field is its input.
-            assert!((margin.pitch - optic_margin(FOV, 1.0).pitch).abs() < EPS);
         }
 
-        let worked = optic_margin(FOV, 16.0 / 9.0);
+        let wide = optic_margin(FOV, 16.0 / 9.0);
         assert!(
-            (worked.yaw.to_degrees() - 19.53).abs() < 5e-3
-                && (worked.pitch.to_degrees() - 11.28).abs() < 5e-3,
-            "the TZF 9b's 25° at 16:9 reaches {}° yaw and {}° pitch",
-            worked.yaw.to_degrees(),
-            worked.pitch.to_degrees(),
+            (wide.to_degrees() - 19.53).abs() < 5e-3
+                && (vertical.to_degrees() - 11.28).abs() < 5e-3,
+            "the TZF 9b's 25° reaches {}° at 16:9 and {}° on a square viewport",
+            wide.to_degrees(),
+            vertical.to_degrees(),
         );
     }
 
@@ -1505,7 +1516,7 @@ mod tests {
             feather > 0.0 && radius - feather < radius && radius + feather > radius
         };
         for viewport in ASPECTS {
-            let glass = OpticPicture::new(viewport, None, both(0.5)).glass();
+            let glass = OpticPicture::new(viewport, None, 0.5).glass();
             assert!(
                 representable(glass.radius, glass.feather),
                 "the {} feather collapses onto the {} radius on a {viewport} viewport",
@@ -1527,29 +1538,28 @@ mod tests {
     }
 
     /// **The glass is cut around the GUN, not around the screen.** Its centre is the sight line
-    /// reprojected: welded to the camera axis only where both blend fractions are 0 — a setting off
-    /// the shipped ladder, pinned here because it is the mechanism's own identity — and with the
-    /// camera locked to an intent held out at the yaw bound, displaced by that whole reach, which
-    /// puts screen centre most of the way to the rim. A cutout pinned to the node's centre passes
-    /// the first case and fails the second.
+    /// reprojected: welded to the camera axis only at `k = 0`, and with the camera locked to an
+    /// intent held out at the bound, displaced by that whole reach, which puts screen centre most
+    /// of the way to the rim. A cutout pinned to the node's centre passes the first case and fails
+    /// the second.
     #[test]
     fn the_cutout_tracks_the_sight_line_not_the_screen_centre() {
-        let welded = OpticPicture::new(VIEWPORT, Some(intent_at(Vec2::ZERO, 900.0)), both(0.0));
+        let welded = OpticPicture::new(VIEWPORT, Some(intent_at(Vec2::ZERO, 900.0)), 0.0);
         let welded_glass = welded.glass();
         let welded_drift = welded
             .glass_offset(&welded_glass, welded.pose.translation() + welded.sight)
             .length();
         assert!(
             welded_drift < 1e-3 && (welded_glass.centre - Vec2::splat(0.5)).length() < 1e-3,
-            "at 0 on both axes the sight line IS the camera axis, so the glass is centred on the \
-             node — the cutout sits {welded_drift} glass-units off the sight line",
+            "at k = 0 the sight line IS the camera axis, so the glass is centred on the node — the \
+             cutout sits {welded_drift} glass-units off the sight line",
         );
 
-        // The camera on the intent, the gun a full yaw bound behind it.
+        // The camera on the intent, the gun a full bound behind it.
         let led = OpticPicture::new(
             VIEWPORT,
             Some(intent_at(on_the_bound(welded.margin, 0.0), 900.0)),
-            both(1.0),
+            1.0,
         );
         let led_glass = led.glass();
         let on_sight = angle_between(led.bearing_at(&led_glass, Vec2::ZERO), led.sight);
@@ -1569,59 +1579,48 @@ mod tests {
         );
     }
 
-    /// **The intent can never leave the drawn glass, nor the viewport — at any pair of blend rungs
-    /// and any aspect.** The one property that makes the mask coherent, and it rests on a SHARED
-    /// NUMBER: `super::OPTIC_RADIUS_FRACTION` is the fraction of each axis' half-extent the cursor
-    /// reaches AND the fraction of the larger axis the circle spans, both in the camera's projected
-    /// space, so the reachable ellipse is inscribed in the drawn circle at every aspect with no
-    /// `min()` and no aspect branch. It touches that rim at the sides of a landscape viewport and
-    /// at the top and bottom of a portrait one, which is why this is asserted rather than argued.
-    /// The blend contributes the rest: it puts the camera inside the rectangle spanned by the sight
-    /// line and the intent, so no rung can push the intent past a rim measured from either end.
+    /// **The intent can never leave the drawn GLASS — at any blend rung and any aspect.** The one
+    /// property that makes the mask coherent, and it rests on a SHARED NUMBER:
+    /// `super::OPTIC_RADIUS_FRACTION` is the fraction of the larger half-extent the cursor reaches
+    /// and `MASK_SPAN_FRACTION` is the fraction of that same axis the circle spans, both in the
+    /// camera's projected space, so the reachable circle IS the drawn one at every aspect with no
+    /// `min()` and no aspect branch. It touches that rim on all four axes, which is why this is
+    /// asserted rather than argued. The blend contributes the rest: it puts the camera on the
+    /// segment between the sight line and the intent, so no rung can push the intent past a rim
+    /// measured from either end.
+    ///
+    /// The glass is NOT contained in the viewport, and the intent therefore need not be: the rim
+    /// spans the LARGER axis, so on a landscape viewport it runs off the top and bottom, and an
+    /// intent near the vertical bound sits past the screen edge with the gun's own elevation stop
+    /// the thing that binds first.
     ///
     /// Driven on the bound itself, all the way round it, at ranges from point-blank to the range
     /// scale's end, through the shipped blend and the shipped placement, and measured in the
     /// shader's own metric.
     #[test]
     fn the_intent_stays_inside_the_drawn_glass_at_every_rung() {
-        /// Float slack, in glass units (~0.007 px at the fixture's viewport). The containment is an
-        /// EXACT equality where the ellipse touches the rim, and the two sides of it reach the
-        /// screen by different paths. Three orders under the ~0.6% a camera placed outside the
-        /// rectangle spanned by the two bearings would overshoot by.
+        /// Float slack as a fraction of the rim: the containment is an EXACT equality on the
+        /// bound's four axes, and the two sides of it reach the screen by different paths.
         const RIM_SLACK: f32 = 1e-5;
 
         for viewport in ASPECTS {
-            for k_yaw in crate::sight::GUNNER_BLEND_LADDER {
-                for k_pitch in crate::sight::GUNNER_BLEND_LADDER {
-                    let blend = GunnerBlend {
-                        yaw: k_yaw,
-                        pitch: k_pitch,
-                    };
-                    let margin = OpticPicture::new(viewport, None, blend).margin;
-                    for step in 0..24 {
-                        let phi = step as f32 * std::f32::consts::TAU / 24.0;
-                        for range in [45.0, 900.0, 4000.0] {
-                            let point = intent_at(on_the_bound(margin, phi), range);
-                            let picture = OpticPicture::new(viewport, Some(point), blend);
-                            let glass = picture.glass();
-                            let world = hull().transform_point3(point);
-                            let out = picture.glass_offset(&glass, world).length();
-                            assert!(
-                                out <= glass.radius + RIM_SLACK,
-                                "on a {viewport} viewport at yaw {k_yaw} / pitch {k_pitch} the \
-                                 intent on the bound ({phi} rad round, {range} m out) drew {out} \
-                                 glass-units from the centre, past the {} radius",
-                                glass.radius,
-                            );
-                            let uv = picture.viewport_uv(world);
-                            assert!(
-                                uv.cmpge(Vec2::splat(-RIM_SLACK)).all()
-                                    && uv.cmple(Vec2::splat(1.0 + RIM_SLACK)).all(),
-                                "on a {viewport} viewport at yaw {k_yaw} / pitch {k_pitch} the \
-                                 intent on the bound ({phi} rad round, {range} m out) left the \
-                                 viewport at {uv}",
-                            );
-                        }
+            for k in GUNNER_BLEND_LADDER {
+                let margin = OpticPicture::new(viewport, None, k).margin;
+                for step in 0..24 {
+                    let phi = step as f32 * std::f32::consts::TAU / 24.0;
+                    for range in [45.0, 900.0, 4000.0] {
+                        let point = intent_at(on_the_bound(margin, phi), range);
+                        let picture = OpticPicture::new(viewport, Some(point), k);
+                        let glass = picture.glass();
+                        let world = hull().transform_point3(point);
+                        let out = picture.glass_offset(&glass, world).length();
+                        assert!(
+                            out <= glass.radius * (1.0 + RIM_SLACK),
+                            "on a {viewport} viewport at k = {k} the intent on the bound ({phi} \
+                             rad round, {range} m out) drew {out} glass-units from the centre, \
+                             past the {} radius",
+                            glass.radius,
+                        );
                     }
                 }
             }
