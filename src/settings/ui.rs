@@ -90,7 +90,7 @@ enum Row {
     /// No consumer yet — see `settings::PixelBudget`.
     LodPixelBudget,
     /// Windowed / borderless fullscreen. Reflects OS-side toggles too — see
-    /// `settings::observe_window_mode`.
+    /// `settings::observe_window_placement`.
     WindowMode,
     /// Which monitor the window is centred on — see `settings::DisplaySelection`, including why a
     /// rung naming an unplugged display falls back rather than being written back.

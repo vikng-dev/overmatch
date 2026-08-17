@@ -242,7 +242,7 @@ mod terminate {
     /// update).
     ///
     /// The `NonSendMarker` pins this to the main thread — the same pin `branding::set_window_icon`
-    /// and `settings::observe_window_mode` use, for the same reason: this is AppKit state.
+    /// and `settings::observe_window_placement` use, for the same reason: this is AppKit state.
     fn install_terminate_handler(_non_send_marker: NonSendMarker) {
         // SAFETY: `objc_getClass` / `sel_registerName` / `class_getInstanceMethod` /
         // `class_addMethod` are called with the declarations from `objc-sys`, i.e. the runtime's
