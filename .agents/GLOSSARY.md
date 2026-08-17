@@ -120,6 +120,7 @@ e_N = e₁ × 2^(N−1): each level doubles the allowed lie, doubling its switch
 The octaves a ladder can claim are bounded by the *left wall* — the source's intrinsic detail scale, the smallest deviation shedding ~half the triangles; targets below it emit near-copies (pure waste) — and the *right wall* — the map DIAGONAL (not its radius: the far corner is what a camera in the near corner can still see), past which a level never renders and is never generated. Optimal D₁ sits at the left wall, measured once game-wide; bigger maps automatically earn deeper ladders.
 
 **Magnification**:
+(This ladder's sense. An optic's magnification — the `×` a view authors, `spec::Optics` — is a different quantity entirely.)
 What happens closer than a level's band, including closer than the source's own resolution: nothing swaps in, the asset shows its finite detail — exactly as a texture goes soft inside mip 0. Not a defect. (Escape hatch if an eyeball ever objects: an additive near band rendering the pre-hygiene authored mesh — one chain row, parked.)
 
 **What sub-pixel does NOT cover**:

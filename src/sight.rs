@@ -412,21 +412,19 @@ pub(crate) fn drive_gunner_aim(
         return;
     }
 
-    // The optic's authored vertical FOV (per-tank) sets both the magnification and the cursor's
-    // reach — the margin is a fixed fraction of the half-FOV, so the travel circle IS the drawn
-    // optic rim. Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews` lands.
+    // The field the view's authored optic derives (`spec::Optics`) sets both the magnification and
+    // the cursor's reach — the margin is a fixed fraction of the half-FOV, so the travel circle IS
+    // the drawn optic rim. Fallback mirrors `camera.rs` for the pre-bind frame before `TankViews`
+    // lands.
     let fov = view_fov(&views, ViewKind::Gunner, GUNNER_FOV_FALLBACK);
     let margin = optic_margin(fov);
 
-    // Radians of commanded aim per mouse count, scaled with the optic FOV so the screen-space cursor
-    // feel — and the count of mouse-counts to cross the optic — is magnification-invariant (a
-    // narrower optic magnifies, so the same screen move is a smaller angle). Anchored so the
-    // reference 0.12 rad optic keeps its tuned 0.0005 (this retires the old "scale with the zoom
-    // FOV" note); with one authored gunner FOV today it is a no-op, and correct the moment a second
-    // optic exists.
-    const SENSITIVITY_AT_REF: f32 = 0.0005;
-    const REF_FOV: f32 = 0.12;
-    let sensitivity = SENSITIVITY_AT_REF * (fov / REF_FOV);
+    // Radians of commanded aim per mouse count, per radian of vertical FOV. What the knob tunes is
+    // the cursor's SCREEN travel, so scaling with the field holds the count of mouse-counts needed
+    // to cross the optic the same at every magnification (a narrower field magnifies, so the same
+    // screen move is a smaller angle). TUNED at 0.0005 rad/count against a 0.12 rad field.
+    const SENSITIVITY_PER_FOV: f32 = 0.0005 / 0.12;
+    let sensitivity = SENSITIVITY_PER_FOV * fov;
 
     // The margin below clamps intent against the gun's live lay — see [`live_servo_angle`].
     let angle = |servo| {
@@ -605,6 +603,7 @@ mod tests {
     use super::*;
 
     use crate::render_policy;
+    use crate::spec::Optics;
 
     /// The game's shape in miniature: one camera, the sun, two tanks with meshes at two depths, and
     /// both sight systems plus the `render_policy` resolver wired exactly as the client mounts them.
@@ -798,13 +797,36 @@ mod tests {
         );
     }
 
-    /// The margin is pinned at the Tiger's authored 0.12 rad optic (≈0.054 rad) and scales with FOV
-    /// so the cursor's travel circle and the drawn rim stay one radius.
+    /// The margin is a fraction of the half-FOV and nothing else, so the cursor's travel circle and
+    /// the drawn rim stay one radius at any field.
     #[test]
     fn margin_is_fraction_of_half_fov() {
         assert!((optic_margin(0.12) - 0.054).abs() < 1e-6);
-        // Scales with the authored FOV: a wider optic gets a proportionally wider reach.
+        // Scales with the field: a wider one gets a proportionally wider reach.
         assert!((optic_margin(0.24) - 2.0 * optic_margin(0.12)).abs() < 1e-9);
+    }
+
+    /// **The deflection bound is DERIVED from the magnification, never a stored angle.** Halving a
+    /// sight's magnification doubles the field it frames and so doubles the reach the cursor is
+    /// clamped to — a bound that carried its own constant would sit still through all of it, and a
+    /// bound that read the magnification directly would move the wrong way.
+    #[test]
+    fn the_deflection_bound_follows_the_magnification() {
+        let bound =
+            |magnification: f32| optic_margin(Optics::Magnified(magnification).vertical_fov());
+        for magnification in [1.0_f32, 2.5, 4.0, 8.0] {
+            // Inversely proportional, which is the apparent-field law carried through the fraction.
+            assert!(
+                (bound(magnification) * magnification - bound(1.0)).abs() < 1e-6,
+                "the bound at {magnification}× is not the 1× bound divided by the magnification",
+            );
+        }
+        assert!(
+            bound(2.5) > 2.0 * bound(8.0),
+            "a 2.5× sight must reach far wider than an 8× one",
+        );
+        // One worked instance, as fixture data: 2.5× frames 25°, so the cursor reaches 0.9 × 12.5°.
+        assert!((bound(2.5).to_degrees() - 11.25).abs() < 1e-3);
     }
 
     /// The yaw/pitch ↔ hull-local direction conversion round-trips: decomposing `local_dir`'s output

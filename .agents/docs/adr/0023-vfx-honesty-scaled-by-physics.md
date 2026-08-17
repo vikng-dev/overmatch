@@ -14,14 +14,14 @@ The plume's numbers come from period gun-camera and range footage of large-calib
 
 The recommendation was a readability target: make the column tall enough to subtend ~10 px at 1000 m, on the grounds that a realistic ~1.5 m puff subtends barely a pixel. The owner rejected readability-tuning outright, and that decision stands on its own — but the arithmetic behind the recommendation was **also** computed against the wrong view, and the correction is worth recording because it removes the temptation to relitigate.
 
-Angular size does not care about the effect; it cares about the optic. Our gunner sight is authored at a **0.12 rad vertical FOV** (`tiger_1.tank.ron`, `views.Gunner` — ≈ 6× magnification; the commander view is 0.785 rad). At 1000 m, on a 1080-px-tall viewport:
+Angular size does not care about the effect; it cares about the optic. Our gunner sight is authored at **2.5×** (`tiger_1.tank.ron`, `views.Gunner` — the TZF 9b, which frames a 25° field; the commander's naked-eye view is 45°). At 1000 m, on a 1080-px-tall viewport:
 
-| | commander (0.785 rad) | **gunner optic (0.12 rad)** |
+| | commander (45°) | **gunner optic (2.5×, 25°)** |
 |---|---|---|
-| a 1.5 m puff | ~2 px | **~13 px** |
-| our honest 7.7 m plume | ~11 px | **~69 px** |
+| a 1.5 m puff | ~2 px | **~4 px** |
+| our honest 7.7 m plume | ~10 px | **~19 px** |
 
-The "sub-pixel at 1 km" figure holds only for an *unmagnified* view. In the view a gunner actually spots fall-of-shot from, the honest plume is already an unmistakable ~70 px, and even a small 1.5 m puff clears the threshold the research was chasing. **The readability the exaggeration was meant to buy is bought by the optic and by accurate scale.** There was never a trade to make.
+The "sub-pixel at 1 km" figure holds only for an *unmagnified* view. In the view a gunner actually spots fall-of-shot from, the honest plume already clears the ~10 px the research was chasing, with the magnification alone doubling it. **The readability the exaggeration was meant to buy is bought by the optic and by accurate scale.** There was never a trade to make.
 
 ## Honest means are still allowed — the rule is against *inventing*, not against *reading well*
 

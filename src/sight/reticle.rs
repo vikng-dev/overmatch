@@ -749,13 +749,15 @@ mod tests {
 
     use super::*;
     use crate::sight::{hull_local_dir, yaw_pitch_of};
+    use crate::spec::Optics;
 
     /// The fixture's viewport, in px.
     const VIEWPORT: UVec2 = UVec2::new(1280, 720);
-    /// The optic's magnified vertical FOV (rad) — fixture data off the seed vehicle's authored gunner
-    /// view, so one milliradian of lay is several pixels here and a mark placed on the bore instead
-    /// of the sight line lands tens of pixels out.
-    const FOV: f32 = 0.12;
+    /// The instrument every fixture below looks through — fixture data, a middling gunnery sight.
+    const OPTICS: Optics = Optics::Magnified(2.5);
+    /// The field it frames (rad), through the one derivation the client uses: one milliradian of lay
+    /// is a pixel here, so a mark placed on the bore instead of the sight line lands tens out.
+    const FOV: f32 = OPTICS.vertical_fov();
     /// Where the gun node stands: far from the world origin, so a placement that composes the wrong
     /// frame moves instead of cancelling.
     const GUN: Vec3 = Vec3::new(137.0, 4.6, -512.0);
@@ -1253,6 +1255,14 @@ mod tests {
     impl OpticPicture {
         /// `intent` is the hull-local committed point; `None` is a tank with nothing committed.
         fn new(viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
+            Self::through(OPTICS, viewport, intent, k)
+        }
+
+        /// The same picture seen through an arbitrary instrument — the camera's projection and the
+        /// sight's bound both come off the one authored `optics`, exactly as the client derives
+        /// them, so a test can change the magnification and nothing else.
+        fn through(optics: Optics, viewport: UVec2, intent: Option<Vec3>, k: f32) -> Self {
+            let fov = optics.vertical_fov();
             let hull = hull();
             let rotation = gun_rotation();
             let eye = hull.transform_point3(MOUNT);
@@ -1262,7 +1272,7 @@ mod tests {
                 camera: Camera {
                     computed: ComputedCameraValues {
                         clip_from_view: Mat4::perspective_infinite_reverse_rh(
-                            FOV,
+                            fov,
                             viewport.x as f32 / viewport.y as f32,
                             0.1,
                         ),
@@ -1279,7 +1289,7 @@ mod tests {
                 ),
                 viewport: viewport.as_vec2(),
                 sight,
-                margin: optic_margin(FOV),
+                margin: optic_margin(fov),
             }
         }
 
@@ -1347,6 +1357,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The drawn glass is the same size on screen at every magnification.** The rim is
+    /// `OPTIC_RADIUS_FRACTION` of the half-field measured through that field's own projection, so
+    /// the two magnification terms cancel and the circle is furniture, not a zoom readout. A radius
+    /// that moved with the magnification would mean something in this path had coupled to an
+    /// absolute angle instead of a fraction of the view.
+    ///
+    /// The cancellation is exact only in the small-angle limit — the projection carries `tan`, the
+    /// bound does not — so what is left is the `tan` term alone. MEASURED across a 1×–12× spread of
+    /// instruments it moves the radius by under 2%, against the 12× a coupled radius would move by,
+    /// which is what makes the bound below a statement about the law rather than about floats.
+    #[test]
+    fn the_drawn_radius_is_invariant_under_magnification() {
+        /// The `tan` residual, as a fraction of the radius. MEASURED over the sweep below.
+        const TAN_RESIDUAL: f32 = 0.02;
+
+        let radius = |magnification: f32| {
+            OpticPicture::through(Optics::Magnified(magnification), VIEWPORT, None, 0.0)
+                .glass()
+                .radius
+        };
+        let reference = radius(2.5);
+        for magnification in [1.0_f32, 2.5, 4.0, 8.0, 12.0] {
+            let drawn = radius(magnification);
+            assert!(
+                (drawn - reference).abs() < TAN_RESIDUAL * reference,
+                "a {magnification}× sight draws its glass at {drawn} of the viewport height, \
+                 against {reference} for the fixture — the rim has coupled to the field",
+            );
+        }
+        // And it holds still at the right place: half the viewport height IS the half-field, so a
+        // rim at `OPTIC_RADIUS_FRACTION` of that half-field is half the fraction of the height.
+        assert!(
+            (reference - crate::sight::OPTIC_RADIUS_FRACTION / 2.0).abs()
+                < TAN_RESIDUAL * reference,
+        );
     }
 
     /// **The glass is cut around the GUN, not around the screen.** Its centre is the sight line

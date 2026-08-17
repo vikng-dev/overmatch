@@ -38,6 +38,8 @@ pub struct Rig {
 
 /// Runtime camera configuration and availability gate for one authored view.
 pub struct ViewConfig {
+    /// Vertical field of view (RADIANS), derived from the authored [`crate::spec::Optics`] at spawn
+    /// — an optic's magnification has already become an angle by the time it reaches a camera.
     pub fov: f32,
     pub requires: Requirement,
 }

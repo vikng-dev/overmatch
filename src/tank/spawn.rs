@@ -849,7 +849,7 @@ fn insert_root_components(
                     (
                         *kind,
                         ViewConfig {
-                            fov: view.fov,
+                            fov: view.optics.vertical_fov(),
                             requires: view.requires.clone(),
                         },
                     )

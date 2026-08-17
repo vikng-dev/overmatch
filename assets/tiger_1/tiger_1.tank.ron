@@ -343,19 +343,15 @@ TankSpec(
         ),
     },
     views: {
-        // fov in RADIANS — the one angle in this file still authored that way (everything else is
-        // degrees, converted once at the spec seam). Deliberately left alone, because the field is
-        // not going to stay an angle: the INTENT is to express these as ZOOM instead.
-        //   * the third-person view gets a continuous fov SLIDER (a viewer comfort control),
-        //   * the gunner sight gets DISCRETE zoom levels, as real optics have — e.g. 4x / 8x —
-        //     rather than a free angle, so magnification is a property of the sight, not a knob.
-        // Converting to degrees now would be churn on a field that wants to become a different
-        // quantity entirely. Revisit when the sight/zoom work lands.
+        // The gunner looks through an INSTRUMENT, so his view is authored the way an instrument is
+        // specified — by magnification. The field it frames follows from the eyepiece's apparent
+        // field (`spec::APPARENT_FIELD_DEG`): 2.5× → 25°. The commander looks through a hatch, so
+        // his view authors the field itself, in degrees like every other angle here.
         //
-        // Today: the gunner optic is magnified (~7° → ~6×), the commander view is wide (~45°).
-        // `requires` gates the view — a dead crewman blacks it out.
-        Gunner:    (node: "Main_Gun_Pitch", fov: 0.12,    requires: [Gunner]),
-        Commander: (node: "Turret_Yaw",     fov: 0.785,   requires: [Commander]),
+        // The gunner's sight is the TZF 9b: 2.5× over a 25° field (both MEASURED off the
+        // instrument's data sheet). `requires` gates the view — a dead crewman blacks it out.
+        Gunner:    (node: "Main_Gun_Pitch", optics: Magnified(2.5), requires: [Gunner]),
+        Commander: (node: "Turret_Yaw",     optics: Unaided(45.0),  requires: [Commander]),
     },
     capabilities: {
         Drive: [Driver, Engine, Transmission],

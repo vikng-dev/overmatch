@@ -216,10 +216,16 @@ fn capture_turret_pivot(
     pivot.0 = Some(position);
 }
 
-/// The gunner optic's fallback vertical FOV (radians) for the pre-bind frame before `TankViews`
-/// lands — mirrors the Tiger's authored `0.12`. Shared (rather than a bare literal at each call
-/// site) so the camera's magnification and the sight's cursor-travel margin agree on the same
-/// pre-bind value.
+/// The vertical FOV (radians) every consumer assumes before it can read a real one — a conservative
+/// BOUND, not any vehicle's authored field: narrower than the field any authored optic derives
+/// (`spec::Optics`), and deliberately so.
+///
+/// Two consumers, one reason. The gunner camera and the sight's cursor-travel margin take it for
+/// the pre-bind frame before `TankViews` lands, so they agree on one number rather than each
+/// carrying a literal. Both LOD ladders seed with it at Startup, before a camera exists
+/// (`view::ViewFacts::default`, `world::terrain_lod_view`) — a narrow field demands the finest
+/// geometry, so seeding under every authored field makes the first frames over-detailed rather than
+/// under-detailed. Widening it would silently coarsen those frames.
 pub const GUNNER_FOV_FALLBACK: f32 = 0.12;
 
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
@@ -424,8 +430,9 @@ pub(crate) fn blended_look(
 ///
 /// Parked at the **Gun node** (the elevation pivot / mantlet) — the coaxial sight's natural home.
 /// The camera drops the `ViewSubjectBody` channel in gunner view (`sight`'s
-/// `apply_sight_camera_profile`), so parking inside the mantlet clips no own geometry. Narrow FOV
-/// for magnification (the Tiger's authored ~0.12 rad ≈ 6× against the 45° commander view).
+/// `apply_sight_camera_profile`), so parking inside the mantlet clips no own geometry. The FOV is
+/// the one the view's authored optic derives (`spec::Optics`) — narrow in proportion to its
+/// magnification, against a naked-eye commander view.
 ///
 /// The gun end of the blend is the **sight line**, the bore depressed by the current superelevation
 /// (`sight::sight_line`, shared with the ranging reticle and the optic mask so the three cannot

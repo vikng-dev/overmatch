@@ -1877,7 +1877,7 @@ mod tests {
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
         report_clips: [],
     )},
-    views: {Gunner: (node: "Sight", fov: 0.5)},"#,
+    views: {Gunner: (node: "Sight", optics: Magnified(2.0))},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
         let json =
