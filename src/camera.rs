@@ -394,26 +394,29 @@ fn reaim_orbit_on_optic_exit(
     camera.into_inner().look_to(direction, Vec3::Y);
 }
 
-/// The optic's look bearing (a WORLD direction): the geometric blend, fraction `k`, from the gun's
-/// `sight` line toward the committed `intent` — the two ends of the one gunner knob
-/// ([`GunnerBlend`]). `k = 0` is the sight line itself, `k = 1` the intent's bearing from the
-/// sight's own origin `eye`; the whole interval is a plain interpolation of the two BEARINGS, with
-/// no state, so the aperture cannot overshoot, wobble, or lag.
+/// The optic's look bearing (a WORLD direction): the geometric blend from the gun's `sight` line
+/// toward the committed `intent`, taken per axis at [`GunnerBlend`]'s two fractions. `0` on an axis
+/// is the sight line itself, `1` the intent's bearing from the sight's own origin `eye`; the whole
+/// interval is a plain interpolation of the two BEARINGS, with no state, so the view cannot
+/// overshoot, wobble, or lag.
+///
+/// The two fractions are independent: yaw takes `blend.yaw` and pitch `blend.pitch`, so each axis'
+/// bearing is a function of that axis alone.
 ///
 /// The blend is taken in the HULL's frame — the frame `sight::drive_gunner_aim` bounds the intent
-/// in — so the camera lands on the segment between the two bearings in exactly the space the optic
-/// circle is a circle in, and the drawn glass therefore always contains the intent. Yaw uses
-/// [`shortest_angle`], as the commit does: a continuous turret wraps, and a naive lerp would wind
-/// the view the long way round.
+/// in — so the camera lands inside the rectangle spanned by the two bearings in exactly the space
+/// the optic's bound is an ellipse in, and the drawn glass therefore always contains the intent.
+/// Yaw uses [`shortest_angle`], as the commit does: a continuous turret wraps, and a naive lerp
+/// would wind the view the long way round.
 ///
 /// `intent` is the hull-local committed point; `None` (a tank with no commitment yet) collapses the
-/// blend to the sight line at every `k`.
+/// blend to the sight line on both axes.
 pub(crate) fn blended_look(
     hull: &Affine3A,
     eye: Vec3,
     sight: Vec3,
     intent: Option<Vec3>,
-    k: f32,
+    blend: GunnerBlend,
 ) -> Vec3 {
     let Some(point) = intent else {
         return sight;
@@ -421,8 +424,8 @@ pub(crate) fn blended_look(
     let to_hull = hull.inverse();
     let (sight_yaw, sight_pitch) = yaw_pitch_of(to_hull.transform_vector3(sight));
     let (intent_yaw, intent_pitch) = yaw_pitch_of(point - to_hull.transform_point3(eye));
-    let yaw = sight_yaw + k * shortest_angle(intent_yaw - sight_yaw);
-    let pitch = sight_pitch + k * (intent_pitch - sight_pitch);
+    let yaw = sight_yaw + blend.yaw * shortest_angle(intent_yaw - sight_yaw);
+    let pitch = sight_pitch + blend.pitch * (intent_pitch - sight_pitch);
     hull.transform_vector3(hull_local_dir(yaw, pitch))
 }
 
@@ -438,9 +441,9 @@ pub(crate) fn blended_look(
 /// (`sight::sight_line`, shared with the ranging reticle and the optic mask so the three cannot
 /// drift apart): the aim commit lobs the gun up by that angle for the dialed range, so depressing
 /// the view by the same holds the sight picture on the target while the barrel rides above it
-/// (dial range → barrel rises, view stays on target). At `k = 0` the camera is welded to it and
-/// lags the player's intent at the mount's slew rate (the WT "view follows the gun" feel); at
-/// `k = 1` the camera holds the intent and the bore lags on screen instead.
+/// (dial range → barrel rises, view stays on target). At `0` on an axis the camera is welded to it
+/// and lags the player's intent at the mount's slew rate (the WT "view follows the gun" feel); at
+/// `1` the camera holds the intent and the bore lags on screen instead.
 ///
 /// Up stays the gun node's own +Y — hull-up carried through the yaw-then-pitch chain rather than
 /// world up, so a hull-mounted sight rolls *with* the tank on a side-slope instead of drifting off
@@ -480,7 +483,7 @@ fn gunner_camera(
         eye,
         sight_line(rotation, theta),
         committed.get(tank).filter(|point| point.is_finite()),
-        blend.0,
+        *blend,
     );
     place_optic_camera(
         &mut transform,
@@ -566,7 +569,13 @@ mod tests {
         (hull.transform_point3(MOUNT), sight, point)
     }
 
-    /// **`k = 0` is the gun's sight line, exactly.** The endpoint the collapse has to reproduce:
+    /// Both fractions at one value — the shape every law below that owes nothing to the split
+    /// states itself in.
+    fn both(k: f32) -> GunnerBlend {
+        GunnerBlend { yaw: k, pitch: k }
+    }
+
+    /// **`0` is the gun's sight line, exactly.** The endpoint the collapse has to reproduce:
     /// the camera welded to the line the shell arcs back down onto (what `gunner_camera` looked
     /// along before there was a knob), whatever the intent is doing — near, far, and at the
     /// bound's own reach.
@@ -574,22 +583,22 @@ mod tests {
     fn the_gun_end_of_the_blend_is_the_sight_line() {
         for (yaw, pitch, range) in [(0.0, 0.0, 50.0), (0.4, -0.2, 4000.0), (-1.9, 0.3, 120.0)] {
             let (eye, sight, point) = sighting(0.35, 0.08, yaw, pitch, range);
-            let look = blended_look(&hull(), eye, sight, Some(point), 0.0);
+            let look = blended_look(&hull(), eye, sight, Some(point), both(0.0));
             let off = angle_between(look, sight);
             assert!(
                 off < EPS,
-                "k = 0 must look along the gun's sight line, off by {off} rad with the intent at \
+                "0 must look along the gun's sight line, off by {off} rad with the intent at \
                  ({yaw}, {pitch}) {range} m out",
             );
         }
         // And with nothing committed at all, every rung collapses to the same line.
         let (eye, sight, _) = sighting(0.35, 0.08, 0.0, 0.0, 50.0);
         for k in [0.0, 0.5, 1.0] {
-            assert_eq!(blended_look(&hull(), eye, sight, None, k), sight);
+            assert_eq!(blended_look(&hull(), eye, sight, None, both(k)), sight);
         }
     }
 
-    /// **`k = 1` is the committed intent's bearing, exactly.** The other endpoint: the camera
+    /// **`1` is the committed intent's bearing, exactly.** The other endpoint: the camera
     /// looking straight at the point the player has commanded (what the lead-optic camera did),
     /// measured from the SIGHT's own origin — a bearing off the hull origin ~2.2 m below would miss
     /// a near aim by most of the optic's radius.
@@ -597,14 +606,68 @@ mod tests {
     fn the_intent_end_of_the_blend_is_the_committed_point() {
         for (yaw, pitch, range) in [(0.0, -0.05, 40.0), (0.4, -0.2, 4000.0), (-1.9, 0.3, 120.0)] {
             let (eye, sight, point) = sighting(0.35, 0.08, yaw, pitch, range);
-            let look = blended_look(&hull(), eye, sight, Some(point), 1.0);
+            let look = blended_look(&hull(), eye, sight, Some(point), both(1.0));
             let off = angle_between(look, hull().transform_point3(point) - eye);
             assert!(
                 off < EPS,
-                "k = 1 must look at the committed point, off by {off} rad with it at ({yaw}, \
+                "1 must look at the committed point, off by {off} rad with it at ({yaw}, \
                  {pitch}) {range} m out",
             );
         }
+    }
+
+    /// **The two fractions are one knob per AXIS: moving either leaves the other axis' bearing
+    /// exactly where it was.** The whole reason the knob split — the turret's traverse lag wants a
+    /// different camera from its elevation lag — rests on the axes not being coupled, which a blend
+    /// that lerped the two bearings as vectors (or re-derived pitch off the blended yaw) would
+    /// silently break.
+    ///
+    /// Measured on the hull-local yaw/pitch the blend itself works in, at an intent led off the
+    /// sight line on BOTH axes, so a leak in either direction moves a number.
+    #[test]
+    fn each_axis_of_the_blend_moves_alone() {
+        // The intent led well off the sight line on BOTH axes: the gun lays at (0.35, 0.08), so
+        // this stands ~0.30 rad out in yaw and ~0.15 in pitch, and a half blend moves each by half
+        // of that.
+        let (eye, sight, point) = sighting(0.35, 0.08, 0.65, -0.09, 900.0);
+        let to_hull = hull().inverse();
+        let bearing = |blend| {
+            yaw_pitch_of(to_hull.transform_vector3(blended_look(
+                &hull(),
+                eye,
+                sight,
+                Some(point),
+                blend,
+            )))
+        };
+
+        let base = GunnerBlend {
+            yaw: 0.5,
+            pitch: 0.5,
+        };
+        let (base_yaw, base_pitch) = bearing(base);
+
+        let (moved_yaw, held_pitch) = bearing(GunnerBlend { yaw: 1.0, ..base });
+        let (yaw_step, pitch_leak) = (
+            shortest_angle(moved_yaw - base_yaw).abs(),
+            (held_pitch - base_pitch).abs(),
+        );
+        assert!(
+            yaw_step > 0.1 && pitch_leak < EPS,
+            "stepping the yaw fraction moved the yaw bearing {yaw_step} rad and leaked \
+             {pitch_leak} rad into the pitch — the axes are coupled",
+        );
+
+        let (held_yaw, moved_pitch) = bearing(GunnerBlend { pitch: 1.0, ..base });
+        let (pitch_step, yaw_leak) = (
+            (moved_pitch - base_pitch).abs(),
+            shortest_angle(held_yaw - base_yaw).abs(),
+        );
+        assert!(
+            pitch_step > 0.05 && yaw_leak < EPS,
+            "stepping the pitch fraction moved the pitch bearing {pitch_step} rad and leaked \
+             {yaw_leak} rad into the yaw — the axes are coupled",
+        );
     }
 
     /// **The blend takes the short way round the yaw wrap.** A continuous turret puts no seam in
@@ -623,7 +686,7 @@ mod tests {
         let eye = hull.transform_point3(MOUNT);
         let intent = hull.transform_point3(point) - eye;
 
-        let look = blended_look(&hull, eye, sight, Some(point), 0.5);
+        let look = blended_look(&hull, eye, sight, Some(point), both(0.5));
         let (from_sight, from_intent) = (angle_between(look, sight), angle_between(look, intent));
         assert!(
             (from_sight - SPLIT).abs() < EPS && (from_intent - SPLIT).abs() < EPS,

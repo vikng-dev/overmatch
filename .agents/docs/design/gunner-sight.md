@@ -91,6 +91,7 @@ alternatives: they are the two ends of one continuous knob.
   tests. Instantaneous, stateless, bounded: no damping and no spring, so the aperture cannot
   overshoot or wobble. Damping is a later decision, not a lost one.
 - **`V` cycles `k`** through `[0.0, 0.35, 0.5, 0.65, 1.0]`, defaulting to the interior `0.5`.
+  (The knob split per axis and the ladder was re-cut — §settlement.)
 - **B and C are cut.** They were a genuinely different commit path — the mouse steering the camera
   and the gun chasing it, with no optic circle — and the free-look commit, its servos param, its
   camera and its wide gunnery FOV went with them. D's spring is cut too, recoverable from git.
@@ -98,9 +99,9 @@ alternatives: they are the two ends of one continuous knob.
   centred on the gun's **sight line reprojected** — not screen centre, which it only coincides with
   at `k = 0`. Its angular radius is `sight::OPTIC_RADIUS_FRACTION × fov/2`, the SAME number that
   bounds the cursor's deflection, carried to pixels through the camera's actual projection. That
-  shared number plus the blend's position on the segment between the two bearings is why the intent
-  can never leave the drawn glass at any `k` — the property the mask's coherence rests on, tested
-  across the whole ladder.
+  shared number plus the blend's position between the two bearings is why the intent can never leave
+  the drawn glass — the property the mask's coherence rests on. (The rim moved to the viewport and
+  the bound to an ellipse; the shared number survives both — §settlement.)
 
 ## 2026-08-17 revision: a view is authored as the instrument it is
 
@@ -120,7 +121,8 @@ identity and the seat a selectable ladder sits in; a consumer invented before th
 would be a consumer invented to satisfy a lint.
 
 Everything downstream already read the field rather than a stored angle, so nothing needed a second
-edit: the cursor's deflection bound is `OPTIC_RADIUS_FRACTION × fov/2` (3.1° → 11.25°), the drawn
+edit: the cursor's deflection bound was `OPTIC_RADIUS_FRACTION × fov/2` (3.1° → 11.25°, since
+replaced by the ellipse — §settlement), the drawn
 glass is that bound measured through the camera's own projection, and the mask's on-screen radius is
 invariant under the field — the two field terms cancel, leaving only the projection's `tan`
 (MEASURED: under 2% of the radius across a 5.2°–62.5° spread).
@@ -133,6 +135,9 @@ which near the dialed range stand ~10–15 px apart — legible marks, crowded l
 numbering (or shortening the scale) is a sight-design decision.
 
 ## 2026-08-17 revision: the mask is a style, and one style is only framing
+
+**Superseded by the section below**, which settles the style and rewrites the bound; kept for the
+containment argument it introduced.
 
 War Thunder's surround is not a scope aperture. It is a circle spanning most of the display's
 **larger axis** with a broad blurred edge, and it says nothing about where the gun can be laid.
@@ -158,3 +163,68 @@ Which of the two reads better is a question for play, so both ship behind one kn
 - **Ultrawide is the honest cost of the larger-axis rule**: at 21:9 the framed circle is 2.13× the
   viewport height (DERIVED), so only the corners darken. That is what the style *is* — framing, not
   an aperture — and a per-axis cap would be a second law bought for nothing.
+
+## 2026-08-17 settlement: the mask settles, the blend splits, the bound becomes an ellipse
+
+Three playtest rulings, taken together because they are one sight picture.
+
+### The mask collapses to the framed circle
+
+Playtested against the aperture: **framed, with the soft feather, is the sight.** Options collapse
+once one is truth — the same ruling that killed the five schemes — so `MaskStyle`, its `Aperture`
+arm, its ladder and its `B` binding are gone, and `Framed`'s geometry is simply the mask. The circle
+spans `MASK_SPAN_FRACTION` (0.9) of the viewport's larger axis as a DIAMETER, feathered by 10% of
+its own radius. `B` is freed and rebound below.
+
+The aperture's job — a rim that *is* the aiming bound — does not survive the collapse, and does not
+need to: the section below puts the bound back on the shared number by a different route.
+
+### The blend knob splits per axis
+
+`GunnerBlend` carries `yaw` and `pitch` instead of one `k`, and `camera::blended_look` reads one per
+axis. **The turret's traverse lag is the large one, and a camera chasing the mouse in yaw makes the
+world swim; elevation lag is small, and a responsive vertical keeps the range bar readable.** So the
+two axes want different cameras, and a single `k` could only split the difference.
+
+- ONE shared ladder, `[0.5, 0.65, 0.8, 1.0]`. **`0` left the ladder** — a camera welded to the gun
+  is not on offer. Defaults: `yaw = 0.65`, `pitch = 1.0`.
+- **`V` steps yaw, `B` steps pitch**, one toast naming both.
+- Still stateless: the camera reads the resource fresh each frame and holds nothing. No time-domain
+  filter and no spring on top — a stateful low-pass is the proportional blend RO2 shipped, and its
+  documented failure is overshoot.
+
+### The deflection bound becomes an ellipse
+
+The circular bound was `OPTIC_RADIUS_FRACTION × half-VERTICAL-field` — 11.25° at the Tiger's 25° —
+which is far tighter sideways than the rim it is meant to match, and it read as annoying.
+
+The new law is simpler than the old: **the intent is bounded to `OPTIC_RADIUS_FRACTION` of the
+viewport half-extent on EACH axis, measured in the camera's projected space.**
+
+```
+yaw_margin   = atan(f · tan(hfov/2))        f = OPTIC_RADIUS_FRACTION
+pitch_margin = atan(f · tan(vfov/2))        tan(hfov/2) = aspect · tan(vfov/2)
+```
+
+At 25° / 16:9 that reaches **19.53° in yaw and 11.28° in pitch** (MEASURED). The pitch bound moved
+from 11.25° because the old form was linear in the angle where this one goes through the projection
+— intended, and more correct.
+
+Why this shape and not a per-axis fraction of the drawn rim: that rim has radius
+`0.45 × max(width, height)`, which is `≥ 0.45 ×` either axis at ANY aspect, so **the ellipse is
+inscribed in the drawn glass automatically** — no `min()`, no aspect branch — and at 16:9 it touches
+the rim exactly at the sides (MEASURED clearance at the tangent: 7.5e-7 glass units, float noise).
+That is the property to preserve; a rule needing a case split is not an improvement.
+
+`OPTIC_RADIUS_FRACTION` is therefore still the ONE number both the bound and the drawn rim are read
+against — the aperture's shared-number invariant, recovered on the framed circle. The containment is
+asserted rather than argued: at every pair of blend rungs, across 16:9, 21:9, 4:3, portrait and
+square, the intent driven all the way round its own ellipse stays inside both the glass and the
+viewport.
+
+`optic_margin` now takes the viewport aspect as well as the field, so `drive_gunner_aim` carries a
+camera query; the pre-bind fallback is a square viewport, the circle both axes share.
+
+`camera::GUNNER_FOV_FALLBACK` was left alone deliberately. It is not a vehicle's field — it is a
+conservative "narrowest field" bound that `view::ViewFacts::default` and `world::terrain_lod_view`
+consume to seed both LOD ladders, and widening it fires two LOD tests.
