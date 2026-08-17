@@ -64,6 +64,11 @@ use bevy::window::{
 };
 use serde::{Deserialize, Serialize};
 
+/// The display row's OFFERED ladder: one rung per monitor bevy has synchronised, named the way the
+/// OS names it. Reads the [`Monitor`] entities this module only counts, and is the one thing that
+/// decides what the row shows and what a step lands on — never what [`DisplaySelection`] means.
+/// Mounted by [`ui::plugin`], its only consumer.
+mod displays;
 /// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
 /// [`FrameCap`]. Pure std timing; see its doc for the coarse-sleep-then-spin shape.
 mod limiter;
@@ -877,9 +882,12 @@ pub(crate) enum DisplaySelection {
 }
 
 impl DisplaySelection {
-    /// How many indexed rungs the ladder offers. Three is a deliberate ceiling rather than a
-    /// measured one: the row is a picker, not an enumeration, and a rung past the attached count
-    /// falls back loudly ([`DisplaySelection::resolve`]) instead of doing something silent.
+    /// How many indexed monitors this enum can NAME — a limit of the persisted variant list, not of
+    /// the row. What the row offers is [`displays::DisplayLadder`], which is built from the attached
+    /// monitors; a fourth monitor is simply not addressable by a stored rung, so it gets none rather
+    /// than borrowing a third display's name. Widening this means adding variants, which old files
+    /// tolerate (they carry a name this enum still has); NARROWING it would make a stored
+    /// `Display3` unparseable and cost the player their whole video file.
     const INDEXED: usize = 3;
 
     /// The monitor this rung names, or `None` for [`DisplaySelection::Auto`] — which is not a
@@ -902,6 +910,18 @@ impl DisplaySelection {
             DisplaySelection::Display1 => Some(0),
             DisplaySelection::Display2 => Some(1),
             DisplaySelection::Display3 => Some(2),
+        }
+    }
+
+    /// The rung naming the zero-based attached-monitor `index`, or `None` past [`Self::INDEXED`].
+    /// The inverse of [`DisplaySelection::index`], and the only place the ladder learns which
+    /// variant a monitor's list position stores.
+    const fn at_index(index: usize) -> Option<Self> {
+        match index {
+            0 => Some(DisplaySelection::Display1),
+            1 => Some(DisplaySelection::Display2),
+            2 => Some(DisplaySelection::Display3),
+            _ => None,
         }
     }
 
@@ -1006,8 +1026,14 @@ impl DisplaySelection {
         }
     }
 
-    /// ASCII only — it reaches `Text`. One-based, per the variant docs.
-    pub(crate) const fn label(self) -> &'static str {
+    /// The rung's name when nothing has been learned about the machine's monitors. ASCII only — it
+    /// reaches `Text`. One-based, per the variant docs.
+    ///
+    /// **This is the fallback, not the label a player normally reads.** A variant cannot name a
+    /// panel: `DISPLAY 2` says only where a rung sits in a list. Once bevy has synchronised the
+    /// monitors, [`displays::DisplayLadder`] names every rung from the display itself and only
+    /// [`DisplaySelection::Auto`] still renders from here.
+    const fn label(self) -> &'static str {
         match self {
             DisplaySelection::Auto => "AUTO",
             DisplaySelection::Primary => "PRIMARY",
@@ -1017,8 +1043,13 @@ impl DisplaySelection {
         }
     }
 
-    /// The ladder. `Auto` first because it is the default and the "leave it alone" rung; the rest
-    /// ascend so the right arrow always walks further down the display list.
+    /// Every variant, in ladder order: `Auto` first because it is the default and the "leave it
+    /// alone" rung; the rest ascend so the right arrow always walks further down the display list.
+    ///
+    /// This is the ladder ONLY where nothing has been learned about the machine's monitors — see
+    /// [`displays::DisplayLadder`], which offers a rung per attached display instead. Everywhere
+    /// else it is the variant sweep: the persistence round-trip walks it to prove every rung an old
+    /// file can hold still parses.
     pub(crate) const ORDER: [DisplaySelection; 2 + DisplaySelection::INDEXED] = [
         DisplaySelection::Auto,
         DisplaySelection::Primary,
@@ -1063,9 +1094,9 @@ pub(crate) struct AttachedDisplays {
     pub(crate) primary: Option<Entity>,
 }
 
-/// Gather [`AttachedDisplays`] from the world. One function, because `apply_settings` and
-/// `observe_window_placement` must resolve the display row IDENTICALLY — see `observe_window_placement` for
-/// what a disagreement between them costs.
+/// Gather [`AttachedDisplays`] from the world. One function, because `apply_settings`,
+/// `observe_window_placement` and [`displays`]'s ladder must resolve the display row IDENTICALLY —
+/// see `observe_window_placement` for what a disagreement between them costs.
 ///
 /// The primary query demands `Monitor` as well as the marker so that a `PrimaryMonitor` on anything
 /// that is not an attached display cannot be spent as one — `MonitorSelection::Entity` is looked up
