@@ -279,7 +279,10 @@ fn apply_sight_camera_profile(
 
 /// Cursor radius as a fraction of half the vertical FOV: `margin = fraction * fov / 2`.
 ///
-/// Invariant: sight input and the optic overlay share this constant.
+/// This is the AIMING bound, in every mask style — no style of surround is an input to it. Only the
+/// `Aperture` mask draws its rim on this same angle, and there the drawn glass IS the reachable set;
+/// `Framed` sizes its circle off the viewport instead, so it contains the bound without indicating
+/// it (`reticle::MaskStyle`).
 pub const OPTIC_RADIUS_FRACTION: f32 = 0.9;
 
 /// Angular cursor radius for vertical FOV `fov`.

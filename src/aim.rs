@@ -1,7 +1,7 @@
 //! Mouse aiming: a screen-center ray commits the shared aim intention into the tank's
 //! [`TankCommand`], which every servo then chases (`drive_aim_servos`) — turret, gun, and the
-//! hull MG alike. RMB free-look holds the committed point; the HUD shows the center reticle,
-//! green bore dot, and amber aim-point dot.
+//! hull MG alike. RMB free-look holds the committed point; the HUD shows the third-person centre
+//! reticle, green bore dot, and amber aim-point dot.
 //!
 //! **The intention is HELD hull-locally and TRAVELS in the frame its view is anchored to.**
 //! [`CommittedAim`] stores the player's bearing off their own tank, so a hold is hull-rigid and the
@@ -25,7 +25,7 @@ use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
-use crate::sight::{SightToggled, in_third_person};
+use crate::sight::{SightMode, SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
@@ -86,6 +86,11 @@ pub(crate) fn aim_distance(
 /// rate; the sim (`drive_aim_servos`, fixed clock) consumes whatever intention stands at each tick.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AimCommit;
+
+/// HUD: the third-person aiming crosshair — screen centre, which is where [`commit_aim`] casts its
+/// pick ray. Held there by its flexbox parent, so it carries no position of its own.
+#[derive(Component)]
+struct CentreReticle;
 
 /// HUD: where the barrel is actually pointing (lags the reticle) — the gun's reality.
 #[derive(Component)]
@@ -204,6 +209,14 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
+        // Presentation, not input: no `PlayerInputSet`, so the dot answers the view it is in even
+        // with the cursor free. `.after(SightToggled)` puts the hide on the frame of the switch.
+        .add_systems(
+            Update,
+            update_centre_reticle
+                .after(SightToggled)
+                .in_set(GameplaySet),
+        )
         // HUD markers reproject through the camera, so they run after the camera's pose is final
         // for the frame — after propagation and after the gunner camera places itself — or they
         // lag/jitter against the rendered view (worst at the gunner optic's high zoom).
@@ -217,7 +230,8 @@ pub fn client_plugin(app: &mut App) {
 }
 
 fn spawn_hud(mut commands: Commands) {
-    // Center reticle: a small white dot held at screen center by flexbox.
+    // Centre reticle: a small white dot held at screen centre by flexbox. Third person only
+    // (`update_centre_reticle`); spawned visible, which is the default view.
     commands
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -228,6 +242,7 @@ fn spawn_hud(mut commands: Commands) {
         })
         .with_children(|parent| {
             parent.spawn((
+                CentreReticle,
                 Node {
                     width: Val::Px(6.0),
                     height: Val::Px(6.0),
@@ -235,6 +250,7 @@ fn spawn_hud(mut commands: Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::WHITE),
+                Visibility::Visible,
             ));
         });
 
@@ -263,6 +279,24 @@ fn spawn_hud(mut commands: Commands) {
         BackgroundColor(Color::srgba(1.0, 0.7, 0.1, 0.7)),
         Visibility::Hidden,
     ));
+}
+
+/// The centre dot belongs to the view whose aim it names. In third person it IS the aiming
+/// crosshair — [`commit_aim`] casts through screen centre, so the dot marks the ray. In the gunner
+/// optic nothing is picked at screen centre (the intent is a bearing off the gun's sight line), and
+/// the graticule's zero mark already stands on that line, so the dot would be a second centre
+/// claiming an aim it does not have.
+fn update_centre_reticle(
+    mode: Res<SightMode>,
+    mut reticle: Query<&mut Visibility, With<CentreReticle>>,
+) {
+    let Ok(mut visibility) = reticle.single_mut() else {
+        return;
+    };
+    visibility.set_if_neq(match *mode {
+        SightMode::Gunner => Visibility::Hidden,
+        SightMode::ThirdPerson => Visibility::Visible,
+    });
 }
 
 /// The hull's tick-truth pose as an affine — `rig_world_pose` (never `GlobalTransform`: see its
@@ -1330,6 +1364,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The centre dot is the third-person crosshair, and only that.** [`commit_aim`] picks along
+    /// the screen-centre ray, so the dot names a real aim there and must be drawn. Inside the optic
+    /// nothing is picked at screen centre — the intent is a bearing off the gun's sight line, and
+    /// the graticule's zero mark already stands on that line — so a dot held at the node's centre
+    /// would claim an aim it does not have.
+    ///
+    /// Run through the shipped spawn and the shipped system, and back again: the switch is a live
+    /// toggle, so the dot must return, not merely leave.
+    #[test]
+    fn the_centre_dot_is_drawn_in_third_person_and_gone_in_the_optic() {
+        let mut world = World::new();
+        world.run_system_once(spawn_hud).expect("the HUD spawns");
+
+        let dot = |world: &mut World, mode: SightMode| {
+            world.insert_resource(mode);
+            world
+                .run_system_once(update_centre_reticle)
+                .expect("the shipped system runs");
+            let mut dots = world.query_filtered::<&Visibility, With<CentreReticle>>();
+            *dots.single(world).expect("the HUD spawns one centre dot")
+        };
+
+        assert_eq!(
+            dot(&mut world, SightMode::ThirdPerson),
+            Visibility::Visible,
+            "third person aims down the screen centre, so the crosshair is drawn",
+        );
+        assert_eq!(
+            dot(&mut world, SightMode::Gunner),
+            Visibility::Hidden,
+            "the optic has no aim at screen centre — the graticule's zero mark is on the sight line",
+        );
+        assert_eq!(
+            dot(&mut world, SightMode::ThirdPerson),
+            Visibility::Visible,
+            "and it comes back on the way out",
+        );
     }
 
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a
