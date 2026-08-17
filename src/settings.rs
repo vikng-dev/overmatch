@@ -8,7 +8,7 @@
 //! | Writer | Writes [`Settings`] | Writes the file |
 //! |---|---|---|
 //! | The settings page (`settings::ui`) | yes | **yes** — every change saves |
-//! | [`observe_window_mode`] (OS fullscreen toggle) | yes — window mode only | **yes** — the green button IS a deliberate choice |
+//! | [`observe_window_placement`] (OS fullscreen toggle) | yes — window mode only | **yes** — the green button IS a deliberate choice |
 //! | [`normalize_vsync`] (a CONCLUSIVE capability probe answer) | yes — vsync only | **yes** — see [`Settings::effective_vsync`] |
 //!
 //! The third row is the odd one: it writes a value the player did NOT choose. It exists because a
@@ -748,10 +748,10 @@ impl PresentCaps {
 /// monitor out of `Window::mode` alone (vendored bevy_winit-0.19.0/src/system.rs:326-334), so the
 /// display row has to reach fullscreen through here or not at all.
 ///
-/// **The row REFLECTS the OS, it does not own it** — see `observe_window_mode`: the player can
+/// **The row REFLECTS the OS, it does not own it** — see `observe_window_placement`: the player can
 /// toggle fullscreen with the green button, and the stored value follows reality rather than
 /// fighting it. That writer computes this mapping with the SAME resolved display this one does,
-/// which is load-bearing rather than tidy — see `observe_window_mode` for the clobber it prevents.
+/// which is load-bearing rather than tidy — see `observe_window_placement` for the clobber it prevents.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub(crate) enum WindowModeSetting {
     /// **The shipped default** — the window the game has always opened with.
@@ -762,7 +762,7 @@ pub(crate) enum WindowModeSetting {
 
 impl WindowModeSetting {
     /// The `Window::mode` this asks for on `monitor` — the ONE mapping, used at boot window
-    /// description, by `apply_settings` and by `observe_window_mode` alike.
+    /// description, by `apply_settings` and by `observe_window_placement` alike.
     ///
     /// `monitor` is a MonitorSelection rather than a [`DisplaySelection`] because the two callers
     /// derive it differently and must be free to: a running app resolves against the live monitor
@@ -817,7 +817,7 @@ impl WindowModeSetting {
 /// wherever `Current` landed, and moving the row while fullscreen did nothing at all.
 ///
 /// The two are applied differently on purpose, and [`apply_settings`] states which is which:
-/// the MODE is level-triggered (it is also written by `observe_window_mode`, so it must be
+/// the MODE is level-triggered (it is also written by `observe_window_placement`, so it must be
 /// re-asserted rather than fired once), the POSITION is edge-triggered (winit rewrites it out from
 /// under us — see the reconciler).
 ///
@@ -1064,7 +1064,7 @@ pub(crate) struct AttachedDisplays {
 }
 
 /// Gather [`AttachedDisplays`] from the world. One function, because `apply_settings` and
-/// `observe_window_mode` must resolve the display row IDENTICALLY — see `observe_window_mode` for
+/// `observe_window_placement` must resolve the display row IDENTICALLY — see `observe_window_placement` for
 /// what a disagreement between them costs.
 ///
 /// The primary query demands `Monitor` as well as the marker so that a `PrimaryMonitor` on anything
@@ -1679,6 +1679,9 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
             // writer, so a root that had the page without the resource would panic on the first
             // reconcile instead of merely missing a row.
             .init_resource::<LodPixelBudget>()
+            // The window-placement state both window writers share — see [`WindowPlacement`] for
+            // why an edge memory cannot be a `Local` here.
+            .init_resource::<WindowPlacement>()
             .add_message::<SaveSettings>()
             // `Startup` applies the loaded file to a world that has just spawned its camera and sun;
             // after that the reconcilers are change-driven, so they cost a resource-tick comparison
@@ -1692,7 +1695,7 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
                 (
                     // BEFORE the page (and therefore before this frame's edits): the observed OS
                     // state is this frame's baseline, which player input then overrides.
-                    observe_window_mode.before(ui::DeclareSettingsPage),
+                    observe_window_placement.before(ui::DeclareSettingsPage),
                     // Same shape, same reason, for the capability side: the probe's answer is the
                     // baseline the page renders and the player then edits. Runs only on a caps
                     // change, which after boot means exactly once — when the probe lands.
@@ -1813,9 +1816,9 @@ fn apply_settings(
     // primary (`read_displays`).
     monitors: Query<(), With<Monitor>>,
     primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
-    // The window PLACEMENT is edge-triggered on this pair — see the write below. The window MODE
-    // beside it deliberately is not.
-    mut last_placement: Local<Option<(WindowModeSetting, DisplaySelection)>>,
+    // The placement state both window writers share — the position edge, and the round trip this
+    // system yields the mode to. NOT a `Local`: see [`WindowPlacement`].
+    mut placement: ResMut<WindowPlacement>,
 ) {
     let msaa = settings.msaa.to_msaa();
     for mut camera_msaa in &mut cameras {
@@ -1893,12 +1896,12 @@ fn apply_settings(
         // only route the row has while fullscreen.
         //
         // Level rather than edge, because this field is NOT ours alone in the other direction
-        // either: `observe_window_mode` writes it whenever the OS toggles fullscreen, and it can do
+        // either: `observe_window_placement` writes it whenever the OS toggles fullscreen, and it can do
         // so on a frame that leaves `Settings` untouched (the player picked FULLSCREEN on the page,
         // so the observed state already matches the stored one and nothing is saved). Re-asserting
         // every pass is what stops that write from silently stripping the monitor back to
         // `Current`. Still guarded, so an already-agreed field costs a comparison and no change
-        // tick. (`observe_window_mode` resolves the display identically — see its doc.)
+        // tick. (`observe_window_placement` resolves the display identically — see its doc.)
         //
         // This write is also the whole BOOT correction. The window was created before
         // `WinitMonitors` existed, so an indexed rung could not be named there and the boot mode
@@ -1906,9 +1909,16 @@ fn apply_settings(
         // request verbatim, and reissues fullscreen only where the component now DIFFERS from that
         // cache (system.rs:305-326). Writing the resolved selection here is what produces that
         // difference — which is why the boot window must never have carried it already.
-        let mode = settings.window_mode.to_window_mode(monitor);
-        if window.mode != mode {
-            window.mode = mode;
+        //
+        // YIELDED for the duration of a monitor round trip: while [`WindowPlacement::round_trip`]
+        // is leaving fullscreen the window is deliberately in a state no row asked for, and
+        // re-asserting the row's mode over it would cancel the trip and strand it half-done — the
+        // observed edge it waits for would never arrive. See [`RoundTrip`].
+        if !placement.round_trip.owns_the_mode() {
+            let mode = settings.window_mode.to_window_mode(monitor);
+            if window.mode != mode {
+                window.mode = mode;
+            }
         }
 
         // The window POSITION is EDGE-triggered, on the (mode, display) pair. It has to be, because
@@ -1921,8 +1931,13 @@ fn apply_settings(
         // The WINDOW MODE is in the edge, not just the display, because leaving fullscreen is
         // exactly when a position that was ignored while fullscreen becomes meaningful again. The
         // FIRST observation counts as an edge on purpose: that is the launch application.
-        let placement = (settings.window_mode, settings.display);
-        if last_placement.replace(placement) != Some(placement) {
+        //
+        // The pair is read out of [`Settings`], never out of `Window::mode`, and that is what keeps
+        // a monitor round trip from spending the edge: the window passes through `Windowed` while
+        // the ROW still says fullscreen, so neither half of this pair moves and the position write
+        // below stays withheld until the player really leaves fullscreen.
+        let applied = (settings.window_mode, settings.display);
+        if placement.last_applied.replace(applied) != Some(applied) {
             let resolved = settings.display.resolve(displays);
             if resolved != settings.display {
                 warn!(
@@ -2006,8 +2021,187 @@ fn normalize_vsync(
     save.write(SaveSettings);
 }
 
-/// Reflect the OS's ACTUAL fullscreen state back into [`Settings`] and `Window::mode` — the
-/// "observe external changes" half of the window-mode row. On macOS the green traffic-light button
+/// The window-placement state that has to outlive a frame, shared by the two window writers.
+///
+/// Neither field can be a `Local`, and the first one is the older lesson: [`apply_settings`] is
+/// registered as TWO system instances (`Startup` and `Update`), so a `Local` edge memory gives each
+/// of them its own, and the "edge-triggered" position write fired twice at boot — visibly, as a
+/// duplicated unreachable-display warning about a second apart. An edge is a property of the WINDOW,
+/// not of a system instance. The second field is one fact two systems have to agree on:
+/// [`observe_window_placement`] drives the round trip and [`apply_settings`] yields the mode to it.
+#[derive(Resource, Default)]
+struct WindowPlacement {
+    /// The `(mode, display)` pair the POSITION write is edge-triggered on — see [`apply_settings`].
+    /// `None` is "never applied", and that first application IS an edge: it is the launch placement.
+    last_applied: Option<(WindowModeSetting, DisplaySelection)>,
+    round_trip: RoundTrip,
+}
+
+/// Moving an already-fullscreen window to another monitor, by leaving fullscreen and re-entering it
+/// on the target.
+///
+/// # Why the window has to go all the way out and back
+///
+/// winit's macOS `set_fullscreen` implements `None -> Some`, `Borderless -> None`,
+/// `Exclusive -> None`, `Borderless -> Exclusive` and `Exclusive -> Borderless`, and nothing else.
+/// There is no `Borderless -> Borderless` arm, so a monitor change on a window that is ALREADY
+/// borderless fullscreen falls through to `_ => {}` and no `toggleFullScreen` is ever issued
+/// (winit-0.30.13/src/platform_impl/macos/window_delegate.rs:1421-1488). The prologue has run by
+/// then regardless: it committed the new value to `ivars().fullscreen` (:1411) and, where the target
+/// screen differs, called `setFrameOrigin` on a window sitting in a macOS fullscreen Space
+/// (:1337-1340). So the window does not move AND winit reports a monitor it is not on — which is
+/// also why re-writing `Window::mode` cannot repair it: `bevy_winit` forwards a mode change only
+/// where `winit_window.fullscreen() != new_mode` (bevy_winit-0.19.0/src/system.rs:362), and that
+/// committed value already equals what we would ask for. Only a transition winit implements can move
+/// the window, and `None -> Some` is the one that does.
+///
+/// Recorded in `upstream/winit-macos-borderless-to-borderless-fullscreen-noop.md`.
+///
+/// # Sequenced on the OBSERVED edge — never on a level, a retry or a frame count
+///
+/// Both halves are asynchronous macOS Space transitions of about 1-2 s, and winit DEFERS anything
+/// sent while one is running: `in_fullscreen_transition` parks the request in `target_fullscreen`
+/// (:1308-1312) and replays it from `windowDidEnterFullScreen` (:291-299), where a
+/// `Borderless -> Borderless` replay meets the same missing arm. So the second write is issued on
+/// the frame the OS is OBSERVED to have left fullscreen, and on no other frame.
+///
+/// # It is armed by the DISAGREEMENT, not by the player touching the row
+///
+/// The rule is one comparison against observed reality, so every way a fullscreen window can come to
+/// be on the wrong monitor is the same case and none of them needs its own trigger:
+///
+/// * **boot** — an indexed rung cannot resolve at window creation
+///   ([`DisplaySelection::at_window_creation`]), so the window is born on the fallback monitor and
+///   the `Startup` correction is itself a `Borderless -> Borderless` no-op;
+/// * **hot-plug** — bevy never re-assigns `PrimaryMonitor` ([`AttachedDisplays::primary`]), so a
+///   sleep or an undock flips what a stored rung resolves to, on a window that is already
+///   fullscreen;
+/// * **a window winit has lost track of** — once a swallowed call has split winit's belief from the
+///   real window, any later recompute is working from the wrong screen (that is what the
+///   `setFrameOrigin` above does to a window in a fullscreen Space). Repairing the divergence as
+///   soon as it is observable is what stops it being something to recompute from.
+///
+/// # Terminating, because a broader trigger makes a retry loop worse than the defect
+///
+/// A trip that did not land is evidence about the target, not a reason to try again. Re-deciding on
+/// a standing mismatch would flap the window between two Spaces for the rest of the session, so a
+/// completed trip that did not land settles into [`RoundTrip::Stranded`]: reported once, never
+/// retried, the window left where it is. Only a CHANGE — the row moving, the display list changing
+/// what it resolves to, or the window being observed to agree after all — re-arms it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum RoundTrip {
+    /// Nothing in flight and nothing spent: a disagreement observed now is acted on.
+    #[default]
+    Idle,
+    /// `Windowed` has been written and the observed fullscreen edge is what releases the second
+    /// write. The target is deliberately NOT carried: the re-entry honours whatever the row says on
+    /// the frame it is written, so a change made mid-transition costs nothing and interrupts
+    /// nothing. While the machine is here the window is passing through a state no row asked for,
+    /// which is why [`Settings`] is not written and [`apply_settings`] yields the mode.
+    Leaving,
+    /// The re-entry has been written for this target; where the window landed is not known yet.
+    Spent(DisplaySelection),
+    /// A completed trip did not put the window on this target. Said once, then held.
+    Stranded(DisplaySelection),
+}
+
+/// What the OS says about the window right now — the only input [`RoundTrip`] may sequence on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct ObservedPlacement {
+    /// Whether the OS has the window in fullscreen.
+    fullscreen: bool,
+    /// Whether the monitor the window is REALLY on is the one the display row resolves to. `None`
+    /// is "could not be learned" — the tri-state discipline [`PresentCaps`] is built around, and it
+    /// moves nothing: a target that cannot be resolved is not a disagreement. Two states reach it,
+    /// both real: a window winit has not mapped to a screen yet answers no `current_monitor()` (see
+    /// `frame_cost::record_monitor`), and a machine on which bevy has marked no primary monitor
+    /// leaves the PRIMARY rung unresolvable.
+    on_target: Option<bool>,
+}
+
+/// What [`RoundTrip::step`] asks the window writer to do this frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PlacementStep {
+    /// Leave `Window::mode` alone.
+    Hold,
+    /// Write `WindowMode::Windowed` — step one. TRANSITIONAL: [`Settings`] is not touched, so no row
+    /// says windowed and the position edge stays unspent.
+    LeaveFullscreen,
+    /// Write the resolved `BorderlessFullscreen` — step two, the `None -> Some` winit implements.
+    ReenterFullscreen,
+    /// Write nothing, and say once that the window is still not where the row asks. The trip is over
+    /// and it did not land; settling here rather than retrying is what makes the rule terminate.
+    Settle,
+}
+
+impl RoundTrip {
+    /// Advance on this frame's observation and say what to write. The whole decision rule.
+    ///
+    /// `target` is the RESOLVED rung ([`DisplaySelection::resolve`]) rather than the stored one, so
+    /// an unreachable rung and the rung it falls back to are one attempt, not two — and a hot-plug
+    /// that changes what the stored rung resolves to is a genuinely new target, which is exactly
+    /// what it is.
+    fn step(
+        &mut self,
+        setting: WindowModeSetting,
+        target: DisplaySelection,
+        observed: ObservedPlacement,
+    ) -> PlacementStep {
+        if setting != WindowModeSetting::Fullscreen {
+            // The row is no longer asking for fullscreen, so this is not the thing placing the
+            // window any more. Abandoning a trip in flight is the point rather than a side effect:
+            // its next write would restore a fullscreen nobody now wants.
+            *self = RoundTrip::Idle;
+            return PlacementStep::Hold;
+        }
+        if *self == RoundTrip::Leaving {
+            if observed.fullscreen {
+                return PlacementStep::Hold;
+            }
+            *self = RoundTrip::Spent(target);
+            return PlacementStep::ReenterFullscreen;
+        }
+        if !observed.fullscreen {
+            // Commanded fullscreen and not there yet: nothing is placed, so nothing can disagree.
+            // The state deliberately SURVIVES this — the frames between the two halves of a trip
+            // look exactly like this one, and resetting here would re-arm the trip against its own
+            // re-entry, which is the flap.
+            return PlacementStep::Hold;
+        }
+        match observed.on_target {
+            // "Could not learn" is not a disagreement, and it is not evidence against one either.
+            None => PlacementStep::Hold,
+            Some(true) => {
+                *self = RoundTrip::Idle;
+                PlacementStep::Hold
+            }
+            // The trip that has just been observed to finish was spent on THIS target and the window
+            // is not on it.
+            Some(false) if *self == RoundTrip::Spent(target) => {
+                *self = RoundTrip::Stranded(target);
+                PlacementStep::Settle
+            }
+            Some(false) if *self == RoundTrip::Stranded(target) => PlacementStep::Hold,
+            Some(false) => {
+                *self = RoundTrip::Leaving;
+                PlacementStep::LeaveFullscreen
+            }
+        }
+    }
+
+    /// Whether the window is in the transitional state the trip owns — the frames on which
+    /// [`apply_settings`] must yield `Window::mode` rather than re-assert the row's fullscreen over
+    /// a half-done trip.
+    const fn owns_the_mode(self) -> bool {
+        matches!(self, RoundTrip::Leaving)
+    }
+}
+
+/// Observe where the window REALLY is — fullscreen or not, and on which monitor — and reconcile
+/// both halves. The "observe external changes" half of the window-mode row, and the only owner of
+/// fullscreen monitor placement.
+///
+/// On macOS the green traffic-light button
 /// toggles native fullscreen without bevy hearing about it: `Window::mode` goes stale, and a page
 /// that trusted it would either lie or fight the OS (writing the stale mode back would kick the
 /// player straight out of the fullscreen they just asked for).
@@ -2033,6 +2227,8 @@ fn normalize_vsync(
 /// booting `Windowed` writes nothing — and with the apply-side skip in place nothing ever commands
 /// that window fullscreen, so the OS edge this system needs cannot occur on a capture run. It
 /// therefore cannot spend the player's persisted fullscreen on a capture client's `Windowed` state.
+/// The round trip below is covered by the same fact from the other side: it arms only on a window
+/// the OS reports as ALREADY fullscreen, which a capture window never is.
 ///
 /// # Why it resolves the DISPLAY row too
 ///
@@ -2044,50 +2240,117 @@ fn normalize_vsync(
 /// `resource_changed::<Settings>`) does not run again to correct anything. A `Current` written here
 /// would stand, and bevy would re-apply fullscreen on whatever monitor the window happened to be
 /// on. Hence the same [`read_displays`] + [`DisplaySelection::resolve`] the reconciler uses.
-fn observe_window_mode(
+///
+/// # Why it also watches WHICH monitor
+///
+/// Tracking fullscreen-or-not alone is what let a disagreement stand forever: winit accepts a
+/// monitor change on an already-fullscreen window, commits it to its own state, and never moves the
+/// window ([`RoundTrip`]). Nothing downstream can notice, because every component and every cache
+/// then reads as correct. So the real monitor is observed beside the real fullscreen state, and the
+/// rule is one comparison against the row: while the row asks for fullscreen and the OS agrees the
+/// window is fullscreen, the monitor it is really on must be the one the row resolves to, or
+/// [`RoundTrip`] drives it there. Keyed on the DISAGREEMENT and not on the player touching the row,
+/// so boot, a hot-plug and a window winit has lost track of are all the same case — see
+/// [`RoundTrip`] for the three and for why the repair terminates.
+///
+/// The target is resolved through `bevy_winit`'s OWN `select_monitor`, so this comparison cannot
+/// drift from the monitor `changed_windows` would actually pick.
+fn observe_window_placement(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
     monitors: Query<(), With<Monitor>>,
     primaries: Query<Entity, (With<Monitor>, With<PrimaryMonitor>)>,
+    // Bevy's own monitor-handle list, the one `changed_windows` resolves `Window::mode` through.
+    // Present on every root that mounts this plugin — they all carry `WinitPlugin`.
+    winit_monitors: Res<bevy::winit::WinitMonitors>,
+    mut placement: ResMut<WindowPlacement>,
     mut last_seen: Local<Option<bool>>,
 ) {
     let Some(window) = window else {
         return;
     };
     let (entity, mut window) = window.into_inner();
-    let Some(fullscreen) = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
-        winit_windows
-            .get_window(entity)
-            .map(|winit_window| winit_window.fullscreen().is_some())
+    let displays = read_displays(&monitors, &primaries);
+    let target = settings.display.monitor_on(displays);
+    let Some(observed) = bevy::winit::WINIT_WINDOWS.with_borrow(|winit_windows| {
+        winit_windows.get_window(entity).map(|winit_window| {
+            let real = winit_window.current_monitor();
+            ObservedPlacement {
+                fullscreen: winit_window.fullscreen().is_some(),
+                on_target: target.and_then(|selection| {
+                    // The primary handle is not reachable from a system, and does not need to be:
+                    // `monitor_on` emits the bare `MonitorSelection::Primary` only where bevy has
+                    // marked no monitor at all, which is precisely the state in which nothing about
+                    // the target can be concluded. `select_monitor` answers `None` there, and an
+                    // unresolvable target is "could not learn", not a disagreement.
+                    let wanted = bevy::winit::select_monitor(
+                        &winit_monitors,
+                        None,
+                        real.clone(),
+                        &selection,
+                    )?;
+                    Some(real.clone()? == wanted)
+                }),
+            }
+        })
     }) else {
         return;
     };
-    let previous = last_seen.replace(fullscreen);
-    // The first observation is a baseline, not an edge — and a same-state frame is nothing at all.
-    if previous.is_none_or(|previous| previous == fullscreen) {
+    let previous = last_seen.replace(observed.fullscreen);
+
+    // The trip's own fullscreen edges are this system's writes coming back, not player intent:
+    // reflecting them below would save a windowed state nobody asked for, spending the player's
+    // persisted fullscreen on the way to honouring their display row.
+    let trip_owns_the_window = placement.round_trip.owns_the_mode();
+    let resolved = settings.display.resolve(displays);
+    let step = placement
+        .round_trip
+        .step(settings.window_mode, resolved, observed);
+    match step {
+        PlacementStep::Hold => {}
+        PlacementStep::LeaveFullscreen => {
+            window.mode = WindowMode::Windowed;
+            info!(
+                "settings: the window is fullscreen on the wrong display -> leaving fullscreen to \
+                 re-enter on {}",
+                resolved.label(),
+            );
+        }
+        PlacementStep::ReenterFullscreen => {
+            window.mode = settings.window_mode.to_window_mode(target);
+            info!("settings: re-entering fullscreen on {}", resolved.label());
+        }
+        PlacementStep::Settle => warn!(
+            "settings: the window is still not on {} after a fullscreen round trip — left where \
+             it is (not retried)",
+            resolved.label(),
+        ),
+    }
+    if trip_owns_the_window || step != PlacementStep::Hold {
         return;
     }
-    let observed = WindowModeSetting::from_fullscreen(fullscreen);
+
+    // The first observation is a baseline, not an edge — and a same-state frame is nothing at all.
+    if previous.is_none_or(|previous| previous == observed.fullscreen) {
+        return;
+    }
+    let reflected = WindowModeSetting::from_fullscreen(observed.fullscreen);
     // Keep `Window::mode` truthful FIRST, whatever the settings say: bevy's change detection can
     // only express "leave fullscreen" later if the component actually says it is fullscreen now.
     // The MONITOR in it is the settings row's, resolved exactly as `apply_settings` resolves it —
     // see this function's doc for the path on which this write is the last word.
-    let mode = observed.to_window_mode(
-        settings
-            .display
-            .monitor_on(read_displays(&monitors, &primaries)),
-    );
+    let mode = reflected.to_window_mode(target);
     if window.mode != mode {
         window.mode = mode;
     }
-    if settings.window_mode != observed {
-        settings.window_mode = observed;
+    if settings.window_mode != reflected {
+        settings.window_mode = reflected;
         save.write(SaveSettings);
         info!(
             "settings: window mode -> {} (changed outside the settings page)",
-            observed.label()
+            reflected.label()
         );
     }
 }
@@ -2251,6 +2514,7 @@ mod tests {
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
             .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
         app.update();
         assert_eq!(
@@ -2441,6 +2705,7 @@ mod tests {
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
             .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
         let sun = app
             .world_mut()
@@ -3194,6 +3459,7 @@ mod tests {
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
             .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
         app.world_mut().spawn((Window::default(), PrimaryWindow));
         spawn_monitors(&mut app, monitors);
@@ -3233,6 +3499,7 @@ mod tests {
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
             .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
         // Step 1-2: the window exists, described with the boot mode, before any monitor does.
         app.world_mut().spawn((
@@ -3452,6 +3719,11 @@ mod tests {
     ///
     /// Three claims, in the order a player meets them: boot, a live change while fullscreen, and
     /// the walk back out to windowed.
+    ///
+    /// **The component write pinned here is necessary and not sufficient**, which is worth stating
+    /// where the assertion is: on macOS, winit accepts the changed mode and then declines to move an
+    /// already-fullscreen window at all. Getting the window there is [`RoundTrip`]'s job, and the
+    /// tests below it.
     #[test]
     fn a_fullscreen_window_follows_the_display_row_and_still_places_itself_after_leaving() {
         // BOOT: a persisted fullscreen on display 2, three displays attached.
@@ -3506,6 +3778,458 @@ mod tests {
             position,
             WindowPosition::Centered(MonitorSelection::Index(2)),
             "leaving fullscreen must place the window on the display the row names",
+        );
+    }
+
+    /// **The decision rule, exhaustively: only a window that REALLY disagrees with the row is moved.**
+    ///
+    /// The comparison is against observed reality, never against `Window::mode` — the whole defect
+    /// is that the component, bevy's cache and winit's own state all read as correct while the
+    /// window sits on the other panel (see [`RoundTrip`]). Both "could not learn" states are pinned
+    /// beside the two decidable ones, because an unresolvable target answering like a disagreement
+    /// would move a window on evidence nobody gathered.
+    #[test]
+    fn the_round_trip_fires_only_where_the_window_really_disagrees_with_the_row() {
+        let fullscreen = WindowModeSetting::Fullscreen;
+        let target = DisplaySelection::Display2;
+        let seen = |fullscreen, on_target| ObservedPlacement {
+            fullscreen,
+            on_target,
+        };
+
+        for (observed, expected, claim) in [
+            (
+                seen(true, Some(false)),
+                PlacementStep::LeaveFullscreen,
+                "a fullscreen window on the wrong monitor is THE defect — it must round trip",
+            ),
+            (
+                seen(true, Some(true)),
+                PlacementStep::Hold,
+                "a window already where the row asks must never be disturbed",
+            ),
+            (
+                seen(true, None),
+                PlacementStep::Hold,
+                "an unresolvable target is not a disagreement — an unmapped window and an \
+                 unmarked primary both land here",
+            ),
+            (
+                seen(false, Some(false)),
+                PlacementStep::Hold,
+                "commanded fullscreen and not arrived: nothing is placed, so nothing disagrees",
+            ),
+        ] {
+            let mut trip = RoundTrip::default();
+            assert_eq!(trip.step(fullscreen, target, observed), expected, "{claim}");
+        }
+
+        // A row that is not asking for fullscreen is not this machine's business at all.
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(WindowModeSetting::Windowed, target, seen(true, Some(false))),
+            PlacementStep::Hold,
+            "a windowed row never drives a fullscreen transition",
+        );
+
+        // A standing agreement leaves nothing behind — the machine is only ever armed by a real
+        // disagreement, so it cannot accumulate state across a session.
+        let mut trip = RoundTrip::default();
+        for _ in 0..64 {
+            assert_eq!(
+                trip.step(fullscreen, target, seen(true, Some(true))),
+                PlacementStep::Hold
+            );
+        }
+        assert_eq!(trip, RoundTrip::Idle);
+    }
+
+    /// **The trigger is the disagreement itself, not the player touching the row** — which is what
+    /// makes boot, a monitor hot-plug and a window winit has lost track of one case instead of
+    /// three. Each arrives as a fullscreen window whose real monitor is not the resolved rung, and
+    /// the rule cannot tell them apart, which is the point.
+    ///
+    /// The hot-plug one is worth its own walk: bevy never re-assigns `PrimaryMonitor`
+    /// ([`AttachedDisplays::primary`]), so a sleep or an undock changes what a stored rung RESOLVES
+    /// to. That is a genuinely new target on an already-fullscreen window, and it must re-arm a
+    /// machine that has settled — including one that settled STRANDED on the old target, or a
+    /// display coming back would be the one case the repair refused to fix.
+    #[test]
+    fn any_observed_disagreement_arms_the_trip_whatever_produced_it() {
+        let fullscreen = WindowModeSetting::Fullscreen;
+        let wrong = ObservedPlacement {
+            fullscreen: true,
+            on_target: Some(false),
+        };
+        let leaving = ObservedPlacement {
+            fullscreen: false,
+            on_target: Some(false),
+        };
+
+        // BOOT: an indexed rung cannot be named at window creation, so the window is born on the
+        // fallback monitor and the `Startup` correction is itself a swallowed no-op. The very first
+        // observation of a fullscreen window on the wrong panel is enough.
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Display2, wrong),
+            PlacementStep::LeaveFullscreen,
+            "a window BORN on the wrong monitor must be repaired without anyone touching the row",
+        );
+
+        // HOT-PLUG: settle stranded on one target, then let the display list change what the stored
+        // rung resolves to.
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Primary, wrong),
+            PlacementStep::LeaveFullscreen
+        );
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Primary, leaving),
+            PlacementStep::ReenterFullscreen
+        );
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Primary, wrong),
+            PlacementStep::Settle
+        );
+        assert_eq!(trip, RoundTrip::Stranded(DisplaySelection::Primary));
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Display1, wrong),
+            PlacementStep::LeaveFullscreen,
+            "the same stored rung resolving somewhere else is a NEW target — a settled machine \
+             must re-arm for it, or a display coming back is the one case never repaired",
+        );
+
+        // And a window that drifts into agreement on its own retires the machine, so a later
+        // disagreement is judged fresh rather than against a stale attempt.
+        let mut trip = RoundTrip::Stranded(DisplaySelection::Display2);
+        assert_eq!(
+            trip.step(
+                fullscreen,
+                DisplaySelection::Display2,
+                ObservedPlacement {
+                    fullscreen: true,
+                    on_target: Some(true)
+                },
+            ),
+            PlacementStep::Hold,
+        );
+        assert_eq!(trip, RoundTrip::Idle);
+    }
+
+    /// **The trip is sequenced on the OBSERVED edge, and it cannot re-enter itself.**
+    ///
+    /// Each half is an asynchronous macOS Space transition of about 1-2 s, during which winit parks
+    /// everything it is sent in `target_fullscreen` and replays it into the same missing match arm
+    /// (see [`RoundTrip`]). So the waits are pinned as arbitrarily many silent frames rather than as
+    /// a count, the second write is released by the edge alone, and the two ways a state machine
+    /// could flap the window between two Spaces forever — retrying a trip that did not land, and
+    /// re-arming against its own re-entry — are pinned closed.
+    #[test]
+    fn the_round_trip_is_sequenced_on_the_observed_edge_and_never_re_enters_itself() {
+        let fullscreen = WindowModeSetting::Fullscreen;
+        let target = DisplaySelection::Display2;
+        let wrong = ObservedPlacement {
+            fullscreen: true,
+            on_target: Some(false),
+        };
+        let leaving = ObservedPlacement {
+            fullscreen: false,
+            on_target: Some(false),
+        };
+        let landed = ObservedPlacement {
+            fullscreen: true,
+            on_target: Some(true),
+        };
+
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, target, wrong),
+            PlacementStep::LeaveFullscreen
+        );
+        for _ in 0..240 {
+            assert_eq!(
+                trip.step(fullscreen, target, wrong),
+                PlacementStep::Hold,
+                "every frame of the macOS transition must be silent — a second write here is \
+                 parked by winit and replayed into the arm that does not exist",
+            );
+        }
+        assert_eq!(
+            trip.step(fullscreen, target, leaving),
+            PlacementStep::ReenterFullscreen,
+            "the observed edge is the ONLY thing that releases the second write",
+        );
+        for _ in 0..240 {
+            assert_eq!(
+                trip.step(fullscreen, target, leaving),
+                PlacementStep::Hold,
+                "the way back in is asynchronous too, and looks exactly like a window that is not \
+                 fullscreen yet — re-arming on it would flap the window forever",
+            );
+        }
+        assert_eq!(trip.step(fullscreen, target, landed), PlacementStep::Hold);
+        assert_eq!(
+            trip,
+            RoundTrip::default(),
+            "landing retires the trip, so a LATER disagreement is judged fresh",
+        );
+
+        // A change requested MID-TRANSITION: the half-done trip is never interrupted, and the
+        // re-entry then honours whatever the row says at the moment it is written — so the newest
+        // choice wins without a second trip being stacked on the first.
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Display2, wrong),
+            PlacementStep::LeaveFullscreen
+        );
+        for _ in 0..64 {
+            assert_eq!(
+                trip.step(fullscreen, DisplaySelection::Display3, wrong),
+                PlacementStep::Hold,
+                "a row moved mid-transition must not start a second trip on top of the first",
+            );
+        }
+        assert_eq!(
+            trip.step(fullscreen, DisplaySelection::Display3, leaving),
+            PlacementStep::ReenterFullscreen,
+        );
+        assert_eq!(
+            trip,
+            RoundTrip::Spent(DisplaySelection::Display3),
+            "the re-entry is what was actually written, so it is what the trip is spent on",
+        );
+
+        // And the row leaving fullscreen mid-trip abandons it: the pending write would put back a
+        // fullscreen nobody is asking for any more.
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, target, wrong),
+            PlacementStep::LeaveFullscreen
+        );
+        assert_eq!(
+            trip.step(WindowModeSetting::Windowed, target, leaving),
+            PlacementStep::Hold
+        );
+        assert_eq!(trip, RoundTrip::Idle);
+    }
+
+    /// **The repair terminates, and it says so exactly once.**
+    ///
+    /// This is the property a trigger keyed on the disagreement rather than on a row change can most
+    /// easily get wrong: the condition that armed the trip is still true when the trip fails, so a
+    /// machine that re-decides on it flaps the window between two macOS Spaces for the rest of the
+    /// session — a repair strictly worse than the defect it repairs. A completed trip that did not
+    /// land therefore settles: one [`PlacementStep::Settle`] (the frame that logs), then silence,
+    /// for as long as nothing about the question changes.
+    ///
+    /// Driven here for thousands of frames across every observation the failed state can produce,
+    /// because "terminating" is a claim about all of them and not about the happy path.
+    #[test]
+    fn a_round_trip_that_does_not_land_settles_once_and_never_retries() {
+        let fullscreen = WindowModeSetting::Fullscreen;
+        let target = DisplaySelection::Display2;
+        let wrong = ObservedPlacement {
+            fullscreen: true,
+            on_target: Some(false),
+        };
+        let leaving = ObservedPlacement {
+            fullscreen: false,
+            on_target: Some(false),
+        };
+        let unknown = ObservedPlacement {
+            fullscreen: true,
+            on_target: None,
+        };
+
+        let mut trip = RoundTrip::default();
+        assert_eq!(
+            trip.step(fullscreen, target, wrong),
+            PlacementStep::LeaveFullscreen
+        );
+        assert_eq!(
+            trip.step(fullscreen, target, leaving),
+            PlacementStep::ReenterFullscreen
+        );
+
+        // The trip is over and the window is still on the wrong panel — the target vanished
+        // mid-flight, or winit swallowed the re-entry too.
+        assert_eq!(
+            trip.step(fullscreen, target, wrong),
+            PlacementStep::Settle,
+            "the one frame that reports it",
+        );
+        assert_eq!(trip, RoundTrip::Stranded(target));
+
+        for frame in 0..4096 {
+            // Every observation the stranded state can be handed, including the ones that look like
+            // a fresh trip's opening frames.
+            let observed = match frame % 3 {
+                0 => wrong,
+                1 => leaving,
+                _ => unknown,
+            };
+            assert_eq!(
+                trip.step(fullscreen, target, observed),
+                PlacementStep::Hold,
+                "frame {frame} ({observed:?}): a settled machine must write NOTHING and report \
+                 nothing again — one attempt and one log line per question, however long the \
+                 disagreement stands",
+            );
+        }
+        assert_eq!(
+            trip,
+            RoundTrip::Stranded(target),
+            "and it must still be settled afterwards, not have wandered somewhere re-armable",
+        );
+
+        // The only things that re-open the question are a change in it: the target moving (covered
+        // by `any_observed_disagreement_arms_the_trip_whatever_produced_it`) or the player leaving
+        // fullscreen, after which a fresh fullscreen is a fresh question.
+        assert_eq!(
+            trip.step(WindowModeSetting::Windowed, target, leaving),
+            PlacementStep::Hold
+        );
+        assert_eq!(trip, RoundTrip::Idle);
+        assert_eq!(
+            trip.step(fullscreen, target, wrong),
+            PlacementStep::LeaveFullscreen,
+            "a player who leaves fullscreen and comes back has asked the question again",
+        );
+    }
+
+    /// **The window passes through `Windowed` without the ROW ever saying so** — which is what keeps
+    /// the round trip from having side effects on the two things `apply_settings` keys off the row.
+    ///
+    /// The position edge is the sharp one: it is deliberately withheld while fullscreen so that it
+    /// is still available when the player really leaves ([`apply_settings`]), and a trip that spent
+    /// it would re-centre the player's windowed window as a side effect of changing display — and
+    /// then leave the window unplaced on the way back out, which is the older bug this module
+    /// already carries a test for. The mode is the other: re-asserting the row's fullscreen over a
+    /// trip in flight cancels it half-done, and the observed edge it is waiting for never arrives.
+    ///
+    /// The two writes reproduced here are exactly what `observe_window_placement` does with
+    /// [`PlacementStep::LeaveFullscreen`] and [`PlacementStep::ReenterFullscreen`]; the system
+    /// itself needs a real winit window and cannot run in a test.
+    #[test]
+    fn a_window_in_a_round_trip_neither_spends_the_placement_edge_nor_is_overwritten() {
+        let mut app = window_app(
+            Settings {
+                window_mode: WindowModeSetting::Fullscreen,
+                display: DisplaySelection::Display2,
+                ..default()
+            },
+            3,
+        );
+        app.update();
+        assert_eq!(
+            window_state(&mut app).0,
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+        );
+
+        let set_window_mode = |app: &mut App, trip: RoundTrip, mode: WindowMode| {
+            let world = app.world_mut();
+            world.resource_mut::<WindowPlacement>().round_trip = trip;
+            let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+            windows.single_mut(world).expect("one window").mode = mode;
+        };
+
+        // Step one, and then the frame that used to break it: an unrelated row moving while the
+        // macOS transition is still animating.
+        set_window_mode(&mut app, RoundTrip::Leaving, WindowMode::Windowed);
+        app.world_mut().resource_mut::<Settings>().msaa = MsaaLevel::Off;
+        app.update();
+        let (mode, position) = window_state(&mut app);
+        assert_eq!(
+            mode,
+            WindowMode::Windowed,
+            "the reconciler must yield the mode to a trip in flight, or the trip is cancelled \
+             half-done and the edge it waits for never comes",
+        );
+        assert_eq!(
+            position,
+            WindowPosition::Automatic,
+            "a window passing through windowed is not a player leaving fullscreen — spending the \
+             edge here re-centres their windowed window and strands the next placement",
+        );
+
+        // Step two, and the row is still exactly what it always was.
+        set_window_mode(
+            &mut app,
+            RoundTrip::Spent(DisplaySelection::Display2),
+            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+        );
+        app.world_mut().resource_mut::<Settings>().msaa = MsaaLevel::X4;
+        app.update();
+        assert_eq!(
+            window_state(&mut app),
+            (
+                WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
+                WindowPosition::Automatic
+            ),
+        );
+        assert_eq!(
+            app.world().resource::<Settings>().window_mode,
+            WindowModeSetting::Fullscreen,
+            "nothing in a round trip may write the row it is serving",
+        );
+
+        // The edge the trip did not spend is still there when the player really leaves.
+        app.world_mut().resource_mut::<Settings>().window_mode = WindowModeSetting::Windowed;
+        app.update();
+        assert_eq!(
+            window_state(&mut app).1,
+            WindowPosition::Centered(MonitorSelection::Index(1)),
+        );
+    }
+
+    /// **The placement edge belongs to the WINDOW, not to a system instance.**
+    ///
+    /// [`apply_settings`] is registered twice — `Startup` and `Update` — which bevy runs as two
+    /// distinct system instances. A `Local` edge memory therefore gave each of them its own, and the
+    /// "edge-triggered" position block fired once per instance at boot (observed as a duplicated
+    /// unreachable-display warning about 0.9 s apart). Harmless in itself, but it makes the edge a
+    /// property of how many times the system happens to be registered, which is not a contract at
+    /// all.
+    ///
+    /// A FRESH instance is the mutation: it is what a second registration is, and with shared state
+    /// it must find the edge already spent rather than re-firing it.
+    #[test]
+    fn the_placement_edge_is_shared_by_every_instance_of_the_reconciler() {
+        let mut app = App::new();
+        app.insert_resource(Settings {
+            display: DisplaySelection::Display2,
+            ..default()
+        })
+        .init_resource::<DirectionalLightShadowMap>()
+        .init_resource::<crate::render_scale::RenderScale>()
+        .init_resource::<PresentCaps>()
+        .init_resource::<UiScale>()
+        .init_resource::<LodPixelBudget>()
+        .init_resource::<WindowPlacement>()
+        .add_systems(Startup, apply_settings);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        spawn_monitors(&mut app, 3);
+        app.update();
+        assert_eq!(
+            window_state(&mut app).1,
+            WindowPosition::Centered(MonitorSelection::Index(1)),
+            "the launch application, from the `Startup` instance",
+        );
+
+        // What winit does the moment the player drags the window (state.rs:381-383).
+        let dragged = WindowPosition::At(IVec2::new(37, 21));
+        {
+            let world = app.world_mut();
+            let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+            windows.single_mut(world).expect("one window").position = dragged;
+        }
+        app.add_systems(Update, apply_settings);
+        app.update();
+        assert_eq!(
+            window_state(&mut app).1,
+            dragged,
+            "a second instance of the reconciler must find the edge already spent, not re-fire it \
+             and drag the window back to the middle",
         );
     }
 
@@ -3566,6 +4290,7 @@ mod tests {
             .init_resource::<PresentCaps>()
             .init_resource::<UiScale>()
             .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
         app.update();
         assert_eq!(

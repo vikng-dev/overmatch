@@ -361,7 +361,7 @@ struct MonitorFacts {
 /// the dependency on being asked at the right moment.
 ///
 /// The window handle lives in a thread-local, so this is a non-send system exactly like
-/// `settings::observe_window_mode`. `current_monitor()` is None until the window is mapped, which
+/// `settings::observe_window_placement`. `current_monitor()` is None until the window is mapped, which
 /// costs a poll or two at startup and is why the analyzer treats an unresolved measurement window
 /// as INVALID rather than as unremarkable.
 fn record_monitor(

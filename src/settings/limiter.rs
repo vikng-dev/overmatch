@@ -26,7 +26,7 @@
 //! winit runner — by the time this system runs the frame's events are long consumed, and the sleep
 //! is indistinguishable from a long frame to everything upstream.
 //!
-//! **Why the `NonSendMarker`** (the same pin `probe` and `settings::observe_window_mode` use): an
+//! **Why the `NonSendMarker`** (the same pin `probe` and `settings::observe_window_placement` use): an
 //! ordinary `Send` system may be handed to any `ComputeTaskPool` worker by the multithreaded
 //! executor, so this one would park a POOL thread — the very threads pipelined rendering and the
 //! parallel visibility/extract work run on — for the whole tail of every frame. On a low-core

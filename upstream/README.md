@@ -12,8 +12,8 @@ issue or PR URL goes into that file's own Status line.
 
 ## Open candidates
 
-Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-review session; 12–15
-each came out of its own later hunt.
+Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-review session; 12–15 and
+18 each came out of its own later hunt.
 
 | # | File | Target | Severity (us) | Our workaround | Unlocks for us |
 |---|------|--------|---------------|----------------|----------------|
@@ -32,6 +32,7 @@ each came out of its own later hunt.
 | 13 | [lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md](lightyear-confirmed-state-at-or-ahead-of-local-tick-never-reconciled.md) | lightyear 0.28 + `main` — **DRAFT, not filed** | HIGH — at lead ≤ 0, `RollbackMode::Check` never checks an actively driven predicted entity; unbounded divergence for the whole session, not a transient | none shipped — routed around in `src/net/lead_zero_rollback.rs` (RED `#[ignore]`d fixtures as the acceptance test + a live lead-arithmetic guard). Cheapest escape if ever needed: keep lead ≥ 1, i.e. `input_delay <= 2` at loopback | Un-`#[ignore]` the `lead_zero_rollback` fixtures; the lead-arithmetic guard stays permanently. **A green upstream suite is not evidence** — today's upstream tests pin the broken half, so retirement needs a positive assertion upstream |
 | 14 | [bevy-uninitbuffervec-rust-size-vs-shader-stride.md](bevy-uninitbuffervec-rust-size-vs-shader-stride.md) | bevy 0.19 under glam `scalar-math` — **DRAFTED, not filed** | BLOCKER for #15's fix — `UninitBufferVec` allocates 164 B against `MeshUniform::min_size()` 176 B, so wgpu rejects the buffer and nothing renders | `vendor/bevy_pbr-0.19.0-scalar-math` alignment patch + a static Rust-size-vs-shader-size gate | Drop the vendored bevy_pbr crate — but only together with #17, which rides the same vendor entry |
 | 15 | [avian-enhanced-determinism-simd-reductions.md](avian-enhanced-determinism-simd-reductions.md) | avian3d 0.7 / glam 0.32.1 — feature-contract gap, **DRAFTED, not filed** | Was the last CROSS-ARCHITECTURE divergence: `enhanced-determinism` does not imply `glam/scalar-math`, so SIMD reduction order splits macOS aarch64 from Linux x86_64 at MEASURED 1 ULP in `fast_renormalize`. **Fix validated locally** — bit-identical for all 3,072 ticks at `020f9fd` | workspace-wide `glam/scalar-math`, plus vendored bevy_reflect (scalar glam has no `BVec3A`/`BVec4A` serde) and vendored bevy_pbr (#14) | Retire both compatibility vendors and the feature pin. Distinct from #8: this one was cross-arch, #8 is the remaining *same-machine* non-determinism |
+| 18 | [winit-macos-borderless-to-borderless-fullscreen-noop.md](winit-macos-borderless-to-borderless-fullscreen-noop.md) | winit 0.30.13 — **DRAFT, not filed** | HIGH — macOS `set_fullscreen` has no `Borderless -> Borderless` arm, so changing display while fullscreen moves nothing. The prologue commits the new monitor to winit's own state first, so the component, bevy's cache and `fullscreen()` all read as correct while the window sits on the other panel | app-side exit-then-re-enter round trip, sequenced on the OBSERVED fullscreen edge (`RoundTrip` in `src/settings.rs`) | Delete `RoundTrip`/`PlacementStep` and the mode yield in `apply_settings` — and with them a transitional window state every future window rule would otherwise have to account for. Changing display while fullscreen stops costing two ~1-2 s Space animations |
 
 **Evidence note on `InputDelayConfig::balanced()`:** it is implicated in **three** CRITICAL failure paths
 (#1, #10 and #11). Its prediction-margin and fabricated-input failures are measured in #1/#10. Its role
