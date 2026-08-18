@@ -227,8 +227,8 @@ jobs:
       - name: Install Linux build dependencies
         if: contains(matrix.target, 'linux')
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
@@ -431,9 +431,9 @@ jobs:
       # renamed in the 64-bit-time_t transition, hence the fallback.
       - name: Install the Linux runtime floor
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2t64 ||
-            sudo apt-get install -y --no-install-recommends libasound2
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libasound2t64 ||
+            sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends libasound2
 
       # Exactly what a user does: `tar xzf`, in a directory of their choosing. No `--strip`, no
       # rename, no file touched afterwards.
