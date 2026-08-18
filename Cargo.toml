@@ -1,6 +1,6 @@
 [package]
 name = "overmatch"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 default-run = "overmatch"
 
