@@ -836,7 +836,7 @@ fn generate_tangents(lod: &mut TerrainLod) {
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    material: &Handle<StandardMaterial>,
+    material: &Handle<crate::terrain_blend::TerrainMaterial>,
     grid: &HeightGrid,
     view: ViewProfile,
 ) {

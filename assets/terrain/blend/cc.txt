@@ -1,0 +1,15 @@
+THE BLEND ARRAYS — `blend_diff.ktx2`, `blend_nor_gl.ktx2`, `blend_arm.ktx2`, each a KTX2 2D ARRAY
+(UASTC 4x4 + zstd supercompression, full mip chain) whose three 2048x2048 slices are three Poly
+Haven packs. Cut by `scripts/encode-terrain-ktx2.sh blend`, bound by `terrain_blend::LAYER_*_PATH`.
+
+ONE ARRAY PER MAP TYPE, not one per pack: nine separate bindings do not fit beside bevy's PBR bind
+group, three array bindings do.
+
+SLICE ORDER IS THE MASK'S CHANNEL ORDER (`terrain_blend::BLEND_LAYERS`, and each pack's own cc.txt
+for its authored scale and attribution):
+
+  slice 0  dirt_aerial_03   mask R, recesses  25 m
+  slice 1  coast_sand_05    mask G, slopes    25 m
+  slice 2  aerial_mud_1     mask B, lowlands   8 m
+
+All three are CC0 (https://creativecommons.org/publicdomain/zero/1.0/) by Poly Haven.

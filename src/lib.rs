@@ -160,6 +160,9 @@ mod state;
 /// primitive as armour at all (§12 membership) and gives it its factor.
 mod substances;
 mod tank;
+/// The ground's surface blend: four material packs mixed per fragment by the map's author-painted
+/// weight masks, through one `ExtendedMaterial`. View-only. See the module doc.
+pub(crate) mod terrain_blend;
 /// The world heightmap: PNG → shared height grid (oracle ground term, heightfield collider,
 /// client render mesh, server spawn heights). See the module doc for the mapping constants.
 pub(crate) mod terrain_grid;

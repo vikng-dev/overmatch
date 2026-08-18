@@ -170,10 +170,11 @@ pub(crate) const MESH_TILE_CELLS: usize = 128;
 /// carries both `dimensions: [2000, 2000]` and the human-readable `scale: "2x2M"`). Recorded in
 /// the pack's `cc.txt` as part of its contract.
 ///
-/// Only the ACTIVE pack needs a constant. Every other folder under `assets/terrain/` is STAGED for
-/// a surface-blending slice that has not come: nothing loads it, so it carries its `cc.txt` and no
-/// maps. That contract is all the slice needs to re-import one through
-/// `scripts/encode-terrain-ktx2.sh`.
+/// Only the BASE pack needs a constant here — the blended layers carry theirs in
+/// [`crate::terrain_blend::BLEND_LAYERS`], and apply it as a UV scale in the shader. The two
+/// folders left under `assets/terrain/` that neither binds (`brown_mud_leaves_01`,
+/// `rocks_ground_02`) are STAGED: nothing loads them, so they carry their `cc.txt` and no maps,
+/// which is all `scripts/encode-terrain-ktx2.sh` needs to cut one.
 const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
 
 /// World metres per repeat of the terrain surface pack: the mesh's UVs are `world_xz / this`,
@@ -185,12 +186,13 @@ const COAST_SAND_ROCKS_02_AUTHORED_M: f32 = 15.0;
 /// live on the client render mesh; grid/oracle/collider are untouched by texturing).
 pub(crate) const TEXTURE_TILE_M: f32 = COAST_SAND_ROCKS_02_AUTHORED_M;
 
-/// The terrain surface pack in use — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
+/// The BASE terrain surface pack — Poly Haven `coast_sand_rocks_02`, CC0 (see the pack folder's
 /// `cc.txt`), relative to the asset root. One folder per pack under `assets/terrain/`, each holding
 /// the three maps `world::spawn_environment` binds: albedo (`diff`/`col`, sRGB), OpenGL-convention
 /// tangent-space normals (`nor_gl`), and the glTF-ORM `arm` pack (R = AO, G = roughness,
-/// B = metallic). The other pack folders hold only their `cc.txt`: nothing loads them, so their
-/// maps are not carried here.
+/// B = metallic). This is what the ground is wherever the map's masks are silent; the three packs
+/// blended on top of it ship as 2D ARRAYS under `assets/terrain/blend/`
+/// ([`crate::terrain_blend`]), and the two folders neither binds hold only their `cc.txt`.
 ///
 /// Its three maps are **KTX2 (UASTC 4x4, zstd-supercompressed, full mip chain)**, built by
 /// `scripts/encode-terrain-ktx2.sh` from masters kept outside the repo. The format is not a

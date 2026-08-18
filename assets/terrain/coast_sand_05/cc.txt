@@ -4,8 +4,10 @@ AUTHORED SCALE: 25 x 25 m (Poly Haven `dimensions: [24999.998, 25000.002]` mm �
 as 25 m on both axes). Whatever binds it must tile at 25 m to keep its sand and shell features
 life-sized. At 2048², 25 m is 82 px/m.
 
-STAGED for the surface-blending slice — nothing loads this pack, so this folder carries its
-contract and no binaries. `scripts/encode-terrain-ktx2.sh coast_sand_05` cuts its three maps as
-KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², from Poly Haven 4k masters that
-are not in the repo either. Poly Haven ships this pack's nor_gl / arm as 16-bit PNGs; the encode
-script truncates them to 8-bit first (bit depth only, no colour-space change).
+SHIPPED as slice 1 of the surface-blend arrays — the mask's slopes channel. This pack's
+three maps are not files of their own: `scripts/encode-terrain-ktx2.sh blend` cuts them, with
+the other two layers, into `assets/terrain/blend/blend_*.ktx2` (KTX2 2D arrays, UASTC 4x4 +
+zstd supercompression, full mip chain) at 2048x2048 per slice, from Poly Haven 4k masters
+that are not in the repo. See `assets/terrain/blend/cc.txt` for the slice order.
+Poly Haven ships this pack's nor_gl / arm as 16-bit PNGs; the encode script truncates them to
+8-bit first (bit depth only, no colour-space change).

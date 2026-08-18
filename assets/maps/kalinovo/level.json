@@ -62,14 +62,23 @@
       "bit_depth": 8,
       "channels": "rgb",
       "resolution": [
-        4096,
-        4096
+        1024,
+        1024
       ],
       "shares_with_heightmap": [
         "world_extent_xz",
-        "sample_centers_xz",
         "image_axes"
       ],
+      "sample_centers_xz": {
+        "pixel_0_0": [
+          -749.267578125,
+          749.267578125
+        ],
+        "pixel_1023_1023": [
+          749.267578125,
+          -749.267578125
+        ]
+      },
       "channel_meaning": {
         "r": "recesses: ambient occlusion, where dirt and debris settle",
         "g": "slopes: where land slides, exposing sand/soil",

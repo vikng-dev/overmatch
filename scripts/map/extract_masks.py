@@ -7,7 +7,7 @@ THE SOURCE STAYS OUT OF THE REPO, exactly like the terrain texture masters: one 
 4-channel TIFF (~113 MB) as the author exported it, default `~/Downloads/terrain_height_1500.tif`
 or `$MAP_TERRAIN_TIF`. Its channels are R=height, G=recesses, B=slopes, A=lowlands.
 
-THE OUTPUT is `assets/maps/<id>/terrain_masks.png` — 8-bit RGB, 4096x4096, carrying the three
+THE OUTPUT is `assets/maps/<id>/terrain_masks.png` — 8-bit RGB, `RESOLUTION`², carrying the three
 masks in the order R=recesses (the TIFF's G), G=slopes (its B), B=lowlands (its A). The order is
 the contract; the manifest block in `level.json` states the same one.
 
@@ -15,14 +15,14 @@ NO COLOUR MANAGEMENT. These are linear weights, not a picture: an ICC profile or
 would gamma-shift every weight on decode. The written file is re-read and refused unless its chunk
 list is exactly IHDR / IDAT / IEND.
 
-PURE CHANNEL EXTRACTION — no resample, no crop, no flip. The masks share the heightmap's pixel
-grid and row order, so they share its extent, sample centres and image axes. That sharing is
-CHECKED before anything is written: the TIFF's R channel must equal the shipped
+CHANNEL EXTRACTION THEN A BOX DOWNSAMPLE — no crop, no flip. The masks keep the heightmap's world
+extent and row order; only the sample spacing differs (see `RESOLUTION`). Alignment is CHECKED at
+FULL resolution before anything is written: the TIFF's R channel must equal the shipped
 `terrain_height.png` bit for bit, or the masks would be silently misaligned with the terrain the
 game runs on.
 
-Quantisation to 8 bits is `round(u16 * 255 / 65535)`; the measured worst-case error over this data
-is printed per run.
+The box filter averages in float64 over the u16 source and quantises ONCE, `round(w * 255)`; the
+measured worst-case and mean error against the full-resolution weights is printed per run.
 """
 
 from __future__ import annotations
@@ -43,6 +43,12 @@ MASKS = "terrain_masks.png"
 
 # (source TIFF channel, output channel, meaning) — the whole channel contract, in output order.
 CHANNELS = ((1, "R", "recesses"), (2, "G", "slopes"), (3, "B", "lowlands"))
+
+# Side of the written mask, in texels. The masks are STRETCHED over the map's world square, so this
+# is a sample spacing: 1500 m / 1024 = 1.46 m, which is the height grid's own node spacing
+# (`terrain_grid::GRID_RESOLUTION` = 1025 over the same square). A finer mask describes shape the
+# terrain does not have. Must divide the source side.
+RESOLUTION = 1024
 
 # What a mask PNG may contain. Anything else is colour management or metadata.
 ALLOWED_CHUNKS = ("IHDR", "IDAT", "IEND")
@@ -117,21 +123,29 @@ def main() -> int:
         )
     print("aligned ▸ TIFF R == {} over all {} pixels".format(HEIGHTMAP, heightmap.size))
 
-    masks = numpy.empty(source.shape[:2] + (3,), numpy.uint8)
-    worst = 0.0
+    side = source.shape[0]
+    if side % RESOLUTION:
+        return fail("{} does not divide the TIFF's {} px side".format(RESOLUTION, side))
+    box = side // RESOLUTION
+
+    masks = numpy.empty((RESOLUTION, RESOLUTION, 3), numpy.uint8)
     for out, (channel, name, meaning) in enumerate(CHANNELS):
-        full = source[:, :, channel]
-        quantised = ((full.astype(numpy.uint32) * 255 + 32767) // 65535).astype(numpy.uint8)
+        full = source[:, :, channel].astype(numpy.float64) / 65535.0
+        # Box average over each `box`² block of source weights, then ONE quantisation.
+        boxed = full.reshape(RESOLUTION, box, RESOLUTION, box).mean(axis=(1, 3))
+        quantised = numpy.rint(boxed * 255.0).astype(numpy.uint8)
         masks[:, :, out] = quantised
-        error = numpy.abs(quantised.astype(numpy.float64) / 255.0 - full / 65535.0).max()
-        worst = max(worst, float(error))
+        error = numpy.abs(
+            numpy.repeat(numpy.repeat(quantised / 255.0, box, 0), box, 1) - full
+        )
         print(
-            "channel ▸ {} = TIFF {} ({}): min {} max {} mean {:.2f}".format(
+            "channel ▸ {} = TIFF {} ({}): min {} max {} mean {:.2f} — vs full-res weights,"
+            " mean error {:.4f}, worst {:.4f}".format(
                 name, "RGBA"[channel], meaning, quantised.min(), quantised.max(),
-                float(quantised.mean()),
+                float(quantised.mean()), float(error.mean()), float(error.max()),
             )
         )
-    print("quantise ▸ worst 8-bit error {:.5f} of full scale".format(worst))
+    print("downsample ▸ {}² ▸ {}² ({}² box average)".format(side, RESOLUTION, box))
 
     out_path = map_dir / MASKS
     Image.fromarray(masks, "RGB").save(out_path, optimize=True)

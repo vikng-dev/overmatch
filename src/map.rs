@@ -72,6 +72,12 @@ pub(crate) fn level_path(root: &Path) -> PathBuf {
     map_dir(root).join(LEVEL_FILE)
 }
 
+/// An asset-server path (`/`-separated, relative to the asset root) into the selected map's own
+/// directory — what the author shipped, as the asset server names it.
+pub(crate) fn map_asset(name: &str) -> String {
+    format!("{MAPS_DIR}/{}/{name}", map_id())
+}
+
 /// An asset-server path (`/`-separated, relative to the asset root) into the selected map's
 /// `derived/` folder — the view-only copies generated from the authored data.
 pub(crate) fn derived_asset(name: &str) -> String {
@@ -91,6 +97,12 @@ pub(crate) struct MapManifest {
     /// Which world direction the heightmap's rows increase toward, as declared — the decode's one
     /// orientation input ([`crate::terrain_grid::grid_from_png`]).
     pub(crate) rows: RowOrder,
+    /// Surface-weight mask file name, as declared.
+    masks: String,
+    /// The mask image's declared side in texels, `[width, height]`. A SAMPLE SPACING, not a
+    /// registration: the mask is stretched over the same world square the heightmap is, at
+    /// whatever resolution it was cut at.
+    pub(crate) masks_resolution: [u32; 2],
     /// The author's object placement, in file order.
     pub(crate) instances: Vec<InstanceRecord>,
 }
@@ -104,6 +116,13 @@ impl MapManifest {
     /// The declared heightmap's name, for messages.
     pub(crate) fn heightmap(&self) -> &str {
         &self.heightmap
+    }
+
+    /// The declared masks, as an ASSET-SERVER path — the map directory's own name, not a
+    /// filesystem path, because this one is loaded through the asset server rather than decoded
+    /// synchronously (it is view-only, ADR-0014).
+    pub(crate) fn masks_asset(&self) -> String {
+        map_asset(&self.masks)
     }
 }
 
@@ -131,6 +150,18 @@ struct LevelFile {
 #[derive(serde::Deserialize)]
 struct TerrainBlock {
     heightmap: HeightmapBlock,
+    masks: MasksBlock,
+}
+
+/// The surface-weight masks a map paints its ground blend with — R = recesses, G = slopes,
+/// B = lowlands, independent linear weights. REQUIRED of every map, on the failure law's own
+/// terms: the ground is drawn by blending them ([`crate::terrain_blend`]), so a manifest without
+/// them describes a world this build cannot render.
+#[derive(serde::Deserialize)]
+struct MasksBlock {
+    /// Mask file name, resolved against the manifest's own directory.
+    asset: String,
+    resolution: [u32; 2],
 }
 
 #[derive(serde::Deserialize)]
@@ -393,6 +424,13 @@ pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
         "map: {} declares height_decode offset {offset_m} / scale {scale_m}",
         path.display(),
     );
+    let masks = level.terrain.masks;
+    assert!(
+        masks.resolution[0] > 0 && masks.resolution[1] > 0,
+        "map: {} declares masks resolution {:?}, which is no image",
+        path.display(),
+        masks.resolution,
+    );
     MapManifest {
         dir: path.parent().unwrap_or_else(|| Path::new("")).to_path_buf(),
         heightmap: heightmap.asset,
@@ -402,6 +440,8 @@ pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
             height_span_m: scale_m,
         },
         rows,
+        masks: masks.asset,
+        masks_resolution: masks.resolution,
         instances: level.instances,
     }
 }
@@ -434,7 +474,8 @@ pub(crate) mod tests {
                "world_extent_xz":{{"minimum":[{min},{min}],"maximum":[{half_m},{half_m}]}},
                "image_axes":{{"column_increases_toward":"+X","row_increases_toward":"{rows}"}},
                "sample_centers_xz":{{"pixel_0_0":[{min},{corner_z}]}},
-               "height_decode":{{"offset_m":{offset_m},"scale_m":{scale_m}}}}}}},
+               "height_decode":{{"offset_m":{offset_m},"scale_m":{scale_m}}}}},
+               "masks":{{"asset":"m.png","resolution":[4,4]}}}},
                "instances":[]}}"#,
             min = -half_m,
         )
@@ -509,13 +550,15 @@ pub(crate) mod tests {
     }
 
     /// The surface-weight masks, pinned the way the heightmap is: DECODED from the shipped bytes,
-    /// so a Git LFS pointer file shipping in their place fails here in CI. Nothing reads them yet —
-    /// `terrain.masks` in `level.json` is the declaration, and this is what proves the bytes behind
-    /// it are the image that block describes: 4096² 8-bit RGB, R = recesses, G = slopes,
-    /// B = lowlands, on the heightmap's own pixel grid.
+    /// so a Git LFS pointer file shipping in their place fails here in CI. `terrain.masks` in
+    /// `level.json` is the declaration, and this is what proves the bytes behind it are the image
+    /// that block describes — 8-bit RGB at the DECLARED resolution, R = recesses, G = slopes,
+    /// B = lowlands. The resolution is read out of the manifest rather than written here, so
+    /// re-cutting the masks at another sample spacing is one edit, in the file that declares it.
     #[test]
     fn shipped_terrain_masks_decode_as_declared() {
-        let path = map_dir(&shipped_assets()).join("terrain_masks.png");
+        let manifest = shipped_manifest();
+        let path = shipped_assets().join(manifest.masks_asset());
         let bytes = std::fs::read(&path)
             .unwrap_or_else(|err| panic!("terrain masks missing at {}: {err}", path.display()));
         assert!(
@@ -529,10 +572,11 @@ pub(crate) mod tests {
         let image::DynamicImage::ImageRgb8(masks) = image else {
             panic!("the masks must be 8-bit RGB, not {color:?}");
         };
+        let [width, height] = manifest.masks_resolution;
         assert_eq!(
             masks.dimensions(),
-            (4096, 4096),
-            "the masks share the heightmap's pixel grid",
+            (width, height),
+            "the masks must be the image level.json declares",
         );
     }
 

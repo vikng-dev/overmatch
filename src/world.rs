@@ -236,6 +236,10 @@ pub fn plugin(app: &mut App) {
         Update,
         (report_failed_terrain_map, attach_environment_light),
     );
+    // The ground material `spawn_environment` builds above. Mounted here rather than in a client
+    // composition because `spawn_environment` writes its asset collection on every composition:
+    // the plugin's render half is behind the render app, which the dedicated server does not have.
+    app.add_plugins(crate::terrain_blend::plugin);
     // The terrain LOD ladder's adaptive half: the levels are generated in `spawn_environment`
     // above, and this keeps their switch distances honest as the optic toggles and the window
     // resizes. Inert until a ladder exists, so the dedicated server pays nothing.
@@ -264,42 +268,57 @@ enum MapEncoding {
 /// the old single-level PNGs it cost sampling work and bought nothing.
 const TERRAIN_ANISOTROPY: u16 = 8;
 
-/// Load one terrain surface map with the sampler EVERY terrain texture needs: repeat addressing
-/// (bevy's default clamps, which would smear the first [`crate::terrain_grid::TEXTURE_TILE_M`]
-/// tile across the whole map), trilinear filtering across the mip chain, and anisotropy. Async load
-/// is fine — this is pure view (ADR-0014), nothing sim-side reads it — but a FAILED load is fatal
+/// How a terrain image is addressed outside `0..1`. A surface pack TILES — bevy's default clamps,
+/// which would smear the first [`crate::terrain_grid::TEXTURE_TILE_M`] tile across the whole map.
+/// A weight mask is STRETCHED over the world square exactly once, so it must clamp instead: with
+/// repeat addressing its opposite edges would bleed into each other at the map's border.
+#[derive(Clone, Copy)]
+enum MapTiling {
+    Repeat,
+    Stretched,
+}
+
+/// Load one terrain image with the sampler its role needs: [`MapTiling`] addressing, trilinear
+/// filtering across the mip chain, and anisotropy. Async load is fine — this is pure view
+/// (ADR-0014), nothing sim-side reads it — but a FAILED load is fatal
 /// ([`report_failed_terrain_map`]). The sampler is orthogonal to the container: the same descriptor
 /// rides the KTX2 maps exactly as it rode the PNGs.
 fn terrain_map(
     asset_server: &AssetServer,
-    path: &'static str,
+    path: &str,
     encoding: MapEncoding,
+    tiling: MapTiling,
 ) -> Handle<Image> {
     use bevy::image::{
         ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
     };
     let is_srgb = matches!(encoding, MapEncoding::Srgb);
+    let address_mode = match tiling {
+        MapTiling::Repeat => ImageAddressMode::Repeat,
+        MapTiling::Stretched => ImageAddressMode::ClampToEdge,
+    };
     asset_server
         .load_builder()
         .with_settings(move |settings: &mut ImageLoaderSettings| {
             settings.is_srgb = is_srgb;
             let mut sampler = ImageSamplerDescriptor {
-                address_mode_u: ImageAddressMode::Repeat,
-                address_mode_v: ImageAddressMode::Repeat,
+                address_mode_u: address_mode,
+                address_mode_v: address_mode,
                 ..ImageSamplerDescriptor::default()
             };
             // Sets the three filters to Linear as well — wgpu REQUIRES that for anisotropy > 1.
             sampler.set_anisotropic_filter(TERRAIN_ANISOTROPY);
             settings.sampler = ImageSampler::Descriptor(sampler);
         })
-        .load(path)
+        .load(path.to_owned())
 }
 
-/// The terrain surface maps whose load must succeed, held by id for [`report_failed_terrain_map`].
-/// Only inserted by the heightmap world with a window — the flat slab / authored course and the
-/// dedicated server never load them, so they can never fail there.
+/// The terrain images whose load must succeed, held by id for [`report_failed_terrain_map`]: the
+/// base pack's three maps, the three blend-layer arrays, and the map's weight mask. Only inserted
+/// by the heightmap world with a window — the flat slab / authored course and the dedicated server
+/// never load them, so they can never fail there.
 #[derive(Resource)]
-struct TerrainMaps([AssetId<Image>; 3]);
+struct TerrainMaps([AssetId<Image>; 7]);
 
 /// Surface a failed terrain-map load instead of swallowing it (ADR-0011, the same stance as
 /// `spec::report_failed_spec`). A texture that fails to decode does NOT draw untextured: bevy
@@ -326,6 +345,7 @@ fn spawn_environment(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<crate::terrain_blend::TerrainMaterial>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     // The one parse of the map's manifest (`terrain_grid::decode_height_grid` publishes it), which
     // the scatter's placement is read out of.
@@ -380,46 +400,105 @@ fn spawn_environment(
         // The render mesh is view-only: windowed compositions have a primary window; the
         // dedicated server (and the headless harness) has none and must not pay for it.
         if !windows.is_empty() {
-            // The ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
+            // The map's manifest is what the mask block and the world extent are read out of, so
+            // the blend cannot be built without it. Absent ⇒ no grid either, which is the branch
+            // above; present-and-unreadable already panicked in `map::parse`.
+            let manifest = manifest
+                .as_deref()
+                .expect("a decoded height grid comes from a parsed manifest");
+            // The BASE ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
             // world-space tiled by the mesh's UVs every `terrain_grid::TEXTURE_TILE_M`.
             let diffuse = terrain_map(
                 &asset_server,
                 crate::terrain_grid::TEXTURE_PATH,
                 MapEncoding::Srgb,
+                MapTiling::Repeat,
             );
             let normal = terrain_map(
                 &asset_server,
                 crate::terrain_grid::NORMAL_PATH,
                 MapEncoding::Linear,
+                MapTiling::Repeat,
             );
             let arm = terrain_map(
                 &asset_server,
                 crate::terrain_grid::ARM_PATH,
                 MapEncoding::Linear,
+                MapTiling::Repeat,
             );
-            commands.insert_resource(TerrainMaps([diffuse.id(), normal.id(), arm.id()]));
-            let material = materials.add(StandardMaterial {
-                base_color_texture: Some(diffuse),
-                // `nor_gl` is the OpenGL convention (+Y green points UP in tangent space) — what
-                // bevy and glTF expect, so NO flip. The pack's `nor_dx` sibling would need this
-                // `true`; picking the wrong one inverts every bump into a dent under a low sun,
-                // which is why the file name carries the convention.
-                normal_map_texture: Some(normal),
-                // glTF ORM packing — R = ambient occlusion, G = roughness, B = metallic. Poly
-                // Haven's `arm` IS that layout, so ONE image feeds both slots bevy reads it
-                // through (occlusion takes R, metallic-roughness takes G/B).
-                occlusion_texture: Some(arm.clone()),
-                metallic_roughness_texture: Some(arm),
-                // The shader MULTIPLIES these factors into the map (`perceptual_roughness *=
-                // mr.g`, `metallic *= mr.b` — bevy_pbr's `pbr_fragment.wgsl`), so 1.0 passes the
-                // roughness map through unscaled (the old 0.95 would have darkened every value).
-                // Metallic stays 0.0 rather than 1.0: the pack's B channel is all-zero (checked
-                // on import), so the render is identical either way, and hard-zero keeps a
-                // dielectric ground from turning to metal on a pack swap.
-                perceptual_roughness: 1.0,
-                metallic: 0.0,
-                ..default()
+            // The three BLENDED packs, one 2D array per map type, plus the map's own weight mask
+            // (`terrain_blend` — layer order is the mask's channel order).
+            let layer_albedo = terrain_map(
+                &asset_server,
+                crate::terrain_blend::LAYER_TEXTURE_PATH,
+                MapEncoding::Srgb,
+                MapTiling::Repeat,
+            );
+            let layer_normal = terrain_map(
+                &asset_server,
+                crate::terrain_blend::LAYER_NORMAL_PATH,
+                MapEncoding::Linear,
+                MapTiling::Repeat,
+            );
+            let layer_arm = terrain_map(
+                &asset_server,
+                crate::terrain_blend::LAYER_ARM_PATH,
+                MapEncoding::Linear,
+                MapTiling::Repeat,
+            );
+            let masks = terrain_map(
+                &asset_server,
+                &manifest.masks_asset(),
+                MapEncoding::Linear,
+                MapTiling::Stretched,
+            );
+            commands.insert_resource(TerrainMaps([
+                diffuse.id(),
+                normal.id(),
+                arm.id(),
+                layer_albedo.id(),
+                layer_normal.id(),
+                layer_arm.id(),
+                masks.id(),
+            ]));
+            let material = terrain_materials.add(crate::terrain_blend::TerrainMaterial {
+                base: StandardMaterial {
+                    base_color_texture: Some(diffuse),
+                    // `nor_gl` is the OpenGL convention (+Y green points UP in tangent space) —
+                    // what bevy and glTF expect, so NO flip. The pack's `nor_dx` sibling would
+                    // need this `true`; picking the wrong one inverts every bump into a dent under
+                    // a low sun, which is why the file name carries the convention.
+                    normal_map_texture: Some(normal),
+                    // glTF ORM packing — R = ambient occlusion, G = roughness, B = metallic. Poly
+                    // Haven's `arm` IS that layout, so ONE image feeds both slots bevy reads it
+                    // through (occlusion takes R, metallic-roughness takes G/B).
+                    occlusion_texture: Some(arm.clone()),
+                    metallic_roughness_texture: Some(arm),
+                    // The shader MULTIPLIES these factors into the map (`perceptual_roughness *=
+                    // mr.g`, `metallic *= mr.b` — bevy_pbr's `pbr_fragment.wgsl`), so 1.0 passes
+                    // the roughness map through unscaled (the old 0.95 would have darkened every
+                    // value). Metallic stays 0.0 rather than 1.0: the pack's B channel is all-zero
+                    // (checked on import), so the render is identical either way, and hard-zero
+                    // keeps a dielectric ground from turning to metal on a pack swap.
+                    perceptual_roughness: 1.0,
+                    metallic: 0.0,
+                    ..default()
+                },
+                extension: crate::terrain_blend::TerrainBlend {
+                    params: crate::terrain_blend::params(manifest),
+                    layer_albedo,
+                    layer_normal,
+                    layer_arm,
+                    masks,
+                },
             });
+            info!(
+                "terrain surface: base pack every {} m, masks {} at {:?}, blend layers {}",
+                crate::terrain_grid::TEXTURE_TILE_M,
+                manifest.masks_asset(),
+                manifest.masks_resolution,
+                crate::terrain_blend::layer_census(),
+            );
             // The ONE-SURFACE invariant (terrain_grid module doc): the drawn ground is built
             // from the grid's own samples with the collider's own cell diagonal — identical
             // geometry, chunked into world-space tiles (positions are absolute, transforms
