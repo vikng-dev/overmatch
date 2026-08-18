@@ -131,6 +131,12 @@ else
   COOLDOWN_S="${COOLDOWN_S:-15}"
 fi
 MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
+# The analyzer's presentation-gate relaxations, as an ARRAY. zsh does not word-split an unquoted
+# parameter expansion, so the obvious `${SMOKE:+--occluded-ok --display-ok --surface-ok}` reaches
+# argparse as ONE argument and every smoke run dies on "--occluded-ok --display-ok --surface-ok
+# does not exist". Real mode never noticed: there the expansion is empty.
+SMOKE_RELAX=()
+[[ -n "$SMOKE" ]] && SMOKE_RELAX=(--occluded-ok --display-ok --surface-ok)
 # How much process startup (asset load, Metal pipeline compilation, window creation) the span
 # deadline forgives before a condition is called stalled — see the poll loop below.
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
@@ -302,7 +308,7 @@ for entry in "${CONDITIONS[@]}"; do
   # numbers are declared fiction.
   ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
       --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
-      ${SMOKE:+--occluded-ok --display-ok --surface-ok} "$stream" ) \
+      "${SMOKE_RELAX[@]}" "$stream" ) \
     || { echo "$cond INVALID: frame stream failed the analyzer's validity gates (see above)" >&2; exit 1; }
   # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
   # occlusion transitions the client observed (0 on a clean visible run after the initial show),
@@ -334,7 +340,7 @@ done
 
 cd "$REPO"
 uv run scripts/perf/analyze.py --warmup-s "$WARMUP_S" --min-rows "$MIN_ROWS" \
-  --expected-duration-s "$DURATION_S" ${SMOKE:+--occluded-ok --display-ok --surface-ok} \
+  --expected-duration-s "$DURATION_S" "${SMOKE_RELAX[@]}" \
   --baseline "${CONDITIONS[1]%%:*}" "$OUT"/*.client.jsonl
 
 echo "sweep complete -> $OUT"
