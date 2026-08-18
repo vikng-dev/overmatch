@@ -5,9 +5,9 @@ imported packs. Whatever binds it must tile at 1.3 m to keep its leaves and ston
 which repeats ~769x per km: this pack needs the blend slice's noise dithering more than the others,
 or an explicit oversizing decision. At 2048², 1.3 m is 1575 px/m.
 
-Shipped as KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², built from the 4k
-masters by scripts/encode-terrain-ktx2.sh. STAGED for the surface-blending slice — no code loads
-this pack yet, which is why it is 2k rather than the active pack's 4k.
-
-Poly Haven ships this pack's nor_gl / arm as 16-bit PNGs; the encode script truncates them to
-8-bit first (bit depth only, no colour-space change — channel means match the source exactly).
+STAGED for the surface-blending slice — nothing loads this pack, so this folder carries its
+contract and no binaries. `scripts/encode-terrain-ktx2.sh brown_mud_leaves_01` cuts its three maps
+as KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², from Poly Haven 4k masters
+that are not in the repo either. Poly Haven ships this pack's nor_gl / arm as 16-bit PNGs; the
+encode script truncates them to 8-bit first (bit depth only, no colour-space change — channel
+means match the source exactly).

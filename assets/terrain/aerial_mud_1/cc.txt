@@ -1,0 +1,11 @@
+"aerial_mud_1" (https://polyhaven.com/a/aerial_mud_1) by Poly Haven (Rob Tuytel) is licensed under CC0 (https://creativecommons.org/publicdomain/zero/1.0/).
+
+AUTHORED SCALE: 8 x 8 m (Poly Haven `dimensions: [8000, 8000]` mm). Whatever binds it must tile at
+8 m to keep its mud cracks and ruts life-sized. At 2048², 8 m is 256 px/m.
+This pack's `scale: "40x40"` field disagrees with its `dimensions`; `dimensions` is the millimetre
+field rocks_ground_02's own `scale` pins, and is what the contract above is read from.
+
+STAGED for the surface-blending slice — nothing loads this pack, so this folder carries its
+contract and no binaries. `scripts/encode-terrain-ktx2.sh aerial_mud_1` cuts its three maps as
+KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², from Poly Haven 4k masters that
+are not in the repo either.

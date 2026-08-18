@@ -54,6 +54,31 @@
         "minimum_m": 0.0,
         "maximum_m": 50.0
       }
+    },
+    "masks": {
+      "asset": "terrain_masks.png",
+      "included": true,
+      "format": "png",
+      "bit_depth": 8,
+      "channels": "rgb",
+      "resolution": [
+        4096,
+        4096
+      ],
+      "shares_with_heightmap": [
+        "world_extent_xz",
+        "sample_centers_xz",
+        "image_axes"
+      ],
+      "channel_meaning": {
+        "r": "recesses: ambient occlusion, where dirt and debris settle",
+        "g": "slopes: where land slides, exposing sand/soil",
+        "b": "lowlands: swampy, marshy, or generally more moist"
+      },
+      "weight_decode": {
+        "formula": "weight = u8 / 255.0",
+        "color_management": "none: linear weights, no ICC profile and no color-space chunk"
+      }
     }
   },
   "prototypes": {

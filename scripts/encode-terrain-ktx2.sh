@@ -17,18 +17,23 @@
 #
 # RESOLUTION POLICY: the pack the game renders is encoded at 4k; packs merely staged for the
 # future surface-blending slice are encoded at 2k, which is still 256 px/m at an 8 m tile. Change
-# a pack's `res` field below to re-cut it.
+# a pack's `res` field below to re-cut it. Only the ACTIVE pack's maps are tracked — a staged pack
+# is its `cc.txt` plus this recipe, and running it writes bytes the repo does not carry.
 #
 #   pack                  albedo file  res
 #   coast_sand_rocks_02   diff         4096   ACTIVE — bound by `terrain_grid::TEXTURE_PATH`
 #   brown_mud_leaves_01   diff         2048   staged
 #   rocks_ground_02       col          2048   staged
+#   dirt_aerial_03        diff         2048   staged
+#   coast_sand_05         diff         2048   staged
+#   aerial_mud_1          diff         2048   staged
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
 SRC="${TERRAIN_SRC:-$HOME/Downloads/overmatch-terrain-src}"
 CDN="https://dl.polyhaven.org/file/ph-assets/Textures"
-PACKS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02}"
+PACKS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 \
+            dirt_aerial_03 coast_sand_05 aerial_mud_1}"
 
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
 mkdir -p "$SRC"
@@ -56,6 +61,9 @@ for pack in $PACKS; do
         coast_sand_rocks_02) albedo=diff; res=4096 ;;
         brown_mud_leaves_01) albedo=diff; res=2048 ;;
         rocks_ground_02)     albedo=col;  res=2048 ;;
+        dirt_aerial_03)      albedo=diff; res=2048 ;;
+        coast_sand_05)       albedo=diff; res=2048 ;;
+        aerial_mud_1)        albedo=diff; res=2048 ;;
         *) echo "unknown pack: $pack" >&2; exit 1 ;;
     esac
     out="assets/terrain/$pack"

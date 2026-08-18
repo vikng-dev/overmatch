@@ -508,6 +508,34 @@ pub(crate) mod tests {
         );
     }
 
+    /// The surface-weight masks, pinned the way the heightmap is: DECODED from the shipped bytes,
+    /// so a Git LFS pointer file shipping in their place fails here in CI. Nothing reads them yet —
+    /// `terrain.masks` in `level.json` is the declaration, and this is what proves the bytes behind
+    /// it are the image that block describes: 4096² 8-bit RGB, R = recesses, G = slopes,
+    /// B = lowlands, on the heightmap's own pixel grid.
+    #[test]
+    fn shipped_terrain_masks_decode_as_declared() {
+        let path = map_dir(&shipped_assets()).join("terrain_masks.png");
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|err| panic!("terrain masks missing at {}: {err}", path.display()));
+        assert!(
+            bytes.len() > 1024,
+            "{} is {} bytes — a Git LFS POINTER, not the masks (checkout without lfs pull)",
+            path.display(),
+            bytes.len(),
+        );
+        let image = image::load_from_memory(&bytes).expect("the masks must decode as PNG");
+        let color = image.color();
+        let image::DynamicImage::ImageRgb8(masks) = image else {
+            panic!("the masks must be 8-bit RGB, not {color:?}");
+        };
+        assert_eq!(
+            masks.dimensions(),
+            (4096, 4096),
+            "the masks share the heightmap's pixel grid",
+        );
+    }
+
     /// The exporter declares the conventions, the reader verifies them: a manifest written in
     /// another frame is present-but-broken, never quietly loaded.
     #[test]

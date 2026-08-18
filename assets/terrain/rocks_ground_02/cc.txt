@@ -4,8 +4,9 @@ AUTHORED SCALE: 2 x 2 m (Poly Haven `dimensions: [2000, 2000]` mm, confirmed by 
 `scale: "2x2M"` field — this pack is what pins the API's unit as millimetres for all three).
 Whatever binds it must tile at 2 m. At 2048², that is 1024 px/m.
 
-Shipped as KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², built from the 4k
-masters by scripts/encode-terrain-ktx2.sh. STAGED for the surface-blending slice — no code loads
-this pack yet, which is why it is 2k rather than the active pack's 4k.
+STAGED for the surface-blending slice — nothing loads this pack, so this folder carries its
+contract and no binaries. `scripts/encode-terrain-ktx2.sh rocks_ground_02` cuts its three maps as
+KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 2048², from Poly Haven 4k masters that
+are not in the repo either.
 
 Poly Haven names this pack's albedo `col` (not `diff`); the name is kept as shipped.
