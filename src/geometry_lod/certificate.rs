@@ -521,7 +521,7 @@ mod tests {
     /// projection itself is pinned in `crate::view`; this pins the MILLIMETRE seam feeding it.)
     #[test]
     fn a_certified_rung_derives_the_distance_it_was_cut_for() {
-        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0), 1.0);
+        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0).expect("a measured view"), 1.0);
         let rung = Rung {
             mesh: "probe".to_owned(),
             deviation_mm: 27.841808,
@@ -539,7 +539,7 @@ mod tests {
     fn every_distance_is_owned_by_exactly_one_level() {
         let root = crate::assets::asset_root();
         let certificate = load(&root, TIGER);
-        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0), 1.0);
+        let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0).expect("a measured view"), 1.0);
         for (key, chain) in &certificate.chains {
             let bands = chain.bands(view);
             assert_eq!(

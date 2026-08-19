@@ -1840,7 +1840,8 @@ pub(crate) mod tests {
             .remove(&shoe_chain_key())
             .expect("the shipped certificate names the shoe's chain");
         let bands = chain.bands(ViewProfile::of(
-            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+                .expect("the reference view is measured"),
             1.0,
         ));
         let level_at = |d: f32| {

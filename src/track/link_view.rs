@@ -193,9 +193,14 @@ pub(crate) fn template_plugin(app: &mut App) {
             // Cheap and always on: an `Added<Name>` scan, so a glb hot-reload re-hides the template
             // it re-instantiates.
             hide_link_template,
-            // Latched on its own resource — one read of the template nodes, ever.
+            // Latched on its own resource — one read of the template nodes, ever. THE BIND WAITS
+            // FOR THE VIEW: the switch metres it derives are the profile projected through the
+            // certificate, and there is no profile until the declared view has been read once
+            // (`crate::view`: no default view). A frame without it is a frame with no shoes yet,
+            // not a frame of shoes bound against a guess.
             bind_link_template
                 .run_if(resource_exists::<RigGeom>)
+                .run_if(resource_exists::<ViewProfile>)
                 .run_if(not(resource_exists::<LinkTemplate>)),
             // The ladder's metres are derived, so they follow the view profile — which moves on
             // human-rate events only (a resize, an optic toggle, a budget row). After the composer
@@ -203,7 +208,7 @@ pub(crate) fn template_plugin(app: &mut App) {
             // it a resize or an optic toggle is one frame of stale metres.
             adapt_shoe_switches
                 .run_if(resource_exists::<LinkTemplate>)
-                .run_if(resource_changed::<ViewProfile>)
+                .run_if(resource_exists_and_changed::<ViewProfile>)
                 .after(crate::geometry_lod::compose_view_profile),
         ),
     );
@@ -219,8 +224,16 @@ pub(crate) fn template_plugin(app: &mut App) {
             .run_if(resource_exists::<LinkTemplate>)
             // "No view yet" is SCHEDULING, not a value the selector has to encode: a composition
             // declares its player view in `Startup`, and the frames before that are frames this
-            // selector is not in. What is left inside it is a bug, and reports as one.
+            // selector is not in. What is left inside it is a bug, and reports as one. "NEVER
+            // declared" is not this gate's silence either — `view::plugin`, which every consumer of
+            // this module mounts, refuses that one after startup.
             .run_if(any_with_component::<PlayerView>)
+            // AN INSTRUMENT DRAWS WHAT IT MEASURES (see `geometry_lod::SourceDetailOnly`): where
+            // the composition has declared source detail there is no selection to make, and a shoe
+            // stays on the authored mesh `spawn_link` gives it.
+            .run_if(not(
+                resource_exists::<crate::geometry_lod::SourceDetailOnly>,
+            ))
             .after(TransformSystems::Propagate)
             .after(crate::camera::GunnerCameraPlaced),
     );
@@ -977,6 +990,9 @@ fn select_belt_rungs(
     mut shoes: Query<(&GlobalTransform, &mut Mesh3d), With<TrackLink>>,
 ) -> Result<(), BevyError> {
     // `single()` answers a QUERY-SHAPE question; the count restates its failure as the domain fact.
+    // The rows ARE the declarations — `PlayerView` requires the camera that carries this pose — so
+    // the number this reports is the number `view::track_view_facts` would report about the same
+    // world, and neither can resolve a declaration the other refuses.
     let Ok(eye) = views.single() else {
         return Err(ViewError::resolving(views.iter().count()).into());
     };
@@ -1109,7 +1125,8 @@ mod tests {
     /// at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
     fn reference_view() -> crate::view::ViewProfile {
         crate::view::ViewProfile::of(
-            crate::view::ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            crate::view::ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+                .expect("the reference view is measured"),
             1.0,
         )
     }
@@ -1524,6 +1541,67 @@ mod tests {
         }
     }
 
+    /// EVERY WAY THE DECLARATION CAN BE WRONG REACHES THIS SELECTOR AS A REPORT, and leaves the
+    /// belt exactly as it was.
+    ///
+    /// The mutant is the original defect itself, in the file ADR-0035's amendment is about: `let
+    /// Ok(eye) = views.single() else { return Ok(()) }`. It passes every other test here, because a
+    /// belt that never reselected is indistinguishable from one whose rung did not change.
+    ///
+    /// The two-declaration case is the second: the count this reports is the number of
+    /// DECLARATIONS, which is the same number `view::track_view_facts` reports about the same world
+    /// — the marker requires the camera that carries both the pose read here and the field read
+    /// there, so no declaration can resolve for one reader and not the other.
+    #[test]
+    fn a_selector_that_cannot_resolve_the_view_reports_rather_than_holding() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let declare_wrongly = |declare: &dyn Fn(&mut World)| -> BevyError {
+            let mut assets = Assets::<Mesh>::default();
+            let template = fixture_template(&mut assets);
+            let side = Side::Right;
+            let authored = template.rung_mesh(0, side).id();
+
+            let mut world = World::new();
+            let parent = world.spawn(Transform::from_translation(ANCHOR)).id();
+            let (_, shoes) = spawn_pool(&mut world, &template, side, parent, &point_belt(2));
+            world.insert_resource(template);
+            declare(&mut world);
+
+            let selected: Result<(), BevyError> = world
+                .run_system_once(select_belt_rungs)
+                .expect("the selector runs");
+            let reported = selected
+                .expect_err("a declaration that does not resolve is a report, never a held rung");
+            for &shoe in &shoes {
+                assert_eq!(
+                    mesh_of(&world, shoe),
+                    authored,
+                    "a selector that cannot resolve the view writes nothing: {reported}",
+                );
+            }
+            reported
+        };
+
+        // Nothing declares a view. The scheduling gate keeps this off a real frame; reaching the
+        // system means the composition has no player view at all.
+        let err = declare_wrongly(&|_| {});
+        assert!(
+            err.to_string().contains("no player view"),
+            "the report names the fault: {err}",
+        );
+
+        // Two declarations: a contradiction, not a selection.
+        let err = declare_wrongly(&|world| {
+            world.spawn(PlayerView);
+            world.spawn(PlayerView);
+        });
+        assert!(
+            err.to_string().contains("2 entities declare"),
+            "the report counts the declarations: {err}",
+        );
+    }
+
     /// **NO SHOE IS EVER DRAWN COARSER THAN ITS OWN CERTIFIED DISTANCE**, charged against the REAL
     /// placement: the shipped rig, every cast pose, every phase, the conform applied, `place_links`
     /// producing the transforms the selector ranges against, and the live system doing the selecting.
@@ -1928,20 +2006,21 @@ mod tests {
     fn a_shorter_view_switches_sooner_than_the_reference_one() {
         use crate::view::{ViewFacts, ViewProfile};
 
+        let measured = |fov, height| ViewFacts::new(fov, height).expect("a measured view");
         let chain = shoe_chain();
         let at = |view| chain.bands(view)[1].start_margin.start;
         let optic = crate::camera::GUNNER_FOV_FALLBACK;
         let reference = at(reference_view());
         assert!(
-            at(ViewProfile::of(ViewFacts::new(optic, 1080.0), 1.0)) < reference,
+            at(ViewProfile::of(measured(optic, 1080.0), 1.0)) < reference,
             "half the pixels, half the deviation term",
         );
         assert!(
-            at(ViewProfile::of(ViewFacts::new(0.785, 2160.0), 1.0)) < reference,
+            at(ViewProfile::of(measured(0.785, 2160.0), 1.0)) < reference,
             "a wider field spends fewer pixels on the same surface",
         );
         assert!(
-            at(ViewProfile::of(ViewFacts::new(optic, 2160.0), 2.0)) < reference,
+            at(ViewProfile::of(measured(optic, 2160.0), 2.0)) < reference,
             "a looser budget admits the reduction sooner",
         );
     }

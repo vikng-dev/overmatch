@@ -137,13 +137,20 @@ fn spawn_tank_when_loaded(
     // this build actually has: heightmap, flat slab, or a re-authored map later.
     let grid = height.as_deref();
     if crate::lod_showcase::enabled() {
+        // THE SHOWCASE STANDS ITS PAIRS AT THEIR OWN SWITCH DISTANCES, so it cannot be laid out
+        // until the view those distances are derived from has been read (`crate::view`: there is no
+        // default view to lay it out against). Waiting a frame is the whole handling — this system
+        // retries until the assets land anyway.
+        let Some(view) = view else {
+            return;
+        };
         spawn_lod_showcase(
             &mut commands,
             content,
             pending.presentation(),
             grid,
             &certificate,
-            view.map_or_else(Default::default, |view| *view),
+            *view,
         );
         commands.remove_resource::<PendingTankAssets>();
         next.set(AppState::Playing);

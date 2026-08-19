@@ -96,6 +96,24 @@ pub(crate) struct GeometryLodLevel {
 #[derive(Component)]
 struct GeometryLodScanned;
 
+/// AN INSTRUMENT DRAWS WHAT IT MEASURES: this composition renders every certified surface at the
+/// level the artist authored, at every distance.
+///
+/// Inserted by the SANDBOXES, and by nothing that has a player. They are the tools the belt wrap,
+/// the suspension envelope, the tooth mesh and the penetration march are certified with, and the
+/// calibrations they carry are millimetre-scale — `track_sandbox::suspension_viz` asks a person to
+/// read a tooth against a tick, and the shoe's first rung deviates 3.7 mm, which is inside the
+/// resolution of that check. An instrument must not silently reduce the thing it is used to
+/// certify, and it does not need the ladder for anything: nothing is measured about its own frame
+/// cost.
+///
+/// BOTH ladders the certificate feeds obey it — [`attach_rungs`] spawns no sibling and writes no
+/// band, and `track::link_view`'s belt selector is not scheduled, so a pooled shoe keeps the
+/// authored mesh it spawns with. The terrain ladder is a different certificate and has its own
+/// clamp (`terrain_lod::TerrainLodClamp`).
+#[derive(Resource)]
+pub(crate) struct SourceDetailOnly;
+
 // ---------------------------------------------------------------------------------------------
 // The plugins
 // ---------------------------------------------------------------------------------------------
@@ -108,7 +126,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
 /// The render half: the view artifact's fingerprint, the chain resolution, and the two range
 /// writers. Mounted on windowed compositions only.
 pub(crate) fn view_plugin(app: &mut App) {
-    app.init_resource::<ViewProfile>().add_systems(
+    app.add_systems(
         Startup,
         (verify_view_artifact, request_tank_gltf).after(load_certificate),
     );
@@ -119,10 +137,19 @@ pub(crate) fn view_plugin(app: &mut App) {
                 resource_exists::<TankCertificate>
                     .and_then(not(resource_exists::<GeometryLodChains>)),
             ),
-            attach_rungs.run_if(resource_exists::<GeometryLodChains>),
-            compose_view_profile,
+            // THE BIND WAITS FOR THE VIEW. A band is metres derived from the profile, so a
+            // primitive bound before there are facts would carry thresholds nobody measured — and
+            // there is no profile to derive them from anyway (`crate::view`: no default view). A
+            // primitive stays unscanned and at source detail until the frame the profile exists,
+            // which is the first frame with a window and a declared camera.
+            attach_rungs.run_if(
+                resource_exists::<GeometryLodChains>
+                    .and_then(resource_exists::<ViewProfile>)
+                    .and_then(not(resource_exists::<SourceDetailOnly>)),
+            ),
+            compose_view_profile.run_if(resource_exists::<crate::view::ViewFacts>),
             adapt_bands
-                .run_if(resource_changed::<ViewProfile>)
+                .run_if(resource_exists_and_changed::<ViewProfile>)
                 .after(compose_view_profile),
         )
             .chain()
@@ -415,22 +442,32 @@ fn attach_rungs(
 /// local to this ladder is the BUDGET (`settings::LodPixelBudget`, the detail row), which is a
 /// tuning knob and not view state. The profile therefore moves on exactly two human-rate events:
 /// the facts moved, or the player moved the row.
+///
+/// It INSERTS the profile rather than updating a default one, and is scheduled behind the facts
+/// existing: there is no view to spend a budget on until somebody has read the declared camera, so
+/// this ladder has no profile either (`crate::view`: no default view).
 pub(crate) fn compose_view_profile(
+    mut commands: Commands,
     facts: Res<crate::view::ViewFacts>,
     budget: Option<Res<crate::settings::LodPixelBudget>>,
-    mut view: ResMut<ViewProfile>,
+    view: Option<ResMut<ViewProfile>>,
 ) {
     let wanted = ViewProfile::of(
         *facts,
-        budget.map_or_else(|| ViewProfile::default().budget_px, |budget| budget.0),
+        budget.map_or(crate::view::DEFAULT_BUDGET_PX, |budget| budget.0),
     );
-    if wanted == *view {
-        return;
+    match view {
+        Some(mut view) => {
+            if *view == wanted {
+                return;
+            }
+            *view = wanted;
+        }
+        None => commands.insert_resource(wanted),
     }
-    *view = wanted;
     info!(
         "geometry_lod: view profile → {:.4} rad × {:.0} px at {:.2} px budget, bands rewritten",
-        view.facts.vfov_rad, view.facts.height_px, view.budget_px,
+        wanted.facts.vfov_rad, wanted.facts.height_px, wanted.budget_px,
     );
 }
 
@@ -468,7 +505,8 @@ mod tests {
     /// gunner optic at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
     pub(crate) fn reference_view() -> ViewProfile {
         ViewProfile::of(
-            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+                .expect("the reference view is measured"),
             1.0,
         )
     }

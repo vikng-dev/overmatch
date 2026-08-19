@@ -833,12 +833,19 @@ fn generate_tangents(lod: &mut TerrainLod) {
 
 /// Build and spawn the whole terrain LOD ladder, logging the per-rung census. Called from
 /// `world::spawn_environment` in place of the flat tile loop, on windowed compositions only.
+///
+/// `view` IS AN OPTION because the ladder is spawned at Startup, before anything has read the
+/// declared camera — and there is no default view to seed it with (`crate::view`). NONE spawns
+/// every tile at its FINEST level, owning every distance, with the coarser ones out of range: the
+/// authored surface, over-detailed rather than under-detailed, until [`adapt_ranges`] rewrites
+/// every threshold on the first frame that has facts. A seeded profile would be a guess at the
+/// player's field and screen, and a guess is what this whole shape removes.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: &Handle<crate::terrain_blend::TerrainMaterial>,
     grid: &HeightGrid,
-    view: ViewProfile,
+    view: Option<ViewProfile>,
 ) {
     let mut lod = build(grid);
     let tangents_started = Instant::now();
@@ -849,11 +856,18 @@ pub(crate) fn spawn(
     let radius = lod.bounding_radius_m;
     for (tile_index, tile) in lod.tiles.iter_mut().enumerate() {
         let aabb = Aabb::from_min_max(tile.min, tile.max);
-        let starts: Vec<f32> = tile
-            .levels
-            .iter()
-            .map(|level| rung_switch_distance_m(view, level.rung, radius))
-            .collect();
+        // With no view yet, the finest level starts at zero and every coarser one at infinity —
+        // the exact-surface tile owns every distance and its reductions own none.
+        let starts: Vec<f32> = match view {
+            Some(view) => tile
+                .levels
+                .iter()
+                .map(|level| rung_switch_distance_m(view, level.rung, radius))
+                .collect(),
+            None => (0..tile.levels.len())
+                .map(|level| if level == 0 { 0.0 } else { f32::INFINITY })
+                .collect(),
+        };
         for (level_index, level) in tile.levels.iter_mut().enumerate() {
             let (tiles_kept, tris, worst) = &mut census[level.rung];
             *tiles_kept += 1;
@@ -898,21 +912,32 @@ pub(crate) fn spawn(
         }
         info!(
             "terrain LOD: rung δ ≤ {declared:.2} m — {tiles_kept} tiles, {tris} tris, \
-             measured worst δ {worst:.4} m, switch at {switch:.0} m",
+             measured worst δ {worst:.4} m, {switch}",
             declared = TERRAIN_LOD_LADDER[rung],
-            switch = rung_switch_distance_m(view, rung, radius),
+            switch = match view {
+                Some(view) => format!(
+                    "switch at {:.0} m",
+                    rung_switch_distance_m(view, rung, radius)
+                ),
+                None => "out of range until the view is read".to_string(),
+            },
         );
     }
     info!(
         "terrain LOD: {tiles} tiles → {entities} entities, generated in {gen} ms \
-         (+{tan} ms tangents), radius {radius:.1} m, view fov {fov:.3} rad × {height:.0} px \
-         @ {budget} px budget",
+         (+{tan} ms tangents), radius {radius:.1} m, {view}",
         tiles = lod.tiles.len(),
         gen = lod.build.as_millis(),
         tan = tangents.as_millis(),
-        fov = view.facts.vfov_rad,
-        height = view.facts.height_px,
-        budget = view.budget_px,
+        view = match view {
+            Some(view) => format!(
+                "view fov {:.3} rad × {:.0} px @ {} px budget",
+                view.facts.vfov_rad, view.facts.height_px, view.budget_px
+            ),
+            None => "no view read yet — every tile at its finest level until the first frame with \
+                     facts"
+                .to_string(),
+        },
     );
     commands.insert_resource(TerrainLodLadder(lod));
 }
@@ -1009,9 +1034,9 @@ fn adapt_ranges(
     ladder: Option<Res<TerrainLodLadder>>,
     facts: Res<ViewFacts>,
     clamp: Res<TerrainLodClamp>,
-    // The applied PROFILE, not the live one: the ladder is spawned against a Startup seed (the
-    // narrow-optic guess in `world`), so the first frame with real facts must rewrite even when
-    // nothing has moved since.
+    // The applied PROFILE, not the live one: a ladder spawned before the view is declared carries
+    // every tile at its finest level, so the first frame with facts must rewrite even when nothing
+    // has moved since.
     mut applied: Local<Option<(ViewProfile, TerrainLodClamp)>>,
     entities: Query<(Entity, &TerrainLodEntity)>,
 ) {
@@ -1155,6 +1180,18 @@ fn cycle_clamp(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MEASURED view — the only kind there is (`crate::view`: no default view). Every fixture
+    /// below states real numbers, so the `expect` is the honest reading of the constructor.
+    fn measured(vfov_rad: f32, height_px: f32) -> ViewFacts {
+        ViewFacts::new(vfov_rad, height_px).expect("a measured view")
+    }
+
+    /// The reference view the shipped corpus was cut against: the gunner optic at 4K native.
+    fn reference_facts() -> ViewFacts {
+        measured(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+    }
+
     use crate::terrain_grid::{GRID_RESOLUTION, tests::shipped_grid};
 
     /// One tile's height patch, in the layout the hierarchy expects.
@@ -1605,7 +1642,7 @@ mod tests {
     #[test]
     fn terrain_lod_ranges_are_complementary() {
         let lod = build(&shipped_grid());
-        let view = terrain_view(ViewFacts::default());
+        let view = terrain_view(reference_facts());
         for (t, tile) in lod.tiles.iter().enumerate() {
             let ranges = lod.ranges(tile, view);
             assert_eq!(ranges.len(), tile.levels.len());
@@ -1655,7 +1692,7 @@ mod tests {
                 },
                 budget_px: TERRAIN_LOD_BUDGET_PX,
             },
-            terrain_view(ViewFacts::default()),
+            terrain_view(reference_facts()),
         ] {
             for tile in &lod.tiles {
                 let ranges = lod.ranges(tile, view);
@@ -1680,7 +1717,7 @@ mod tests {
     #[test]
     fn wired_thresholds_are_the_derivation() {
         let lod = build(&shipped_grid());
-        let view = terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0));
+        let view = terrain_view(reference_facts());
         // Independent re-derivation of the whole chain, from the constants only.
         let radius = lod
             .tiles
@@ -1739,7 +1776,7 @@ mod tests {
         let started = std::time::Instant::now();
         let lod = build(&grid);
         let wall = started.elapsed();
-        let view = terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0));
+        let view = terrain_view(reference_facts());
         let mut census = vec![(0usize, 0usize, 0.0f32); TERRAIN_LOD_LADDER.len()];
         for tile in &lod.tiles {
             for level in &tile.levels {
@@ -2084,9 +2121,10 @@ mod tests {
     /// an authored view. The accepted end of the interval is checked too, so a fallback that
     /// swallowed every value would fail here rather than pass quietly.
     ///
-    /// The guard itself lives in `crate::view` now, shared with the tank's chains — so what this
-    /// pins is that the terrain RANGE CHAIN is behind it, which is the property that would be lost
-    /// if this ladder ever grew a second way to build a profile.
+    /// The guard itself lives in `crate::view` now, shared with the tank's chains — and it is a
+    /// CONSTRUCTOR that refuses, so what this pins is that the terrain profile is built through it
+    /// and cannot be built any other way. A ladder that grew a second way to make a profile is
+    /// exactly what would be lost.
     #[test]
     fn an_invalid_fov_cannot_reach_the_range_chain() {
         let lod = build(&shipped_grid());
@@ -2099,11 +2137,18 @@ mod tests {
             core::f32::consts::PI,
             6.0,
         ] {
-            let view = terrain_view(ViewFacts::new(fov, 1440.0));
+            assert!(
+                ViewFacts::new(fov, 1440.0).is_none(),
+                "fov {fov} is not a view, so no profile can carry it to the chain",
+            );
+        }
+        // The legal interval is passed THROUGH, right up to its open ends, and the chain it
+        // produces covers every distance exactly once.
+        for fov in [1.0e-4, 0.12, std::f32::consts::FRAC_PI_4, 3.0] {
+            let view = terrain_view(measured(fov, 1440.0));
             assert_eq!(
-                view.facts.vfov_rad,
-                ViewFacts::default().vfov_rad,
-                "fov {fov} must fall back"
+                view.facts.vfov_rad, fov,
+                "fov {fov} is legal and must not be replaced"
             );
             for tile in &lod.tiles {
                 for range in lod.ranges(tile, view) {
@@ -2113,7 +2158,6 @@ mod tests {
                         range.start_margin.start
                     );
                 }
-                // And the chain still covers everything exactly once.
                 for distance in [0.0, 100.0, 1_000.0, 50_000.0] {
                     assert_eq!(
                         lod.ranges(tile, view)
@@ -2125,20 +2169,11 @@ mod tests {
                 }
             }
         }
-        // The legal interval is passed THROUGH, right up to its open ends.
-        for fov in [1.0e-4, 0.12, std::f32::consts::FRAC_PI_4, 3.0] {
-            assert_eq!(
-                ViewFacts::new(fov, 1440.0).vfov_rad,
-                fov,
-                "fov {fov} is legal and must not be replaced"
-            );
-        }
         // Heights get the same treatment.
         for height in [0.0, -1.0, f32::NAN, f32::INFINITY] {
-            assert_eq!(
-                ViewFacts::new(0.5, height).height_px,
-                ViewFacts::default().height_px,
-                "height {height} must fall back"
+            assert!(
+                ViewFacts::new(0.5, height).is_none(),
+                "height {height} is not a view either",
             );
         }
     }
@@ -2179,7 +2214,7 @@ mod tests {
     fn the_terrain_ladder_derives_through_the_shared_exact_projection() {
         let commander = std::f32::consts::FRAC_PI_4;
         let radius = 133.4;
-        let view = terrain_view(ViewFacts::new(commander, 2160.0));
+        let view = terrain_view(measured(commander, 2160.0));
         for (rung, &dev) in TERRAIN_LOD_LADDER.iter().enumerate().skip(1) {
             let wired = rung_switch_distance_m(view, rung, radius);
             // Same view, same deviation, same metres — reached through the CERTIFICATE's side of
@@ -2263,6 +2298,11 @@ mod tests {
 mod tactical {
     use super::*;
     use crate::terrain_grid::tests::shipped_grid;
+
+    /// A MEASURED view — the only kind there is (`crate::view`: no default view).
+    fn measured(vfov_rad: f32, height_px: f32) -> ViewFacts {
+        ViewFacts::new(vfov_rad, height_px).expect("a measured view")
+    }
 
     /// One tile-level's geometry, indexed for O(1) point location.
     ///
@@ -2623,15 +2663,15 @@ mod tactical {
         [
             (
                 "gunner optic 4K @ 1 px",
-                terrain_view(ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)),
+                terrain_view(measured(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)),
             ),
             (
                 "commander 4K @ 1 px",
-                terrain_view(ViewFacts::new(commander, 2160.0)),
+                terrain_view(measured(commander, 2160.0)),
             ),
             (
                 "commander 4K @ 8 px (widest sketched quality setting)",
-                ViewProfile::of(ViewFacts::new(commander, 2160.0), WIDEST_SKETCHED_BUDGET_PX),
+                ViewProfile::of(measured(commander, 2160.0), WIDEST_SKETCHED_BUDGET_PX),
             ),
         ]
     }

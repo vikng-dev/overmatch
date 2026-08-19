@@ -358,7 +358,8 @@ mod tests {
         shoe_switches(
             &certificate,
             ViewProfile::of(
-                ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0),
+                ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+                    .expect("the reference view is measured"),
                 1.0,
             ),
         )

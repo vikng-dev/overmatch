@@ -351,7 +351,10 @@ fn spawn_environment(
     // the scatter's placement is read out of.
     manifest: Option<Res<crate::map::MapManifest>>,
     windows: Query<&Window>,
-    scale: Option<Res<crate::render_scale::RenderScale>>,
+    // The tank ladder's own profile, or NONE on the frames before the declared view has been read
+    // — which at Startup is always, so the terrain ladder spawns at its finest level and
+    // `terrain_lod::adapt_ranges` writes the real thresholds on the first frame with facts.
+    view: Option<Res<crate::view::ViewProfile>>,
     asset_server: Res<AssetServer>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
@@ -514,7 +517,7 @@ fn spawn_environment(
                 &mut meshes,
                 &material,
                 &grid,
-                terrain_lod_view(windows.iter().next(), scale.as_deref()),
+                view.as_deref().copied(),
             );
         }
         // The map's object scatter (`scatter`): graybox proxies posed from the shipped level file
@@ -566,28 +569,6 @@ fn spawn_environment(
         revision: 0,
         blocks,
     });
-}
-
-/// The view profile the terrain ladder is FIRST wired for, at Startup — before any camera has
-/// spawned and therefore before any fov is knowable.
-///
-/// Deliberately the NARROWEST view the game has (the gunner optic): a narrow field demands the
-/// finest geometry, so seeding with it means the first frames are over-detailed rather than
-/// under-detailed. `terrain_lod::adapt_ranges` replaces it with the live view on the first frame
-/// that has a window and a camera, at human rate thereafter. A window bevy has not sized yet
-/// reports zero height, which `ViewFacts::new` reads as ABSENT rather than as a one-pixel viewport.
-///
-/// The FIELD is seeded, not read: no camera exists yet. The rendered HEIGHT comes out of
-/// `crate::view`'s own expression of it, so the seed and the live view cannot disagree about what
-/// the render scale does.
-fn terrain_lod_view(
-    window: Option<&Window>,
-    scale: Option<&crate::render_scale::RenderScale>,
-) -> crate::view::ViewProfile {
-    crate::terrain_lod::terrain_view(crate::view::ViewFacts::new(
-        crate::camera::GUNNER_FOV_FALLBACK,
-        crate::view::ViewFacts::rendered_height_px(window, scale),
-    ))
 }
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a

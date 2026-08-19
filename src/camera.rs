@@ -222,10 +222,11 @@ fn capture_turret_pivot(
 ///
 /// Two consumers, one reason. The gunner camera and the sight's cursor-travel margin take it for
 /// the pre-bind frame before `TankViews` lands, so they agree on one number rather than each
-/// carrying a literal. Both LOD ladders seed with it at Startup, before a camera exists
-/// (`view::ViewFacts::default`, `world::terrain_lod_view`) — a narrow field demands the finest
-/// geometry, so seeding under every authored field makes the first frames over-detailed rather than
-/// under-detailed. Widening it would silently coarsen those frames.
+/// carrying a literal. NEITHER LOD LADDER seeds with it any more: a view nobody has measured is not
+/// a view at all (`view::ViewFacts` carries no default), so a ladder without facts defers instead of
+/// selecting through a field it guessed. What is left here is the pre-bind CAMERA field, and it is
+/// still deliberately narrow — the optic opens up to its authored field the frame the rig lands
+/// rather than snapping shut.
 pub const GUNNER_FOV_FALLBACK: f32 = 0.12;
 
 /// The controlled tank's authored FOV for `kind`, or `fallback` before the rig binds.
