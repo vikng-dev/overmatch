@@ -316,6 +316,13 @@ pub fn plugin(app: &mut App) {
         crate::view::plugin,
         crate::geometry_lod::view_plugin,
     ));
+    // THIS INSTRUMENT DRAWS THE AUTHORED SURFACE, at every distance. The belt wrap, the suspension
+    // envelope and the tooth mesh are all certified HERE, by eye, against millimetre-scale
+    // overlays ([`suspension_viz::draw_sprocket`] asks whether a glb tooth sits ON a white tick) —
+    // and the default vantage stands 11.9 m off the belt, past the shoe's first switch at 6.9 m and
+    // a metre inside the road wheels' at 12.9 m. Reducing the mesh a person is measuring, by the
+    // same certificate the measurement is checking, is not a view of it.
+    app.insert_resource(crate::geometry_lod::SourceDetailOnly);
     app.add_plugins((crate::spec::plugin, crate::bake::plugin))
         // This is a WINDOWED root on `DefaultPlugins`, so it is on bevy's deadlocking exit path
         // exactly like the game is: without this, quitting the sandbox wedges the process instead

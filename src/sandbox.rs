@@ -247,6 +247,13 @@ pub fn plugin(app: &mut App) {
     // The armor sandbox stays on the flat slab + authored blocks: its target placement and shot
     // scripting assume y=0 ground, and a dev tool should not shift when the game's heightmap does.
     app.insert_resource(crate::terrain_grid::ForceFlatWorld);
+    // THIS INSTRUMENT DRAWS THE AUTHORED SURFACE, at every distance. The penetration march itself is
+    // never at risk — the armour and component volumes are painted on the sim glb's parts, which
+    // carry no chain — but the visual hull IS what a person aims the camera-gun at and reads an
+    // entry point against, and at the 30 m the target stands from the default vantage half its
+    // chains are already off their source rung (up to ~16 mm of surface). A tool whose whole use is
+    // "look at where this shell went into this plate" shows the authored plate.
+    app.insert_resource(crate::geometry_lod::SourceDetailOnly);
     // The sandbox's own App composition — physics + the shared shell mechanic + a battlefield to
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((
