@@ -1776,32 +1776,28 @@ pub(crate) mod tests {
         }
     }
 
-    /// The far probe placement's REASON to exist, asserted as the quantity BEVY ACTUALLY MEASURES:
-    /// every probe's worst-case CAMERA-TO-SHOE distance must land inside ONE band of the shoe chain,
+    /// The far probe placement's REASON to exist, asserted as the quantity THE SELECTOR ACTUALLY
+    /// READS: every probe's belt must select ONE band of the shoe chain across every camera heading,
     /// and that band must not be the base shoe's — or the "far" capture is measuring something other
     /// than a reduced belt.
     ///
-    /// # Why the tank-centre distance is the wrong number
+    /// # The quantity is the BELT's, not a shoe's
     ///
-    /// This test used to compare the probe's XZ distance from the CONTROLLED TANK'S SPAWN POINT
-    /// against the thresholds, and called that "conservative" because the orbit camera sits behind
-    /// the tank. It is not conservative, it is a different quantity in three ways at once:
+    /// `track::link_view::select_belt_rungs` measures camera origin to BELT origin in 3D and
+    /// subtracts `RigGeom::belt_radius`; a belt is one rung for all 97 of its shoes by construction,
+    /// so no probe can straddle a threshold internally and the spread that matters is the CAMERA's.
+    /// Two terms move it, and neither is tank-centre-to-tank-centre XZ:
     ///
-    ///   * `check_visibility_ranges` measures camera origin to MESH origin in 3D, not tank centre to
-    ///     tank centre in XZ.
-    ///   * The camera is only "behind" for one mouse-look heading. Look is free, so the body can be
-    ///     up to [`ORBIT_FAR`] TOWARD the probes — which subtracts from the distance rather than
-    ///     adding to it.
-    ///   * A shoe is not at its tank's origin: the belt spans the hull, so each of a probe's 194
-    ///     shoes sits up to a footprint half-diagonal off the spawn point, and the near ones are
-    ///     what cross a threshold first.
+    ///   * the orbit. Look is free, so the camera can sit up to [`ORBIT_FAR`] toward the probes or
+    ///     the same distance beyond the tank — the block's selection distance spans `2 × ORBIT_FAR`
+    ///     for a stationary probe, and a switch inside that span is a capture that averages two
+    ///     meshes.
+    ///   * the belt bias, which only ever subtracts.
     ///
-    /// So the bound asserted here is `probe XZ distance − ORBIT_FAR − footprint half-diagonal`,
-    /// against the band with an explicit [`BAND_MARGIN_M`] to spare. The terrain height difference
-    /// between the duel pad and the probe block is deliberately NOT subtracted: 3D distance is
-    /// `√(xz² + Δy²) ≥ xz`, so any height delta (and the camera's own lift above the hull) only
-    /// pushes the probes FURTHER away, which is the safe direction for the near edge and the only
-    /// edge a finite band's far side would need — see the far half below.
+    /// The terrain height difference between the duel pad and the probe block is deliberately NOT
+    /// subtracted: 3D distance is `√(xz² + Δy²) ≥ xz`, so any height delta (and the camera's own lift
+    /// above the hull) only pushes the probes FURTHER away — the safe direction for the near edge,
+    /// and the far edge is bounded with the terms the other way round anyway.
     ///
     /// # Read off the BAND, not off a level number
     ///
@@ -1812,10 +1808,9 @@ pub(crate) mod tests {
     /// `[501, 1050)` m. Nothing about the placement changed and nothing about it needed to. A test
     /// that had named `shoe_lod_range(1)` would have gone red on a regeneration that broke nothing.
     ///
-    /// What the test still refuses is the two ways the placement can stop meaning anything: the
-    /// block STRADDLING a threshold (half the tanks on one mesh, half on another, and a capture
-    /// that averages them), and the block landing back on the BASE shoe (the near placement with
-    /// extra steps).
+    /// What the test refuses is the two ways the placement can stop meaning anything: the block's
+    /// selection CROSSING a threshold as the camera swings, and the block landing back on the BASE
+    /// shoe (the near placement with extra steps).
     #[test]
     fn the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band() {
         use crate::camera::ORBIT_FAR;
@@ -1830,11 +1825,12 @@ pub(crate) mod tests {
         /// fails to run.
         const BAND_MARGIN_M: f32 = 25.0;
 
-        // The furthest a probe's own shoes reach from its spawn point, worst case: the corner of
-        // the square footprint every spawn is cleared over. The Tiger's belt (≈6.6 m long, ≈3.7 m
-        // outside-to-outside) fits well inside it, so this is a documented over-estimate rather
-        // than a measurement of the track — which is what a bound wants to be.
-        let shoe_reach = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
+        // An over-estimate of the belt's own selection bias (`RigGeom::belt_radius`): the corner of
+        // the square footprint every spawn is cleared over. The Tiger's bias is MEASURED 3.945 m
+        // (`link_view::the_belt_radius_covers_every_shoe_the_rig_can_draw` prints it) against the
+        // 7.07 m here, so this is a documented over-estimate rather than a second derivation of the
+        // track — which is what a bound wants to be.
+        let belt_bias = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
         // The bands the shoe's chain owns, derived off the certificate at the view the corpus was
         // quoted in — the same derivation the runtime performs, so a re-cut asset re-asks this
         // question rather than leaving a stale answer.
@@ -1857,26 +1853,25 @@ pub(crate) mod tests {
         let mut band: Option<usize> = None;
         for i in 0..28 {
             let xz = probe_spawn_xz(true, i).distance(anchor);
-            // Camera pulled the full orbit radius TOWARD the probe, and the probe's nearest shoe
-            // reaching back at it. Height deltas omitted on purpose: they only add.
-            let nearest = xz - ORBIT_FAR - shoe_reach;
-            // The far end needs the terms the other way round, and no orbit help: the camera can
-            // equally sit ORBIT_FAR on the far side, and the probe's furthest shoe reaches away.
-            let furthest = xz + ORBIT_FAR + shoe_reach;
+            // Camera pulled the full orbit radius TOWARD the probe, less the belt's own bias.
+            // Height deltas omitted on purpose: they only add.
+            let nearest = xz - ORBIT_FAR - belt_bias;
+            // The far end is the same selection with the orbit the other way round. The bias only
+            // ever subtracts, so it is dropped here rather than added.
+            let furthest = xz + ORBIT_FAR;
             let level = level_at(nearest);
             assert!(
                 level > 0,
-                "far probe {i} sits {xz:.0} m from the controlled tank, but its nearest shoe can be \
-                 {nearest:.0} m from the camera (orbit {ORBIT_FAR} m + {shoe_reach:.1} m of hull), \
-                 which is still the BASE shoe's band — the far placement would render exactly what \
-                 the near one does",
+                "far probe {i} sits {xz:.0} m from the controlled tank, but its belt can select at \
+                 {nearest:.0} m (orbit {ORBIT_FAR} m + {belt_bias:.1} m of bias), which is still the \
+                 BASE shoe's band — the far placement would render exactly what the near one does",
             );
             assert_eq!(
                 level_at(furthest),
                 level,
-                "far probe {i} STRADDLES a threshold: its shoes span {nearest:.0}..{furthest:.0} m \
-                 from the camera, which crosses out of LOD{level}'s band — the capture would \
-                 average two meshes",
+                "far probe {i}'s belt selects across {nearest:.0}..{furthest:.0} m as the camera \
+                 swings, which crosses out of LOD{level}'s band — the capture would average two \
+                 meshes",
             );
             let previous = *band.get_or_insert(level);
             assert_eq!(
@@ -1889,15 +1884,15 @@ pub(crate) mod tests {
             let (near_edge, far_edge) = (owned.start_margin.start, owned.end_margin.end);
             assert!(
                 nearest >= near_edge + BAND_MARGIN_M,
-                "far probe {i}'s nearest shoe can be {nearest:.0} m from the camera — inside \
-                 LOD{level}'s {near_edge:.0} m opening plus {BAND_MARGIN_M} m of margin, so \
-                 mid-capture it would drop to the level above",
+                "far probe {i}'s belt can select at {nearest:.0} m — inside LOD{level}'s \
+                 {near_edge:.0} m opening plus {BAND_MARGIN_M} m of margin, so mid-capture it would \
+                 drop to the level above",
             );
             assert!(
                 furthest < far_edge - BAND_MARGIN_M,
-                "far probe {i}'s furthest shoe can be {furthest:.0} m from the camera — past the \
-                 {far_edge:.0} m end of LOD{level}'s band (less {BAND_MARGIN_M} m of margin), so it \
-                 would render the level below rather than the band this placement was sited for",
+                "far probe {i}'s belt can select at {furthest:.0} m — past the {far_edge:.0} m end \
+                 of LOD{level}'s band (less {BAND_MARGIN_M} m of margin), so it would render the \
+                 level below rather than the band this placement was sited for",
             );
         }
     }

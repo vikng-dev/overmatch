@@ -648,6 +648,40 @@ mod tests {
         );
     }
 
+    /// The inheritance walks THROUGH an unscoped ancestor, which is the shape the shoe pool has: a
+    /// tank root, a `ShoeBelt` that declares no scope of its own, and the shoes under it. Both halves
+    /// have to survive the extra hop — the channel inherited from the root two levels up, and the
+    /// shoe's own `PROXIED_CASTER` shadow role — or a track either casts twice or follows the wrong
+    /// view.
+    #[test]
+    fn a_proxied_caster_inherits_through_an_unscoped_belt() {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        let world = app.world_mut();
+        let root = world.spawn(VisualScope::VIEW_SUBJECT_BODY).id();
+        let belt = world.spawn(ChildOf(root)).id();
+        let shoe = world
+            .spawn((
+                Mesh3d(Handle::default()),
+                VisualScope::PROXIED_CASTER,
+                ChildOf(belt),
+            ))
+            .id();
+        let optic = world.spawn(CameraProfile::BattlefieldOptic).id();
+        let third_person = world.spawn(CameraProfile::BattlefieldThirdPerson).id();
+        app.update();
+
+        assert!(
+            !reaches(app.world(), optic, shoe),
+            "the belt is not a scope — the shoe still inherits its tank's channel through it",
+        );
+        assert!(reaches(app.world(), third_person, shoe));
+        assert!(
+            !casts_shadow(app.world(), shoe),
+            "and the belt did not swallow the shoe's own shadow role",
+        );
+    }
+
     /// Late arrival: a mesh attached long after its ancestor was scoped still resolves. The tank
     /// glb lands asynchronously over many frames, which is exactly why the mechanism this replaces
     /// was a per-frame sweep.

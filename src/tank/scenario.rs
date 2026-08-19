@@ -210,10 +210,13 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe down a ladder of certified reductions, and a block inside the first switch never
-/// draws anything but the authored shoe: at 55..99 m the near block measures 194 full-detail shoes
-/// per tank and says nothing about what the ladder buys. This flag is the other placement — the far
-/// block, where the reductions are what is on screen — and nothing else.
+/// every shoe down a ladder of certified reductions whose metres follow the view: at the commander
+/// field (45°) at 1440p they are 6.9 / 26.8 / 49.8 / 81.6 m, so the near block's 55..99 m of
+/// separation puts its belts on the two COARSEST rungs — 252 and 166 triangles a shoe against the
+/// authored 1 520 — and moves across a switch as the camera does. That is a measurement of the
+/// bottom of the ladder, not of the shoe pool the shadow work is sized against, and not of a fixed
+/// rung. This flag is the other placement — the far block, one rung, well past the last switch —
+/// and nothing else.
 ///
 /// It moves the WHOLE offline scene, not just the grid, because the camera sits at the duel and the
 /// world is finite (the map declares its side — `map::MapManifest`): with the duel

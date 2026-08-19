@@ -1,10 +1,10 @@
 //! The track's SHADOW PROXY: a ~776-triangle closed ribbon that casts the belt's shadow so the
-//! ~322 000-triangle shoe pool does not have to.
+//! 294 880-triangle shoe pool does not have to.
 //!
 //! # Why
 //!
-//! A Tiger carries `link_count × 2` real shoes (MEASURED 97 × 2 = 194 entities) at MEASURED 1 661
-//! triangles each — ~322 k triangles per tank, and ~1.08 M before the LOD pipeline re-certified the
+//! A Tiger carries `link_count × 2` real shoes (MEASURED 97 × 2 = 194 entities) at MEASURED 1 520
+//! triangles each — 294 880 triangles per tank, and ~1.08 M before the LOD pipeline re-certified the
 //! shoe (the cascade numbers below were MEASURED at the old count and
 //! are therefore the pessimistic end, not a stale claim about the
 //! asset). Every one of them is re-submitted into EVERY shadow
@@ -482,7 +482,7 @@ mod tests {
             assert_eq!(indices.len(), count * 24, "{count} stations");
             assert_eq!(positions(&mesh).len(), count * 4);
         }
-        // 97 links/side against the shoe pool's 97 × 1 661.
+        // 97 links/side against the shoe pool's 97 × 1 520.
         assert_eq!(97 * 8, 776);
     }
 

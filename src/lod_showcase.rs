@@ -41,9 +41,9 @@
 //!
 //! # The clamp is the whole trick, and it is showcase-only
 //!
-//! A belt's rung is SELECTED by its distance, and the ladder tiles `[0, ∞)` — which is exactly what
-//! makes "show me L2 and L3 at the same distance" impossible on the production path, and rightly
-//! so. [`clamp_showcase_shoes`] — which does not exist in a process without the variable — pins one
+//! A belt's rung is SELECTED by its distance and the ladder tiles `[0, ∞)`, so "L2 and L3 at one
+//! range" cannot be reached on the production path at all.
+//! [`clamp_showcase_shoes`] — which does not exist in a process without the variable — pins one
 //! tank's belts to a rung through [`crate::track::link_view::ShoeBelt::pin`], the one override the
 //! selector honours. No production code branches on any of it, and the certificate still owns every
 //! distance the selector derives: a pin is not a point on the ladder, so it asks the chain for
