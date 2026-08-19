@@ -64,7 +64,13 @@ read here for its eye position. Which view a rung is for is a domain question, s
 a declaration and never by counting the cameras that happen to exist: a mirror, spotter or
 render-to-texture camera is not a player view and re-tunes nothing. (The nearest-active-camera rule
 this replaces, shipped 2026-08-19 and retired the same day, derived that domain fact from world
-shape — so an overlay camera parked on a belt silently re-tuned it for a view no player has.) A
+shape — so an overlay camera parked on a belt silently re-tuned it for a view no player has.) The
+cost accepted with that: the nearest-camera rule bounded the error in EVERY view at once — no view
+was ever shown a rung it had not earned, because the belt tuned for whichever camera was closest.
+The declared view abandons that bound. A secondary camera nearer the belt than the player's — a
+spotter, a replay pass, a render-to-texture mirror — is shown the player's rung, which is coarser
+than its own certified distance, and its screen-space error is unbounded by the certificate. The
+budget holds for the one view a player actually looks through; every other view is best-effort. A
 declaration that fails to resolve refuses loudly rather than holding its last rung; "no view yet" is
 scheduling, not a value the selector encodes. Scene primitives keep the siblings.
 

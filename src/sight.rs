@@ -261,10 +261,10 @@ fn mark_view_subject_body(
     }
 }
 
-/// Point the one 3D camera at the channel set its current view wants.
+/// Point every 3D camera at the channel set the current view wants.
 ///
 /// This is the entire "hide the player's own tank in the gunner optic" mechanism now: ONE
-/// component on ONE entity, O(1) in the size of the world. The optic profile drops
+/// component per camera, O(1) in the size of the world. The optic profile drops
 /// `ViewSubjectBody` and keeps drawing everything else — it is not a "hide" flag and it is not a
 /// second camera.
 fn apply_sight_camera_profile(
