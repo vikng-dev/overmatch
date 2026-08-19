@@ -177,7 +177,10 @@ struct RigSide {
     idler_view: Entity,
     /// The idler node's authored REST transform, captured at bind (see `sprocket_rest`).
     idler_rest: Transform,
-    /// One entity per link, children of the tank root, local transforms in hull space. Real
+    /// This side's BELT ([`link_view::ShoeBelt`]): the identity-posed frame the shoes hang from,
+    /// and the entity that picks the rung they all draw. A recursive despawn of it takes the pool.
+    belt: Entity,
+    /// One entity per link, children of [`Self::belt`], local transforms in hull space. Real
     /// instanced SHOES ([`super::link_view`]) — the same template, placer and mirrored left-side
     /// mesh the sandbox draws, so the two tools cannot disagree about what this track looks like.
     links: Vec<Entity>,
@@ -223,9 +226,8 @@ fn rebind_on_reinstance(
         return;
     };
     for side in &rig.sides {
-        for &link in &side.links {
-            commands.entity(link).despawn();
-        }
+        // Recursive: the belt owns the shoes, so one despawn per side takes the whole pool.
+        commands.entity(side.belt).despawn();
         // The shadow ribbon goes with them — `attach_shadow_proxies` spawns a fresh one (and a fresh
         // mesh asset) against the rebound rig, and a leaked one would keep casting the old belt.
         if let Some(proxy) = &side.proxy {
@@ -379,12 +381,18 @@ fn bind_track_rigs(
         // red "witness" link 0 used to wear was a dev sign-check for "does driving forward move the
         // lower run rearward", and that invariant is now pinned by `link_view`'s slot-rotation test
         // rather than by a differently-coloured link in every shipped session.
-        let pool = |commands: &mut Commands, side: Side| -> Vec<Entity> {
-            (0..spec.link_count)
-                .map(|_| link_view::spawn_link(commands, &template, side, root))
-                .collect()
+        // One belt entity per side, and the shoes under it: the belt is what selects the rung the
+        // whole side draws, and its radius is how much nearer than the hull origin a shoe on it can
+        // be — the terrain conform reaching a `PROBE_REACH` below the rest envelope included.
+        let pool = |commands: &mut Commands, side: Side| -> (Entity, Vec<Entity>) {
+            let belt =
+                link_view::spawn_belt(commands, side, geom.belt_radius(side, PROBE_REACH), root);
+            let links = (0..spec.link_count)
+                .map(|_| link_view::spawn_link(commands, &template, side, belt))
+                .collect();
+            (belt, links)
         };
-        let [links_l, links_r] = [
+        let [(belt_l, links_l), (belt_r, links_r)] = [
             pool(&mut commands, Side::Left),
             pool(&mut commands, Side::Right),
         ];
@@ -418,6 +426,7 @@ fn bind_track_rigs(
                 sprocket_tooth_tip: sl_tip,
                 idler_view: il,
                 idler_rest: il_rest,
+                belt: belt_l,
                 links: links_l,
                 link_frame: template.frame(Side::Left),
                 link_center_x: geom.link_center_x(Side::Left),
@@ -435,6 +444,7 @@ fn bind_track_rigs(
                 sprocket_tooth_tip: sr_tip,
                 idler_view: ir,
                 idler_rest: ir_rest,
+                belt: belt_r,
                 links: links_r,
                 link_frame: template.frame(Side::Right),
                 link_center_x: geom.link_center_x(Side::Right),
@@ -442,9 +452,8 @@ fn bind_track_rigs(
             },
         ];
         info!(
-            "track rig bound: {} links/side (+{} reduced siblings/side per level — {}), {} \
+            "track rig bound: {} links/side on one belt entity each ({}), {} \
              wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
-            spec.link_count,
             spec.link_count,
             template.chain_summary(),
             sides[0].wheels.len(),

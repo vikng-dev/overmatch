@@ -210,13 +210,10 @@ const PROBE_GRID_COLUMNS: usize = 6;
 /// # `OVERMATCH_PROBE_FAR=1`: the same block, on the far side of the shoe LOD
 ///
 /// The near block is the RIGHT default and the wrong half of one question. `track::link_view` swaps
-/// every shoe down a ladder of certified reductions, and that costs ONE extra entity per shoe PER
-/// LEVEL — at 194 shoes per tank,
-/// four reduced levels and 30 tanks, 23 280 more walked by `check_visibility_ranges` every frame,
-/// whether or not any of them is far enough to matter. So the LOD has two frames to answer for: the
-/// FAR one, where the triangle win is real and the walk is paid for, and the NEAR one, where the
-/// rendered geometry is the base mesh exactly as before and the walk is pure overhead. The near
-/// block at 55..99 m can only show the second. This flag is the other placement, and nothing else.
+/// every shoe down a ladder of certified reductions, and a block inside the first switch never
+/// draws anything but the authored shoe: at 55..99 m the near block measures 194 full-detail shoes
+/// per tank and says nothing about what the ladder buys. This flag is the other placement — the far
+/// block, where the reductions are what is on screen — and nothing else.
 ///
 /// It moves the WHOLE offline scene, not just the grid, because the camera sits at the duel and the
 /// world is finite (the map declares its side — `map::MapManifest`): with the duel

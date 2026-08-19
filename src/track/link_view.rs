@@ -101,53 +101,49 @@
 //! and normals negated in x, triangle winding reversed to compensate. Both instances then render
 //! under ordinary positive-determinant transforms.
 //!
-//! # Distance LOD: extra shoe ENTITIES, not extra pools
+//! # Distance LOD: ONE entity per shoe, its mesh handle swapped PER BELT
 //!
 //! The shoes are the largest geometry pool a tank owns — the Tiger's MEASURED 97 links per side ×
 //! 2 sides = 194 shoes, at 1 661 triangles each, is ~322 k triangles per tank, and a 15v15 frame
-//! holds thirty of them. Beyond a few tens of metres none of that detail survives rasterisation, so
-//! every shoe carries a CHAIN of lower-detail siblings — machine reductions of the same authored
-//! shoe, cut by `scripts/tank/build.py` into the tank's own view glb as rung mesh records and
-//! certified in `assets/tiger_1/tiger_1.lod.json`, in the same mesh-local frame and on the same
-//! material. At the chain's floor the same belt costs a fraction of that per tank.
+//! holds thirty of them. The lower-detail shoes are machine reductions of the same authored shoe,
+//! cut by `scripts/tank/build.py` into the tank's own view glb as rung mesh records and certified in
+//! `assets/tiger_1/tiger_1.lod.json`: same mesh-local frame, same material, same vertex layout, so
+//! the rung a shoe draws is a [`Mesh3d`] HANDLE and nothing else about the entity.
 //!
-//! The switch is bevy's own [`VisibilityRange`] — [`VisibilityRange::abrupt`], deliberately, because
-//! a crossfaded range compiles a second dithering permutation of every shoe pipeline for a
-//! transition nobody can see. Each reduced level is spawned as a CHILD of the base shoe rather than
-//! as another pooled sibling, and three separate mechanisms fall out of that for free:
+//! A shoe is one entity and carries no [`bevy::camera::visibility::VisibilityRange`].
+//! [`select_belt_rungs`] picks the rung and writes it onto every shoe of a [`ShoeBelt`] at once:
 //!
-//!   * **Placement.** [`place_links`] writes ONE transform per shoe and ordinary propagation carries
-//!     the children, so the levels can never disagree about where a link is — and there is no
-//!     second placement system to keep in step with the first.
-//!   * **Rendering policy.** `render_policy` resolves a mesh against its nearest scoped ANCESTOR, so
-//!     the children inherit their tank's channel and, once the shadow ribbon lands and the shoe is
-//!     silenced with `VisualScope::PROXIED_CASTER`, inherit the silence too. Nothing here mirrors a
-//!     layer or a shadow marker by hand; the one path that used to rewrite layers per mesh under the
-//!     controlled tank no longer exists.
-//!   * **Lifetime.** `despawn` is recursive over `Children`, so a rig rebind or a sandbox pool
-//!     shrink takes the reduced shoes with the shoe they belong to.
+//!   * PER BELT, not per shoe: one selection and one draw bin for a side's 97 shoes, which span
+//!     MEASURED ~6.6 m.
+//!   * From the camera distance to the belt's own origin LESS [`RigGeom::belt_radius`] — the rest
+//!     envelope's bound on how much nearer a shoe can be than that origin — so no shoe is reduced
+//!     before its own certified distance. Same conservative direction as the `+ radius_m` slack
+//!     inside `ViewProfile::switch_distance_m`.
+//!   * On a TRANSITION only: the steady state is one distance per belt and no write at all. A belt
+//!     that gains a shoe re-writes, because a fresh shoe spawns at rung 0.
+//!   * On half-open `[start, end)` boundaries ([`rung_at`]) — the certificate's law
+//!     (`Chain::switches`), reproduced by hand rather than read off bevy's range predicate.
 //!
 //! Sharing the material has one obligation the assets do not discharge: [`LINK_MATERIAL`] is
 //! NORMAL-MAPPED, and bevy's PBR shader drops normal mapping — silently — on a mesh with no
 //! `ATTRIBUTE_TANGENT`. The reduced primitives carry no material of their own, which is exactly the
 //! case `bevy_gltf` does NOT auto-generate tangents for, so [`lod_shoe_meshes`] builds them at bind
 //! time and refuses the bind if it cannot. Otherwise a swap would change the LIGHTING as well as the
-//! silhouette, and the distances below are argued only about the silhouette.
+//! silhouette, and the certified deviations bound the silhouette alone.
 //!
-//! The pattern costs entity count — the pool is multiplied by the number of levels, and every one
-//! of those entities is visited by `check_visibility_ranges` each frame. There is no number here to
-//! tune: the retreat is re-cutting the ladder and rebuilding the trio, and the bands follow.
+//! One narrowing, recorded in ADR-0035: a mesh handle cannot differ per view, so every view selects
+//! at the one camera's distance.
 //!
 //! Whether a swap LOOKS like a swap is the one thing the geometric bound cannot answer;
-//! [`crate::lod_showcase`] is the instrument for judging it by eye, and takes the ranges it writes
-//! from [`shoe_lod_range`] so it cannot drift from the chain it is showing off.
+//! [`crate::lod_showcase`] is the instrument for judging it by eye, and pins a belt's rung through
+//! [`ShoeBelt::pin`] rather than writing a ladder of its own.
 
-use bevy::camera::visibility::VisibilityRange;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use crate::geometry_lod::certificate::Rung;
-use crate::geometry_lod::{ChainRef, GeometryLodLevel};
+use crate::geometry_lod::{Chain, ChainRef};
+use crate::view::ViewProfile;
 
 use super::forces::phase_decompose;
 use super::rig_geom::RigGeom;
@@ -166,6 +162,14 @@ pub(crate) fn template_plugin(app: &mut App) {
             bind_link_template
                 .run_if(resource_exists::<RigGeom>)
                 .run_if(not(resource_exists::<LinkTemplate>)),
+            // The ladder's metres are derived, so they follow the view profile — which moves on
+            // human-rate events only (a resize, an optic toggle, a budget row).
+            adapt_shoe_switches
+                .run_if(resource_exists::<LinkTemplate>)
+                .run_if(resource_changed::<ViewProfile>),
+            select_belt_rungs
+                .run_if(resource_exists::<LinkTemplate>)
+                .after(adapt_shoe_switches),
         ),
     );
 }
@@ -233,15 +237,14 @@ pub(crate) struct LinkTemplate {
     material: Handle<StandardMaterial>,
     /// Per side: mesh space → the canonical pin frame.
     frame: PerSide<LinkFrame>,
-    /// The `geometry_lod` chain index every spawned level records, so the adaptive layer rewrites a
-    /// pooled shoe's band by exactly the path it rewrites a scene primitive's — there is no second
-    /// threshold writer for the track. `None` when the certificate names the shoe no chain: there
-    /// is one level, it owns every distance, and nothing has to be rewritten when the view moves.
-    chain: Option<usize>,
-    /// The band each level owns under the view profile AT BIND TIME, rung 0 first. A profile move
-    /// rewrites the live entities through `geometry_lod::adapt_bands`; this is the seed a fresh
-    /// spawn takes.
-    bands: Vec<VisibilityRange>,
+    /// The shoe's CERTIFICATE RECORD — bounding radius and certified deviations — or `None` when
+    /// the certificate names the shoe no chain (one level, owning every distance). The switch
+    /// metres are derived from it against the live view profile, so [`adapt_shoe_switches`] needs
+    /// nothing else to re-derive them.
+    chain: Option<Chain>,
+    /// Where each rung takes over, nearest first: `switches[i]` is the distance beyond which rung
+    /// `i + 1` is drawn. Always `lods.len()` long, and empty when the shoe earned no rung.
+    switches: Vec<f32>,
 }
 
 impl LinkTemplate {
@@ -251,31 +254,25 @@ impl LinkTemplate {
         *self.frame.get(side)
     }
 
-    /// The number of levels the chain has, base INCLUDED — so `0..levels()` is every index
-    /// [`Self::band`] and [`Self::tris`] accept.
-    pub(crate) fn levels(&self) -> usize {
-        self.lods.len() + 1
-    }
-
-    /// The range level `level` owns: `0` is the base shoe, `1 + i` is the chain's rung `i`.
-    ///
-    /// Derived by `geometry_lod` from the certificate, so the levels are COMPLEMENTARY by
-    /// construction — each range ends exactly where the next begins.
-    pub(crate) fn band(&self, level: usize) -> VisibilityRange {
-        self.bands[level].clone()
+    /// The mesh one rung draws on `side`: `0` is the authored shoe, `1 + i` the chain's rung `i`.
+    /// A rung past the chain's floor draws the floor — a pin ([`ShoeBelt::pin`]) is the only source
+    /// of one, and a clamped belt showing the coarsest shoe it has beats one showing none.
+    fn rung_mesh(&self, rung: usize, side: Side) -> Handle<Mesh> {
+        match rung.min(self.lods.len()).checked_sub(1) {
+            None => self.mesh.get(side).clone(),
+            Some(index) => self.lods[index].get(side).clone(),
+        }
     }
 
     /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond
     /// 56 m, LOD2 beyond 127 m, ..."`. Lives here so a consumer's rig-bound line reports whatever
     /// the chain currently is, rather than naming one threshold a re-cut would silently falsify.
     pub(crate) fn chain_summary(&self) -> String {
-        let levels = (1..self.levels())
-            .map(|level| {
-                format!(
-                    "LOD{level} beyond {:.0} m",
-                    self.bands[level].start_margin.start
-                )
-            })
+        let levels = self
+            .switches
+            .iter()
+            .enumerate()
+            .map(|(index, switch)| format!("LOD{} beyond {switch:.0} m", index + 1))
             .collect::<Vec<_>>()
             .join(", ");
         format!(
@@ -306,27 +303,36 @@ pub(crate) struct LinkFrame {
 /// anything else — and so the sandbox's `mesh_layers` mesh tagger can exclude the shoe pool (the
 /// instances are nameless children of the hull, and without this marker they would fall through to
 /// the hull layer and fight the `links` switch for their visibility).
-///
-/// EVERY detail level wears it. The consumers only ever reach a link by an entity id they were
-/// handed ([`place_links`] calls back with pool entities), so widening the marker costs them
-/// nothing — while a reduced child WITHOUT it would be a nameless hull descendant, exactly the case
-/// the tagger's exclusion exists for.
 #[derive(Component)]
 pub(crate) struct TrackLink;
 
-/// WHICH level of the shoe's certified chain a shoe entity is — `0` is the base shoe, `1 + i` is
-/// the chain's rung `i`. The same index [`LinkTemplate::band`] and [`LinkTemplate::tris`] take.
+/// ONE SIDE'S BELT: the entity every shoe on it is parented to, and the rung they all draw.
 ///
-/// Every level already carries the range that SELECTS it; this says which level it IS. The
-/// distinction matters exactly once — for a consumer that wants to OVERRIDE the selection, which is
-/// [`crate::lod_showcase`] and nothing else — and it is a tag rather than a lookup because the
-/// alternative is matching a spawned entity's `Mesh3d` handle back against `LinkTemplate::lods`,
-/// i.e. the same fact recovered by search instead of recorded.
-///
-/// It is NOT a knob and nothing reads it on the production path: in a process with no showcase this
-/// is one index-sized component on entities that already exist.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct ShoeLod(pub(crate) usize);
+/// The unit of LOD selection ([`select_belt_rungs`]) and the unit of lifetime — a recursive despawn
+/// of the belt takes its shoes with it. Spawned by [`spawn_belt`] and posed nowhere: it sits at
+/// identity in the frame its parent works in, so [`place_links`]' hull-local poses carry through
+/// unchanged.
+#[derive(Component)]
+pub(crate) struct ShoeBelt {
+    /// Which side's meshes this belt's shoes wear — the left is the template's genuine mirror.
+    side: Side,
+    /// Metres from this entity's origin to the furthest shoe the belt can put anywhere
+    /// ([`RigGeom::belt_radius`]): the bias that makes the belt select on its NEAREST shoe.
+    radius_m: f32,
+    /// The rung [`select_belt_rungs`] last wrote on every shoe.
+    rung: usize,
+    /// A dev instrument's override ([`crate::lod_showcase`]) — the rung this belt draws at every
+    /// distance. `None` on every production belt; nothing else writes it.
+    pin: Option<usize>,
+}
+
+impl ShoeBelt {
+    /// Pin this belt to one rung whatever distance it is at — [`crate::lod_showcase`]'s clamp, and
+    /// the one thing in the tree that overrides the selection.
+    pub(crate) fn pin(&mut self, rung: usize) {
+        self.pin = Some(rung);
+    }
+}
 
 /// Hide the glb's template link the moment it appears.
 ///
@@ -520,11 +526,8 @@ fn bind_link_template(
             }
         }
     }
-    // One band, `[0, inf)`, when the shoe earned no rung: the base shoe owns every distance.
-    let bands = chain.map_or_else(
-        || vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
-        |chain| chain.bands(*view),
-    );
+    // No switch at all when the shoe earned no rung: the base shoe owns every distance.
+    let switches = chain.map_or_else(Vec::new, |chain| chain.chain().switches(*view));
 
     let mesh = PerSide::new(meshes.add(mirrored), source.0.clone());
 
@@ -560,7 +563,6 @@ fn bind_link_template(
     // still follow from its meshes.
     let deviations: &[Rung] = chain.map_or(&[], |chain| &chain.chain().rungs);
     for (index, (rung, tier)) in deviations.iter().zip(lods.iter()).enumerate() {
-        let band = &bands[index + 1];
         info!(
             "track links: LOD{} bound - `{}`, {} triangles/shoe (−{}%) over [{:.1}, {:.1}) m \
              ({:.3} mm certified deviation + {:.3} m radius, at {:.0} px through the {:.4} rad \
@@ -571,8 +573,8 @@ fn bind_link_template(
             100 - (tris[index + 1] * 100)
                 .checked_div(triangles.max(1))
                 .unwrap_or(0),
-            band.start_margin.start,
-            band.end_margin.end,
+            switches[index],
+            switches.get(index + 1).copied().unwrap_or(f32::INFINITY),
             rung.deviation_mm,
             chain.map_or(f32::NAN, |chain| chain.chain().radius_m),
             view.facts.height_px,
@@ -583,14 +585,13 @@ fn bind_link_template(
         );
     }
 
-    let index = chain.map(ChainRef::index);
     commands.insert_resource(LinkTemplate {
         mesh,
         lods,
         material: material.0.clone(),
         frame,
-        chain: index,
-        bands,
+        chain: chain.map(|chain| chain.chain().clone()),
+        switches,
     });
 }
 
@@ -838,68 +839,117 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 // The pool
 // ---------------------------------------------------------------------------------------------
 
-/// Spawn one pooled shoe on `side`, parented to `parent` (a hull-local frame in both consumers),
-/// together with one child per certified rung. The returned entity is the BASE shoe — the
-/// one the pool holds and the one [`place_links`] poses.
+/// Spawn one side's BELT under `parent` (a hull-local frame in both consumers): the entity every
+/// shoe on that side hangs from, and the one that selects their rung.
+///
+/// `radius_m` is [`RigGeom::belt_radius`] for this side — how much nearer than this entity's origin
+/// a shoe can be, which is the bias [`select_belt_rungs`] selects on.
+pub(crate) fn spawn_belt(
+    commands: &mut Commands,
+    side: Side,
+    radius_m: f32,
+    parent: Entity,
+) -> Entity {
+    commands
+        .spawn((
+            ShoeBelt {
+                side,
+                radius_m,
+                rung: 0,
+                pin: None,
+            },
+            // IDENTITY: [`place_links`] writes poses in the frame `parent` already works in, so the
+            // belt must add nothing to it. `Visibility` keeps the propagation chain from the tank
+            // root to the shoes unbroken.
+            Transform::IDENTITY,
+            Visibility::default(),
+            ChildOf(parent),
+        ))
+        .id()
+}
+
+/// Spawn one pooled shoe on `side` under its [`ShoeBelt`]. ONE entity: the rung it draws is the
+/// [`Mesh3d`] handle the belt writes, so it spawns at rung 0 and the belt corrects it on the frame
+/// the parenting lands.
 ///
 /// Persistent entities whose transforms are rewritten each frame — never rebuilt meshes and never
 /// immediate-mode gizmos: at ~97 links × 2 sides × 1 661 triangles a per-frame rebuild would be
 /// ~322 k triangles of CPU work every frame, while identical mesh+material instances batch into two
 /// draws. Parked below the world until the first placement writes a real pose (the spawn lands via
 /// `Commands`, so the placer only sees it next frame, and an un-posed link must not flash on screen).
-///
-/// The levels' ranges MEET — `[0, 55.9)`, `[55.9, 126.6)`, ... as the chain ships — so exactly
-/// one of them is drawn at every distance, in every view, with no gap and no double-draw. Both the
-/// meshes and the ranges come from the chain, so a level added or dropped there stays consistent
-/// here without touching this function. Every child carries the same [`TrackLink`] marker as its
-/// parent: it is a pooled shoe by every rule that matters to the consumers (the sandbox's mesh
-/// tagger excludes the pool by that marker, and would otherwise class a nameless hull descendant as
-/// hull geometry and repaint it under x-ray).
 pub(crate) fn spawn_link(
     commands: &mut Commands,
     template: &LinkTemplate,
     side: Side,
-    parent: Entity,
+    belt: Entity,
 ) -> Entity {
-    let mut shoe = commands.spawn((
-        TrackLink,
-        ShoeLod(0),
-        Mesh3d(template.mesh.get(side).clone()),
-        MeshMaterial3d(template.material.clone()),
-        template.band(0),
-        Transform::from_xyz(0.0, -1000.0, 0.0),
-        ChildOf(parent),
-    ));
-    // The chain tag `geometry_lod`'s adaptive layer rewrites bands through — the pooled shoes ride
-    // the SAME writer as every scene primitive, so the track cannot drift out of step with the rest
-    // of the model when the view profile moves. Absent when the shoe earned no rung: one level owns
-    // every distance and there is nothing to rewrite.
-    if let Some(chain) = template.chain {
-        shoe.insert(GeometryLodLevel { chain, level: 0 });
-    }
-    for (level, tier) in template.lods.iter().enumerate() {
-        shoe.with_child((
+    commands
+        .spawn((
             TrackLink,
-            ShoeLod(level + 1),
-            GeometryLodLevel {
-                chain: template
-                    .chain
-                    .expect("a reduced level exists only under a chain"),
-                level: level + 1,
-            },
-            Mesh3d(tier.get(side).clone()),
-            // The SAME material: the levels differ in triangles and in nothing else, and a second
-            // material would put a second batch (and a visible shading seam) on every swap.
+            Mesh3d(template.mesh.get(side).clone()),
             MeshMaterial3d(template.material.clone()),
-            template.band(level + 1),
-            // IDENTITY, and load-bearing: every reduced mesh is authored in the same mesh-local
-            // frame as the full shoe, so riding the parent's transform puts it exactly where the
-            // shoe was. It is also what makes the range tests agree — all the levels resolve to the
-            // same world origin, so no two of them can be in (or out of) range on the same frame.
-            Transform::IDENTITY,
-        ));
+            Transform::from_xyz(0.0, -1000.0, 0.0),
+            ChildOf(belt),
+        ))
+        .id()
+}
+
+/// The rung a belt at `distance_m` draws: the level whose half-open band `[start, end)` owns that
+/// distance, `switches` being the takeover distances in ascending order.
+///
+/// A boundary belongs to the level that TAKES OVER there — bevy's
+/// `VisibilityRange::is_visible_at_all` (`distance >= start && distance < end`) restated as an
+/// index. A distance nearer than every switch, negative, or not a number selects the authored shoe.
+fn rung_at(switches: &[f32], distance_m: f32) -> usize {
+    switches.partition_point(|&switch| switch <= distance_m)
+}
+
+/// Write each belt's rung onto its shoes, when it changes.
+///
+/// Steady state is one distance and one compare per belt and NO write. The distance is biased by
+/// [`ShoeBelt::radius_m`], so the belt selects the rung its NEAREST shoe earns and no shoe is ever
+/// coarser than its own certified distance allows; the far end of the belt carries that rung too,
+/// which keeps a side in one draw bin rather than straddling two.
+///
+/// A belt whose `Children` moved is rewritten even at an unchanged rung: [`spawn_link`] spawns at
+/// rung 0, and a pool that grows at range would otherwise leave the fresh shoes at source detail
+/// until the next transition.
+fn select_belt_rungs(
+    template: Res<LinkTemplate>,
+    camera: Single<&GlobalTransform, With<Camera3d>>,
+    mut belts: Query<(&mut ShoeBelt, &GlobalTransform, Ref<Children>)>,
+    mut shoes: Query<&mut Mesh3d, With<TrackLink>>,
+) {
+    let eye = camera.translation();
+    for (mut belt, at, children) in &mut belts {
+        let wanted = belt.pin.unwrap_or_else(|| {
+            rung_at(
+                &template.switches,
+                eye.distance(at.translation()) - belt.radius_m,
+            )
+        });
+        if wanted == belt.rung && !children.is_changed() {
+            continue;
+        }
+        belt.rung = wanted;
+        let mesh = Mesh3d(template.rung_mesh(wanted, belt.side));
+        for shoe in children.iter() {
+            if let Ok(mut current) = shoes.get_mut(shoe) {
+                current.set_if_neq(mesh.clone());
+            }
+        }
     }
-    shoe.id()
+}
+
+/// Re-derive the ladder's metres when the view profile moves — the pool's half of
+/// `geometry_lod::adapt_bands`, which cannot see these shoes (they carry no `GeometryLodLevel` and
+/// no band; the belt selects for them).
+fn adapt_shoe_switches(mut template: ResMut<LinkTemplate>, view: Res<ViewProfile>) {
+    let template = &mut *template;
+    let Some(chain) = &template.chain else {
+        return;
+    };
+    template.switches = chain.switches(*view);
 }
 
 /// Place one side's pool on this frame's belt stations.
@@ -1000,7 +1050,7 @@ mod tests {
     /// A template whose mesh handles are ALL DISTINCT — two per side for the base plus two per
     /// certified rung — so a test can tell which one landed on which entity. Built from a bare
     /// `Assets<Mesh>` rather than an `AssetPlugin` app: the only thing under test is which handle
-    /// `spawn_link` clones where. The BANDS are the shipped chain's, derived exactly as the bind
+    /// the belt writes where. The SWITCHES are the shipped chain's, derived exactly as the bind
     /// derives them.
     fn fixture_template(assets: &mut Assets<Mesh>) -> LinkTemplate {
         let mut fresh = || {
@@ -1021,175 +1071,377 @@ mod tests {
             lods,
             material: Handle::default(),
             frame: tiger_frames(),
-            chain: Some(0),
-            bands: chain.bands(reference_view()),
+            switches: chain.switches(reference_view()),
+            chain: Some(chain),
         }
     }
 
-    /// Run `spawn_link` against a real `World` and hand back every level of the shoe, base first:
-    /// the pooled entity and one child per chain row, in chain order.
-    fn spawn_levels(
+    /// One side's pool against a real `World`, exactly as a consumer builds it: the belt entity,
+    /// then `count` shoes under it.
+    fn spawn_pool(
         world: &mut World,
         template: &LinkTemplate,
         side: Side,
         parent: Entity,
-    ) -> Vec<Entity> {
+        radius_m: f32,
+        count: usize,
+    ) -> (Entity, Vec<Entity>) {
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world);
-        let link = spawn_link(&mut commands, template, side, parent);
+        let belt = spawn_belt(&mut commands, side, radius_m, parent);
+        let shoes = (0..count)
+            .map(|_| spawn_link(&mut commands, template, side, belt))
+            .collect();
         queue.apply(world);
-        let children = world
-            .entity(link)
-            .get::<Children>()
-            .expect("a shoe carries its reduced siblings");
-        assert_eq!(
-            children.len(),
-            template.lods.len(),
-            "one child per chain rung, never a second pool",
-        );
-        std::iter::once(link).chain(children.iter()).collect()
+        (belt, shoes)
     }
 
-    /// The LOD chain as spawned: one entity per level, all DIFFERENT meshes, one material, and
-    /// ranges that TILE `[0, ∞)` — every distance owned by exactly one level.
+    /// The mesh asset an entity draws — the whole of what a rung IS under the swap.
+    fn mesh_of(world: &World, entity: Entity) -> bevy::asset::AssetId<Mesh> {
+        world
+            .entity(entity)
+            .get::<Mesh3d>()
+            .expect("a shoe is a mesh")
+            .0
+            .id()
+    }
+
+    /// A live selector: the template as a resource, [`select_belt_rungs`] mounted, and a camera the
+    /// test moves by hand. No transform propagation is mounted, so the belt stays at the world
+    /// origin and the camera's own translation IS the distance to it.
+    fn selector_app(template: LinkTemplate) -> (App, Entity) {
+        let mut app = App::new();
+        app.insert_resource(template);
+        app.add_systems(Update, select_belt_rungs);
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), GlobalTransform::IDENTITY))
+            .id();
+        (app, camera)
+    }
+
+    /// Stand the camera `distance_m` from the belt's origin and run one frame.
+    fn look_from(app: &mut App, camera: Entity, distance_m: f32) {
+        *app.world_mut()
+            .get_mut::<GlobalTransform>(camera)
+            .expect("the test camera") = GlobalTransform::from_translation(Vec3::X * distance_m);
+        app.update();
+    }
+
+    /// A pool under a running [`selector_app`] — the template is lifted out of the world for the
+    /// spawn and put straight back.
+    fn spawn_pool_in(
+        app: &mut App,
+        side: Side,
+        radius_m: f32,
+        count: usize,
+        parent: Entity,
+    ) -> (Entity, Vec<Entity>) {
+        let template = app
+            .world_mut()
+            .remove_resource::<LinkTemplate>()
+            .expect("the fixture template");
+        let pool = spawn_pool(app.world_mut(), &template, side, parent, radius_m, count);
+        app.insert_resource(template);
+        pool
+    }
+
+    /// A POOLED SHOE IS ONE ENTITY, and the belt above it owns everything the levels used to.
     ///
-    /// The handle assertion is the one that matters for cost — a tank's 194 shoes at a level must be
-    /// 194 references to that level's two assets, not 194 meshes — and the tiling assertion is what
-    /// makes the chain a level-of-detail rather than a gap (the track vanishing in a band) or a
-    /// double-draw (two levels submitted at once).
-    ///
-    /// The tiling is asserted against bevy's REAL contract, read off `bevy_camera` 0.19
-    /// `visibility/range.rs`: `is_visible_at_all` is `distance >= start_margin.start &&
-    /// distance < end_margin.end`, i.e. HALF-OPEN `[start, end)`, and it is the exact predicate
-    /// `check_visibility_ranges` uses to fill `VisibleEntityRanges`. So a boundary distance belongs
-    /// to the level BELOW it (350.0 m draws LOD1, not the base) — which is why the sweep below tests
-    /// each boundary itself, not just a value either side of it.
+    /// The handle assertion is the one that matters for cost — a tank's 194 shoes at a rung must be
+    /// 194 references to that rung's two assets, not 194 meshes. The three absences are the swap
+    /// design stated as structure: no reduced child to place, propagate, sweep and extract; no
+    /// `VisibilityRange`, because the belt selects rather than bevy; and no `GeometryLodLevel`, so
+    /// `geometry_lod::adapt_bands` cannot become a second writer of a fact the belt now owns.
     #[test]
-    fn every_distance_is_owned_by_exactly_one_shoe_level() {
+    fn a_pooled_shoe_is_one_entity_under_its_belt() {
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
         let mut world = World::new();
 
         for side in Side::ALL {
             let parent = world.spawn_empty().id();
-            let levels = spawn_levels(&mut world, &template, side, parent);
-            let mesh_of = |e: Entity| {
-                world
-                    .entity(e)
-                    .get::<Mesh3d>()
-                    .expect("a shoe is a mesh")
-                    .0
-                    .id()
-            };
-            let material_of = |e: Entity| {
-                world
-                    .entity(e)
-                    .get::<MeshMaterial3d<StandardMaterial>>()
-                    .map(|m| m.0.id())
-            };
-            let range_of = |e: Entity| {
-                world
-                    .entity(e)
-                    .get::<VisibilityRange>()
-                    .cloned()
-                    .expect("every level is range-gated")
-            };
-
-            assert_eq!(mesh_of(levels[0]), template.mesh.get(side).id());
-            for (i, tier) in template.lods.iter().enumerate() {
-                assert_eq!(mesh_of(levels[i + 1]), tier.get(side).id());
+            let (belt, shoes) = spawn_pool(&mut world, &template, side, parent, 3.4, 3);
+            for &entity in &shoes {
+                let shoe = world.entity(entity);
+                assert!(
+                    shoe.get::<Children>().is_none(),
+                    "a shoe carries no reduced sibling — the rung is its own mesh handle",
+                );
+                assert!(
+                    shoe.get::<bevy::camera::visibility::VisibilityRange>()
+                        .is_none(),
+                    "nothing range-gates a shoe: the belt selects for the whole side at once",
+                );
+                assert!(
+                    shoe.get::<crate::geometry_lod::GeometryLodLevel>()
+                        .is_none(),
+                    "a pooled shoe is invisible to `adapt_bands`, which would otherwise write a \
+                     band the belt already owns",
+                );
+                assert!(shoe.contains::<TrackLink>(), "the pool's own marker");
+                assert_eq!(
+                    mesh_of(&world, entity),
+                    template.mesh.get(side).id(),
+                    "a fresh shoe draws the authored shoe; the belt corrects it",
+                );
                 // The look is the artist's, once: a second material would mean a second batch and a
                 // shading seam on the swap.
-                assert_eq!(material_of(levels[i + 1]), material_of(levels[0]));
-                // Coincident: the children ride their parent's transform, which is what lets one
-                // placement write serve every level AND what makes the range tests agree.
                 assert_eq!(
-                    world.entity(levels[i + 1]).get::<Transform>().copied(),
-                    Some(Transform::IDENTITY),
+                    shoe.get::<MeshMaterial3d<StandardMaterial>>()
+                        .map(|m| m.0.id()),
+                    Some(template.material.id()),
                 );
             }
-            let meshes: std::collections::HashSet<_> = levels.iter().map(|&e| mesh_of(e)).collect();
+            let belt = world.entity(belt);
             assert_eq!(
-                meshes.len(),
-                levels.len(),
-                "each level must be its own mesh — a shared handle is not an LOD",
+                belt.get::<Children>().map(|children| children.len()),
+                Some(shoes.len()),
+                "the belt owns the pool — one recursive despawn takes it",
             );
+            assert_eq!(
+                belt.get::<Transform>().copied(),
+                Some(Transform::IDENTITY),
+                "the belt adds nothing to the frame `place_links` writes in",
+            );
+        }
 
-            // The ranges themselves, as the chain's thresholds: [0, 55.9), [55.9, 126.6), ... as it
-            // ships.
-            let ranges: Vec<_> = levels.iter().map(|&e| range_of(e)).collect();
-            for range in &ranges {
+        // Every rung is its own mesh, per side — a shared handle is not an LOD.
+        let mut handles = std::collections::HashSet::new();
+        for side in Side::ALL {
+            for rung in 0..=template.lods.len() {
                 assert!(
-                    range.is_abrupt(),
-                    "abrupt, so no shoe pipeline grows a crossfade permutation for a swap nobody \
-                     sees",
+                    handles.insert(template.rung_mesh(rung, side).id()),
+                    "rung {rung} on {side:?} repeats a mesh another level already draws",
                 );
             }
-            assert_eq!(ranges[0].start_margin.start, 0.0, "the base starts at zero");
-            for pair in ranges.windows(2) {
-                assert_eq!(
-                    pair[0].end_margin.end, pair[1].start_margin.start,
-                    "a level must hand over exactly where the next takes over",
-                );
-            }
-            assert!(
-                ranges
-                    .last()
-                    .expect("at least the base level")
-                    .end_margin
-                    .end
-                    .is_infinite(),
-                "the last level never ends",
-            );
-            // The wired ranges carry the CHAIN's thresholds, in order — driven off the chain rather
-            // than off a literal list, so adding or dropping a level is still one row there.
-            let thresholds: Vec<f32> = ranges[1..].iter().map(|r| r.start_margin.start).collect();
-            let chain = shoe_chain();
-            let derived: Vec<f32> = chain
-                .bands(reference_view())
-                .into_iter()
-                .skip(1)
-                .map(|band| band.start_margin.start)
+        }
+    }
+
+    /// THE TILING LAW, reproduced by hand: exactly one rung owns every distance, and a boundary
+    /// belongs to the rung that TAKES OVER there.
+    ///
+    /// Charged against bevy's own predicate rather than against a table — `is_visible_at_all` is
+    /// `distance >= start_margin.start && distance < end_margin.end` (`bevy_camera` 0.19
+    /// `visibility/range.rs`), the HALF-OPEN `[start, end)` reading [`rung_at`] now has to
+    /// reproduce without it. The probes hit each boundary ITSELF, not just a hair either side: an
+    /// inclusive-on-both-ends reading would double-draw there and an exclusive-on-both would leave
+    /// the belt with no shoe at all.
+    #[test]
+    fn every_distance_is_owned_by_exactly_one_shoe_rung() {
+        let chain = shoe_chain();
+        let view = reference_view();
+        let switches = chain.switches(view);
+        let bands = chain.bands(view);
+        assert_eq!(bands.len(), switches.len() + 1, "one band per level");
+
+        let mut probes = vec![0.0_f32, 1.0, 120.0, 400.0, 2_500.0, 10_000.0, f32::MAX];
+        for &switch in &switches {
+            probes.extend([switch - 0.01, switch, switch + 0.01]);
+        }
+        for probe in probes {
+            let visible: Vec<usize> = bands
+                .iter()
+                .enumerate()
+                .filter(|(_, band)| band.is_visible_at_all(probe))
+                .map(|(level, _)| level)
                 .collect();
             assert_eq!(
-                thresholds, derived,
-                "the spawned bands are the certificate's derivation, in order",
+                visible.len(),
+                1,
+                "at {probe} m exactly one rung may be drawn, got {visible:?}",
             );
-            // Every level is TAGGED with its own index, which is what lets the showcase override
-            // a selection without matching mesh handles back to the template.
-            for (i, &e) in levels.iter().enumerate() {
-                assert_eq!(world.entity(e).get::<ShoeLod>().copied(), Some(ShoeLod(i)));
-            }
+            assert_eq!(
+                rung_at(&switches, probe),
+                visible[0],
+                "at {probe} m the selector must pick the rung whose band owns the distance",
+            );
+        }
 
-            // TILING: exactly one level is drawn at every distance. Each threshold is probed AT the
-            // boundary and a hair either side, because `[start, end)` is what decides which level
-            // owns the boundary itself — an inclusive-on-both-ends reading would double-draw there,
-            // and an exclusive-on-both would leave the track with no shoe at all.
-            let mut probes = vec![0.0_f32, 1.0, 120.0, 400.0, 2_500.0, 10_000.0];
-            for &t in &thresholds {
-                probes.extend([t - 0.01, t, t + 0.01]);
-            }
-            for d in probes {
-                let visible: Vec<usize> = ranges
+        // The boundary said as a fact rather than as a count: AT the switch the coarser rung is
+        // drawn, one float below it the finer one still is.
+        for (index, &switch) in switches.iter().enumerate() {
+            assert_eq!(rung_at(&switches, switch), index + 1);
+            assert_eq!(rung_at(&switches, switch - switch * f32::EPSILON), index);
+        }
+        // The last rung's OPEN end. Beyond every switch it is the answer, and it stays the answer
+        // at infinity — where bevy's own predicate draws NOTHING (`INFINITY < INFINITY` is false).
+        // A handle has no "invisible" state to fall into, and no camera stands there.
+        assert_eq!(rung_at(&switches, f32::MAX), switches.len());
+        assert_eq!(rung_at(&switches, f32::INFINITY), switches.len());
+
+        // A shoe with no certified chain has nothing to select between, at any distance — and a
+        // distance that is not a number selects the AUTHORED shoe, never a coarser one by accident.
+        for probe in [0.0, 55.9, 1e9, -1.0, f32::NAN] {
+            assert_eq!(rung_at(&[], probe), 0);
+        }
+        assert_eq!(rung_at(&switches, f32::NAN), 0);
+        assert_eq!(rung_at(&switches, -1.0), 0);
+    }
+
+    /// THE BELT SELECTS ON ITS NEAREST SHOE, not on its own origin.
+    ///
+    /// A side's shoes span metres and its first switch is tens of them, so the belt is one
+    /// selection — but the reference point is the belt's origin, and a shoe can be
+    /// [`ShoeBelt::radius_m`] nearer than that. Subtracting the radius is the same conservative
+    /// direction `ViewProfile::switch_distance_m`'s own `+ radius_m` slack takes: at the distance
+    /// below, the belt's nearest possible shoe is exactly at its certified switch and no shoe on
+    /// the belt is reduced any earlier.
+    #[test]
+    fn a_belt_selects_the_rung_its_nearest_shoe_earns() {
+        const RADIUS_M: f32 = 3.4;
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let side = Side::Right;
+        let switches = template.switches.clone();
+        let rungs: Vec<_> = (0..=template.lods.len())
+            .map(|rung| template.rung_mesh(rung, side).id())
+            .collect();
+
+        let (mut app, camera) = selector_app(template);
+        let parent = app.world_mut().spawn_empty().id();
+        let (_, shoes) = spawn_pool_in(&mut app, side, RADIUS_M, 3, parent);
+        let drawn = |app: &App| -> Vec<bevy::asset::AssetId<Mesh>> {
+            shoes
+                .iter()
+                .map(|&shoe| mesh_of(app.world(), shoe))
+                .collect()
+        };
+
+        for (index, &switch) in switches.iter().enumerate() {
+            // A hair nearer than the switch, measured on the nearest shoe: the finer rung holds.
+            look_from(&mut app, camera, switch + RADIUS_M - 0.01);
+            assert_eq!(
+                drawn(&app),
+                vec![rungs[index]; shoes.len()],
+                "at {switch} m less a hair the belt must still draw rung {index} on every shoe",
+            );
+            // ...and at the switch itself the whole belt takes the coarser rung together, which is
+            // what keeps it in ONE draw bin instead of straddling two.
+            look_from(&mut app, camera, switch + RADIUS_M);
+            assert_eq!(
+                drawn(&app),
+                vec![rungs[index + 1]; shoes.len()],
+                "at {switch} m rung {} must take over on every shoe at once",
+                index + 1,
+            );
+        }
+        // Back to the muzzle: the selection is a function of the distance, not a ratchet.
+        look_from(&mut app, camera, 0.0);
+        assert_eq!(drawn(&app), vec![rungs[0]; shoes.len()]);
+    }
+
+    /// THE STEADY STATE WRITES NOTHING. The whole design rests on it: a frame on which no belt
+    /// changed rung must cost two distances per tank and not one component write — no `Mesh3d`
+    /// churn to re-extract, no `ShoeBelt` change to re-run anything downstream.
+    #[test]
+    fn an_unmoved_belt_writes_no_handle() {
+        #[derive(Resource, Default)]
+        struct Churn(usize);
+
+        fn count_churn(
+            mut churn: ResMut<Churn>,
+            meshes: Query<(), Changed<Mesh3d>>,
+            belts: Query<(), Changed<ShoeBelt>>,
+        ) {
+            churn.0 += meshes.iter().count() + belts.iter().count();
+        }
+
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let switch = template.switches[0];
+        let (mut app, camera) = selector_app(template);
+        app.init_resource::<Churn>()
+            .add_systems(Update, count_churn.after(select_belt_rungs));
+        let parent = app.world_mut().spawn_empty().id();
+        let (_, shoes) = spawn_pool_in(&mut app, Side::Right, 3.4, 97, parent);
+
+        // The frame the pool lands: the belt writes, because a fresh shoe spawns at rung 0.
+        look_from(&mut app, camera, switch * 2.0);
+        assert!(app.world().resource::<Churn>().0 > 0, "the swap must land");
+
+        // Every frame after it, with the camera and the pool unmoved.
+        for _ in 0..3 {
+            app.world_mut().resource_mut::<Churn>().0 = 0;
+            app.update();
+            assert_eq!(
+                app.world().resource::<Churn>().0,
+                0,
+                "an unmoved belt rewrote a handle it had already written — at 30 tanks that is \
+                 5 820 component writes and a re-extract per frame for nothing",
+            );
+        }
+        // ...and a camera that moves WITHOUT crossing a switch is just as quiet.
+        app.world_mut().resource_mut::<Churn>().0 = 0;
+        look_from(&mut app, camera, switch * 2.0 + 5.0);
+        assert_eq!(app.world().resource::<Churn>().0, 0);
+        assert_eq!(shoes.len(), 97, "the Tiger's own pool size, per side");
+    }
+
+    /// A SHOE THAT JOINS A REDUCED BELT takes the belt's rung, not the authored shoe.
+    ///
+    /// [`spawn_link`] spawns at rung 0 and the belt writes only on a transition, so the one thing
+    /// that can strand a shoe at source detail is a pool that GROWS at range — the sandbox's live
+    /// link-count knob, and a rig rebind. The belt's own `Children` changing is what catches it.
+    #[test]
+    fn a_shoe_that_joins_a_reduced_belt_takes_its_rung() {
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let side = Side::Left;
+        let switch = template.switches[0];
+        let coarser = template.rung_mesh(1, side).id();
+
+        let (mut app, camera) = selector_app(template);
+        let parent = app.world_mut().spawn_empty().id();
+        let (belt, _) = spawn_pool_in(&mut app, side, 0.0, 2, parent);
+        look_from(&mut app, camera, switch + 1.0);
+
+        let template = app
+            .world_mut()
+            .remove_resource::<LinkTemplate>()
+            .expect("the fixture template");
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, app.world());
+        let fresh = spawn_link(&mut commands, &template, side, belt);
+        queue.apply(app.world_mut());
+        app.insert_resource(template);
+        assert_ne!(mesh_of(app.world(), fresh), coarser, "it spawns at rung 0");
+
+        app.update();
+        assert_eq!(
+            mesh_of(app.world(), fresh),
+            coarser,
+            "a shoe added to a belt already past the switch must join it at its rung",
+        );
+    }
+
+    /// THE SHOWCASE'S PIN is the one override, and it outranks the distance at every distance —
+    /// which is exactly what makes "L1 and L2 side by side at one range" possible off the
+    /// production path ([`crate::lod_showcase`]).
+    #[test]
+    fn a_pinned_belt_draws_its_rung_at_every_distance() {
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets);
+        let side = Side::Right;
+        let last = template.lods.len();
+        let coarsest = template.rung_mesh(last, side).id();
+
+        let (mut app, camera) = selector_app(template);
+        let parent = app.world_mut().spawn_empty().id();
+        let (belt, shoes) = spawn_pool_in(&mut app, side, 0.0, 2, parent);
+        app.world_mut()
+            .get_mut::<ShoeBelt>(belt)
+            .expect("the belt")
+            .pin(last);
+
+        for probe in [0.0_f32, 30.0, 500.0, 5_000.0] {
+            look_from(&mut app, camera, probe);
+            assert!(
+                shoes
                     .iter()
-                    .enumerate()
-                    .filter(|(_, r)| r.is_visible_at_all(d))
-                    .map(|(i, _)| i)
-                    .collect();
-                assert_eq!(
-                    visible.len(),
-                    1,
-                    "at {d} m exactly one level must be visible, got {visible:?}",
-                );
-            }
-            // ...and the boundary lands on the FARTHER level, which is the half-open contract said
-            // as a fact rather than as a count.
-            for (i, &t) in thresholds.iter().enumerate() {
-                assert!(
-                    ranges[i + 1].is_visible_at_all(t) && !ranges[i].is_visible_at_all(t),
-                    "at exactly {t} m the level below must take over",
-                );
-            }
+                    .all(|&shoe| mesh_of(app.world(), shoe) == coarsest),
+                "a pinned belt must draw its rung at {probe} m",
+            );
         }
     }
 
@@ -1197,9 +1449,8 @@ mod tests {
     ///
     /// The law is source detail, silently (ADR-0035): a re-cut that earns the shoe no rung is
     /// legitimate — the build's own coverage owns that question — and the belt must draw its base
-    /// shoe at every distance rather than vanish. What this pins is the spawn: one entity per link,
-    /// no reduced children, one band owning `[0, inf)`, and NO `GeometryLodLevel`, because there is
-    /// no chain for the adaptive layer to rewrite against.
+    /// shoe at every distance rather than vanish. Under the swap there is simply nothing to select
+    /// between: an empty ladder, and the authored handle left where the spawn put it.
     #[test]
     fn a_shoe_with_no_certified_chain_draws_at_source_detail() {
         let mut assets = Assets::<Mesh>::default();
@@ -1215,32 +1466,26 @@ mod tests {
             material: Handle::default(),
             frame: tiger_frames(),
             chain: None,
-            bands: vec![VisibilityRange::abrupt(0.0, f32::INFINITY)],
+            switches: Vec::new(),
         };
-        let mut world = World::new();
-        let parent = world.spawn_empty().id();
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, &world);
-        let link = spawn_link(&mut commands, &template, Side::Right, parent);
-        queue.apply(&mut world);
+        let authored = template.mesh.get(Side::Right).id();
+        let (mut app, camera) = selector_app(template);
+        let parent = app.world_mut().spawn_empty().id();
+        let (_, shoes) = spawn_pool_in(&mut app, Side::Right, 3.4, 2, parent);
 
-        assert!(
-            world.entity(link).get::<Children>().is_none(),
-            "a chainless shoe spawns no reduced sibling",
-        );
-        assert!(
-            world.entity(link).get::<GeometryLodLevel>().is_none(),
-            "a chainless shoe carries no chain tag for the adaptive layer to find",
-        );
-        let range = world
-            .entity(link)
-            .get::<VisibilityRange>()
-            .expect("a shoe carries a range");
         for probe in [0.0_f32, 1.0, 500.0, 5_000.0, 1e6] {
-            assert!(
-                range.is_visible_at_all(probe),
-                "the base shoe must own {probe} m when there is no level below it",
-            );
+            look_from(&mut app, camera, probe);
+            for &shoe in &shoes {
+                assert_eq!(
+                    mesh_of(app.world(), shoe),
+                    authored,
+                    "the authored shoe must own {probe} m when there is no rung below it",
+                );
+                assert!(
+                    app.world().entity(shoe).get::<Children>().is_none(),
+                    "a chainless shoe is still one entity",
+                );
+            }
         }
     }
 
@@ -1328,47 +1573,6 @@ mod tests {
         assert!(
             at(ViewProfile::of(ViewFacts::new(optic, 2160.0), 2.0)) < reference,
             "a looser budget admits the reduction sooner",
-        );
-    }
-
-    /// EVERY reduced sibling inherits the CASTER SWAP. When the shadow ribbon lands,
-    /// `drive_track_views` writes `VisualScope::PROXIED_CASTER` onto the pooled shoe and onto
-    /// nothing else; the children must go quiet with it, or a tank past the first threshold in
-    /// the chain's first threshold would cast its whole belt through the shadow map the ribbon was
-    /// built to replace.
-    ///
-    /// Asserted through `render_policy`'s own resolver rather than by reading a marker off the
-    /// spawn, because inheritance is exactly the mechanism being relied on: nothing in this module
-    /// writes a shadow marker or a layer, and this is the test that says so.
-    #[test]
-    fn silencing_a_shoe_silences_every_reduced_sibling() {
-        use crate::render_policy::{VisualScope, casts_shadow};
-
-        let mut assets = Assets::<Mesh>::default();
-        let template = fixture_template(&mut assets);
-        let mut app = App::new();
-        app.add_plugins(crate::render_policy::plugin);
-
-        let world = app.world_mut();
-        let tank = world.spawn(VisualScope::WORLD_SOLID).id();
-        let levels = spawn_levels(world, &template, Side::Right, tank);
-        app.update();
-        assert!(
-            levels.iter().all(|&e| casts_shadow(app.world(), e)),
-            "before the ribbon exists EVERY level carries the belt's shadow, as one shoe did",
-        );
-
-        app.world_mut()
-            .entity_mut(levels[0])
-            .insert(VisualScope::PROXIED_CASTER);
-        app.update();
-        assert!(
-            !casts_shadow(app.world(), levels[0]),
-            "the swap silences the shoe it is written on",
-        );
-        assert!(
-            levels[1..].iter().all(|&e| !casts_shadow(app.world(), e)),
-            "and every reduced sibling, which is written on nothing at all",
         );
     }
 

@@ -14,7 +14,9 @@
 
 use bevy::prelude::*;
 
-use crate::track::link_view::{LinkTemplate, TrackLink, place_links as place_shared, spawn_link};
+use crate::track::link_view::{
+    LinkTemplate, TrackLink, place_links as place_shared, spawn_belt, spawn_link,
+};
 
 use super::belt::BeltPhase;
 use super::rig_geom::RigGeom;
@@ -40,9 +42,22 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
-/// The instanced links, per side, children of the hull.
+/// The instanced links, per side, under that side's belt entity.
 #[derive(Resource, Default)]
-struct LinkPool(PerSide<Vec<Entity>>);
+struct LinkPool(PerSide<SideBelt>);
+
+/// One side's belt entity and the shoes hanging from it.
+#[derive(Default)]
+struct SideBelt {
+    /// The `ShoeBelt` entity — spawned once under the hull, and the one that selects the rung every
+    /// shoe on this side draws. `None` until the hull exists.
+    belt: Option<Entity>,
+    links: Vec<Entity>,
+}
+
+/// The conform reach the sandbox's belt view probes with — how far below the rest envelope a drawn
+/// shoe can be, and therefore part of the belt's own selection radius.
+const CONFORM_REACH: f32 = 0.5;
 
 /// Keep the instance pool the same size as the material loop.
 ///
@@ -61,15 +76,24 @@ fn sync_link_pool(
     };
     let want = geom.link_count;
     for side in Side::ALL {
-        let links = pool.0.get_mut(side);
-        if links.len() == want {
+        let pool = pool.0.get_mut(side);
+        let belt = *pool.belt.get_or_insert_with(|| {
+            spawn_belt(
+                &mut commands,
+                side,
+                geom.belt_radius(side, CONFORM_REACH),
+                hull,
+            )
+        });
+        if pool.links.len() == want {
             continue;
         }
-        for entity in links.drain(want.min(links.len())..) {
+        for entity in pool.links.drain(want.min(pool.links.len())..) {
             commands.entity(entity).despawn();
         }
-        while links.len() < want {
-            links.push(spawn_link(&mut commands, &template, side, hull));
+        while pool.links.len() < want {
+            pool.links
+                .push(spawn_link(&mut commands, &template, side, belt));
         }
     }
 }
@@ -94,7 +118,7 @@ fn place_links(
     mut stations: Local<Vec<Vec2>>,
 ) {
     for side in Side::ALL {
-        let entities = pool.0.get(side);
+        let entities = &pool.0.get(side).links;
         if !viz.links {
             for &entity in entities {
                 if let Ok((_, mut visibility)) = links.get_mut(entity) {

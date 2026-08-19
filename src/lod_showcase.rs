@@ -41,24 +41,18 @@
 //!
 //! # The clamp is the whole trick, and it is showcase-only
 //!
-//! A level is SELECTED by its [`VisibilityRange`], and the ranges tile `[0, ∞)` — which is exactly
-//! what makes "show me L2 and L3 at the same distance" impossible on the production path, and
-//! rightly so. The clamp overrides the range on one tank's shoes: the chosen level gets `[0, ∞)`
-//! and every other level gets an EMPTY range, which `is_visible_at_all` reads as never
-//! (`distance >= 0 && distance < 0` is false everywhere). It is written by
-//! [`clamp_showcase_shoes`], which does not exist in a process without the variable, onto entities
-//! found through [`crate::track::link_view::ShoeLod`], which is a tag and not a knob. No production
-//! code branches on any of it, and `geometry_lod` still owns every range it derives — the clamp
-//! asks the chain for nothing, it writes the two degenerate ranges directly, because "always" and
-//! "never" are not points on the ladder. A clamped entity carries
-//! [`crate::geometry_lod::LodPinned`], so the adaptive layer leaves it alone rather than fighting
-//! it for the component a frame at a time.
+//! A belt's rung is SELECTED by its distance, and the ladder tiles `[0, ∞)` — which is exactly what
+//! makes "show me L2 and L3 at the same distance" impossible on the production path, and rightly
+//! so. [`clamp_showcase_shoes`] — which does not exist in a process without the variable — pins one
+//! tank's belts to a rung through [`crate::track::link_view::ShoeBelt::pin`], the one override the
+//! selector honours. No production code branches on any of it, and the certificate still owns every
+//! distance the selector derives: a pin is not a point on the ladder, so it asks the chain for
+//! nothing.
 
-use bevy::camera::visibility::VisibilityRange;
 use bevy::prelude::*;
 
-use crate::geometry_lod::{LodPinned, TankCertificate};
-use crate::track::link_view::{ShoeLod, shoe_chain_key};
+use crate::geometry_lod::TankCertificate;
+use crate::track::link_view::{ShoeBelt, shoe_chain_key};
 use crate::view::ViewProfile;
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
@@ -141,7 +135,7 @@ pub(crate) struct ShowcaseTank {
 
 /// Pin every shoe under this tank to one level of the chain, whatever distance it is at.
 ///
-/// On the tank ROOT, read by [`clamp_showcase_shoes`] through the shoe's ancestors — so it survives
+/// On the tank ROOT, read by [`clamp_showcase_shoes`] through the belt's ancestors — so it survives
 /// the rig binding, rebinding, and the belt's pool being rebuilt, none of which the showcase knows
 /// about or should.
 #[derive(Component, Clone, Copy)]
@@ -156,14 +150,7 @@ pub(crate) struct LodClamp(pub(crate) usize);
 pub(crate) fn shoe_switches(certificate: &TankCertificate, view: ViewProfile) -> Vec<f32> {
     certificate
         .chain(&shoe_chain_key())
-        .map(|chain| {
-            chain
-                .bands(view)
-                .into_iter()
-                .skip(1)
-                .map(|band| band.start_margin.start)
-                .collect()
-        })
+        .map(|chain| chain.switches(view))
         .unwrap_or_default()
 }
 
@@ -303,22 +290,21 @@ pub(crate) fn legend(switches: &[f32], deviations: &[f32]) -> Vec<String> {
     lines
 }
 
-/// Pin the shoes of every clamped tank to their tank's level, as they appear.
+/// Pin every clamped tank's belts to their tank's level, as they appear.
 ///
-/// `Added<ShoeLod>` rather than a sweep: shoes arrive when the rig binds, and a rig rebind despawns
-/// the pool and spawns a new one, so the added filter covers the whole lifetime while costing an
-/// empty query every frame after the first.
+/// `Added<ShoeBelt>` rather than a sweep: belts arrive when the rig binds, and a rig rebind despawns
+/// them and spawns fresh ones, so the added filter covers the whole lifetime while costing an empty
+/// query every frame after the first.
 ///
 /// The clamp is looked up through the ANCESTORS rather than passed down from the spawn, for the
 /// same reason `render_policy` resolves scopes that way: the showcase does not know how many frames
 /// deep `track::view` parents its pool, and should not have to.
 fn clamp_showcase_shoes(
-    mut commands: Commands,
-    shoes: Query<(Entity, &ShoeLod), Added<ShoeLod>>,
+    mut belts: Query<(Entity, &mut ShoeBelt), Added<ShoeBelt>>,
     parents: Query<&ChildOf>,
     clamps: Query<&LodClamp>,
 ) {
-    for (entity, lod) in &shoes {
+    for (entity, mut belt) in &mut belts {
         let mut node = Some(entity);
         let mut clamp = None;
         while let Some(current) = node {
@@ -328,20 +314,9 @@ fn clamp_showcase_shoes(
             }
             node = parents.get(current).ok().map(ChildOf::parent);
         }
-        let Some(clamp) = clamp else {
-            continue;
-        };
-        // `[0, ∞)` and `[0, 0)`: bevy reads a range as `distance >= start && distance < end`, so the
-        // second is EMPTY at every distance including zero. Abrupt in both cases — a crossfade
-        // between "always" and "never" would dither the very silhouette being compared.
-        commands.entity(entity).insert((
-            if lod.0 == clamp {
-                VisibilityRange::abrupt(0.0, f32::INFINITY)
-            } else {
-                VisibilityRange::abrupt(0.0, 0.0)
-            },
-            LodPinned,
-        ));
+        if let Some(clamp) = clamp {
+            belt.pin(clamp);
+        }
     }
 }
 

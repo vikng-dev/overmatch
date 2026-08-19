@@ -253,6 +253,19 @@ impl Rung {
 }
 
 impl Chain {
+    /// Where each rung TAKES OVER, nearest first: `switches[i]` is the distance beyond which
+    /// `rungs[i]` is legal. Strictly ascending, because the certified deviations are.
+    ///
+    /// The one derivation of the ladder's metres. Consumers that select by hand
+    /// ([`crate::track::link_view`]'s pooled shoes) take these; [`Self::bands`] is the same list
+    /// stated as ranges for the consumers bevy selects for.
+    pub(crate) fn switches(&self, view: ViewProfile) -> Vec<f32> {
+        self.rungs
+            .iter()
+            .map(|rung| view.switch_distance_m(rung.deviation_m(), self.radius_m))
+            .collect()
+    }
+
     /// The complementary ranges this chain's levels own: `[0, s₁) [s₁, s₂) … [sₙ, ∞)`, one entry
     /// per level with rung 0 (the source primitive) first.
     ///
@@ -265,11 +278,7 @@ impl Chain {
     /// than crossfaded: a dithered range compiles a second permutation of every pipeline it touches
     /// for a sub-budget transition.
     pub(crate) fn bands(&self, view: ViewProfile) -> Vec<VisibilityRange> {
-        let starts: Vec<f32> = self
-            .rungs
-            .iter()
-            .map(|rung| view.switch_distance_m(rung.deviation_m(), self.radius_m))
-            .collect();
+        let starts = self.switches(view);
         (0..=starts.len())
             .map(|level| {
                 let start = if level == 0 { 0.0 } else { starts[level - 1] };

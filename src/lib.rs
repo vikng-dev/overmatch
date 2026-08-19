@@ -66,8 +66,9 @@ mod exact;
 mod firecontrol;
 mod frame_cost;
 /// The tank build's certificate applied at runtime (ADR-0035): `<id>.lod.json` read as data, the
-/// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung. The single
-/// seam between what the build measured and what the renderer selects — no measurement is
+/// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung on every
+/// scene primitive (the track's pooled shoes swap a mesh handle instead — `track::link_view`). The
+/// single seam between what the build measured and what the renderer selects — no measurement is
 /// transcribed into Rust.
 mod geometry_lod;
 /// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the

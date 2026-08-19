@@ -258,6 +258,30 @@ impl RigGeom {
         self.pitch * self.link_count as f32
     }
 
+    /// How far from the HULL ORIGIN one side's belt can reach (m): no shoe on `side` is ever
+    /// further from the origin than this, whatever the pose.
+    ///
+    /// The drawn belt lies in the convex hull of the side's running-gear circles (the route is
+    /// tangent segments and wrap arcs; the sag drape is pushed OUT of every circle and hangs inside
+    /// that hull), so `max(|centre| + radius)` bounds it in the side plane, `travel_m` covers the
+    /// pose the rest circles do not carry — suspension travel and the view's terrain conform — and
+    /// the shoe's own lateral centre is the third leg of the right triangle.
+    ///
+    /// It is a BIAS, not a measurement of anything drawn: [`crate::track::link_view`]'s belt selects
+    /// one rung for all of its shoes, and subtracting this from the camera-to-hull distance selects
+    /// on the nearest shoe the belt could have.
+    pub(crate) fn belt_radius(&self, side: Side, travel_m: f32) -> f32 {
+        let in_plane = self
+            .rest
+            .get(side)
+            .iter()
+            .map(|&(centre, radius)| centre.length() + radius)
+            .fold(0.0_f32, f32::max);
+        self.link_center_x(side)
+            .abs()
+            .hypot(in_plane + travel_m.max(0.0))
+    }
+
     /// Where arc length ZERO sits on the sprocket, as a side-plane angle (rad, `atan2(y, z)` about
     /// the sprocket centre) — i.e. **where `BeltPhase = 0` puts the first pin**.
     ///

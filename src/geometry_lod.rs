@@ -2,8 +2,9 @@
 //!
 //! One module owns the whole seam. It reads `<id>.lod.json` as data, fingerprints the trio members
 //! this process opens, and — on the render side — gives every spawned scene primitive the
-//! certificate names a [`VisibilityRange`] plus one coincident sibling per rung. Nothing swaps at
-//! runtime: bevy selects per view, and the entities are all present from the bind.
+//! certificate names a [`VisibilityRange`] plus one coincident sibling per rung. Nothing a SCENE
+//! PRIMITIVE draws swaps at runtime: bevy selects per view, and the entities are all present from
+//! the bind.
 //!
 //! # The mechanism: coincident siblings, one placement
 //!
@@ -18,6 +19,13 @@
 //! A RUNG WEARS ITS SOURCE PRIMITIVE'S MATERIAL. Rung mesh records carry no glTF material — they
 //! are bare machine reductions — and the material is cloned off the rung-0 entity at bind time, so
 //! a swap changes the silhouette and nothing else.
+//!
+//! THE TRACK'S POOLED SHOES ARE THE EXCEPTION, and they are not spawned here ([`attach_rungs`] is
+//! gated on `GltfMeshName`, which the loader writes on scene-primitive leaves only). A shoe is one
+//! entity whose mesh HANDLE its belt swaps, because 194 shoes per tank moving every frame make the
+//! sibling's per-frame cost — propagation, the visibility sweep, the extract scan — the dominant
+//! one. It carries no `GeometryLodLevel` and no band; the certificate reaches it as
+//! [`Chain::switches`] instead of as ranges.
 //!
 //! # Switch distances are derived, never shipped
 //!
@@ -87,11 +95,6 @@ pub(crate) struct GeometryLodLevel {
 /// carry this and nothing else.
 #[derive(Component)]
 struct GeometryLodScanned;
-
-/// This entity's range is PINNED by a dev instrument ([`crate::lod_showcase`]); the adaptive layer
-/// leaves it alone. Two writers for one component would each win a frame at a time.
-#[derive(Component)]
-pub(crate) struct LodPinned;
 
 // ---------------------------------------------------------------------------------------------
 // The plugins
@@ -432,11 +435,16 @@ fn compose_view_profile(
 }
 
 /// Rewrite every band on a profile move. THE ONE WRITER, apart from the bind.
+///
+/// `GeometryLodLevel` is exactly the set of entities bevy selects for, which is why the pooled
+/// shoes were dropped from it rather than filtered out of this query: a shoe's level is now a fact
+/// its BELT owns and rewrites (`track::link_view`), so leaving the component on one would be two
+/// writers for one fact, each winning a frame at a time.
 fn adapt_bands(
     mut commands: Commands,
     chains: Option<Res<GeometryLodChains>>,
     view: Res<ViewProfile>,
-    levels: Query<(Entity, &GeometryLodLevel), Without<LodPinned>>,
+    levels: Query<(Entity, &GeometryLodLevel)>,
 ) {
     let Some(chains) = chains else {
         return;
