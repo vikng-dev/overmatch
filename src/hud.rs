@@ -1,7 +1,7 @@
 //! Shared world-anchored HUD for game and armor sandbox.
 //!
-//! Invariant: labels read simulation state but never write it; each composition supplies a
-//! [`HudCamera`] rather than coupling shared HUD systems to a camera implementation.
+//! Invariant: labels read simulation state but never write it; the camera it reprojects through is
+//! the composition's declared [`PlayerView`], never a camera implementation of its own.
 
 use bevy::prelude::*;
 
@@ -12,12 +12,7 @@ use crate::camera::GunnerCameraPlaced;
 use crate::damage::{Ammo, CrewStation, FunctionRole};
 use crate::tank::{Tank, ViewNode};
 use crate::ui_font::UiFonts;
-
-/// The camera the HUD reprojects world points through. Each binary tags its own world camera with
-/// this — the game's player camera, the sandbox's free-fly camera — so the shared systems don't
-/// depend on either binary's camera marker (the sandbox has three `Camera3d`s; the game has one).
-#[derive(Component)]
-pub struct HudCamera;
+use crate::view::PlayerView;
 
 /// A pooled label floated over a damaged component each frame, showing its HP; hidden while unused.
 #[derive(Component)]
@@ -94,7 +89,7 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
 /// turret-resident component's sim pose steps at tick rate since the sim/view split, and the
 /// label must track the smoothly-rendered model, not the stepped skeleton.
 fn update_component_hp_labels(
-    camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
+    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     components: Query<
         (
             Entity,
@@ -171,7 +166,7 @@ fn volume_label(
 /// a little above the hull so it clears the model. The aggregate status this used to carry now lives
 /// in the controlled tank's fixed corner panel (`crew_ui::update_status_panel`).
 fn update_tank_nameplates(
-    camera: Single<(&Camera, &GlobalTransform), With<HudCamera>>,
+    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     tanks: Query<(Entity, &GlobalTransform, Option<&Name>), With<Tank>>,
     // A bot carries the replicated `NetBot` marker (`Name` doesn't ride the wire), so its nameplate
     // is prefixed `[BOT]`.

@@ -24,9 +24,10 @@ use crate::ballistics::{
 use crate::command;
 use crate::crew_ui;
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
-use crate::hud::{self, HudCamera};
+use crate::hud;
 use crate::spec;
 use crate::tank::{Controlled, Tank, TankPresentation, TankSimSource, ViewOf, spawn_complete_tank};
+use crate::view::PlayerView;
 use crate::world;
 
 // The clickable egui control panel — the sandbox's Layers / Shot / Time / Telemetry / Scene surface.
@@ -276,7 +277,7 @@ pub fn plugin(app: &mut App) {
         // sandbox provides it too (the sandbox's own labels keep the default font — a dev tool).
         crate::ui_font::plugin,
         // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
-        // `HudCamera` tag on the free-fly camera below.
+        // `PlayerView` declaration on the free-fly camera below.
         hud::plugin,
         // The controlled tank's crew bar + `1`–`5` swap input (shared with the game). The sandbox's
         // single target is marked `Controlled`, so the same code drives it here.
@@ -392,8 +393,11 @@ fn spawn_camera(mut commands: Commands) {
             Camera3d::default(),
             Transform::from_xyz(0.0, 3.0, 18.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
             FreeFlyCam,
-            // The shared HUD reprojects its world-anchored labels through this camera.
-            HudCamera,
+            // THE SANDBOX'S PLAYER VIEW: this is the camera its player looks through, so it carries
+            // the declaration the game's camera does and every shared reader of the live view — the
+            // LOD ladders, the HUD reprojection, the billboards — reads it here too. The overlay and
+            // UI cameras below carry none, which is exactly what keeps them out of that answer.
+            PlayerView,
             // Main 3D pass (order 0, render layer 0): the scene + gizmos.
         ))
         .with_children(|parent| {

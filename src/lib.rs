@@ -76,7 +76,7 @@ mod geometry_lod;
 #[cfg(test)]
 mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
-/// `GamePlugin` and the sandbox; each tags its own world camera with `hud::HudCamera`.
+/// `GamePlugin` and the sandbox; each reprojects through the camera it declared `view::PlayerView`.
 mod hud;
 /// `OVERMATCH_LOD_SHOWCASE=1`: a flat map, the player at one edge, and a clamped PAIR of Tigers at
 /// every switch distance in the shoe LOD chain — the two meshes the pipeline's rendered-difference

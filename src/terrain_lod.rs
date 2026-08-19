@@ -1810,7 +1810,9 @@ mod tests {
         app.add_plugins((crate::view::plugin, plugin));
         app.insert_resource(TerrainLodLadder(synthetic_ladder()));
         let world = app.world_mut();
-        let window = world.spawn(Window::default()).id();
+        let window = world
+            .spawn((Window::default(), bevy::window::PrimaryWindow))
+            .id();
         let camera = world
             .spawn((
                 Camera3d::default(),
@@ -1818,6 +1820,8 @@ mod tests {
                     fov: std::f32::consts::FRAC_PI_4,
                     ..default()
                 }),
+                // The declared view the shared reader resolves — the ladder consumes its facts.
+                crate::view::PlayerView,
             ))
             .id();
         let entities: Vec<Entity> = (0..3)
@@ -1912,13 +1916,14 @@ mod tests {
         app.add_plugins((crate::view::plugin, plugin));
         app.insert_resource(TerrainLodLadder(synthetic_ladder()));
         let world = app.world_mut();
-        world.spawn(Window::default());
+        world.spawn((Window::default(), bevy::window::PrimaryWindow));
         world.spawn((
             Camera3d::default(),
             Projection::Perspective(PerspectiveProjection {
                 fov: std::f32::consts::FRAC_PI_4,
                 ..default()
             }),
+            crate::view::PlayerView,
         ));
         let entities: Vec<Entity> = (0..3)
             .map(|level| {

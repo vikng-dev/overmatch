@@ -922,6 +922,10 @@ fn spawn_camera(mut commands: Commands) {
             Camera3d::default(),
             Transform::from_xyz(11.0, 3.5, 3.0).looking_at(Vec3::new(0.0, 0.8, 0.0), Vec3::Y),
             FreeFlyCam,
+            // THE SANDBOX'S PLAYER VIEW — the declaration `view` and the belt selector resolve
+            // against. The overlay child below carries none: it shares this camera's pose, it is
+            // not a second view of the world.
+            crate::view::PlayerView,
         ))
         .with_children(|parent| {
             // The overlay camera for "on-top" volumes: a child so it shares the fly pose, drawn after

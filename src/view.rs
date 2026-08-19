@@ -1,6 +1,18 @@
 //! THE LIVE VIEW, once: the facts every screen-space ladder selects through, and the projection
 //! that turns a world-space deviation into metres of switch distance (ADR-0033 §9).
 //!
+//! # The view is DECLARED, not discovered
+//!
+//! [`PlayerView`] marks the camera the player looks through, and every reader of "the view" filters
+//! on it. Nothing infers it from the shape of the world: `single()` over `With<Camera3d>` answers
+//! "is there exactly one 3-D camera", a fact about the archetypes, and reading a domain fact out of
+//! it holds only while the game happens to spawn one camera. A mirror, a spotter, an overlay or a
+//! debug camera then makes the answer WRONG, and bevy's `single()` reports wrong by SKIPPING — no
+//! log, no panic, the ladders frozen at the last value they held, which is the one direction LOD
+//! must never fail in. Under the declaration that ambiguity cannot be expressed: a second camera is
+//! not a player view unless someone declares it one, and two declarations are a contradiction the
+//! reader refuses out loud ([`ViewError`]).
+//!
 //! # One reader, many consumers
 //!
 //! [`ViewFacts`] is the only thing in the tree that reads a `Projection`, a `Window` and
@@ -22,7 +34,83 @@
 //! optic toggle — and the field carries a relative dead band ([`FOV_HYSTERESIS`]) so a dragged
 //! magnification slider cannot mint a slot per frame.
 
+use bevy::ecs::error::BevyError;
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
+
+/// THE CAMERA THE PLAYER LOOKS THROUGH — the one declaration every reader of the live view
+/// resolves against (module doc).
+///
+/// Put it on the `Camera3d` a composition presents to its player: the game's orbit camera, each
+/// sandbox's free-fly camera. Put it on nothing else. It is deliberately a bare marker and not
+/// [`crate::render_policy::CameraProfile`] — a profile says which CHANNELS a camera draws, which a
+/// sandbox's overlay/UI rig has its own (raw-layer) answer to, so making the profile do double duty
+/// would force a render-channel policy onto every composition that has a player.
+///
+/// EXACTLY ONE per app. Zero is a composition that has not declared its view; two is a
+/// contradiction — see [`ViewError`].
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) struct PlayerView;
+
+/// What can be wrong with the declaration — the value form of every failure the readers used to
+/// express as a silent `return`.
+///
+/// None of these is a transient and none of them is "not yet": a reader is SCHEDULED behind
+/// `any_with_component::<PlayerView>` (see [`plugin`]), so startup's genuine absence never reaches
+/// one. Reaching one means the declaration itself is wrong, which is a bug in a composition rather
+/// than a condition of a frame — so they carry bevy's default `Severity::Panic` and fail the build
+/// that introduced them, exactly as a missing model contract does (ADR-0011). A ladder that quietly
+/// held its last value is what this replaces.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ViewError {
+    /// A declared view that carries nothing to read — a `PlayerView` on something that is not a
+    /// camera. (The scheduling gate is what makes "no camera yet" a different thing entirely.)
+    NoPlayerView,
+    /// More than one camera declares itself the player's view. The count is the diagnosis: it says
+    /// how many, so the composition that added the second one is findable.
+    ManyPlayerViews(usize),
+    /// The player's view is not a perspective one. Every screen-space ladder projects a metre
+    /// through a perspective half-angle ([`ViewFacts::sub_pixel_distance_m`]); an orthographic or
+    /// custom projection has no such angle and no distance to select at.
+    UnsupportedProjection,
+}
+
+impl ViewError {
+    /// The domain fact behind a query that did not resolve to exactly one declared view, `views`
+    /// being how many it matched. THE ONE translation from query shape to domain in the tree.
+    pub(crate) fn resolving(views: usize) -> Self {
+        match views {
+            0 => Self::NoPlayerView,
+            many => Self::ManyPlayerViews(many),
+        }
+    }
+}
+
+impl core::fmt::Display for ViewError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NoPlayerView => write!(
+                f,
+                "no player view: a `PlayerView` is declared but carries no camera to read — the \
+                 view is declared, never discovered, so put the marker on the `Camera3d` the \
+                 player looks through",
+            ),
+            Self::ManyPlayerViews(views) => write!(
+                f,
+                "{views} cameras declare `PlayerView`: exactly one camera is the player's view — a \
+                 mirror, spotter, overlay or debug camera is not one and must not declare itself \
+                 one",
+            ),
+            Self::UnsupportedProjection => write!(
+                f,
+                "the player's view carries a non-perspective projection: every screen-space ladder \
+                 projects a metre through a perspective half-angle, which no other projection has",
+            ),
+        }
+    }
+}
+
+impl core::error::Error for ViewError {}
 
 /// Relative field-of-view change that must accumulate before the facts move.
 ///
@@ -31,12 +119,13 @@ use bevy::prelude::*;
 /// LOD entity on both ladders for a sub-pixel difference.
 pub(crate) const FOV_HYSTERESIS: f32 = 0.10;
 
-/// What the player's view IS, right now: the single 3-D camera's vertical field, and the pixel
+/// What the player's view IS, right now: the [`PlayerView`] camera's vertical field, and the pixel
 /// height the main pass actually renders at.
 ///
-/// There is exactly one 3-D camera in the game (`camera::spawn_camera`) and the gunner optic swaps
-/// its `Projection` fov in place, so the live view is a single pair rather than a set — which is
-/// what makes one shared resource the right shape and not an over-generalisation.
+/// Exactly one camera is declared the player's view and the gunner optic swaps its `Projection` fov
+/// in place, so the live view is a single pair rather than a set — which is what makes one shared
+/// resource the right shape and not an over-generalisation. Note where that "one" comes from: the
+/// declaration, not a count of the cameras in the world.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub(crate) struct ViewFacts {
     /// Vertical field of view, radians.
@@ -92,6 +181,32 @@ impl ViewFacts {
             } else {
                 default.height_px
             },
+        }
+    }
+
+    /// THE WHOLE INTENDED BEHAVIOUR OF [`track_view_facts`], as arithmetic: the facts these become
+    /// for a view of `vfov_rad` rendered at `height_px`, dead band included. Pure — no world, no
+    /// query, no `Option`, so the rule is testable without an `App` and the system that calls it is
+    /// left with nothing but resolving the view and reporting what it could not.
+    ///
+    /// Returns SELF when nothing moved, which is what keeps the resource's change ticks at human
+    /// rate: the caller writes only a value that differs.
+    ///
+    /// Inside the dead band the field is HELD, not adopted — adopting it would let a slider creep
+    /// the value one sub-threshold step at a time and mint a range-table slot for each. The band is
+    /// measured against the HELD field, never against the last request, so sub-threshold steps
+    /// accumulate and land the moment their total crosses it: the band DELAYS, it does not deadlock.
+    pub(crate) fn settled(self, vfov_rad: f32, height_px: f32) -> Self {
+        let wanted = Self::new(vfov_rad, height_px);
+        let field_moved = (wanted.vfov_rad - self.vfov_rad).abs()
+            > FOV_HYSTERESIS * self.vfov_rad.max(f32::MIN_POSITIVE);
+        Self {
+            vfov_rad: if field_moved {
+                wanted.vfov_rad
+            } else {
+                self.vfov_rad
+            },
+            ..wanted
         }
     }
 
@@ -176,49 +291,56 @@ impl ViewProfile {
     }
 }
 
-/// THE ONE READER of the live view. Moves [`ViewFacts`] only when the view actually moves, so a
-/// consumer behind `resource_changed` rebuilds at human rate (module doc).
+/// THE ONE READER of the live view: a thin adapter over [`ViewFacts::settled`] that resolves the
+/// declared view and hands back what it could not.
+///
+/// Three jobs the one `let Ok(…) else { return }` it replaces had conflated. The ARITHMETIC is in
+/// `settled`, where it is testable without a world. The FAILURES are values, at this one boundary,
+/// and each is a contradiction in the declaration rather than a state of the frame. "NOT YET" is
+/// neither of those and is expressed as SCHEDULING ([`plugin`]) — so nothing here has to encode the
+/// startup frames where a composition legitimately has no camera, and nothing here may `return`
+/// silently.
+///
+/// The window is the PRIMARY one — bevy's own declaration of the window a composition presents —
+/// for the same reason the camera is the declared view. An absent one is not an error though: it is
+/// an absent HEIGHT, which [`ViewFacts::new`] documents as an untrusted input with a conservative
+/// fallback.
 pub(crate) fn track_view_facts(
-    camera: Query<&Projection, With<Camera3d>>,
-    windows: Query<&Window>,
+    views: Query<&Projection, With<PlayerView>>,
+    window: Query<&Window, With<PrimaryWindow>>,
     scale: Option<Res<crate::render_scale::RenderScale>>,
     mut facts: ResMut<ViewFacts>,
-) {
-    let Ok(Projection::Perspective(projection)) = camera.single() else {
-        return;
+) -> Result<(), BevyError> {
+    // `single()` answers a QUERY-SHAPE question ("is there exactly one row?"); the count restates
+    // its failure as the domain fact this reader actually needs.
+    let Ok(projection) = views.single() else {
+        return Err(ViewError::resolving(views.iter().count()).into());
     };
-    let Ok(window) = windows.single() else {
-        return;
+    let Projection::Perspective(projection) = projection else {
+        return Err(ViewError::UnsupportedProjection.into());
     };
-    let wanted = ViewFacts::new(
-        projection.fov,
-        ViewFacts::rendered_height_px(Some(window), scale.as_deref()),
-    );
-    let field_moved = (wanted.vfov_rad - facts.vfov_rad).abs()
-        > FOV_HYSTERESIS * facts.vfov_rad.max(f32::MIN_POSITIVE);
-    if !field_moved && wanted.height_px == facts.height_px {
-        return;
+    let height_px = ViewFacts::rendered_height_px(window.single().ok(), scale.as_deref());
+    let settled = facts.settled(projection.fov, height_px);
+    if settled != *facts {
+        *facts = settled;
+        info!(
+            "view: {:.4} rad × {:.0} px — every LOD ladder reselects",
+            facts.vfov_rad, facts.height_px,
+        );
     }
-    // Inside the dead band the field is HELD, not adopted: adopting it would let a slider creep
-    // the value one sub-threshold step at a time and mint a range-table slot for each.
-    *facts = ViewFacts {
-        vfov_rad: if field_moved {
-            wanted.vfov_rad
-        } else {
-            facts.vfov_rad
-        },
-        ..wanted
-    };
-    info!(
-        "view: {:.4} rad × {:.0} px — every LOD ladder reselects",
-        facts.vfov_rad, facts.height_px,
-    );
+    Ok(())
 }
 
 /// Mount the live view. Every windowed composition needs it; a headless one has no view to read.
+///
+/// The reader is GATED ON THE DECLARATION existing, which is the whole handling of "not yet": a
+/// composition's camera spawns in `Startup` and the frames before it are simply frames this system
+/// is not in. What is left inside it is genuinely a bug, and says so.
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<ViewFacts>()
-        .add_systems(Update, track_view_facts);
+    app.init_resource::<ViewFacts>().add_systems(
+        Update,
+        track_view_facts.run_if(any_with_component::<PlayerView>),
+    );
 }
 
 #[cfg(test)]
@@ -312,70 +434,169 @@ mod tests {
         );
     }
 
-    /// THE ONE READER, and the dead band on the field.
+    /// THE DEAD BAND ON THE FIELD, tested where it lives: arithmetic, no world.
     ///
-    /// A resize moves the facts on the frame it happens. A field nudge INSIDE [`FOV_HYSTERESIS`]
-    /// leaves them alone: bevy retains a permanent range-table slot per distinct `VisibilityRange`,
-    /// so a magnification slider that adopted every sub-threshold step would leak one slot per
-    /// frame it was dragged.
+    /// A field nudge INSIDE [`FOV_HYSTERESIS`] leaves the facts alone — bevy retains a permanent
+    /// range-table slot per distinct `VisibilityRange`, so a magnification slider that adopted every
+    /// sub-threshold step would leak one slot per frame it was dragged.
     ///
     /// THE BAND DELAYS, IT DOES NOT DEADLOCK, and that is the half worth pinning. Every comparison
-    /// is against the HELD value, never against the last frame's request — so a slider dragged in
+    /// is against the HELD value, never against the last request — so a slider dragged in
     /// sub-threshold steps accumulates against what is wired and lands the moment the total crosses
     /// the band. A dead band measured from the request instead would let a slow drag walk the view
     /// anywhere while the ladders stayed selected for the field the session started in.
     #[test]
-    fn the_facts_move_on_a_resize_and_hold_inside_the_field_dead_band() {
+    fn the_field_dead_band_delays_a_drag_and_never_deadlocks_it() {
+        let commander = std::f32::consts::FRAC_PI_4;
+        let held = ViewFacts::new(commander, 1440.0);
+        // A resize is a human-rate move and carries no band at all.
+        assert_eq!(held.settled(commander, 2160.0).height_px, 2160.0);
+        // Half a band: the field is HELD at the wired value, and nothing else moves either — a
+        // settling that returns SELF is what keeps the resource's change ticks at human rate.
+        let half = held.settled(commander * (1.0 + FOV_HYSTERESIS * 0.5), 1440.0);
+        assert_eq!(half, held, "inside the band the field is held, not adopted");
+        // A second step of the same size, measured against the HELD value: the total is now past
+        // the band, so it lands. The drag is delayed, not swallowed.
+        let crossed = commander * (1.0 + FOV_HYSTERESIS * 1.025);
+        assert_eq!(half.settled(crossed, 1440.0).vfov_rad, crossed);
+        // The optic toggle is 6.5x and cannot be gated by any dead band worth having.
+        assert_eq!(
+            held.settled(crate::camera::GUNNER_FOV_FALLBACK, 1440.0)
+                .vfov_rad,
+            crate::camera::GUNNER_FOV_FALLBACK,
+        );
+        // An untrusted field inside the band is still refused: the fallback is the value settled
+        // ON, not a reason to hold. (`NaN` fails the band comparison, so holding would be silent.)
+        assert_eq!(
+            held.settled(f32::NAN, 1440.0).vfov_rad,
+            ViewFacts::default().vfov_rad,
+        );
+    }
+
+    /// A crowd of cameras where ONE carries the declaration — the regression that started this.
+    /// `single()` over `With<Camera3d>` fails on TWO exactly as it fails on zero, and a failed
+    /// `single()` inside a system is a SILENT SKIP: every LOD ladder then held whatever it last
+    /// selected, pointed the forbidden way (too coarse for the actual view), with nothing in the
+    /// log. The sandboxes, which mount three 3-D cameras and two, never ran this reader at all.
+    ///
+    /// So: three 3-D cameras, one declaration, and the facts must be the DECLARED camera's — not
+    /// the first, not the nearest, not the default the resource started at.
+    #[test]
+    fn the_declared_view_is_read_out_of_a_crowd_of_cameras() {
         let mut app = App::new();
         app.add_plugins(plugin);
         let world = app.world_mut();
-        let window = world.spawn(Window::default()).id();
-        let camera = world
-            .spawn((
-                Camera3d::default(),
-                Projection::Perspective(PerspectiveProjection {
-                    fov: std::f32::consts::FRAC_PI_4,
-                    ..default()
-                }),
-            ))
-            .id();
-        app.update();
-        app.world_mut()
+        let window = world.spawn((Window::default(), PrimaryWindow)).id();
+        world
             .get_mut::<Window>(window)
             .expect("the test window")
             .resolution
             .set_physical_resolution(2560, 1440);
+        // The overlay and UI rigs a sandbox mounts: 3-D cameras, no player behind either.
+        world.spawn(Camera3d::default());
+        world.spawn(Camera3d::default());
+        world.spawn((
+            Camera3d::default(),
+            Projection::Perspective(PerspectiveProjection {
+                fov: std::f32::consts::FRAC_PI_4,
+                ..default()
+            }),
+            PlayerView,
+        ));
         app.update();
         let facts = *app.world().resource::<ViewFacts>();
-        assert_eq!(facts.height_px, 1440.0, "a resize is a human-rate move");
-        assert_eq!(facts.vfov_rad, std::f32::consts::FRAC_PI_4);
+        assert_eq!(
+            facts.vfov_rad,
+            std::f32::consts::FRAC_PI_4,
+            "the declared view is the view, however many cameras stand beside it",
+        );
+        assert_eq!(facts.height_px, 1440.0);
+    }
 
-        let nudge = |app: &mut App, fov: f32| {
-            let mut lens = app
-                .world_mut()
-                .get_mut::<Projection>(camera)
-                .expect("the test camera");
-            let Projection::Perspective(projection) = lens.as_mut() else {
-                panic!("the test camera must carry a perspective projection");
-            };
-            projection.fov = fov;
-            app.update();
-            app.world().resource::<ViewFacts>().vfov_rad
+    /// NOT YET IS NOT AN ERROR. A composition spawns its camera in `Startup`; the frames before it
+    /// are frames this reader is not scheduled in, so they are neither a skip nor a report — and
+    /// the facts are still the conservative default every ladder starts against.
+    #[test]
+    fn a_composition_without_a_declared_view_is_scheduling_not_an_error() {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        app.world_mut().spawn((Window::default(), PrimaryWindow));
+        app.world_mut().spawn(Camera3d::default());
+        app.update();
+        assert_eq!(*app.world().resource::<ViewFacts>(), ViewFacts::default());
+    }
+
+    /// EVERY FAILURE IS A VALUE, and each one is producible. The mutant this catches is the
+    /// original itself: a reader that answered any of these with `return` passed every test in this
+    /// file, because a silent skip is indistinguishable from a frame where nothing moved.
+    #[test]
+    fn each_way_the_declaration_can_be_wrong_is_reported_rather_than_skipped() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let read = |spawn: &dyn Fn(&mut World)| -> Result<(), BevyError> {
+            let mut app = App::new();
+            app.add_plugins(plugin);
+            let world = app.world_mut();
+            world.spawn((Window::default(), PrimaryWindow));
+            spawn(world);
+            app.world_mut()
+                .run_system_once(track_view_facts)
+                .expect("the reader runs")
         };
-        // Half a band: nothing moves, and the field is HELD at the wired value.
-        let commander = std::f32::consts::FRAC_PI_4;
-        assert_eq!(
-            nudge(&mut app, commander * (1.0 + FOV_HYSTERESIS * 0.5)),
-            commander,
+
+        // A declaration on something that is not a camera: nothing to read.
+        let err = read(&|world| {
+            world.spawn(PlayerView);
+        })
+        .expect_err("a declaration with no camera under it is a bug, not a frame");
+        assert!(
+            err.to_string().contains("no player view"),
+            "the report names the fault: {err}",
         );
-        // A second step of the same size. Measured against the HELD value the total is now past
-        // the band, so it lands — the drag is delayed, not swallowed.
-        let crossed = commander * (1.0 + FOV_HYSTERESIS * 1.025);
-        assert_eq!(nudge(&mut app, crossed), crossed);
-        // The optic toggle is 6.5× and cannot be gated by any dead band worth having.
-        assert_eq!(
-            nudge(&mut app, crate::camera::GUNNER_FOV_FALLBACK),
-            crate::camera::GUNNER_FOV_FALLBACK,
+
+        // Two declarations: a contradiction, and the count is the diagnosis.
+        let err = read(&|world| {
+            world.spawn((Camera3d::default(), PlayerView));
+            world.spawn((Camera3d::default(), PlayerView));
+        })
+        .expect_err("two player views is a contradiction");
+        assert!(
+            err.to_string().contains("2 cameras declare"),
+            "the report counts them: {err}",
         );
+
+        // A projection with no perspective half-angle to project a metre through.
+        let err = read(&|world| {
+            world.spawn((
+                Camera3d::default(),
+                Projection::Orthographic(OrthographicProjection::default_3d()),
+                PlayerView,
+            ));
+        })
+        .expect_err("an orthographic player view has no field to select through");
+        assert!(
+            err.to_string().contains("non-perspective"),
+            "the report names the fault: {err}",
+        );
+
+        // And the shape of the thing being pinned: the same three variants, as values.
+        assert_eq!(ViewError::resolving(0), ViewError::NoPlayerView);
+        assert_eq!(ViewError::resolving(3), ViewError::ManyPlayerViews(3));
+    }
+
+    /// THE REPORT IS LOUD IN A REAL SCHEDULE, not merely a value the caller could drop. bevy's
+    /// fallback handler takes a `BevyError` at its default severity, which is `Panic`: the build
+    /// that mounts a second player view dies on the frame it does, exactly as a missing model
+    /// contract does (ADR-0011). The silently-skipping version this replaces `update()`d forever.
+    #[test]
+    #[should_panic(expected = "cameras declare `PlayerView`")]
+    fn a_second_declaration_stops_the_app_rather_than_the_ladders() {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        let world = app.world_mut();
+        world.spawn((Window::default(), PrimaryWindow));
+        world.spawn((Camera3d::default(), PlayerView));
+        world.spawn((Camera3d::default(), PlayerView));
+        app.update();
     }
 }

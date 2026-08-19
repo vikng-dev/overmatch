@@ -16,7 +16,6 @@ use bevy::prelude::*;
 
 use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
-use crate::hud::HudCamera;
 use crate::sight::{
     GunnerBlend, SightMode, SightToggled, hull_local_dir, in_gunner, in_third_person, sight_line,
     yaw_pitch_of,
@@ -26,6 +25,7 @@ use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, Tank, TankViews, ViewNode, rig_world_pose, shortest_angle,
 };
+use crate::view::PlayerView;
 use crate::world::ground_distance;
 
 /// Apply one free-fly input frame to `transform`.
@@ -263,8 +263,10 @@ fn spawn_camera(mut commands: Commands) {
         // listener; the ear gap is the panning width (`sfx::LISTENER_EAR_GAP`), and bevy's default
         // of 4 m would hard-pan anything closer than that.
         SpatialListener::new(crate::sfx::LISTENER_EAR_GAP),
-        // The HUD reprojects world-anchored labels through this camera.
-        HudCamera,
+        // WHAT THE PLAYER LOOKS THROUGH. The one declaration behind every reader of the live view
+        // — both LOD ladders, the belt selector, the aim projection, the HUD reprojection — none of
+        // which may infer "the player's view" from how many cameras happen to exist (`view`).
+        PlayerView,
     ));
 }
 
@@ -272,7 +274,7 @@ fn spawn_camera(mut commands: Commands) {
 /// orbit camera, split out so it hangs on `PlayerInputSet` — with the cursor released the orbit
 /// freezes while `orbit_camera` keeps the body following the tank.
 fn orbit_look(
-    camera: Single<&mut Transform, With<Camera3d>>,
+    camera: Single<&mut Transform, With<PlayerView>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     follow: Res<CameraFollow>,
     pivot: Res<TurretPivot>,
@@ -305,9 +307,9 @@ fn orbit_look(
 }
 
 fn orbit_camera(
-    camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<Camera3d>>,
+    camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<PlayerView>>,
     spatial: SpatialQuery,
-    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
+    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<PlayerView>)>,
     views: Query<&TankViews, With<Controlled>>,
     pivot: Res<TurretPivot>,
     mouse_scroll: Res<AccumulatedMouseScroll>,
@@ -359,10 +361,10 @@ fn reaim_orbit_on_optic_exit(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
-    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<Camera3d>)>,
+    tank: Query<&Transform, (With<Tank>, With<Controlled>, Without<PlayerView>)>,
     hull: Query<&GlobalTransform, With<Hull>>,
     pivot: Res<TurretPivot>,
-    camera: Single<&mut Transform, With<Camera3d>>,
+    camera: Single<&mut Transform, With<PlayerView>>,
 ) {
     // Only the exit direction re-aims; entering the optic needs nothing (`gunner_camera` owns the
     // pose outright while in it).
@@ -446,12 +448,12 @@ pub(crate) fn blended_look(
 /// world up, so a hull-mounted sight rolls *with* the tank on a side-slope instead of drifting off
 /// the bore — and the sight line is orthonormal to it by construction.
 fn gunner_camera(
-    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<Camera3d>>,
+    camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     views: Query<&TankViews, With<Controlled>>,
     view_nodes: Query<&ViewNode>,
-    gun: Query<&GlobalTransform, Without<Camera3d>>,
-    hull: Query<&GlobalTransform, (With<Hull>, Without<Camera3d>)>,
+    gun: Query<&GlobalTransform, Without<PlayerView>>,
+    hull: Query<&GlobalTransform, (With<Hull>, Without<PlayerView>)>,
     committed: Res<CommittedAim>,
     blend: Res<GunnerBlend>,
     ranging: Res<Ranging>,
