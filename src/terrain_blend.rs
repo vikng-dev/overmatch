@@ -20,6 +20,14 @@
 //! Every layer multiplies that by [`BlendLayer::uv_scale`] — its own authored metres are a pack
 //! CONTRACT (each pack's `cc.txt`), and mapping a scan onto anything else silently resizes every
 //! feature in it. So a pack swap is a constant here, never a mesh regeneration.
+//!
+//! # The macro tint
+//!
+//! Every pack repeats at its authored size, and at 8–25 m that grid is visible across a map. The
+//! shader multiplies the BLENDED albedo by a low-frequency gain over world XZ
+//! ([`MACRO_PERIOD_M`], [`MACRO_AMPLITUDE`]) — one gain for all four packs, after the mix, which
+//! is the only point the base pack can be reached at all. It moves brightness, which is what a
+//! repeat is read by; the packs, the normals and the ARM are untouched.
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
@@ -102,6 +110,23 @@ const BLEND_WINDOW: f32 = 0.4;
 /// leaves are not an approximation of the 13 it avoids — they are the same result.
 const SKIP_WEIGHT: f32 = 0.5 / 255.0;
 
+/// World metres per period of the macro tint. Well above every pack's authored size
+/// ([`BLEND_LAYERS`], 8–25 m), so the tint varies across a repeat instead of with it.
+const MACRO_PERIOD_M: f32 = 60.0;
+
+/// How far the macro tint may push the blended albedo, as a fraction of it: the ground ranges
+/// between `1 - this` and `1 + this` of its packs' own colour. Strictly below 1, which is what
+/// makes the gain positive at every field value.
+const MACRO_AMPLITUDE: f32 = 0.12;
+
+/// The gain the shader applies is `1 ± MACRO_AMPLITUDE`, so an amplitude at or above 1 would zero
+/// or invert the ground's albedo. Checked where it cannot be edited past — at compile time.
+const _: () = assert!(0.0 < MACRO_AMPLITUDE && MACRO_AMPLITUDE < 1.0);
+
+/// The tint must vary ACROSS a repeat rather than beat against it, so its period clears twice the
+/// coarsest pack ([`TEXTURE_TILE_M`] is the base pack's, [`BLEND_LAYERS`] the rest).
+const _: () = assert!(MACRO_PERIOD_M > 2.0 * TEXTURE_TILE_M);
+
 /// THE BLEND LAW, as arithmetic: mask weights and per-pack AO in, the four normalized weights that
 /// mix albedo, normal and ARM out. Index 0 is the base pack, `i + 1` is [`BLEND_LAYERS`]`[i]`.
 ///
@@ -138,6 +163,20 @@ pub(crate) fn blend_weights(mask: [f32; 3], ao: [f32; 4]) -> [f32; 4] {
     weights
 }
 
+/// THE MACRO TINT'S ENVELOPE, as arithmetic: a two-octave value-noise field in `0..1.5` in, the
+/// gain the shader multiplies the blended albedo by out.
+///
+/// MIRRORED in `assets/shaders/terrain_blend.wgsl`. Only the ENVELOPE is mirrored, not the hash —
+/// `sin`-based hashing does not agree bit-for-bit between a CPU and a GPU, and the properties that
+/// matter (a strictly positive gain, bounded by the amplitude, centred on 1) hold for any field in
+/// range. This copy exists so those properties have an executable specification; no shipping code
+/// path calls it.
+#[cfg(test)]
+pub(crate) fn macro_gain(field: f32) -> f32 {
+    const MACRO_PEAK: f32 = 1.5;
+    1.0 + MACRO_AMPLITUDE * (field * (2.0 / MACRO_PEAK) - 1.0)
+}
+
 /// The uniform block `terrain_blend.wgsl` reads — the whole CPU→shader contract, and the single
 /// home of every number the blend law uses.
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
@@ -150,6 +189,9 @@ pub(crate) struct TerrainBlendParams {
     pub mask_map: Vec4,
     /// `x`: [`AO_BIAS`], `y`: [`BLEND_WINDOW`], `z`: [`SKIP_WEIGHT`], `w`: unused.
     pub blend_law: Vec4,
+    /// `x`: periods per metre (`1 / `[`MACRO_PERIOD_M`]), `y`: [`MACRO_AMPLITUDE`], `zw`: unused.
+    /// World-space, so it rides no UV set and no pack's authored size.
+    pub macro_tint: Vec4,
 }
 
 /// The terrain blend's half of [`TerrainMaterial`]: the three layer arrays, the map's weight mask,
@@ -207,6 +249,7 @@ pub(crate) fn params(manifest: &MapManifest) -> TerrainBlendParams {
         ),
         mask_map: mask_map(manifest.extent, manifest.rows),
         blend_law: Vec4::new(AO_BIAS, BLEND_WINDOW, SKIP_WEIGHT, 0.0),
+        macro_tint: Vec4::new(1.0 / MACRO_PERIOD_M, MACRO_AMPLITUDE, 0.0, 0.0),
     }
 }
 
@@ -309,6 +352,52 @@ mod tests {
             0.0 < SKIP_WEIGHT && SKIP_WEIGHT < step,
             "SKIP_WEIGHT {SKIP_WEIGHT} must fall strictly between 0 and one mask step {step}",
         );
+    }
+
+    /// THE TINT MULTIPLIES ALBEDO, so a gain that reached zero would paint black ground and a
+    /// negative one would invert it. Swept across the field's whole range including both ends: the
+    /// gain stays strictly positive and inside the amplitude it is authored with.
+    #[test]
+    fn the_macro_gain_is_positive_and_bounded_by_its_amplitude() {
+        for step in 0..=1500 {
+            let field = step as f32 / 1000.0;
+            let gain = macro_gain(field);
+            assert!(
+                gain > 0.0,
+                "field {field} gains {gain} — albedo may not be zeroed or inverted",
+            );
+            assert!(
+                (1.0 - MACRO_AMPLITUDE..=1.0 + MACRO_AMPLITUDE).contains(&gain),
+                "field {field} gains {gain}, outside 1 ± {MACRO_AMPLITUDE}",
+            );
+        }
+    }
+
+    /// The tint VARIES the ground, it does not lighten or darken it: the field's midpoint gains
+    /// exactly 1, and the two ends are the same distance either side. A gain that was not centred
+    /// would shift the whole map's albedo away from the packs the author picked.
+    #[test]
+    fn the_macro_gain_is_centred_on_the_packs_own_colour() {
+        assert_eq!(macro_gain(0.75), 1.0, "the field's midpoint must not tint");
+        let (dark, light) = (macro_gain(0.0), macro_gain(1.5));
+        assert!(
+            ((1.0 - dark) - (light - 1.0)).abs() < 1e-6,
+            "the field's ends gain {dark} and {light} — not symmetric about 1",
+        );
+    }
+
+    /// The tint's period must sit clear of every LAYER's authored size too — the compile-time
+    /// check above only covers the base pack, and a pack swap moves these.
+    #[test]
+    fn the_macro_period_is_longer_than_every_packs_repeat() {
+        for layer in &BLEND_LAYERS {
+            assert!(
+                MACRO_PERIOD_M > 2.0 * layer.authored_m,
+                "{} repeats every {} m, which the {MACRO_PERIOD_M} m tint must span",
+                layer.pack,
+                layer.authored_m,
+            );
+        }
     }
 
     /// Each layer renders at LIFE SIZE off the one UV set the mesh bakes: the mesh's UV repeats
