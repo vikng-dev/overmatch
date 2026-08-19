@@ -258,46 +258,6 @@ impl RigGeom {
         self.pitch * self.link_count as f32
     }
 
-    /// How far from the HULL ORIGIN one side's belt can reach (m): no shoe on `side` is ever
-    /// further from the origin than this, whatever the pose.
-    ///
-    /// The drawn belt lies in the convex hull of the side's running-gear circles (the route is
-    /// tangent segments and wrap arcs; the sag drape is pushed OUT of every circle and hangs inside
-    /// that hull), so `max(|centre| + radius)` bounds it in the side plane. Three terms close the
-    /// bound onto what the renderer actually measures, and the pose one is why `params` is here
-    /// rather than a caller's number: the circles ARTICULATE, and a rig whose road wheels dominate
-    /// the rest envelope reaches further than its rest circles by the whole droop stroke.
-    ///
-    ///   * every cast [`Pose`], not just [`Pose::Rest`] — `circles` lowers the sprung wheels by the
-    ///     chain-clamped droop and raises them by the bump stop;
-    ///   * `conform_m` — the view's downward terrain-probe reach (`track::view`'s `PROBE_REACH`),
-    ///     the one displacement applied to the drawn stations after the wrap;
-    ///   * `shoe_anchor_m` — `track::link_view`'s `LinkFrame` anchor offset. The route carries the
-    ///     PIN MIDPOINT; the range is measured to the shoe ENTITY ORIGIN, which sits that far off it
-    ///     (`translation = anchor − rotation * frame.origin`, so the gap is exactly `|origin|`).
-    ///
-    /// It is a BIAS, not a measurement of anything drawn: [`crate::track::link_view`]'s belt selects
-    /// one rung for all of its shoes, and subtracting this from the camera-to-hull distance selects
-    /// on the nearest shoe the belt could have. Pinned against the real placement — every pose, every
-    /// phase, conform included — by `link_view`'s `the_belt_radius_covers_every_shoe_the_rig_can_draw`.
-    pub(crate) fn belt_radius(
-        &self,
-        side: Side,
-        params: &SuspensionParams,
-        conform_m: f32,
-        shoe_anchor_m: f32,
-    ) -> f32 {
-        let in_plane = [Pose::Rest, Pose::Droop, Pose::Compression]
-            .into_iter()
-            .flat_map(|pose| self.circles(side, pose, params))
-            .map(|(centre, radius)| centre.length() + radius)
-            .fold(0.0_f32, f32::max);
-        self.link_center_x(side)
-            .abs()
-            .hypot(in_plane + conform_m.max(0.0))
-            + shoe_anchor_m.max(0.0)
-    }
-
     /// Where arc length ZERO sits on the sprocket, as a side-plane angle (rad, `atan2(y, z)` about
     /// the sprocket centre) — i.e. **where `BeltPhase = 0` puts the first pin**.
     ///

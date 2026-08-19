@@ -382,17 +382,9 @@ fn bind_track_rigs(
         // lower run rearward", and that invariant is now pinned by `link_view`'s slot-rotation test
         // rather than by a differently-coloured link in every shipped session.
         // One belt entity per side, and the shoes under it: the belt is what selects the rung the
-        // whole side draws, and its radius is how much nearer than the hull origin a shoe on it can
-        // be — every articulated pose, the `PROBE_REACH` conform, and the shoe's own anchor offset.
-        let suspension = spec.suspension.params();
+        // whole side draws, off the placed pose of its own nearest shoe.
         let pool = |commands: &mut Commands, side: Side| -> (Entity, Vec<Entity>) {
-            let radius_m = geom.belt_radius(
-                side,
-                &suspension,
-                PROBE_REACH,
-                template.frame(side).anchor_offset_m(),
-            );
-            let belt = link_view::spawn_belt(commands, side, radius_m, root);
+            let belt = link_view::spawn_belt(commands, side, root);
             let links = (0..spec.link_count)
                 .map(|_| link_view::spawn_link(commands, &template, side, belt))
                 .collect();

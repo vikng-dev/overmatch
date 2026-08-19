@@ -1783,10 +1783,10 @@ pub(crate) mod tests {
     ///
     /// # The quantity is the BELT's, not a shoe's
     ///
-    /// `track::link_view::select_belt_rungs` measures camera origin to BELT origin in 3D and
-    /// subtracts `RigGeom::belt_radius`; a belt is one rung for all 97 of its shoes by construction,
-    /// so no probe can straddle a threshold internally and the spread that matters is the CAMERA's.
-    /// Two terms move it, and neither is tank-centre-to-tank-centre XZ:
+    /// `track::link_view::select_belt_rungs` measures camera origin to the belt's NEAREST SHOE in
+    /// 3D; a belt is one rung for all 97 of its shoes by construction, so no probe can straddle a
+    /// threshold internally and the spread that matters is the CAMERA's. Two terms move it, and
+    /// neither is tank-centre-to-tank-centre XZ:
     ///
     ///   * the orbit. Look is free, so the camera can sit up to [`ORBIT_FAR`] toward the probes or
     ///     the same distance beyond the tank — the block's selection distance spans `2 × ORBIT_FAR`
@@ -1825,11 +1825,12 @@ pub(crate) mod tests {
         /// fails to run.
         const BAND_MARGIN_M: f32 = 25.0;
 
-        // An over-estimate of the belt's own selection bias (`RigGeom::belt_radius`): the corner of
-        // the square footprint every spawn is cleared over. The Tiger's bias is MEASURED 3.945 m
-        // (`link_view::the_belt_radius_covers_every_shoe_the_rig_can_draw` prints it) against the
-        // 7.07 m here, so this is a documented over-estimate rather than a second derivation of the
-        // track — which is what a bound wants to be.
+        // An over-estimate of how much nearer than the tank's own origin a shoe on its belt can
+        // stand: the corner of the square footprint every spawn is cleared over. A Tiger's shoes
+        // reach MEASURED 3.401 m from the belt origin
+        // (`link_view::no_shoe_is_drawn_coarser_than_its_own_certified_distance` prints it) against
+        // the 7.07 m here, so this is a documented over-estimate rather than a second derivation of
+        // the track — which is what a bound wants to be.
         let belt_bias = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
         // The bands the shoe's chain owns, derived off the certificate at the view the corpus was
         // quoted in — the same derivation the runtime performs, so a re-cut asset re-asks this

@@ -15,7 +15,7 @@
 use bevy::prelude::*;
 
 use crate::track::link_view::{
-    LinkTemplate, ShoeBelt, TrackLink, place_links as place_shared, spawn_belt, spawn_link,
+    LinkTemplate, TrackLink, place_links as place_shared, spawn_belt, spawn_link,
 };
 
 use super::belt::BeltPhase;
@@ -55,10 +55,6 @@ struct SideBelt {
     links: Vec<Entity>,
 }
 
-/// The conform reach the sandbox's belt view probes with — the terrain displacement applied to the
-/// drawn stations, and therefore one term of the belt's own selection radius.
-const CONFORM_REACH: f32 = 0.5;
-
 /// Keep the instance pool the same size as the material loop.
 ///
 /// The link count is LIVE (`;` / `'` retunes it and rebuilds [`RigGeom`] under the running rig), so
@@ -68,9 +64,7 @@ fn sync_link_pool(
     mut commands: Commands,
     template: Res<LinkTemplate>,
     geom: Res<RigGeom>,
-    suspension: Res<super::RigSuspension>,
     hull: Query<Entity, With<Hull>>,
-    mut belts: Query<&mut ShoeBelt>,
     mut pool: ResMut<LinkPool>,
 ) {
     let Ok(hull) = hull.single() else {
@@ -79,22 +73,9 @@ fn sync_link_pool(
     let want = geom.link_count;
     for side in Side::ALL {
         let pool = pool.0.get_mut(side);
-        // LIVE, not spawn-time: the `;`/`'` knob rebuilds [`RigGeom`] under the running rig, so a
-        // radius latched inside the insert would go on describing the rig the belt was born under.
-        let radius_m = geom.belt_radius(
-            side,
-            &suspension.0,
-            CONFORM_REACH,
-            template.frame(side).anchor_offset_m(),
-        );
         let belt = *pool
             .belt
-            .get_or_insert_with(|| spawn_belt(&mut commands, side, radius_m, hull));
-        if let Ok(mut belt) = belts.get_mut(belt)
-            && belt.radius_m() != radius_m
-        {
-            belt.set_radius(radius_m);
-        }
+            .get_or_insert_with(|| spawn_belt(&mut commands, side, hull));
         if pool.links.len() == want {
             continue;
         }

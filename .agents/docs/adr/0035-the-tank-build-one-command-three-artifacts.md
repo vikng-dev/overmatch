@@ -52,7 +52,10 @@ per tank, all of them moving, charged propagation, the visibility sweep and the 
 four hidden siblings per drawn shoe: MEASURED 2026-08-19 on an M-series Mac at 2560×1440, the
 siblings cost 0.61 ms/frame of aggregate cross-thread `propagate_descendants` going from 2 to 30
 tanks (~0.1–0.3 ms wall-clock). So a shoe is one entity whose `Mesh3d` handle its BELT writes,
-selected per belt from the same certified switch distances.
+selected per belt from the same certified switch distances, at the distance to the belt's NEAREST
+SHOE — every other shoe is further off and earns a coarser-or-equal rung, so one rung for the side
+is conservative by construction. It costs MEASURED +5.0 % belt triangles against a per-shoe
+selection, integrated over 5–150 m and azimuth at 45°/1440p.
 
 What this gives up, deliberately: PER-VIEW rung selection. A `VisibilityRange` is evaluated per
 view; a mesh handle cannot be, so a belt makes ONE selection for every view. The rule is the
