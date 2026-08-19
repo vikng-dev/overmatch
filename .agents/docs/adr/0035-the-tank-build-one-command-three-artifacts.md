@@ -58,11 +58,15 @@ is conservative by construction. It costs MEASURED +5.0 % belt triangles against
 selection, integrated over 5–150 m and azimuth at 45°/1440p.
 
 What this gives up, deliberately: PER-VIEW rung selection. A `VisibilityRange` is evaluated per
-view; a mesh handle cannot be, so a belt makes ONE selection for every view. The rule is the
-nearest ACTIVE `Camera3d` — the only selection no view can call coarser than its certified
-distance — so a mirror, spotter or render-to-texture camera pulls the belts it can see finer for
-every view at once, and pays for it in the other views. A belt with no active camera at all
-refuses loudly rather than holding its last rung. Scene primitives keep the siblings.
+view; a mesh handle cannot be, so a belt makes ONE selection, and it is made FOR THE DECLARED
+PLAYER VIEW (`view::PlayerView`) — the same one fact both LOD ladders take their projection from,
+read here for its eye position. Which view a rung is for is a domain question, so it is answered by
+a declaration and never by counting the cameras that happen to exist: a mirror, spotter or
+render-to-texture camera is not a player view and re-tunes nothing. (The nearest-active-camera rule
+this replaces, shipped 2026-08-19 and retired the same day, derived that domain fact from world
+shape — so an overlay camera parked on a belt silently re-tuned it for a view no player has.) A
+declaration that fails to resolve refuses loudly rather than holding its last rung; "no view yet" is
+scheduling, not a value the selector encodes. Scene primitives keep the siblings.
 
 ## Locality and the source/product boundary
 
@@ -77,7 +81,7 @@ nothing restructures then.
 ## YAGNI ledger (deliberate absences)
 
 No worker pools until a measured build hurts; no hot reload (regen = restart); no
-per-camera band sets (one profile: the most demanding active view); no imposters/HLOD
+per-camera band sets (one profile: the declared player view's); no imposters/HLOD
 (0033's parked list stands); no certificate schema version until schema #2 exists; no
 source-only rows (`mesh_count` is the whole coverage check); no audit distances (tests
 derive metres the same way the runtime does — recording both invites drift).

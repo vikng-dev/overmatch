@@ -164,19 +164,21 @@
 //! silhouette, and the certified deviations bound the silhouette alone.
 //!
 //! One narrowing, recorded in ADR-0035: a mesh handle cannot differ per view, so a belt makes ONE
-//! selection for all of them — the nearest active camera's, which is the only one no view can call
-//! too coarse. A second camera therefore pulls the belts it can see finer for every view at once.
+//! selection for all of them — the DECLARED player view's (`view::PlayerView`), the same one fact
+//! both LOD ladders select through. Which view a rung is for is a domain question, so it is
+//! answered by a declaration and never by counting the cameras that happen to exist.
 //!
 //! Whether a swap LOOKS like a swap is the one thing the geometric bound cannot answer;
 //! [`crate::lod_showcase`] is the instrument for judging it by eye, and pins a belt's rung through
 //! [`ShoeBelt::pin`] rather than writing a ladder of its own.
 
+use bevy::ecs::error::BevyError;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use crate::geometry_lod::certificate::Rung;
 use crate::geometry_lod::{Chain, ChainRef};
-use crate::view::ViewProfile;
+use crate::view::{PlayerView, ViewError, ViewProfile};
 
 use super::forces::phase_decompose;
 use super::rig_geom::RigGeom;
@@ -215,6 +217,10 @@ pub(crate) fn template_plugin(app: &mut App) {
         PostUpdate,
         select_belt_rungs
             .run_if(resource_exists::<LinkTemplate>)
+            // "No view yet" is SCHEDULING, not a value the selector has to encode: a composition
+            // declares its player view in `Startup`, and the frames before that are frames this
+            // selector is not in. What is left inside it is a bug, and reports as one.
+            .run_if(any_with_component::<PlayerView>)
             .after(TransformSystems::Propagate)
             .after(crate::camera::GunnerCameraPlaced),
     );
@@ -949,40 +955,32 @@ fn rung_at(switches: &[f32], distance_m: f32) -> usize {
 /// which keeps it in ONE draw bin rather than straddling two. A shoe still parked below the world
 /// (spawned, not yet placed) reads far away, and the belt re-selects on the frame the placer lands.
 ///
-/// Measured against EVERY active `Camera3d`, nearest wins. A mesh handle cannot differ per view
-/// (ADR-0035's amendment), so the one selection has to be the one no view can call too coarse; a
-/// second camera — a mirror, a spotter, a render-to-texture pass — therefore pulls every belt it can
-/// see finer rather than being ignored. Zero active 3-D cameras is a refusal, not a silent hold: the
-/// `Single` this replaced failed param validation on zero AND on two, and a failed validation is
-/// SKIPPED, which froze every belt at the rung it last held with nothing in the log.
+/// MEASURED FROM THE DECLARED PLAYER VIEW (`view::PlayerView`) — the same one fact
+/// `view::track_view_facts` takes its projection from, read here for its eye position. A mesh
+/// handle cannot differ per view (ADR-0035's amendment), so this selection is made for a VIEW, and
+/// which view that is is DECLARED rather than discovered: scanning the cameras that happen to exist
+/// and taking the nearest answered a domain question ("whose view is this rung for?") with a fact
+/// about the world's shape, so a mirror, spotter or render-to-texture pass silently re-tuned every
+/// belt in the game. Such a camera is not a player view and now cannot be mistaken for one.
+///
+/// The declaration failing to resolve is a REFUSAL, never a silent hold — the system is scheduled
+/// behind the view existing (see [`template_plugin`]), so what reaches it is a contradiction in the
+/// declaration itself and reports as one ([`ViewError`]).
 ///
 /// A belt whose `Children` moved is rewritten even at an unchanged rung: [`spawn_link`] spawns at
 /// rung 0, and a pool that grows at range would otherwise leave the fresh shoes at source detail
 /// until the next transition.
 fn select_belt_rungs(
     template: Res<LinkTemplate>,
-    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    views: Query<&GlobalTransform, With<PlayerView>>,
     mut belts: Query<(&mut ShoeBelt, Ref<Children>)>,
     mut shoes: Query<(&GlobalTransform, &mut Mesh3d), With<TrackLink>>,
-    // The eyes are gathered ONCE per frame rather than per shoe, into a buffer that outlives the
-    // frame: the scan below is 194 shoes per tank and re-walking the camera query inside it would
-    // multiply that by the view count.
-    mut eyes: Local<Vec<Vec3>>,
-) {
-    eyes.clear();
-    eyes.extend(
-        cameras
-            .iter()
-            .filter(|(_, camera)| camera.is_active)
-            .map(|(eye, _)| eye.translation()),
-    );
-    if eyes.is_empty() {
-        error_once!(
-            "track shoes: no active `Camera3d` to select a rung from — every belt holds the rung it \
-             last drew"
-        );
-        return;
-    }
+) -> Result<(), BevyError> {
+    // `single()` answers a QUERY-SHAPE question; the count restates its failure as the domain fact.
+    let Ok(eye) = views.single() else {
+        return Err(ViewError::resolving(views.iter().count()).into());
+    };
+    let eye = eye.translation();
     for (mut belt, children) in &mut belts {
         let wanted = match belt.pin {
             Some(rung) => rung,
@@ -993,10 +991,7 @@ fn select_belt_rungs(
                     let Ok((at, _)) = shoes.get(shoe) else {
                         continue;
                     };
-                    let at = at.translation();
-                    for eye in eyes.iter() {
-                        nearest_sq = nearest_sq.min(eye.distance_squared(at));
-                    }
+                    nearest_sq = nearest_sq.min(eye.distance_squared(at.translation()));
                 }
                 // A belt with no shoe under it has no nearest shoe and nothing to write.
                 if !nearest_sq.is_finite() {
@@ -1020,6 +1015,7 @@ fn select_belt_rungs(
             }
         }
     }
+    Ok(())
 }
 
 /// Re-derive the ladder's metres when the view profile moves — the pool's half of
@@ -1217,7 +1213,10 @@ mod tests {
             PostUpdate,
             select_belt_rungs.after(TransformSystems::Propagate),
         );
-        let camera = app.world_mut().spawn(Camera3d::default()).id();
+        let camera = app
+            .world_mut()
+            .spawn((Camera3d::default(), PlayerView))
+            .id();
         let anchor = app
             .world_mut()
             .spawn(Transform::from_translation(ANCHOR))
@@ -1454,18 +1453,21 @@ mod tests {
         assert_eq!(drawn(&app), vec![rungs[0]; shoes.len()]);
     }
 
-    /// A SECOND `Camera3d` MUST NOT STOP THE SELECTOR, and the nearest of them is what it selects on.
+    /// A SECOND CAMERA IS NOT A SECOND VIEW, and the declared one is the one the belt selects on.
     ///
-    /// The `Single<&GlobalTransform, With<Camera3d>>` this replaced failed param validation on TWO
-    /// matches exactly as it did on zero, and a failed validation is SKIPPED — no log, no panic. The
-    /// track sandbox spawns two cameras (the fly cam and its overlay child), so the selector never
-    /// ran there at all; in the game the first mirror, spotter or render-to-texture pass would have
-    /// frozen every belt at whatever rung it last held, coarse rungs at close range included.
+    /// Two failures live here, and the declaration removes both. The `Single<&GlobalTransform,
+    /// With<Camera3d>>` this file once carried failed param validation on TWO matches exactly as it
+    /// did on zero, and a failed validation is SKIPPED — no log, no panic — so the track sandbox
+    /// (a fly cam and its overlay child) never selected at all. Scanning every camera and taking
+    /// the NEAREST, which replaced it, still answered a domain question ("whose view is this rung
+    /// for?") out of the shape of the world: an overlay child sitting on the belt, a mirror or a
+    /// render-to-texture pass then re-tuned every belt in the game for a view no player has.
     ///
-    /// The rule is the only one a single mesh handle can honour across views: the NEAREST active
-    /// camera. An inactive camera is not a view and does not pull the ladder finer.
+    /// So: the overlay camera stands ON the belt while the declared view stands well past the
+    /// switch, and the belt must draw the DECLARED view's coarse rung. Under the nearest-camera
+    /// rule this asserted the opposite.
     #[test]
-    fn two_cameras_select_the_nearer_ones_rung() {
+    fn a_second_camera_is_not_a_second_view() {
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
         let side = Side::Right;
@@ -1475,9 +1477,10 @@ mod tests {
             template.rung_mesh(1, side).id(),
         );
 
-        let (mut app, far, parent) = selector_app(template);
+        let (mut app, view, parent) = selector_app(template);
         let (_, shoes) = spawn_pool_in(&mut app, side, &point_belt(2), parent);
-        let near = app
+        // The sandbox's overlay camera: a 3-D camera sharing the scene, declaring nothing.
+        let overlay = app
             .world_mut()
             .spawn((Camera3d::default(), Transform::default()))
             .id();
@@ -1488,41 +1491,35 @@ mod tests {
                 Transform::from_translation(ANCHOR + Vec3::Z * distance_m);
         };
 
-        // Both cameras well past the switch: the belt reduces, and having two of them did not
-        // silence the system.
-        stand(&mut app, near, switch * 2.0);
-        look_from(&mut app, far, switch * 3.0);
+        // Both past the switch: the belt reduces, and a second camera did not silence the system.
+        stand(&mut app, overlay, switch * 2.0);
+        look_from(&mut app, view, switch * 3.0);
         for &shoe in &shoes {
             assert_eq!(
                 mesh_of(app.world(), shoe),
                 coarser,
-                "two cameras must still select — the belt is frozen at rung 0",
+                "a second camera must not stop the selector — the belt is frozen at rung 0",
             );
         }
 
-        // One of them steps inside the switch. A mesh handle cannot differ per view, so the belt
-        // owes the NEAR view its rung.
-        stand(&mut app, near, switch - 1.0);
-        look_from(&mut app, far, switch * 3.0);
+        // The undeclared camera steps right onto the belt. It is not a view, so nothing moves.
+        stand(&mut app, overlay, 0.0);
+        look_from(&mut app, view, switch * 3.0);
+        for &shoe in &shoes {
+            assert_eq!(
+                mesh_of(app.world(), shoe),
+                coarser,
+                "a camera nobody looks through must not pull the ladder finer",
+            );
+        }
+
+        // And the declared view alone governs: it steps inside the switch and the belt follows.
+        look_from(&mut app, view, switch - 1.0);
         for &shoe in &shoes {
             assert_eq!(
                 mesh_of(app.world(), shoe),
                 base,
-                "the near view must not be shown a rung it has not earned",
-            );
-        }
-
-        // Switched off, it is not a view: the far camera's own rung comes back.
-        app.world_mut()
-            .get_mut::<Camera>(near)
-            .expect("the near camera")
-            .is_active = false;
-        look_from(&mut app, far, switch * 3.0);
-        for &shoe in &shoes {
-            assert_eq!(
-                mesh_of(app.world(), shoe),
-                coarser,
-                "an inactive camera is not a view and must not hold the ladder open",
+                "the declared view is the view the rung is selected for",
             );
         }
     }
