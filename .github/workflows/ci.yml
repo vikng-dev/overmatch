@@ -71,9 +71,14 @@ jobs:
 
       # Bevy needs these to compile on Linux (alsa/udev + windowing), same as the
       # release build.
+      #
+      # `update` is non-fatal here and in every other workflow: the runner image
+      # ships populated apt indexes, so a mirror that stalls past the 300 s timeout
+      # costs nothing. `install` stays strict — an index too stale to resolve these
+      # packages fails there, naming the package.
       - name: Install Linux build dependencies
         run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
           sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev jq time
@@ -153,7 +158,7 @@ jobs:
       # release build.
       - name: Install Linux build dependencies
         run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
           sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev jq time
@@ -256,7 +261,7 @@ jobs:
       - name: Install system dependencies
         if: steps.scope.outputs.affected == 'true'
         run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
           sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev \

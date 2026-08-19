@@ -31,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux build dependencies
         run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
           sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
