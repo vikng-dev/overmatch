@@ -415,7 +415,7 @@ fn attach_rungs(
 /// local to this ladder is the BUDGET (`settings::LodPixelBudget`, the detail row), which is a
 /// tuning knob and not view state. The profile therefore moves on exactly two human-rate events:
 /// the facts moved, or the player moved the row.
-fn compose_view_profile(
+pub(crate) fn compose_view_profile(
     facts: Res<crate::view::ViewFacts>,
     budget: Option<Res<crate::settings::LodPixelBudget>>,
     mut view: ResMut<ViewProfile>,
@@ -436,10 +436,9 @@ fn compose_view_profile(
 
 /// Rewrite every band on a profile move. THE ONE WRITER, apart from the bind.
 ///
-/// `GeometryLodLevel` is exactly the set of entities bevy selects for, which is why the pooled
-/// shoes were dropped from it rather than filtered out of this query: a shoe's level is now a fact
-/// its BELT owns and rewrites (`track::link_view`), so leaving the component on one would be two
-/// writers for one fact, each winning a frame at a time.
+/// `GeometryLodLevel` is exactly the set of entities bevy selects for. A pooled track shoe carries
+/// none: its level is a fact its BELT owns and rewrites (`track::link_view`), and one on a shoe
+/// would be a second writer of it.
 fn adapt_bands(
     mut commands: Commands,
     chains: Option<Res<GeometryLodChains>>,

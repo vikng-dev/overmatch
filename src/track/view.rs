@@ -192,7 +192,7 @@ struct RigSide {
     /// plane would lose the authored overhang.
     link_center_x: f32,
     /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
-    /// belt's shadow so the 1 661-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
+    /// belt's shadow so the 1 520-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
     /// (the shoes cast, exactly as they shipped) and for the one frame between the rig binding and
     /// [`attach_shadow_proxies`] running.
     proxy: Option<ProxySide>,
@@ -383,10 +383,16 @@ fn bind_track_rigs(
         // rather than by a differently-coloured link in every shipped session.
         // One belt entity per side, and the shoes under it: the belt is what selects the rung the
         // whole side draws, and its radius is how much nearer than the hull origin a shoe on it can
-        // be — the terrain conform reaching a `PROBE_REACH` below the rest envelope included.
+        // be — every articulated pose, the `PROBE_REACH` conform, and the shoe's own anchor offset.
+        let suspension = spec.suspension.params();
         let pool = |commands: &mut Commands, side: Side| -> (Entity, Vec<Entity>) {
-            let belt =
-                link_view::spawn_belt(commands, side, geom.belt_radius(side, PROBE_REACH), root);
+            let radius_m = geom.belt_radius(
+                side,
+                &suspension,
+                PROBE_REACH,
+                template.frame(side).anchor_offset_m(),
+            );
+            let belt = link_view::spawn_belt(commands, side, radius_m, root);
             let links = (0..spec.link_count)
                 .map(|_| link_view::spawn_link(commands, &template, side, belt))
                 .collect();
