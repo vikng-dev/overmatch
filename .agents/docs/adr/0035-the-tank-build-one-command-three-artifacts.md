@@ -47,6 +47,16 @@ warning; the exporter ships translation-only nodes), so the projection carries n
 term. Shadows inherit observer-based range selection plus the caster-proxy policy;
 no shadow-specific derivation exists.
 
+AMENDED 2026-08-19 — the track's POOLED SHOES are the one consumer that swaps. 194 moving shoes
+per tank made the coincident siblings the dominant per-frame cost (propagation, the visibility
+sweep, the extract scan all charge for a hidden sibling of a moving parent), so a shoe is one
+entity whose `Mesh3d` handle its BELT writes, selected per belt from the same certified
+switch distances. What this gives up, deliberately: PER-VIEW rung selection. A `VisibilityRange`
+is evaluated per view; a mesh handle cannot be, so every view — a second camera, a distinct
+`ShadowLodOrigin` — draws the rung the one camera selected. Not exercised today (one `Camera3d`,
+and the shoes stop casting under the shadow proxy's `PROXIED_CASTER`); a mirror or spotter camera
+would inherit the near view's rung rather than its own. Scene primitives keep the siblings.
+
 ## Locality and the source/product boundary
 
 The certificate is PER TANK — building tank #2 touches zero tiger files. Retired with this
