@@ -8,6 +8,7 @@ use bevy::prelude::*;
 // `STALE_FIRE_TICKS` is shared with the sim-side catch-up impact gate (`ballistics::on_fire_shell`)
 // so the muzzle flash and the impact phantom fall stale together — one constant, no drift.
 use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
+use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
@@ -507,7 +508,7 @@ fn on_main_gun_fire(
     mut light_ring: ResMut<MuzzleLightRing>,
     shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     // The decoded terrain surface, when the world has one — the ground-dust gate's only query.
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
@@ -828,7 +829,7 @@ fn on_mg_fire(
     mut cadence: ResMut<MgSmokeCadence>,
     shadows: Res<MuzzleShadows>,
     mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     mut commands: Commands,
 ) {
     // The complement of the 88 observer's gate — the SAME boundary the shell-scene/tracer split
@@ -1173,6 +1174,7 @@ mod tests {
         // Park a camera far past the 400 m cutoff from the fixed shot origin (1, 2, 3).
         app.world_mut().spawn((
             Camera3d::default(),
+            PlayerView,
             GlobalTransform::from_translation(Vec3::new(2000.0, 0.0, 0.0)),
         ));
         fire(&mut app, 0.088, 0);

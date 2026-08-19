@@ -24,6 +24,7 @@ use bevy::prelude::*;
 use crate::Layer;
 use crate::ballistics::Projectile;
 use crate::scatter::ScatterProxy;
+use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{BillboardRing, VfxBillboardMaterial};
@@ -79,7 +80,7 @@ fn read_scatter_crossings(
     mut ring: ResMut<BillboardRing>,
     mut ground_ring: ResMut<GroundMarkRing>,
     mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     mut commands: Commands,
 ) {
     let is_proxy = |entity: Entity| proxies.contains(entity);

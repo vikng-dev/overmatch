@@ -53,7 +53,7 @@ use bevy::prelude::*;
 
 use crate::geometry_lod::TankCertificate;
 use crate::track::link_view::{ShoeBelt, shoe_chain_key};
-use crate::view::ViewProfile;
+use crate::view::{PlayerView, ViewProfile};
 
 /// Mount the showcase's runtime half — the shoe clamp and the one-shot camera aim.
 ///
@@ -327,7 +327,10 @@ fn clamp_showcase_shoes(
 /// for the tanks. Writing the ROTATION is enough and is not fought over: the orbit camera reads its
 /// yaw and pitch back off the transform each frame (there is no stored orientation) and writes only
 /// the translation, so a single write survives until the mouse moves.
-fn aim_camera_down_range(mut done: Local<bool>, mut camera: Query<&mut Transform, With<Camera3d>>) {
+fn aim_camera_down_range(
+    mut done: Local<bool>,
+    mut camera: Query<&mut Transform, With<PlayerView>>,
+) {
     if *done {
         return;
     }

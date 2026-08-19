@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
+use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
@@ -503,7 +504,7 @@ fn spawn_impact_read(
     mut ring: ResMut<BillboardRing>,
     mut ground_ring: ResMut<GroundMarkRing>,
     mut rng: ResMut<ViewRng>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     mut commands: Commands,
 ) {
     let normal = impact.normal.try_normalize().unwrap_or(Vec3::Y);

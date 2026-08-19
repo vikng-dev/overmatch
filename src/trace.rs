@@ -23,6 +23,7 @@ use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
 };
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
+use crate::view::PlayerView;
 
 mod state_hash;
 
@@ -248,7 +249,7 @@ fn record_frame(
     fixed: Res<Time<Fixed>>,
     roots: Query<(Entity, &GlobalTransform, Has<Controlled>), With<Tank>>,
     // The optional world-camera pose permits camera-space analysis; headless rows omit it.
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     net: NetFrameCtx,
     // The root's confirmed-authority history: lightyear seeds these buffers from every replication
     // receive (`add_confirmed_to_history`) and the interpolation cursor walks them. `Option<&…>`

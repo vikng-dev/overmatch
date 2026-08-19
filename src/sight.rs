@@ -23,6 +23,7 @@ use crate::tank::{
     Controlled, RemoteServos, ServoIndex, ServoSpec, ServoState, Tank, TankServos, TankViews,
     rig_world_pose, shortest_angle,
 };
+use crate::view::PlayerView;
 
 use reticle::Toast;
 
@@ -400,7 +401,7 @@ pub(crate) fn drive_gunner_aim(
     mut committed: ResMut<CommittedAim>,
     controlled: ControlledTank,
     views: Query<&TankViews, With<Controlled>>,
-    cameras: Query<&Camera, With<Camera3d>>,
+    cameras: Query<&Camera, With<PlayerView>>,
     servos: LiveServos,
     servo_specs: Query<&ServoSpec>,
     ranging: Res<Ranging>,

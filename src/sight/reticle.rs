@@ -21,6 +21,7 @@ use crate::spec::ViewKind;
 use crate::state::GameplaySet;
 use crate::tank::{Controlled, Hull, Rig, TankViews, ViewNode};
 use crate::ui_font::UiFonts;
+use crate::view::PlayerView;
 
 use super::{SightMode, sight_line, view_available};
 
@@ -374,7 +375,7 @@ fn update_ranging_reticle(
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     mut line: Query<(&mut Node, &mut Visibility), (With<ReticleLine>, Without<RangeScaleTick>)>,
     mut ticks: Query<(&RangeScaleTick, &mut Node, &mut Visibility), Without<ReticleLine>>,
 ) {
@@ -594,7 +595,7 @@ fn update_optic_mask(
     view_nodes: Query<&ViewNode>,
     gun: Query<&GlobalTransform>,
     tables: Query<&RangeTable>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     mut materials: ResMut<Assets<OpticMaskMaterial>>,
     mut mask: Query<(&MaterialNode<OpticMaskMaterial>, &mut Visibility), With<OpticMask>>,
 ) {
@@ -645,7 +646,7 @@ fn update_optic_mask(
 fn update_intent_reticle(
     mode: Res<SightMode>,
     committed: Res<CommittedAim>,
-    camera: Single<(&Camera, &GlobalTransform)>,
+    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut reticle: Query<(&mut Node, &mut Visibility), With<IntentReticle>>,
@@ -862,6 +863,9 @@ mod tests {
                         },
                         ..default()
                     },
+                    // The harness's ONE declared view (`view::PlayerView`) — what every reticle
+                    // system resolves the player's camera through.
+                    PlayerView,
                     GlobalTransform::default(),
                 ))
                 .id();

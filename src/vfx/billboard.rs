@@ -25,6 +25,8 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::transform::TransformSystems;
 
+use crate::view::PlayerView;
+
 /// Live-billboard ring cap — a leak bound over the ONE ring every consumer shares, the impact puffs
 /// included: they hold no cap of their own and are evicted against this one. Only the long-lived
 /// ground scars are insulated in a ring of their own (`GROUND_MARK_CAP`), so a multi-second scar
@@ -381,7 +383,7 @@ pub(super) fn age_billboards(
 /// of billboarding (the material keeps Bevy's default vertex path). Runs even while paused: a
 /// frozen smoke puff should still face a camera the player orbits.
 fn face_billboards(
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     mut billboards: Query<(&mut Transform, &Billboard), With<FaceCamera>>,
 ) {
     let Ok(camera) = camera.single() else {

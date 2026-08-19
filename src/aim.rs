@@ -30,6 +30,7 @@ use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
     Controlled, Hull, Rig, ServoCommand, ServoRole, Tank, TankRoot, ViewNode, rig_world_pose,
 };
+use crate::view::PlayerView;
 
 /// Maximum engagement range; rays that hit nothing fall back to a point this far out. Shared by
 /// every aim ray — the third-person pick, the bore dot, and the optic's resolve
@@ -327,7 +328,7 @@ fn hull_frame(
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
-    camera_query: Single<(&Camera, &GlobalTransform)>,
+    camera_query: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     window: Single<&Window>,
     controlled: ControlledTank,
     poses: Query<(&Position, &Rotation)>,
@@ -490,7 +491,7 @@ fn place_indicator(
 
 fn update_bore_indicator(
     spatial: SpatialQuery,
-    camera_query: Single<(&Camera, &GlobalTransform)>,
+    camera_query: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,
     view_nodes: Query<&ViewNode>,
     muzzle: Query<&GlobalTransform>,
@@ -542,7 +543,7 @@ fn update_aim_indicator(
     // committed aim *intention*, which `commit_aim` fixes by projecting screen-centre through the
     // camera pose (ADR-0003). The camera is parentless, so its `Transform` IS its world pose,
     // the exact pose `commit_aim` reads, so the dot stays welded to the point it was committed at.
-    camera_query: Single<(&Camera, &Transform), With<Camera3d>>,
+    camera_query: Single<(&Camera, &Transform), With<PlayerView>>,
     controlled: Query<(&Rig, &TankCommand), With<Controlled>>,
     hull: Query<&GlobalTransform, With<Hull>>,
     mut indicator: Query<(&mut Node, &mut Visibility), With<AimIndicator>>,
@@ -690,6 +691,9 @@ mod tests {
                         },
                         ..default()
                     },
+                    // The harness's ONE declared view: every reader under test resolves the
+                    // player's camera by this marker, never by counting the cameras present.
+                    crate::view::PlayerView,
                     GlobalTransform::default(),
                 ))
                 .id();

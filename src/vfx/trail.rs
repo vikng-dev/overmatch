@@ -18,6 +18,7 @@ use bevy::shader::ShaderRef;
 use serde_json::json;
 
 use crate::ballistics::{PenetrationMarks, ShellPath, ShellVisual, Shot};
+use crate::view::PlayerView;
 use crate::{ShotClock, ShotId};
 
 use super::ViewRng;
@@ -466,7 +467,7 @@ fn flush_removed_shell_path(
 /// its smoke has fully dissolved.
 fn update_trails(
     time: Res<Time>,
-    camera: Query<&GlobalTransform, With<Camera3d>>,
+    camera: Query<&GlobalTransform, With<PlayerView>>,
     shells: Query<(&ShellPath, &Transform, &PenetrationMarks)>,
     mut trails: Query<(Entity, &mut TrailRibbon, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
