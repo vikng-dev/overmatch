@@ -359,7 +359,7 @@ pub(crate) fn env_parse<T: std::str::FromStr>(name: &str) -> Option<T> {
 
 /// Harness-only receive conditioner selected by `SPIKE_JITTER_SEED`.
 ///
-/// Lightyear 0.28's stock conditioner obtains a fresh thread RNG for every packet and exposes no
+/// Lightyear's stock conditioner (0.30) obtains a fresh thread RNG for every packet and exposes no
 /// seeded constructor. This component therefore intercepts raw receive payloads in Lightyear's
 /// `ApplyConditioner` set, exactly between UDP buffering and connection/transport consumption.
 /// Its SplitMix64 output is keyed only by `(seed, packet_index)`: neither OS randomness nor the

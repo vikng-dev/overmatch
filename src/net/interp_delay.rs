@@ -37,12 +37,12 @@
 //! the uplink law), so startup estimator pollution — connect/load stalls read as hundreds of ms
 //! of arrival delay — never reaches the objective; arming then latches for the session.
 //!
-//! `sync_timelines` re-reads `&InterpolationConfig` every frame with no caching, so writing the
-//! component is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
+//! Lightyear's `sync_timeline` re-reads `Res<InterpolationConfig>` every frame with no caching, so
+//! writing the resource is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
 //! stepped target is an error step the controller escalates to `Resync` (the live gauge showed
 //! `steady=2` from exactly this). The written value therefore FOLLOWS the law through a slewed
 //! follower — at most [`MAX_SLEW_PER_FRAME_TICKS`] per Update frame — and the steady-state
-//! `SyncEvent` count is ZERO (`net::extrapolate`'s FRONTIER `steady=` counter is the live gauge).
+//! resync count is ZERO (`net::extrapolate`'s FRONTIER `steady=` counter is the live gauge).
 //!
 //! Derivation and the contract constants behind `Q_p`:
 //! `net::sync_margin`'s module doc and `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1.
@@ -52,7 +52,7 @@ use core::time::Duration;
 use bevy::prelude::*;
 use lightyear::core::tick::TickDuration;
 use lightyear::interpolation::timeline::InterpolationConfig;
-use lightyear::prelude::{PingManager, SyncSystems};
+use lightyear::prelude::{Client, PingManager, SyncSystems};
 
 use super::sync_margin::{ArrivalDelay, ArrivalStats};
 
@@ -93,8 +93,9 @@ fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Dur
     rtt / 2 + stats.spread().saturating_sub(super::extrapolate::horizon()) + tick
 }
 
-/// Resolve the mode, mount the deriving system, and hand back the client entity's initial
-/// `InterpolationConfig`. Single call site (`net::client`), so the env var is read exactly once.
+/// Resolve the mode, mount the deriving system, and hand back the initial
+/// `InterpolationConfig` resource. Single call site (`net::client`), so the env var is read
+/// exactly once.
 pub(super) fn install(app: &mut App, tick: Duration) -> InterpolationConfig {
     let mode = match super::harness::env_parse::<u64>("OVERMATCH_INTERP_DELAY_MS") {
         Some(ms) => DelayMode::Fixed(Duration::from_millis(ms)),
@@ -135,7 +136,8 @@ pub(super) fn derive_interpolation_delay(
     mode: Res<DelayMode>,
     tick: Res<TickDuration>,
     estimator: Res<ArrivalDelay>,
-    mut clients: Query<(&mut InterpolationConfig, &PingManager)>,
+    config: Option<ResMut<InterpolationConfig>>,
+    pings: Query<&PingManager, With<Client>>,
     mut armed: Local<bool>,
     mut logged: Local<Option<Duration>>,
 ) {
@@ -153,7 +155,10 @@ pub(super) fn derive_interpolation_delay(
             estimator.describe()
         );
     }
-    for (mut config, pings) in &mut clients {
+    let Some(mut config) = config else {
+        return;
+    };
+    for pings in &pings {
         let target = derived_min_delay(pings.rtt(), &estimator.stats, tick.0);
         let next = slewed(
             config.min_delay,
@@ -188,7 +193,7 @@ mod tests {
     use bevy::prelude::World;
     use lightyear::core::tick::TickDuration;
     use lightyear::interpolation::timeline::InterpolationConfig;
-    use lightyear::prelude::PingManager;
+    use lightyear::prelude::{Client, PingManager};
 
     use super::{ArrivalDelay, ArrivalStats, derived_min_delay, slewed};
 
@@ -331,12 +336,8 @@ mod tests {
         estimator.stats = spread(100.0);
         world.insert_resource(estimator);
         let installed = Duration::from_nanos(15_625_000);
-        let client = world
-            .spawn((
-                InterpolationConfig::default().with_min_delay(installed),
-                PingManager::default(),
-            ))
-            .id();
+        world.insert_resource(InterpolationConfig::default().with_min_delay(installed));
+        world.spawn((Client, PingManager::default()));
         let target = derived_min_delay(Duration::ZERO, &spread(100.0), TICK);
         let step = TICK / 2;
         let mut last = installed;
@@ -344,10 +345,7 @@ mod tests {
             world
                 .run_system_once(super::derive_interpolation_delay)
                 .expect("writer runs");
-            let now = world
-                .get::<InterpolationConfig>(client)
-                .expect("client config")
-                .min_delay;
+            let now = world.resource::<InterpolationConfig>().min_delay;
             assert!(
                 now.abs_diff(last) <= step,
                 "one frame moves min_delay at most half a tick (moved {:?})",
@@ -376,20 +374,11 @@ mod tests {
         estimator.stats = ArrivalStats::test_cold_spread(0.243);
         world.insert_resource(estimator);
         let installed = Duration::from_nanos(15_625_000);
-        let client = world
-            .spawn((
-                InterpolationConfig::default().with_min_delay(installed),
-                PingManager::default(),
-            ))
-            .id();
+        world.insert_resource(InterpolationConfig::default().with_min_delay(installed));
+        world.spawn((Client, PingManager::default()));
         // A registered system keeps its `Local` state across runs — the latch under test.
         let writer = world.register_system(super::derive_interpolation_delay);
-        let read = |world: &World| {
-            world
-                .get::<InterpolationConfig>(client)
-                .expect("client config")
-                .min_delay
-        };
+        let read = |world: &World| world.resource::<InterpolationConfig>().min_delay;
         for _ in 0..8 {
             world.run_system(writer).expect("writer runs");
         }

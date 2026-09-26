@@ -301,7 +301,7 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `net_boundary.rs` | nothing outside `net` may name the netcode layer |
 | `gpu_layout.rs` | Rust ↔ shader struct layout contract |
 | `determinism_deps.rs` | **tripwire** — fails if a dep bump splits `glam` and silently drops the `scalar-math` pin |
-| `net_input_buffer_wrap.rs` | **tripwire** — pins lightyear 0.28's non-saturating `Tick` subtraction behind the connect-hang guard |
+| `net_input_buffer_wrap.rs` | **tripwire** — pins the inverted-range input encoding (bounded but mislabeled in lightyear 0.30) and its two enablers behind the connect-hang guard |
 | `net_interp_delay.rs` | **tripwire** — pins the `send_interval = 0` interpolation-delay collapse |
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
 | `net_fire_release.rs` | mechanism proof for the MG fire-release leak |
@@ -442,8 +442,8 @@ does not.
 ### C6. Verify every engine API against the pinned version before writing it
 
 `AGENTS.md`: treat Bevy/Avian API knowledge as deprecated. Pins are **Bevy 0.19**, **avian3d 0.7**,
-**lightyear 0.28**, **glam 0.32**, **wgpu 29**, **bevy_egui 0.41**. Check `docs.rs/bevy/0.19.0/…`,
-`docs.rs/avian3d/0.7.0/…`, or the `v0.19.0` / `v0.7.0` git tags. This has repeatedly caught real
+**lightyear 0.30**, **bevy_replicon 0.44**, **glam 0.32**, **wgpu 29**, **bevy_egui 0.42**. Check
+`docs.rs/bevy/0.19.1/…`, `docs.rs/avian3d/0.7.0/…`, or the `v0.19.1` / `v0.7.0` git tags. This has repeatedly caught real
 renames (`Trigger`→`On`, buffered events→observers, `Camera` moving to `bevy::camera`,
 `SceneRoot`→`WorldAssetRoot`). A simplification proposed from memory of a different Bevy version
 either does not compile — the good case — or compiles and means something else.

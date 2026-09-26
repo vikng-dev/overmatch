@@ -27,8 +27,8 @@ use std::collections::VecDeque;
 
 use lightyear::core::tick::Tick;
 
-/// Whether the fractional cursor `cursor_tick + overstep` has crossed `event` — lightyear's own
-/// wrapping tick difference, so the rule survives the `u32::MAX` boundary.
+/// Whether the fractional cursor `cursor_tick + overstep` has crossed `event` — lightyear's signed
+/// tick difference (monotonic ticks, saturating to the `i32` range).
 fn crossed(event: Tick, cursor_tick: Tick, overstep: f64) -> bool {
     f64::from(event - cursor_tick) <= overstep
 }
@@ -181,16 +181,21 @@ mod tests {
         assert_eq!(queue.len(), CursorQueue::<usize>::CAP);
     }
 
-    /// The crossing rule survives the `u32` tick boundary: an announcement just past the wrap is
-    /// held by a cursor just before it, and releases once the cursor wraps after it.
+    /// Ticks are MONOTONIC (lightyear 0.30 does not wrap them), so the crossing rule orders
+    /// numerically at the top of the range: an announcement near `u32::MAX` holds against a small
+    /// cursor and releases once the cursor reaches it. Fires if lightyear re-introduces wrapping
+    /// ticks, which would read the small cursor as having crossed.
     #[test]
-    fn the_crossing_is_wrap_safe() {
+    fn the_crossing_orders_monotonically_at_the_top_of_the_range() {
         let mut queue = CursorQueue::default();
-        queue.hold(Tick(2), "wrapped");
+        queue.hold(Tick(u32::MAX - 1), "late");
         assert!(
-            queue.release(Tick(u32::MAX - 1), 0.5).is_empty(),
-            "pre-wrap cursor: the announcement is 4 ticks ahead",
+            queue.release(Tick(2), 0.5).is_empty(),
+            "a small cursor is far behind an announcement near u32::MAX",
         );
-        assert_eq!(queue.release(Tick(3), 0.0), vec![(Tick(2), "wrapped")]);
+        assert_eq!(
+            queue.release(Tick(u32::MAX - 1), 0.0),
+            vec![(Tick(u32::MAX - 1), "late")]
+        );
     }
 }

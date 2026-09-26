@@ -347,8 +347,8 @@ pub fn run() {
     // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
     // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
     // id silently OVERWRITES the server's `PeerId → Entity` mapping, and ownership routing resolves by
-    // RAW id value — `ControlledBy` and `PeerMetadata.mapping` both key on the value, not on which
-    // machine sent it. Two machines that happened to share a PID would therefore collide: the server
+    // RAW id value — `ControlledBy` and `NetworkingMetadata::peer_map` both key on the value, not on
+    // which machine sent it. Two machines that happened to share a PID would therefore collide: the server
     // misroutes `ControlledBy`, and an opponent's tank arrives on the wrong client carrying
     // `Controlled` (turret desync, one client driving both tanks, input contention). A well-distributed random u64 makes a
     // cross-machine collision vanishingly unlikely. `RandomState::new()` is seeded from OS randomness on
@@ -376,11 +376,12 @@ pub fn run() {
             info!(
                 "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
             );
-            Some(RecvLinkConditioner::new(LinkConditionerConfig::new(
-                Duration::from_millis(latency_ms),
-                Duration::from_millis(jitter_ms),
-                0.0,
-            )))
+            Some(RecvLinkConditioner::new(
+                LinkConditionerConfig::default()
+                    .with_incoming_latency(Duration::from_millis(latency_ms))
+                    .with_incoming_jitter(Duration::from_millis(jitter_ms))
+                    .with_fixed_loss(0.0),
+            ))
         }
         RecvConditionerMode::Seeded(seed) => {
             info!(
@@ -428,21 +429,26 @@ pub fn run() {
     );
     // Buffer-edge starvation instruments and the bounded extrapolation gap-filler.
     super::extrapolate::install(&mut app);
+    // Both timeline configs are app-global resources. Inserted AFTER `ClientPlugins`, so
+    // lightyear's `On<Insert, InputTimelineConfig>` observer exists and seeds the input delay
+    // from `input_delay` at once rather than at the first timeline shift. Inputs are stamped and
+    // sent on this timeline regardless of any predicted view.
+    app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
+    // Every replica — the own hull included — rides the interpolation buffer behind the server
+    // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
+    // sizing law and rewrites `min_delay` every frame.
+    app.insert_resource(interpolation);
     // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
     // (there is exactly one), so its id need not be threaded through.
     let mut client_entity = app.world_mut().spawn((
         Name::new("Client"),
-        Client::default(),
-        Link::new(conditioner),
+        Client,
+        Link::default().with_conditioner(conditioner),
         LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
         PeerAddr(server_addr),
-        // Explicitly own the input timeline configuration: inputs are stamped and sent on this
-        // timeline regardless of any predicted view.
-        InputTimelineConfig::new(sync_config, input_delay),
-        // Every replica — the own hull included — rides the interpolation buffer behind the server
-        // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns
-        // the sizing law and rewrites `min_delay` every frame.
-        interpolation,
+        // Lightyear's client replication systems all filter on this marker: without it the link
+        // connects and nothing replicates.
+        ReplicationReceiver,
         NetcodeClient::new(
             Authentication::Manual {
                 server_addr,
@@ -719,8 +725,7 @@ fn drive_connection(
             // unreachable server — both time out — so the overlay shows the combined hint after
             // `MISMATCH_HINT_AFTER_ATTEMPTS`; this is purely for a dev reading the console.
             let reason = disconnected
-                .and_then(|d| d.reason.as_deref())
-                .unwrap_or("no reason reported");
+                .map_or_else(|| "no reason reported".to_owned(), |d| d.reason.to_string());
             info!(
                 "client: reconnect attempt {} ({}) — last netcode state: {reason}",
                 retry.attempts,
@@ -939,9 +944,7 @@ fn clear_stranded_input_buffer(
     if start - delayed_tick <= 0 {
         return None;
     }
-    buffer.start_tick = None;
-    buffer.buffer.clear();
-    buffer.last_remote_tick = None;
+    *buffer = NativeBuffer::default();
     Some(start)
 }
 
@@ -951,31 +954,30 @@ fn clear_stranded_input_buffer(
 /// unbounded encoder call.
 fn drop_stranded_input_buffer(
     timeline: Res<LocalTimeline>,
-    sender: Query<(Entity, &InputTimeline), With<Client>>,
+    sync: Res<LocalTimelineSync>,
+    sender: Query<Entity, With<Client>>,
     mut buffers: Query<&mut NativeBuffer<TankCommand>, With<InputMarker<TankCommand>>>,
     mut metrics: ResMut<InputBufferGuardMetrics>,
 ) {
     // There is no encoder work, and therefore no range-wrap risk, before an input buffer exists.
     // Checking this first also leaves startup/teardown alone when no locally controlled tank is
-    // present. Once a buffer exists, one client timeline is the invariant that makes its delayed
-    // encoder tick meaningful.
+    // present. Once a buffer exists, one client connection is the invariant that makes the global
+    // input timeline's delayed encoder tick meaningful.
     if buffers.is_empty() {
         return;
     }
-    let (client, input_timeline) = match sender.single() {
+    let client = match sender.single() {
         Ok(client) => client,
         Err(error) => {
             let mut cleared = 0_u64;
             for mut buffer in &mut buffers {
                 if buffer.start_tick.is_some()
-                    || !buffer.buffer.is_empty()
+                    || !buffer.is_empty()
                     || buffer.last_remote_tick.is_some()
                 {
                     cleared += 1;
                 }
-                buffer.start_tick = None;
-                buffer.buffer.clear();
-                buffer.last_remote_tick = None;
+                *buffer = NativeBuffer::default();
             }
             if cleared == 0 {
                 return;
@@ -984,18 +986,18 @@ fn drop_stranded_input_buffer(
             error!(
                 ?error,
                 cleared,
-                "client: input-buffer guard cleared marked buffers because it requires exactly one Client + InputTimeline"
+                "client: input-buffer guard cleared marked buffers because it requires exactly one Client"
             );
             debug_assert!(
                 false,
-                "input-buffer guard requires exactly one Client + InputTimeline while a local input buffer exists: {error:?}"
+                "input-buffer guard requires exactly one Client while a local input buffer exists: {error:?}"
             );
             return;
         }
     };
-    let delayed_tick = timeline.tick() + input_timeline.input_delay() as i32;
+    let delayed_tick = timeline.tick() + sync.input_delay() as i32;
     for mut buffer in &mut buffers {
-        let buffered_states = buffer.buffer.len();
+        let buffered_states = buffer.len();
         if let Some(start) = clear_stranded_input_buffer(&mut buffer, delayed_tick) {
             metrics.cleared += 1;
             let lead: i32 = start - delayed_tick;
@@ -1232,7 +1234,7 @@ pub(super) fn receive_fire_events(
     // The release clock: the fractional interpolation cursor every held announcement compares its
     // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
     // so its events present at arrival.
-    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    cursor: Option<Res<InterpolationTimeline>>,
     mut pending: ResMut<PendingRecoilKicks>,
     mut seen: ResMut<SeenShots>,
     mut held: ResMut<HeldFireEvents>,
@@ -1252,9 +1254,8 @@ pub(super) fn receive_fire_events(
     mut commands: Commands,
 ) {
     let now = timeline.tick();
-    let cursor = cursors
-        .single()
-        .ok()
+    let cursor = cursor
+        .filter(|timeline| timeline.is_synced())
         .map(|timeline| (timeline.tick(), f64::from(timeline.overstep().to_f32())));
     for mut receiver in &mut batch_receivers {
         for batch in receiver.receive() {
@@ -1747,18 +1748,17 @@ pub(super) fn age_sanctioned_shots(mut sanctioned: ResMut<SanctionedShots>, time
 /// = spawn at the muzzle and fly normally); `None` REJECTS the shot as absurd (the caller skips
 /// the tracer AND the recoil).
 ///
-/// Wrap-safe by construction: `Tick` is a wrapping `u32` (`lightyear_core::tick`, via `wrapping_id!`)
-/// and implements `Sub<Tick>` returning the difference as an `i32` — lightyear's OWN tick difference
-/// (`(now as i64 − fire as i64) as i32`, bit-identical to its `wrapping_diff` helper and correct across
-/// the `u32::MAX` boundary), not a naive `u32` subtraction that would underflow. (A `u32` tick never
-/// actually wraps in a session — ~777 days at 64 Hz — but the arithmetic is correct at the boundary
-/// regardless, which is what the wraparound test pins.)
+/// Bounded by construction: lightyear's `Tick` is a MONOTONIC `u32` that does not wrap, and
+/// `Sub<Tick>` returns the signed difference saturated to the `i32` range — never a naive `u32`
+/// subtraction that would underflow. (A `u32` tick is exhausted after ~777 days at 64 Hz; no
+/// session gets near it.) So any pair of ticks, however far apart, lands in one of the arms below,
+/// which is what the saturation test pins.
 ///   - elapsed < 0: the fire tick is AHEAD of our current tick. The server fires at a tick ≤ its
 ///     own now, and the local (input) timeline runs ahead of the server, so this only happens on
-///     clock skew or a malicious / wrapped tick — don't rewind; spawn at the muzzle (`Some(0)`).
+///     clock skew or a malicious tick — don't rewind; spawn at the muzzle (`Some(0)`).
 ///   - 0 ≤ elapsed ≤ [`MAX_COSMETIC_CATCH_UP_TICKS`]: fast-forward that many ticks (the normal
 ///     case is DERIVED approximately 10).
-///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale / wrapped nonsense — reject
+///   - elapsed > [`MAX_COSMETIC_CATCH_UP_TICKS`]: absurd / stale nonsense — reject
 ///     (`None`), no loop.
 fn fire_catch_up_ticks(fire: Tick, now: Tick) -> Option<u32> {
     let elapsed = now - fire;
@@ -1858,14 +1858,16 @@ fn feed_action_state(
 /// `bridge_action_state_to_tank_command` for the four ways it happens and
 /// `TankCommand::fail_consumables_closed` for what we refuse to do about them.
 ///
-/// Pre-sync, `input_delay()` is 0, so the stamp is the current tick and a joining player's first
-/// click attests immediately.
+/// The delay is lightyear's own `LocalTimelineSync::input_delay()` — the one its
+/// `buffer_action_state` files the command under — so the stamp and the buffer slot cannot name
+/// different ticks. Pre-sync the buffer is not written at all (lightyear gates it on
+/// `SyncedLocalTimeline`), so a pre-sync stamp never reaches the wire.
 fn stamp_input_tick(
     timeline: Res<LocalTimeline>,
-    sender: Query<&InputTimeline, With<Client>>,
+    sync: Res<LocalTimelineSync>,
     mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
-    let delay = sender.single().map_or(0, |t| t.input_delay() as i32);
+    let delay = sync.input_delay() as i32;
     let for_tick = timeline.tick() + delay;
     for mut state in &mut slots {
         state.0.for_tick = for_tick.0;
@@ -2075,40 +2077,43 @@ mod tests {
         );
     }
 
+    /// A buffer holding one (absent) slot at `start`, with a remote high-water mark beside it.
+    fn one_slot_buffer(start: Tick, last_remote: Tick) -> NativeBuffer<TankCommand> {
+        let mut buffer = NativeBuffer::<TankCommand>::default();
+        buffer.set_empty(start);
+        buffer.last_remote_tick = Some(last_remote);
+        buffer
+    }
+
+    /// A buffer with a start tick and a remote mark but no slots — the shape a stranded buffer
+    /// is left in when every slot has been popped.
+    fn slotless_buffer(start: Tick, last_remote: Tick) -> NativeBuffer<TankCommand> {
+        let mut buffer = NativeBuffer::<TankCommand>::default();
+        buffer.start_tick = Some(start);
+        buffer.last_remote_tick = Some(last_remote);
+        buffer
+    }
+
     #[test]
     fn input_buffer_guard_clears_an_inverted_encoder_range() {
-        let mut buffer = NativeBuffer::<TankCommand> {
-            start_tick: Some(Tick(313)),
-            last_remote_tick: Some(Tick(312)),
-            ..default()
-        };
-        buffer
-            .buffer
-            .push_back(lightyear_inputs::input_buffer::Compressed::Absent);
+        let mut buffer = one_slot_buffer(Tick(313), Tick(312));
 
         assert_eq!(
             clear_stranded_input_buffer(&mut buffer, Tick(20)),
             Some(Tick(313))
         );
         assert_eq!(buffer.start_tick, None);
-        assert!(buffer.buffer.is_empty());
+        assert!(buffer.is_empty());
         assert_eq!(buffer.last_remote_tick, None);
     }
 
     #[test]
     fn input_buffer_guard_preserves_a_current_encoder_range() {
-        let mut buffer = NativeBuffer::<TankCommand> {
-            start_tick: Some(Tick(20)),
-            last_remote_tick: Some(Tick(20)),
-            ..default()
-        };
-        buffer
-            .buffer
-            .push_back(lightyear_inputs::input_buffer::Compressed::Absent);
+        let mut buffer = one_slot_buffer(Tick(20), Tick(20));
 
         assert_eq!(clear_stranded_input_buffer(&mut buffer, Tick(20)), None);
         assert_eq!(buffer.start_tick, Some(Tick(20)));
-        assert_eq!(buffer.buffer.len(), 1);
+        assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.last_remote_tick, Some(Tick(20)));
     }
 
@@ -2124,29 +2129,21 @@ mod tests {
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(20);
         app.insert_resource(timeline);
-        app.world_mut()
-            .spawn((Client::default(), InputTimeline::default()));
+        app.init_resource::<LocalTimelineSync>();
+        app.world_mut().spawn(Client);
 
         let stranded = app
             .world_mut()
             .spawn((
                 InputMarker::<TankCommand>::default(),
-                NativeBuffer::<TankCommand> {
-                    start_tick: Some(Tick(313)),
-                    last_remote_tick: Some(Tick(312)),
-                    ..default()
-                },
+                slotless_buffer(Tick(313), Tick(312)),
             ))
             .id();
         let current = app
             .world_mut()
             .spawn((
                 InputMarker::<TankCommand>::default(),
-                NativeBuffer::<TankCommand> {
-                    start_tick: Some(Tick(20)),
-                    last_remote_tick: Some(Tick(20)),
-                    ..default()
-                },
+                slotless_buffer(Tick(20), Tick(20)),
             ))
             .id();
 
@@ -2157,7 +2154,7 @@ mod tests {
             .get::<NativeBuffer<TankCommand>>(stranded)
             .unwrap();
         assert_eq!(stranded.start_tick, None);
-        assert!(stranded.buffer.is_empty());
+        assert!(stranded.is_empty());
         assert_eq!(stranded.last_remote_tick, None);
 
         let current = app
@@ -2165,7 +2162,7 @@ mod tests {
             .get::<NativeBuffer<TankCommand>>(current)
             .unwrap();
         assert_eq!(current.start_tick, Some(Tick(20)));
-        assert!(current.buffer.is_empty());
+        assert!(current.is_empty());
         assert_eq!(current.last_remote_tick, Some(Tick(20)));
         assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
     }
@@ -2175,23 +2172,18 @@ mod tests {
     /// As above, no `ClientPlugins` are present, so this cannot invoke the hazardous encoder.
     #[cfg(debug_assertions)]
     #[test]
-    fn installed_input_buffer_guard_clears_before_rejecting_multiple_client_timelines() {
+    fn installed_input_buffer_guard_clears_before_rejecting_multiple_clients() {
         let mut app = App::new();
         install_input_buffer_guard(&mut app);
         app.insert_resource(LocalTimeline::default());
-        app.world_mut()
-            .spawn((Client::default(), InputTimeline::default()));
-        app.world_mut()
-            .spawn((Client::default(), InputTimeline::default()));
+        app.init_resource::<LocalTimelineSync>();
+        app.world_mut().spawn(Client);
+        app.world_mut().spawn(Client);
         let buffer = app
             .world_mut()
             .spawn((
                 InputMarker::<TankCommand>::default(),
-                NativeBuffer::<TankCommand> {
-                    start_tick: Some(Tick(313)),
-                    last_remote_tick: Some(Tick(312)),
-                    ..default()
-                },
+                slotless_buffer(Tick(313), Tick(312)),
             ))
             .id();
 
@@ -2205,15 +2197,17 @@ mod tests {
             .get::<NativeBuffer<TankCommand>>(buffer)
             .unwrap();
         assert_eq!(buffer.start_tick, None);
-        assert!(buffer.buffer.is_empty());
+        assert!(buffer.is_empty());
         assert_eq!(buffer.last_remote_tick, None);
         assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
     }
 
     /// The stamp must name the tick lightyear will FILE the command under (`local_tick +
     /// input_delay`), not the tick that authored it — otherwise the bridge's comparison is off by
-    /// the delay and every consumable fails closed forever. This mounts the same fixed-delay
-    /// `InputTimelineConfig` as the shipping client so removing `+ delay` fails the assertion.
+    /// the delay and every consumable fails closed forever. This inserts the same fixed-delay
+    /// `InputTimelineConfig` as the shipping client, after `ClientPlugins` exactly as the client
+    /// does, so removing `+ delay` — or inserting the config where lightyear's seeding observer
+    /// cannot see it — fails the assertion.
     #[test]
     fn stamp_names_the_tick_the_command_will_be_read_on() {
         let mut app = App::new();
@@ -2225,11 +2219,11 @@ mod tests {
         let mut timeline = LocalTimeline::default();
         timeline.apply_delta(42);
         world.insert_resource(timeline);
-        world.spawn((
-            Client::default(),
-            Link::default(),
-            InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
+        world.insert_resource(InputTimelineConfig::new(
+            SyncConfig::default(),
+            shipping_input_delay(),
         ));
+        world.spawn((Client, Link::default()));
         let entity = world
             .spawn((
                 ActionState(TankCommand::default()),
@@ -2417,13 +2411,15 @@ mod tests {
         assert_eq!(fire_catch_up_ticks(Tick(0), Tick(1_000_000)), None);
     }
 
-    /// Tick arithmetic WRAPS: a fire tick just below `u32::MAX` with a predicted-present tick a few
-    /// ticks past the wrap yields the small true elapsed (6 here), NOT a ~4-billion-tick nonsense that
-    /// would be rejected or loop. `Tick`'s `Sub` (lightyear's own wrap-correct difference) makes it hold.
+    /// Tick arithmetic SATURATES rather than wrapping (lightyear 0.30's `Tick` is monotonic), so the
+    /// extreme pairs land in the bounded arms: a fire tick at `u32::MAX` against a present at 0 reads
+    /// as far in the future (spawn at the muzzle), and the reverse as absurdly stale (rejected) —
+    /// never a ~4-billion-tick catch-up loop. Fires if lightyear re-introduces wrapping ticks.
     #[test]
-    fn wraparound_near_max_behaves() {
-        // MAX-2 → MAX-1 → MAX → 0 → 1 → 2 → 3 is 6 ticks across the wrap boundary.
-        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX - 2), Tick(3)), Some(6));
+    fn extreme_tick_pairs_saturate_into_the_bounded_arms() {
+        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX), Tick(0)), Some(0));
+        assert_eq!(fire_catch_up_ticks(Tick(0), Tick(u32::MAX)), None);
+        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX - 2), Tick(3)), Some(0));
     }
 
     fn shot(tick: u32) -> ShotId {

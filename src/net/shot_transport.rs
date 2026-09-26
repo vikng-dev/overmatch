@@ -23,17 +23,19 @@ use crate::state::GameplaySet;
 pub(super) const VISUAL_COPIES: u8 = 3;
 /// DERIVED: sixteen 64 Hz ticks are 250 ms, matching the current client armor-outcome hold span.
 const VISUAL_TTL_TICKS: i32 = 16;
-/// DERIVED from Lightyear 0.28's 1,156-byte unfragmented-message ceiling, leaving 56 bytes of
-/// headroom after worst-case bincode entity encoding and the message type id.
+/// DERIVED from Lightyear 0.30's 1,163-byte unfragmented-message ceiling (the transport's fragment
+/// size at the 1,200-byte default MTU: 13 header + 22 fragment-metadata bytes, then the payload's
+/// own varint length prefix), leaving 63 bytes of headroom after worst-case postcard entity
+/// encoding and the message type id.
 pub(crate) const VISUAL_BATCH_WIRE_LIMIT: usize = 1_100;
 /// DERIVED STARTING DEFAULT: four maximum-size batches cover the current 30-tank, two-weapon
 /// synchronized volley while bounding one recipient's automatic-fire work per server tick.
 const VISUAL_TICK_WIRE_LIMIT: usize = VISUAL_BATCH_WIRE_LIMIT * 4;
-/// DERIVED: Lightyear's registered `MessageNetId` is a varint-encoded `u16`, whose largest tier is
-/// four bytes.
+/// DERIVED upper bound: Lightyear's registered `MessageNetId` is a varint-encoded `u16` (at most
+/// three LEB128 bytes); four keeps the bound conservative.
 const MESSAGE_NET_ID_BYTES: usize = 4;
-/// DERIVED from Lightyear 0.28's `SendEntityMap`: recipient-mapped entities set bit 63 before Bevy's
-/// `u64` serde representation is encoded, forcing bincode's nine-byte `u64` tier.
+/// DERIVED from Lightyear 0.30's `SendEntityMap`: recipient-mapped entities set bit 63 before Bevy's
+/// `u64` serde representation is encoded, forcing postcard's ten-byte LEB128 `u64` tier.
 const WORST_CASE_MAPPED_ENTITY: Entity = Entity::from_bits(0x8000_0000_0000_0001);
 
 #[derive(Clone)]
@@ -328,8 +330,8 @@ fn batch_wire_upper_bound(batch: &FireVisualBatch) -> usize {
             event.shooter = WORST_CASE_MAPPED_ENTITY;
         }
     }
-    bincode::serde::encode_to_vec(&worst_case, bincode::config::standard())
-        .expect("registered shot facts serialize with Lightyear's bincode configuration")
+    postcard::to_allocvec(&worst_case)
+        .expect("registered shot facts serialize with Lightyear's postcard encoding")
         .len()
         + MESSAGE_NET_ID_BYTES
 }
@@ -606,22 +608,22 @@ fn observe_reliable_outbox(
     }
     let now = timeline.tick();
     for (entity, transport) in &connections {
-        if let Some(sender) = transport.senders.get(&ChannelKind::of::<OutcomeChannel>()) {
+        if let Some(sender) = transport.channel_send(ChannelKind::of::<OutcomeChannel>()) {
             ledger.observe(
                 entity,
                 ReliableOutboxChannel::Outcome,
                 now,
-                &sender.messages_sent,
-                &sender.message_acks,
+                sender.messages_sent(),
+                sender.message_acks(),
             );
         }
-        if let Some(sender) = transport.senders.get(&ChannelKind::of::<DamageChannel>()) {
+        if let Some(sender) = transport.channel_send(ChannelKind::of::<DamageChannel>()) {
             ledger.observe(
                 entity,
                 ReliableOutboxChannel::Damage,
                 now,
-                &sender.messages_sent,
-                &sender.message_acks,
+                sender.messages_sent(),
+                sender.message_acks(),
             );
         }
     }
@@ -1175,7 +1177,13 @@ mod tests {
             repair_cost < fresh_cost,
             "the repair is the smaller known payload"
         );
-        let smaller_fresh_count = 4;
+        // The scenario needs the byte budget left, after fresh fires and smaller fresh facts fill
+        // it, to refuse one more fire yet fit the old repair. Which count of smaller facts does
+        // that depends on the wire encoding's sizes, so it is derived from them, not hand-picked:
+        // the residual is `(limit − k·repair) mod fresh`.
+        let smaller_fresh_count = (1..=16)
+            .find(|k| (VISUAL_TICK_WIRE_LIMIT - k * repair_cost) % fresh_cost >= repair_cost)
+            .expect("some count of smaller facts leaves exactly room for the repair");
         let fresh_count = (VISUAL_TICK_WIRE_LIMIT - smaller_fresh_count * repair_cost) / fresh_cost;
         assert!(
             fresh_count * fresh_cost + smaller_fresh_count * repair_cost + fresh_cost
@@ -1305,10 +1313,7 @@ mod tests {
                 event.shooter = Entity::from_bits(0x8000_0000_0000_0001);
             }
         }
-        let mapped_wire_bytes = bincode::serde::encode_to_vec(&mapped, bincode::config::standard())
-            .unwrap()
-            .len()
-            + 4;
+        let mapped_wire_bytes = postcard::to_allocvec(&mapped).unwrap().len() + 4;
 
         assert_eq!(batch_wire_upper_bound(&batch), mapped_wire_bytes);
         assert!(

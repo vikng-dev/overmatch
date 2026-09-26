@@ -2,7 +2,7 @@
 //! derived `min_delay` compensates for (the 2026-07-11 remote-tank "teleports along the driving
 //! path" fix; the derived law replaced the 100 ms pin on 2026-08-14).
 //!
-//! The mechanism being pinned, in lightyear 0.28 (`lightyear_interpolation` timeline.rs):
+//! The mechanism being pinned, in lightyear 0.30 (`lightyear_interpolation` timeline.rs):
 //! interpolated remotes render at `I = server_estimate − (delay + jitter_margin)` with
 //! `delay = max(remote_send_interval · send_interval_ratio, min_delay)`. Our server replicates
 //! every tick and therefore advertises `send_interval = 0` (`ReplicationMetadata` default), which
@@ -11,9 +11,11 @@
 //! #890 — closed 2026-08-03 without a fix — and #423). The delay collapses to the 5 ms `min_delay`
 //! default, while the server estimate sits RTT/2 AHEAD of the newest received keyframe — so on any
 //! real link the interpolation clock overruns the keyframe buffer and lightyear clamps (freeze,
-//! then step). Our fix writes `min_delay = rtt/2 + send_interval_ratio · tick` client-side every
-//! frame, which makes `send_interval_ratio` a live input to our own law: the defaults test below
-//! is the tripwire for that gap term, `net::interp_delay`'s unit tests pin the arithmetic.
+//! then step). Our fix writes `min_delay = rtt/2 + (arrival spread beyond the extrapolation
+//! horizon) + one tick` client-side every frame; `net::interp_delay`'s unit tests pin the
+//! arithmetic. The law's gap term is a whole tick of its own and does not read
+//! `send_interval_ratio` — at `send_interval = 0` the ratio multiplies zero — so the defaults test
+//! below guards the BASELINE the law replaces, not an input to it.
 //!
 //! WHAT FIRES WHEN: these tests FAIL when a lightyear upgrade changes the degenerate — the TODO
 //! implemented (ratio falling back to tick/frame rate), `InterpolationConfig` defaults changed
@@ -25,25 +27,25 @@
 //! delay" section),
 //! which this degenerate is the evidence for.
 //!
-//! Direct `lightyear_sync`/`lightyear_core` dev-dependencies (same locked 0.28.0 the facade
-//! uses): the `SyncedTimeline`/`SyncTargetTimeline` traits and the fixed-point time types are not
-//! re-exported by the `lightyear` facade, and `sync_objective` is the honest observable — it is
-//! the exact function the sync systems call each frame to place the interpolation clock.
+//! Direct `lightyear_sync`/`lightyear_core` dev-dependencies (same locked version the facade
+//! uses): `SyncTargetTimeline` and `RemoteTimeline` are not re-exported by the `lightyear` facade,
+//! and `TimelineSync::sync_objective` is the honest observable — it is the exact function the sync
+//! systems call each frame to place the interpolation clock.
 
 use core::time::Duration;
 
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::PingManager;
 use lightyear_sync::prelude::client::RemoteTimeline;
-use lightyear_sync::timeline::sync::{SyncTargetTimeline, SyncedTimeline};
+use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
 
 /// The game's fixed tick (64 Hz), matching `ClientPlugins { tick_duration }` in `net::client`.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
 
-/// The upstream defaults our fix overrides — and, for `send_interval_ratio`, CONSUMES: the derived
-/// law's gap term is `send_interval_ratio · tick`, read live off the config. If these move (issue
-/// #890's likely fix shape), the law in `src/net/interp_delay.rs` must be re-derived against the
-/// new baseline.
+/// The upstream defaults our fix overrides. `send_interval_ratio` is dead at `send_interval = 0`
+/// and our law does not read it, but a move in either default is the likely shape of #890's fix
+/// (1.7 -> 1.2 landed in 0.30 while the `to_duration` TODO stayed): re-check the degenerate below
+/// and re-derive the law in `src/net/interp_delay.rs` against the new baseline.
 #[test]
 fn upstream_interpolation_config_defaults_unchanged() {
     let config = InterpolationConfig::default();
@@ -54,9 +56,10 @@ fn upstream_interpolation_config_defaults_unchanged() {
          law in src/net/interp_delay.rs and revisit the parked upstream filing (see module doc)"
     );
     assert!(
-        (config.send_interval_ratio - 1.7).abs() < 1e-6,
-        "lightyear changed InterpolationConfig::default().send_interval_ratio (was 1.7, now {}) \
-         — the derived law's gap term moves with it; re-derive src/net/interp_delay.rs (see module doc)",
+        (config.send_interval_ratio - 1.2).abs() < 1e-6,
+        "lightyear changed InterpolationConfig::default().send_interval_ratio (was 1.2, now {}) \
+         — re-check the send_interval=0 degenerate and re-derive src/net/interp_delay.rs (see \
+         module doc)",
         config.send_interval_ratio
     );
 }

@@ -903,17 +903,22 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     }
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+    // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the present `P` that
+    // `fire_catch_up_ticks` measures a shot's age against. Same fixed input delay as the shipping
+    // client, and inserted the same way: an app-global resource, after `ClientPlugins`.
+    app.insert_resource(InputTimelineConfig::new(
+        SyncConfig::default(),
+        shipping_input_delay(),
+    ));
     let client = app
         .world_mut()
         .spawn((
-            Client::default(),
-            Link::new(None),
+            Client,
+            Link::default(),
             LocalAddr(SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0)),
             PeerAddr(server_addr),
-            // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the
-            // present `P` that `fire_catch_up_ticks` measures a shot's age against. Same fixed
-            // input delay as the shipping client.
-            InputTimelineConfig::new(SyncConfig::default(), shipping_input_delay()),
+            // As on the shipping client: lightyear's client replication filters on it.
+            ReplicationReceiver,
             NetcodeClient::new(
                 Authentication::Manual {
                     server_addr,

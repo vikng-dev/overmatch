@@ -74,7 +74,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{InputTimelineConfig, Interpolated, IsSynced, SyncConfig, SyncSystems};
+use lightyear::prelude::{InputTimelineConfig, Interpolated, SyncConfig, SyncSystems};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
@@ -293,7 +293,7 @@ impl ArrivalDelay {
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
 /// ping estimator never reads. Samples enter ONLY while BOTH hold: `AppState::Playing` is active
-/// AND an `IsSynced<InterpolationTimeline>` entity exists — connect/loading-phase arrivals carry
+/// AND the `InterpolationTimeline` resource reports synced — connect/loading-phase arrivals carry
 /// client load stalls, not path delay, and each one evicted at ring capacity swings the delay law
 /// into a resync.
 fn record_packet_arrival(
@@ -301,10 +301,11 @@ fn record_packet_arrival(
     time: Res<Time<Real>>,
     tick: Res<TickDuration>,
     state: Res<State<AppState>>,
-    synced: Query<(), With<IsSynced<InterpolationTimeline>>>,
+    timeline: Option<Res<InterpolationTimeline>>,
     mut estimator: ResMut<ArrivalDelay>,
 ) {
-    if *state.get() != AppState::Playing || synced.is_empty() {
+    let synced = timeline.is_some_and(|timeline| timeline.is_synced());
+    if *state.get() != AppState::Playing || !synced {
         return;
     }
     estimator.record(
@@ -467,7 +468,7 @@ fn derive_input_margins(
             Without<ChildOf>,
         ),
     >,
-    mut clients: Query<&mut InputTimelineConfig>,
+    config: Option<ResMut<InputTimelineConfig>>,
     mut armed: Local<bool>,
     mut written: Local<Option<(u8, f32, f32)>>,
     mut logged: Local<Option<Duration>>,
@@ -483,14 +484,14 @@ fn derive_input_margins(
         *armed = true;
         info!("net: input sync margins ARMED derived — own hull rides the server stream");
     }
-    for mut config in &mut clients {
+    if let Some(mut config) = config {
         let sync = match fixed {
             Some(margin) => fixed_input_sync(base.sync, margin, tick.0),
             None => derived_input_sync(base.sync, &estimator.stats, tick.0),
         };
         let key = (sync.jitter_multiple, sync.jitter_margin, sync.error_margin);
         if *written == Some(key) {
-            continue;
+            return;
         }
         let coverage = estimator.stats.coverage();
         if fixed.is_none() && logged.is_none_or(|last| last.abs_diff(coverage) >= LOG_STEP) {
@@ -514,7 +515,7 @@ mod tests {
     use bevy::prelude::{App, Real, State, Time};
     use lightyear::core::tick::{Tick, TickDuration};
     use lightyear::interpolation::timeline::InterpolationTimeline;
-    use lightyear::prelude::{IsSynced, SyncConfig};
+    use lightyear::prelude::{SyncConfig, TimelineSync};
     use lightyear_transport::plugin::PacketReceived;
 
     use super::{
@@ -668,7 +669,7 @@ mod tests {
         );
     }
 
-    /// THE RECORDING GATE IS Playing ∧ IsSynced<InterpolationTimeline>: an arrival while either
+    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline: an arrival while either
     /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
     /// `record_packet_arrival` (or either conjunct) — the matching pre-gate trigger records and
     /// its zero-count assertion reds; the final trigger pins that the gated path still records.
@@ -701,8 +702,9 @@ mod tests {
             "playing without a synced interpolation timeline never records"
         );
         app.insert_resource(State::new(AppState::Loading));
-        app.world_mut()
-            .spawn(IsSynced::<InterpolationTimeline>::default());
+        let mut timeline = InterpolationTimeline::default();
+        timeline.set_synced(true);
+        app.insert_resource(timeline);
         assert_eq!(
             arrive(&mut app, 1_002),
             0,

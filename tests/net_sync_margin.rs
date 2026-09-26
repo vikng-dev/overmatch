@@ -2,7 +2,7 @@
 //! re-size (companion to `tests/net_interp_delay.rs`, which pins the `min_delay` degenerate the
 //! other half of the downlink law compensates for).
 //!
-//! The mechanisms being pinned, in lightyear 0.28:
+//! The mechanisms being pinned, in lightyear 0.30:
 //!
 //! - the INPUT timeline objective (`lightyear_sync` input.rs): `remote + rtt/2 + (jitter ·
 //!   jitter_multiple + tick · jitter_margin) + 1 tick + tick · error_margin − input_delay`. The
@@ -31,12 +31,9 @@ use core::time::Duration;
 
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::{PingManager, SyncConfig};
-use lightyear_sync::prelude::InputTimeline;
 use lightyear_sync::prelude::client::RemoteTimeline;
-use lightyear_sync::timeline::input::{InputDelayConfig, InputTimelineConfig};
-use lightyear_sync::timeline::sync::{
-    SyncAdjustment, SyncContext, SyncTargetTimeline, SyncedTimeline,
-};
+use lightyear_sync::timeline::input::{InputDelayConfig, InputTimelineConfig, LocalTimelineSync};
+use lightyear_sync::timeline::sync::{SyncAdjustment, SyncTargetTimeline, TimelineSync};
 
 /// The game's fixed tick (64 Hz), matching `ClientPlugins { tick_duration }` in `net::client`.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
@@ -107,8 +104,12 @@ fn input_objective_pays_floor_pipeline_and_deadband_once_each() {
         InputDelayConfig::fixed_input_delay(0),
     );
     let remote = RemoteTimeline::default();
-    let objective =
-        InputTimeline::default().sync_objective(&remote, &config, &PingManager::default(), TICK);
+    let objective = LocalTimelineSync::default().sync_objective(
+        &remote,
+        &config,
+        &PingManager::default(),
+        TICK,
+    );
     let lead = (objective - remote.current_estimate()).to_f32();
     let expected = 0.25 + 1.0 + 0.75;
     assert!(
@@ -155,22 +156,27 @@ fn interp_objective_honors_the_sync_floor() {
 /// field from the controller.
 #[test]
 fn error_margin_is_the_speed_controller_deadband() {
-    let config = SyncConfig {
-        error_margin: 0.32,
-        ..SyncConfig::default()
-    };
-    let mut context = SyncContext::default();
+    // The controller's hysteresis is private in 0.30; `TimelineSync::speed_adjustment` is the
+    // public entry to it, reached through the local clock's controller with a zero input delay.
+    let config = InputTimelineConfig::new(
+        SyncConfig {
+            error_margin: 0.32,
+            ..SyncConfig::default()
+        },
+        InputDelayConfig::fixed_input_delay(0),
+    );
+    let mut controller = LocalTimelineSync::default();
     assert!(
         matches!(
-            context.speed_adjustment(&config, 0.2),
+            controller.speed_adjustment(&config, 0.2),
             SyncAdjustment::DoNothing
         ),
         "an error inside the deadband must not adjust speed"
     );
-    let mut context = SyncContext::default();
-    let mut last = context.speed_adjustment(&config, 0.5);
+    let mut controller = LocalTimelineSync::default();
+    let mut last = controller.speed_adjustment(&config, 0.5);
     for _ in 0..2 {
-        last = context.speed_adjustment(&config, 0.5);
+        last = controller.speed_adjustment(&config, 0.5);
     }
     assert!(
         matches!(last, SyncAdjustment::SpeedAdjust(_)),

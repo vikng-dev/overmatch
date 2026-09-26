@@ -78,7 +78,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::InterpolationTimeline;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Interpolated, IsSynced, LocalTimeline, NetworkTimeline, PingManager};
+use lightyear::prelude::{Interpolated, LocalTimeline, NetworkTimeline, PingManager};
 
 use super::protocol::{InputBridge, NetTank};
 use super::sync_margin::ArrivalDelay;
@@ -546,7 +546,7 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
 fn recover_unannounced_rounds(
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
-    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    cursor: Option<Res<InterpolationTimeline>>,
     mut roots: Query<(Entity, &mut OwnFirePresentation)>,
     muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
     mut recoil: ResMut<super::client::PendingRecoilKicks>,
@@ -556,7 +556,7 @@ fn recover_unannounced_rounds(
     let Some(arrival) = arrival else {
         return;
     };
-    let Ok(cursor) = cursors.single() else {
+    let Some(cursor) = cursor.filter(|cursor| cursor.is_synced()) else {
         return;
     };
     let wait = announce_wait_ticks(arrival.stats.coverage(), tick.0);
@@ -1450,8 +1450,8 @@ mod tests {
         app.add_observer(count_presented_round);
         let mut timeline = InterpolationTimeline::default();
         timeline.set_now(TickInstant::from(Tick(cursor_tick)));
-        app.world_mut()
-            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()));
+        lightyear::prelude::TimelineSync::set_synced(&mut timeline, true);
+        app.insert_resource(timeline);
         // The armed root: one state-proven consumption revealed at tick 100, never announced.
         let mut slot = SlotLedger::seeded(ready(BELT));
         slot.confirmed = 1;

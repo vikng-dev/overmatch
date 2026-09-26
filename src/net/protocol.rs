@@ -9,8 +9,7 @@ use bevy::ecs::query::QueryData;
 use bevy::prelude::*;
 use lightyear::avian3d::plugin::{AvianReplicationMode, LightyearAvianPlugin};
 // `Remote` (bevy_replicon's "this entity arrived by replication", re-exported): the honest
-// authority-vs-replica discriminator — `Predicted`/`Interpolated` are not (the server entity
-// carries both markers itself).
+// authority-vs-replica discriminator — `Predicted`/`Interpolated` are role markers, not provenance.
 use lightyear::prelude::client::Remote;
 use lightyear::prelude::input::native::ActionState;
 use lightyear::prelude::*;
@@ -127,7 +126,12 @@ use crate::{CombatantId, ShotId};
 /// servos at different bearings the moment the hull leaves yaw zero, so this is a sim skew as much
 /// as a format change; the tag exists so a consumer can never again be wrong about which frame it
 /// was handed.
-pub const PROTOCOL_REV: u32 = 28;
+///
+/// REV 29 (lightyear 0.28 -> 0.30.1, bevy_replicon 0.41 -> 0.44): no own type moves, but the
+/// framing under all of it does — messages serialize with postcard instead of bincode, the packet
+/// header is 13 bytes, message ids are wrapping `u16`s, and replicon 0.43+ folds marker components
+/// into its own protocol hash. REV 28 shipped (v0.5.2 onward), so this is a real bump.
+pub const PROTOCOL_REV: u32 = 29;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -886,11 +890,11 @@ const WIRE_TYPES_HASH: u64 = 0x7926_3814_03fc_ca61;
 /// change the on-wire bytes without touching any source in this tree. Re-pinning either version
 /// changes the handshake directly; house process also bumps [`PROTOCOL_REV`].
 const WIRE_DEP_AVIAN3D: &str = "0.7.0";
-const WIRE_DEP_LIGHTYEAR: &str = "0.28.0";
+const WIRE_DEP_LIGHTYEAR: &str = "0.30.1";
 
 /// Register the exact shared wire surface represented by [`WIRE_SURFACE`].
 pub(crate) fn plugin(app: &mut App) {
-    // `LocalTimeline` is incremented by lightyear in `FixedFirst` (lightyear_core 0.28's
+    // `LocalTimeline` is incremented by lightyear in `FixedFirst` (lightyear_core's
     // `increment_local_tick`); publish it before every `GameplaySet` consumer, especially
     // `shooting::fire`, which must put the id on its initial FireShell event.
     app.init_resource::<crate::ShotClock>();
@@ -963,10 +967,18 @@ pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(input::native::InputPlugin::<TankCommand>::default());
 
     // Avian replication (map §5): mount lightyear_avian3d's ordering fixes, then register the
-    // root's Position/Rotation/velocities. `AvianReplicationMode::Position` replicates the sim
-    // pose, never `Transform`.
+    // root's Position/Rotation/velocities ourselves. `AvianReplicationMode::Position` replicates the
+    // sim pose, never `Transform`; `sync_to_transform: false` keeps physics authority one-way
+    // (Position -> Transform in PostUpdate only). Nothing here moves a body by writing its
+    // `Transform`: child colliders (servo nodes) reach physics through avian's own
+    // `ColliderTransform` propagation from their LOCAL transforms. `register_physics_components`
+    // is OFF because the plugin's defaults predict all four components and this client predicts
+    // nothing — the registrations below are the protocol.
     app.add_plugins(LightyearAvianPlugin {
-        replication_mode: AvianReplicationMode::Position,
+        replication_mode: AvianReplicationMode::Position {
+            sync_to_transform: false,
+        },
+        register_physics_components: false,
         ..default()
     });
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
@@ -1116,7 +1128,9 @@ mod tests {
                 },
             ],
         };
-        let mid = registry.interpolate(start, end, 0.5);
+        // The registry no longer exposes its interpolation fn; the registration is asserted above
+        // and this pins the law it registers.
+        let mid = track_drive_lerp(start, end, 0.5);
         assert_eq!(
             mid,
             TrackDrive {
@@ -1278,9 +1292,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Re-pinned for REV 28 (`TankCommand::aim` carries its frame: the own-type graph moved
-        // with the new `AimIntent` variant).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x13f6_0491_39b9_3915;
+        // Pins REV 29 and the lightyear 0.30.1 wire dependency (the framing changed under an
+        // unchanged own-type graph).
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x3f3d_9417_ec19_f150;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1499,7 +1513,7 @@ mod tests {
     /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
     /// `TankCommand`/`AimIntent`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`.
     /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
-    /// earns its own row: bincode encodes the variant as its declaration index, so reordering
+    /// earns its own row: postcard encodes the variant as its declaration index, so reordering
     /// variants changes what the bytes mean without touching one character of the type that embeds
     /// it.
     const WIRE_TYPE_DEFS: &[(&str, &str)] = &[
@@ -2090,9 +2104,9 @@ mod tests {
     }
 
     /// **The `for_tick` wire cost, measured — not modelled.** lightyear serializes an
-    /// `InputMessage` with `bincode::serde::encode_into_std_write(.., config::standard())`
-    /// (`lightyear_serde` registry.rs:175), so this encodes a real `NativeStateSequence<TankCommand>`
-    /// — the exact `states` payload of one input message — with the exact same crate and config.
+    /// `InputMessage` with postcard (`lightyear_serde`'s `default_serialize`), so this encodes a real
+    /// `NativeStateSequence<TankCommand>` — the exact `states` payload of one input message — with
+    /// the exact same encoding.
     ///
     /// The honest downside of provenance: `for_tick` changes EVERY tick, so it defeats
     /// `Compressed::SameAsPrecedent` run-compression. A message that used to be one full command plus
@@ -2113,7 +2127,7 @@ mod tests {
     fn input_message_wire_cost() {
         use lightyear::prelude::input::native::NativeStateSequence;
 
-        const REDUNDANCY: u32 = 5; // lightyear `InputConfig::packet_redundancy` default
+        const REDUNDANCY: usize = 5; // lightyear `InputConfig::packet_redundancy` default
         const TICK_HZ: usize = 64;
 
         // `ActionStateSequence` is the trait carrying `build_from_input_buffer`.
@@ -2125,8 +2139,8 @@ mod tests {
                 buffer, REDUNDANCY, end,
             )
             .expect("buffer has entries");
-            bincode::serde::encode_to_vec(&seq, bincode::config::standard())
-                .expect("bincode encodes the sequence")
+            postcard::to_allocvec(&seq)
+                .expect("postcard encodes the sequence")
                 .len()
         }
 
@@ -2145,7 +2159,7 @@ mod tests {
 
         let mut unstamped = NativeBuffer::<TankCommand>::default();
         let mut stamped = NativeBuffer::<TankCommand>::default();
-        // REALISTIC tick values: bincode's `standard()` config VARINT-encodes, so a `for_tick` of
+        // REALISTIC tick values: postcard VARINT-encodes integers, so a `for_tick` of
         // 100 costs one byte while a real mid-session tick (100_000 ≈ 26 min in at 64 Hz) costs
         // several. Measuring at tick 100 would flatter the stamp.
         const T0: i32 = 100_000;

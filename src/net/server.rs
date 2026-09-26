@@ -67,6 +67,13 @@ pub fn run() {
                 // Must match the client's `Authentication::Manual.protocol_id`.
                 protocol_id: protocol_id(),
                 private_key: [0; 32], // dev only — matches the client's Authentication::Manual
+                // OFF: a manual token names the address the CLIENT dialled — the droplet's public
+                // IP — while this socket binds `0.0.0.0`, and netcode's check matches an
+                // unspecified bind only against LOOPBACK token addresses. Left on, every
+                // non-loopback client is dropped at the connection request (an `info!`, no error)
+                // and retries forever. The server cannot know its own public address to list it
+                // in `additional_expected_addresses`.
+                server_addr_check: false,
                 ..default()
             }),
             LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), PORT)),
