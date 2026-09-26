@@ -276,7 +276,7 @@ repository gates before commit:
 
 ```text
 cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings
 cargo test --locked
 ```
 
