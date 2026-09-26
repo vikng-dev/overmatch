@@ -32,6 +32,12 @@ pub(super) fn base_app() -> App {
     base_app_with(PhysicsPlugins::default().build())
 }
 
+/// [`base_app`] with the NETCODE physics composition (`net::physics::physics_plugins`: avian's own
+/// transform and interpolation plugins disabled), for tests of what that composition changes.
+pub(super) fn net_physics_app() -> App {
+    base_app_with(super::physics::physics_plugins())
+}
+
 fn base_app_with(physics: bevy::app::PluginGroupBuilder) -> App {
     let mut app = App::new();
     app.add_plugins((

@@ -186,14 +186,14 @@ impl ArrivalStats {
 /// packet; digested once per frame into [`ArrivalStats`].
 #[derive(Resource, Debug, Default)]
 pub(super) struct ArrivalDelay {
-    /// First-sample anchor `(arrival_secs, remote_tick)`; every `d_i` is relative to it, so tick
-    /// wrap and the meaningless absolute offset both cancel.
+    /// First-sample anchor `(arrival_secs, remote_tick)`; every `d_i` is relative to it, so the
+    /// meaningless absolute offset between the two clocks cancels.
     epoch: Option<(f64, Tick)>,
     /// `(arrival_secs, d_i)` pruned to [`SPIKE_WINDOW`] — the min anchor.
     window: VecDeque<(f64, f64)>,
     /// `d_i` eviction ring of [`ring_cap`] samples — the quantile distribution.
     ring: VecDeque<f64>,
-    /// Newest remote tick seen on any packet (wrapping max) — the "server has simulated through
+    /// Newest remote tick seen on any packet (numeric max) — the "server has simulated through
     /// here" bound `net::fire_presentation`'s heal deadlines read.
     newest_remote: Option<Tick>,
     samples: u64,

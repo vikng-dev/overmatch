@@ -23,16 +23,17 @@ use crate::state::GameplaySet;
 pub(super) const VISUAL_COPIES: u8 = 3;
 /// DERIVED: sixteen 64 Hz ticks are 250 ms, matching the current client armor-outcome hold span.
 const VISUAL_TTL_TICKS: i32 = 16;
-/// DERIVED from Lightyear 0.30's 1,163-byte unfragmented-message ceiling (the transport's fragment
-/// size at the 1,200-byte default MTU: 13 header + 22 fragment-metadata bytes, then the payload's
-/// own varint length prefix), leaving 63 bytes of headroom after worst-case postcard entity
-/// encoding and the message type id.
+/// DERIVED from Lightyear 0.30's 1,162-byte unfragmented-message ceiling (the transport's fragment
+/// size at the 1,200-byte default MTU: 13 header bytes + 23 fragment-metadata bytes — a 4-byte
+/// channel id, 2-byte message id, two 8-byte fragment fields, 1 compression byte — then the
+/// payload's own 2-byte QUIC-varint length prefix), leaving 62 bytes of headroom after worst-case
+/// postcard entity encoding and the message type id.
 pub(crate) const VISUAL_BATCH_WIRE_LIMIT: usize = 1_100;
 /// DERIVED STARTING DEFAULT: four maximum-size batches cover the current 30-tank, two-weapon
 /// synchronized volley while bounding one recipient's automatic-fire work per server tick.
 const VISUAL_TICK_WIRE_LIMIT: usize = VISUAL_BATCH_WIRE_LIMIT * 4;
-/// DERIVED upper bound: Lightyear's registered `MessageNetId` is a varint-encoded `u16` (at most
-/// three LEB128 bytes); four keeps the bound conservative.
+/// DERIVED: Lightyear's registered `MessageNetId` is a `u16` in lightyear's QUIC-style varint
+/// (1/2/4/8-byte tiers), whose largest tier for a `u16` is four bytes — the exact maximum.
 const MESSAGE_NET_ID_BYTES: usize = 4;
 /// DERIVED from Lightyear 0.30's `SendEntityMap`: recipient-mapped entities set bit 63 before Bevy's
 /// `u64` serde representation is encoded, forcing postcard's ten-byte LEB128 `u64` tier.

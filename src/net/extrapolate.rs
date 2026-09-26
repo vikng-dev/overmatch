@@ -124,6 +124,7 @@ pub(super) fn install(app: &mut App) {
     app.init_resource::<FrontierDiag>();
     app.init_resource::<HullEdges>();
     app.init_resource::<PreSyncCursor>();
+    app.add_observer(allow_handshake_resync);
     app.add_observer(log_summary_on_disconnect);
     app.add_systems(
         PostUpdate,
@@ -211,14 +212,19 @@ pub(super) struct FrontierDiag {
     blend_count: u64,
     blend_residual_sum_m: f64,
     blend_residual_max_m: f32,
-    /// Interpolation-timeline resync count. The handshake resync is exactly one; every resync
-    /// past the first is a steady-state resync and must not happen.
+    /// Interpolation-timeline resync count, handshakes included.
     sync_events: u64,
+    /// Resyncs past each connection's handshake — steady-state resyncs, which must not happen.
+    steady_resyncs: u64,
+    /// Whether this connection's one handshake resync has been seen. Lightyear resets the
+    /// interpolation timeline on every `Connected`, so each (re)connection is owed one; cleared by
+    /// [`allow_handshake_resync`].
+    handshake_spent: bool,
 }
 
 impl FrontierDiag {
     fn steady_sync_events(&self) -> u64 {
-        self.sync_events.saturating_sub(1)
+        self.steady_resyncs
     }
 
     fn summary(&self, open_gaps: usize) -> String {
@@ -246,6 +252,11 @@ impl FrontierDiag {
             self.steady_sync_events(),
         )
     }
+}
+
+/// A (re)connection resets the interpolation timeline, so its first resync is the handshake.
+fn allow_handshake_resync(_connected: On<Add, Connected>, mut diag: ResMut<FrontierDiag>) {
+    diag.handshake_spent = false;
 }
 
 /// The interpolation cursor as it stood entering this frame's timeline sync.
@@ -279,13 +290,15 @@ fn count_interp_resyncs(
         return;
     }
     diag.sync_events += 1;
-    if diag.steady_sync_events() > 0 {
-        warn!(
-            "net: FRONTIER interpolation resync #{} — a steady-state resync snapped every remote \
-             hull",
-            diag.sync_events
-        );
+    if !diag.handshake_spent {
+        diag.handshake_spent = true;
+        return;
     }
+    diag.steady_resyncs += 1;
+    warn!(
+        "net: FRONTIER interpolation resync #{} — a steady-state resync snapped every remote hull",
+        diag.sync_events
+    );
 }
 
 /// The estimator and own-fire digests riding the FRONTIER line — each absent in worlds that never
@@ -1334,6 +1347,16 @@ mod tests {
             diag.steady_sync_events(),
             1,
             "the handshake resync is the one allowed event",
+        );
+        // A reconnect owes one more handshake: its snap is not steady-state.
+        world.resource_mut::<FrontierDiag>().handshake_spent = false;
+        frame(&mut world, Some(Tick(40)));
+        let diag = world.resource::<FrontierDiag>();
+        assert_eq!(diag.sync_events, 3);
+        assert_eq!(
+            diag.steady_sync_events(),
+            1,
+            "a reconnect's handshake resync is not steady-state",
         );
     }
 }

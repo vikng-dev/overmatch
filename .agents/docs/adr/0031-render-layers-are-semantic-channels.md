@@ -109,7 +109,8 @@ Every shadow view inherits its LIGHT's `RenderLayers` — bevyengine/bevy#24797 
 shipped in Bevy 0.19.1. Before it, shadow views carried no mask, defaulted to layer 0, and silently
 dropped every caster off layer 0, which is precisely what made "hide it with a layer" un-shadow the
 thing. Until 0.19.1 the project carried a vendored backport in `bevy_pbr`; it retired with the
-upgrade, and with it the source tripwire that pinned the backport's shape.
+upgrade. `tests/bevy_shadow_view_render_layers.rs` guards upstream's shape in the linked
+`bevy_pbr`.
 
 The consequence to keep in mind is that **shadow correctness now depends on each LIGHT carrying the
 right mask**. A light with no profile is layer-0-only and will not shadow anything moved off

@@ -1,8 +1,8 @@
 # Upstream: shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast
 
-Status: **FIXED UPSTREAM — shipped in bevy 0.19.1; the vendored backport and its source tripwire
-(`tests/bevy_shadow_view_render_layers.rs`) are retired.** Kept as the mechanism record; the file
-references below describe the 0.19.0 backport as it was.
+Status: **FIXED UPSTREAM — shipped in bevy 0.19.1; the vendored backport is retired.**
+`tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape in the linked `bevy_pbr`.
+Kept as the mechanism record; the file references below describe the 0.19.0 backport as it was.
 Found: 2026-07-28, Overmatch, while putting meshes on non-zero render layers. Root-caused from the
 vendored source, not inferred; the main-world half of the contradiction is reproduced in-tree by
 `tests/bevy_shadow_view_render_layers.rs`.

@@ -35,7 +35,7 @@ use bevy::ecs::system::SystemParam;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::interpolation::timeline::InterpolationConfig;
 use lightyear::prelude::{
-    ControlledBy, InterpolationTimeline, LocalTimeline, NetworkTimeline, PingManager,
+    Client, ControlledBy, InterpolationTimeline, LocalTimeline, NetworkTimeline, PingManager,
     ReplicationCheckpointMap,
 };
 
@@ -260,10 +260,14 @@ fn record_frame(
         Option<&ConfirmedHistory<Position>>,
         Option<&ConfirmedHistory<LinearVelocity>>,
     )>,
-    // The client connection entity: the clock every hull (own included) actually renders on, the
-    // two link statistics the `min_delay` law consumes, and the delay in force. Matches nothing in
-    // the single-player or server compositions, so those rows simply omit the fields.
-    link: Query<(&InterpolationTimeline, &InterpolationConfig, &PingManager)>,
+    // The clock every hull (own included) actually renders on and the delay in force (both
+    // app-global resources), plus the client link's two statistics the `min_delay` law consumes.
+    // Absent in the single-player and server compositions, so those rows simply omit the fields.
+    (timeline, interp, pings): (
+        Option<Res<InterpolationTimeline>>,
+        Option<Res<InterpolationConfig>>,
+        Query<&PingManager, With<Client>>,
+    ),
 ) {
     // One camera pose for every tank row this frame (recorded after Propagate, so the third-person
     // orbit camera's `GlobalTransform` is final). `None` on a headless client → `cam`/`camq` omitted.
@@ -274,14 +278,17 @@ fn record_frame(
     // One connection state for every tank row this frame, the way `tick`/`conf` already repeat.
     // `itick` carries the overstep because headroom (`conft − itick`) is a sub-tick quantity —
     // the whole point of the measurement is how little of it is left.
-    let link = link.iter().next().map(|(timeline, config, pings)| {
-        (
-            f64::from(timeline.tick().0) + f64::from(timeline.overstep().to_f32()),
-            millis(pings.rtt()),
-            millis(pings.jitter()),
-            millis(config.min_delay),
-        )
-    });
+    let link = timeline
+        .zip(interp)
+        .zip(pings.iter().next())
+        .map(|((timeline, config), pings)| {
+            (
+                f64::from(timeline.tick().0) + f64::from(timeline.overstep().to_f32()),
+                millis(pings.rtt()),
+                millis(pings.jitter()),
+                millis(config.min_delay),
+            )
+        });
     for (entity, global, controlled) in roots.iter().take(frame_row_cap()) {
         let (_, rotation, translation) = global.to_scale_rotation_translation();
         let mut row = json!({

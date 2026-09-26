@@ -68,7 +68,7 @@ milestone. 0.19.1 has shipped and both backports are retired; the files stay as 
 | # | File | Target | Upstream fix | Our vendor entry |
 |---|------|--------|--------------|------------------|
 | 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the vendored `bevy_light` entry is gone; cascade count stays a live setting like `ShadowDistance` |
-| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport and its source tripwire are gone; `vendor/bevy_pbr-0.19.1-scalar-math` now carries only #14 |
+| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport is gone (`tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape); `vendor/bevy_pbr-0.19.1-scalar-math` carries only #14 |
 
 ## Cross-report unlocks — the things blocked on MORE THAN ONE fix
 

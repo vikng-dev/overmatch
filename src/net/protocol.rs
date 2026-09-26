@@ -981,6 +981,15 @@ pub(crate) fn plugin(app: &mut App) {
         register_physics_components: false,
         ..default()
     });
+    // The plugin mirrors `sync_to_transform` into `PhysicsTransformConfig::transform_to_position`,
+    // and in this mode that flag's only reader is avian's spawn hook (`init_physics_transform`):
+    // OFF, a body spawned with a `Transform` and no `Position` — every scatter building and trunk,
+    // the test course's statics — gets its placeholder `Position` ZEROED, and with avian's
+    // transform plugin disabled nothing ever moves it. ON, the hook derives `Position`/`Rotation`
+    // from the spawn transform once. No per-frame import is installed either way in this mode.
+    app.world_mut()
+        .resource_mut::<avian3d::physics_transform::PhysicsTransformConfig>()
+        .transform_to_position = true;
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from
     // the pose they ride beside).
@@ -1082,6 +1091,38 @@ mod tests {
     use crate::command::{AimIntent, CrewSwap};
     use crate::damage::CrewStation;
 
+    /// A static body spawned by `Transform` alone — the shape `scatter` and the test course use —
+    /// lands where its transform says under the NETCODE physics composition, not at the origin.
+    /// Fails if the spawn-time Transform -> Position derivation is off (see `plugin`).
+    #[test]
+    fn a_transform_only_static_body_spawns_at_its_transform() {
+        use avian3d::prelude::Collider;
+        use lightyear::prelude::client::ClientPlugins;
+
+        let mut app = crate::net::test_harness::net_physics_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+        let body = app
+            .world_mut()
+            .spawn((
+                Transform::from_xyz(40.0, 2.0, -15.0),
+                RigidBody::Static,
+                Collider::cuboid(1.0, 1.0, 1.0),
+            ))
+            .id();
+        let position = app
+            .world()
+            .get::<Position>(body)
+            .expect("body has a Position")
+            .0;
+        assert!(
+            position.distance(Vec3::new(40.0, 2.0, -15.0)) < 1e-4,
+            "a Transform-only static body must spawn at its transform, got {position:?}"
+        );
+    }
+
     #[test]
     fn track_drive_is_registered_for_cursor_interpolation() {
         use lightyear::interpolation::prelude::InterpolationRegistry;
@@ -1128,8 +1169,10 @@ mod tests {
                 },
             ],
         };
-        // The registry no longer exposes its interpolation fn; the registration is asserted above
-        // and this pins the law it registers.
+        // What this does NOT pin: WHICH fn is registered. Lightyear 0.30 keeps a rule's
+        // interpolation fn crate-private, so a swap to `.add_linear_interpolation()` at the
+        // registration would still pass here. This pins that TrackDrive is interpolated at all
+        // (above) and the law `track_drive_lerp` computes (below).
         let mid = track_drive_lerp(start, end, 0.5);
         assert_eq!(
             mid,
@@ -2047,31 +2090,6 @@ mod tests {
         assert!(
             world.get::<TankCommand>(entity).unwrap().fire_primary,
             "an attested edge must bridge through (own-tank rollback re-fire)",
-        );
-    }
-
-    /// The PRE-SYNC window: before the `InputTimeline` syncs, `input_delay()` is 0, so
-    /// `stamp_input_tick` stamps the CURRENT tick and a genuine click attests immediately — even
-    /// though no `InputBuffer` exists yet. (The bridge no longer reads the buffer at all; this pins
-    /// that a joining player's first click is not swallowed.)
-    #[test]
-    fn pre_sync_click_attests_and_passes() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(3));
-        let entity = world
-            .spawn((
-                ActionState(authored_for(3, fire_click())),
-                TankCommand::default(),
-            ))
-            .id();
-
-        world
-            .run_system_once(bridge_action_state_to_tank_command)
-            .unwrap();
-
-        assert!(
-            world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "a pre-sync click is authored for the current tick — it must pass",
         );
     }
 

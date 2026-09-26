@@ -5,9 +5,9 @@
 //!
 //! Pinned against lightyear 0.30, whose `InputBuffer` stores MATERIALIZED `Option` values (wire
 //! compression — `Compressed::SameAsPrecedent` — is re-derived at message-build time, never
-//! stored). The 0.28 buffer stored the compressed chain itself, which is what let an `Absent`
-//! anchor dead-end every read behind it and propagate through `pop`; that mechanism is gone, and
-//! the tests below that described it now pin what replaced it: a single-tick hole.
+//! stored). So an `Absent` entry is a single-tick hole: it neither dead-ends the reads behind it
+//! nor travels through `pop` (upstream issue #1559 describes the stored-chain buffer where it
+//! did; the record is `upstream/lightyear-absent-anchor-input-freeze.md`).
 
 use core::time::Duration;
 use std::collections::HashMap;
@@ -34,7 +34,8 @@ type Seq = NativeStateSequence<Cmd>;
 const TICK: Duration = Duration::from_nanos(15_625_000); // 64 Hz
 const REDUNDANCY: usize = 5; // lightyear InputConfig default
 const HISTORY_DEPTH: u32 = 20; // lightyear_inputs::HISTORY_DEPTH
-/// `Tick` is a WRAPPING id — keep every tick well away from 0.
+/// Tick arithmetic SATURATES at 0 (lightyear's `Tick` is monotonic) — keep every tick well away
+/// from it so a history-depth subtraction stays exact.
 const BASE: i32 = 1000;
 
 fn tk(t: i32) -> Tick {
@@ -308,9 +309,9 @@ fn a_fabricated_gap_fill_is_indistinguishable_from_a_held_trigger() {
 /// lightyear's server `update_action_state` skips the apply and the `ActionState` holds the previous
 /// command for that one tick — while every stored tick behind it resolves on its own.
 ///
-/// (In 0.28 the buffer stored the compressed chain, so a `SameAsPrecedent` tail behind an `Absent`
-/// dead-ended `get`, `get_last` and `get_predict` for the WHOLE tail and froze the server
-/// indefinitely — upstream issue #1559, "presses work, holds freeze". The record is
+/// (A buffer that stored the compressed chain would let a `SameAsPrecedent` tail behind an
+/// `Absent` dead-end every read for the WHOLE tail and freeze the server indefinitely — upstream
+/// issue #1559, "presses work, holds freeze"; record in
 /// `upstream/lightyear-absent-anchor-input-freeze.md`.)
 ///
 /// Attestation needs none of this: the held command names the tick it was authored for, so the
@@ -354,9 +355,8 @@ fn an_absent_entry_is_a_one_tick_hole() {
 }
 
 /// The hole does not travel. `pop` drops independent materialized values and repairs nothing, so
-/// popping through an `Absent` leaves the next tick exactly as stored — the 0.28 repair step that
-/// rewrote the new front with the popped `Absent` (and so carried the freeze forward one tick per
-/// server tick) is gone.
+/// popping through an `Absent` leaves the next tick exactly as stored — a front rewritten with
+/// the popped `Absent` would carry a freeze forward one tick per server tick.
 #[test]
 fn popping_through_an_absent_entry_does_not_move_it() {
     let pressed = ActionState(Cmd {

@@ -1603,8 +1603,8 @@ fn spawn_reconstructed_fire(
     commands: &mut Commands,
 ) {
     // An own echo arriving so late the belt-delta fallback already presented its round: one
-    // consumption, one bang — swallow the duplicate (matched by weapon slot and wrap-safe
-    // fire-tick order against the recorded reveal, so a future round can never match).
+    // consumption, one bang — swallow the duplicate (matched by weapon slot and signed fire-tick
+    // order against the recorded reveal, so a future round can never match).
     if let Ok(mut ledger) = own_ledgers.get_mut(shooter)
         && ledger.try_swallow_owed(event.weapon as usize, event.fire_tick.0)
     {
@@ -2380,9 +2380,9 @@ mod tests {
         assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
     }
 
-    /// A fire tick AHEAD of our current tick (only reachable via clock skew / a malicious or
-    /// wrapped tick, since the server fires at a tick <= its now and the local timeline leads the
-    /// server) clamps to 0, never rewinds the shell.
+    /// A fire tick AHEAD of our current tick (only reachable via clock skew or a malicious tick,
+    /// since the server fires at a tick <= its now and the local timeline leads the server) clamps
+    /// to 0, never rewinds the shell.
     #[test]
     fn future_fire_tick_clamps_to_zero() {
         assert_eq!(fire_catch_up_ticks(Tick(503), Tick(500)), Some(0));
@@ -2399,7 +2399,7 @@ mod tests {
         );
     }
 
-    /// A fire tick far in the past — a stale/lost `FireEvent`, or corrupt/wrapped nonsense off the wire
+    /// A fire tick far in the past — a stale/lost `FireEvent`, or corrupt nonsense off the wire
     /// — is REJECTED (no tracer, no loop over 10^6 steps), the same reject-off-the-wire discipline as
     /// the bore guard.
     #[test]
