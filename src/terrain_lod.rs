@@ -1246,7 +1246,9 @@ mod tests {
                 *tri = [tri[first], tri[(first + 1) % 3], tri[(first + 2) % 3]];
             };
             let mut theirs: Vec<[u32; 3]> = indices
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|tri| [tri[0], tri[1], tri[2]])
                 .collect();
             ours.iter_mut().for_each(&normalize);
@@ -2350,7 +2352,9 @@ mod tactical {
                     let positions: Vec<Vec3> =
                         vertices.iter().copied().map(Vec3::from_array).collect();
                     let tris: Vec<[u32; 3]> = indices
-                        .chunks_exact(3)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
                         .map(|tri| [tri[0], tri[1], tri[2]])
                         .collect();
                     // Bucket each triangle into the unit cells it covers. The tile-local grid

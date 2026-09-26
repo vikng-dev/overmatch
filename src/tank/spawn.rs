@@ -719,7 +719,9 @@ fn insert_ballistic_volumes(
                     .collect();
                 let triangles: Vec<[u32; 3]> = primitive
                     .indices
-                    .chunks_exact(3)
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
                     .map(|t| [t[0], t[1], t[2]])
                     .collect();
                 // Name the broken volume before Avian rejects an empty triangle list.

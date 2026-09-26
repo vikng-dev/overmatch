@@ -829,12 +829,12 @@ fn mirrored_mesh(source: &Mesh) -> Mesh {
     }
     match mesh.indices_mut() {
         Some(Indices::U16(indices)) => {
-            for tri in indices.chunks_exact_mut(3) {
+            for tri in indices.as_chunks_mut::<3>().0 {
                 tri.swap(1, 2);
             }
         }
         Some(Indices::U32(indices)) => {
-            for tri in indices.chunks_exact_mut(3) {
+            for tri in indices.as_chunks_mut::<3>().0 {
                 tri.swap(1, 2);
             }
         }
@@ -2508,7 +2508,7 @@ mod tests {
                 let mut worst: Option<(f32, [u32; 3])> = None;
                 let mut touching = 0usize;
                 let mut uv_degenerate = 0usize;
-                for tri in indices.chunks_exact(3) {
+                for tri in indices.as_chunks::<3>().0 {
                     if tri.iter().all(|&v| usable(v)) {
                         continue;
                     }

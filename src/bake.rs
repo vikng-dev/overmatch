@@ -461,7 +461,7 @@ pub(crate) fn manifold_gate(
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(primitive.indices.len() / 3);
     let mut out_of_range: Vec<String> = Vec::new();
     let mut degenerate: Vec<String> = Vec::new();
-    for (triangle, corners) in primitive.indices.chunks_exact(3).enumerate() {
+    for (triangle, corners) in primitive.indices.as_chunks::<3>().0.iter().enumerate() {
         let mut welded_corners = [0u32; 3];
         let mut resolved = true;
         for (slot, &corner) in welded_corners.iter_mut().zip(corners) {
@@ -2283,7 +2283,9 @@ mod tests {
 
         // Every face flipped: closed, but wound inward — the walk would read its entries as exits.
         let inverted: Vec<u32> = closed
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|face| [face[0], face[2], face[1]])
             .collect();
         let findings = gate("Inverted", &tetrahedron(inverted.clone()))

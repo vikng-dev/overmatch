@@ -28,7 +28,6 @@
 
 use std::time::Duration;
 
-use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use super::fuzz::{PROBE_TANK_AT, probe_world};

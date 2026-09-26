@@ -390,7 +390,7 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
     // triangles would be eaten by the shadow pass's back-face culling and the proxy would cast
     // nothing at all — a silent failure, and the exact one this prototype exists to avoid.
     if signed_volume(&positions, &indices) < 0.0 {
-        for tri in indices.chunks_exact_mut(3) {
+        for tri in indices.as_chunks_mut::<3>().0 {
             tri.swap(1, 2);
         }
     }
@@ -410,7 +410,9 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
 /// the triangles are wound outward.
 fn signed_volume(positions: &[[f32; 3]], indices: &[u32]) -> f32 {
     indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|tri| {
             let [a, b, c] = [0, 1, 2].map(|k| Vec3::from_array(positions[tri[k] as usize]));
             a.dot(b.cross(c))

@@ -2467,7 +2467,6 @@ mod march_tests {
         AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LayerMask,
         LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
     };
-    use bevy::prelude::*;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
