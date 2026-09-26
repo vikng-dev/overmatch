@@ -12,7 +12,9 @@ Supersedes, with the survivals named in §5:
 [[0027-element-grip-netcode]],
 [[0029-weapon-gate-is-tick-correlated-authority-state]] (the owner-prediction half),
 [[0030-servo-pose-is-owner-reconciled]],
-[[0032-unpredictable-authoritative-facts-adopt-unconditionally]].
+[[0032-unpredictable-authoritative-facts-adopt-unconditionally]];
+and the prediction-era clauses of [[0014-sim-view-split]], [[0021-fire-replication-architecture]],
+[[0022-input-attestation-not-detection]] and [[0025-belt-force-locomotion]].
 
 ## Ruling
 

@@ -87,11 +87,11 @@ need not be.
 `CoreCheckbox`/`CoreRadio`, **and zero uses of `Interaction`** — Bevy's own UI interaction
 component. The settings UI instead hand-rolls its pointer handling:
 
-- `src/settings/ui.rs:934` and `:999` read `window.physical_cursor_position()` directly;
-- `src/settings/ui.rs:970-971` and `:1531` document a hand-written slider `track_fraction`,
-  including a hand-managed physical-vs-logical pixel conversion the comments call out as a trap.
+- `settings::ui` reads `window.physical_cursor_position()` directly in two drag handlers;
+- `settings::ui`'s hand-written slider `track_fraction` documents a hand-managed
+  physical-vs-logical pixel conversion the comments call out as a trap.
 
-That is a slider drag interaction implemented from raw cursor coordinates in a ~1 900-line file.
+That is a slider drag interaction implemented from raw cursor coordinates in a ~2 700-line file.
 Note this **contradicts a widely-repeated claim that "game UI stays bevy_ui + core_widgets"** — that
 was the intent; the tree does not currently reflect it. Flagged, not acted on (§C.7): whether to
 adopt the widget crate is an owner decision, because it is an interaction-behaviour change, not a
@@ -289,7 +289,7 @@ simplification.** Treat every type named in `WIRE_SURFACE`, and every field reac
 frozen for this brief's purposes. "Tidying" a replicated struct's field order is a protocol change
 wearing a refactor's clothes.
 
-### B4. `tests/` is eleven gates and tripwires — touch none of them
+### B4. `tests/` is thirteen gates and tripwires — touch none of them
 
 Several look redundant or tautological *on purpose*. Deleting one removes an alarm, not a test.
 
@@ -306,6 +306,8 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `bevy_shadow_view_render_layers.rs` | **tripwire** — pins the vendored `bevy_pbr` shadow-layer patch (upstream #24797, lands 0.19.1) |
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
 | `net_fire_release.rs` | mechanism proof for the MG fire-release leak |
+| `net_sync_margin.rs` | **tripwire** — pins the lightyear sync-margin term placement `net::sync_margin`'s derived laws re-size |
+| `shape_cast_reachability.rs` | **inverted tripwire** — fires when the first shape-cast call site appears in `src/` (parry GJK cast tolerance) |
 
 A tripwire's job is to **fail on a dependency bump**, telling you a local workaround is now
 retirable — or still needed. `determinism_deps.rs` is the clearest case: it asserts something

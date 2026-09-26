@@ -736,7 +736,7 @@ reductions.
 
 The workspace-wide `glam/scalar-math` decision in
 [[0028-cross-architecture-bit-determinism-via-glam-scalar-math]] closes the class for the current
-pinned simulation graph. Its validating pair at `codex-scalarmath` commit `020f9fd` was MEASURED
+pinned simulation graph. Its validating pair at commit `020f9fd` was MEASURED
 startup `IDENTICAL` for all 1,345 named raw values and tick payloads `IDENTICAL` for all 3,072
 ticks across all seven seams. The full probe including dump took MEASURED 18.2 s with scalar math
 vs 20.3 s with SIMD, a difference within measurement noise.

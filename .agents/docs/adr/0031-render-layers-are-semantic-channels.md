@@ -1,6 +1,6 @@
 # Render layers are semantic channels
 
-> **Status: accepted; landed local, playtest pending. View-layer only — no wire surface, no
+> **Status: accepted; shipped in v0.3.0. View-layer only — no wire surface, no
 > `PROTOCOL_REV` movement.**
 
 `RenderLayers` carries stable rendering DOMAINS and nothing else. Three semantic channels

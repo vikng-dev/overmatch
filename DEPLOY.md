@@ -125,8 +125,16 @@ gh run download <run-id> -n overmatch-server-x86_64-linux --repo vikng-dev/overm
 # 2. Ship + swap
 scp -i ~/.ssh/do-vikng-dev overmatch-server.tar.gz root@157.245.48.161:/opt/
 ssh -i ~/.ssh/do-vikng-dev root@157.245.48.161 '
-  cd /opt && tar xzf overmatch-server.tar.gz &&
-  systemctl restart overmatch-server &&
+  set -e; cd /opt
+  # Same clean-install swap the release workflow does: never extract over the live tree, or files
+  # deleted/renamed since the last release linger on the droplet.
+  rm -rf overmatch-server.staging && mkdir overmatch-server.staging
+  tar xzf overmatch-server.tar.gz -C overmatch-server.staging
+  rm -rf overmatch-server.old
+  if [ -d overmatch-server ]; then mv overmatch-server overmatch-server.old; fi
+  mv overmatch-server.staging/overmatch-server overmatch-server
+  rm -rf overmatch-server.staging overmatch-server.old
+  systemctl restart overmatch-server
   systemctl status overmatch-server --no-pager | head -5'
 ```
 

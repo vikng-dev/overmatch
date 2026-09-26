@@ -79,9 +79,10 @@ env:
 
 jobs:
   # The DRAFT GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when
-  # it is launched from a tag ref. The client/macOS jobs `needs` this, so on a dispatch they skip
-  # with it; the server job runs regardless (see its `if`). Every upload job below attaches to this
-  # draft; `publish-release` un-drafts it once the droplet runs this build.
+  # it is launched from a tag ref. The client and server build jobs `needs` this with `always()`,
+  # so they wait for it on a tag and still run on a tag-less dispatch (see their `if`); `build-macos`
+  # runs only on a dispatch. Every upload job below attaches to this draft; `publish-release`
+  # un-drafts it once the droplet runs this build.
   create-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -759,8 +760,9 @@ jobs:
   # The invariant's hinge: the draft becomes visible only here, downstream of a live droplet running
   # this run's server artifact, of every client archive being attached, AND of both smoke lanes
   # having connected a freshly extracted client to a server. Any failure upstream leaves the draft
-  # unpublished, so the latest visible Release still matches the droplet — and cannot be one whose
-  # client never booted.
+  # unpublished, so no visible Release is ever ahead of the droplet — and none can be one whose
+  # client never booted. (The droplet CAN be ahead of it: a deploy that succeeds before a smoke
+  # failure is not rolled back — see the header.)
   #
   # `sign-macos` is deliberately NOT a need: it never runs on a tag, and a skipped need would skip
   # this job with it. Every job named below runs on every tag push, so the plain `if` is enough —
