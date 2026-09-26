@@ -289,7 +289,7 @@ simplification.** Treat every type named in `WIRE_SURFACE`, and every field reac
 frozen for this brief's purposes. "Tidying" a replicated struct's field order is a protocol change
 wearing a refactor's clothes.
 
-### B4. `tests/` is thirteen gates and tripwires — touch none of them
+### B4. `tests/` is twelve gates and tripwires — touch none of them
 
 Several look redundant or tautological *on purpose*. Deleting one removes an alarm, not a test.
 
@@ -303,7 +303,6 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `determinism_deps.rs` | **tripwire** — fails if a dep bump splits `glam` and silently drops the `scalar-math` pin |
 | `net_input_buffer_wrap.rs` | **tripwire** — pins lightyear 0.28's non-saturating `Tick` subtraction behind the connect-hang guard |
 | `net_interp_delay.rs` | **tripwire** — pins the `send_interval = 0` interpolation-delay collapse |
-| `bevy_shadow_view_render_layers.rs` | **tripwire** — pins the vendored `bevy_pbr` shadow-layer patch (upstream #24797, lands 0.19.1) |
 | `bevy_ktx2_uastc_fallback.rs` | **tripwire** — pins the KTX2/UASTC fallback slice panic |
 | `net_fire_release.rs` | mechanism proof for the MG fire-release leak |
 | `net_sync_margin.rs` | **tripwire** — pins the lightyear sync-margin term placement `net::sync_margin`'s derived laws re-size |
@@ -319,10 +318,10 @@ in `src/`. If a tripwire looks wrong, report it (§C.7); never edit it.
 
 ### B5. `vendor/` is off limits
 
-Three patched crates — `bevy_reflect`, `bevy_pbr`, `bevy_light`, all 0.19.0 — wired through
-`[patch.crates-io]`. Every deviation from pristine upstream is marked `// OVERMATCH PATCH:` (11
-such marks in `bevy_pbr` alone) so the diff is self-describing, and each crate carries an
-`OVERMATCH_PATCH.md`. **Do not format, lint, tidy, de-duplicate or comment-prune anything under
+Two patched crates — `bevy_reflect` and `bevy_pbr`, both 0.19.1 — wired through
+`[patch.crates-io]`. Every deviation from pristine upstream is marked `// OVERMATCH PATCH:` so the
+diff is self-describing, and each crate carries an `OVERMATCH_PATCH.md` naming its deviation and
+its retirement condition. **Do not format, lint, tidy, de-duplicate or comment-prune anything under
 `vendor/`.** Its entire value is that it diffs cleanly against upstream; any cosmetic change
 destroys exactly that.
 

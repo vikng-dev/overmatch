@@ -48,11 +48,11 @@
 //!
 //! # Shadows depend on the LIGHT's mask now
 //!
-//! `vendor/bevy_pbr-0.19.0-scalar-math` is patched so that every shadow view inherits its LIGHT's
-//! `RenderLayers` (a backport of bevyengine/bevy#24797, milestone 0.19.1 — see that crate's
-//! `OVERMATCH_PATCH.md`). Before the patch, shadow views carried no mask at all, defaulted to layer
-//! 0, and silently dropped every caster off layer 0. After it, a light with NO mask is layer-0-only
-//! and will not shadow anything this module has moved off `BattlefieldWorld`.
+//! bevy_pbr 0.19.1 gives every shadow view its LIGHT's `RenderLayers` (bevyengine/bevy#24797; record
+//! in `upstream/bevy-shadow-view-ignores-light-render-layers.md`). Before it, shadow views carried
+//! no mask at all, defaulted to layer 0, and silently dropped every caster off layer 0. Now a light
+//! with NO mask is layer-0-only and will not shadow anything this module has moved off
+//! `BattlefieldWorld`.
 //!
 //! That is why [`LightProfile`] exists and why the sun's profile covers all three channels: it is
 //! now the single point of failure for the local tank's shadow AND for the track ribbon's. Both are

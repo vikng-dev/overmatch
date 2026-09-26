@@ -165,13 +165,13 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
 const ALLOWED_CITATIONS: &[(&str, &str, &str)] = &[
     (
         "src/track/shadow_proxy.rs",
-        "vendor/bevy_pbr-0.19.0-scalar-math/src/render/light.rs",
+        "vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs",
         "The alpha-mode/`MAY_DISCARD` match arm, cited alongside its symbol. Vendored third-party \
-         code moves only when we re-vendor, and `35f9ff3` re-pinned this one by line on purpose.",
+         code moves only when we re-vendor, and each re-vendor re-pins this one by line on purpose.",
     ),
     (
         "src/track/shadow_proxy.rs",
-        "vendor/bevy_pbr-0.19.0-scalar-math/src/render/pbr_prepass_functions.wgsl",
+        "vendor/bevy_pbr-0.19.1-scalar-math/src/render/pbr_prepass_functions.wgsl",
         "A WGSL fragment-shader body. There is no item path to cite in a shader — the line IS the \
          only handle.",
     ),

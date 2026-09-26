@@ -1,6 +1,7 @@
 # Upstream: `check_dir_light_mesh_visibility` panics when cascade count grows at runtime
 
-Status: **DO NOT FILE — already fixed upstream.** Kept as the mechanism record + vendored-patch rationale.
+Status: **FIXED UPSTREAM — shipped in bevy 0.19.1; `vendor/bevy_light-0.19.0-cascade-count/` is
+retired.** Kept as the mechanism record; the vendor references below describe the backport as it was.
 Found: 2026-07-26, Overmatch field crash (F6 shadow knob). Root-caused from vendored source, not inferred.
 Verified + extended: 2026-07-27 by a research agent with a minimal repro (six workaround modes, worst-case
 thread-starvation pattern, 40 grow transitions per run) and a real-game validation.

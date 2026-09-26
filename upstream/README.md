@@ -39,15 +39,15 @@ Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-rev
 in exposing #11 is an inference from the source path and the zero-clear fixed-delay A/B recorded in #11.
 We have pinned it. Reconsider adaptive delay only when all three are resolved upstream.
 
-## Fixed upstream, unreleased — mechanism records behind the vendored crates
+## Fixed upstream, released in bevy 0.19.1 — mechanism records of retired vendor patches
 
 Both were root-caused here from vendored source, then found already fixed in the **0.19.1**
-milestone that crates.io has not shipped. Kept as the mechanism record + vendored-patch rationale.
+milestone. 0.19.1 has shipped and both backports are retired; the files stay as mechanism records.
 
 | # | File | Target | Upstream fix | Our vendor entry |
 |---|------|--------|--------------|------------------|
-| 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | `vendor/bevy_light-0.19.0-cascade-count` — drop when 0.19.1 ships. With it, cascade count is a live setting like `ShadowDistance` |
-| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | `vendor/bevy_pbr-0.19.0-scalar-math` (shared with #14) — the main-world half is pinned in-tree by `tests/bevy_shadow_view_render_layers.rs` |
+| 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the vendored `bevy_light` entry is gone; cascade count stays a live setting like `ShadowDistance` |
+| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport and its source tripwire are gone; `vendor/bevy_pbr-0.19.1-scalar-math` now carries only #14 |
 
 ## Cross-report unlocks — the things blocked on MORE THAN ONE fix
 
@@ -82,9 +82,9 @@ milestone that crates.io has not shipped. Kept as the mechanism record + vendore
   1 cm / 0.01 rad reference) — needs #2 AND #8.** ADR-0015 calls them "a ratchet, not a setting" and names
   exactly those two conditions ("contact-restore fix, upstream constraint ordering"). #2 is banked; #8 is
   the open half.
-- **Retiring `vendor/bevy_pbr-0.19.0-scalar-math` — needs #14 AND #17.** One vendored crate carries two
-  unrelated patches: the `MeshUniform` allocation fix (#14, still ours to file) and the shadow-view
-  `RenderLayers` backport (#17, already merged upstream). The bevy 0.19.1 release retires only half of it.
+- **Retiring `vendor/bevy_pbr-0.19.1-scalar-math` — needs #14.** Bevy 0.19.1 shipped #17's fix, so
+  the shadow-view backport is gone; the vendored crate now carries only the `MeshUniform`
+  allocation fix (#14, still ours to file).
 
 Housekeeping: when an upstream fix ships, the matching workaround's removal condition is stated
 in each file. #12 carries an automatic tripwire — `tests/bevy_ktx2_uastc_fallback.rs` FAILS when
