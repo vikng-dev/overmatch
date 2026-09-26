@@ -1,7 +1,8 @@
 # 0037 — One authoritative timeline, and view overlays
 
 Status: ACCEPTED 2026-08-15. Ratified by feel on the `exp/unpredicted-drive` arc and by
-measurement (`.agents/scratch/one-timeline-state-of-play-2026-08-14.md`, the decision record;
+measurement (`.agents/scratch/one-timeline-state-of-play-2026-08-14.md`, the decision record, retired
+from the tree — `git show 9d31272:.agents/scratch/one-timeline-state-of-play-2026-08-14.md`;
 `.agents/scratch/error-smoothing-legacy-hunt-2026-08-14.md`, the dissolution inventory).
 Shipped as declared `PROTOCOL_REV = 27`.
 

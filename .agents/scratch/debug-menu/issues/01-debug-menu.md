@@ -23,3 +23,14 @@ One menu to toggle each visualisation independently (and ideally tweak a few liv
 
 - Keep it dev-only (stripped from release, like the current debug module).
 - Don't block current driving work — this is a quality-of-life consolidation for when the debug surface is larger.
+
+## Comments
+
+**2026-09-26 — surface drift since filing.** The "current debug surface" above predates the
+`dev_tools` feature. As of `src/debug.rs` today: the debug helpers are gated on `dev_tools`
+(default-on, release builds included), not `debug_assertions`; the always-on draws are gone —
+one master switch `ShowGizmos` (key `G`, off by default) drives both our belt-contact arrows
+(`draw_wheel_forces`, which replaced `draw_suspension_forces`) and Avian's collider gizmos; `X`
+(x-ray) and `F` (detach camera) remain separate keys; a ring-buffered impact marker rides the same
+switch. `bevy_egui` is now a dependency behind `dev_ui` (the sandbox bins). The goal — one menu
+with per-visualisation toggles instead of one master key — still stands.

@@ -21,7 +21,8 @@
 //! which would make the delay RTT-independent and retire the `rtt/2` term). A failure here is NOT
 //! a regression — it is the signal to re-derive the LAW in `src/net/interp_delay.rs` (derivation:
 //! `.agents/scratch/interp-delay-derivation-2026-08-14.md`) and to revisit the parked upstream
-//! filing (`.agents/scratch/wave-a-adoption-memo.md`, "lightyear interpolation delay" section),
+//! filing (`git show 90ba478^:.agents/scratch/wave-a-adoption-memo.md`, "lightyear interpolation
+//! delay" section),
 //! which this degenerate is the evidence for.
 //!
 //! Direct `lightyear_sync`/`lightyear_core` dev-dependencies (same locked 0.28.0 the facade
