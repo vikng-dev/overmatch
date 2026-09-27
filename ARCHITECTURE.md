@@ -55,8 +55,10 @@ constructor. Loaded assets may delay admission or view attachment; they may not 
 state to appear late on an already-replicated entity.
 
 The desired content seam is a validated, spawn-ready `TankBlueprint`. The simulation consumes that
-plain data. Runtime GLB extraction is transitional; an offline bake and content fingerprint are the
-target described by ADR-0014.
+plain data, parsed at boot from the certified sim artifact `<id>.sim.glb` that the offline bake
+produces (ADR-0035) and sha256-checked against `<id>.lod.json` before the bake reads it. What is
+still target (ADR-0014): a versioned plain-data blueprint, and a content fingerprint the handshake
+compares.
 
 ### Determinism and schedules
 
@@ -240,7 +242,7 @@ evidence documents and link them briefly when the implementation still depends o
 | State | Debt | Required evidence for repayment |
 |---|---|---|
 | **OPEN — correctness** | `net::rig::attach_replicated_rig` waits for replicated `Position`/`Rotation`, then calls the explicitly exceptional `attach_replicated_tank_body` on an existing `Remote` root. Construction is asset-independent and lands in one flush, but sim state is still attached after root replication. | Replace the replicated shell with a source-verified spawn-intent/acknowledgment design that constructs sim state before ordinary component replication can expose the entity. Pin split arrival, initial connection, and first-physics-tick behavior in a real client/server lifecycle test. |
-| **OPEN — content seam** | `TankBlueprint` removes Bevy asset readiness from simulation construction, but geometry is still extracted from the runtime GLB and the blueprint is neither versioned nor fingerprinted. | Server boots and simulates with the GLB absent; content validation happens before Battle admission; client and server compare a content fingerprint. |
+| **OPEN — content seam** | `TankBlueprint` removes Bevy asset readiness from simulation construction and is parsed at boot from the certified sim artifact `<id>.sim.glb` (ADR-0035), sha256-checked against `<id>.lod.json`; the server no longer opens the view GLB. But the blueprint is not a versioned plain-data format, and the tank content is not in the handshake fingerprint (`protocol_id` folds only the map digest). | Content validation happens before Battle admission; client and server compare a tank-content fingerprint at the handshake; the blueprint is versioned plain data. |
 | **OPEN — dependency closure** | The dedicated server is headless at runtime but still compiles Bevy rendering/window dependencies through the shared package. | A targeted server dependency report excludes render, WGPU, and Winit, and a headless Battle test runs the actual server composition. |
 | **OPEN — Battle identity** | `ShotId` is unique within the current connection-scoped Battle, but has no Battle epoch. A connection therefore may not carry reusable combatant/tick identities across multiple Battles. | Before one connection can survive Garage and enter another Battle, add an authority-issued Battle epoch to shot identity and pin cross-Battle damage-receipt deduplication. |
 | **OPEN — aggregate network budget** | Automatic shot visuals have a bounded application admission rate, but Lightyear's whole-link bandwidth limiter is disabled and no representative replication/input/control baseline exists. Channel separation is not a scheduler reservation. | Measure the full per-client traffic mix under representative movement, combat, loss, and 30-player fan-out; then choose and enforce a quota with consequence/replication priorities, reliable-age instrumentation, and real-UDP overload tests. |
@@ -274,8 +276,8 @@ repository gates before commit:
 
 ```text
 cargo fmt --all --check
-cargo clippy --profile ci --locked --all-targets -- -D warnings
-cargo test --profile ci --locked
+cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings
+cargo test --locked
 ```
 
 ## Cargo workspace extraction gates

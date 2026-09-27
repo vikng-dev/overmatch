@@ -78,11 +78,9 @@
 //! `set_visible()`s what it saw, so a caster no camera draws does survive extraction — the bug was
 //! only ever in `queue_shadows`.
 //!
-//! It is fixed. `vendor/bevy_pbr-0.19.0-scalar-math` now copies the LIGHT's `RenderLayers` onto all
-//! three kinds of shadow view (a backport of bevyengine/bevy#24797, milestone 0.19.1 — see that
-//! crate's `OVERMATCH_PATCH.md` and `tests/bevy_shadow_view_render_layers.rs`, which fails if a
-//! vendor refresh drops it). **So shadow correctness now depends on each LIGHT carrying the right
-//! mask**: the sun declares `LightProfile::BattlefieldSun`, which covers this ribbon's channel, and
+//! It is fixed. bevy_pbr 0.19.1 copies the LIGHT's `RenderLayers` onto every kind of shadow view
+//! (bevyengine/bevy#24797; record in `upstream/bevy-shadow-view-ignores-light-render-layers.md`).
+//! **So shadow correctness now depends on each LIGHT carrying the right mask**: the sun declares `LightProfile::BattlefieldSun`, which covers this ribbon's channel, and
 //! `render_policy`'s tests pin that the sun reaches it and that no camera does.
 //!
 //! The second blocker was local and is also gone: `sight` used to run a per-frame sweep that
@@ -294,7 +292,7 @@ impl Section {
 /// The ribbon is hidden by its [`crate::render_policy::VisualScope::SHADOW_PROXY`] scope, not by
 /// its material, so the material's only job is to stay out of the way — and opaque is the shape
 /// that does that best. `AlphaMode::Opaque` sets no `MeshPipelineKey::MAY_DISCARD` on the shadow
-/// item (`vendor/bevy_pbr-0.19.0-scalar-math/src/render/light.rs:2461-2468`), so the shadow draw
+/// item (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs:2474-2481`), so the shadow draw
 /// takes the cheapest `is_depth_only` path there is and runs no fragment shader at all.
 ///
 /// # The trick this retires
@@ -390,7 +388,7 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
     // triangles would be eaten by the shadow pass's back-face culling and the proxy would cast
     // nothing at all — a silent failure, and the exact one this prototype exists to avoid.
     if signed_volume(&positions, &indices) < 0.0 {
-        for tri in indices.chunks_exact_mut(3) {
+        for tri in indices.as_chunks_mut::<3>().0 {
             tri.swap(1, 2);
         }
     }
@@ -410,7 +408,9 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
 /// the triangles are wound outward.
 fn signed_volume(positions: &[[f32; 3]], indices: &[u32]) -> f32 {
     indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|tri| {
             let [a, b, c] = [0, 1, 2].map(|k| Vec3::from_array(positions[tri[k] as usize]));
             a.dot(b.cross(c))
@@ -571,10 +571,10 @@ mod tests {
     }
 
     /// The alpha modes whose SHADOW item bevy tags with `MeshPipelineKey::MAY_DISCARD` — copied by
-    /// hand from `vendor/bevy_pbr-0.19.0-scalar-math/src/render/light.rs:2461`, the only place that
+    /// hand from `vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs:2474`, the only place that
     /// decides it. A material in this set has its shadow draw routed through the material's PREPASS
     /// fragment shader, and `prepass_alpha_discard`
-    /// (`vendor/bevy_pbr-0.19.0-scalar-math/src/render/pbr_prepass_functions.wgsl:76`) discards
+    /// (`vendor/bevy_pbr-0.19.1-scalar-math/src/render/pbr_prepass_functions.wgsl:76`) discards
     /// anything whose alpha is under `PREMULTIPLIED_ALPHA_CUTOFF` = 0.05. So a fully transparent
     /// material in this set casts NOTHING.
     ///

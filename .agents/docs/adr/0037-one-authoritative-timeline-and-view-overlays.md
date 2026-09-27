@@ -1,7 +1,8 @@
 # 0037 — One authoritative timeline, and view overlays
 
 Status: ACCEPTED 2026-08-15. Ratified by feel on the `exp/unpredicted-drive` arc and by
-measurement (`.agents/scratch/one-timeline-state-of-play-2026-08-14.md`, the decision record;
+measurement (`.agents/scratch/one-timeline-state-of-play-2026-08-14.md`, the decision record, retired
+from the tree — `git show 9d31272:.agents/scratch/one-timeline-state-of-play-2026-08-14.md`;
 `.agents/scratch/error-smoothing-legacy-hunt-2026-08-14.md`, the dissolution inventory).
 Shipped as declared `PROTOCOL_REV = 27`.
 
@@ -11,7 +12,9 @@ Supersedes, with the survivals named in §5:
 [[0027-element-grip-netcode]],
 [[0029-weapon-gate-is-tick-correlated-authority-state]] (the owner-prediction half),
 [[0030-servo-pose-is-owner-reconciled]],
-[[0032-unpredictable-authoritative-facts-adopt-unconditionally]].
+[[0032-unpredictable-authoritative-facts-adopt-unconditionally]];
+and the prediction-era clauses of [[0014-sim-view-split]], [[0021-fire-replication-architecture]],
+[[0022-input-attestation-not-detection]] and [[0025-belt-force-locomotion]].
 
 ## Ruling
 

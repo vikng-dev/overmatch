@@ -4,11 +4,17 @@
 //! # The estimator (NetEQ's relative-arrival-delay form)
 //!
 //! Every received transport packet is tick-stamped by its sender (`PacketReceived { remote_tick }`,
-//! `lightyear_transport` plugin.rs) — 64 samples/s of the actual replication stream, where the ping
-//! path samples 10/s, assumes a symmetric Gaussian, and CLAMPS outliers (`lightyear` ping
-//! estimator.rs) — the exact samples a dejitter sizer must not discard. Per packet the estimator
-//! records the relative arrival delay `d_i = arrival_instant − remote_tick × tick` (epoch-anchored;
-//! only differences of `d_i` carry meaning) and maintains:
+//! `lightyear_transport` plugin.rs). The estimator samples the FIRST packet to bring each new remote
+//! tick — 64 samples/s of the actual replication stream, where the ping path samples 10/s, assumes
+//! a symmetric Gaussian, and CLAMPS outliers (`lightyear` ping estimator.rs) — the exact samples a
+//! dejitter sizer must not discard. One sample per TICK, not per packet: every constant below
+//! ([`quantile_p`], [`ring_cap`], the warmup floor) is derived per tick, and the transport's packets
+//! per tick is not ours to fix (MEASURED on the scripted 80/10 ms loopback run: ~1.24 under
+//! lightyear 0.28, ~5 under 0.30 — per-packet sampling shrank the ring's 60 s retention to ~13 s).
+//! A packet that brings no new tick carries content already superseded, so it is not a sample.
+//! Per sample the estimator records the relative arrival delay
+//! `d_i = arrival_instant − remote_tick × tick` (epoch-anchored; only differences of `d_i` carry
+//! meaning) and maintains:
 //!
 //! - `min{d_i}` over the [`SPIKE_WINDOW`] — the fastest recent packet, the anchor that absorbs
 //!   path shifts and clock skew (NetEQ's ~2 s spike window precedent; tracks the measured 0.52 s
@@ -74,7 +80,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
 use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
 use lightyear::prelude::client::InputDelayConfig;
-use lightyear::prelude::{InputTimelineConfig, Interpolated, IsSynced, SyncConfig, SyncSystems};
+use lightyear::prelude::{InputTimelineConfig, Interpolated, SyncConfig, SyncSystems};
 use lightyear_transport::plugin::PacketReceived;
 
 use super::protocol::NetTank;
@@ -182,18 +188,18 @@ impl ArrivalStats {
     }
 }
 
-/// The stream-measured arrival-delay estimator. Fed by [`record_packet_arrival`] per received
-/// packet; digested once per frame into [`ArrivalStats`].
+/// The stream-measured arrival-delay estimator. Fed by [`record_packet_arrival`] once per new
+/// remote tick (see the module doc); digested once per frame into [`ArrivalStats`].
 #[derive(Resource, Debug, Default)]
 pub(super) struct ArrivalDelay {
-    /// First-sample anchor `(arrival_secs, remote_tick)`; every `d_i` is relative to it, so tick
-    /// wrap and the meaningless absolute offset both cancel.
+    /// First-sample anchor `(arrival_secs, remote_tick)`; every `d_i` is relative to it, so the
+    /// meaningless absolute offset between the two clocks cancels.
     epoch: Option<(f64, Tick)>,
     /// `(arrival_secs, d_i)` pruned to [`SPIKE_WINDOW`] — the min anchor.
     window: VecDeque<(f64, f64)>,
     /// `d_i` eviction ring of [`ring_cap`] samples — the quantile distribution.
     ring: VecDeque<f64>,
-    /// Newest remote tick seen on any packet (wrapping max) — the "server has simulated through
+    /// Newest remote tick seen on any packet (numeric max) — the "server has simulated through
     /// here" bound `net::fire_presentation`'s heal deadlines read.
     newest_remote: Option<Tick>,
     samples: u64,
@@ -203,6 +209,13 @@ pub(super) struct ArrivalDelay {
 
 impl ArrivalDelay {
     fn record(&mut self, arrival_secs: f64, remote_tick: Tick, tick_secs: f64) {
+        // One sample per new remote tick: a packet that advances nothing is not a sample.
+        if self
+            .newest_remote
+            .is_some_and(|newest| remote_tick - newest <= 0)
+        {
+            return;
+        }
         let (epoch_secs, epoch_tick) = *self.epoch.get_or_insert((arrival_secs, remote_tick));
         let d = (arrival_secs - epoch_secs) - f64::from(remote_tick - epoch_tick) * tick_secs;
         self.window.push_back((arrival_secs, d));
@@ -214,12 +227,7 @@ impl ArrivalDelay {
         if self.ring.len() > ring_cap() {
             self.ring.pop_front();
         }
-        if self
-            .newest_remote
-            .is_none_or(|newest| remote_tick - newest > 0)
-        {
-            self.newest_remote = Some(remote_tick);
-        }
+        self.newest_remote = Some(remote_tick);
         self.samples += 1;
     }
 
@@ -293,7 +301,7 @@ impl ArrivalDelay {
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
 /// ping estimator never reads. Samples enter ONLY while BOTH hold: `AppState::Playing` is active
-/// AND an `IsSynced<InterpolationTimeline>` entity exists — connect/loading-phase arrivals carry
+/// AND the `InterpolationTimeline` resource reports synced — connect/loading-phase arrivals carry
 /// client load stalls, not path delay, and each one evicted at ring capacity swings the delay law
 /// into a resync.
 fn record_packet_arrival(
@@ -301,10 +309,11 @@ fn record_packet_arrival(
     time: Res<Time<Real>>,
     tick: Res<TickDuration>,
     state: Res<State<AppState>>,
-    synced: Query<(), With<IsSynced<InterpolationTimeline>>>,
+    timeline: Option<Res<InterpolationTimeline>>,
     mut estimator: ResMut<ArrivalDelay>,
 ) {
-    if *state.get() != AppState::Playing || synced.is_empty() {
+    let synced = timeline.is_some_and(|timeline| timeline.is_synced());
+    if *state.get() != AppState::Playing || !synced {
         return;
     }
     estimator.record(
@@ -467,7 +476,7 @@ fn derive_input_margins(
             Without<ChildOf>,
         ),
     >,
-    mut clients: Query<&mut InputTimelineConfig>,
+    config: Option<ResMut<InputTimelineConfig>>,
     mut armed: Local<bool>,
     mut written: Local<Option<(u8, f32, f32)>>,
     mut logged: Local<Option<Duration>>,
@@ -483,14 +492,14 @@ fn derive_input_margins(
         *armed = true;
         info!("net: input sync margins ARMED derived — own hull rides the server stream");
     }
-    for mut config in &mut clients {
+    if let Some(mut config) = config {
         let sync = match fixed {
             Some(margin) => fixed_input_sync(base.sync, margin, tick.0),
             None => derived_input_sync(base.sync, &estimator.stats, tick.0),
         };
         let key = (sync.jitter_multiple, sync.jitter_margin, sync.error_margin);
         if *written == Some(key) {
-            continue;
+            return;
         }
         let coverage = estimator.stats.coverage();
         if fixed.is_none() && logged.is_none_or(|last| last.abs_diff(coverage) >= LOG_STEP) {
@@ -514,7 +523,7 @@ mod tests {
     use bevy::prelude::{App, Real, State, Time};
     use lightyear::core::tick::{Tick, TickDuration};
     use lightyear::interpolation::timeline::InterpolationTimeline;
-    use lightyear::prelude::{IsSynced, SyncConfig};
+    use lightyear::prelude::{SyncConfig, TimelineSync};
     use lightyear_transport::plugin::PacketReceived;
 
     use super::{
@@ -668,7 +677,30 @@ mod tests {
         );
     }
 
-    /// THE RECORDING GATE IS Playing ∧ IsSynced<InterpolationTimeline>: an arrival while either
+    /// ONE SAMPLE PER TICK: the ring and quantile are derived per tick, so a tick the transport
+    /// splits across several packets samples once (its first arrival), and a late packet whose
+    /// tick is already covered samples not at all. Mutant: drop the early return in `record` —
+    /// the repeat and stale packets record and the count reds.
+    #[test]
+    fn a_tick_samples_once_however_many_packets_carry_it() {
+        let mut estimator = ArrivalDelay::default();
+        // Tick 1000 in three packets, tick 1001 in two, then a reordered straggler for 1000.
+        for (at, tick) in [
+            (0.000, 1_000),
+            (0.001, 1_000),
+            (0.002, 1_000),
+            (0.016, 1_001),
+            (0.017, 1_001),
+            (0.030, 1_000),
+        ] {
+            estimator.record(at, Tick(tick), TICK_SECS);
+        }
+        assert_eq!(estimator.samples, 2, "two ticks, two samples");
+        assert_eq!(estimator.ring.len(), 2);
+        assert_eq!(estimator.newest_remote, Some(Tick(1_001)));
+    }
+
+    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline: an arrival while either
     /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
     /// `record_packet_arrival` (or either conjunct) — the matching pre-gate trigger records and
     /// its zero-count assertion reds; the final trigger pins that the gated path still records.
@@ -701,8 +733,9 @@ mod tests {
             "playing without a synced interpolation timeline never records"
         );
         app.insert_resource(State::new(AppState::Loading));
-        app.world_mut()
-            .spawn(IsSynced::<InterpolationTimeline>::default());
+        let mut timeline = InterpolationTimeline::default();
+        timeline.set_synced(true);
+        app.insert_resource(timeline);
         assert_eq!(
             arrive(&mut app, 1_002),
             0,

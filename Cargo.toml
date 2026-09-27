@@ -18,7 +18,10 @@ avian3d = { version = "0.7", features = ["serialize"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = "0.4.45"
-bincode = { version = "2.0.1", features = ["serde"] }
+# Lightyear 0.30's message serializer (`lightyear_serde`'s default), named directly only by
+# `net::shot_transport`'s batch wire-size bound, which must measure a batch in the exact encoding the
+# wire carries. Already in the tree through lightyear (same locked version).
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 ron = "0.12"
 glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
 winit = "0.30"
@@ -28,13 +31,13 @@ winit = "0.30"
 wgpu = { version = "29.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = { version = "1", optional = true }
-bevy_egui = { version = "0.41", optional = true }
+bevy_egui = { version = "0.42", optional = true }
 gltf = "1.4"
 # Already in the tree through the asset stack (same locked version — this adds no compiled crate);
 # named directly only by `geometry_lod::certificate`, which fingerprints the shipped trio's bytes
 # against the `view_glb_sha` / `sim_glb_sha` the tank build recorded (ADR-0035).
 sha2 = "0.10"
-lightyear = { version = "0.28", default-features = false, features = [
+lightyear = { version = "0.30.1", default-features = false, features = [
     "std",
     "client", "server",
     "replication", "interpolation",
@@ -42,8 +45,8 @@ lightyear = { version = "0.28", default-features = false, features = [
     "netcode", "udp",
     "avian3d",
 ] }
-lightyear_transport = "0.28"
-bevy_replicon = "0.41"
+lightyear_transport = "0.30.1"
+bevy_replicon = "0.44"
 
 # The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
 # locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
@@ -78,10 +81,10 @@ objc2-app-kit = { version = "0.2.2", features = [
 objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }
 
 [dev-dependencies]
-lightyear_sync = "0.28"
-lightyear_core = "0.28"
-lightyear_inputs = "0.28"
-lightyear_inputs_native = "0.28"
+lightyear_sync = "0.30.1"
+lightyear_core = "0.30.1"
+lightyear_inputs = "0.30.1"
+lightyear_inputs_native = "0.30.1"
 
 [features]
 default = ["dev_tools"]
@@ -90,9 +93,8 @@ bitprobe = ["dep:flate2"]
 dev_ui = ["dep:bevy_egui"]
 
 [patch.crates-io]
-bevy_reflect = { path = "vendor/bevy_reflect-0.19.0-scalar-math" }
-bevy_pbr = { path = "vendor/bevy_pbr-0.19.0-scalar-math" }
-bevy_light = { path = "vendor/bevy_light-0.19.0-cascade-count" }
+bevy_reflect = { path = "vendor/bevy_reflect-0.19.1-scalar-math" }
+bevy_pbr = { path = "vendor/bevy_pbr-0.19.1-scalar-math" }
 
 [[bin]]
 name = "overmatch"

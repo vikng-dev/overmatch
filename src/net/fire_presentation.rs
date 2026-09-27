@@ -76,9 +76,11 @@ use std::collections::VecDeque;
 use bevy::ecs::change_detection::Tick as ChangeTick;
 use bevy::prelude::*;
 use lightyear::core::tick::{Tick, TickDuration};
-use lightyear::interpolation::timeline::InterpolationTimeline;
+use lightyear::interpolation::timeline::SyncedInterpolationTimeline;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
-use lightyear::prelude::{Interpolated, IsSynced, LocalTimeline, NetworkTimeline, PingManager};
+use lightyear::prelude::{
+    Interpolated, LocalTimeline, LocalTimelineSync, NetworkTimeline, PingManager,
+};
 
 use super::protocol::{InputBridge, NetTank};
 use super::sync_margin::ArrivalDelay;
@@ -228,7 +230,7 @@ impl SlotLedger {
         }
     }
 
-    /// Consume one owed swallow matching this echo, oldest-first (wrap-safe tick order).
+    /// Consume one owed swallow matching this echo, oldest-first (signed tick order).
     fn swallow_owed(&mut self, fire_tick: u32) -> bool {
         let Some(index) = self
             .owed_swallows
@@ -546,7 +548,8 @@ fn refusal_wait_ticks(rtt: Duration, spread: Duration, tick: Duration) -> u32 {
 fn recover_unannounced_rounds(
     tick: Res<TickDuration>,
     arrival: Option<Res<ArrivalDelay>>,
-    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    // Skips the whole system until the cursor syncs: an unsynced cursor defines no wait.
+    cursor: SyncedInterpolationTimeline,
     mut roots: Query<(Entity, &mut OwnFirePresentation)>,
     muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
     mut recoil: ResMut<super::client::PendingRecoilKicks>,
@@ -554,9 +557,6 @@ fn recover_unannounced_rounds(
     mut commands: Commands,
 ) {
     let Some(arrival) = arrival else {
-        return;
-    };
-    let Ok(cursor) = cursors.single() else {
         return;
     };
     let wait = announce_wait_ticks(arrival.stats.coverage(), tick.0);
@@ -764,10 +764,18 @@ impl AuthoredIntent {
 
 /// Record what this client just filed for its stamped tick. Mounted by `net::client`, chained after
 /// `stamp_input_tick` so the copy is keyed by the tick the stamp names.
+///
+/// Only once the local timeline is synced: lightyear's `buffer_action_state` files nothing before
+/// that (it takes `SyncedLocalTimeline`), so a pre-sync click never reaches the wire, and recording
+/// it would present a round locally that the authority never heard of.
 pub(super) fn record_own_intent(
+    sync: Option<Res<LocalTimelineSync>>,
     mut intent: ResMut<AuthoredIntent>,
     slots: Query<&ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
 ) {
+    if !sync.is_some_and(|sync| sync.is_synced()) {
+        return;
+    }
     let Ok(state) = slots.single() else {
         return;
     };
@@ -800,6 +808,7 @@ fn present_own_intent(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
+    use lightyear::interpolation::timeline::InterpolationTimeline;
 
     use super::*;
 
@@ -1077,6 +1086,37 @@ mod tests {
             !command.fire_primary && !command.fire_secondary,
             "the presentation must replace the attested consumables, not join them",
         );
+    }
+
+    /// NOTHING FILED, NOTHING RECORDED: before the local timeline syncs, lightyear buffers and sends
+    /// no input, so a click then must not enter the own-intent ledger — it would present a round the
+    /// authority never received. Once synced, the same click records. Dropping the sync gate reds
+    /// the first assertion.
+    #[test]
+    fn a_pre_sync_click_is_not_recorded() {
+        let mut world = World::new();
+        world.init_resource::<AuthoredIntent>();
+        world.init_resource::<LocalTimelineSync>();
+        world.spawn((
+            ActionState(TankCommand {
+                fire_primary: true,
+                for_tick: 5,
+                ..default()
+            }),
+            InputMarker::<TankCommand>::default(),
+        ));
+        world
+            .run_system_once(record_own_intent)
+            .expect("recorder runs");
+        assert!(
+            world.resource::<AuthoredIntent>().authored.is_empty(),
+            "a pre-sync click is never filed, so it must not be recorded",
+        );
+        world.resource_mut::<LocalTimelineSync>().set_synced(true);
+        world
+            .run_system_once(record_own_intent)
+            .expect("recorder runs");
+        assert_eq!(world.resource::<AuthoredIntent>().authored.len(), 1);
     }
 
     /// V3: A LEGALITY RULE MUST NOT STUTTER THE OWNER'S OWN FLASH. `net::protocol`'s bridge runs on
@@ -1450,8 +1490,8 @@ mod tests {
         app.add_observer(count_presented_round);
         let mut timeline = InterpolationTimeline::default();
         timeline.set_now(TickInstant::from(Tick(cursor_tick)));
-        app.world_mut()
-            .spawn((timeline, IsSynced::<InterpolationTimeline>::default()));
+        lightyear::prelude::TimelineSync::set_synced(&mut timeline, true);
+        app.insert_resource(timeline);
         // The armed root: one state-proven consumption revealed at tick 100, never announced.
         let mut slot = SlotLedger::seeded(ready(BELT));
         slot.confirmed = 1;

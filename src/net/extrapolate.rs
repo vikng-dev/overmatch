@@ -8,8 +8,8 @@
 //!
 //! - **Instruments (unconditional, read-only).** Per interpolated hull, every frame the cursor
 //!   sits at/past its newest confirmed `Position` sample is a starved frame; a maximal run of them
-//!   is one gap. Gaps are counted with their durations (ticks), `SyncEvent` occurrences on the
-//!   interpolation timeline are counted (steady-state must be zero after the handshake resync),
+//!   is one gap. Gaps are counted with their durations (ticks), resyncs of the interpolation
+//!   timeline are counted (steady-state must be zero after the handshake resync),
 //!   and each closed gap is checked against a ledger of recent impulse-class authority ticks
 //!   (fire announcements, damage confirms) for gap∧impulse coincidence.
 //!   A summary line logs every [`SUMMARY_PERIOD_SECS`], on disconnect, and at app exit.
@@ -76,10 +76,10 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use lightyear::core::confirmed_history::ConfirmedHistory;
 use lightyear::core::tick::{Tick, TickDuration};
-use lightyear::core::timeline::SyncEvent;
+use lightyear::core::time::TickInstant;
 use lightyear::interpolation::plugin::InterpolationSystems;
-use lightyear::interpolation::timeline::{InterpolationConfig, InterpolationTimeline};
-use lightyear::prelude::{Connected, Interpolated, IsSynced, NetworkTimeline};
+use lightyear::interpolation::timeline::InterpolationTimeline;
+use lightyear::prelude::{Connected, Interpolated, NetworkTimeline, SyncSystems};
 
 use super::protocol::NetTank;
 
@@ -123,8 +123,16 @@ pub(super) fn install(app: &mut App) {
     app.init_resource::<ImpulseTicks>();
     app.init_resource::<FrontierDiag>();
     app.init_resource::<HullEdges>();
-    app.add_observer(count_interp_sync_events);
+    app.init_resource::<PreSyncCursor>();
+    app.add_observer(allow_handshake_resync);
     app.add_observer(log_summary_on_disconnect);
+    app.add_systems(
+        PostUpdate,
+        (
+            note_pre_sync_cursor.before(SyncSystems::Sync),
+            count_interp_resyncs.after(SyncSystems::Sync),
+        ),
+    );
     app.add_systems(
         Update,
         (
@@ -172,7 +180,7 @@ impl ImpulseTicks {
     }
 
     /// Whether any recorded impulse tick lies in the half-open gap span `(floor, ceil]` —
-    /// lightyear's own wrapping tick difference, so the span survives the `u32::MAX` boundary.
+    /// lightyear's signed tick difference (monotonic ticks, saturating to the `i32` range).
     fn any_within(&self, floor: Tick, ceil: Tick) -> bool {
         self.ring
             .iter()
@@ -204,14 +212,19 @@ pub(super) struct FrontierDiag {
     blend_count: u64,
     blend_residual_sum_m: f64,
     blend_residual_max_m: f32,
-    /// `SyncEvent<InterpolationConfig>` count. The handshake resync emits exactly one; every
-    /// event past the first is a steady-state resync and must not happen.
+    /// Interpolation-timeline resync count, handshakes included.
     sync_events: u64,
+    /// Resyncs past each connection's handshake — steady-state resyncs, which must not happen.
+    steady_resyncs: u64,
+    /// Whether this connection's one handshake resync has been seen. Lightyear resets the
+    /// interpolation timeline on every `Connected`, so each (re)connection is owed one; cleared by
+    /// [`allow_handshake_resync`].
+    handshake_spent: bool,
 }
 
 impl FrontierDiag {
     fn steady_sync_events(&self) -> u64 {
-        self.sync_events.saturating_sub(1)
+        self.steady_resyncs
     }
 
     fn summary(&self, open_gaps: usize) -> String {
@@ -241,20 +254,51 @@ impl FrontierDiag {
     }
 }
 
+/// A (re)connection resets the interpolation timeline, so its first resync is the handshake.
+fn allow_handshake_resync(_connected: On<Add, Connected>, mut diag: ResMut<FrontierDiag>) {
+    diag.handshake_spent = false;
+}
+
+/// The interpolation cursor as it stood entering this frame's timeline sync.
+#[derive(Resource, Default)]
+struct PreSyncCursor(Option<TickInstant>);
+
+fn note_pre_sync_cursor(
+    timeline: Option<Res<InterpolationTimeline>>,
+    mut pre: ResMut<PreSyncCursor>,
+) {
+    pre.0 = timeline.map(|timeline| timeline.now());
+}
+
 /// Count interpolation-timeline resyncs. Steady state after the handshake must be zero — a
 /// nonzero steady count is every remote hull jumping, and the periodic summary flags it.
-fn count_interp_sync_events(
-    _event: On<SyncEvent<InterpolationConfig>>,
+///
+/// Lightyear emits no event for this timeline's resync, so it is detected: the cursor advances
+/// only in `PreUpdate` (`TimelineSystems::Advance`), and inside `SyncSystems::Sync` the speed
+/// controller only rescales it — the one write to `now` there is `TimelineSync::resync`'s snap. So
+/// `now` differing across the sync set IS a resync. (A snap onto the exact current instant is
+/// invisible, and moves nothing to observe.)
+fn count_interp_resyncs(
+    timeline: Option<Res<InterpolationTimeline>>,
+    pre: Res<PreSyncCursor>,
     mut diag: ResMut<FrontierDiag>,
 ) {
-    diag.sync_events += 1;
-    if diag.steady_sync_events() > 0 {
-        warn!(
-            "net: FRONTIER interpolation SyncEvent #{} — a steady-state resync snapped every \
-             remote hull",
-            diag.sync_events
-        );
+    let (Some(timeline), Some(before)) = (timeline, pre.0) else {
+        return;
+    };
+    if timeline.now() == before {
+        return;
     }
+    diag.sync_events += 1;
+    if !diag.handshake_spent {
+        diag.handshake_spent = true;
+        return;
+    }
+    diag.steady_resyncs += 1;
+    warn!(
+        "net: FRONTIER interpolation resync #{} — a steady-state resync snapped every remote hull",
+        diag.sync_events
+    );
 }
 
 /// The estimator and own-fire digests riding the FRONTIER line — each absent in worlds that never
@@ -595,7 +639,7 @@ impl HullEdges {
 /// clamp with the bounded projection / blend-back.
 fn drive_hull_edges(
     tick: Res<TickDuration>,
-    cursors: Query<&InterpolationTimeline, With<IsSynced<InterpolationTimeline>>>,
+    cursor: Option<Res<InterpolationTimeline>>,
     mut hulls: Query<
         (
             Entity,
@@ -612,7 +656,7 @@ fn drive_hull_edges(
     impulses: Res<ImpulseTicks>,
     mut diag: ResMut<FrontierDiag>,
 ) {
-    let Ok(timeline) = cursors.single() else {
+    let Some(timeline) = cursor.filter(|timeline| timeline.is_synced()) else {
         // No synced cursor: no starvation is defined, and stale trackers must not carry a gap
         // across a resync.
         edges.map.clear();
@@ -702,7 +746,7 @@ fn drive_hull_edges(
 #[cfg(test)]
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
-    use lightyear::core::time::TickInstant;
+    use lightyear::prelude::TimelineSync;
 
     use super::*;
 
@@ -1143,9 +1187,9 @@ mod tests {
         (base + whole as i32, offset - whole)
     }
 
-    /// IMPULSE∧GAP COINCIDENCE is membership of the half-open span `(floor, ceil]`, wrap-safe.
-    /// Widening either end (inclusive floor, exclusive ceiling) reds an endpoint assert; a naive
-    /// non-wrapping compare reds the boundary case.
+    /// IMPULSE∧GAP COINCIDENCE is membership of the half-open span `(floor, ceil]`. Widening either
+    /// end (inclusive floor, exclusive ceiling) reds an endpoint assert; the top-of-range case pins
+    /// that ticks are monotonic (lightyear 0.30 does not wrap them).
     #[test]
     fn impulse_ticks_inside_a_gap_span_count_as_coincident() {
         let mut ledger = ImpulseTicks::default();
@@ -1160,10 +1204,14 @@ mod tests {
             "ceiling is inclusive"
         );
         assert!(!ledger.any_within(Tick(103), Tick(110)), "outside misses");
-        // The span survives the u32 boundary.
-        let mut wrapped = ImpulseTicks::default();
-        wrapped.record(Tick(1), ImpulseClass::Damage);
-        assert!(wrapped.any_within(Tick(u32::MAX - 1), Tick(2)));
+        // At the top of the range the span orders numerically: no wrap back to small ticks.
+        let mut top = ImpulseTicks::default();
+        top.record(Tick(u32::MAX - 1), ImpulseClass::Damage);
+        assert!(top.any_within(Tick(u32::MAX - 3), Tick(u32::MAX)));
+        assert!(
+            !top.any_within(Tick(u32::MAX), Tick(2)),
+            "an inverted span holds nothing"
+        );
         // Recording is idempotent per (tick, class).
         ledger.record(Tick(102), ImpulseClass::Fire);
         assert_eq!(ledger.ring.len(), 1, "a duplicate stamp records once");
@@ -1179,7 +1227,8 @@ mod tests {
         world.init_resource::<HullEdges>();
         let mut timeline = InterpolationTimeline::default();
         timeline.set_now(cursor);
-        world.spawn((timeline, IsSynced::<InterpolationTimeline>::default()));
+        timeline.set_synced(true);
+        world.insert_resource(timeline);
         let mut pos_history = ConfirmedHistory::<Position>::default();
         pos_history.insert_present(Tick(100), Position(Vec3::new(10.0, 0.0, -4.0)));
         let mut rot_history = ConfirmedHistory::<Rotation>::default();
@@ -1266,24 +1315,48 @@ mod tests {
         assert_eq!(world.resource::<HullEdges>().open_gaps(), 0);
     }
 
-    /// SYNC EVENTS ARE COUNTED, and everything past the handshake's one is steady-state. An
-    /// unwired observer reds the count; miscounting the handshake allowance reds the steady half.
+    /// RESYNCS ARE COUNTED, and everything past the handshake's one is steady-state. A frame whose
+    /// cursor does not move across the sync set counts nothing; each snap counts once. Comparing
+    /// against anything but the pre-sync cursor reds the quiet frame; miscounting the handshake
+    /// allowance reds the steady half.
     #[test]
-    fn interpolation_sync_events_are_counted() {
-        let mut app = App::new();
-        app.init_resource::<FrontierDiag>();
-        app.add_observer(count_interp_sync_events);
-        let entity = app.world_mut().spawn_empty().id();
-        app.world_mut()
-            .trigger(SyncEvent::<InterpolationConfig>::new(entity, 3));
-        app.world_mut()
-            .trigger(SyncEvent::<InterpolationConfig>::new(entity, -2));
-        let diag = app.world().resource::<FrontierDiag>();
-        assert_eq!(diag.sync_events, 2);
+    fn interpolation_resyncs_are_counted() {
+        let mut world = World::new();
+        world.init_resource::<FrontierDiag>();
+        world.init_resource::<PreSyncCursor>();
+        world.insert_resource(InterpolationTimeline::default());
+        let frame = |world: &mut World, snap_to: Option<Tick>| {
+            world
+                .run_system_once(note_pre_sync_cursor)
+                .expect("pre-sync note runs");
+            if let Some(tick) = snap_to {
+                world
+                    .resource_mut::<InterpolationTimeline>()
+                    .set_now(TickInstant::from(tick));
+            }
+            world
+                .run_system_once(count_interp_resyncs)
+                .expect("resync counter runs");
+        };
+        frame(&mut world, Some(Tick(100)));
+        frame(&mut world, None);
+        frame(&mut world, Some(Tick(97)));
+        let diag = world.resource::<FrontierDiag>();
+        assert_eq!(diag.sync_events, 2, "two snaps, one quiet frame");
         assert_eq!(
             diag.steady_sync_events(),
             1,
             "the handshake resync is the one allowed event",
+        );
+        // A reconnect owes one more handshake: its snap is not steady-state.
+        world.resource_mut::<FrontierDiag>().handshake_spent = false;
+        frame(&mut world, Some(Tick(40)));
+        let diag = world.resource::<FrontierDiag>();
+        assert_eq!(diag.sync_events, 3);
+        assert_eq!(
+            diag.steady_sync_events(),
+            1,
+            "a reconnect's handshake resync is not steady-state",
         );
     }
 }

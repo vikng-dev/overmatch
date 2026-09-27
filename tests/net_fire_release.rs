@@ -1,14 +1,20 @@
 //! Reproduction + mechanism proof for the "letting go of the MG still fires 1-2 more rounds" leak.
 //! Replays lightyear's REAL input pipeline (`InputBuffer`, `NativeStateSequence`,
-//! `build_from_input_buffer`, `update_buffer`, `get_predict`, `pop_keeping_last`) end to end and
+//! `build_from_input_buffer`, `update_buffer`, `predict`, `pop_keeping_last`) end to end and
 //! counts the ticks on which fire is committed off a value the player never authored for that tick.
+//!
+//! Pinned against lightyear 0.30, whose `InputBuffer` stores MATERIALIZED `Option` values (wire
+//! compression — `Compressed::SameAsPrecedent` — is re-derived at message-build time, never
+//! stored). So an `Absent` entry is a single-tick hole: it neither dead-ends the reads behind it
+//! nor travels through `pop` (upstream issue #1559 describes the stored-chain buffer where it
+//! did; the record is `upstream/lightyear-absent-anchor-input-freeze.md`).
 
 use core::time::Duration;
 use std::collections::HashMap;
 
 use bevy::prelude::Reflect;
 use lightyear_core::prelude::Tick;
-use lightyear_inputs::input_buffer::{Compressed, InputBuffer};
+use lightyear_inputs::input_buffer::InputBuffer;
 use lightyear_inputs::input_message::ActionStateSequence;
 use lightyear_inputs_native::prelude::{ActionState, NativeStateSequence};
 use serde::{Deserialize, Serialize};
@@ -26,9 +32,10 @@ type Buf = InputBuffer<ActionState<Cmd>, Cmd>;
 type Seq = NativeStateSequence<Cmd>;
 
 const TICK: Duration = Duration::from_nanos(15_625_000); // 64 Hz
-const REDUNDANCY: u32 = 5; // lightyear InputConfig default
+const REDUNDANCY: usize = 5; // lightyear InputConfig default
 const HISTORY_DEPTH: u32 = 20; // lightyear_inputs::HISTORY_DEPTH
-/// `Tick` is a WRAPPING id — keep every tick well away from 0.
+/// Tick arithmetic SATURATES at 0 (lightyear's `Tick` is monotonic) — keep every tick well away
+/// from it so a history-depth subtraction stays exact.
 const BASE: i32 = 1000;
 
 fn tk(t: i32) -> Tick {
@@ -141,9 +148,9 @@ fn run(s: &Scenario) -> Outcome {
         if c.fire_secondary && !authorized(&t) {
             out.client_leak.push(t);
             out.notes.push(format!(
-                "CLIENT t={t} authored={:?} raw={:?}",
+                "CLIENT t={t} authored={:?} stored={:?}",
                 authored.get(&t),
-                client.get_raw(tk(t))
+                client.get(tk(t)).map(|a| a.0.fire_secondary)
             ));
         }
         // PostUpdate: `prepare_input_message` + `clean_buffers`.
@@ -170,17 +177,16 @@ fn run(s: &Scenario) -> Outcome {
         let tick = tk(t);
         // FixedPreUpdate: lightyear `update_action_state`. NOTE: on `None` the ActionState is left
         // STALE — lightyear does not touch it.
-        if let Some(snap) = server.get_predict(tick) {
-            action = snap.clone();
+        if let Some(snap) = server.predict(tick, TICK) {
+            action = snap;
         }
         // FixedUpdate: our bridge.
         let c = bridge(s.fix, &server, tick, &action);
         if c.fire_secondary && !authorized(&t) {
             out.server_leak.push(t);
             out.notes.push(format!(
-                "SERVER t={t} authored={:?} raw={:?} get={:?} held_last={}",
+                "SERVER t={t} authored={:?} get={:?} held_last={}",
                 authored.get(&t),
-                server.get_raw(tick),
                 server.get(tick).map(|a| a.0.fire_secondary),
                 server.get(tick).is_none() && server.get_last().is_some(),
             ));
@@ -223,11 +229,10 @@ fn delay_shrink_strands_a_stale_pressed_tick_on_the_server() {
 }
 
 /// MECHANISM B — the input delay GROWS (RTT worsens), so `end_tick` JUMPS: the client skips a
-/// buffer tick entirely. `InputBuffer::set_raw` gap-fills the skipped tick with
-/// `Compressed::SameAsPrecedent` — a FABRICATED repeat of the last command, on a tick the player
-/// never authored at all. `get()` resolves `SameAsPrecedent` back to `Some(pressed)`, so
-/// `held_last` is false on BOTH ends: the client fires the phantom round itself AND ships the
-/// fabrication to the server, which fires it too.
+/// buffer tick entirely. `InputBuffer::set_raw` gap-fills the skipped tick with a copy of the last
+/// stored command (hold-last) — a FABRICATED repeat, on a tick the player never authored at all.
+/// `get()` returns it as `Some(pressed)`, so `held_last` is false on BOTH ends: the client fires
+/// the phantom round itself AND ships the fabrication to the server, which fires it too.
 ///
 /// A 1→3 delay jump fabricates TWO ticks — literally "one or two more shots".
 #[test]
@@ -253,12 +258,13 @@ struct PlainCmd {
 }
 
 /// Why no buffer-SHAPE rule can close this on today's wire: a fabricated gap-fill and a genuinely
-/// HELD trigger produce the byte-identical `Compressed::SameAsPrecedent`, and both resolve through
-/// `get` to `Some(pressed)`. Provenance — a value that knows which tick it was authored for — is
-/// the only thing that separates them.
+/// HELD trigger materialize the byte-identical stored value, both read back through `get` as
+/// `Some(pressed)`, and both re-encode on the wire as the same `SameAsPrecedent`. Provenance — a value
+/// that knows which tick it was authored for — is the only thing that separates them.
 #[test]
-fn same_as_precedent_cannot_distinguish_fabrication_from_a_held_trigger() {
+fn a_fabricated_gap_fill_is_indistinguishable_from_a_held_trigger() {
     type PlainBuf = InputBuffer<ActionState<PlainCmd>, PlainCmd>;
+    type PlainSeq = NativeStateSequence<PlainCmd>;
     let pressed = ActionState(PlainCmd {
         fire_secondary: true,
         aim: 0,
@@ -268,10 +274,11 @@ fn same_as_precedent_cannot_distinguish_fabrication_from_a_held_trigger() {
         aim: 0,
     });
 
-    // A genuinely HELD trigger: `set` compresses the repeat at tick 11.
+    // A genuinely HELD trigger: the player authored ticks 10 and 11, both pressed.
     let mut held: PlainBuf = PlainBuf::default();
     held.set(tk(10), pressed.clone());
     held.set(tk(11), pressed.clone());
+    held.set(tk(12), released.clone());
 
     // A delay JUMP (2→3): buffer tick 11 is never authored — `set_raw` gap-fills it.
     let mut jump: PlainBuf = PlainBuf::default();
@@ -279,126 +286,132 @@ fn same_as_precedent_cannot_distinguish_fabrication_from_a_held_trigger() {
     jump.set(tk(12), released.clone());
 
     assert_eq!(
-        format!("{:?}", held.get_raw(tk(11))),
-        "SameAsPrecedent",
-        "a held trigger compresses to SameAsPrecedent"
+        held.get(tk(11)),
+        jump.get(tk(11)),
+        "a FABRICATED gap-fill stores the identical value a held trigger does"
+    );
+    assert!(
+        jump.get(tk(11)).is_some_and(|a| a.0.fire_secondary),
+        "the player NEVER authored tick 11, yet the buffer hands back a pressed trigger — so \
+         `held_last` (get() is Some) is blind"
+    );
+    let held_wire = PlainSeq::build_from_input_buffer(&held, 3, tk(12)).expect("held encodes");
+    let jump_wire = PlainSeq::build_from_input_buffer(&jump, 3, tk(12)).expect("jump encodes");
+    assert_eq!(
+        format!("{held_wire:?}"),
+        format!("{jump_wire:?}"),
+        "…and the wire carries the two byte-identically"
+    );
+}
+
+/// What an `Absent` entry does in 0.30: it is a ONE-TICK hole, not an anchor. A stored `None` reads
+/// as no input at exactly its own tick — `get` and `predict` both return `None` there, so
+/// lightyear's server `update_action_state` skips the apply and the `ActionState` holds the previous
+/// command for that one tick — while every stored tick behind it resolves on its own.
+///
+/// (A buffer that stored the compressed chain would let a `SameAsPrecedent` tail behind an
+/// `Absent` dead-end every read for the WHOLE tail and freeze the server indefinitely — upstream
+/// issue #1559, "presses work, holds freeze"; record in
+/// `upstream/lightyear-absent-anchor-input-freeze.md`.)
+///
+/// Attestation needs none of this: the held command names the tick it was authored for, so the
+/// one held tick fails consumables closed.
+#[test]
+fn an_absent_entry_is_a_one_tick_hole() {
+    let pressed = |t: i32| {
+        ActionState(Cmd {
+            fire_secondary: true,
+            aim: 0,
+            for_tick: tk(t).0,
+        })
+    };
+    let mut buf: Buf = Buf::default();
+    buf.set(tk(10), pressed(10));
+    buf.set_empty(tk(11));
+    buf.set(tk(12), pressed(12));
+    buf.set(tk(13), pressed(13));
+
+    assert!(buf.get(tk(11)).is_none(), "the hole reads as no input");
+    assert!(
+        buf.predict(tk(11), TICK).is_none(),
+        "predict returns None at the hole → update_action_state skips → ActionState held one tick"
+    );
+    assert!(
+        buf.get(tk(13)).is_some() && buf.get_last().is_some(),
+        "the ticks behind the hole resolve on their own — no dead-ending"
     );
     assert_eq!(
-        format!("{:?}", jump.get_raw(tk(11))),
-        "SameAsPrecedent",
-        "a FABRICATED gap-fill is the identical buffer shape"
-    );
-    // Both resolve to a pressed trigger, and neither is `held_last` (get() is Some for both).
-    assert!(held.get(tk(11)).unwrap().0.fire_secondary);
-    assert!(
-        jump.get(tk(11)).unwrap().0.fire_secondary,
-        "the player NEVER authored tick 11, yet the buffer hands back a pressed trigger"
-    );
-    assert!(
-        jump.get(tk(11)).is_some(),
-        "so `held_last` is false — blind"
-    );
-}
-
-/// MECHANISM C — an `Absent` entry ANCHORS the server's buffer and FREEZES its `ActionState`.
-///
-/// This is the case that defeats even the retired `held_last` detector, and it is why the fix had to
-/// become an attestation rather than a better detector. Verified here against the real
-/// `InputBuffer`; upstream this is lightyear issue #1559 ("presses work, holds freeze"), still open.
-///
-/// Once an `Absent` sits in the buffer with a `SameAsPrecedent` tail behind it (which is what a HELD
-/// button produces — nothing changes, so nothing is worth encoding):
-///
-/// - `get(tick)` recurses back through the `SameAsPrecedent`s, hits the `Absent`, and returns `None`
-///   for the WHOLE tail.
-/// - `get_last()` does the same — it DEAD-ENDS on the `Absent` and returns `None` too, even though
-///   the buffer is manifestly non-empty. This is the killer: `held_last`'s second conjunct
-///   (`get_last().is_some()`) goes FALSE exactly when the freeze bites, so the detector reports "not
-///   extrapolating" at the precise moment the server is most lost.
-/// - `get_predict(tick)` returns `None`, so lightyear's `update_action_state` SKIPS the apply
-///   (server.rs:707) and the server's `ActionState` FREEZES at whatever it last held — a trigger-down
-///   command, forever.
-/// - `pop_keeping_last` degrades to a plain `pop` (its `get_last_with_tick()` is `None`), and `pop`'s
-///   "repair" step re-writes the new front with the value it popped — which is the `Absent`. So the
-///   anchor PROPAGATES FORWARD one tick per server tick. The poison sustains itself.
-///
-/// No stamp is needed to see any of this. That is the point: `for_tick` never asks WHY a value is
-/// wrong.
-#[test]
-fn absent_anchor_freezes_the_server_and_blinds_the_held_last_detector() {
-    let mut buf: Buf = Buf::default();
-    let pressed = ActionState(Cmd {
-        fire_secondary: true,
-        aim: 0,
-        for_tick: tk(10).0,
-    });
-    buf.set(tk(10), pressed.clone());
-    // The Absent (however it got seeded), then the SameAsPrecedent tail a HELD button produces.
-    buf.set_empty(tk(11));
-    buf.set_raw(tk(12), Compressed::SameAsPrecedent);
-    buf.set_raw(tk(13), Compressed::SameAsPrecedent);
-
-    // The whole tail reads as "no input", even though the buffer is full of entries.
-    assert!(buf.get(tk(13)).is_none(), "get dead-ends on the Absent");
-    assert_eq!(buf.len(), 4, "…while the buffer is manifestly non-empty");
-
-    // THE KILLER: get_last() is None too — it recurses back and dead-ends on the same Absent.
-    assert!(
-        buf.get_last().is_none(),
-        "get_last must dead-end on the Absent — this is what blinds `held_last`"
+        buf.predict(tk(13), TICK).map(|a| a.0.for_tick),
+        Some(tk(13).0),
+        "…and the very next stored tick re-applies a command authored for it"
     );
 
-    // So the retired detector reports "not extrapolating" …
-    let held_last = buf.get(tk(13)).is_none() && buf.get_last().is_some();
-    assert!(
-        !held_last,
-        "held_last is FALSE precisely when the server is most lost — the detector is blind here"
-    );
-
-    // … while lightyear's server would SKIP the ActionState apply and freeze on the pressed command.
-    assert!(
-        buf.get_predict(tk(13)).is_none(),
-        "get_predict returns None → update_action_state skips → ActionState FROZEN at pressed"
-    );
-
-    // And attestation sees it without knowing any of the above: the frozen command names tick 10.
-    let frozen = pressed.0;
+    // Attestation: the command held across the hole names tick 10, not 11.
     assert_ne!(
-        frozen.for_tick,
-        tk(13).0,
-        "the frozen command attests to tick 10, not tick 13 — consumables fail closed"
+        pressed(10).0.for_tick,
+        tk(11).0,
+        "the held command attests to tick 10 — consumables fail closed on tick 11"
     );
 }
 
-/// The `Absent` anchor PROPAGATES: `pop_keeping_last` degrades to `pop`, whose repair step rewrites
-/// the new front with the popped value — the `Absent` itself. So the freeze does not age out; the
-/// server carries it forward one tick at a time.
+/// The hole does not travel. `pop` drops independent materialized values and repairs nothing, so
+/// popping through an `Absent` leaves the next tick exactly as stored — a front rewritten with
+/// the popped `Absent` would carry a freeze forward one tick per server tick.
 #[test]
-fn absent_anchor_propagates_forward_through_pop() {
-    let mut buf: Buf = Buf::default();
+fn popping_through_an_absent_entry_does_not_move_it() {
     let pressed = ActionState(Cmd {
         fire_secondary: true,
         aim: 0,
         for_tick: tk(10).0,
     });
-    buf.set(tk(10), pressed);
+    let mut buf: Buf = Buf::default();
+    buf.set(tk(10), pressed.clone());
     buf.set_empty(tk(11));
     for t in 12..16 {
-        buf.set_raw(tk(t), Compressed::SameAsPrecedent);
+        buf.set(tk(t), pressed.clone());
     }
 
     // The server simulating tick 12 pops up to tick 11 — straight through the Absent.
     buf.pop_keeping_last(tk(11));
 
-    assert_eq!(
-        format!("{:?}", buf.get_raw(tk(12))),
-        "Absent",
-        "pop's repair step rewrote the new front with the Absent it popped — the anchor MOVED"
-    );
     assert!(
-        buf.get_last().is_none(),
-        "…so the buffer is still blind, one tick later, and will be next tick too"
+        buf.get(tk(12)).is_some(),
+        "the new front is the value stored at tick 12, not the popped Absent"
     );
+    assert!(buf.get_last().is_some(), "…and the buffer reads normally");
+}
+
+/// The client never PUTS a `SameAsPrecedent` behind an `Absent`: the encoder emits it only between
+/// two EQUAL stored values, so the tick after a hole is always encoded as a real `Input`. That is
+/// the property that keeps a held button from materializing a server-side `None` tail — the decode
+/// itself would still resolve a `SameAsPrecedent` after an `Absent` to `None`
+/// (`Compressed::resolve`).
+#[test]
+fn the_encoder_never_compresses_across_an_absent_entry() {
+    let held = ActionState(Cmd {
+        fire_secondary: true,
+        aim: 0,
+        for_tick: 0,
+    });
+    let mut buf: Buf = Buf::default();
+    buf.set(tk(10), held.clone());
+    buf.set_empty(tk(11));
+    buf.set(tk(12), held.clone());
+    buf.set(tk(13), held.clone());
+
+    let wire = format!(
+        "{:?}",
+        Seq::build_from_input_buffer(&buf, 4, tk(13)).expect("buffer encodes")
+    );
+    // The four states in order: the tick after the hole must be a real `Input`, and only the
+    // equal pair behind it compresses.
+    let mut from = 0;
+    for needle in ["Input", "Absent", "Input", "SameAsPrecedent"] {
+        let at = wire[from..].find(needle).unwrap_or_else(|| {
+            panic!("expected Input, Absent, Input, SameAsPrecedent in order; got {wire}")
+        });
+        from += at + needle.len();
+    }
 }
 
 /// Before/after table: today's `held_last` guard vs. the candidate fixes, swept over delay wobble,
@@ -490,72 +503,6 @@ fn sweep() {
     );
 }
 
-/// SCOPE of the freeze (the "stuck throttle" question). The `Absent` anchor freezes the server's
-/// WHOLE `ActionState`, not just the fire fields — `get_predict` returns `None`, so lightyear's
-/// `update_action_state` skips the apply for every field at once. So could a poisoned buffer strand
-/// a THROTTLE and run the tank away?
-///
-/// It is bounded, and this pins why: the freeze can only PERSIST while the client's command is
-/// byte-identical tick over tick, because that is what produces the all-`SameAsPrecedent` tail
-/// behind the `Absent` (`set` only compresses a value equal to its precedent). The instant ANY field
-/// changes, the client encodes a real `Compressed::Input`, `update_buffer` writes it (it is past
-/// `last_remote_tick`), `get_predict` resolves it — and the `ActionState` un-freezes.
-///
-/// Which bounds the hazard sharply for us, and the bound is `for_tick`, not the aim.
-/// `net::client::stamp_input_tick` writes `local_tick + input_delay` into every command it buffers,
-/// so in the SHIPPING configuration no two consecutive commands are ever byte-identical and the
-/// `SameAsPrecedent` chain cannot form at all. The scenario below is therefore the unstamped shape,
-/// kept because the freeze itself is a property of the buffer, not of our stamp.
-///
-/// Do not lean on `aim` for this. It used to differ every tick because it was a hull-local point
-/// that moved whenever the hull did; under ADR-0038 the third-person view authors a WORLD place from
-/// a world-locked camera, so a player pivoting on the spot with a still mouse emits the same point
-/// tick after tick. The gunner optic still authors hull-local and still changes as the sight is
-/// steered, but nothing about the aim field is load-bearing here any more.
-///
-/// And when the command IS bit-identical — parked, not touching anything — the frozen command is the
-/// command the player is still holding, so freezing it is a no-op. Hold-last on the levels is
-/// lightyear's intended semantics and ours (see `bridge_action_state_to_tank_command`); only the
-/// CONSUMABLES are gated, by `for_tick`.
-#[test]
-fn a_changed_command_unfreezes_the_absent_anchored_buffer() {
-    let mut buf: Buf = Buf::default();
-    let held = ActionState(Cmd {
-        fire_secondary: true,
-        aim: 0,
-        for_tick: tk(10).0,
-    });
-    buf.set(tk(10), held.clone());
-    buf.set_empty(tk(11)); // the Absent
-    buf.set_raw(tk(12), Compressed::SameAsPrecedent); // …and the tail a HELD command produces
-    buf.set_raw(tk(13), Compressed::SameAsPrecedent);
-    assert!(
-        buf.get_predict(tk(13)).is_none(),
-        "frozen while the command does not change"
-    );
-
-    // Any change to ANY field — here `aim`, which our hull-local aim point moves every tick — is
-    // encoded as a real `Input`, not a `SameAsPrecedent`.
-    buf.set(
-        tk(14),
-        ActionState(Cmd {
-            fire_secondary: true,
-            aim: 7, // the aim moved
-            for_tick: tk(14).0,
-        }),
-    );
-
-    assert_eq!(
-        format!("{:?}", buf.get_raw(tk(14))).split('(').next(),
-        Some("Input"),
-        "a changed command encodes a real Input, never a SameAsPrecedent"
-    );
-    assert!(
-        buf.get_predict(tk(14)).is_some(),
-        "…so the ActionState UN-FREEZES: the freeze cannot outlive the first changed command"
-    );
-}
-
 // ===================== SCOPE EXPERIMENT: the Absent freeze on the SERVER path =====================
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
@@ -574,12 +521,11 @@ type Seq2 = NativeStateSequence<Cmd2>;
 ///
 /// **Answer: no — it is bounded to ONE tick, and that bound is structural, not lucky.**
 ///
-/// The `SameAsPrecedent` tail behind an `Absent` exists ONLY for ticks whose command equalled its
-/// predecessor — that is precisely what `InputBuffer::set` compresses. So on every tick inside the
-/// poisoned region, the player's authored command IS the frozen command, for every field: the freeze
-/// is a NO-OP there. The first tick whose command CHANGES is encoded as a real `Compressed::Input`,
-/// lands past `last_remote_tick`, and RE-ANCHORS the buffer. And a release is a change. So the freeze
-/// cannot outlive the input it is freezing — whatever seeded it, and however long the player holds.
+/// A held (unchanged) command is exactly what the stored value already is, so holding it through a
+/// skipped apply is a NO-OP for every field. The first tick whose command CHANGES is encoded as a
+/// real `Compressed::Input`, lands past `last_remote_tick`, and is applied. And a release is a
+/// change. So a stale `ActionState` cannot outlive the input it is holding — whatever seeded it,
+/// and however long the player holds.
 ///
 /// The one tick that CAN differ is the transition itself: the delay jump opens a GAP tick that nobody
 /// authored, sitting between the last pressed tick and the first released one, and the frozen value
@@ -651,8 +597,8 @@ fn scope_can_the_freeze_stick_a_held_throttle() {
                 }
                 let tick = tk(t);
                 // lightyear `update_action_state`: on None the apply is SKIPPED — ActionState FROZEN.
-                if let Some(snap) = server.get_predict(tick) {
-                    action = snap.clone();
+                if let Some(snap) = server.predict(tick, TICK) {
+                    action = snap;
                 }
                 let raw = action.0;
                 // our bridge: attestation gates CONSUMABLES; the levels ride through on hold-last.
@@ -700,8 +646,8 @@ fn scope_can_the_freeze_stick_a_held_throttle() {
         "attestation must fire ZERO rounds after the player let go, under every seed position",
     );
     // The freeze CANNOT outlive the first CHANGED command: the change encodes a real
-    // `Compressed::Input`, which lands past `last_remote_tick` and re-anchors the buffer. The
-    // release IS that change. So a stuck throttle is bounded by the ticks between the `Absent` and
+    // `Compressed::Input`, which lands past `last_remote_tick` and is applied. The release IS that
+    // change. So a stuck throttle is bounded by the ticks between the `Absent` and
     // the release — and while the command is unchanged, the frozen value IS the value the player is
     // still holding, so holding it is a no-op. The only tick that can differ is the transition
     // itself.

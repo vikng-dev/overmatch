@@ -55,7 +55,7 @@ Rejected alternatives:
 ## Consequences
 
 - Cross-architecture bit identity is proven for the full deterministic fixture at commit
-  `020f9fd` on branch `codex-scalarmath`: MEASURED startup `IDENTICAL` for all 1,345 values and tick
+  `020f9fd` (an ancestor of `main`): MEASURED startup `IDENTICAL` for all 1,345 values and tick
   payloads `IDENTICAL` for all 3,072 ticks across all seven seams, macOS aarch64 vs Linux x86_64.
 - The cost is negligible in the validating measurement. The full probe including dump took
   MEASURED 18.2 s with scalar math vs 20.3 s with SIMD; the difference is within measurement noise.

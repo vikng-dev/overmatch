@@ -105,13 +105,11 @@ const SETTINGS_VERSION: u32 = 1;
 /// this drop is not simply a quality cut.
 ///
 /// **This used to be a hard constant, and the story below is why.** The count is a live row now
-/// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because
-/// `vendor/bevy_light-0.19.0-cascade-count/` backports upstream PR #24807 (merged, milestone
-/// 0.19.1 — unreleased as of 2026-07-27); see
-/// `upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream record and
-/// the validation evidence. **The vendored patch must outlive this row**: dropping the
-/// `[patch.crates-io]` entry before bevy 0.19.1 ships reintroduces the crash below on the first
-/// grow step. Everything from MEASURED down is kept as the historical record of the mechanism.
+/// ([`ShadowCascades`]), and changing it at runtime is safe ONLY because bevy 0.19.1 carries
+/// upstream PR #24807; see `upstream/bevy-cascade-count-stale-local-parallel.md` for the upstream
+/// record and the validation evidence. **This row requires `bevy_light` >= 0.19.1**: on stock 0.19.0
+/// the crash below fires on the first grow step. Everything from MEASURED down is kept as the
+/// historical record of the mechanism.
 ///
 /// MEASURED 2026-07-26 (field crash): stepping a shadow knob from a 2-cascade setting back to a
 /// 4-cascade one panicked in `bevy_light-0.19.0/src/lib.rs:477`,
@@ -214,9 +212,8 @@ const SHADOW_CASCADE_OVERLAP: f32 = 0.2;
 /// falls off with distance, at a fixed [`ShadowResolution`] and [`ShadowDistance`]. Fewer cascades
 /// cost less (one shadow-map render pass each) and alias more near the camera.
 ///
-/// **A live row only by grace of the vendored bevy_light patch** — see [`SHADOW_CASCADES`]'s doc
-/// for the crash that makes stock 0.19.0 unable to grow this at runtime, and for the vendor entry
-/// that must outlive this type.
+/// **A live row only because bevy_light 0.19.1 fixed the cascade-growth panic** — see
+/// [`SHADOW_CASCADES`]'s doc for the crash that makes stock 0.19.0 unable to grow this at runtime.
 ///
 /// **This is the expensive row** — the only one on this page worth a whole millisecond. MEASURED on
 /// an M4: ~1.16 ms per cascade, against 0.27 ms for the entire resolution ladder. A frame-rate
@@ -2723,7 +2720,7 @@ mod tests {
     /// What is deliberately NOT tested: the (now vendored-away) bevy panic itself was
     /// scheduling-dependent (it needs a pooled thread-local that missed a frame's init), so a test
     /// that tried to reproduce it could pass with the bug fully live — worse than no test. The
-    /// backport's own validation lives with the vendor entry
+    /// fix's validation lives with its upstream record
     /// (`upstream/bevy-cascade-count-stale-local-parallel.md`).
     #[test]
     fn the_cascade_count_follows_its_row_and_only_its_row() {

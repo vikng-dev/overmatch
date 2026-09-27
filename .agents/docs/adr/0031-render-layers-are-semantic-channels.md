@@ -1,6 +1,6 @@
 # Render layers are semantic channels
 
-> **Status: accepted; landed local, playtest pending. View-layer only — no wire surface, no
+> **Status: accepted; shipped in v0.3.0. View-layer only — no wire surface, no
 > `PROTOCOL_REV` movement.**
 
 `RenderLayers` carries stable rendering DOMAINS and nothing else. Three semantic channels
@@ -103,17 +103,14 @@ An absent `RenderLayers` already IS `BattlefieldWorld`, so world geometry is lef
 than stamped with an explicit default; the resolver costs a parent lookup per new mesh and nothing
 else.
 
-### The vendored backport this depends on
+### The upstream fix this depends on
 
-`vendor/bevy_pbr-0.19.0-scalar-math` is patched so every shadow view inherits its LIGHT's
-`RenderLayers` — a backport of bevyengine/bevy#24797 (fixes #24792), merged 2026-07-08, milestone
-0.19.1. Before it, shadow views carried no mask, defaulted to layer 0, and silently dropped every
-caster off layer 0, which is precisely what made "hide it with a layer" un-shadow the thing.
-
-**Retirement condition: delete the patch when Bevy 0.19.1 ships.** Upstream's shape differs (it
-attaches `RenderLayers` as a component on the extracted light entity and drops
-`ExtractedDirectionalLight::render_layers`); ours is smaller and changes no public API.
-`tests/bevy_shadow_view_render_layers.rs` fails if a vendor refresh drops it.
+Every shadow view inherits its LIGHT's `RenderLayers` — bevyengine/bevy#24797 (fixes #24792),
+shipped in Bevy 0.19.1. Before it, shadow views carried no mask, defaulted to layer 0, and silently
+dropped every caster off layer 0, which is precisely what made "hide it with a layer" un-shadow the
+thing. Until 0.19.1 the project carried a vendored backport in `bevy_pbr`; it retired with the
+upgrade. `tests/bevy_shadow_view_render_layers.rs` guards upstream's shape in the linked
+`bevy_pbr`.
 
 The consequence to keep in mind is that **shadow correctness now depends on each LIGHT carrying the
 right mask**. A light with no profile is layer-0-only and will not shadow anything moved off
@@ -177,5 +174,4 @@ not paid for now.
 ## Related
 
 [[0014-sim-view-split]] · [[0024-one-authoritative-runtime-for-player-facing-worlds]] ·
-`vendor/bevy_pbr-0.19.0-scalar-math/OVERMATCH_PATCH.md` ·
 `upstream/bevy-shadow-view-ignores-light-render-layers.md`

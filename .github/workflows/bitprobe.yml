@@ -14,8 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
-      # Same checkout/LFS transport as the deployed-server workflow, narrowed to the one LFS object
-      # the synchronous production bake consumes. The Tiger RON is ordinary Git content.
+      # Same checkout/LFS transport as the deployed-server workflow, narrowed to the LFS objects the
+      # synchronous production bake consumes: each vehicle's certified sim artifact `<id>.sim.glb`
+      # (ADR-0035) — never the view glb, which no headless composition opens. The tank RON and the
+      # `<id>.lod.json` certificate the sim glb is sha256-checked against are ordinary Git content.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
@@ -23,7 +25,7 @@ jobs:
       - name: Pull bitprobe simulation geometry from R2
         run: |
           git lfs install --local
-          git lfs pull --include='assets/tiger_1/tiger_1.glb'
+          git lfs pull --include='assets/*/*.sim.glb'
 
       # Keep toolchain, host libraries, cache family, release profile, and --locked behavior aligned
       # with .github/actions/build-server/action.yml. `--features bitprobe` is the observation-only

@@ -39,15 +39,36 @@ Records 1–11 come from the 2026-07-06/07 MP jitter campaign + architecture-rev
 in exposing #11 is an inference from the source path and the zero-clear fixed-delay A/B recorded in #11.
 We have pinned it. Reconsider adaptive delay only when all three are resolved upstream.
 
-## Fixed upstream, unreleased — mechanism records behind the vendored crates
+## Re-checked against lightyear 0.30.1 (the tree's current pin)
+
+The table above states each record as found, against lightyear 0.28. The tree now pins 0.30.1; each
+lightyear record was re-read against the 0.30.1 source. VERIFIED = read in the 0.30.1 source for
+this re-check; the rest are from a source reading not repeated here and are labelled as such.
+Client prediction left the tree at ADR-0037, so several records no longer touch this project
+whatever their upstream state.
+
+| # | Record | At 0.30.1 | Our side |
+|---|--------|-----------|----------|
+| 1 | check-starvation | Mechanism replaced — rollback checks run per completed checkpoint, covering lead ≤ 0 (source reading) | Moot: no prediction. `net/watchdog.rs` already gone |
+| 2 | avian-blanket-apply-pos-to-transform | **FIXED — VERIFIED**: the blanket `Position`/`Rotation` → `ApplyPosToTransform` requirement is gone; real child colliders have it removed (`lightyear_avian3d` plugin.rs) | The `AuthoredLocalTransform` shield is now redundant; delete it only after a playtest parity run |
+| 4 | dual-marker-tiebreak | Not fixed; the tie now resolves the other way (`Interpolated` outranks `Predicted`) (source reading) | Nothing to delete |
+| 5 | avian-restore-assumes-enlarged-aabb | Mechanism replaced — restore snapshots the collider trees (source reading) | None needed |
+| 6 | confirmedhistory-seeding | Fixed — add-time seeding removed (source reading) | Moot: `strip_confirmed_history` already gone |
+| 7 | sealed-correction-policy | Partly widened (`CorrectionPolicy::new`, `with_ease`); still no custom curve (source reading) | Moot: no correction layer |
+| 9 | avian-childof-not-replicated-transform-mode | Upstream rewrote the test; not re-run here | None (Position mode) |
+| 10 | absent-anchor-input-freeze | **Partly fixed — VERIFIED**: the buffer stores materialized values, so the propagating `Absent` anchor is gone and an `Absent` is a one-tick hole; stalled `end_tick` corrections are still dropped by the `tick > last_remote_tick` gate and gap-fill still fabricates a hold-last copy (`lightyear_inputs` input_buffer.rs / input_message.rs) | `fixed_input_delay(3)` and `for_tick` stay load-bearing; `tests/net_fire_release.rs` re-pinned to the 0.30 buffer |
+| 11 | native-input-encoder-inverted-range-oom | **OOM fixed — VERIFIED**: the encoder is bounded; an inverted range now yields one mislabeled state (`lightyear_inputs_native` input_message.rs) | Guard stays; `tests/net_input_buffer_wrap.rs` pins the bounded wrong answer |
+| 13 | confirmed-state-at-or-ahead-never-reconciled | Mechanism replaced by the same checkpoint rewrite as #1 (source reading) | Moot: no prediction |
+
+## Fixed upstream, released in bevy 0.19.1 — mechanism records of retired vendor patches
 
 Both were root-caused here from vendored source, then found already fixed in the **0.19.1**
-milestone that crates.io has not shipped. Kept as the mechanism record + vendored-patch rationale.
+milestone. 0.19.1 has shipped and both backports are retired; the files stay as mechanism records.
 
 | # | File | Target | Upstream fix | Our vendor entry |
 |---|------|--------|--------------|------------------|
-| 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | `vendor/bevy_light-0.19.0-cascade-count` — drop when 0.19.1 ships. With it, cascade count is a live setting like `ShadowDistance` |
-| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | `vendor/bevy_pbr-0.19.0-scalar-math` (shared with #14) — the main-world half is pinned in-tree by `tests/bevy_shadow_view_render_layers.rs` |
+| 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the vendored `bevy_light` entry is gone; cascade count stays a live setting like `ShadowDistance` |
+| 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport is gone (`tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape); `vendor/bevy_pbr-0.19.1-scalar-math` carries only #14 |
 
 ## Cross-report unlocks — the things blocked on MORE THAN ONE fix
 
@@ -82,9 +103,9 @@ milestone that crates.io has not shipped. Kept as the mechanism record + vendore
   1 cm / 0.01 rad reference) — needs #2 AND #8.** ADR-0015 calls them "a ratchet, not a setting" and names
   exactly those two conditions ("contact-restore fix, upstream constraint ordering"). #2 is banked; #8 is
   the open half.
-- **Retiring `vendor/bevy_pbr-0.19.0-scalar-math` — needs #14 AND #17.** One vendored crate carries two
-  unrelated patches: the `MeshUniform` allocation fix (#14, still ours to file) and the shadow-view
-  `RenderLayers` backport (#17, already merged upstream). The bevy 0.19.1 release retires only half of it.
+- **Retiring `vendor/bevy_pbr-0.19.1-scalar-math` — needs #14.** Bevy 0.19.1 shipped #17's fix, so
+  the shadow-view backport is gone; the vendored crate now carries only the `MeshUniform`
+  allocation fix (#14, still ours to file).
 
 Housekeeping: when an upstream fix ships, the matching workaround's removal condition is stated
 in each file. #12 carries an automatic tripwire — `tests/bevy_ktx2_uastc_fallback.rs` FAILS when

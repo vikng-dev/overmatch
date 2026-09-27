@@ -5,7 +5,7 @@
 > spark arrives at RTT/2 and the shove at RTT/2 + D, so the ordering this stack policed is
 > structurally impossible.
 
-> **Status: accepted; landed local on `feat/authoritative-facts`, playtest pending. `PROTOCOL_REV`
+> **Original status (historical): accepted; landed local on `feat/authoritative-facts`, playtest pending. `PROTOCOL_REV`
 > is now 25: the owner-private `HullShock` registration re-pinned it to 22 earlier on the same
 > branch, naming the victim on `ImpactConfirm`/`RicochetKeyframe` moved it to 23, giving
 > `HullShock` its own `opened` tick moved it to 24 — see *Correlating a spark with a fact* — and

@@ -97,7 +97,7 @@ An artist-side rewrite of the source at its true information content (the 5,550-
 _Avoid_: LOD0 generation, decimation preset
 
 **Deviation**:
-Worst-case point-to-surface distance (mm) between a generated level and the source — the biggest lie the level tells about where the surface is. Measured **two-way** (one-way misses holes); never an average (averages hide the spike that pops). Travels with the level as `worst_dev_mm`.
+Worst-case point-to-surface distance (mm) between a generated level and the source — the biggest lie the level tells about where the surface is. Measured **two-way** (one-way misses holes); never an average (averages hide the spike that pops). Travels with the level as `deviation_mm` in the certificate's `rungs`.
 _Avoid_: error percentage, triangle reduction (those are inputs/outputs, not the lie)
 
 **Normal deviation**:
@@ -151,8 +151,9 @@ The barrel's rest (fully forward) position, to which recoil returns. "Return to 
 
 **Weapon gate**:
 The complete authority-owned state that decides whether one weapon slot may fire: its absolute
-next-ready simulation tick and, for an automatic weapon, its belt count. The owner predicts it, but
-corrections restore at the authority sample's producing tick and replay forward (ADR-0029).
+next-ready simulation tick and, for an automatic weapon, its belt count. The client reads it as a
+legality report; it is not predicted (ADR-0029's wire shape; ADR-0037 dissolved the owner-prediction
+half).
 _Avoid_: reload timer (the gate also covers cyclic readiness and belt swaps), belt snapshot
 
 **Stabilization**:
@@ -263,17 +264,19 @@ _Avoid_: "determinism" for this (continuity bounds divergence growth; determinis
 _Avoid_: filing determinism under lockstep. Lockstep *needs* forward determinism; so does predict-and-rollback. Determinism is a property of the sim, orthogonal to who holds authority (ADR-0015).
 
 **Misprediction / Divergence**:
-The two error classes a correction repairs. *Misprediction*: you guessed a remote player's next input wrong — information-theoretic, irreducible, and **determinism cannot touch it**. *Divergence*: same inputs, different results — determinism eliminates it entirely. Solo rollbacks are pure divergence, which is why ADR-0015 treats them as a defect metric with target ~zero.
+*Superseded in part by ADR-0037: the client no longer predicts, so misprediction has no live
+instance; divergence remains the sim-determinism question.* The two error classes a correction repairs. *Misprediction*: you guessed a remote player's next input wrong — information-theoretic, irreducible, and **determinism cannot touch it**. *Divergence*: same inputs, different results — determinism eliminates it entirely. Solo rollbacks are pure divergence, which is why ADR-0015 treats them as a defect metric with target ~zero.
 _Avoid_: "determinism makes prediction more accurate" (it makes *replay* exact; the guess is bounded by information, not reproducibility)
 
 **Prediction margin**:
-How many ticks the client runs ahead of the confirmed state it receives. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbs all latency into delay, margin hits zero, and every confirmed update arrives at-or-ahead of the current tick.
+*Historical (pre-ADR-0037).* How many ticks the client ran ahead of the confirmed state it received. Input delay eats it: `InputDelayConfig::balanced()` at loopback RTT absorbed all latency into delay, margin hit zero, and every confirmed update arrived at-or-ahead of the current tick. The client now predicts nothing and runs a fixed input delay of `SHIPPING_INPUT_DELAY_TICKS`.
 
 **Check starvation**:
-The zero-margin failure (fixed by `net/watchdog.rs`): lightyear's receive-time rollback check is skipped for any sample stamped at-or-ahead of the current tick and never retried, so state rollback goes permanently, silently dead — measured 35–50 m divergence with fresh authority arriving and zero rollbacks. Pre-watchdog lat0 rollback counts measured this, not convergence.
+*Historical: the watchdog that worked around it was deleted with client prediction (ADR-0037); the
+client no longer rolls back.* The zero-margin failure: lightyear's receive-time rollback check is skipped for any sample stamped at-or-ahead of the current tick and never retried, so state rollback goes permanently, silently dead — measured 35–50 m divergence with fresh authority arriving and zero rollbacks. Pre-watchdog lat0 rollback counts measured this, not convergence.
 
 **Tick index** (predicted `P` / server `S` / confirmed `C` / interpolation `I`):
-The tick a given entity is a view of. A client's world is not a snapshot of one instant: its own tank lives at the *predicted* index `P`, an opponent's collider at the *interpolation* index `I`, and server-authoritative facts arrive on the *confirmed* frontier `C`. See `design/timelines-and-shear.md` for the offsets and their sources.
+The tick a given entity is a view of. A client's world is not a snapshot of one instant: every tank, the client's own included, renders at the *interpolation* index `I` (ADR-0037) — `P` survives as the input timeline's tick — and server-authoritative facts arrive on the *confirmed* frontier `C`. See `design/timelines-and-shear.md` for the offsets and their sources.
 _Avoid_: comparing `C` and `I` as if commensurable — `C` is a global replication-completeness frontier, `I` a per-entity render index.
 
 **Shear**:
@@ -288,7 +291,8 @@ Whether a system's dynamics shrink or grow a perturbation — the Lyapunov quest
 _Avoid_: "self-correcting" (does not distinguish contractive from merely bounded or oscillatory)
 
 **Netcode scaffolding** (Layer 1 / Layer 2):
-The two-layer doctrine (ADR-0015). *Layer 1* — permanent sim-design work, ours: divergence continuity. *Layer 2* — deliberately removable workarounds, each mapped to a named upstream defect with a removal condition (watchdog, contact-restore fix, coarsened thresholds). The render-space error layer looks like Layer 2 but is permanent — other players' inputs are unpredictable forever, and it is how any correction is presented.
+*Superseded in part by ADR-0037: with no client prediction, the Layer-2 scaffolding (watchdog,
+render-space error layer) is gone.* The two-layer doctrine (ADR-0015). *Layer 1* — permanent sim-design work, ours: divergence continuity. *Layer 2* — deliberately removable workarounds, each mapped to a named upstream defect with a removal condition (watchdog, contact-restore fix, coarsened thresholds). The render-space error layer looks like Layer 2 but is permanent — other players' inputs are unpredictable forever, and it is how any correction is presented.
 _Avoid_: calling Layer-1 work a workaround (it stands on its own merits)
 
 ## Collision

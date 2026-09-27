@@ -633,7 +633,7 @@ life; reload/recoil/drive stay 0 throughout. Incidence: 3/12 valid decoded runs 
 sensitive contact/solver behavior at island-change events — the avian constraint-order class
 (upstream report #2) and/or the BVH contact-restore class (#5); the wave-A avian fork A/B on
 this instrument is the discriminating experiment. Handed off via
-`.agents/scratch/hsim-to-wave-a.md`.
+`.agents/scratch/hsim-to-wave-a.md` (retired; `git show 90fae66^:.agents/scratch/hsim-to-wave-a.md`).
 
 ### Standing updates
 
@@ -661,7 +661,8 @@ this instrument is the discriminating experiment. Handed off via
 
 The wave-A review session (HANDOFF-wave-a-review.md, now consumed) reviewed Codex's three fork
 patches and ran the game-level A/Bs on main @ d7d103e. Verdicts + records:
-`.agents/scratch/wave-a-ab-records/`; adoption memo: `.agents/scratch/wave-a-adoption-memo.md`.
+`.agents/scratch/wave-a-ab-records/`; adoption memo: `.agents/scratch/wave-a-adoption-memo.md` (both
+retired; `git show 90ba478^:<path>`).
 Everything below is MEASURED (80/10 unless noted; N given per claim).
 
 - **Class 3 is NOT the avian constraint-order term.** §9 handed class 3 to the wave-A avian
@@ -735,7 +736,7 @@ reductions.
 
 The workspace-wide `glam/scalar-math` decision in
 [[0028-cross-architecture-bit-determinism-via-glam-scalar-math]] closes the class for the current
-pinned simulation graph. Its validating pair at `codex-scalarmath` commit `020f9fd` was MEASURED
+pinned simulation graph. Its validating pair at commit `020f9fd` was MEASURED
 startup `IDENTICAL` for all 1,345 named raw values and tick payloads `IDENTICAL` for all 3,072
 ticks across all seven seams. The full probe including dump took MEASURED 18.2 s with scalar math
 vs 20.3 s with SIMD, a difference within measurement noise.
