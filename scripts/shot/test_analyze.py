@@ -433,6 +433,26 @@ class OwnFireIdentityTests(unittest.TestCase):
         self.assertEqual(verification_failures(result), ["lost_shots=1"])
 
 
+    def test_fire_with_no_connected_recipient_is_unaddressed_not_lost(self) -> None:
+        # A fire on a tick whose transport row names no public recipient (no client connected
+        # yet) could never reach this client; the same fire on a tick WITH a recipient but no
+        # send row stays a strict loss.
+        server = [
+            row("fire", 1, 100, 1, cal=0.0079),
+            {"k": "transport", "t": 1, "public_recipient_count": 0},
+            row("fire", 10, 100, 10, cal=0.0079),
+            {"k": "transport", "t": 10, "public_recipient_count": 1},
+        ]
+        client = [row("spawn", 12, 300, 12, src="own")]
+
+        result = analyze({"tick_hz": 64}, client, {"tick_hz": 64}, server)
+
+        self.assertEqual(result["unaddressed"], 1)
+        self.assertEqual(result["expected"], 1)
+        self.assertEqual(result["lost"], 1)
+        self.assertEqual(verification_failures(result), ["lost_shots=1"])
+
+
 class TransportCopyTests(unittest.TestCase):
     def test_copy_counts_keep_multiple_bounces_separate_and_split_policy(self) -> None:
         server = [

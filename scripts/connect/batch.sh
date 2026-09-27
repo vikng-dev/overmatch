@@ -26,7 +26,7 @@ cd "$REPO" || exit 1
 
 LOAD_PIDS=()
 if [ "${LOAD:-0}" = "1" ]; then
-  for c in $(seq 1 "$(sysctl -n hw.ncpu)"); do yes > /dev/null & LOAD_PIDS+=($!); done
+  for c in $(seq 1 "$(sysctl -n hw.ncpu 2>/dev/null || nproc)"); do yes > /dev/null & LOAD_PIDS+=($!); done
   trap '[ ${#LOAD_PIDS[@]} -gt 0 ] && kill $LOAD_PIDS 2>/dev/null' EXIT
   echo "cpu load: ${#LOAD_PIDS[@]} busy-loops"
 fi
@@ -49,7 +49,7 @@ for i in $(seq $START $((START + N - 1))); do
   t0=$(date +%s)
   SPIKE_SIMULATE_INPUT=1 SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
     SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
-    ./target/debug/overmatch > "$base.client.log" 2>&1 &
+    ./target/debug/overmatch --local > "$base.client.log" 2>&1 &
   CLIENT_PID=$!
 
   elapsed=0
