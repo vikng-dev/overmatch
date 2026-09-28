@@ -300,10 +300,23 @@ impl ArrivalDelay {
 }
 
 /// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
-/// ping estimator never reads. Samples enter ONLY while BOTH hold: `AppState::Playing` is active
-/// AND the `InterpolationTimeline` resource reports synced — connect/loading-phase arrivals carry
-/// client load stalls, not path delay, and each one evicted at ring capacity swings the delay law
-/// into a resync.
+/// ping estimator never reads. Samples enter ONLY while ALL hold: `AppState::Playing` is active,
+/// the `InterpolationTimeline` resource reports synced, and the frame that drained the socket was
+/// no longer than `net::extrapolate`'s horizon g* — connect/loading-phase arrivals and arrivals
+/// stamped after a client frame stall carry client stalls, not path delay, and each one evicted at
+/// ring capacity swings the delay law into a resync.
+///
+/// THE STALL CONJUNCT: an arrival is stamped when its frame drains the socket, so a packet queued
+/// during a frame of length `dt` reads up to `dt` late. Every sample carries up to one frame of that
+/// error; a frame past g* (imported, never restated: the tail the extrapolator already hides) makes
+/// it an error the delay law would pay for as buffer. MEASURED on the scripted 80/10 ms loopback
+/// run: the local rig and shadow bake stall the client 460–560 ms about 0.5 s after connect, which
+/// held `min_delay` at ~0.5–0.6 s for the ring's full 60 s; on the same run with the receive
+/// conditioner off, excluding those frames takes the armed `min_delay` from 414 ms to 18 ms. (With
+/// `SPIKE_LATENCY_MS` on, the conditioner re-queues the post-stall drain and releases it on later
+/// ordinary frames, so ~200 ms of the stall still reads as spread — a harness artifact, no real
+/// socket queues after the drain.) A sustained low frame rate below g* (52 ms, ~19 fps) still
+/// records.
 fn record_packet_arrival(
     event: On<PacketReceived>,
     time: Res<Time<Real>>,
@@ -313,7 +326,8 @@ fn record_packet_arrival(
     mut estimator: ResMut<ArrivalDelay>,
 ) {
     let synced = timeline.is_some_and(|timeline| timeline.is_synced());
-    if *state.get() != AppState::Playing || !synced {
+    let stalled = time.delta() > super::extrapolate::horizon();
+    if *state.get() != AppState::Playing || !synced || stalled {
         return;
     }
     estimator.record(
@@ -700,10 +714,10 @@ mod tests {
         assert_eq!(estimator.newest_remote, Some(Tick(1_001)));
     }
 
-    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline: an arrival while either
-    /// conjunct is down never enters the estimator. Mutant: delete the guard's early return in
-    /// `record_packet_arrival` (or either conjunct) — the matching pre-gate trigger records and
-    /// its zero-count assertion reds; the final trigger pins that the gated path still records.
+    /// THE RECORDING GATE IS Playing ∧ a synced InterpolationTimeline ∧ an unstalled frame: an
+    /// arrival while any conjunct is down never enters the estimator. Mutant: delete the guard's
+    /// early return in `record_packet_arrival` (or any conjunct) — the matching trigger records and
+    /// its count assertion reds; the ordinary-frame triggers pin that the gated path still records.
     #[test]
     fn pre_gate_arrivals_never_enter_the_estimator() {
         let mut app = App::new();
@@ -746,6 +760,31 @@ mod tests {
             arrive(&mut app, 1_003),
             1,
             "playing ∧ synced records — the observer stays live"
+        );
+        // A frame past the horizon stamps its arrivals late: they never record.
+        let now = app.world().resource::<Time<Real>>().startup();
+        let mut real = app.world_mut().resource_mut::<Time<Real>>();
+        real.update_with_instant(now);
+        real.update_with_instant(
+            now + super::super::extrapolate::horizon() + Duration::from_millis(1),
+        );
+        assert_eq!(
+            arrive(&mut app, 1_004),
+            1,
+            "an arrival drained by a stalled frame never records"
+        );
+        let last = app
+            .world()
+            .resource::<Time<Real>>()
+            .last_update()
+            .expect("updated");
+        app.world_mut()
+            .resource_mut::<Time<Real>>()
+            .update_with_instant(last + TICK);
+        assert_eq!(
+            arrive(&mut app, 1_005),
+            2,
+            "the next ordinary frame records again"
         );
     }
 

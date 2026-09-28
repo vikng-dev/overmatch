@@ -162,7 +162,9 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     # --- index every row by shot key -----------------------------------------------------
     server: dict[tuple[int, int, int], dict] = defaultdict(lambda: defaultdict(list))
     for r in srows:
-        if r["k"] in ("send", "transport"):
+        # `send` joins below; `transport` and `reliable_outbox` are per-tick aggregates with no
+        # ShotId (`src/shot_trace.rs`).
+        if r["k"] in ("send", "transport", "reliable_outbox"):
             continue
         server[shot_key(r)][r["k"]].append(r)
     client: dict[tuple[int, int, int], dict] = defaultdict(lambda: defaultdict(list))
@@ -308,7 +310,21 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
     )
 
     # d. Cross-tank fires: semantics completely unchanged — strict tick-exact exactly-once.
-    observed_expected = {k for k in fired - own if k[0] != c_own}
+    #    A fire on a tick whose transport row records no public recipient at all (no client
+    #    connected yet — e.g. a bot firing at server start) had no one to reach: it is not
+    #    expected. A fire on a tick WITH recipients stays strict even if no send row exists,
+    #    so a fact the server failed to send is still a loss.
+    unaddressed_ticks = {
+        r["t"]
+        for r in srows
+        if r.get("k") == "transport" and int(r.get("public_recipient_count", 1)) == 0
+    }
+    unaddressed = {
+        k
+        for k in fired - own
+        if k[0] != c_own and any(f["t"] in unaddressed_ticks for f in server[k]["fire"])
+    }
+    observed_expected = {k for k in fired - own if k[0] != c_own} - unaddressed
 
     # Damage/marker accounting joins on the AUTHORITATIVE key: a correctly re-timed or
     # re-scheduled own round's damage confirm rides the server's fire key, not the client's
@@ -528,6 +544,7 @@ def analyze(cmeta: dict, crows: list[dict], smeta: dict, srows: list[dict]) -> d
         "trace_end_window_ticks": TRACE_END_WINDOW_TICKS,
         "client_trace_end_gap_ticks": client_trace_end_gap,
         "expected": len(observed_expected),
+        "unaddressed": len(unaddressed),
         "delivered": delivered,
         "lost": len(lost),
         "dup_rows": dup_rows,
@@ -664,6 +681,7 @@ def report(a: dict, samples: int) -> None:
     print("\n  DELIVERY  (shots the server broadcast that this client should observe)")
     print(f"    analyzable server fires      {a['server_fires']}")
     print(f"      of which this client's own {a['own_shots']}  (tick-exact prediction matches — never echoed back)")
+    print(f"    unaddressed (no recipient)   {a['unaddressed']}   (fired on a tick with no client connected)")
     print(f"    expected on this client      {a['expected']}   (cross-tank fires; strict exactly-once)")
     print(f"    delivered                    {a['delivered']}")
     print(f"    LOST (never arrived)         {a['lost']}")
