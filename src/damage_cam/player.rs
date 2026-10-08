@@ -68,19 +68,22 @@ pub fn demo_plugin(app: &mut App) {
         .insert_resource(ActiveClip::new(0, &scenarios))
         .insert_resource(scenarios)
         .init_resource::<Playhead>()
+        .init_resource::<CamLaw>()
         .add_systems(Startup, (spawn_scene, spawn_hud))
         .add_systems(
             Update,
             (
                 handle_keys,
                 advance_playhead,
-                rebuild_internals.run_if(resource_changed::<ActiveClip>),
+                (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
                 prepare_view,
                 apply_ghost,
                 tint_internals,
                 drive_camera,
                 draw_clip,
                 update_hud,
+                update_cards,
+                update_labels,
             )
                 .chain(),
         );
@@ -131,6 +134,8 @@ struct Playhead {
     clip: f32,
     rate: f32,
     paused: bool,
+    /// Hold-orbit angle (rad) about the framed centre; zero outside the hold.
+    orbit: f32,
 }
 
 impl Default for Playhead {
@@ -139,12 +144,34 @@ impl Default for Playhead {
             clip: 0.0,
             rate: 1.0,
             paused: false,
+            orbit: 0.0,
         }
     }
 }
 
 /// Clip seconds one scrub key press moves the playhead.
 const SCRUB_S: f32 = 0.1;
+/// Hold-orbit rate, rad per real second.
+const ORBIT_RAD_S: f32 = 0.25;
+
+/// The camera law at the plate, through the reveal and traverse beats.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq)]
+enum CamLaw {
+    /// The framed oblique x-ray view.
+    #[default]
+    Cut,
+    /// Follows the shell along the path through the hull.
+    Ride,
+}
+
+impl CamLaw {
+    fn label(self) -> &'static str {
+        match self {
+            CamLaw::Cut => "CUT",
+            CamLaw::Ride => "RIDE",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Beat {
@@ -297,7 +324,7 @@ impl Framing {
         let (lo, hi) = points.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| {
             (lo.min(*p), hi.max(*p))
         });
-        let radius = ((hi - lo).length() * 0.5).max(0.8);
+        let radius = ((hi - lo).length() * 0.5).max(1.2);
         let normal = Vec3::from(report.impact.normal);
         let side = Vec3::new(normal.x, 0.0, normal.z)
             .try_normalize()
@@ -313,8 +340,10 @@ impl Framing {
         }
     }
 
-    fn eye(&self) -> Transform {
-        Transform::from_translation(self.center + self.view_dir * self.distance)
+    /// The framed view, turned `orbit` rad about the vertical through the centre.
+    fn eye(&self, orbit: f32) -> Transform {
+        let dir = Quat::from_rotation_y(orbit) * self.view_dir;
+        Transform::from_translation(self.center + dir * self.distance)
             .looking_at(self.center, Vec3::Y)
     }
 }
@@ -369,6 +398,12 @@ struct InternalBox(usize);
 #[derive(Component)]
 struct StatusText;
 
+#[derive(Component)]
+struct VerdictText;
+
+#[derive(Component)]
+struct PlateCard;
+
 fn spawn_scene(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
@@ -383,7 +418,7 @@ fn spawn_scene(
     commands.insert_resource(TankFixture {
         spec: asset_server.load(TANK_SPEC),
     });
-    commands.spawn((Camera3d::default(), clip.framing.eye(), ClipCamera));
+    commands.spawn((Camera3d::default(), exterior_eye(&clip.report), ClipCamera));
     commands.spawn((crate::world::sun_light(), crate::world::sun_transform()));
     commands.spawn((
         Mesh3d(meshes.add(Plane3d::default().mesh().size(40.0, 40.0))),
@@ -428,6 +463,59 @@ fn spawn_hud(mut commands: Commands) {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
             left: Val::Px(12.0),
+            ..default()
+        },
+    ));
+    commands
+        .spawn(Node {
+            position_type: PositionType::Absolute,
+            top: Val::Px(10.0),
+            width: Val::Percent(100.0),
+            justify_content: JustifyContent::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                VerdictText,
+                Text::new(""),
+                TextFont {
+                    font_size: FontSize::Px(22.0),
+                    ..default()
+                },
+                TextColor(SPAN),
+                TextLayout::justify(Justify::Center),
+                Visibility::Hidden,
+            ));
+        });
+    commands.spawn((
+        PlateCard,
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.85, 0.87, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(12.0),
+            left: Val::Px(12.0),
+            padding: UiRect::all(Val::Px(8.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+        Visibility::Hidden,
+    ));
+    commands.spawn((
+        Text::new("1-4 scenario   R replay   Space pause   Left/Right scrub   C camera   Esc quit"),
+        TextFont {
+            font_size: FontSize::Px(14.0),
+            ..default()
+        },
+        TextColor(Color::srgb(0.7, 0.72, 0.78)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(12.0),
+            right: Val::Px(12.0),
             ..default()
         },
     ));
@@ -578,8 +666,15 @@ fn handle_keys(
     scenarios: Res<Scenarios>,
     mut clip: ResMut<ActiveClip>,
     mut playhead: ResMut<Playhead>,
+    mut law: ResMut<CamLaw>,
     mut exit: MessageWriter<AppExit>,
 ) {
+    if keys.just_pressed(KeyCode::KeyC) {
+        *law = match *law {
+            CamLaw::Cut => CamLaw::Ride,
+            CamLaw::Ride => CamLaw::Cut,
+        };
+    }
     for (index, key) in SCENARIO_KEYS.iter().enumerate() {
         if keys.just_pressed(*key) && index < scenarios.0.len() {
             *clip = ActiveClip::new(index, &scenarios);
@@ -604,10 +699,18 @@ fn handle_keys(
 }
 
 fn advance_playhead(time: Res<Time<Real>>, mut playhead: ResMut<Playhead>) {
-    if playhead.paused || playhead.clip >= HOLD_START {
+    if playhead.clip < HOLD_START {
+        playhead.orbit = 0.0;
+    }
+    if playhead.paused {
         return;
     }
-    playhead.clip = (playhead.clip + time.delta_secs() * playhead.rate).min(HOLD_START);
+    let step = time.delta_secs() * playhead.rate;
+    if playhead.clip >= HOLD_START {
+        playhead.orbit += step * ORBIT_RAD_S;
+    } else {
+        playhead.clip = (playhead.clip + step).min(HOLD_START);
+    }
 }
 
 /// The impact beat looks at the contact point from outside, off the line of fire.
@@ -619,15 +722,34 @@ fn exterior_eye(report: &PenetrationReport) -> Transform {
     Transform::from_translation(eye).looking_at(point, Vec3::Y)
 }
 
-/// Exterior through the impact beat, then a cut to the framed oblique.
+/// Behind and above the shell head at record time `cutoff`, looking along its travel.
+fn ride_eye(report: &PenetrationReport, cutoff: f32) -> Transform {
+    let path = path_until(report, cutoff);
+    let head = path.last().map_or(Vec3::from(report.impact.point), |p| p.1);
+    let dir = path
+        .iter()
+        .rev()
+        .map(|p| head - p.1)
+        .find(|d| d.length_squared() > 1.0e-6)
+        .map_or(Vec3::from(report.impact.incoming), Vec3::normalize);
+    Transform::from_translation(head - dir * 1.2 + Vec3::Y * 0.35).looking_at(head + dir, Vec3::Y)
+}
+
+/// Exterior through the impact beat, then the camera law until the consequence beat cuts to the
+/// framed oblique, which orbits in the hold.
 fn drive_camera(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
+    law: Res<CamLaw>,
     mut camera: Single<&mut Transform, With<ClipCamera>>,
 ) {
-    **camera = match Beat::at(playhead.clip) {
-        Beat::Impact => exterior_eye(&clip.report),
-        _ => clip.framing.eye(),
+    let now = playhead.clip;
+    **camera = match (Beat::at(now), *law) {
+        (Beat::Impact, _) => exterior_eye(&clip.report),
+        (Beat::Reveal | Beat::Traverse, CamLaw::Ride) => {
+            ride_eye(&clip.report, clip.timeline.cutoff(now))
+        }
+        _ => clip.framing.eye(playhead.orbit),
     };
 }
 
@@ -793,6 +915,7 @@ fn draw_internals(gizmos: &mut Gizmos, report: &PenetrationReport, timeline: &Ti
 fn update_hud(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
+    law: Res<CamLaw>,
     scenarios: Res<Scenarios>,
     mut status: Single<&mut Text, With<StatusText>>,
 ) {
@@ -802,14 +925,139 @@ fn update_hud(
         ""
     };
     status.0 = format!(
-        "t {:.2} s  {}{}\nscenario {}/{} {}{synthetic}",
+        "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{synthetic}",
         playhead.clip,
         Beat::at(playhead.clip).label(),
         if playhead.paused { "  [paused]" } else { "" },
         clip.index + 1,
         scenarios.0.len(),
         scenarios.0[clip.index].0,
+        law.label(),
     );
+}
+
+fn verdict_word(verdict: Verdict) -> (&'static str, Color) {
+    match verdict {
+        Verdict::Through => ("THROUGH", SPAN),
+        Verdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
+        Verdict::Ricochet => ("RICOCHET", RICOCHET),
+    }
+}
+
+fn verdict_card(report: &PenetrationReport) -> String {
+    let (word, _) = verdict_word(report.impact.verdict);
+    let p = &report.projectile;
+    format!(
+        "{word}\n{}  {:.0} mm  {:.1} kg  {:.0} m/s  incidence {:.0} deg",
+        p.name, p.caliber_mm, p.mass_kg, p.speed_mps, report.impact.incidence_deg
+    )
+}
+
+fn plate_card(report: &PenetrationReport) -> String {
+    let mut card = String::from("PLATES");
+    for plate in &report.plates {
+        card.push_str(&format!(
+            "\n{}\n  chord {:.0} mm\n  steel-equiv {:.0} mm\n  cost {:.0} mm\n  overmatched {}",
+            plate.name,
+            plate.chord_mm,
+            plate.steel_equiv_mm,
+            plate.cost_mm,
+            if plate.overmatched { "yes" } else { "no" },
+        ));
+    }
+    card
+}
+
+/// The verdict appears at contact, the plate card from the reveal on.
+fn update_cards(
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    mut verdict: Single<
+        (&mut Text, &mut TextColor, &mut Visibility),
+        (With<VerdictText>, Without<PlateCard>),
+    >,
+    mut plates: Single<(&mut Text, &mut Visibility), (With<PlateCard>, Without<VerdictText>)>,
+) {
+    let (text, color, visibility) = &mut *verdict;
+    text.0 = verdict_card(&clip.report);
+    color.0 = verdict_word(clip.report.impact.verdict).1;
+    **visibility = shown(playhead.clip >= CONTACT_AT);
+    let (text, visibility) = &mut *plates;
+    text.0 = plate_card(&clip.report);
+    **visibility = shown(playhead.clip >= IMPACT_END);
+}
+
+fn shown(visible: bool) -> Visibility {
+    if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    }
+}
+
+/// One label per consequence, by its index in [`PenetrationReport::consequences`].
+#[derive(Component)]
+struct ConsequenceLabel(usize);
+
+fn rebuild_labels(
+    mut commands: Commands,
+    clip: Res<ActiveClip>,
+    labels: Query<Entity, With<ConsequenceLabel>>,
+) {
+    for entity in &labels {
+        commands.entity(entity).despawn();
+    }
+    for (index, consequence) in clip.report.consequences.iter().enumerate() {
+        let (word, color) = match consequence.state {
+            ConsequenceState::Damaged => ("damaged", AMBER),
+            ConsequenceState::Lost => ("lost", LOST),
+            ConsequenceState::Cookoff => ("cookoff", LOST),
+        };
+        let function = consequence.function.as_deref().unwrap_or("");
+        commands.spawn((
+            ConsequenceLabel(index),
+            Text::new(format!("{} {word}\n{function}", consequence.volume)),
+            TextFont {
+                font_size: FontSize::Px(14.0),
+                ..default()
+            },
+            TextColor(color),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            Visibility::Hidden,
+        ));
+    }
+}
+
+/// Each label sits over its internal's top face once its consequence lands.
+fn update_labels(
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    camera: Single<(&Camera, &GlobalTransform), With<ClipCamera>>,
+    mut labels: Query<(&ConsequenceLabel, &mut Node, &mut Visibility)>,
+) {
+    let (camera, camera_transform) = *camera;
+    for (label, mut node, mut visibility) in &mut labels {
+        let Some(consequence) = clip.report.consequences.get(label.0) else {
+            continue;
+        };
+        let landed = playhead.clip >= clip.timeline.consequence_clip(consequence.t);
+        let anchor = clip
+            .report
+            .internal(&consequence.volume)
+            .map(|internal| Vec3::from(internal.center) + Vec3::Y * internal.half_extents[1]);
+        let screen = anchor.and_then(|a| camera.world_to_viewport(camera_transform, a).ok());
+        match screen {
+            Some(screen) if landed => {
+                node.left = Val::Px(screen.x + 8.0);
+                node.top = Val::Px(screen.y - 8.0);
+                *visibility = Visibility::Inherited;
+            }
+            _ => *visibility = Visibility::Hidden,
+        }
+    }
 }
 
 #[cfg(test)]
