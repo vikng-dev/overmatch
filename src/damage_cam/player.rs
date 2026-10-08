@@ -84,6 +84,7 @@ pub fn demo_plugin(app: &mut App) {
                 advance_playhead,
                 (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
                 tint_internals,
+                place_shell,
                 drive_camera,
                 draw_clip,
                 update_hud,
@@ -434,6 +435,15 @@ fn spawn_scene(
     let scene: Handle<WorldAsset> =
         asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH));
     commands.spawn((WorldAssetRoot(scene), Transform::IDENTITY, TankView));
+    // The game's main-gun round as `ballistics::view` dresses it: same asset, unscaled.
+    let shell: Handle<WorldAsset> =
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset("shell/shell.glb"));
+    commands.spawn((
+        WorldAssetRoot(shell),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        ShellModel,
+    ));
     commands.insert_resource(TankFixture {
         spec: asset_server.load(TANK_SPEC),
     });
@@ -579,6 +589,7 @@ fn prepare_view(
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     roots: Query<(), With<TankView>>,
+    shells: Query<(), With<ShellModel>>,
     mut ready: ResMut<ViewReady>,
 ) {
     let Some(spec) = specs.get(&fixture.spec) else {
@@ -600,6 +611,9 @@ fn prepare_view(
         let mut hide = false;
         let mut in_view = false;
         for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
+            if shells.contains(node) {
+                break;
+            }
             if roots.contains(node) {
                 in_view = true;
                 break;
@@ -750,6 +764,13 @@ fn exterior_eye(report: &PenetrationReport) -> Transform {
 
 /// Behind and above the shell head at record time `cutoff`, looking along its travel.
 fn ride_eye(report: &PenetrationReport, cutoff: f32) -> Transform {
+    let (head, dir) = shell_head(report, cutoff);
+    Transform::from_translation(head - dir * 1.2 + Vec3::Y * 0.35).looking_at(head + dir, Vec3::Y)
+}
+
+/// The shell head at record time `cutoff` and its unit travel direction along the last segment of
+/// non-zero length; `impact.incoming` when there is none.
+fn shell_head(report: &PenetrationReport, cutoff: f32) -> (Vec3, Vec3) {
     let path = path_until(report, cutoff);
     let head = path.last().map_or(Vec3::from(report.impact.point), |p| p.1);
     let dir = path
@@ -758,7 +779,25 @@ fn ride_eye(report: &PenetrationReport, cutoff: f32) -> Transform {
         .map(|p| head - p.1)
         .find(|d| d.length_squared() > 1.0e-6)
         .map_or(Vec3::from(report.impact.incoming), Vec3::normalize);
-    Transform::from_translation(head - dir * 1.2 + Vec3::Y * 0.35).looking_at(head + dir, Vec3::Y)
+    (head, dir)
+}
+
+/// The shell model's root, kept out of the ghost swap.
+#[derive(Component)]
+struct ShellModel;
+
+/// Place the shell model at the head, model `-Z` along travel (the game's projectile convention,
+/// `looking_to(travel, Y)`), hidden until the playhead starts.
+fn place_shell(
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    ready: Res<ViewReady>,
+    mut shell: Single<(&mut Transform, &mut Visibility), With<ShellModel>>,
+) {
+    let (transform, visibility) = &mut *shell;
+    let (head, dir) = shell_head(&clip.report, clip.timeline.cutoff(playhead.clip));
+    **transform = Transform::from_translation(head).looking_to(dir, Vec3::Y);
+    **visibility = shown(ready.0);
 }
 
 /// Exterior through the impact beat, then the camera law until the consequence beat cuts to the
@@ -826,11 +865,6 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
     let path = path_until(report, cutoff);
     draw_striped(&mut gizmos, &path);
     let head = path.last().map(|p| p.1);
-    if let Some(&(t, head)) = path.last()
-        && report.path.last().is_some_and(|last| t < last.t)
-    {
-        gizmos.sphere(Isometry3d::from_translation(head), 0.04, TRACER);
-    }
     if now >= CONTACT_AT {
         draw_impact(&mut gizmos, report);
     }
