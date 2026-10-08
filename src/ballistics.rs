@@ -20,14 +20,10 @@ use crate::{ClientReplica, Layer, ShotClock, ShotId};
 mod sanctioned;
 
 /// The §13 union field walk — the pure resolution core (overlaps charge their union, micro-gaps
-/// ε-weld, the shell samples the world as a caliber-wide disc). NOT WIRED: the march below still
-/// runs the serial [`resolve_armor_crossing`]; slice 2 of the arc replaces it with this. Everything
-/// in there is a pure function over pre-collected hit lists, which is what makes the §13.6
-/// invariants testable to the bit.
-#[allow(
-    dead_code,
-    reason = "slice-1 pure core; slice 2 wires it into the march and retires the serial resolver"
-)]
+/// ε-weld, the shell samples the world as a caliber-wide disc). The march runs it through
+/// `resolve::resolve_crossing`, the Avian adapter that collects the corridor. Everything in there
+/// is a pure function over pre-collected hit lists, which is what makes the §13.6 invariants
+/// testable to the bit.
 mod walk;
 
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
@@ -740,7 +736,9 @@ pub struct PenetrationMarks {
 }
 
 /// A single spall fragment's trace: where it stopped, and whether it deposited HP (hit a component)
-/// or merely shadowed / flew on (hit armor or air). Carries 1 HP; no penetration of its own (§5).
+/// or merely shadowed / flew on (hit armor or air). A fragment is an energy packet (§5): it carries
+/// a penetration value that bleeds with distance (`FRAG_DRAG`), deposits `pen × FRAG_DMG_PER_MM`
+/// into each component it crosses, punches through thin volumes and stops in thick ones.
 pub struct SpallFragment {
     pub end: Vec3,
     pub deposited: bool,

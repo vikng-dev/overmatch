@@ -340,7 +340,7 @@ Deflection off a too-steep face without entering — spawns a new path segment a
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Spall** (exit cone):
-The fixed-shape cone of fragments thrown from a volume's exit face on perforation — dense on-axis, thinning with angle and distance — and the primary crew-killer. Each fragment is one HP unit that stops at the first volume it reaches.
+The fixed-shape cone of fragments thrown from a volume's exit face on perforation — dense on-axis, thinning with angle and distance — and the primary crew-killer. Each fragment is an energy packet: a penetration value that bleeds with distance, deposits damage in proportion to it, punches through thin volumes and stops in thick ones.
 _Avoid_: spalling, fragmentation, frag (the noun is spall; the emitter is the exit cone)
 
 **Station**:
