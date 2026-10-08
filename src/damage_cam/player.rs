@@ -15,7 +15,7 @@ use bevy::prelude::*;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{ConsequenceState, PenetrationReport, Role, Verdict};
+use super::{ConsequenceState, PenetrationReport, Role, SpallBurst, Verdict};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -45,8 +45,12 @@ const CONSEQUENCE_FROM: f32 = 2.8;
 const CONSEQUENCE_TO: f32 = 3.6;
 /// One sim tick of record time: the path's stripe period.
 const TICK_S: f32 = 1.0 / 64.0;
-/// Clip seconds a burst's fragments take to reach their ends.
-const FRAGMENT_GROW_S: f32 = 0.25;
+/// The spall speed law `cos(1.92 theta)` (Verolme-Szymczak) is read no further off axis than this
+/// (rad) and never below this fraction of the shell's residual speed.
+const FRAGMENT_THETA_MAX: f32 = std::f32::consts::FRAC_PI_4;
+const FRAGMENT_SPEED_FLOOR: f32 = 0.1;
+/// Minimum axial length (m) drawn for a burst's cone envelope.
+const CONE_MIN_LENGTH_M: f32 = 0.3;
 /// Path points past the shell's departure from the armour (a ricochet's deflection leg, a
 /// through-and-through's exit leg) count toward framing only this far (m) from where it left;
 /// points between plates are never clamped.
@@ -136,15 +140,19 @@ struct ActiveClip {
     report: PenetrationReport,
     timeline: Timeline,
     framing: Framing,
+    /// One per [`PenetrationReport::spall`] entry, in order.
+    bursts: Vec<BurstTiming>,
 }
 
 impl ActiveClip {
     fn new(index: usize, scenarios: &Scenarios) -> Self {
         let report = scenarios.0[index].1.clone();
+        let bursts = burst_timings(&report);
         Self {
             index,
-            timeline: Timeline::new(&report),
+            timeline: Timeline::new(&report, &bursts),
             framing: Framing::new(&report),
+            bursts,
             report,
         }
     }
@@ -235,14 +243,14 @@ impl Beat {
 struct Timeline {
     /// Record time of the first path point; `<= 0`.
     approach_start: f32,
-    /// Record time of the last path point, plate or burst; `> 0`.
+    /// Record time of the last path point, plate, burst or fragment arrival; `> 0`.
     span: f32,
     consequence_from: f32,
     consequence_to: f32,
 }
 
 impl Timeline {
-    fn new(report: &PenetrationReport) -> Self {
+    fn new(report: &PenetrationReport, bursts: &[BurstTiming]) -> Self {
         let approach_start = report.path.first().map_or(0.0, |p| p.t).min(0.0);
         let span = report
             .path
@@ -250,6 +258,7 @@ impl Timeline {
             .map(|p| p.t)
             .chain(report.plates.iter().map(|p| p.t))
             .chain(report.spall.iter().map(|b| b.t))
+            .chain(bursts.iter().flat_map(|b| b.fragments.iter().copied()))
             .fold(1.0e-4, f32::max);
         let consequence_from = report
             .consequences
@@ -301,6 +310,83 @@ impl Timeline {
                 + (CONSEQUENCE_TO - CONSEQUENCE_FROM) * (t - self.consequence_from) / range
         }
     }
+}
+
+/// Fragment speed as a fraction of the shell's residual speed, `theta` rad off the burst axis:
+/// `cos(1.92 theta)`, read no further than [`FRAGMENT_THETA_MAX`] and floored at
+/// [`FRAGMENT_SPEED_FLOOR`]. On axis the fragment keeps pace with the shell.
+fn fragment_speed_fraction(theta: f32) -> f32 {
+    (1.92 * theta.min(FRAGMENT_THETA_MAX))
+        .cos()
+        .max(FRAGMENT_SPEED_FLOOR)
+}
+
+/// The shell's speed along the path segment that contains record time `t`; the contact speed
+/// when no segment does.
+fn path_speed_at(report: &PenetrationReport, t: f32) -> f32 {
+    report
+        .path
+        .windows(2)
+        .find(|pair| pair[0].t <= t && t <= pair[1].t && pair[1].t > pair[0].t)
+        .map(|pair| {
+            Vec3::from(pair[0].point).distance(Vec3::from(pair[1].point)) / (pair[1].t - pair[0].t)
+        })
+        .unwrap_or(report.projectile.speed_mps)
+}
+
+/// When a burst's pieces reach their ends, in record seconds, from the shell's residual speed at
+/// the burst and [`fragment_speed_fraction`] of each piece's angle off the axis.
+struct BurstTiming {
+    /// Axial length (m) of the cone envelope: the farthest fragment's projection on the axis.
+    length: f32,
+    /// The envelope's tip, on axis.
+    nose: f32,
+    /// The envelope's end circle, along a generator at the cone's half-angle.
+    rim: f32,
+    /// One per [`SpallBurst::fragments`] entry, in order.
+    fragments: Vec<f32>,
+}
+
+impl BurstTiming {
+    fn new(report: &PenetrationReport, burst: &SpallBurst) -> Self {
+        let origin = Vec3::from(burst.origin);
+        let axis = Vec3::from(burst.axis).normalize_or(Vec3::Z);
+        let v_exit = path_speed_at(report, burst.t);
+        let arrival = |distance: f32, theta: f32| {
+            burst.t + distance / (v_exit * fragment_speed_fraction(theta))
+        };
+        let length = burst
+            .fragments
+            .iter()
+            .map(|f| (Vec3::from(f.end) - origin).dot(axis))
+            .fold(CONE_MIN_LENGTH_M, f32::max);
+        let half = burst.half_angle_deg.to_radians();
+        let fragments = burst
+            .fragments
+            .iter()
+            .map(|f| {
+                let offset = Vec3::from(f.end) - origin;
+                match offset.try_normalize() {
+                    Some(dir) => arrival(offset.length(), axis.angle_between(dir)),
+                    None => burst.t,
+                }
+            })
+            .collect();
+        Self {
+            length,
+            nose: arrival(length, 0.0),
+            rim: arrival(length / half.cos(), half),
+            fragments,
+        }
+    }
+}
+
+fn burst_timings(report: &PenetrationReport) -> Vec<BurstTiming> {
+    report
+        .spall
+        .iter()
+        .map(|burst| BurstTiming::new(report, burst))
+        .collect()
 }
 
 /// The oblique x-ray view: bounds of the post-contact path and the affected internals, seen from
@@ -923,9 +1009,22 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
             }
         }
     }
-    for burst in report.spall.iter().filter(|b| cutoff >= b.t) {
-        let grow = ((now - timeline.clip_of(burst.t)) / FRAGMENT_GROW_S).clamp(0.0, 1.0);
-        draw_burst(&mut gizmos, burst, grow);
+    for (burst, timing) in report
+        .spall
+        .iter()
+        .zip(&clip.bursts)
+        .filter(|(b, _)| cutoff >= b.t)
+    {
+        let start = timeline.clip_of(burst.t);
+        let progress = |arrival: f32| {
+            let end = timeline.clip_of(arrival);
+            if end <= start {
+                1.0
+            } else {
+                ((now - start) / (end - start)).clamp(0.0, 1.0)
+            }
+        };
+        draw_burst(&mut gizmos, burst, timing, progress);
     }
     draw_internals(&mut gizmos, report, timeline, now);
 }
@@ -954,28 +1053,31 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
     gizmos.line(point, point + normal * 0.35, Color::srgb(0.8, 0.82, 0.86));
 }
 
-/// The cone as an envelope (axis, a few generators, the end circle) and every fragment, faint
-/// unless it hit something.
-fn draw_burst(gizmos: &mut Gizmos, burst: &super::SpallBurst, grow: f32) {
+/// The cone as an envelope (the axis to the nose, generators and the end circle at the rim's own
+/// reach) and every fragment at its own progress, faint unless it hit something. `progress` maps
+/// a record arrival time to the fraction of the way there at the playhead.
+fn draw_burst(
+    gizmos: &mut Gizmos,
+    burst: &SpallBurst,
+    timing: &BurstTiming,
+    progress: impl Fn(f32) -> f32,
+) {
     let origin = Vec3::from(burst.origin);
     let axis = Vec3::from(burst.axis).normalize_or(Vec3::Z);
-    let length = burst
-        .fragments
-        .iter()
-        .map(|f| (Vec3::from(f.end) - origin).dot(axis))
-        .fold(0.3, f32::max)
-        * grow;
-    let tip = origin + axis * length;
-    let rim = length * burst.half_angle_deg.to_radians().tan();
     let facing = Quat::from_rotation_arc(Vec3::Z, axis);
-    gizmos.line(origin, tip, CONE);
-    gizmos.circle(Isometry3d::new(tip, facing), rim, CONE);
+    let nose = origin + axis * timing.length * progress(timing.nose);
+    let reach = timing.length * progress(timing.rim);
+    let rim = reach * burst.half_angle_deg.to_radians().tan();
+    let ring = origin + axis * reach;
+    gizmos.line(origin, nose, CONE);
+    gizmos.circle(Isometry3d::new(ring, facing), rim, CONE);
     for k in 0..6 {
         let angle = k as f32 * std::f32::consts::TAU / 6.0;
         let offset = facing * Vec3::new(angle.cos(), angle.sin(), 0.0) * rim;
-        gizmos.line(origin, tip + offset, CONE);
+        gizmos.line(origin, ring + offset, CONE);
     }
-    for fragment in &burst.fragments {
+    for (fragment, arrival) in burst.fragments.iter().zip(&timing.fragments) {
+        let grow = progress(*arrival);
         let end = origin.lerp(Vec3::from(fragment.end), grow);
         if fragment.hits.is_empty() {
             gizmos.line(origin, end, FRAGMENT_FAINT);
@@ -1178,6 +1280,7 @@ fn update_labels(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{Fragment, Impact, PathPoint, Projectile};
     use super::*;
 
     fn scenario(file: &str) -> PenetrationReport {
@@ -1209,9 +1312,87 @@ mod tests {
         assert!(!within(unclamped, envelope, FRAME_REACH_M));
     }
 
+    /// A straight, constant-speed path with one burst half-way along it, for the timing law.
+    fn straight_burst(fragment_end: [f32; 3]) -> PenetrationReport {
+        PenetrationReport {
+            synthetic: true,
+            projectile: Projectile {
+                name: "fixture".into(),
+                caliber_mm: 88.0,
+                mass_kg: 10.0,
+                speed_mps: 900.0,
+            },
+            impact: Impact {
+                point: [0.0; 3],
+                normal: [0.0, 0.0, -1.0],
+                incoming: [0.0, 0.0, 1.0],
+                incidence_deg: 0.0,
+                verdict: Verdict::Through,
+            },
+            plates: vec![],
+            path: vec![
+                PathPoint {
+                    t: 0.0,
+                    point: [0.0; 3],
+                },
+                PathPoint {
+                    t: 0.001,
+                    point: [0.0, 0.0, 0.6],
+                },
+            ],
+            spall: vec![SpallBurst {
+                t: 0.0005,
+                origin: [0.0, 0.0, 0.3],
+                axis: [0.0, 0.0, 1.0],
+                half_angle_deg: 30.0,
+                fragments: vec![Fragment {
+                    end: fragment_end,
+                    hits: vec![],
+                }],
+            }],
+            consequences: vec![],
+            internals: vec![],
+        }
+    }
+
+    #[test]
+    fn fragment_speed_falls_off_axis_to_a_floor() {
+        let at = |deg: f32| fragment_speed_fraction(deg.to_radians());
+        assert_eq!(at(0.0), 1.0);
+        assert!((at(15.0) - 0.88).abs() <= 0.01);
+        assert!((at(30.0) - 0.54).abs() <= 0.01);
+        assert!((at(40.0) - 0.23).abs() <= 0.01);
+        for deg in [44.0, 45.0, 60.0, 90.0, 180.0] {
+            assert_eq!(at(deg), FRAGMENT_SPEED_FLOOR, "{deg} deg");
+        }
+    }
+
+    #[test]
+    fn on_axis_fragment_keeps_pace_with_the_shell() {
+        let report = straight_burst([0.0, 0.0, 0.6]);
+        assert!((path_speed_at(&report, 0.0005) - 600.0).abs() < 1.0e-3);
+        assert_eq!(path_speed_at(&report, 0.002), 900.0);
+        let timing = &burst_timings(&report)[0];
+        assert!((timing.fragments[0] - 0.001).abs() < 1.0e-6);
+        assert!((timing.nose - 0.001).abs() < 1.0e-6);
+        assert!(timing.rim > timing.nose);
+        let timeline = Timeline::new(&report, &burst_timings(&report));
+        assert!((timeline.clip_of(timing.fragments[0]) - TRAVERSE_END).abs() < 1.0e-4);
+    }
+
+    #[test]
+    fn off_axis_fragment_lags_and_extends_the_span() {
+        let report = straight_burst([0.0, 0.3, 0.6]);
+        let timing = &burst_timings(&report)[0];
+        assert!(timing.fragments[0] > 0.001);
+        let timeline = Timeline::new(&report, &burst_timings(&report));
+        assert_eq!(timeline.span, timing.fragments[0]);
+    }
+
     #[test]
     fn timeline_maps_contact_and_span_onto_the_beats() {
-        let timeline = Timeline::new(&through());
+        let report = through();
+        let timeline = Timeline::new(&report, &burst_timings(&report));
         assert_eq!(timeline.clip_of(timeline.approach_start), 0.0);
         assert_eq!(timeline.clip_of(0.0), REVEAL_END);
         assert_eq!(timeline.clip_of(timeline.span), TRAVERSE_END);
