@@ -59,6 +59,8 @@ const CONE_MIN_LENGTH_M: f32 = 0.3;
 /// through-and-through's exit leg) count toward framing only this far (m) from where it left;
 /// points between plates are never clamped.
 const FRAME_REACH_M: f32 = 3.0;
+/// A path segment passing within this distance (m) of the last exit holds the shell's departure.
+const DEPARTURE_TOLERANCE_M: f32 = 0.02;
 /// Section view: below this incidence (deg) the plane of incidence is spanned by the shot line and
 /// world up instead of the plate normal.
 const SECTION_MIN_INCIDENCE_DEG: f32 = 3.0;
@@ -184,7 +186,7 @@ impl ActiveClip {
         let bursts = burst_timings(&report);
         Self {
             index,
-            timeline: Timeline::new(&report, &bursts),
+            timeline: Timeline::new(&report),
             framing: Framing::new(&report),
             section: SectionPlane::new(&report),
             bursts,
@@ -278,14 +280,16 @@ impl Beat {
 struct Timeline {
     /// Record time of the first path point; `<= 0`.
     approach_start: f32,
-    /// Record time of the last path point, plate, burst or fragment arrival; `> 0`.
+    /// Record time of the last path point, plate or burst; `> 0`. It reaches the traverse's end,
+    /// so the shell's pacing never depends on fragments: their arrivals past it map on at the same
+    /// rate, into the consequence beat, and are complete by the hold.
     span: f32,
     consequence_from: f32,
     consequence_to: f32,
 }
 
 impl Timeline {
-    fn new(report: &PenetrationReport, bursts: &[BurstTiming]) -> Self {
+    fn new(report: &PenetrationReport) -> Self {
         let approach_start = report.path.first().map_or(0.0, |p| p.t).min(0.0);
         let span = report
             .path
@@ -293,7 +297,6 @@ impl Timeline {
             .map(|p| p.t)
             .chain(report.plates.iter().map(|p| p.t))
             .chain(report.spall.iter().map(|b| b.t))
-            .chain(bursts.iter().flat_map(|b| b.fragments.iter().copied()))
             .fold(1.0e-4, f32::max);
         let consequence_from = report
             .consequences
@@ -313,22 +316,23 @@ impl Timeline {
         }
     }
 
-    /// Clip time at which record time `t` is reached.
+    /// Clip time at which record time `t` is reached, no later than [`HOLD_START`].
     fn clip_of(&self, t: f32) -> f32 {
         if t < 0.0 {
             CONTACT_AT * (t - self.approach_start) / -self.approach_start
         } else {
-            REVEAL_END + (TRAVERSE_END - REVEAL_END) * (t / self.span).min(1.0)
+            (REVEAL_END + (TRAVERSE_END - REVEAL_END) * t / self.span).min(HOLD_START)
         }
     }
 
-    /// Record time drawn up to at clip time `clip`.
+    /// Record time drawn up to at clip time `clip`: the inverse of [`Self::clip_of`], everything
+    /// from the hold on.
     fn cutoff(&self, clip: f32) -> f32 {
         if clip < CONTACT_AT && self.approach_start < 0.0 {
             self.approach_start * (1.0 - clip / CONTACT_AT)
         } else if clip < REVEAL_END {
             0.0
-        } else if clip < TRAVERSE_END {
+        } else if clip < HOLD_START {
             self.span * (clip - REVEAL_END) / (TRAVERSE_END - REVEAL_END)
         } else {
             f32::INFINITY
@@ -356,13 +360,14 @@ fn fragment_speed_fraction(theta: f32) -> f32 {
         .max(FRAGMENT_SPEED_FLOOR)
 }
 
-/// The shell's speed along the path segment that contains record time `t`; the contact speed
-/// when no segment does.
+/// The shell's speed along the path segment that contains record time `t`: at a sample's own
+/// time the outgoing segment, the incoming one only where none follows; the contact speed when no
+/// segment does.
 fn path_speed_at(report: &PenetrationReport, t: f32) -> f32 {
-    report
-        .path
-        .windows(2)
-        .find(|pair| pair[0].t <= t && t <= pair[1].t && pair[1].t > pair[0].t)
+    let segments = || report.path.windows(2).filter(|pair| pair[1].t > pair[0].t);
+    segments()
+        .find(|pair| pair[0].t <= t && t < pair[1].t)
+        .or_else(|| segments().find(|pair| pair[0].t < t && t <= pair[1].t))
         .map(|pair| {
             Vec3::from(pair[0].point).distance(Vec3::from(pair[1].point)) / (pair[1].t - pair[0].t)
         })
@@ -498,20 +503,47 @@ fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
 }
 
 /// Where the shell left the armour for good (the ricochet point, or the last plate's exit) and
-/// the record time of the path point there; `None` when the path ends in material.
+/// the record time it was there: the point interpolated onto the first path segment ending at or
+/// after the plate's entry that passes within [`DEPARTURE_TOLERANCE_M`] of it, or the nearest
+/// sample's time when no segment does. `None` when the path ends in material.
 fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
-    let anchor = Vec3::from(match report.impact.verdict {
-        Verdict::Ricochet => report.impact.point,
-        _ => report.plates.last()?.exit?,
-    });
-    let left_at = report
+    let (anchor, from) = match report.impact.verdict {
+        Verdict::Ricochet => (report.impact.point, 0.0),
+        _ => {
+            let plate = report.plates.last()?;
+            (plate.exit?, plate.t)
+        }
+    };
+    let anchor = Vec3::from(anchor);
+    let on_path = report
         .path
-        .iter()
-        .min_by(|a, b| {
-            let gap = |p: &super::PathPoint| Vec3::from(p.point).distance_squared(anchor);
-            gap(a).total_cmp(&gap(b))
-        })?
-        .t;
+        .windows(2)
+        .filter(|pair| pair[1].t >= from)
+        .find_map(|pair| {
+            let (a, b) = (Vec3::from(pair[0].point), Vec3::from(pair[1].point));
+            let span = b - a;
+            let along = span.length_squared();
+            let s = if along > 0.0 {
+                ((anchor - a).dot(span) / along).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            (anchor.distance(a + span * s) <= DEPARTURE_TOLERANCE_M)
+                .then(|| pair[0].t + (pair[1].t - pair[0].t) * s)
+        });
+    let left_at = match on_path {
+        Some(t) => t,
+        None => {
+            report
+                .path
+                .iter()
+                .min_by(|a, b| {
+                    let gap = |p: &super::PathPoint| Vec3::from(p.point).distance_squared(anchor);
+                    gap(a).total_cmp(&gap(b))
+                })?
+                .t
+        }
+    };
     Some((left_at, anchor))
 }
 
@@ -1645,7 +1677,7 @@ fn update_plate_labels(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Fragment, Impact, PathPoint, Projectile};
+    use super::super::{Fragment, Impact, PathPoint, Plate, Projectile};
     use super::*;
 
     fn scenario(file: &str) -> PenetrationReport {
@@ -1794,28 +1826,84 @@ mod tests {
         assert!((timing.fragments[0] - 0.001).abs() < 1.0e-6);
         assert!((timing.nose - 0.001).abs() < 1.0e-6);
         assert!(timing.rim > timing.nose);
-        let timeline = Timeline::new(&report, &burst_timings(&report));
+        let timeline = Timeline::new(&report);
         assert!((timeline.clip_of(timing.fragments[0]) - TRAVERSE_END).abs() < 1.0e-4);
     }
 
+    /// A lagging fragment never stretches the span: it maps past the traverse end at the same
+    /// rate, `cutoff` inverting it there, and clamps at the hold.
     #[test]
-    fn off_axis_fragment_lags_and_extends_the_span() {
-        let report = straight_burst([0.0, 0.3, 0.6]);
+    fn off_axis_fragment_lags_and_maps_past_the_traverse() {
+        let report = straight_burst([0.0, 0.136, 0.808]);
         let timing = &burst_timings(&report)[0];
         assert!(timing.fragments[0] > 0.001);
-        let timeline = Timeline::new(&report, &burst_timings(&report));
-        assert_eq!(timeline.span, timing.fragments[0]);
+        let timeline = Timeline::new(&report);
+        assert_eq!(timeline.span, 0.001);
+        let arrival = timeline.clip_of(timing.fragments[0]);
+        assert!(arrival > TRAVERSE_END && arrival < HOLD_START, "{arrival}");
+        assert!((timeline.cutoff(arrival) - timing.fragments[0]).abs() < 1.0e-6);
+        let slow = straight_burst([0.0, 0.3, 0.6]);
+        let slow_arrival = burst_timings(&slow)[0].fragments[0];
+        assert_eq!(Timeline::new(&slow).span, 0.001);
+        assert_eq!(Timeline::new(&slow).clip_of(slow_arrival), HOLD_START);
+    }
+
+    #[test]
+    fn path_speed_prefers_the_outgoing_segment_at_a_shared_sample() {
+        let mut report = straight_burst([0.0, 0.0, 0.6]);
+        report.path.push(PathPoint {
+            t: 0.002,
+            point: [0.0, 0.0, 1.0],
+        });
+        assert!((path_speed_at(&report, 0.0) - 600.0).abs() < 1.0e-3);
+        assert!((path_speed_at(&report, 0.001) - 400.0).abs() < 1.0e-3);
+        assert!((path_speed_at(&report, 0.002) - 400.0).abs() < 1.0e-3);
+        assert_eq!(path_speed_at(&report, 0.003), 900.0);
+    }
+
+    /// Samples at 0, 0.1 and 16 m with the exit at 10 m: the sample nearest the exit is the
+    /// path's end, so only a search along the segments finds the departure and clamps the rest.
+    #[test]
+    fn departure_is_found_on_a_sparsely_sampled_path() {
+        let mut report = straight_burst([0.0, 0.0, 0.6]);
+        report.spall.clear();
+        let speed = 700.0;
+        report.path = [0.0, 0.1, 16.0]
+            .map(|z| PathPoint {
+                t: z / speed,
+                point: [0.0, 0.0, z],
+            })
+            .to_vec();
+        report.plates = vec![Plate {
+            name: "fixture".into(),
+            t: 9.9 / speed,
+            entry: [0.0, 0.0, 9.9],
+            exit: Some([0.0, 0.0, 10.0]),
+            chord_mm: 100.0,
+            steel_equiv_mm: 100.0,
+            cost_mm: 100.0,
+            overmatched: false,
+        }];
+        let (left_at, anchor) = departure(&report).unwrap();
+        assert!((left_at - 10.0 / speed).abs() < 1.0e-6);
+        assert_eq!(anchor, Vec3::new(0.0, 0.0, 10.0));
+        let (_, hi) = bounds(&framed_points(&report));
+        assert!((hi.z - (10.0 + FRAME_REACH_M)).abs() < 1.0e-4, "{hi}");
     }
 
     #[test]
     fn timeline_maps_contact_and_span_onto_the_beats() {
         let report = through();
-        let timeline = Timeline::new(&report, &burst_timings(&report));
+        let timeline = Timeline::new(&report);
         assert_eq!(timeline.clip_of(timeline.approach_start), 0.0);
         assert_eq!(timeline.clip_of(0.0), REVEAL_END);
         assert_eq!(timeline.clip_of(timeline.span), TRAVERSE_END);
         assert_eq!(timeline.cutoff(CONTACT_AT), 0.0);
-        assert_eq!(timeline.cutoff(TRAVERSE_END), f32::INFINITY);
+        assert!((timeline.cutoff(TRAVERSE_END) - timeline.span).abs() < 1.0e-6);
+        assert_eq!(timeline.cutoff(HOLD_START), f32::INFINITY);
+        let past = timeline.clip_of(timeline.span * 1.5);
+        assert!((past - (TRAVERSE_END + 0.5 * (TRAVERSE_END - REVEAL_END))).abs() < 1.0e-4);
+        assert_eq!(timeline.clip_of(timeline.span * 100.0), HOLD_START);
     }
 
     #[test]
