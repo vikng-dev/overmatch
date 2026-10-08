@@ -8,10 +8,14 @@
 //!
 //! Mounted by `bin/damage_cam_demo`, whose labels use Bevy's default font (ASCII only).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
+use bevy::camera::ScalingMode;
 use bevy::camera::visibility::VisibilitySystems;
+use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
+use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
@@ -55,6 +59,19 @@ const CONE_MIN_LENGTH_M: f32 = 0.3;
 /// through-and-through's exit leg) count toward framing only this far (m) from where it left;
 /// points between plates are never clamped.
 const FRAME_REACH_M: f32 = 3.0;
+/// Section view: below this incidence (deg) the plane of incidence is spanned by the shot line and
+/// world up instead of the plate normal.
+const SECTION_MIN_INCIDENCE_DEG: f32 = 3.0;
+/// The section fits the shot line from this far (m) before the first entry to this far past the
+/// last exit or embed, with this many calibres of margin across it.
+const SECTION_LEAD_M: f32 = 1.0;
+const SECTION_MARGIN_CALIBRES: f32 = 3.0;
+/// The section eye's stand-off (m) from the plane.
+const SECTION_EYE_M: f32 = 12.0;
+/// World up projected into the plane serves as the view's up only above this length.
+const SECTION_UP_MIN: f32 = 0.2;
+/// Fragments fade out over this distance (m) from the plane in section view.
+const SECTION_FADE_M: f32 = 0.5;
 
 const TRACER: Color = Color::srgb(1.0, 0.85, 0.2);
 const TRACER_ALT: Color = Color::srgb(0.95, 0.95, 0.9);
@@ -68,46 +85,62 @@ const FRAGMENT_FAINT: Color = Color::srgba(0.6, 0.62, 0.68, 0.35);
 const FRAGMENT_HIT: Color = Color::srgb(1.0, 0.4, 0.1);
 const AMBER: Color = Color::srgb(1.0, 0.65, 0.1);
 const LOST: Color = Color::srgb(1.0, 0.1, 0.1);
+/// The flat colour of steel exposed by the section cut.
+const CUT: Color = Color::srgb(0.80, 0.82, 0.86);
 
 pub fn demo_plugin(app: &mut App) {
     let scenarios = load_scenarios();
-    // An optional first argument names the starting scenario.
+    // An optional first argument names the starting scenario; a second one, `section`, starts in
+    // section view.
     let start = std::env::args()
         .nth(1)
         .and_then(|arg| SCENARIOS.iter().position(|(label, _)| *label == arg))
         .unwrap_or(0);
-    app.add_plugins((crate::quit::plugin, crate::spec::plugin))
-        .insert_resource(ClearColor(Color::srgb(0.09, 0.1, 0.12)))
-        .insert_resource(ActiveClip::new(start, &scenarios))
-        .insert_resource(scenarios)
-        .init_resource::<Playhead>()
-        .init_resource::<CamLaw>()
-        .init_resource::<ViewReady>()
-        .add_systems(Startup, (spawn_scene, spawn_hud))
-        .add_systems(
-            Update,
-            (
-                handle_keys,
-                advance_playhead,
-                (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
-                tint_internals,
-                place_shell,
-                drive_camera,
-                draw_clip,
-                update_hud,
-                update_cards,
-                update_labels,
-            )
-                .chain(),
+    let section = SectionView {
+        on: std::env::args().nth(2).is_some_and(|arg| arg == "section"),
+        restore: None,
+    };
+    app.add_plugins((
+        crate::quit::plugin,
+        crate::spec::plugin,
+        MaterialPlugin::<SectionMaterial>::default(),
+    ))
+    .insert_resource(ClearColor(Color::srgb(0.09, 0.1, 0.12)))
+    .insert_resource(ActiveClip::new(start, &scenarios))
+    .insert_resource(scenarios)
+    .insert_resource(section)
+    .init_resource::<Playhead>()
+    .init_resource::<CamLaw>()
+    .init_resource::<ViewReady>()
+    .init_resource::<CutMaterials>()
+    .add_systems(Startup, (spawn_scene, spawn_hud))
+    .add_systems(
+        Update,
+        (
+            handle_keys,
+            advance_playhead,
+            (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
+            tint_internals,
+            place_shell,
+            section_camera
+                .run_if(resource_changed::<SectionView>.or_else(resource_changed::<ActiveClip>)),
+            drive_camera,
+            draw_clip,
+            update_hud,
+            update_cards,
+            update_labels,
+            update_plate_labels,
         )
-        // Scene meshes spawn in `SpawnScene`, after `Update`; classifying them here, before
-        // visibility propagates, keeps a proxy or an unghosted hull off their first rendered frame.
-        .add_systems(
-            PostUpdate,
-            (prepare_view, apply_ghost)
-                .chain()
-                .before(VisibilitySystems::VisibilityPropagate),
-        );
+            .chain(),
+    )
+    // Scene meshes spawn in `SpawnScene`, after `Update`; classifying them here, before
+    // visibility propagates, keeps a proxy or an unghosted hull off their first rendered frame.
+    .add_systems(
+        PostUpdate,
+        (prepare_view, apply_cut, apply_ghost)
+            .chain()
+            .before(VisibilitySystems::VisibilityPropagate),
+    );
 }
 
 /// Set once [`prepare_view`] has classified a mesh under the [`TankView`] root; the playhead holds
@@ -140,6 +173,7 @@ struct ActiveClip {
     report: PenetrationReport,
     timeline: Timeline,
     framing: Framing,
+    section: SectionPlane,
     /// One per [`PenetrationReport::spall`] entry, in order.
     bursts: Vec<BurstTiming>,
 }
@@ -152,6 +186,7 @@ impl ActiveClip {
             index,
             timeline: Timeline::new(&report, &bursts),
             framing: Framing::new(&report),
+            section: SectionPlane::new(&report),
             bursts,
             report,
         }
@@ -486,6 +521,134 @@ fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
     })
 }
 
+/// The plane of incidence through the impact (spanned by the shot line and the struck plate's
+/// normal, so the band shows at true thickness) and the orthographic eye that films it side-on.
+#[derive(Clone, Copy, Debug)]
+struct SectionPlane {
+    point: Vec3,
+    /// Unit normal; the eye sits on this side. Above the plane, or on its +X side when it is
+    /// vertical.
+    normal: Vec3,
+    /// Looks along `-normal`, up being world up projected into the plane, or the shot line's
+    /// in-plane perpendicular when the plane is near horizontal.
+    eye: Transform,
+    /// The fitted viewport, world units.
+    width: f32,
+    height: f32,
+}
+
+impl SectionPlane {
+    fn new(report: &PenetrationReport) -> Self {
+        let point = Vec3::from(report.impact.point);
+        let incoming = Vec3::from(report.impact.incoming).normalize_or(Vec3::NEG_Z);
+        let span = if report.impact.incidence_deg < SECTION_MIN_INCIDENCE_DEG {
+            Vec3::Y
+        } else {
+            Vec3::from(report.impact.normal)
+        };
+        let mut normal = incoming
+            .cross(span)
+            .try_normalize()
+            .unwrap_or_else(|| incoming.any_orthonormal_vector());
+        if normal.y < -1.0e-3 || (normal.y.abs() <= 1.0e-3 && normal.x < 0.0) {
+            normal = -normal;
+        }
+        let up = Vec3::Y.reject_from_normalized(normal);
+        let up = if up.length() >= SECTION_UP_MIN {
+            up.normalize()
+        } else {
+            normal.cross(incoming).normalize_or(Vec3::Z)
+        };
+        let look = Transform::IDENTITY.looking_to(-normal, up);
+        let (right, up) = (*look.right(), *look.up());
+        let first = report.plates.first().map_or(point, |p| Vec3::from(p.entry));
+        let last = report
+            .plates
+            .last()
+            .map_or(point, |p| Vec3::from(p.exit.unwrap_or(p.entry)));
+        let along = (last - first).try_normalize().unwrap_or(incoming);
+        let across = normal.cross(along).normalize_or(up)
+            * (report.projectile.caliber_mm * 1.0e-3 * SECTION_MARGIN_CALIBRES);
+        let ends = [
+            first - along * SECTION_LEAD_M,
+            last + along * SECTION_LEAD_M,
+        ];
+        let (lo, hi) = ends
+            .iter()
+            .flat_map(|end| [*end + across, *end - across])
+            .map(|corner| Vec2::new((corner - point).dot(right), (corner - point).dot(up)))
+            .fold((Vec2::MAX, Vec2::MIN), |(lo, hi), c| (lo.min(c), hi.max(c)));
+        let centre = (lo + hi) * 0.5;
+        let eye = Transform::from_translation(
+            point + right * centre.x + up * centre.y + normal * SECTION_EYE_M,
+        )
+        .looking_to(-normal, up);
+        Self {
+            point,
+            normal,
+            eye,
+            width: hi.x - lo.x,
+            height: hi.y - lo.y,
+        }
+    }
+
+    /// Signed distance from the plane, positive on the eye's side.
+    fn height_of(&self, p: Vec3) -> f32 {
+        (p - self.point).dot(self.normal)
+    }
+
+    fn projection(&self) -> Projection {
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::AutoMin {
+                min_width: self.width,
+                min_height: self.height,
+            },
+            ..OrthographicProjection::default_3d()
+        })
+    }
+}
+
+/// Section view (key `X`): the armour cut along [`SectionPlane`], filmed by its eye.
+#[derive(Resource, Default)]
+struct SectionView {
+    on: bool,
+    /// The clip camera's projection before the cut, put back when the view turns off.
+    restore: Option<Projection>,
+}
+
+type SectionMaterial = ExtendedMaterial<StandardMaterial, SectionCut>;
+
+/// The cut's half of [`SectionMaterial`]: the plane and the flat colour of the steel it exposes.
+/// Bindings start at 100, bevy's convention for a material extension.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+struct SectionCut {
+    #[uniform(100)]
+    params: SectionCutParams,
+}
+
+/// The uniform block `section_cut.wgsl` reads.
+#[derive(ShaderType, Reflect, Debug, Clone, Copy, Default)]
+struct SectionCutParams {
+    /// xyz: the unit normal toward the eye, w: `normal . point`; a fragment with
+    /// `normal . position > w` is on the eye's side and discarded.
+    plane: Vec4,
+    cut_color: Vec4,
+}
+
+impl MaterialExtension for SectionCut {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/section_cut.wgsl".into()
+    }
+}
+
+/// A view mesh wearing the cut material in place of its [`GhostSwap`] one.
+#[derive(Component)]
+struct Cut;
+
+/// Cut materials by the original material they extend, made on first use.
+#[derive(Resource, Default)]
+struct CutMaterials(HashMap<AssetId<StandardMaterial>, Handle<SectionMaterial>>);
+
 #[derive(Component)]
 struct ClipCamera;
 
@@ -653,7 +816,9 @@ fn spawn_hud(mut commands: Commands) {
         Visibility::Hidden,
     ));
     commands.spawn((
-        Text::new("1-5 scenario   R replay   Space pause   Left/Right scrub   C camera   Esc quit"),
+        Text::new(
+            "1-5 scenario   R replay   Space pause   Left/Right scrub   C camera   X section   Esc quit",
+        ),
         TextFont {
             font_size: FontSize::Px(14.0),
             ..default()
@@ -783,6 +948,62 @@ fn apply_ghost(
     }
 }
 
+/// While section view is on, every ghost-swap mesh wears the cut material: its own material
+/// extended by the plane, culling nothing. Off, it gets its own material back for [`apply_ghost`]
+/// to settle.
+fn apply_cut(
+    mut commands: Commands,
+    section: Res<SectionView>,
+    clip: Res<ActiveClip>,
+    standard: Res<Assets<StandardMaterial>>,
+    mut cut_materials: ResMut<Assets<SectionMaterial>>,
+    mut cache: ResMut<CutMaterials>,
+    uncut: Query<(Entity, &GhostSwap), Without<Cut>>,
+    cut: Query<(Entity, &GhostSwap), With<Cut>>,
+) {
+    if !section.on {
+        for (entity, swap) in &cut {
+            commands
+                .entity(entity)
+                .remove::<(Cut, MeshMaterial3d<SectionMaterial>)>()
+                .insert(MeshMaterial3d(swap.original.clone()));
+        }
+        return;
+    }
+    let plane = &clip.section;
+    let cut = CUT.to_linear();
+    let params = SectionCutParams {
+        plane: plane.normal.extend(plane.normal.dot(plane.point)),
+        cut_color: Vec4::new(cut.red, cut.green, cut.blue, cut.alpha),
+    };
+    if clip.is_changed() || section.is_changed() {
+        for handle in cache.0.values() {
+            if let Some(mut material) = cut_materials.get_mut(handle) {
+                material.extension.params = params;
+            }
+        }
+    }
+    for (entity, swap) in &uncut {
+        let handle = cache
+            .0
+            .entry(swap.original.id())
+            .or_insert_with(|| {
+                let mut base = standard.get(&swap.original).cloned().unwrap_or_default();
+                base.cull_mode = None;
+                base.double_sided = true;
+                cut_materials.add(SectionMaterial {
+                    base,
+                    extension: SectionCut { params },
+                })
+            })
+            .clone();
+        commands
+            .entity(entity)
+            .remove::<MeshMaterial3d<StandardMaterial>>()
+            .insert((Cut, MeshMaterial3d(handle)));
+    }
+}
+
 /// A `Damaged` internal's box turns amber once its consequence lands.
 fn tint_internals(
     playhead: Res<Playhead>,
@@ -823,6 +1044,7 @@ fn handle_keys(
     mut clip: ResMut<ActiveClip>,
     mut playhead: ResMut<Playhead>,
     mut law: ResMut<CamLaw>,
+    mut section: ResMut<SectionView>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if keys.just_pressed(KeyCode::KeyC) {
@@ -830,6 +1052,9 @@ fn handle_keys(
             CamLaw::Cut => CamLaw::Ride,
             CamLaw::Ride => CamLaw::Cut,
         };
+    }
+    if keys.just_pressed(KeyCode::KeyX) {
+        section.on = !section.on;
     }
     for (index, key) in SCENARIO_KEYS.iter().enumerate() {
         if keys.just_pressed(*key) && index < scenarios.0.len() {
@@ -920,21 +1145,40 @@ fn place_shell(
 }
 
 /// Exterior through the impact beat, then the camera law until the consequence beat cuts to the
-/// framed oblique, which orbits in the hold.
+/// framed oblique, which orbits in the hold. Section view overrides them all with its own eye.
 fn drive_camera(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
     law: Res<CamLaw>,
+    section: Res<SectionView>,
     mut camera: Single<&mut Transform, With<ClipCamera>>,
 ) {
     let now = playhead.clip;
-    **camera = match (Beat::at(now), *law) {
-        (Beat::Impact, _) => exterior_eye(&clip.report),
-        (Beat::Reveal | Beat::Traverse, CamLaw::Ride) => {
+    **camera = match (section.on, Beat::at(now), *law) {
+        (true, _, _) => clip.section.eye,
+        (_, Beat::Impact, _) => exterior_eye(&clip.report),
+        (_, Beat::Reveal | Beat::Traverse, CamLaw::Ride) => {
             ride_eye(&clip.report, clip.timeline.cutoff(now))
         }
         _ => clip.framing.eye(playhead.orbit),
     };
+}
+
+/// Entering section view keeps the clip camera's projection and fits the orthographic one to the
+/// clip's section; leaving puts the kept projection back.
+fn section_camera(
+    mut section: ResMut<SectionView>,
+    clip: Res<ActiveClip>,
+    mut projection: Single<&mut Projection, With<ClipCamera>>,
+) {
+    if section.on {
+        if section.restore.is_none() {
+            section.restore = Some(projection.clone());
+        }
+        **projection = clip.section.projection();
+    } else if let Some(previous) = section.restore.take() {
+        **projection = previous;
+    }
 }
 
 /// Record path up to `cutoff`, with the last segment interpolated to it.
@@ -978,8 +1222,14 @@ fn draw_striped(gizmos: &mut Gizmos, points: &[(f32, Vec3)]) {
     }
 }
 
-fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>) {
+fn draw_clip(
+    mut gizmos: Gizmos,
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    section: Res<SectionView>,
+) {
     let (report, timeline, now) = (&clip.report, &clip.timeline, playhead.clip);
+    let plane = section.on.then_some(&clip.section);
     let cutoff = timeline.cutoff(now);
     let path = path_until(report, cutoff);
     draw_striped(&mut gizmos, &path);
@@ -1008,7 +1258,15 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
                 gizmos.sphere(Isometry3d::from_translation(exit), 0.035, EXIT);
             }
         }
+        if let (Some(plane), Some(head)) = (plane, head) {
+            draw_section_plate(&mut gizmos, report, plate, plane, head);
+        }
     }
+    let fade = |p: Vec3| {
+        plane.map_or(1.0, |plane| {
+            1.0 - (plane.height_of(p).abs() / SECTION_FADE_M).min(1.0)
+        })
+    };
     for (burst, timing) in report
         .spall
         .iter()
@@ -1024,9 +1282,53 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
                 ((now - start) / (end - start)).clamp(0.0, 1.0)
             }
         };
-        draw_burst(&mut gizmos, burst, timing, progress);
+        draw_burst(&mut gizmos, burst, timing, progress, fade);
     }
     draw_internals(&mut gizmos, report, timeline, now);
+}
+
+/// The section's reading of one plate: the chord as a bar with end ticks (an embed's chord runs
+/// from the entry to the shell head; a ricochet has none) and a bar of calibre length across the
+/// shot line just before the entry, so overmatch reads against the band. The record drives every
+/// length; the mesh only supplies the band.
+fn draw_section_plate(
+    gizmos: &mut Gizmos,
+    report: &PenetrationReport,
+    plate: &super::Plate,
+    plane: &SectionPlane,
+    head: Vec3,
+) {
+    let entry = Vec3::from(plate.entry);
+    let incoming = Vec3::from(report.impact.incoming);
+    let calibre = report.projectile.caliber_mm * 1.0e-3;
+    let chord = match plate.exit {
+        Some(exit) => {
+            let exit = Vec3::from(exit);
+            Some((exit, (exit - entry).normalize_or(incoming)))
+        }
+        None if report.impact.verdict == Verdict::Ricochet => None,
+        None => {
+            let along = (head - entry).normalize_or(incoming);
+            let depth = (head - entry)
+                .dot(along)
+                .clamp(0.0, plate.chord_mm * 1.0e-3);
+            Some((entry + along * depth, along))
+        }
+    };
+    let along = chord.map_or(incoming, |(_, along)| along);
+    let across = plane.normal.cross(along).normalize_or(Vec3::Y);
+    if let Some((end, _)) = chord {
+        let reached = entry.lerp(end, plate_progress(entry, end, head));
+        let tick = across * calibre * 0.25;
+        gizmos.line(entry, reached, SPAN);
+        gizmos.line(entry - tick, entry + tick, SPAN);
+        if reached.distance_squared(end) < 1.0e-8 {
+            gizmos.line(end - tick, end + tick, SPAN);
+        }
+    }
+    let bar = entry - along * calibre * 0.4;
+    let half = across * calibre * 0.5;
+    gizmos.line(bar - half, bar + half, TRACER);
 }
 
 /// How far through the crossing `entry`→`exit` the shell head is, as its clamped projection.
@@ -1055,12 +1357,14 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
 
 /// The cone as an envelope (the axis to the nose, generators and the end circle at the rim's own
 /// reach) and every fragment at its own progress, faint unless it hit something. `progress` maps
-/// a record arrival time to the fraction of the way there at the playhead.
+/// a record arrival time to the fraction of the way there at the playhead; `fade` scales a
+/// fragment's alpha by where it ends.
 fn draw_burst(
     gizmos: &mut Gizmos,
     burst: &SpallBurst,
     timing: &BurstTiming,
     progress: impl Fn(f32) -> f32,
+    fade: impl Fn(Vec3) -> f32,
 ) {
     let origin = Vec3::from(burst.origin);
     let axis = Vec3::from(burst.axis).normalize_or(Vec3::Z);
@@ -1078,13 +1382,20 @@ fn draw_burst(
     }
     for (fragment, arrival) in burst.fragments.iter().zip(&timing.fragments) {
         let grow = progress(*arrival);
-        let end = origin.lerp(Vec3::from(fragment.end), grow);
+        let full = Vec3::from(fragment.end);
+        let alpha = fade(full);
+        let end = origin.lerp(full, grow);
         if fragment.hits.is_empty() {
-            gizmos.line(origin, end, FRAGMENT_FAINT);
+            let color = FRAGMENT_FAINT.with_alpha(FRAGMENT_FAINT.alpha() * alpha);
+            gizmos.line(origin, end, color);
         } else {
-            gizmos.line(origin, end, FRAGMENT_HIT);
+            gizmos.line(origin, end, FRAGMENT_HIT.with_alpha(alpha));
             if grow >= 1.0 {
-                gizmos.sphere(Isometry3d::from_translation(end), 0.03, EXIT);
+                gizmos.sphere(
+                    Isometry3d::from_translation(end),
+                    0.03,
+                    EXIT.with_alpha(alpha),
+                );
             }
         }
     }
@@ -1126,6 +1437,7 @@ fn update_hud(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
     law: Res<CamLaw>,
+    section: Res<SectionView>,
     ready: Res<ViewReady>,
     scenarios: Res<Scenarios>,
     mut status: Single<&mut Text, With<StatusText>>,
@@ -1141,7 +1453,7 @@ fn update_hud(
         ""
     };
     status.0 = format!(
-        "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{synthetic}",
+        "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{}{synthetic}",
         playhead.clip,
         beat,
         if playhead.paused { "  [paused]" } else { "" },
@@ -1149,6 +1461,7 @@ fn update_hud(
         scenarios.0.len(),
         scenarios.0[clip.index].0,
         law.label(),
+        if section.on { "  SECTION" } else { "" },
     );
 }
 
@@ -1215,13 +1528,36 @@ fn shown(visible: bool) -> Visibility {
 #[derive(Component)]
 struct ConsequenceLabel(usize);
 
+/// One label per plate, by its index in [`PenetrationReport::plates`]; section view only.
+#[derive(Component)]
+struct PlateLabel(usize);
+
 fn rebuild_labels(
     mut commands: Commands,
     clip: Res<ActiveClip>,
-    labels: Query<Entity, With<ConsequenceLabel>>,
+    labels: Query<Entity, Or<(With<ConsequenceLabel>, With<PlateLabel>)>>,
 ) {
     for entity in &labels {
         commands.entity(entity).despawn();
+    }
+    for (index, plate) in clip.report.plates.iter().enumerate() {
+        commands.spawn((
+            PlateLabel(index),
+            Text::new(format!(
+                "{}\nchord {:.0} mm  steel {:.0} mm  cost {:.0} mm",
+                plate.name, plate.chord_mm, plate.steel_equiv_mm, plate.cost_mm
+            )),
+            TextFont {
+                font_size: FontSize::Px(14.0),
+                ..default()
+            },
+            TextColor(SPAN),
+            Node {
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            Visibility::Hidden,
+        ));
     }
     for (index, consequence) in clip.report.consequences.iter().enumerate() {
         let (word, color) = match consequence.state {
@@ -1271,6 +1607,35 @@ fn update_labels(
             Some(screen) if landed => {
                 node.left = Val::Px(screen.x + 8.0);
                 node.top = Val::Px(screen.y - 8.0);
+                *visibility = Visibility::Inherited;
+            }
+            _ => *visibility = Visibility::Hidden,
+        }
+    }
+}
+
+/// In section view, each plate's label sits by its entry once the shell has reached it.
+fn update_plate_labels(
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    section: Res<SectionView>,
+    camera: Single<(&Camera, &Transform), With<ClipCamera>>,
+    mut labels: Query<(&PlateLabel, &mut Node, &mut Visibility)>,
+) {
+    let (camera, transform) = *camera;
+    let camera_transform = &GlobalTransform::from(*transform);
+    for (label, mut node, mut visibility) in &mut labels {
+        let Some(plate) = clip.report.plates.get(label.0) else {
+            continue;
+        };
+        let reached = section.on && playhead.clip >= clip.timeline.clip_of(plate.t);
+        let screen = camera
+            .world_to_viewport(camera_transform, Vec3::from(plate.entry))
+            .ok();
+        match screen {
+            Some(screen) if reached => {
+                node.left = Val::Px(screen.x + 12.0);
+                node.top = Val::Px(screen.y + 12.0);
                 *visibility = Visibility::Inherited;
             }
             _ => *visibility = Visibility::Hidden,
@@ -1353,6 +1718,59 @@ mod tests {
             consequences: vec![],
             internals: vec![],
         }
+    }
+
+    /// The plane of incidence holds the shot line and the struck normal; the eye looks straight
+    /// along its normal from the normal's side, up in the plane, and fits the shot's span.
+    #[test]
+    fn section_plane_holds_the_shot_and_the_normal() {
+        for (_, file) in SCENARIOS {
+            let report = scenario(file);
+            let plane = SectionPlane::new(&report);
+            let incoming = Vec3::from(report.impact.incoming).normalize();
+            let normal = Vec3::from(report.impact.normal);
+            assert!(plane.normal.is_normalized(), "{file}");
+            assert!(plane.normal.dot(incoming).abs() < 1.0e-3, "{file}");
+            if report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG {
+                assert!(plane.normal.dot(normal).abs() < 1.0e-3, "{file}");
+            }
+            assert!(plane.normal.y >= -1.0e-3, "{file}: eye below the plane");
+            assert!(plane.height_of(plane.eye.translation) > 0.0, "{file}");
+            assert!(
+                (*plane.eye.forward() + plane.normal).length() < 1.0e-4,
+                "{file}"
+            );
+            assert!(plane.eye.up().dot(plane.normal).abs() < 1.0e-4, "{file}");
+            assert!(plane.height_of(Vec3::from(report.impact.point)).abs() < 1.0e-6);
+            let inside = |p: Vec3| {
+                let d = p - plane.eye.translation;
+                d.dot(*plane.eye.right()).abs() <= plane.width * 0.5 + 1.0e-4
+                    && d.dot(*plane.eye.up()).abs() <= plane.height * 0.5 + 1.0e-4
+            };
+            assert!(inside(Vec3::from(report.impact.point)), "{file}");
+            for plate in &report.plates {
+                assert!(inside(Vec3::from(plate.entry)), "{file}: {}", plate.name);
+                if let Some(exit) = plate.exit {
+                    assert!(inside(Vec3::from(exit)), "{file}: {}", plate.name);
+                }
+            }
+            assert!(
+                plane.width.max(plane.height) >= 2.0 * SECTION_LEAD_M,
+                "{file}"
+            );
+        }
+    }
+
+    /// Near-parallel incidence spans the plane with world up instead of the normal.
+    #[test]
+    fn section_plane_falls_back_to_world_up_when_incidence_is_flat() {
+        let mut report = straight_burst([0.0, 0.0, 0.6]);
+        report.impact.incidence_deg = 1.0;
+        report.impact.normal = [0.0, 0.0, -1.0];
+        let plane = SectionPlane::new(&report);
+        assert!(plane.normal.dot(Vec3::Y).abs() < 1.0e-6);
+        assert!(plane.normal.dot(Vec3::Z).abs() < 1.0e-6);
+        assert!(plane.normal.x > 0.0);
     }
 
     #[test]
