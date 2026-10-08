@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
+use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::{ConsequenceState, PenetrationReport, Role, Verdict};
@@ -71,6 +72,8 @@ pub fn demo_plugin(app: &mut App) {
         .add_systems(
             Update,
             (
+                handle_keys,
+                advance_playhead,
                 rebuild_internals.run_if(resource_changed::<ActiveClip>),
                 prepare_view,
                 apply_ghost,
@@ -78,7 +81,8 @@ pub fn demo_plugin(app: &mut App) {
                 drive_camera,
                 draw_clip,
                 update_hud,
-            ),
+            )
+                .chain(),
         );
 }
 
@@ -121,17 +125,26 @@ impl ActiveClip {
     }
 }
 
-/// Clip seconds, on its own clock.
+/// Clip seconds, on its own clock: real delta times `rate`, stopped at [`HOLD_START`].
 #[derive(Resource)]
 struct Playhead {
     clip: f32,
+    rate: f32,
+    paused: bool,
 }
 
 impl Default for Playhead {
     fn default() -> Self {
-        Self { clip: HOLD_START }
+        Self {
+            clip: 0.0,
+            rate: 1.0,
+            paused: false,
+        }
     }
 }
+
+/// Clip seconds one scrub key press moves the playhead.
+const SCRUB_S: f32 = 0.1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Beat {
@@ -553,8 +566,69 @@ fn tint_internals(
     }
 }
 
-fn drive_camera(clip: Res<ActiveClip>, mut camera: Single<&mut Transform, With<ClipCamera>>) {
-    **camera = clip.framing.eye();
+const SCENARIO_KEYS: [KeyCode; 4] = [
+    KeyCode::Digit1,
+    KeyCode::Digit2,
+    KeyCode::Digit3,
+    KeyCode::Digit4,
+];
+
+fn handle_keys(
+    keys: Res<ButtonInput<KeyCode>>,
+    scenarios: Res<Scenarios>,
+    mut clip: ResMut<ActiveClip>,
+    mut playhead: ResMut<Playhead>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    for (index, key) in SCENARIO_KEYS.iter().enumerate() {
+        if keys.just_pressed(*key) && index < scenarios.0.len() {
+            *clip = ActiveClip::new(index, &scenarios);
+            playhead.clip = 0.0;
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyR) {
+        playhead.clip = 0.0;
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        playhead.paused = !playhead.paused;
+    }
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        playhead.clip = (playhead.clip - SCRUB_S).max(0.0);
+    }
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        playhead.clip = (playhead.clip + SCRUB_S).min(HOLD_START);
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.write(AppExit::Success);
+    }
+}
+
+fn advance_playhead(time: Res<Time<Real>>, mut playhead: ResMut<Playhead>) {
+    if playhead.paused || playhead.clip >= HOLD_START {
+        return;
+    }
+    playhead.clip = (playhead.clip + time.delta_secs() * playhead.rate).min(HOLD_START);
+}
+
+/// The impact beat looks at the contact point from outside, off the line of fire.
+fn exterior_eye(report: &PenetrationReport) -> Transform {
+    let point = Vec3::from(report.impact.point);
+    let incoming = Vec3::from(report.impact.incoming);
+    let side = incoming.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+    let eye = point - incoming * 6.0 + side * 3.5 + Vec3::Y * 1.8;
+    Transform::from_translation(eye).looking_at(point, Vec3::Y)
+}
+
+/// Exterior through the impact beat, then a cut to the framed oblique.
+fn drive_camera(
+    playhead: Res<Playhead>,
+    clip: Res<ActiveClip>,
+    mut camera: Single<&mut Transform, With<ClipCamera>>,
+) {
+    **camera = match Beat::at(playhead.clip) {
+        Beat::Impact => exterior_eye(&clip.report),
+        _ => clip.framing.eye(),
+    };
 }
 
 /// Record path up to `cutoff`, with the last segment interpolated to it.
@@ -728,9 +802,10 @@ fn update_hud(
         ""
     };
     status.0 = format!(
-        "t {:.2} s  {}\nscenario {}/{} {}{synthetic}",
+        "t {:.2} s  {}{}\nscenario {}/{} {}{synthetic}",
         playhead.clip,
         Beat::at(playhead.clip).label(),
+        if playhead.paused { "  [paused]" } else { "" },
         clip.index + 1,
         scenarios.0.len(),
         scenarios.0[clip.index].0,
