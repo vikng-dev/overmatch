@@ -52,6 +52,9 @@ mod cost;
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
 pub(crate) mod damage;
+/// The damage cam: the `PenetrationReport` record and its clip player, mounted by
+/// `bin/damage_cam_demo`. Not part of `GamePlugin`.
+pub mod damage_cam;
 #[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
