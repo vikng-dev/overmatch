@@ -10,6 +10,7 @@
 
 use std::collections::HashSet;
 
+use bevy::camera::visibility::VisibilitySystems;
 use bevy::prelude::*;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
@@ -63,12 +64,18 @@ const LOST: Color = Color::srgb(1.0, 0.1, 0.1);
 
 pub fn demo_plugin(app: &mut App) {
     let scenarios = load_scenarios();
+    // An optional first argument names the starting scenario.
+    let start = std::env::args()
+        .nth(1)
+        .and_then(|arg| SCENARIOS.iter().position(|(label, _)| *label == arg))
+        .unwrap_or(0);
     app.add_plugins((crate::quit::plugin, crate::spec::plugin))
         .insert_resource(ClearColor(Color::srgb(0.09, 0.1, 0.12)))
-        .insert_resource(ActiveClip::new(0, &scenarios))
+        .insert_resource(ActiveClip::new(start, &scenarios))
         .insert_resource(scenarios)
         .init_resource::<Playhead>()
         .init_resource::<CamLaw>()
+        .init_resource::<ViewReady>()
         .add_systems(Startup, (spawn_scene, spawn_hud))
         .add_systems(
             Update,
@@ -76,8 +83,6 @@ pub fn demo_plugin(app: &mut App) {
                 handle_keys,
                 advance_playhead,
                 (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
-                prepare_view,
-                apply_ghost,
                 tint_internals,
                 drive_camera,
                 draw_clip,
@@ -86,8 +91,21 @@ pub fn demo_plugin(app: &mut App) {
                 update_labels,
             )
                 .chain(),
+        )
+        // Scene meshes spawn in `SpawnScene`, after `Update`; classifying them here, before
+        // visibility propagates, keeps a proxy or an unghosted hull off their first rendered frame.
+        .add_systems(
+            PostUpdate,
+            (prepare_view, apply_ghost)
+                .chain()
+                .before(VisibilitySystems::VisibilityPropagate),
         );
 }
+
+/// Set once [`prepare_view`] has classified a mesh under the [`TankView`] root; the playhead holds
+/// at zero until then so loading does not eat the impact beat.
+#[derive(Resource, Default)]
+struct ViewReady(bool);
 
 /// Every scenario, loaded once at startup. A malformed clip is a broken fixture, so it panics.
 #[derive(Resource)]
@@ -303,13 +321,14 @@ impl Framing {
             .chain(report.consequences.iter().map(|c| c.volume.as_str()))
             .collect();
         let mut points = vec![impact];
-        points.extend(
-            report
-                .path
-                .iter()
-                .filter(|p| p.t >= 0.0)
-                .map(|p| impact + (Vec3::from(p.point) - impact).clamp_length_max(FRAME_REACH_M)),
-        );
+        points.extend(report.path.iter().filter(|p| p.t >= 0.0).map(|p| {
+            let offset = Vec3::from(p.point) - impact;
+            if report.impact.verdict == Verdict::Ricochet {
+                impact + offset.clamp_length_max(FRAME_REACH_M)
+            } else {
+                impact + offset
+            }
+        }));
         for internal in report
             .internals
             .iter()
@@ -560,6 +579,7 @@ fn prepare_view(
     parents: Query<&ChildOf>,
     names: Query<&Name>,
     roots: Query<(), With<TankView>>,
+    mut ready: ResMut<ViewReady>,
 ) {
     let Some(spec) = specs.get(&fixture.spec) else {
         return;
@@ -590,6 +610,9 @@ fn prepare_view(
         }
         if !in_view {
             continue;
+        }
+        if !ready.0 {
+            ready.0 = true;
         }
         if hide {
             commands
@@ -698,7 +721,10 @@ fn handle_keys(
     }
 }
 
-fn advance_playhead(time: Res<Time<Real>>, mut playhead: ResMut<Playhead>) {
+fn advance_playhead(time: Res<Time<Real>>, ready: Res<ViewReady>, mut playhead: ResMut<Playhead>) {
+    if !ready.0 {
+        return;
+    }
     if playhead.clip < HOLD_START {
         playhead.orbit = 0.0;
     }
@@ -799,6 +825,7 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
     let cutoff = timeline.cutoff(now);
     let path = path_until(report, cutoff);
     draw_striped(&mut gizmos, &path);
+    let head = path.last().map(|p| p.1);
     if let Some(&(t, head)) = path.last()
         && report.path.last().is_some_and(|last| t < last.t)
     {
@@ -820,9 +847,13 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
             let radius = report.projectile.caliber_mm * 1.5e-3;
             gizmos.circle(Isometry3d::new(entry, facing), radius, OVERMATCH);
         }
-        if let Some(exit) = plate.exit {
-            gizmos.line(entry, Vec3::from(exit), SPAN);
-            gizmos.sphere(Isometry3d::from_translation(Vec3::from(exit)), 0.035, EXIT);
+        if let (Some(exit), Some(head)) = (plate.exit, head) {
+            let exit = Vec3::from(exit);
+            let through = plate_progress(entry, exit, head);
+            gizmos.line(entry, entry.lerp(exit, through), SPAN);
+            if through >= 1.0 {
+                gizmos.sphere(Isometry3d::from_translation(exit), 0.035, EXIT);
+            }
         }
     }
     for burst in report.spall.iter().filter(|b| cutoff >= b.t) {
@@ -830,6 +861,16 @@ fn draw_clip(mut gizmos: Gizmos, playhead: Res<Playhead>, clip: Res<ActiveClip>)
         draw_burst(&mut gizmos, burst, grow);
     }
     draw_internals(&mut gizmos, report, timeline, now);
+}
+
+/// How far through the crossing `entry`→`exit` the shell head is, as its clamped projection.
+fn plate_progress(entry: Vec3, exit: Vec3, head: Vec3) -> f32 {
+    let span = exit - entry;
+    let length_squared = span.length_squared();
+    if length_squared <= 0.0 {
+        return 1.0;
+    }
+    ((head - entry).dot(span) / length_squared).clamp(0.0, 1.0)
 }
 
 fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
@@ -916,9 +957,15 @@ fn update_hud(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
     law: Res<CamLaw>,
+    ready: Res<ViewReady>,
     scenarios: Res<Scenarios>,
     mut status: Single<&mut Text, With<StatusText>>,
 ) {
+    let beat = if ready.0 {
+        Beat::at(playhead.clip).label()
+    } else {
+        "loading"
+    };
     let synthetic = if clip.report.synthetic {
         "\nSYNTHETIC"
     } else {
@@ -927,7 +974,7 @@ fn update_hud(
     status.0 = format!(
         "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{synthetic}",
         playhead.clip,
-        Beat::at(playhead.clip).label(),
+        beat,
         if playhead.paused { "  [paused]" } else { "" },
         clip.index + 1,
         scenarios.0.len(),
@@ -1035,10 +1082,12 @@ fn rebuild_labels(
 fn update_labels(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
-    camera: Single<(&Camera, &GlobalTransform), With<ClipCamera>>,
+    camera: Single<(&Camera, &Transform), With<ClipCamera>>,
     mut labels: Query<(&ConsequenceLabel, &mut Node, &mut Visibility)>,
 ) {
-    let (camera, camera_transform) = *camera;
+    // The clip camera is unparented, so its `Transform` is its world pose as of this frame.
+    let (camera, transform) = *camera;
+    let camera_transform = &GlobalTransform::from(*transform);
     for (label, mut node, mut visibility) in &mut labels {
         let Some(consequence) = clip.report.consequences.get(label.0) else {
             continue;
@@ -1081,6 +1130,15 @@ mod tests {
         assert_eq!(timeline.clip_of(timeline.span), TRAVERSE_END);
         assert_eq!(timeline.cutoff(CONTACT_AT), 0.0);
         assert_eq!(timeline.cutoff(TRAVERSE_END), f32::INFINITY);
+    }
+
+    #[test]
+    fn plate_span_follows_the_head() {
+        let (entry, exit) = (Vec3::ZERO, Vec3::Z * 0.1);
+        assert_eq!(plate_progress(entry, exit, entry), 0.0);
+        assert_eq!(plate_progress(entry, exit, Vec3::Z * 0.05), 0.5);
+        assert_eq!(plate_progress(entry, exit, Vec3::Z * 2.0), 1.0);
+        assert_eq!(plate_progress(entry, exit, Vec3::NEG_Z), 0.0);
     }
 
     #[test]
