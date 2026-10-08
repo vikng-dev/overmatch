@@ -1,0 +1,49 @@
+// stopped: 76 mm M62 APC embedded in the gun mantlet (Gun_Mask) at 1500 m.
+// Synthetic demo clip: plausible numbers, not sim output. Hull-local frame (glb axes,
+// -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
+(
+    synthetic: true,
+    projectile: (name: "76mm M62 APC", caliber_mm: 76.2, mass_kg: 7.00, speed_mps: 710.0),
+    impact: (
+        point: (0.450, 2.250, -1.398),
+        normal: (0.280, 0.050, -0.959),
+        incoming: (-0.040, -0.010, 0.999),
+        incidence_deg: 14.1,
+        verdict: Stopped,
+    ),
+    plates: [
+        (
+            name: "Gun_Mask",
+            t: 0.00000,
+            entry: (0.450, 2.250, -1.398),
+            exit: None,
+            chord_mm: 118.6,
+            steel_equiv_mm: 118.6,
+            cost_mm: 135.2,
+            overmatched: false,
+        ),
+    ],
+    path: [
+        (t: -0.03521, point: (1.449, 2.500, -26.377)),
+        (t: 0.00000, point: (0.450, 2.250, -1.398)),
+        (t: 0.00022, point: (0.447, 2.249, -1.326)),
+    ],
+    spall: [
+    ],
+    consequences: [
+    ],
+    internals: [
+        (name: "Driver", role: Crew, center: (-0.574, 1.093, -1.615), half_extents: (0.221, 0.554, 0.342)),
+        (name: "BowGunner", role: Crew, center: (0.647, 1.093, -1.419), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Commander", role: Crew, center: (-0.501, 1.996, 0.389), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Gunner", role: Crew, center: (-0.500, 1.936, -0.489), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Loader", role: Crew, center: (0.647, 1.996, 0.009), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Engine", role: Engine, center: (0.000, 1.088, 1.987), half_extents: (0.352, 0.624, 0.634)),
+        (name: "Transmission", role: Module, center: (0.000, 0.713, -1.619), half_extents: (0.906, 0.250, 0.841)),
+        (name: "Breech", role: Module, center: (0.000, 2.185, -0.416), half_extents: (0.228, 0.215, 0.687)),
+        (name: "Ammo_L_0", role: Ammo, center: (-1.242, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_L_1", role: Ammo, center: (-1.242, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_R_0", role: Ammo, center: (1.278, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_R_1", role: Ammo, center: (1.278, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+    ],
+)
