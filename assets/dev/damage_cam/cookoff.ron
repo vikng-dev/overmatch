@@ -1,4 +1,4 @@
-// cookoff: 75 mm PzGr 39/42 through the left lower hull side; a fragment punches the right sponson floor into the ammo rack.
+// cookoff: 75 mm PzGr 39/42 through the left lower hull side, embedded in the right; a fragment punches the right sponson floor into the ammo rack.
 // Synthetic demo clip: plausible numbers, not sim output. Hull-local frame (glb axes,
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
@@ -22,6 +22,16 @@
             cost_mm: 84.2,
             overmatched: false,
         ),
+        (
+            name: "Hull_Side_Lower_R",
+            t: 0.00287,
+            entry: (0.975, 0.930, 0.721),
+            exit: None,
+            chord_mm: 35.0,
+            steel_equiv_mm: 34.9,
+            cost_mm: 36.8,
+            overmatched: false,
+        ),
     ],
     path: [
         (t: -0.03049, point: (-25.985, 1.469, -0.897)),
@@ -29,6 +39,7 @@
         (t: 0.00010, point: (-0.955, 0.968, 0.605)),
         (t: 0.00124, point: (-0.137, 0.952, 0.654)),
         (t: 0.00206, point: (0.412, 0.941, 0.687)),
+        (t: 0.00292, point: (1.010, 0.929, 0.723)),
     ],
     spall: [
         (

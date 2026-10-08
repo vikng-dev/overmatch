@@ -171,8 +171,11 @@ mod tests {
         assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
     }
 
-    /// Every name a scenario's hits and consequences cite resolves to one of its internals, and
-    /// every timed list is in time order.
+    /// Every name a scenario's hits and consequences cite resolves to one of its internals, every
+    /// timed list is in time order, and the path ends in or past the last plate: the sim marches a
+    /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
+    /// end and a perforated last plate has it beyond the exit. A ricochet's deflection leg is
+    /// unconstrained.
     #[test]
     fn scenarios_are_self_consistent() {
         for (_, file) in player::SCENARIOS {
@@ -198,6 +201,52 @@ mod tests {
                 "{file}"
             );
             assert!(report.path.len() >= 2, "{file}: path needs a segment");
+            let last = report.path.last().unwrap();
+            for plate in &report.plates {
+                assert!(
+                    last.t >= plate.t,
+                    "{file}: the path ends before {}",
+                    plate.name
+                );
+            }
+            if let Some(index) = report.plates.iter().position(|p| p.exit.is_none()) {
+                assert_eq!(
+                    index + 1,
+                    report.plates.len(),
+                    "{file}: a plate without an exit is the last plate"
+                );
+            }
+            if report.impact.verdict != Verdict::Ricochet {
+                let plate = report.plates.last().expect("a plate");
+                match plate.exit {
+                    None => {
+                        let gap = distance(last.point, plate.entry);
+                        assert!(
+                            gap <= 0.25,
+                            "{file}: the path ends {gap:.2} m from {}",
+                            plate.name
+                        );
+                    }
+                    Some(exit) => {
+                        let along: f32 = (0..3)
+                            .map(|i| (last.point[i] - exit[i]) * (exit[i] - plate.entry[i]))
+                            .sum();
+                        assert!(
+                            along >= 0.0,
+                            "{file}: the path ends behind the exit of {}",
+                            plate.name
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a.iter()
+            .zip(b)
+            .map(|(a, b)| (a - b).powi(2))
+            .sum::<f32>()
+            .sqrt()
     }
 }

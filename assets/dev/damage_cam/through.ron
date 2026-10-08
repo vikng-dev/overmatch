@@ -1,4 +1,4 @@
-// through: 88 mm PzGr 39 on the upper front plate at 1000 m.
+// through: 88 mm PzGr 39 on the upper front plate at 1000 m, embedded in the rear plate.
 // Synthetic demo clip: plausible numbers, not sim output. Hull-local frame (glb axes,
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
@@ -22,6 +22,16 @@
             cost_mm: 107.4,
             overmatched: false,
         ),
+        (
+            name: "Hull_Rear",
+            t: 0.00853,
+            entry: (-0.793, 1.351, 2.720),
+            exit: None,
+            chord_mm: 35.0,
+            steel_equiv_mm: 34.9,
+            cost_mm: 37.2,
+            overmatched: false,
+        ),
     ],
     path: [
         (t: -0.03623, point: (2.186, 2.246, -27.101)),
@@ -29,6 +39,7 @@
         (t: 0.00016, point: (-0.310, 1.497, -2.135)),
         (t: 0.00115, point: (-0.370, 1.479, -1.540)),
         (t: 0.00213, point: (-0.424, 1.463, -0.993)),
+        (t: 0.00859, point: (-0.796, 1.350, 2.755)),
     ],
     spall: [
         (

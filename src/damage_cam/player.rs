@@ -20,12 +20,13 @@ use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
 pub const SCENARIO_DIR: &str = "dev/damage_cam";
-/// `(label, file)` in key order: `1`..`4`.
-pub const SCENARIOS: [(&str, &str); 4] = [
+/// `(label, file)` in key order: `1`..`5`.
+pub const SCENARIOS: [(&str, &str); 5] = [
     ("through", "through.ron"),
     ("ricochet", "ricochet.ron"),
     ("stopped", "stopped.ron"),
     ("cookoff", "cookoff.ron"),
+    ("overpen", "overpen.ron"),
 ];
 
 /// The demo's tank fixture: the view the clips are drawn over and the spec that names its collision
@@ -46,7 +47,9 @@ const CONSEQUENCE_TO: f32 = 3.6;
 const TICK_S: f32 = 1.0 / 64.0;
 /// Clip seconds a burst's fragments take to reach their ends.
 const FRAGMENT_GROW_S: f32 = 0.25;
-/// A ricochet's deflection leg counts toward framing only this far (m) from the impact point.
+/// Path points past the shell's departure from the armour (a ricochet's deflection leg, a
+/// through-and-through's exit leg) count toward framing only this far (m) from where it left;
+/// points between plates are never clamped.
 const FRAME_REACH_M: f32 = 3.0;
 
 const TRACER: Color = Color::srgb(1.0, 0.85, 0.2);
@@ -312,38 +315,7 @@ struct Framing {
 
 impl Framing {
     fn new(report: &PenetrationReport) -> Self {
-        let impact = Vec3::from(report.impact.point);
-        let affected: HashSet<&str> = report
-            .spall
-            .iter()
-            .flat_map(|b| &b.fragments)
-            .flat_map(|f| &f.hits)
-            .map(|h| h.volume.as_str())
-            .chain(report.consequences.iter().map(|c| c.volume.as_str()))
-            .collect();
-        let mut points = vec![impact];
-        points.extend(report.path.iter().filter(|p| p.t >= 0.0).map(|p| {
-            let offset = Vec3::from(p.point) - impact;
-            if report.impact.verdict == Verdict::Ricochet {
-                impact + offset.clamp_length_max(FRAME_REACH_M)
-            } else {
-                impact + offset
-            }
-        }));
-        for internal in report
-            .internals
-            .iter()
-            .filter(|i| affected.contains(i.name.as_str()))
-        {
-            let (center, half) = (
-                Vec3::from(internal.center),
-                Vec3::from(internal.half_extents),
-            );
-            points.extend([center - half, center + half]);
-        }
-        let (lo, hi) = points.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| {
-            (lo.min(*p), hi.max(*p))
-        });
+        let (lo, hi) = bounds(&framed_points(report));
         let radius = ((hi - lo).length() * 0.5).max(1.2);
         let normal = Vec3::from(report.impact.normal);
         let side = Vec3::new(normal.x, 0.0, normal.z)
@@ -366,6 +338,66 @@ impl Framing {
         Transform::from_translation(self.center + dir * self.distance)
             .looking_at(self.center, Vec3::Y)
     }
+}
+
+/// What the oblique view bounds: the impact, the post-contact path with its departure leg
+/// clamped to [`FRAME_REACH_M`], and the affected internals' boxes.
+fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
+    let affected: HashSet<&str> = report
+        .spall
+        .iter()
+        .flat_map(|b| &b.fragments)
+        .flat_map(|f| &f.hits)
+        .map(|h| h.volume.as_str())
+        .chain(report.consequences.iter().map(|c| c.volume.as_str()))
+        .collect();
+    let departure = departure(report);
+    let mut points = vec![Vec3::from(report.impact.point)];
+    points.extend(report.path.iter().filter(|p| p.t >= 0.0).map(|p| {
+        let point = Vec3::from(p.point);
+        match departure {
+            Some((left_at, anchor)) if p.t > left_at => {
+                anchor + (point - anchor).clamp_length_max(FRAME_REACH_M)
+            }
+            _ => point,
+        }
+    }));
+    for internal in report
+        .internals
+        .iter()
+        .filter(|i| affected.contains(i.name.as_str()))
+    {
+        let (center, half) = (
+            Vec3::from(internal.center),
+            Vec3::from(internal.half_extents),
+        );
+        points.extend([center - half, center + half]);
+    }
+    points
+}
+
+/// Where the shell left the armour for good (the ricochet point, or the last plate's exit) and
+/// the record time of the path point there; `None` when the path ends in material.
+fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
+    let anchor = Vec3::from(match report.impact.verdict {
+        Verdict::Ricochet => report.impact.point,
+        _ => report.plates.last()?.exit?,
+    });
+    let left_at = report
+        .path
+        .iter()
+        .min_by(|a, b| {
+            let gap = |p: &super::PathPoint| Vec3::from(p.point).distance_squared(anchor);
+            gap(a).total_cmp(&gap(b))
+        })?
+        .t;
+    Some((left_at, anchor))
+}
+
+fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
+    points.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| {
+        (lo.min(*p), hi.max(*p))
+    })
 }
 
 #[derive(Component)]
@@ -535,7 +567,7 @@ fn spawn_hud(mut commands: Commands) {
         Visibility::Hidden,
     ));
     commands.spawn((
-        Text::new("1-4 scenario   R replay   Space pause   Left/Right scrub   C camera   Esc quit"),
+        Text::new("1-5 scenario   R replay   Space pause   Left/Right scrub   C camera   Esc quit"),
         TextFont {
             font_size: FontSize::Px(14.0),
             ..default()
@@ -691,11 +723,12 @@ fn tint_internals(
     }
 }
 
-const SCENARIO_KEYS: [KeyCode; 4] = [
+const SCENARIO_KEYS: [KeyCode; 5] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
     KeyCode::Digit4,
+    KeyCode::Digit5,
 ];
 
 fn handle_keys(
@@ -1147,13 +1180,33 @@ fn update_labels(
 mod tests {
     use super::*;
 
+    fn scenario(file: &str) -> PenetrationReport {
+        PenetrationReport::load(&crate::assets::asset_root().join(SCENARIO_DIR).join(file)).unwrap()
+    }
+
     fn through() -> PenetrationReport {
-        PenetrationReport::load(
-            &crate::assets::asset_root()
-                .join(SCENARIO_DIR)
-                .join("through.ron"),
-        )
-        .unwrap()
+        scenario("through.ron")
+    }
+
+    /// Inside `lo - margin ..= hi + margin` on every axis.
+    fn within(point: Vec3, (lo, hi): (Vec3, Vec3), margin: f32) -> bool {
+        point.cmpge(lo - margin).all() && point.cmple(hi + margin).all()
+    }
+
+    #[test]
+    fn departure_leg_counts_toward_framing_only_within_reach() {
+        let short = scenario("overpen.ron");
+        let mut long = short.clone();
+        let exit = Vec3::from(short.plates.last().unwrap().exit.unwrap());
+        let end = long.path.last_mut().unwrap();
+        let leg = (Vec3::from(end.point) - exit).normalize();
+        end.point = (exit + leg * 20.0).into();
+        end.t += 18.0 / 700.0;
+        let envelope = bounds(&framed_points(&short));
+        let (lo, hi) = bounds(&framed_points(&long));
+        assert!(within(lo, envelope, FRAME_REACH_M) && within(hi, envelope, FRAME_REACH_M));
+        let unclamped = Vec3::from(long.path.last().unwrap().point);
+        assert!(!within(unclamped, envelope, FRAME_REACH_M));
     }
 
     #[test]
