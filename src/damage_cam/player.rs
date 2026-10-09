@@ -67,9 +67,10 @@ const SECTION_MIN_INCIDENCE_DEG: f32 = 3.0;
 /// Section view: a shot segment within this angle (deg) of vertical spans no vertical cut and
 /// takes the incidence construction instead.
 const SECTION_VERTICAL_FALLBACK_DEG: f32 = 10.0;
-/// The section fits the shot line from this far (m) before the first entry to this far past the
-/// last exit or embed, with this many calibres of margin across it.
-const SECTION_LEAD_M: f32 = 1.0;
+/// A plate's section fits its crossing from this far (m) before the entry to this far past the
+/// far end, with this many calibres of margin across the shot line. The lead is a tuning knob:
+/// it sets how much of the frame the band and chord fill against the calibre bar.
+const SECTION_LEAD_M: f32 = 0.6;
 const SECTION_MARGIN_CALIBRES: f32 = 3.0;
 /// The section eye's stand-off (m) from the plane.
 const SECTION_EYE_M: f32 = 12.0;
@@ -124,6 +125,7 @@ pub fn demo_plugin(app: &mut App) {
         (
             handle_keys,
             advance_playhead,
+            track_section,
             (rebuild_internals, rebuild_labels).run_if(resource_changed::<ActiveClip>),
             tint_internals,
             place_shell,
@@ -629,10 +631,38 @@ fn incidence_basis(d: Vec3, span: Vec3) -> (Vec3, Vec3) {
     (normal, up)
 }
 
-/// The cut plane through the impact, by a [`SectionRule`], and the orthographic eye that films it
-/// side-on.
+/// The crossing of plate `index`: its entry and the far end of the segment the shell follows
+/// through it, which is the exit, an embed's path end or a ricochet's own entry. The impact point
+/// twice when the record has no such plate.
+fn crossing(report: &PenetrationReport, index: usize) -> (Vec3, Vec3) {
+    let Some(plate) = report.plates.get(index) else {
+        let point = Vec3::from(report.impact.point);
+        return (point, point);
+    };
+    let entry = Vec3::from(plate.entry);
+    let far = match plate.exit {
+        Some(exit) => Vec3::from(exit),
+        None if report.impact.verdict == Verdict::Ricochet => entry,
+        None => report.path.last().map_or(entry, |p| Vec3::from(p.point)),
+    };
+    (entry, far)
+}
+
+/// The plate whose crossing the section shows at record time `cutoff`: the last one entered by
+/// then, the first before any is.
+fn current_plate(report: &PenetrationReport, cutoff: f32) -> usize {
+    report
+        .plates
+        .iter()
+        .rposition(|p| p.t <= cutoff)
+        .unwrap_or(0)
+}
+
+/// The cut plane through one plate's crossing, by a [`SectionRule`], and the orthographic eye
+/// that films it side-on.
 #[derive(Clone, Copy, Debug)]
 struct SectionPlane {
+    /// The crossing's entry.
     point: Vec3,
     /// Unit normal; the eye sits on this side. For a vertical cut, the side from which the shell
     /// travels left to right; for an incidence cut, above the plane, or on its +X side when it is
@@ -647,26 +677,21 @@ struct SectionPlane {
 }
 
 impl SectionPlane {
-    fn new(report: &PenetrationReport, rule: SectionRule) -> Self {
-        let point = Vec3::from(report.impact.point);
+    /// The cut for plate `index`, along the segment the shell follows through it.
+    fn new(report: &PenetrationReport, rule: SectionRule, index: usize) -> Self {
         let incoming = Vec3::from(report.impact.incoming).normalize_or(Vec3::NEG_Z);
-        let struck = (report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG)
+        let (point, far) = crossing(report, index);
+        let along = (far - point).try_normalize().unwrap_or(incoming);
+        // The record carries a normal for the first plate only; later plates cut vertically
+        // under either rule.
+        let struck = (index == 0 && report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG)
             .then(|| Vec3::from(report.impact.normal));
-        let (normal, up) = section_basis(incoming, rule, struck);
+        let (normal, up) = section_basis(along, rule, struck);
         let look = Transform::IDENTITY.looking_to(-normal, up);
         let (right, up) = (*look.right(), *look.up());
-        let first = report.plates.first().map_or(point, |p| Vec3::from(p.entry));
-        let last = report
-            .plates
-            .last()
-            .map_or(point, |p| Vec3::from(p.exit.unwrap_or(p.entry)));
-        let along = (last - first).try_normalize().unwrap_or(incoming);
         let across = normal.cross(along).normalize_or(up)
             * (report.projectile.caliber_mm * 1.0e-3 * SECTION_MARGIN_CALIBRES);
-        let ends = [
-            first - along * SECTION_LEAD_M,
-            last + along * SECTION_LEAD_M,
-        ];
+        let ends = [point - along * SECTION_LEAD_M, far + along * SECTION_LEAD_M];
         let (lo, hi) = ends
             .iter()
             .flat_map(|end| [*end + across, *end - across])
@@ -702,19 +727,31 @@ impl SectionPlane {
     }
 }
 
-/// Section view (key `X`): the armour cut along [`SectionPlane`], filmed by its eye. `V` cycles
-/// the rule.
+/// Section view (key `X`): the armour cut along the current plate's [`SectionPlane`], filmed by
+/// its eye. `V` cycles the rule.
 #[derive(Resource, Default)]
 struct SectionView {
     on: bool,
     rule: SectionRule,
+    /// Index into [`PenetrationReport::plates`] of the crossing on show; [`track_section`] owns
+    /// it.
+    plate: usize,
     /// The clip camera's projection before the cut, put back when the view turns off.
     restore: Option<Projection>,
 }
 
 impl SectionView {
     fn plane(&self, report: &PenetrationReport) -> SectionPlane {
-        SectionPlane::new(report, self.rule)
+        SectionPlane::new(report, self.rule, self.plate)
+    }
+}
+
+/// Keeps [`SectionView::plate`] on the plate the playhead is crossing, written only when it
+/// moves so the view refits on the change.
+fn track_section(playhead: Res<Playhead>, clip: Res<ActiveClip>, mut section: ResMut<SectionView>) {
+    let plate = current_plate(&clip.report, clip.timeline.cutoff(playhead.clip));
+    if section.plate != plate {
+        section.plate = plate;
     }
 }
 
@@ -1342,10 +1379,11 @@ fn draw_clip(
     if now >= CONTACT_AT {
         draw_impact(&mut gizmos, report);
     }
-    for plate in report
+    for (index, plate) in report
         .plates
         .iter()
-        .filter(|p| now >= timeline.clip_of(p.t))
+        .enumerate()
+        .filter(|(_, p)| now >= timeline.clip_of(p.t))
     {
         let entry = Vec3::from(plate.entry);
         let entry_color = if plate.overmatched { OVERMATCH } else { ENTRY };
@@ -1363,7 +1401,9 @@ fn draw_clip(
                 gizmos.sphere(Isometry3d::from_translation(exit), 0.035, EXIT);
             }
         }
-        if let (Some(plane), Some(head)) = (&plane, head) {
+        if index == section.plate
+            && let (Some(plane), Some(head)) = (&plane, head)
+        {
             draw_section_plate(&mut gizmos, report, plate, plane, head);
         }
     }
@@ -1723,7 +1763,7 @@ fn update_labels(
     }
 }
 
-/// In section view, each plate's label sits by its entry once the shell has reached it.
+/// In section view, the current plate's label sits by its entry once the shell has reached it.
 fn update_plate_labels(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
@@ -1737,7 +1777,9 @@ fn update_plate_labels(
         let Some(plate) = clip.report.plates.get(label.0) else {
             continue;
         };
-        let reached = section.on && playhead.clip >= clip.timeline.clip_of(plate.t);
+        let reached = section.on
+            && label.0 == section.plate
+            && playhead.clip >= clip.timeline.clip_of(plate.t);
         let screen = camera
             .world_to_viewport(camera_transform, Vec3::from(plate.entry))
             .ok();
@@ -1831,72 +1873,110 @@ mod tests {
 
     const RULES: [SectionRule; 2] = [SectionRule::Vertical, SectionRule::Incidence];
 
-    /// Under either rule the plane holds the shot line through the impact; the eye looks straight
-    /// along its normal from the normal's side, up in the plane, and fits the shot's span.
+    /// Whether `p` lands in the plane's fitted viewport.
+    fn in_view(plane: &SectionPlane, p: Vec3) -> bool {
+        let d = p - plane.eye.translation;
+        d.dot(*plane.eye.right()).abs() <= plane.width * 0.5 + 1.0e-4
+            && d.dot(*plane.eye.up()).abs() <= plane.height * 0.5 + 1.0e-4
+    }
+
+    /// The unit direction of the crossing of plate `index`; the incoming direction where it has
+    /// no length.
+    fn crossing_dir(report: &PenetrationReport, index: usize) -> Vec3 {
+        let (entry, far) = crossing(report, index);
+        (far - entry)
+            .try_normalize()
+            .unwrap_or(Vec3::from(report.impact.incoming).normalize())
+    }
+
+    /// A two-plate record whose path bends between the plates: the first crossing runs along
+    /// `+Z`, the second along the diagonal of `+X` and `+Z`.
+    fn bent_two_plate() -> PenetrationReport {
+        let mut report = straight_burst([0.0, 0.0, 0.6]);
+        report.spall.clear();
+        let plate = |name: &str, t: f32, entry: [f32; 3], exit: [f32; 3]| Plate {
+            name: name.into(),
+            t,
+            entry,
+            exit: Some(exit),
+            chord_mm: 100.0,
+            steel_equiv_mm: 100.0,
+            cost_mm: 100.0,
+            overmatched: false,
+        };
+        report.impact.point = [0.0, 1.0, 0.0];
+        report.plates = vec![
+            plate("first", 0.0, [0.0, 1.0, 0.0], [0.0, 1.0, 0.1]),
+            plate("second", 0.003, [1.0, 1.0, 2.0], [1.07, 1.0, 2.07]),
+        ];
+        report.path = [
+            (0.0, [0.0, 1.0, 0.0]),
+            (0.0001, [0.0, 1.0, 0.1]),
+            (0.003, [1.0, 1.0, 2.0]),
+            (0.0031, [1.07, 1.0, 2.07]),
+            (0.004, [1.7, 1.0, 2.7]),
+        ]
+        .map(|(t, point)| PathPoint { t, point })
+        .to_vec();
+        report
+    }
+
+    /// Under either rule each plate's plane holds its own crossing; the eye looks straight along
+    /// the normal from the normal's side, up in the plane, and fits the crossing with its lead.
     #[test]
-    fn section_plane_holds_the_shot_and_fits_it() {
+    fn section_plane_holds_the_crossing_and_fits_it() {
         for (_, file) in SCENARIOS {
             let report = scenario(file);
-            let incoming = Vec3::from(report.impact.incoming).normalize();
             for rule in RULES {
-                let plane = SectionPlane::new(&report, rule);
-                assert!(plane.normal.is_normalized(), "{file} {rule:?}");
-                assert!(plane.normal.dot(incoming).abs() < 1.0e-3, "{file} {rule:?}");
-                assert!(
-                    plane.height_of(plane.eye.translation) > 0.0,
-                    "{file} {rule:?}"
-                );
-                assert!(
-                    (*plane.eye.forward() + plane.normal).length() < 1.0e-4,
-                    "{file} {rule:?}"
-                );
-                assert!(
-                    plane.eye.up().dot(plane.normal).abs() < 1.0e-4,
-                    "{file} {rule:?}"
-                );
-                assert!(plane.height_of(Vec3::from(report.impact.point)).abs() < 1.0e-6);
-                let inside = |p: Vec3| {
-                    let d = p - plane.eye.translation;
-                    d.dot(*plane.eye.right()).abs() <= plane.width * 0.5 + 1.0e-4
-                        && d.dot(*plane.eye.up()).abs() <= plane.height * 0.5 + 1.0e-4
-                };
-                assert!(inside(Vec3::from(report.impact.point)), "{file} {rule:?}");
-                for plate in &report.plates {
-                    assert!(inside(Vec3::from(plate.entry)), "{file}: {}", plate.name);
-                    if let Some(exit) = plate.exit {
-                        assert!(inside(Vec3::from(exit)), "{file}: {}", plate.name);
-                    }
+                for index in 0..report.plates.len() {
+                    let plane = SectionPlane::new(&report, rule, index);
+                    let (entry, far) = crossing(&report, index);
+                    let along = crossing_dir(&report, index);
+                    let tag = format!("{file} {rule:?} {}", report.plates[index].name);
+                    assert!(plane.normal.is_normalized(), "{tag}");
+                    assert_eq!(plane.point, entry, "{tag}");
+                    assert!(plane.height_of(far).abs() < 1.0e-6, "{tag}");
+                    assert!(plane.height_of(plane.eye.translation) > 0.0, "{tag}");
+                    assert!(
+                        (*plane.eye.forward() + plane.normal).length() < 1.0e-4,
+                        "{tag}"
+                    );
+                    assert!(plane.eye.up().dot(plane.normal).abs() < 1.0e-4, "{tag}");
+                    assert!(in_view(&plane, entry - along * SECTION_LEAD_M), "{tag}");
+                    assert!(in_view(&plane, far + along * SECTION_LEAD_M), "{tag}");
+                    assert!(
+                        plane.width.max(plane.height) >= 2.0 * SECTION_LEAD_M,
+                        "{tag}"
+                    );
                 }
-                assert!(
-                    plane.width.max(plane.height) >= 2.0 * SECTION_LEAD_M,
-                    "{file} {rule:?}"
-                );
             }
         }
     }
 
-    /// The vertical cut holds the shot line and world up, its eye upright with the shell
+    /// The vertical cut holds the crossing and world up, its eye upright with the shell
     /// travelling left to right.
     #[test]
     fn vertical_plane_is_upright_and_reads_left_to_right() {
         for (_, file) in SCENARIOS {
             let report = scenario(file);
-            let plane = SectionPlane::new(&report, SectionRule::Vertical);
-            let incoming = Vec3::from(report.impact.incoming).normalize();
-            assert!(plane.normal.y.abs() < 1.0e-6, "{file}");
-            assert!(plane.normal.dot(incoming).abs() < 1.0e-6, "{file}");
-            assert!(plane.eye.up().dot(Vec3::Y) > 1.0 - 1.0e-6, "{file}");
-            assert!(plane.eye.right().dot(incoming) > 0.0, "{file}");
+            for index in 0..report.plates.len() {
+                let plane = SectionPlane::new(&report, SectionRule::Vertical, index);
+                let along = crossing_dir(&report, index);
+                assert!(plane.normal.y.abs() < 1.0e-6, "{file} {index}");
+                assert!(plane.normal.dot(along).abs() < 1.0e-6, "{file} {index}");
+                assert!(plane.eye.up().dot(Vec3::Y) > 1.0 - 1.0e-6, "{file} {index}");
+                assert!(plane.eye.right().dot(along) > 0.0, "{file} {index}");
+            }
         }
     }
 
-    /// The incidence cut holds the struck normal, the eye above the plane.
+    /// The incidence cut of the first plate holds the struck normal, the eye above the plane.
     #[test]
     fn incidence_plane_holds_the_struck_normal() {
         for (_, file) in SCENARIOS {
             let report = scenario(file);
             assert!(report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG);
-            let plane = SectionPlane::new(&report, SectionRule::Incidence);
+            let plane = SectionPlane::new(&report, SectionRule::Incidence, 0);
             let normal = Vec3::from(report.impact.normal);
             assert!(plane.normal.dot(normal).abs() < 1.0e-3, "{file}");
             assert!(plane.normal.y >= -1.0e-3, "{file}: eye below the plane");
@@ -1917,11 +1997,11 @@ mod tests {
         report.impact.normal = struck.into();
         report.impact.incidence_deg = 40.0;
         report.impact.incoming = steep.into();
-        let plane = SectionPlane::new(&report, SectionRule::Vertical);
+        let plane = SectionPlane::new(&report, SectionRule::Vertical, 0);
         assert!(plane.normal.dot(steep).abs() < 1.0e-6);
         assert!(plane.normal.dot(struck).abs() < 1.0e-6, "{}", plane.normal);
         report.impact.incoming = shallow.into();
-        let plane = SectionPlane::new(&report, SectionRule::Vertical);
+        let plane = SectionPlane::new(&report, SectionRule::Vertical, 0);
         assert!(plane.normal.dot(shallow).abs() < 1.0e-6);
         assert!(plane.normal.y.abs() < 1.0e-6, "{}", plane.normal);
         assert!(plane.eye.up().dot(Vec3::Y) > 1.0 - 1.0e-6);
@@ -1933,10 +2013,86 @@ mod tests {
         let mut report = straight_burst([0.0, 0.0, 0.6]);
         report.impact.incidence_deg = 1.0;
         report.impact.normal = [0.0, 0.0, -1.0];
-        let plane = SectionPlane::new(&report, SectionRule::Incidence);
+        let plane = SectionPlane::new(&report, SectionRule::Incidence, 0);
         assert!(plane.normal.dot(Vec3::Y).abs() < 1.0e-6);
         assert!(plane.normal.dot(Vec3::Z).abs() < 1.0e-6);
         assert!(plane.eye.right().dot(Vec3::Z) > 0.0);
+    }
+
+    /// The section shows the first plate until the playhead reaches the second's entry, and the
+    /// second from then through the hold.
+    #[test]
+    fn current_plate_follows_the_playhead() {
+        let report = through();
+        assert_eq!(report.plates.len(), 2);
+        let timeline = Timeline::new(&report);
+        let at = |clip: f32| current_plate(&report, timeline.cutoff(clip));
+        assert_eq!(at(0.0), 0);
+        assert_eq!(at(CONTACT_AT), 0);
+        let second = timeline.clip_of(report.plates[1].t);
+        assert_eq!(at(second - 0.01), 0);
+        assert_eq!(at(second + 0.01), 1);
+        assert_eq!(at(HOLD_START), 1);
+    }
+
+    /// Where the path bends between plates the two vertical planes differ, each holding its own
+    /// crossing; the incidence rule gives the second plate the same vertical cut.
+    #[test]
+    fn each_plate_cuts_along_its_own_crossing() {
+        let report = bent_two_plate();
+        let first = SectionPlane::new(&report, SectionRule::Vertical, 0);
+        let second = SectionPlane::new(&report, SectionRule::Vertical, 1);
+        let d0 = Vec3::Z;
+        let d1 = Vec3::new(1.0, 0.0, 1.0).normalize();
+        assert!(first.normal.dot(d0).abs() < 1.0e-6);
+        assert!(second.normal.dot(d1).abs() < 1.0e-6);
+        assert!(first.normal.dot(d1).abs() > 0.5, "{} {}", first.normal, d1);
+        for (plane, plate) in [(&first, &report.plates[0]), (&second, &report.plates[1])] {
+            assert!(plane.normal.y.abs() < 1.0e-6);
+            assert!(plane.height_of(Vec3::from(plate.entry)).abs() < 1.0e-6);
+            assert!(plane.height_of(Vec3::from(plate.exit.unwrap())).abs() < 1.0e-6);
+        }
+        let incidence = SectionPlane::new(&report, SectionRule::Incidence, 1);
+        assert_eq!(incidence.normal, second.normal);
+        assert_eq!(incidence.eye, second.eye);
+    }
+
+    /// Each plate's fit runs from its entry minus the lead to its far end plus the lead, the
+    /// calibre margin across; an embed's far end is the path's end, a ricochet's its entry.
+    #[test]
+    fn plate_fit_spans_the_crossing_with_a_lead() {
+        let report = bent_two_plate();
+        let calibre = report.projectile.caliber_mm * 1.0e-3;
+        for (index, plate) in report.plates.iter().enumerate() {
+            let plane = SectionPlane::new(&report, SectionRule::Vertical, index);
+            let (entry, exit) = (Vec3::from(plate.entry), Vec3::from(plate.exit.unwrap()));
+            let d = (exit - entry).normalize();
+            let chord = entry.distance(exit);
+            assert!(
+                (plane.width - (chord + 2.0 * SECTION_LEAD_M)).abs() < 1.0e-4,
+                "{}: {}",
+                plate.name,
+                plane.width
+            );
+            assert!((plane.height - 2.0 * SECTION_MARGIN_CALIBRES * calibre).abs() < 1.0e-4);
+            assert!(in_view(&plane, entry - d * SECTION_LEAD_M));
+            assert!(in_view(&plane, exit + d * SECTION_LEAD_M));
+            assert!(!in_view(&plane, entry - d * (SECTION_LEAD_M + 0.01)));
+            assert!(!in_view(&plane, exit + d * (SECTION_LEAD_M + 0.01)));
+        }
+        let stopped = scenario("stopped.ron");
+        let (entry, far) = crossing(&stopped, 0);
+        assert_eq!(far, Vec3::from(stopped.path.last().unwrap().point));
+        assert_ne!(far, entry);
+        let ricochet = scenario("ricochet.ron");
+        let (entry, far) = crossing(&ricochet, 0);
+        assert_eq!(far, entry);
+        let plane = SectionPlane::new(&ricochet, SectionRule::Vertical, 0);
+        let incoming = Vec3::from(ricochet.impact.incoming).normalize();
+        assert!(in_view(&plane, entry - incoming * SECTION_LEAD_M));
+        assert!(in_view(&plane, entry + incoming * SECTION_LEAD_M));
+        assert!(!in_view(&plane, entry - incoming * (SECTION_LEAD_M + 0.05)));
+        assert!(!in_view(&plane, entry + incoming * (SECTION_LEAD_M + 0.05)));
     }
 
     #[test]
