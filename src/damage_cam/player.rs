@@ -61,9 +61,12 @@ const CONE_MIN_LENGTH_M: f32 = 0.3;
 const FRAME_REACH_M: f32 = 3.0;
 /// A path segment passing within this distance (m) of the last exit holds the shell's departure.
 const DEPARTURE_TOLERANCE_M: f32 = 0.02;
-/// Section view: below this incidence (deg) the plane of incidence is spanned by the shot line and
-/// world up instead of the plate normal.
+/// Section view: below this incidence (deg) the struck normal is too close to the shot line to
+/// span an incidence cut, which is then cut vertically.
 const SECTION_MIN_INCIDENCE_DEG: f32 = 3.0;
+/// Section view: a shot segment within this angle (deg) of vertical spans no vertical cut and
+/// takes the incidence construction instead.
+const SECTION_VERTICAL_FALLBACK_DEG: f32 = 10.0;
 /// The section fits the shot line from this far (m) before the first entry to this far past the
 /// last exit or embed, with this many calibres of margin across it.
 const SECTION_LEAD_M: f32 = 1.0;
@@ -100,7 +103,7 @@ pub fn demo_plugin(app: &mut App) {
         .unwrap_or(0);
     let section = SectionView {
         on: std::env::args().nth(2).is_some_and(|arg| arg == "section"),
-        restore: None,
+        ..default()
     };
     app.add_plugins((
         crate::quit::plugin,
@@ -175,7 +178,6 @@ struct ActiveClip {
     report: PenetrationReport,
     timeline: Timeline,
     framing: Framing,
-    section: SectionPlane,
     /// One per [`PenetrationReport::spall`] entry, in order.
     bursts: Vec<BurstTiming>,
 }
@@ -188,7 +190,6 @@ impl ActiveClip {
             index,
             timeline: Timeline::new(&report),
             framing: Framing::new(&report),
-            section: SectionPlane::new(&report),
             bursts,
             report,
         }
@@ -553,16 +554,92 @@ fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
     })
 }
 
-/// The plane of incidence through the impact (spanned by the shot line and the struck plate's
-/// normal, so the band shows at true thickness) and the orthographic eye that films it side-on.
+/// How the section's cut plane is chosen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum SectionRule {
+    /// Vertical through the shot line, filmed upright: the chord shows at true length.
+    #[default]
+    Vertical,
+    /// The plane of incidence, through the shot line and the struck plate's normal: the band
+    /// shows at true thickness.
+    Incidence,
+}
+
+impl SectionRule {
+    fn next(self) -> Self {
+        match self {
+            SectionRule::Vertical => SectionRule::Incidence,
+            SectionRule::Incidence => SectionRule::Vertical,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SectionRule::Vertical => "vertical",
+            SectionRule::Incidence => "incidence",
+        }
+    }
+}
+
+/// The plane normal (toward the eye) and the eye's up for a cut along the unit shot direction
+/// `d`; `struck` is the struck plate's outward normal when the record has one for this crossing.
+/// The incidence construction serves where its rule asks for it and a normal is known, and
+/// where the vertical one cannot stand.
+fn section_basis(d: Vec3, rule: SectionRule, struck: Option<Vec3>) -> (Vec3, Vec3) {
+    let incidence = rule == SectionRule::Incidence && struck.is_some();
+    match (incidence, vertical_basis(d)) {
+        (false, Some(basis)) => basis,
+        _ => incidence_basis(d, struck.unwrap_or(Vec3::Y)),
+    }
+}
+
+/// A vertical plane through `d`, the eye upright and on the side from which the shell travels
+/// left to right; `None` within [`SECTION_VERTICAL_FALLBACK_DEG`] of vertical.
+fn vertical_basis(d: Vec3) -> Option<(Vec3, Vec3)> {
+    if d.y.abs() > SECTION_VERTICAL_FALLBACK_DEG.to_radians().cos() {
+        return None;
+    }
+    let normal = d.cross(Vec3::Y).try_normalize()?;
+    // `looking_to(-normal, Y)` has right = `Y x normal`.
+    let normal = if Vec3::Y.cross(normal).dot(d) >= 0.0 {
+        normal
+    } else {
+        -normal
+    };
+    Some((normal, Vec3::Y))
+}
+
+/// The plane through `d` and `span`, the eye above it (on its +X side when it is vertical); up is
+/// world up projected into the plane, or `d`'s in-plane perpendicular when the plane is near
+/// horizontal.
+fn incidence_basis(d: Vec3, span: Vec3) -> (Vec3, Vec3) {
+    let mut normal = d
+        .cross(span)
+        .try_normalize()
+        .unwrap_or_else(|| d.any_orthonormal_vector());
+    if normal.y < -1.0e-3 || (normal.y.abs() <= 1.0e-3 && normal.x < 0.0) {
+        normal = -normal;
+    }
+    let up = Vec3::Y.reject_from_normalized(normal);
+    let up = if up.length() >= SECTION_UP_MIN {
+        up.normalize()
+    } else {
+        normal.cross(d).normalize_or(Vec3::Z)
+    };
+    (normal, up)
+}
+
+/// The cut plane through the impact, by a [`SectionRule`], and the orthographic eye that films it
+/// side-on.
 #[derive(Clone, Copy, Debug)]
 struct SectionPlane {
     point: Vec3,
-    /// Unit normal; the eye sits on this side. Above the plane, or on its +X side when it is
+    /// Unit normal; the eye sits on this side. For a vertical cut, the side from which the shell
+    /// travels left to right; for an incidence cut, above the plane, or on its +X side when it is
     /// vertical.
     normal: Vec3,
-    /// Looks along `-normal`, up being world up projected into the plane, or the shot line's
-    /// in-plane perpendicular when the plane is near horizontal.
+    /// Looks along `-normal`, up being world up for a vertical cut and the incidence
+    /// construction's up otherwise.
     eye: Transform,
     /// The fitted viewport, world units.
     width: f32,
@@ -570,27 +647,12 @@ struct SectionPlane {
 }
 
 impl SectionPlane {
-    fn new(report: &PenetrationReport) -> Self {
+    fn new(report: &PenetrationReport, rule: SectionRule) -> Self {
         let point = Vec3::from(report.impact.point);
         let incoming = Vec3::from(report.impact.incoming).normalize_or(Vec3::NEG_Z);
-        let span = if report.impact.incidence_deg < SECTION_MIN_INCIDENCE_DEG {
-            Vec3::Y
-        } else {
-            Vec3::from(report.impact.normal)
-        };
-        let mut normal = incoming
-            .cross(span)
-            .try_normalize()
-            .unwrap_or_else(|| incoming.any_orthonormal_vector());
-        if normal.y < -1.0e-3 || (normal.y.abs() <= 1.0e-3 && normal.x < 0.0) {
-            normal = -normal;
-        }
-        let up = Vec3::Y.reject_from_normalized(normal);
-        let up = if up.length() >= SECTION_UP_MIN {
-            up.normalize()
-        } else {
-            normal.cross(incoming).normalize_or(Vec3::Z)
-        };
+        let struck = (report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG)
+            .then(|| Vec3::from(report.impact.normal));
+        let (normal, up) = section_basis(incoming, rule, struck);
         let look = Transform::IDENTITY.looking_to(-normal, up);
         let (right, up) = (*look.right(), *look.up());
         let first = report.plates.first().map_or(point, |p| Vec3::from(p.entry));
@@ -640,12 +702,20 @@ impl SectionPlane {
     }
 }
 
-/// Section view (key `X`): the armour cut along [`SectionPlane`], filmed by its eye.
+/// Section view (key `X`): the armour cut along [`SectionPlane`], filmed by its eye. `V` cycles
+/// the rule.
 #[derive(Resource, Default)]
 struct SectionView {
     on: bool,
+    rule: SectionRule,
     /// The clip camera's projection before the cut, put back when the view turns off.
     restore: Option<Projection>,
+}
+
+impl SectionView {
+    fn plane(&self, report: &PenetrationReport) -> SectionPlane {
+        SectionPlane::new(report, self.rule)
+    }
 }
 
 type SectionMaterial = ExtendedMaterial<StandardMaterial, SectionCut>;
@@ -849,7 +919,7 @@ fn spawn_hud(mut commands: Commands) {
     ));
     commands.spawn((
         Text::new(
-            "1-5 scenario   R replay   Space pause   Left/Right scrub   C camera   X section   Esc quit",
+            "1-5 scenario   R replay   Space pause   Left/Right scrub   C camera   X section   V plane   Esc quit",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -1002,7 +1072,7 @@ fn apply_cut(
         }
         return;
     }
-    let plane = &clip.section;
+    let plane = section.plane(&clip.report);
     let cut = CUT.to_linear();
     let params = SectionCutParams {
         plane: plane.normal.extend(plane.normal.dot(plane.point)),
@@ -1087,6 +1157,9 @@ fn handle_keys(
     }
     if keys.just_pressed(KeyCode::KeyX) {
         section.on = !section.on;
+    }
+    if section.on && keys.just_pressed(KeyCode::KeyV) {
+        section.rule = section.rule.next();
     }
     for (index, key) in SCENARIO_KEYS.iter().enumerate() {
         if keys.just_pressed(*key) && index < scenarios.0.len() {
@@ -1187,7 +1260,7 @@ fn drive_camera(
 ) {
     let now = playhead.clip;
     **camera = match (section.on, Beat::at(now), *law) {
-        (true, _, _) => clip.section.eye,
+        (true, _, _) => section.plane(&clip.report).eye,
         (_, Beat::Impact, _) => exterior_eye(&clip.report),
         (_, Beat::Reveal | Beat::Traverse, CamLaw::Ride) => {
             ride_eye(&clip.report, clip.timeline.cutoff(now))
@@ -1207,7 +1280,7 @@ fn section_camera(
         if section.restore.is_none() {
             section.restore = Some(projection.clone());
         }
-        **projection = clip.section.projection();
+        **projection = section.plane(&clip.report).projection();
     } else if let Some(previous) = section.restore.take() {
         **projection = previous;
     }
@@ -1261,7 +1334,7 @@ fn draw_clip(
     section: Res<SectionView>,
 ) {
     let (report, timeline, now) = (&clip.report, &clip.timeline, playhead.clip);
-    let plane = section.on.then_some(&clip.section);
+    let plane = section.on.then(|| section.plane(report));
     let cutoff = timeline.cutoff(now);
     let path = path_until(report, cutoff);
     draw_striped(&mut gizmos, &path);
@@ -1290,12 +1363,12 @@ fn draw_clip(
                 gizmos.sphere(Isometry3d::from_translation(exit), 0.035, EXIT);
             }
         }
-        if let (Some(plane), Some(head)) = (plane, head) {
+        if let (Some(plane), Some(head)) = (&plane, head) {
             draw_section_plate(&mut gizmos, report, plate, plane, head);
         }
     }
     let fade = |p: Vec3| {
-        plane.map_or(1.0, |plane| {
+        plane.as_ref().map_or(1.0, |plane| {
             1.0 - (plane.height_of(p).abs() / SECTION_FADE_M).min(1.0)
         })
     };
@@ -1484,8 +1557,13 @@ fn update_hud(
     } else {
         ""
     };
+    let cut = if section.on {
+        format!("  SECTION {}", section.rule.label())
+    } else {
+        String::new()
+    };
     status.0 = format!(
-        "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{}{synthetic}",
+        "t {:.2} s  {}{}\nscenario {}/{} {}\ncam {}{cut}{synthetic}",
         playhead.clip,
         beat,
         if playhead.paused { "  [paused]" } else { "" },
@@ -1493,7 +1571,6 @@ fn update_hud(
         scenarios.0.len(),
         scenarios.0[clip.index].0,
         law.label(),
-        if section.on { "  SECTION" } else { "" },
     );
 }
 
@@ -1752,57 +1829,114 @@ mod tests {
         }
     }
 
-    /// The plane of incidence holds the shot line and the struck normal; the eye looks straight
+    const RULES: [SectionRule; 2] = [SectionRule::Vertical, SectionRule::Incidence];
+
+    /// Under either rule the plane holds the shot line through the impact; the eye looks straight
     /// along its normal from the normal's side, up in the plane, and fits the shot's span.
     #[test]
-    fn section_plane_holds_the_shot_and_the_normal() {
+    fn section_plane_holds_the_shot_and_fits_it() {
         for (_, file) in SCENARIOS {
             let report = scenario(file);
-            let plane = SectionPlane::new(&report);
             let incoming = Vec3::from(report.impact.incoming).normalize();
-            let normal = Vec3::from(report.impact.normal);
-            assert!(plane.normal.is_normalized(), "{file}");
-            assert!(plane.normal.dot(incoming).abs() < 1.0e-3, "{file}");
-            if report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG {
-                assert!(plane.normal.dot(normal).abs() < 1.0e-3, "{file}");
-            }
-            assert!(plane.normal.y >= -1.0e-3, "{file}: eye below the plane");
-            assert!(plane.height_of(plane.eye.translation) > 0.0, "{file}");
-            assert!(
-                (*plane.eye.forward() + plane.normal).length() < 1.0e-4,
-                "{file}"
-            );
-            assert!(plane.eye.up().dot(plane.normal).abs() < 1.0e-4, "{file}");
-            assert!(plane.height_of(Vec3::from(report.impact.point)).abs() < 1.0e-6);
-            let inside = |p: Vec3| {
-                let d = p - plane.eye.translation;
-                d.dot(*plane.eye.right()).abs() <= plane.width * 0.5 + 1.0e-4
-                    && d.dot(*plane.eye.up()).abs() <= plane.height * 0.5 + 1.0e-4
-            };
-            assert!(inside(Vec3::from(report.impact.point)), "{file}");
-            for plate in &report.plates {
-                assert!(inside(Vec3::from(plate.entry)), "{file}: {}", plate.name);
-                if let Some(exit) = plate.exit {
-                    assert!(inside(Vec3::from(exit)), "{file}: {}", plate.name);
+            for rule in RULES {
+                let plane = SectionPlane::new(&report, rule);
+                assert!(plane.normal.is_normalized(), "{file} {rule:?}");
+                assert!(plane.normal.dot(incoming).abs() < 1.0e-3, "{file} {rule:?}");
+                assert!(
+                    plane.height_of(plane.eye.translation) > 0.0,
+                    "{file} {rule:?}"
+                );
+                assert!(
+                    (*plane.eye.forward() + plane.normal).length() < 1.0e-4,
+                    "{file} {rule:?}"
+                );
+                assert!(
+                    plane.eye.up().dot(plane.normal).abs() < 1.0e-4,
+                    "{file} {rule:?}"
+                );
+                assert!(plane.height_of(Vec3::from(report.impact.point)).abs() < 1.0e-6);
+                let inside = |p: Vec3| {
+                    let d = p - plane.eye.translation;
+                    d.dot(*plane.eye.right()).abs() <= plane.width * 0.5 + 1.0e-4
+                        && d.dot(*plane.eye.up()).abs() <= plane.height * 0.5 + 1.0e-4
+                };
+                assert!(inside(Vec3::from(report.impact.point)), "{file} {rule:?}");
+                for plate in &report.plates {
+                    assert!(inside(Vec3::from(plate.entry)), "{file}: {}", plate.name);
+                    if let Some(exit) = plate.exit {
+                        assert!(inside(Vec3::from(exit)), "{file}: {}", plate.name);
+                    }
                 }
+                assert!(
+                    plane.width.max(plane.height) >= 2.0 * SECTION_LEAD_M,
+                    "{file} {rule:?}"
+                );
             }
-            assert!(
-                plane.width.max(plane.height) >= 2.0 * SECTION_LEAD_M,
-                "{file}"
-            );
         }
     }
 
-    /// Near-parallel incidence spans the plane with world up instead of the normal.
+    /// The vertical cut holds the shot line and world up, its eye upright with the shell
+    /// travelling left to right.
     #[test]
-    fn section_plane_falls_back_to_world_up_when_incidence_is_flat() {
+    fn vertical_plane_is_upright_and_reads_left_to_right() {
+        for (_, file) in SCENARIOS {
+            let report = scenario(file);
+            let plane = SectionPlane::new(&report, SectionRule::Vertical);
+            let incoming = Vec3::from(report.impact.incoming).normalize();
+            assert!(plane.normal.y.abs() < 1.0e-6, "{file}");
+            assert!(plane.normal.dot(incoming).abs() < 1.0e-6, "{file}");
+            assert!(plane.eye.up().dot(Vec3::Y) > 1.0 - 1.0e-6, "{file}");
+            assert!(plane.eye.right().dot(incoming) > 0.0, "{file}");
+        }
+    }
+
+    /// The incidence cut holds the struck normal, the eye above the plane.
+    #[test]
+    fn incidence_plane_holds_the_struck_normal() {
+        for (_, file) in SCENARIOS {
+            let report = scenario(file);
+            assert!(report.impact.incidence_deg >= SECTION_MIN_INCIDENCE_DEG);
+            let plane = SectionPlane::new(&report, SectionRule::Incidence);
+            let normal = Vec3::from(report.impact.normal);
+            assert!(plane.normal.dot(normal).abs() < 1.0e-3, "{file}");
+            assert!(plane.normal.y >= -1.0e-3, "{file}: eye below the plane");
+        }
+    }
+
+    /// A shot within [`SECTION_VERTICAL_FALLBACK_DEG`] of vertical takes the incidence
+    /// construction; one outside it cuts vertically.
+    #[test]
+    fn vertical_rule_falls_back_to_incidence_near_vertical() {
+        let struck = Vec3::new(0.3, -0.5, 0.8).normalize();
+        let plunge = |deg: f32| Vec3::new(deg.to_radians().sin(), -deg.to_radians().cos(), 0.0);
+        let steep = plunge(SECTION_VERTICAL_FALLBACK_DEG - 5.0);
+        let shallow = plunge(SECTION_VERTICAL_FALLBACK_DEG + 5.0);
+        assert!(vertical_basis(steep).is_none());
+        assert!(vertical_basis(shallow).is_some());
+        let mut report = straight_burst([0.0, 0.0, 0.6]);
+        report.impact.normal = struck.into();
+        report.impact.incidence_deg = 40.0;
+        report.impact.incoming = steep.into();
+        let plane = SectionPlane::new(&report, SectionRule::Vertical);
+        assert!(plane.normal.dot(steep).abs() < 1.0e-6);
+        assert!(plane.normal.dot(struck).abs() < 1.0e-6, "{}", plane.normal);
+        report.impact.incoming = shallow.into();
+        let plane = SectionPlane::new(&report, SectionRule::Vertical);
+        assert!(plane.normal.dot(shallow).abs() < 1.0e-6);
+        assert!(plane.normal.y.abs() < 1.0e-6, "{}", plane.normal);
+        assert!(plane.eye.up().dot(Vec3::Y) > 1.0 - 1.0e-6);
+    }
+
+    /// Near-parallel incidence has no usable normal: the incidence rule cuts vertically.
+    #[test]
+    fn incidence_rule_cuts_vertically_when_incidence_is_flat() {
         let mut report = straight_burst([0.0, 0.0, 0.6]);
         report.impact.incidence_deg = 1.0;
         report.impact.normal = [0.0, 0.0, -1.0];
-        let plane = SectionPlane::new(&report);
+        let plane = SectionPlane::new(&report, SectionRule::Incidence);
         assert!(plane.normal.dot(Vec3::Y).abs() < 1.0e-6);
         assert!(plane.normal.dot(Vec3::Z).abs() < 1.0e-6);
-        assert!(plane.normal.x > 0.0);
+        assert!(plane.eye.right().dot(Vec3::Z) > 0.0);
     }
 
     #[test]
