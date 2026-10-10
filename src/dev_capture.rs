@@ -10,6 +10,10 @@
 //! * `OVERMATCH_CAPTURE_SIZE=WxH` — the frame in physical pixels, default 2560x1440. The target's
 //!   scale factor is [`SCALE_FACTOR`], so the UI lays out at half that in logical pixels, as on a
 //!   retina window.
+//! * `OVERMATCH_CAPTURE_UI=0` — hide every UI tree, every frame, after whatever the app's own
+//!   systems wrote to its roots' `Visibility` that frame.
+//! * `OVERMATCH_CAPTURE_GIZMOS=0` — disable the default gizmo group when the cameras are
+//!   retargeted.
 //!
 //! The process exits once every frame is on disk, with a failure code if any is missing.
 //!
@@ -31,6 +35,7 @@
 use std::path::{Path, PathBuf};
 
 use bevy::app::AppExit;
+use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{Camera, ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::TextureFormat;
@@ -57,6 +62,7 @@ struct Capture {
     at: Vec<f32>,
     sight: bool,
     size: UVec2,
+    gizmos: bool,
     /// The cameras' target once retargeted; each screenshot names it verbatim.
     target: Option<ImageRenderTarget>,
     switched: bool,
@@ -75,8 +81,10 @@ pub fn plugin(app: &mut App) {
         .ok()
         .and_then(|s| parse_size(&s))
         .unwrap_or(UVec2::new(2560, 1440));
+    let ui = std::env::var("OVERMATCH_CAPTURE_UI").as_deref() != Ok("0");
+    let gizmos = std::env::var("OVERMATCH_CAPTURE_GIZMOS").as_deref() != Ok("0");
     info!(
-        "capture: {} at {at:?} s, sight {sight}, {}x{}",
+        "capture: {} at {at:?} s, sight {sight}, {}x{}, ui {ui}, gizmos {gizmos}",
         path.to_string_lossy(),
         size.x,
         size.y
@@ -87,12 +95,27 @@ pub fn plugin(app: &mut App) {
         at,
         sight,
         size,
+        gizmos,
         target: None,
         switched: false,
         requested: 0,
         saved: 0,
     });
     app.add_systems(Update, capture);
+    if !ui {
+        app.add_systems(
+            PostUpdate,
+            hide_ui.before(VisibilitySystems::VisibilityPropagate),
+        );
+    }
+}
+
+/// Apps rewrite their UI roots' `Visibility` from `Update`; this runs after them and before the
+/// value propagates, so the roots stay hidden whatever they wrote.
+fn hide_ui(mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>) {
+    for mut visibility in &mut roots {
+        visibility.set_if_neq(Visibility::Hidden);
+    }
 }
 
 /// Comma-separated seconds; unparsable entries are dropped; empty means the default.
@@ -143,6 +166,7 @@ fn capture(
     mut cap: ResMut<Capture>,
     mut images: ResMut<Assets<Image>>,
     mut cameras: Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
+    gizmo_store: Option<ResMut<GizmoConfigStore>>,
     mode: Option<ResMut<SightMode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -156,6 +180,11 @@ fn capture(
     }
     if cap.target.is_none() && t >= first - WARM_UP {
         cap.target = Some(retarget(&mut commands, &mut images, &mut cameras, cap.size));
+        if !cap.gizmos
+            && let Some(mut store) = gizmo_store
+        {
+            store.config_mut::<DefaultGizmoConfigGroup>().0.enabled = false;
+        }
     }
     let Some(target) = cap.target.clone() else {
         return;
