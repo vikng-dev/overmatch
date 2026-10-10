@@ -2,7 +2,7 @@
 //! AFTER `DefaultPlugins` by the offline root and the damage cam demo, never by the network client.
 //!
 //! * `OVERMATCH_CAPTURE=<png>` — the frame's path. With several times the time goes before the
-//!   extension: `shot.png` → `shot-8.0s.png`.
+//!   extension: `shot.png` → `shot-8.5s.png`, `shot-4s.png`.
 //! * `OVERMATCH_CAPTURE_AT=<s>[,<s>…]` — app seconds (`Time` as `Update` sees it) of each frame;
 //!   default 6.
 //! * `OVERMATCH_CAPTURE_SIGHT=1` — switch to the gunner optic two seconds before the first frame,
@@ -140,7 +140,7 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
     }
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-    path.with_file_name(format!("{stem}-{at:.1}s.{ext}"))
+    path.with_file_name(format!("{stem}-{at}s.{ext}"))
 }
 
 /// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
