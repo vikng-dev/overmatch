@@ -1,65 +1,140 @@
-//! One in-engine frame to disk, for documentation. `OVERMATCH_CAPTURE=<png path>` saves a frame
-//! `OVERMATCH_CAPTURE_AT` seconds after startup (default 6) and exits shortly after.
-//! `OVERMATCH_CAPTURE_SIGHT=1` switches to the gunner optic two seconds before the capture,
-//! writing the same resource the Shift toggle writes. `OVERMATCH_CAPTURE_SIZE=WxH` sets the
-//! frame (default 2560x1440, rendered at scale factor 2 like a retina window). Mounted by the
-//! offline root and the damage cam demo only, never by the network client; without the variable
-//! it mounts nothing.
+//! In-engine frames to disk, for documentation. Inert unless `OVERMATCH_CAPTURE` is set; mounted
+//! AFTER `DefaultPlugins` by the offline root and the damage cam demo, never by the network client.
 //!
-//! One second before the capture every camera that targets the window is retargeted to an
-//! offscreen image, and the frame is read back from that image. This is what lets the run stay
-//! hidden: a hidden window has no swapchain, and the client's scaled main pass does not reach a
-//! window screenshot even when the window is visible.
+//! * `OVERMATCH_CAPTURE=<png>` — the frame's path. With several times the time goes before the
+//!   extension: `shot.png` → `shot-8.0s.png`.
+//! * `OVERMATCH_CAPTURE_AT=<s>[,<s>…]` — app seconds (`Time` as `Update` sees it) of each frame;
+//!   default 6.
+//! * `OVERMATCH_CAPTURE_SIGHT=1` — switch to the gunner optic two seconds before the first frame,
+//!   by writing the resource the Shift toggle writes; ignored where that resource is absent.
+//! * `OVERMATCH_CAPTURE_SIZE=WxH` — the frame in physical pixels, default 2560x1440. The target's
+//!   scale factor is [`SCALE_FACTOR`], so the UI lays out at half that in logical pixels, as on a
+//!   retina window.
+//!
+//! The process exits once every frame is on disk, with a failure code if any is missing.
+//!
+//! # Invariant: a capture run shows no window
+//!
+//! The primary window is created hidden and, on macOS, the process renounces activation. A root
+//! that already created its window hidden keeps both duties ([`run_offline`](crate::run_offline),
+//! whose `SPIKE_SIM_WINDOWED=1` mode also keeps a persisted fullscreen from re-applying — pass it
+//! there). A hidden window has no swapchain texture, and a window screenshot reads back nothing
+//! without one (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the
+//! copy), so the frame is instead read back from an offscreen image that every window-targeting
+//! camera is pointed at one second before the first frame.
+//!
+//! The screenshot names that target exactly — same handle AND same scale factor. `ScreenshotPlugin`
+//! swaps the view's output attachment for its own texture by `NormalizedRenderTarget` equality,
+//! which `ImageRenderTarget` defines over both fields; `Screenshot::image` normalizes to scale 1,
+//! names a target no camera renders into, and reads back black.
+
+use std::path::{Path, PathBuf};
 
 use bevy::app::AppExit;
 use bevy::camera::{Camera, ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
-use bevy::render::render_resource::{TextureFormat, TextureUsages};
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::render::render_resource::TextureFormat;
+use bevy::render::view::screenshot::{Screenshot, ScreenshotCaptured, save_to_disk};
+use bevy::ui::IsDefaultUiCamera;
+use bevy::window::PrimaryWindow;
 
 use crate::sight::SightMode;
 
+/// Logical-to-physical ratio of the frame; the UI lays out at `size / SCALE_FACTOR` logical pixels.
+const SCALE_FACTOR: f32 = 2.0;
+/// Seconds between the retarget and the first frame. The image's GPU texture, the camera's target
+/// info and the UI's relayout each follow the retarget by a frame; one second covers them all.
+const WARM_UP: f32 = 1.0;
+/// Seconds before the first frame at which the sight switches.
+const SIGHT_LEAD: f32 = 2.0;
+/// Seconds after the last frame's time by which it must be on disk, or the run exits failed.
+const GRACE: f32 = 3.0;
+
 #[derive(Resource)]
 struct Capture {
-    path: String,
-    at: f32,
+    path: PathBuf,
+    /// Ascending and non-empty.
+    at: Vec<f32>,
     sight: bool,
     size: UVec2,
-    target: Option<Handle<Image>>,
+    /// The cameras' target once retargeted; each screenshot names it verbatim.
+    target: Option<ImageRenderTarget>,
     switched: bool,
-    shot: bool,
+    /// Frames requested so far: an index into `at`.
+    requested: usize,
+    saved: usize,
 }
 
 pub fn plugin(app: &mut App) {
-    let Ok(path) = std::env::var("OVERMATCH_CAPTURE") else {
+    let Some(path) = std::env::var_os("OVERMATCH_CAPTURE") else {
         return;
     };
-    let at = std::env::var("OVERMATCH_CAPTURE_AT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6.0);
+    let at = parse_times(&std::env::var("OVERMATCH_CAPTURE_AT").unwrap_or_default());
     let sight = std::env::var("OVERMATCH_CAPTURE_SIGHT").as_deref() == Ok("1");
     let size = std::env::var("OVERMATCH_CAPTURE_SIZE")
         .ok()
-        .and_then(|s| {
-            let (w, h) = s.split_once('x')?;
-            Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
-        })
+        .and_then(|s| parse_size(&s))
         .unwrap_or(UVec2::new(2560, 1440));
     info!(
-        "capture: {path} at {at:.1} s, sight {sight}, {}x{}",
-        size.x, size.y
+        "capture: {} at {at:?} s, sight {sight}, {}x{}",
+        path.to_string_lossy(),
+        size.x,
+        size.y
     );
+    hide_window(app);
     app.insert_resource(Capture {
-        path,
+        path: path.into(),
         at,
         sight,
         size,
         target: None,
         switched: false,
-        shot: false,
+        requested: 0,
+        saved: 0,
     });
     app.add_systems(Update, capture);
+}
+
+/// Comma-separated seconds; unparsable entries are dropped; empty means the default.
+fn parse_times(s: &str) -> Vec<f32> {
+    let mut at: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+    if at.is_empty() {
+        at.push(6.0);
+    }
+    at.sort_by(f32::total_cmp);
+    at
+}
+
+fn parse_size(s: &str) -> Option<UVec2> {
+    let (w, h) = s.split_once('x')?;
+    Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
+}
+
+/// One frame keeps `path`; several put the time before the extension.
+fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
+    if frames == 1 {
+        return path.to_owned();
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
+    path.with_file_name(format!("{stem}-{at:.1}s.{ext}"))
+}
+
+/// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
+/// reads `visible` when it creates the OS window, which is after every plugin's build.
+fn hide_window(app: &mut App) {
+    let world = app.world_mut();
+    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+    let Ok(mut window) = windows.single_mut(world) else {
+        warn!("capture: no primary window at mount; one created later will be visible");
+        return;
+    };
+    if !window.visible {
+        return;
+    }
+    window.visible = false;
+    #[cfg(target_os = "macos")]
+    app.add_systems(Startup, crate::net::revoke_macos_activation);
 }
 
 fn capture(
@@ -67,44 +142,96 @@ fn capture(
     time: Res<Time>,
     mut cap: ResMut<Capture>,
     mut images: ResMut<Assets<Image>>,
-    mut cameras: Query<&mut RenderTarget, With<Camera>>,
+    mut cameras: Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
     mode: Option<ResMut<SightMode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let t = time.elapsed_secs();
-    if cap.sight && !cap.switched && t >= cap.at - 2.0 {
+    let first = cap.at[0];
+    if cap.sight && !cap.switched && t >= first - SIGHT_LEAD {
         if let Some(mut mode) = mode {
             *mode = SightMode::Gunner;
         }
         cap.switched = true;
     }
-    if cap.target.is_none() && t >= cap.at - 1.0 {
-        let mut image =
-            Image::new_target_texture(cap.size.x, cap.size.y, TextureFormat::Rgba8UnormSrgb, None);
-        image.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-        let handle = images.add(image);
-        let mut moved = 0;
-        for mut target in &mut cameras {
-            if matches!(*target, RenderTarget::Window(_)) {
-                *target = RenderTarget::Image(ImageRenderTarget {
-                    handle: handle.clone(),
-                    scale_factor: 2.0,
-                });
-                moved += 1;
-            }
-        }
-        info!("capture: {moved} camera(s) retargeted to the offscreen frame");
-        cap.target = Some(handle);
+    if cap.target.is_none() && t >= first - WARM_UP {
+        cap.target = Some(retarget(&mut commands, &mut images, &mut cameras, cap.size));
     }
-    if !cap.shot && t >= cap.at {
-        if let Some(handle) = cap.target.clone() {
-            commands
-                .spawn(Screenshot::image(handle))
-                .observe(save_to_disk(cap.path.clone()));
-        }
-        cap.shot = true;
+    let Some(target) = cap.target.clone() else {
+        return;
+    };
+    if let Some(&due) = cap.at.get(cap.requested)
+        && t >= due
+    {
+        commands
+            .spawn(Screenshot(RenderTarget::Image(target)))
+            .observe(save_to_disk(frame_path(&cap.path, due, cap.at.len())))
+            .observe(|_: On<ScreenshotCaptured>, mut cap: ResMut<Capture>| cap.saved += 1);
+        cap.requested += 1;
     }
-    if cap.shot && t >= cap.at + 1.5 {
+    let last = cap.at[cap.at.len() - 1];
+    if cap.saved == cap.at.len() {
         exit.write(AppExit::Success);
+    } else if t >= last + GRACE {
+        error!("capture: {} of {} frames saved", cap.saved, cap.at.len());
+        exit.write(AppExit::error());
+    }
+}
+
+/// Point every window-targeting camera at a fresh `size` image and make the highest-order one the
+/// UI's default camera — the one `bevy_ui` picks for the window on its own, but only among window
+/// targets. A camera already marked keeps the role.
+fn retarget(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    cameras: &mut Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
+    size: UVec2,
+) -> ImageRenderTarget {
+    let image = Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
+    let target = ImageRenderTarget {
+        handle: images.add(image),
+        scale_factor: SCALE_FACTOR,
+    };
+    let mut moved = 0;
+    let mut ui_camera: Option<(isize, Entity)> = None;
+    let mut marked = false;
+    for (entity, camera, mut render_target, is_ui) in cameras.iter_mut() {
+        marked |= is_ui;
+        if !matches!(*render_target, RenderTarget::Window(_)) {
+            continue;
+        }
+        *render_target = RenderTarget::Image(target.clone());
+        moved += 1;
+        if ui_camera.is_none_or(|(order, _)| camera.order > order) {
+            ui_camera = Some((camera.order, entity));
+        }
+    }
+    if let Some((_, entity)) = ui_camera
+        && !marked
+    {
+        commands.entity(entity).insert(IsDefaultUiCamera);
+    }
+    info!(
+        "capture: {moved} camera(s) retargeted to a {}x{} image",
+        size.x, size.y
+    );
+    target
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn times_default_sort_and_drop_junk() {
+        assert_eq!(parse_times(""), vec![6.0]);
+        assert_eq!(parse_times("8, 2.5,x,4"), vec![2.5, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn one_frame_keeps_the_path_and_several_stamp_it() {
+        let path = Path::new("/out/shot.png");
+        assert_eq!(frame_path(path, 8.0, 1), path);
+        assert_eq!(frame_path(path, 8.5, 2), Path::new("/out/shot-8.5s.png"));
     }
 }

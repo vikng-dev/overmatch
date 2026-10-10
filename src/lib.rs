@@ -96,6 +96,9 @@ mod map;
 mod net;
 pub(crate) use net::{env_flag, env_parse, env_value};
 pub use net::{run_client, run_server};
+/// Documentation frames to disk; inert without `OVERMATCH_CAPTURE`. Public so the damage cam demo
+/// can mount it; the offline root mounts it too, the network client never.
+pub mod dev_capture;
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
 /// because it is pure view-state that the always-sim `sight` module also declares into — putting it
@@ -133,7 +136,6 @@ mod render_scale;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
-pub mod dev_capture;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
