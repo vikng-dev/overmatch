@@ -133,6 +133,7 @@ mod render_scale;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
+pub mod dev_capture;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
@@ -885,6 +886,8 @@ pub fn run_offline() {
         app.add_systems(Startup, net::revoke_macos_activation);
     }
     app.add_plugins(GamePlugin);
+    // Documentation frames; inert without `OVERMATCH_CAPTURE`.
+    app.add_plugins(dev_capture::plugin);
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to
     // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles

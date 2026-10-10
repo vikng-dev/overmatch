@@ -9,5 +9,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .add_plugins(overmatch::damage_cam::player::demo_plugin)
+        // Documentation frames; inert without `OVERMATCH_CAPTURE`.
+        .add_plugins(overmatch::dev_capture::plugin)
         .run();
 }
