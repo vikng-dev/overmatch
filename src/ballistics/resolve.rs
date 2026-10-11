@@ -16,6 +16,15 @@
 //! primitives the disc is still inside, and that is a lookup on rays already walked
 //! ([`DiscWalk::resume_at`]), never an inference.
 //!
+//! # One mechanism, decided before it is applied
+//!
+//! [`decide`] resolves a crossing from a [`Flight`] — the round's position, direction, speed,
+//! CURRENT sampling frame and continuation — into a typed [`Decision`] with nothing mutated.
+//! [`apply`] carries the runtime's consequences out of it (HP, impulses, marks, spall, events), and
+//! [`Flight::follow`] advances the flight to where the next crossing starts. The runtime march and
+//! the §13.6 gate (`fuzz`) both drive successive crossings through exactly this state machine; the
+//! gate observes the decisions and applies nothing.
+//!
 //! # Fail closed, never free
 //!
 //! On any structured [`WalkError`] the round STOPS at the contact it was resolving: no perforation,
@@ -33,8 +42,8 @@ use super::walk::{
     Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface,
-    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
+    BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
+    MarchingShell, PenetrationEvent, ProjectileMarchWorld, RoundBody, ShellRicochet, ShellTerminal,
     TerminalVerdict, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
@@ -47,7 +56,7 @@ const ENTRANCE_SPAN: f32 = 0.5;
 
 /// Ceiling on corridor extension. A crossing that has not closed in 50 m of material is not a
 /// crossing.
-const MAX_CORRIDOR: f32 = 50.0;
+pub(crate) const MAX_CORRIDOR: f32 = 50.0;
 
 /// Below this calibre the disc degenerates to its axis (`k = 1`).
 ///
@@ -73,40 +82,13 @@ const TRANSIT_K: f32 = 1.0;
 /// HP and shrugs it off.
 const SHOCK_K: f32 = 0.045;
 
-/// What one resolved crossing did, and what the march must carry out of it.
-pub(crate) struct Crossing {
-    pub outcome: ArmorCrossing,
-    pub damage: f32,
-    /// Line-of-sight metres flown from the corridor origin to where the march resumes, SUMMED over
-    /// the segments actually flown.
-    ///
-    /// The driver cannot reconstruct this and must not try. A crossing is two segments, not one: the
-    /// round flies from the corridor origin to the AXIS handoff along the incoming direction, and
-    /// from there to the exit along the BENT one. The driver knows only where its cast first touched
-    /// armour — the nearest of k sample rays — and at oblique incidence that ray leads the axis by
-    /// `r·tan(incidence)` — DERIVED: 135 mm for an 88 at 72° (`0.044 m × tan 72°`). Charging to it
-    /// skips the approach and hands the round that much free travel inside the same tick, which
-    /// moves subsequent impacts across tick accounting boundaries.
-    ///
-    /// The disc lift a ricochet resumes on is deliberately NOT counted: it is a repositioning of the
-    /// body clear of the face it bounced off, not distance the round flew.
-    pub travel: f32,
-    /// Where the march resumes and which primitives each disc sample is still inside there.
-    ///
-    /// `None` unless the round perforated. This is the ONLY state a crossing leaves behind, and it
-    /// exists because the alternative is guessing: a shell that punches an outer plate while one ring
-    /// sample is already inside the crewman behind it must resume knowing that, or the next corridor
-    /// reports an exit it never entered.
-    pub interior: Option<Interior>,
-    /// Where the march must resume, when the contact point itself is not far enough clear.
-    ///
-    /// A bounce is the case that needs it. The point model could resume one boundary nudge along the
-    /// outgoing ray and be done; a DISC cannot, because at oblique incidence its lateral offsets lie
-    /// mostly ALONG the struck surface's normal — after a 75° deflection, half the ring is still
-    /// tens of millimetres behind the face. First contact would fire again immediately, on the very
-    /// surface the round just left. So a ricochet lifts the shell clear along `n̄` by the disc's own
-    /// radius: the same statement the 1 mm nudge makes for a point, sized for a body.
-    pub resume: Option<Vec3>,
+/// The disc radius a round of `caliber` samples at — zero below [`DISC_MIN_CALIBER`].
+pub(crate) fn disc_radius(caliber: f32) -> f32 {
+    if caliber >= DISC_MIN_CALIBER {
+        caliber * 0.5
+    } else {
+        0.0
+    }
 }
 
 /// The resume point of a perforation and the seeds read there, in ONE anchor frame.
@@ -117,8 +99,9 @@ pub(crate) struct Crossing {
 /// rounding wherever on the map the shot is. A resume point rebuilt in world f32 is quantized at
 /// the world's spacing (2.44e-4 m past 2048 m, DERIVED), far wider than the topology band the seeds
 /// were judged in, and an entry face that close to the plane is then owned by the seed AND
-/// re-collected ahead of the origin, or by nobody. The march carries this unchanged into the next
+/// re-collected ahead of the origin, or by nobody. The flight carries this unchanged into the next
 /// crossing and converts to world only for its cast and for presentation.
+#[derive(Clone, Debug)]
 pub(crate) struct Interior {
     /// WORLD anchor of the corridor the seeds were read on.
     pub anchor: Vec3,
@@ -127,7 +110,223 @@ pub(crate) struct Interior {
     pub seeds: Vec<SampleSeed>,
 }
 
-/// Everything the driver borrows from the march. Grouped so the phase takes one parameter rather
+impl Interior {
+    /// Some sample resumes inside material. The next crossing must then be resolved from these seeds
+    /// before the flight may stop marching: the material's exit lies ahead with its entry behind,
+    /// and only the seeds say the sample is inside.
+    pub(crate) fn holds_material(&self) -> bool {
+        self.seeds.iter().any(|seed| !seed.inside.is_empty())
+    }
+}
+
+/// The state successive crossings read and advance: where the round is, where it is going, and the
+/// sampling frame and continuation it carries out of the last crossing.
+///
+/// The runtime march and the §13.6 gate drive the SAME state through the same [`decide`] and
+/// [`Flight::follow`], so a crossing sequence is one state machine wherever it is run.
+#[derive(Clone, Debug)]
+pub(crate) struct Flight {
+    /// WORLD position the next cast starts from (one [`MARCH_EPS`] along `direction` from here).
+    pub position: Vec3,
+    pub direction: Dir3,
+    /// m/s.
+    pub speed: f32,
+    /// The sampling basis for `direction`, transported through every bend so far. Resolution reads
+    /// THIS, never a basis stored for an earlier heading.
+    pub frame: DiscFrame,
+    /// The last perforation's resume point and seeds, anchor-relative; `None` in open air.
+    pub continuation: Option<Interior>,
+}
+
+/// What [`Flight::follow`] moved the flight by.
+pub(crate) struct Followed {
+    /// Line-of-sight metres charged against the travel budget, including the boundary nudge.
+    pub travel: f32,
+    /// The round came to rest.
+    pub stopped: bool,
+}
+
+impl Flight {
+    /// WORLD origin of the next cast and of a corridor that has no continuation to resume from: the
+    /// position, nudged off whatever face the flight is leaving.
+    pub(crate) fn cast_origin(&self) -> Vec3 {
+        self.position + self.direction * MARCH_EPS
+    }
+
+    /// A continuation holds a sample inside material ([`Interior::holds_material`]).
+    pub(crate) fn holds_material(&self) -> bool {
+        self.continuation
+            .as_ref()
+            .is_some_and(Interior::holds_material)
+    }
+
+    /// Advance the flight along a decision: the state the next crossing starts from. The sampling
+    /// frame is transported through every direction change, including the null one.
+    pub(crate) fn follow(&mut self, decision: Decision) -> Followed {
+        let nudge = MARCH_EPS;
+        match decision {
+            Decision::Clear { resume, travel } => {
+                self.frame = self
+                    .frame
+                    .transport(Vec3::from(self.direction), Vec3::from(self.direction));
+                self.position = resume;
+                self.continuation = None;
+                Followed {
+                    travel: nudge + travel,
+                    stopped: false,
+                }
+            }
+            Decision::Bounce(bounce) => {
+                self.frame = self
+                    .frame
+                    .transport(Vec3::from(self.direction), Vec3::from(bounce.direction));
+                self.direction = bounce.direction;
+                self.speed = bounce.speed;
+                self.position = bounce.resume;
+                self.continuation = None;
+                Followed {
+                    travel: nudge + bounce.travel,
+                    stopped: false,
+                }
+            }
+            Decision::Bite(bite) => match bite.end {
+                BiteEnd::Embedded { at, .. } => {
+                    self.position = at;
+                    self.continuation = None;
+                    Followed {
+                        travel: nudge + bite.travel,
+                        stopped: true,
+                    }
+                }
+                BiteEnd::Perforated {
+                    resume,
+                    direction,
+                    speed,
+                    continuation,
+                    ..
+                } => {
+                    self.frame = self
+                        .frame
+                        .transport(Vec3::from(self.direction), Vec3::from(direction));
+                    self.direction = direction;
+                    self.speed = speed;
+                    self.position = resume;
+                    self.continuation = Some(continuation);
+                    Followed {
+                        travel: nudge + bite.travel,
+                        stopped: false,
+                    }
+                }
+            },
+        }
+    }
+}
+
+/// What one crossing decided, before any consequence is applied: the runtime applies it
+/// ([`apply`]); the §13.6 gate only observes it.
+///
+/// Positions are WORLD; the continuation alone stays anchor-relative ([`Interior`]).
+#[derive(Clone, Debug)]
+pub(crate) enum Decision {
+    /// First contact said there was armour; the disc, which is the resolution, met none. No
+    /// fabricated event (§13.6) — and no re-probing: the round flies past the WHOLE corridor just
+    /// examined, because that corridor is exactly the span now known to be empty. Advancing only to
+    /// the contact would re-detect it and creep forward one boundary nudge at a time.
+    Clear {
+        /// The far end of the examined corridor, where the flight resumes.
+        resume: Vec3,
+        /// The examined corridor's length.
+        travel: f32,
+    },
+    /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
+    Bounce(Bounce),
+    /// It bit in: stopped inside the material or came out the far side.
+    Bite(Bite),
+}
+
+/// A deflection off the entrance face (§4). The deflection ANGLE and the bleed both already carry η
+/// from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
+#[derive(Clone, Debug)]
+pub(crate) struct Bounce {
+    pub position: Vec3,
+    pub normal: Vec3,
+    /// Entrance coverage η.
+    pub coverage: f32,
+    /// The volume owning the struck face.
+    pub struck: Entity,
+    /// The rigid body owning `struck`, which takes the momentum exchange.
+    pub owner: Option<Entity>,
+    /// HP the bounce jars into the struck component before that component's own floor: impact
+    /// energy × squareness ([`SHOCK_K`]). Armour has no HP and shrugs it off.
+    pub shock: f32,
+    pub direction: Dir3,
+    /// Speed retained (m/s).
+    pub speed: f32,
+    /// Momentum handed to `owner` at `position`.
+    pub impulse: Vec3,
+    /// Line-of-sight metres flown to the face, along the way in. The lift to `resume` is not travel:
+    /// it repositions the body clear of the face it bounced off.
+    pub travel: f32,
+    /// Where the flight resumes: lifted clear of the face along `n̄` by the disc's own radius. At
+    /// oblique incidence a disc's lateral offsets lie mostly ALONG the struck surface's normal, so
+    /// resuming at the contact point leaves half the ring behind the face and first contact fires
+    /// again on the very surface just left. A point needs only the nudge; a body needs its radius.
+    pub resume: Vec3,
+}
+
+/// An entry into the material (§§3–6).
+#[derive(Clone, Debug)]
+pub(crate) struct Bite {
+    /// Where the round punched in: the struck face.
+    pub entrance: Vec3,
+    pub normal: Vec3,
+    /// Entrance coverage η.
+    pub coverage: f32,
+    pub overmatched: bool,
+    /// The rigid body owning the entrance face, which takes the momentum exchange (§13.5).
+    pub owner: Option<Entity>,
+    /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
+    /// first plate deposits nothing behind it.
+    pub deposits: Vec<walk::EntityDeposit>,
+    /// Line-of-sight metres flown, summed over the segments actually flown: the approach to the
+    /// AXIS hand-off along the way in, then the transit along the bend.
+    ///
+    /// Not reconstructible from the cast. The cast knows only where its nearest sample ray first
+    /// touched armour, and at oblique incidence that ray leads the axis by `r·tan(incidence)` —
+    /// DERIVED: 135 mm for an 88 at 72° (`0.044 m × tan 72°`). Charging to it skips the approach and
+    /// hands the round that much free travel inside the same tick, which moves subsequent impacts
+    /// across tick accounting boundaries.
+    pub travel: f32,
+    pub end: BiteEnd,
+}
+
+/// How a bite ended.
+#[derive(Clone, Debug)]
+pub(crate) enum BiteEnd {
+    /// Defeated: buried at `at`, the whole remaining momentum to the entrance body.
+    Embedded { at: Vec3, impulse: Vec3 },
+    /// Punched through.
+    Perforated {
+        /// The aggregate exit face — what the crossing's marks record.
+        exit: Vec3,
+        /// The axis at the exit, where the flight resumes.
+        resume: Vec3,
+        direction: Dir3,
+        /// Residual speed (m/s).
+        speed: f32,
+        /// The momentum the shell lost crossing, to the entrance body at the entrance.
+        impulse: Vec3,
+        /// One spall source per downward field step the round reached, including the exit (§13.2's
+        /// field law): `(position, η-weighted budget)`.
+        spall: Vec<(Vec3, f32)>,
+        /// Which primitives each sample is still inside where the flight resumes. A shell that
+        /// punches an outer plate while one ring sample is already inside the crewman behind it
+        /// must resume knowing that, or the next corridor reports an exit it never entered.
+        continuation: Interior,
+    },
+}
+
+/// Everything the driver borrows from the world. Grouped so the phase takes one parameter rather
 /// than nine, exactly as [`ProjectileMarchWorld`] groups the queries.
 pub(crate) struct ResolveContext<'a, 'w, 's> {
     pub world: &'a ProjectileMarchWorld<'w, 's>,
@@ -147,47 +346,33 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
     pub laws: WalkLaws,
 }
 
-/// Resolve one crossing of the union field, from first contact through to the plan's consequences.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the march's phase seam: shell, world, flight state and sinks are each irreducible"
-)]
-pub(crate) fn resolve_crossing(
-    shell: &mut MarchingShell,
+/// Decide one crossing of the union field from first contact, with no consequence applied:
+/// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the bend,
+/// [`walk::finish`], the residual speed, the travel and the continuation.
+///
+/// `contact` is the distance from [`Flight::cast_origin`] to the nearest sample's first armour
+/// contact; it sizes the first corridor and nothing else.
+pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
-    // Corridor origin in WORLD — the shell's position, nudged off whatever face it is leaving. Used
-    // as the anchor only when there is no `interior` to resume from.
-    origin: Vec3,
-    dir: Dir3,
-    speed: f32,
-    // Distance from `origin` to the nearest sample's first armour contact.
-    contact: f32,
-    // The previous perforation's resume point and seeds (`None` in open air).
-    interior: Option<&Interior>,
-    terminal_emitted: &mut bool,
-    health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<Forces>,
     not_own: &dyn Fn(Entity) -> bool,
-    commands: &mut Commands,
-) -> Result<Crossing, WalkError> {
-    let caliber = shell.projectile.caliber;
-    let radius = if caliber >= DISC_MIN_CALIBER {
-        caliber * 0.5
-    } else {
-        0.0
-    };
-    let frame = shell.projectile.disc;
+    body: RoundBody,
+    flight: &Flight,
+    contact: f32,
+) -> Result<Decision, WalkError> {
+    let radius = disc_radius(body.caliber);
+    let dir = flight.direction;
+    let speed = flight.speed;
 
     // --- ENTRANCE: the disc as it meets the surface, along the incoming axis.
     //
-    // The march's contact point becomes the corridor ANCHOR, and every position from here to the end
-    // of the crossing is measured from it. The transit corridor inherits the same anchor, which is
-    // what makes its handoff a small offset from the face positions the entrance measured rather
-    // than an independently rounded world position (see `walk::RayCorridor::anchor`). Resuming from
-    // a perforation keeps that perforation's anchor, for the same reason (see [`Interior`]).
-    let (anchor, start, seeds) = match interior {
+    // The cast origin becomes the corridor ANCHOR, and every position from here to the end of the
+    // crossing is measured from it. The transit corridor inherits the same anchor, which is what
+    // makes its handoff a small offset from the face positions the entrance measured rather than an
+    // independently rounded world position (see `walk::RayCorridor::anchor`). Resuming from a
+    // perforation keeps that perforation's anchor, for the same reason (see [`Interior`]).
+    let (anchor, start, seeds) = match &flight.continuation {
         Some(interior) => (interior.anchor, interior.origin, interior.seeds.as_slice()),
-        None => (origin, Vec3::ZERO, &[][..]),
+        None => (flight.cast_origin(), Vec3::ZERO, &[][..]),
     };
     let entrance = closing_walk(
         context,
@@ -195,34 +380,32 @@ pub(crate) fn resolve_crossing(
         anchor,
         start,
         Vec3::from(dir),
-        frame,
+        flight.frame,
         radius,
         seeds,
         contact + ENTRANCE_SPAN,
     )?;
+    let capability_in = capability(body, speed);
     let shot = Shot {
-        caliber,
-        capability: capability(shell.projectile.body(), speed),
+        caliber: body.caliber,
+        capability: capability_in,
     };
+    let owner = |struck: Entity| {
+        context
+            .world
+            .owners
+            .get(struck)
+            .ok()
+            .map(|owner| owner.tank())
+    };
+    let v_in = Vec3::from(dir) * speed;
 
     match walk::begin(&entrance, &shot, &context.laws) {
-        // First contact said there was armour here; the disc, which is the resolution, says
-        // otherwise. No fabricated event (§13.6) — and no re-probing of ground already covered: the
-        // round flies past the WHOLE corridor just examined, because that corridor is exactly the
-        // span now known to be empty. Advancing only to the contact would re-detect it and creep
-        // forward one boundary nudge at a time.
         Begin::Miss => {
             let examined = contact + ENTRANCE_SPAN;
-            Ok(Crossing {
-                outcome: ArmorCrossing::Perforated {
-                    exit: anchor + (start + dir * examined),
-                    direction: dir,
-                    speed,
-                },
-                damage: 0.0,
+            Ok(Decision::Clear {
+                resume: anchor + (start + dir * examined),
                 travel: examined,
-                interior: None,
-                resume: None,
             })
         }
         Begin::Ricochet {
@@ -230,26 +413,23 @@ pub(crate) fn resolve_crossing(
             direction,
             speed_scale,
         } => {
-            let event = &entrance.events[0];
-            Ok(ricochet(
-                shell,
-                context,
-                anchor,
-                start,
-                read.position,
-                read.normal,
-                read.incidence,
-                event.entrance_volume,
-                dir,
-                speed,
-                direction,
-                speed_scale,
-                radius,
-                terminal_emitted,
-                health,
-                bodies,
-                commands,
-            ))
+            let struck = entrance.events[0].entrance_volume;
+            let position = anchor + read.position;
+            let out = Dir3::new(direction).unwrap_or(dir);
+            let bled = speed * speed_scale;
+            Ok(Decision::Bounce(Bounce {
+                position,
+                normal: read.normal,
+                coverage: read.coverage,
+                struck,
+                owner: owner(struck),
+                shock: SHOCK_K * capability_in * read.incidence.cos(),
+                direction: out,
+                speed: bled,
+                impulse: body.mass * (v_in - Vec3::from(out) * bled),
+                travel: (read.position - start).dot(Vec3::from(dir)).max(0.0),
+                resume: position + read.normal * radius,
+            }))
         }
         Begin::Transit(request) => {
             // --- TRANSIT: re-collected along the BENT axis, seeded from the handoff. The entrance
@@ -267,21 +447,96 @@ pub(crate) fn resolve_crossing(
                 ENTRANCE_SPAN,
             )?;
             let plan = walk::finish(&transit, &request, &shot, &context.laws)?;
-            Ok(perforate_or_embed(
-                shell,
-                context,
+            Ok(Decision::Bite(bite(
                 &transit,
-                &plan,
+                plan,
+                body,
+                capability_in,
                 start,
                 dir,
                 bent,
-                speed,
-                terminal_emitted,
-                health,
-                bodies,
-                commands,
-            ))
+                v_in,
+                owner,
+                &context.laws,
+            )))
         }
+    }
+}
+
+/// The bite's plan in world terms, with its residual speed, travel and continuation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private kernel of `decide`; every argument is crossing state already in hand"
+)]
+fn bite(
+    transit: &DiscWalk,
+    plan: walk::ResolutionPlan,
+    body: RoundBody,
+    capability_in: f32,
+    // Where the entrance corridor started, RELATIVE to the transit's anchor.
+    start: Vec3,
+    incoming: Dir3,
+    bent: Dir3,
+    v_in: Vec3,
+    owner: impl Fn(Entity) -> Option<Entity>,
+    laws: &WalkLaws,
+) -> Bite {
+    // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves for presentation and
+    // physics — the entrance, the exit, the embed point, spall sources, the resume point — is
+    // converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
+    // anchor-relative: it is the next corridor's input, and rebuilding it in world would round it at
+    // the world's spacing (see there).
+    let world = |local: Vec3| transit.anchor + local;
+    let struck = transit.events[0].entrance_volume;
+    // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
+    // then measures the rest, along the bend.
+    let approach = (transit.origin - start).dot(Vec3::from(incoming)).max(0.0);
+    let entrance = world(plan.entrance.position);
+    let (end, t) = match plan.outcome {
+        Outcome::Embedded { at, t } => (
+            BiteEnd::Embedded {
+                at: world(at),
+                impulse: body.mass * v_in,
+            },
+            t,
+        ),
+        Outcome::Perforated { exit, t, .. } => {
+            let residual = speed_for(body, (capability_in - plan.cost_spent).max(0.0));
+            // Read at the point the NEXT corridor will actually start from — the flight nudges every
+            // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
+            // plate the round has already cleared.
+            let resume = t + MARCH_EPS;
+            (
+                BiteEnd::Perforated {
+                    exit: world(exit),
+                    resume: world(transit.origin + transit.axis * t),
+                    direction: bent,
+                    speed: residual,
+                    impulse: body.mass * (v_in - Vec3::from(bent) * residual),
+                    spall: plan
+                        .spall
+                        .iter()
+                        .map(|mark| (world(mark.position), mark.budget))
+                        .collect(),
+                    continuation: Interior {
+                        anchor: transit.anchor,
+                        origin: transit.origin + transit.axis * resume,
+                        seeds: transit.resume_at(resume as f64, laws),
+                    },
+                },
+                t,
+            )
+        }
+    };
+    Bite {
+        entrance,
+        normal: plan.entrance.normal,
+        coverage: plan.entrance.coverage,
+        overmatched: plan.entrance.overmatched,
+        owner: owner(struck),
+        deposits: plan.deposits,
+        travel: approach + t,
+        end,
     }
 }
 
@@ -293,7 +548,7 @@ pub(crate) fn resolve_crossing(
 /// half of a welded sandwich.
 #[expect(
     clippy::too_many_arguments,
-    reason = "private kernel of `resolve_crossing`; every argument is corridor geometry"
+    reason = "private kernel of `decide`; every argument is corridor geometry"
 )]
 fn closing_walk(
     context: &ResolveContext<'_, '_, '_>,
@@ -466,148 +721,102 @@ pub(super) fn volume_table(
     VolumeTable::new(entries)
 }
 
-/// The bounce: deflect off `n̄`, no entry, no spall (§4). The deflection ANGLE and the bleed both
-/// already carry η from the core (§13.5) — a graze is a partial ricochet in
-/// direction as well as in speed.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one emission site; the alternative is a struct used exactly once"
-)]
-fn ricochet(
+/// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
+/// and the impact and authority events. Returns the HP actually removed.
+///
+/// Nothing here decides anything: every quantity comes out of the [`Decision`], so the §13.6 gate,
+/// which observes the same decisions and applies none of this, reads the outcome the runtime acts on.
+pub(crate) fn apply(
+    decision: &Decision,
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
-    // The corridor's world anchor; `position` and the geometry around it are relative to it.
-    anchor: Vec3,
-    // Where the entrance corridor started, RELATIVE to the anchor.
-    start: Vec3,
-    // Struck face, RELATIVE to the anchor.
-    local_position: Vec3,
-    normal: Vec3,
-    incidence: f32,
-    struck: Entity,
-    incoming: Dir3,
-    speed: f32,
-    direction: Vec3,
-    speed_scale: f32,
-    radius: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> Crossing {
-    let mut damage = 0.0;
-    let position = anchor + local_position;
-    let out = Dir3::new(direction).unwrap_or(incoming);
-    let bled = speed * speed_scale;
-    let v_in = Vec3::from(incoming) * speed;
+) -> f32 {
+    match decision {
+        Decision::Clear { .. } => 0.0,
+        Decision::Bounce(bounce) => apply_bounce(
+            bounce,
+            shell,
+            context,
+            terminal_emitted,
+            health,
+            bodies,
+            commands,
+        ),
+        Decision::Bite(bite) => apply_bite(
+            bite,
+            shell,
+            context,
+            terminal_emitted,
+            health,
+            bodies,
+            commands,
+        ),
+    }
+}
 
-    // Even a deflected hit jars an exposed component — scaled by impact energy and by how square
-    // the graze was. Armour has no HP, so it shrugs the bounce off.
+fn apply_bounce(
+    bounce: &Bounce,
+    shell: &mut MarchingShell,
+    context: &ResolveContext<'_, '_, '_>,
+    terminal_emitted: &mut bool,
+    health: &mut Query<&mut ComponentHealth>,
+    bodies: &mut Query<Forces>,
+    commands: &mut Commands,
+) -> f32 {
+    let mut damage = 0.0;
     if context.deposit
-        && let Ok(mut hp) = health.get_mut(struck)
+        && let Ok(mut hp) = health.get_mut(bounce.struck)
     {
-        let shock = SHOCK_K * capability(shell.projectile.body(), speed) * incidence.cos();
         let before = hp.current;
-        hp.current = (before - shock).max(0.0);
+        hp.current = (before - bounce.shock).max(0.0);
         damage += before - hp.current;
     }
-
-    let body = context
-        .world
-        .owners
-        .get(struck)
-        .ok()
-        .map(|owner| owner.tank());
-    if let Some(body) = body {
-        apply_hit_impulse(
-            bodies,
-            body,
-            shell.projectile.mass * (v_in - Vec3::from(out) * bled),
-            position,
-        );
+    if let Some(owner) = bounce.owner {
+        apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);
     }
-
     commands.trigger(Impact {
-        position,
-        normal,
+        position: bounce.position,
+        normal: bounce.normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
         outcome: ImpactOutcome::Ricochet {
-            direction: Vec3::from(out),
+            direction: Vec3::from(bounce.direction),
         },
     });
-    shell.marks.ricochets.push(position);
-    shell.path.points.push(position);
+    shell.marks.ricochets.push(bounce.position);
+    shell.path.points.push(bounce.position);
     if let Some(shot) = shell.shot
         && !*terminal_emitted
     {
         commands.trigger(ShellRicochet {
             shot: shot.0,
-            origin: position,
-            direction: Vec3::from(out),
-            speed: bled,
+            origin: bounce.position,
+            direction: Vec3::from(bounce.direction),
+            speed: bounce.speed,
             sequence: (shell.marks.ricochets.len() - 1) as u32,
         });
     }
-
-    Crossing {
-        outcome: ArmorCrossing::Ricochet {
-            direction: out,
-            speed: bled,
-        },
-        damage,
-        // To the face it bounced off, along the way in. The lift the resume point carries is not
-        // travel — see [`Crossing::travel`].
-        travel: (local_position - start).dot(Vec3::from(incoming)).max(0.0),
-        interior: None,
-        resume: Some(position + normal * radius),
-    }
+    damage
 }
 
-/// The bite: spend the plan's cost, deposit per-presence damage, throw the plan's spall, and either
-/// stop or come out the far side.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one emission site; the alternative is a struct used exactly once"
-)]
-fn perforate_or_embed(
+fn apply_bite(
+    bite: &Bite,
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
-    transit: &DiscWalk,
-    plan: &walk::ResolutionPlan,
-    // Where the entrance corridor started, RELATIVE to the transit's anchor.
-    start: Vec3,
-    incoming: Dir3,
-    bent: Dir3,
-    speed: f32,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> Crossing {
+) -> f32 {
     let mut damage = 0.0;
-    let plan_entrance = plan.entrance;
-    // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves this function for
-    // presentation and physics — impacts, marks, impulse application points, the perforation's exit
-    // — is converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
-    // anchor-relative: it is the next corridor's input, and rebuilding it in world would round it
-    // at the world's spacing (see there).
-    let world = |local: Vec3| transit.anchor + local;
-    let entrance_position = world(plan_entrance.position);
-    let struck = transit.events[0].entrance_volume;
-    let body = context
-        .world
-        .owners
-        .get(struck)
-        .ok()
-        .map(|owner| owner.tank());
-    let v_in = Vec3::from(incoming) * speed;
-
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
-    // (§13.2's damage law — no ownership, no priority, no argmax). The plan already clipped every
-    // chord at the embed progress, so a round that died in the plate deposits nothing behind it.
+    // (§13.2's damage law — no ownership, no priority, no argmax).
     if context.deposit {
-        for deposit in &plan.deposits {
+        for deposit in &bite.deposits {
             if let Ok(mut hp) = health.get_mut(deposit.entity) {
                 let before = hp.current;
                 hp.current = (before - deposit.cost * TRANSIT_K).max(0.0);
@@ -616,103 +825,61 @@ fn perforate_or_embed(
         }
     }
 
-    // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
-    // then measures the rest, along the bend. Two segments, and the driver is told their sum rather
-    // than left to guess it from a contact distance that belongs to a different ray.
-    let approach = (transit.origin - start).dot(Vec3::from(incoming)).max(0.0);
-
-    let (outcome, terminal_at, interior, flown) = match plan.outcome {
-        Outcome::Embedded { at, t } => {
-            let at = world(at);
+    let (verdict, position, terminal_at) = match &bite.end {
+        BiteEnd::Embedded { at, impulse } => {
             shell.marks.events.push(PenetrationEvent {
-                entry: entrance_position,
-                exit: at,
-                overmatched: plan_entrance.overmatched,
+                entry: bite.entrance,
+                exit: *at,
+                overmatched: bite.overmatched,
             });
-            shell.path.points.push(at);
-            // Stopped: the entrance surface's body absorbs the whole remaining momentum.
-            if let Some(body) = body {
-                apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, at);
+            shell.path.points.push(*at);
+            if let Some(owner) = bite.owner {
+                apply_hit_impulse(bodies, owner, *impulse, *at);
             }
-            (ArmorCrossing::Embedded { at }, at, None, approach + t)
+            // The struck FACE reads at the visible surface for an embed, the embed point being
+            // inside the steel.
+            (TerminalVerdict::Stopped, *at, *at)
         }
-        Outcome::Perforated { exit, t, .. } => {
-            let exit = world(exit);
-            let residual = speed_for(shell.projectile.body(), {
-                let capability = capability(shell.projectile.body(), speed);
-                (capability - plan.cost_spent).max(0.0)
-            });
+        BiteEnd::Perforated {
+            exit,
+            direction,
+            speed,
+            impulse,
+            spall,
+            ..
+        } => {
             // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
-            if let Some(body) = body {
-                apply_hit_impulse(
-                    bodies,
-                    body,
-                    shell.projectile.mass * (v_in - Vec3::from(bent) * residual),
-                    entrance_position,
-                );
+            if let Some(owner) = bite.owner {
+                apply_hit_impulse(bodies, owner, *impulse, bite.entrance);
             }
             shell.marks.events.push(PenetrationEvent {
-                entry: entrance_position,
-                exit,
-                overmatched: plan_entrance.overmatched,
+                entry: bite.entrance,
+                exit: *exit,
+                overmatched: bite.overmatched,
             });
-            shell.path.points.push(exit);
-
-            // Spall at every downward field step the round reached, including the exit (§13.2's
-            // field law), not once per welded run. Each mark carries its own already-η-weighted
-            // budget.
-            for mark in &plan.spall {
+            shell.path.points.push(*exit);
+            // Each source carries its own already-η-weighted budget.
+            for (source, budget) in spall {
                 damage += throw_spall_burst(
                     shell.spall,
-                    world(mark.position),
-                    bent,
-                    mark.budget,
+                    *source,
+                    *direction,
+                    *budget,
                     shell.projectile.caliber,
-                    residual,
+                    *speed,
                     context.world,
                     health,
                     context.armor,
                     context.deposit,
                 );
             }
-
-            // Resume where the WHOLE disc is past the crossing, and carry what any sample is still
-            // inside. Resuming at the mean exit would leave the trailing samples in material with
-            // nobody to tell the next corridor about it.
-            // Read at the point the NEXT corridor will actually start from — the march nudges every
-            // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
-            // plate the round has already cleared.
-            let resume = t + super::MARCH_EPS;
-            let interior = Interior {
-                anchor: transit.anchor,
-                origin: transit.origin + transit.axis * resume,
-                seeds: transit.resume_at(resume as f64, &context.laws),
-            };
-            (
-                ArmorCrossing::Perforated {
-                    exit: world(transit.origin + transit.axis * t),
-                    direction: bent,
-                    speed: residual,
-                },
-                entrance_position,
-                Some(interior),
-                approach + t,
-            )
+            (TerminalVerdict::Through, bite.entrance, bite.entrance)
         }
     };
 
-    let verdict = match plan.outcome {
-        Outcome::Embedded { .. } => TerminalVerdict::Stopped,
-        Outcome::Perforated { .. } => TerminalVerdict::Through,
-    };
-    // The struck FACE reads at the entrance, where the round punched in, and (for an embed) the
-    // visible surface, since the embed point is inside the steel.
     commands.trigger(Impact {
-        position: match plan.outcome {
-            Outcome::Embedded { at, .. } => world(at),
-            Outcome::Perforated { .. } => entrance_position,
-        },
-        normal: plan_entrance.normal,
+        position,
+        normal: bite.normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
         outcome: verdict.into(),
@@ -725,17 +892,10 @@ fn perforate_or_embed(
         commands.trigger(ShellTerminal {
             shot: shot.0,
             position: terminal_at,
-            normal: plan_entrance.normal,
+            normal: bite.normal,
             verdict,
             after_bounces: shell.marks.ricochets.len() as u32,
         });
     }
-
-    Crossing {
-        outcome,
-        damage,
-        travel: flown,
-        interior,
-        resume: None,
-    }
+    damage
 }

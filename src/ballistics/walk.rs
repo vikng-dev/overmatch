@@ -1,8 +1,8 @@
 //! The §13 union field walk — the pure core.
 //!
-//! The live march runs it through `super::resolve::resolve_crossing`. Everything here is a pure
-//! function over pre-collected data: no ECS, no spatial queries, no commands, no wall clock, no
-//! RNG. Those live in the Avian adapter (`super::resolve`, `super::collect`), which is what makes
+//! The live march and the §13.6 gate run it through `super::resolve::decide`. Everything here is a
+//! pure function over pre-collected data: no ECS, no spatial queries, no commands, no wall clock,
+//! no RNG. Those live in the Avian adapter (`super::resolve`, `super::collect`), which is what makes
 //! the laws testable to the bit.
 //!
 //! # What it replaces

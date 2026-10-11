@@ -17,19 +17,23 @@
 //!
 //! Every number the fuzzer reports comes back out of the shipped resolution path: the corridor is
 //! built by `resolve::build_corridor` (the march's own kernel), the field integral and the events by
-//! [`walk::walk_ray`]/[`walk::walk_disc`], η by the disc walk's own entrance coverage, and the
-//! caliber gate by [`super::capability`]. The only arithmetic here is the prefix integral of a walk
-//! the core already produced. A gate that re-derives the law it is gating cannot fail.
+//! [`walk::walk_ray`]/[`walk::walk_disc`], and ADMISSION by [`drive`] — the runtime's own crossing
+//! state machine ([`resolve::decide`] and [`resolve::Flight::follow`]: entrance rules, bend,
+//! transit, stop, bounce, continuation), observed with no consequence applied. A gate that
+//! re-derives the law it is gating cannot fail. The one survey number computed here is the
+//! straight-axis prefix integral ([`Report::min_reach`]), which is reported and never admits.
 //!
 //! # What a FINDING is
 //!
 //! Not "a ray reached the crew" — a shot that pays for 100 mm of front plate and kills the driver is
-//! the game working. A finding is a corridor whose factor-weighted cost to a crew or ammunition
-//! volume is BELOW the smallest probe round's capability: an effectively unarmoured route. Each one
-//! is measured against the whole gun list (§13.5's caliber gate: a big disc engages the rim of a
-//! small opening and pays for it, a small one flies through) and reported with its admitting
-//! caliber, and then it FAILS THE GATE BY NAME. There is no exemption channel: a corridor is a
-//! defect in the model, and the fix is in the model.
+//! the game working. A finding is a ray along which the FLOOR PROBE — the probe round of least
+//! capability, at the speed where its capability is the gate floor — puts a positive chord into a
+//! crew or ammunition volume before it stops: an effectively unarmoured route. Each one is measured
+//! against the whole gun list, each round driven through the same mechanism (§13.5's caliber gate: a
+//! big disc engages the rim of a small opening and pays for it, a small one flies through), reported
+//! with its admitting caliber, and then it FAILS THE GATE BY NAME. There is no exemption channel: a
+//! corridor is a defect in the model, and the fix is in the model. A walk error met on a driven
+//! flight is a gate failure too, never a non-admission.
 //!
 //! # Determinism
 //!
@@ -43,9 +47,11 @@ use std::time::{Duration, Instant};
 use avian3d::prelude::{Collider, ColliderAabb, Position, RigidBody, Rotation, SpatialQueryFilter};
 use bevy::prelude::*;
 
-use super::resolve::{self, ResolveContext};
+use super::resolve::{self, Decision, Flight, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
-use super::{ProjectileMarchWorld, RoundBody, capability};
+use super::{
+    Ahead, MARCH_EPS, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for,
+};
 use crate::Layer;
 use crate::damage::{Ammo, CrewStation, hit_ancestor};
 use crate::tank::{TankSimSource, spawn_headless_tank};
@@ -74,17 +80,19 @@ pub struct ProbeRound {
 }
 
 impl ProbeRound {
+    /// What the capability law and the crossing mechanism read off this round.
+    pub(super) fn body(&self) -> RoundBody {
+        RoundBody {
+            mass: self.mass,
+            caliber: self.caliber,
+            nose_factor: self.nose_factor,
+        }
+    }
+
     /// Reference-mm this round can defeat at its reference speed — the shipped [`super::capability`]
     /// law, never a table.
     pub fn capability(&self) -> f32 {
-        capability(
-            RoundBody {
-                mass: self.mass,
-                caliber: self.caliber,
-                nose_factor: self.nose_factor,
-            },
-            self.speed,
-        )
+        capability(self.body(), self.speed)
     }
 }
 
@@ -173,11 +181,12 @@ pub struct FuzzConfig {
     /// Ceiling on distinct regions that get the full per-caliber disc sweep. A runaway (a genuinely
     /// open tank) must produce a truncated report, not a run that never ends.
     pub max_region_sweeps: usize,
-    /// Reference-mm a corridor to crew/ammo must come in UNDER to count as a finding. `None` is the
-    /// gate's definition: the smallest probe round's capability, i.e. "a route even a machine-gun
-    /// bullet takes for free". Raise it to survey the graded weakspots above that line — the number
-    /// that reads as a hole rather than as armour is the thinnest authored plate (25 mm on this
-    /// tank), and everything between the two is a real, deliberate, thin spot rather than a defect.
+    /// The capability (reference-mm) of the floor probe — the probe round of least capability,
+    /// driven at the speed where its capability is this ([`floor_probe`]). `None` is the gate's
+    /// definition: that round at its own reference speed, i.e. "a route even a machine-gun bullet
+    /// takes". Raise it to survey the graded weakspots above that line — the number that reads as a
+    /// hole rather than as armour is the thinnest authored plate (25 mm on this tank), and
+    /// everything between the two is a real, deliberate, thin spot rather than a defect.
     pub finding_floor: Option<f32>,
 }
 
@@ -217,11 +226,11 @@ impl TargetKind {
 /// One probe round's measurement of one opening.
 #[derive(Clone, Copy, Debug)]
 pub struct RoundMeasurement {
-    /// η — the ENTRANCE COVERAGE the disc walk itself reported (§13.5's engagement fraction). 1.0 is
-    /// a fully engaged face; 0.0 is a round that flew through the opening without touching it.
+    /// η — the ENTRANCE COVERAGE of the first armour the driven round met (§13.5's engagement
+    /// fraction). 1.0 is a fully engaged face; 0.0 is a round that met no armour at all.
     pub eta: f32,
-    /// Disc-mean `∫ max(factor) dt` from the corridor origin to the target's face, in reference-mm.
-    pub cost: f32,
+    /// The driven round put a positive chord into the target before it stopped.
+    pub reached: bool,
     /// What this round can spend, from [`ProbeRound::capability`].
     pub capability: f32,
 }
@@ -229,7 +238,7 @@ pub struct RoundMeasurement {
 impl RoundMeasurement {
     /// This round gets through the opening to the target.
     pub fn admits(&self) -> bool {
-        self.cost <= self.capability
+        self.reached
     }
 }
 
@@ -247,7 +256,8 @@ pub struct Region {
     pub kind: TargetKind,
     /// How many fuzz rays landed in this cell.
     pub rays: u64,
-    /// The cheapest axis-ray cost seen reaching a target here (reference-mm).
+    /// The cheapest straight-axis cost seen to a target here (reference-mm) — a survey number;
+    /// infinite when the floor probe reached the target off the straight axis (after a bounce).
     pub min_axis_cost: f32,
     /// One entry per [`PROBE_ROUNDS`] element, same order.
     pub measurements: Vec<RoundMeasurement>,
@@ -605,6 +615,132 @@ fn prefix_cost(spans: &[Span], t: f64) -> f64 {
         .sum()
 }
 
+/// One round's flight along one shot line, driven through the runtime's crossing state machine.
+#[derive(Clone, Debug, Default)]
+pub(super) struct Drive {
+    /// Every crossing decided, in order.
+    pub decisions: Vec<Decision>,
+}
+
+impl Drive {
+    /// Entrance coverage η of the first armour the round met, `0` when it met none.
+    pub(super) fn eta(&self) -> f32 {
+        self.decisions
+            .iter()
+            .find_map(|decision| match decision {
+                Decision::Clear { .. } => None,
+                Decision::Bounce(bounce) => Some(bounce.coverage),
+                Decision::Bite(bite) => Some(bite.coverage),
+            })
+            .unwrap_or(0.0)
+    }
+
+    /// THE ADMISSION RULE: some crossing put a positive chord into `target` before the round
+    /// stopped. Deposits are clipped at the embed progress, so a round that dies short of the target
+    /// never reaches it, however close.
+    pub(super) fn reaches(&self, target: Entity) -> bool {
+        self.entered().any(|entity| entity == target)
+    }
+
+    /// Every volume a crossing put a positive chord into, in decision order (with repeats).
+    pub(super) fn entered(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.decisions.iter().flat_map(|decision| match decision {
+            Decision::Bite(bite) => bite
+                .deposits
+                .iter()
+                .filter(|deposit| deposit.chord > 0.0)
+                .map(|deposit| deposit.entity)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        })
+    }
+}
+
+/// A walk error met on a driven flight, with the leg it was met on.
+#[derive(Clone, Debug)]
+pub(super) struct DriveFailure {
+    pub error: WalkError,
+    /// WORLD cast origin and direction of the failing leg.
+    pub origin: Vec3,
+    pub direction: Vec3,
+}
+
+/// Fly `body` at `speed` from `origin` along `direction` for at most `length` metres of travel,
+/// deciding every crossing exactly as the runtime march does — the same surface cuts
+/// ([`super::next_surface`]), the same [`resolve::decide`], the same [`Flight::follow`], the same
+/// continuation drain — and applying nothing. Straight flight between crossings: the gate fires
+/// geometric lines, without gravity or drag.
+///
+/// The probe round fires from the tank's own frame of reference, so nothing is excluded as its own.
+pub(super) fn drive(
+    context: &ResolveContext<'_, '_, '_>,
+    body: RoundBody,
+    speed: f32,
+    origin: Vec3,
+    direction: Vec3,
+    length: f32,
+) -> Result<Drive, DriveFailure> {
+    let fail = |error: WalkError, flight: &Flight| DriveFailure {
+        error,
+        origin: flight.cast_origin(),
+        direction: Vec3::from(flight.direction),
+    };
+    let bad = |reason| DriveFailure {
+        error: WalkError::BadCorridor { sample: 0, reason },
+        origin,
+        direction,
+    };
+    let direction = Dir3::new(direction).map_err(|_| bad("the shot line has no direction"))?;
+    let frame = DiscFrame::anchored(Vec3::from(direction))
+        .ok_or_else(|| bad("the shot line has no usable sampling basis"))?;
+    let mut flight = Flight {
+        position: origin,
+        direction,
+        speed,
+        frame,
+        continuation: None,
+    };
+    let radius = resolve::disc_radius(body.caliber);
+    let mut remaining = length;
+    let mut out = Drive::default();
+    while remaining > MARCH_EPS || flight.holds_material() {
+        let contact = match next_surface(context.world, &flight, radius, remaining, &|_| true) {
+            Ahead::Open | Ahead::Terrain { .. } => break,
+            Ahead::Held => 0.0,
+            Ahead::Armor(hit) => {
+                if hit_ancestor(hit.entity, &context.world.volumes, &context.world.parents)
+                    .is_none()
+                {
+                    break;
+                }
+                hit.distance
+            }
+        };
+        let decision = resolve::decide(context, &|_| true, body, &flight, contact)
+            .map_err(|error| fail(error, &flight))?;
+        out.decisions.push(decision.clone());
+        let followed = flight.follow(decision);
+        remaining -= followed.travel;
+        if followed.stopped {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// The round the gate floor IS: the probe round of least capability, at the speed where its
+/// capability equals the configured floor, or at its own reference speed when none is configured.
+pub(super) fn floor_probe(config: &FuzzConfig) -> (RoundBody, f32) {
+    let round = PROBE_ROUNDS
+        .iter()
+        .min_by(|a, b| a.capability().total_cmp(&b.capability()))
+        .expect("the gun list is not empty");
+    let speed = config
+        .finding_floor
+        .map_or(round.speed, |floor| speed_for(round.body(), floor));
+    (round.body(), speed)
+}
+
 impl Pass<'_, '_, '_> {
     /// The authored name of a volume, or a legible stand-in. A split (mixed-substance) volume lives
     /// on an unnamed per-primitive collider, so the fallback names its PARENT node — §13.7's
@@ -789,69 +925,48 @@ impl Pass<'_, '_, '_> {
         (near <= far).then(|| origin + direction * near.max(0.0))
     }
 
-    /// Measure one opening against every gun in the game (§13.5's caliber gate).
-    fn sweep(&self, ray: &FuzzRay, target: Entity) -> Vec<RoundMeasurement> {
+    /// Measure one opening against every gun in the game (§13.5's caliber gate): each round driven
+    /// along the witness ray through the shared mechanism, admitted iff it reaches the target.
+    fn sweep(&self, ray: &FuzzRay, target: Entity) -> Result<Vec<RoundMeasurement>, DriveFailure> {
         PROBE_ROUNDS
             .iter()
             .map(|round| {
-                let radius = if round.caliber >= resolve::DISC_MIN_CALIBER {
-                    round.caliber * 0.5
-                } else {
-                    0.0
-                };
-                let capability = round.capability();
-                let Ok(walked) = self.probe(ray, radius) else {
-                    // A corridor that will not resolve is not an admission — fail closed.
-                    return RoundMeasurement {
-                        eta: 1.0,
-                        cost: f32::INFINITY,
-                        capability,
-                    };
-                };
-                // η is the disc walk's OWN entrance coverage — the §13.5 engagement fraction the
-                // ricochet, bleed and normalization laws already consume. Nothing recomputed here.
-                let eta = walked.events.first().map_or(0.0, |event| event.coverage);
-                let Some(reach) = walked.walks[0]
-                    .presence
-                    .iter()
-                    .find(|presence| presence.entity == target)
-                    .and_then(|presence| presence.spans.first())
-                    .map(|(start, _)| *start)
-                else {
-                    return RoundMeasurement {
-                        eta,
-                        cost: f32::INFINITY,
-                        capability,
-                    };
-                };
-                // §13.5's transit law over the target depth: the disc's cost is the MEAN over its k
-                // samples, uncovered samples contributing their (zero) integral like any other.
-                let mean = walked
-                    .walks
-                    .iter()
-                    .map(|walk| prefix_cost(&walk.spans, reach))
-                    .sum::<f64>()
-                    / walked.walks.len() as f64;
-                RoundMeasurement {
-                    eta,
-                    cost: mean as f32,
-                    capability,
-                }
+                let flown = drive(
+                    &self.context,
+                    round.body(),
+                    round.speed,
+                    ray.origin,
+                    ray.direction,
+                    ray.length,
+                )?;
+                Ok(RoundMeasurement {
+                    eta: flown.eta(),
+                    reached: flown.reaches(target),
+                    capability: round.capability(),
+                })
             })
             .collect()
     }
-}
 
-/// The floor a corridor has to be under to count as a finding: the smallest probe round's
-/// capability. Above it the corridor went through real armour and paid for it, which is the game
-/// working rather than a hole.
-fn finding_floor(config: &FuzzConfig) -> f32 {
-    config.finding_floor.unwrap_or_else(|| {
-        PROBE_ROUNDS
-            .iter()
-            .map(ProbeRound::capability)
-            .fold(f32::INFINITY, f32::min)
-    })
+    /// A driven flight's walk error, as the report records it.
+    fn drive_failure(&self, ray: u64, failure: DriveFailure) -> WalkFailure {
+        let leg = FuzzRay {
+            origin: failure.origin,
+            direction: failure.direction,
+            length: resolve::MAX_CORRIDOR,
+        };
+        WalkFailure {
+            ray,
+            origin: failure.origin,
+            direction: failure.direction,
+            volume: blamed_volume(&failure.error).map_or_else(
+                || "(no volume)".to_owned(),
+                |entity| self.volume_name(entity),
+            ),
+            crossings: self.blamed_crossings(&leg, &failure.error),
+            error: format!("{:?}", failure.error),
+        }
+    }
 }
 
 /// The tank's world bounding sphere and its local box, from the bound colliders themselves.
@@ -983,7 +1098,7 @@ fn run_fuzz(
         radius,
         ..default()
     };
-    let floor = finding_floor(&config);
+    let (floor_body, floor_speed) = floor_probe(&config);
     let mut regions: BTreeMap<([i32; 3], TargetKind), Region> = BTreeMap::new();
 
     for index in 0..config.rays {
@@ -1016,16 +1131,28 @@ fn run_fuzz(
         if crossed && config.duplication_stride > 0 && index % config.duplication_stride == 0 {
             pass.duplication_gate(index, &ray, &mut report);
         }
-        cluster_findings(
-            index,
-            &ray,
-            axis,
-            &pass,
-            floor,
-            &config,
-            &mut regions,
-            &mut report,
-        );
+        survey_reach(axis, &pass, &mut report);
+        // ADMISSION: the floor probe, flown through the runtime's own mechanism along this line.
+        match drive(
+            &pass.context,
+            floor_body,
+            floor_speed,
+            ray.origin,
+            ray.direction,
+            ray.length,
+        ) {
+            Ok(flown) => cluster_findings(
+                index,
+                &ray,
+                axis,
+                &flown,
+                &pass,
+                &config,
+                &mut regions,
+                &mut report,
+            ),
+            Err(failure) => record_failure(pass.drive_failure(index, failure), &mut report),
+        }
     }
 
     report.regions = regions.into_values().collect();
@@ -1035,6 +1162,15 @@ fn run_fuzz(
     report.elapsed = started.elapsed();
     output.0 = report;
     commands.remove_resource::<FuzzJob>();
+}
+
+/// A walk failure joins the report, counted against the volume it blames.
+fn record_failure(failure: WalkFailure, report: &mut Report) {
+    *report
+        .walk_error_volumes
+        .entry(failure.volume.clone())
+        .or_default() += 1;
+    report.walk_errors.push(failure);
 }
 
 /// The two per-ray invariants §13.6 states about EVENTS, machine-checked.
@@ -1061,22 +1197,9 @@ fn check_ray_invariants(index: u64, crossed: bool, axis: &walk::RayWalk, report:
     }
 }
 
-/// Fold one ray's crew/ammo reaches into the region table, sweeping the guns the first time a cell
-/// is seen.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the fold's whole state, split out of `run_fuzz` only to keep that function readable"
-)]
-fn cluster_findings(
-    index: u64,
-    ray: &FuzzRay,
-    axis: &walk::RayWalk,
-    pass: &Pass<'_, '_, '_>,
-    floor: f32,
-    config: &FuzzConfig,
-    regions: &mut BTreeMap<([i32; 3], TargetKind), Region>,
-    report: &mut Report,
-) {
+/// The straight axis's survey: the census of volumes it crossed and the cheapest straight-line cost
+/// to each crew/ammo volume. Reported, never admitting.
+fn survey_reach(axis: &walk::RayWalk, pass: &Pass<'_, '_, '_>, report: &mut Report) {
     for presence in &axis.presence {
         if presence.chord > 0.0 {
             *report
@@ -1096,9 +1219,43 @@ fn cluster_findings(
             .entry(target.name.clone())
             .or_insert(f32::INFINITY);
         *thinnest = thinnest.min(cost);
-        if cost >= floor {
-            continue;
-        }
+    }
+}
+
+/// The straight-axis cost to `target`, or infinity when the axis never crosses it.
+fn axis_cost(axis: &walk::RayWalk, target: Entity) -> f32 {
+    axis.presence
+        .iter()
+        .find(|presence| presence.entity == target)
+        .and_then(|presence| presence.spans.first())
+        .map_or(f32::INFINITY, |(reach, _)| {
+            prefix_cost(&axis.spans, *reach) as f32
+        })
+}
+
+/// Fold the crew/ammo volumes the floor probe reached into the region table, sweeping the guns the
+/// first time a cell is seen.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fold's whole state, split out of `run_fuzz` only to keep that function readable"
+)]
+fn cluster_findings(
+    index: u64,
+    ray: &FuzzRay,
+    axis: &walk::RayWalk,
+    flown: &Drive,
+    pass: &Pass<'_, '_, '_>,
+    config: &FuzzConfig,
+    regions: &mut BTreeMap<([i32; 3], TargetKind), Region>,
+    report: &mut Report,
+) {
+    let reached: BTreeSet<Entity> = flown
+        .entered()
+        .filter(|entity| pass.targets.contains_key(entity))
+        .collect();
+    for entity in reached {
+        let target = &pass.targets[&entity];
+        let cost = axis_cost(axis, entity);
         let Some(entry_local) = pass.pierce_local(ray) else {
             continue;
         };
@@ -1118,7 +1275,13 @@ fn cluster_findings(
                     report.sweeps_truncated = true;
                     continue;
                 }
-                let measurements = pass.sweep(ray, presence.entity);
+                let measurements = match pass.sweep(ray, entity) {
+                    Ok(measurements) => measurements,
+                    Err(failure) => {
+                        record_failure(pass.drive_failure(index, failure), report);
+                        continue;
+                    }
+                };
                 let admitting = measurements.iter().position(RoundMeasurement::admits);
                 regions.insert(
                     (cell, target.kind),
@@ -1461,19 +1624,14 @@ fn render_region(out: &mut String, region: &Region) {
                 .name
                 .to_owned()),
     );
-    let _ = writeln!(out, "\n| round | η | cost (ref-mm) | capability | admits |");
-    let _ = writeln!(out, "|---|---|---|---|---|");
+    let _ = writeln!(out, "\n| round | η | capability | admits |");
+    let _ = writeln!(out, "|---|---|---|---|");
     for (round, measurement) in PROBE_ROUNDS.iter().zip(&region.measurements) {
         let _ = writeln!(
             out,
-            "| {} | {:.3} | {} | {:.0} | {} |",
+            "| {} | {:.3} | {:.0} | {} |",
             round.name,
             measurement.eta,
-            if measurement.cost.is_finite() {
-                format!("{:.2}", measurement.cost)
-            } else {
-                "blocked".to_owned()
-            },
             measurement.capability,
             if measurement.admits() { "yes" } else { "no" },
         );

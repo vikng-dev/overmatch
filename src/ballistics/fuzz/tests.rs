@@ -105,11 +105,17 @@ fn a_corridor_above_the_gate_floor_fails_the_gate() {
         !report.regions.is_empty(),
         "raising the floor to 60 reference-mm found no corridor at all — the finding path is dead"
     );
+    // The floor probe is not one of the guns: a raised floor flies the least capable round faster
+    // than any gun fires it, and a route it takes after a bounce need not be one a gun's own disc
+    // and capability take. So the sweep's liveness is asserted over the run, not per region.
+    assert!(
+        report
+            .regions
+            .iter()
+            .any(|region| region.admitting.is_some()),
+        "no gun was admitted through any opening the raised floor found — the sweep is dead"
+    );
     for region in &report.regions {
-        assert!(
-            region.admitting.is_some(),
-            "a corridor cheap enough to be a finding must be admitted by SOME gun: {region:?}"
-        );
         assert_eq!(
             region.measurements.len(),
             PROBE_ROUNDS.len(),
