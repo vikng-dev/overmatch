@@ -703,7 +703,6 @@ pub(super) fn drive(
         direction,
         speed,
         frame,
-        lag: 0.0,
         continuation: None,
     };
     let radius = resolve::disc_radius(body.caliber);

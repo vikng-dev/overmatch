@@ -162,11 +162,13 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// Where each sample's next sweep starts and what it is inside there, in ONE anchor frame.
 ///
 /// INVARIANT: every sample's start (`anchor + origin + seeds[i].offset`) is a point its own ray has
-/// already reached — a perforation's resume point one nudge past the exit along that sample's ray,
-/// advanced by any corridor that met nothing and any open air flown since — and `seeds[i].inside` is
-/// what that ray's walk says the sample is inside there. Offsets are whatever the rays left behind —
-/// staggered along an oblique plate, tilted against the travel after a bend — and are never
-/// re-squared, rotated or flattened: any of those moves a start off the ray that certified it.
+/// already reached — the end of an open-air sweep, of a corridor that met nothing, or a perforation's
+/// resume point one nudge past the exit along that sample's ray — and `seeds[i].inside` is what that
+/// ray's walk says the sample is inside there. A fresh layout ([`Interior::laid`]) is the one start
+/// declared rather than walked: the muzzle, or a bounce lifted off its face. Offsets are whatever the
+/// rays left behind — staggered along an oblique plate after a perforation, tilted against the
+/// travel after a bend — and are never re-squared, rotated or flattened: any of those moves a start
+/// off the ray that certified it.
 ///
 /// The origin and the seeds share one anchor so they agree to corridor-scale rounding wherever on
 /// the map the shot is. A resume point rebuilt in world f32 is quantized at the world's spacing
@@ -186,6 +188,24 @@ pub(crate) struct Interior {
 }
 
 impl Interior {
+    /// A fresh layout at `position`: each sample at its offset, declared outside everything.
+    pub(crate) fn laid(position: Vec3, offsets: Vec<Vec3>) -> Self {
+        Self {
+            anchor: position,
+            origin: Vec3::ZERO,
+            seeds: offsets
+                .into_iter()
+                .enumerate()
+                .map(|(sample, offset)| SampleSeed {
+                    sample,
+                    offset,
+                    t: 0.0,
+                    inside: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
     /// Some sample resumes inside material. The next crossing must then be resolved from these seeds
     /// before the flight may stop marching: the material's exit lies ahead with its entry behind,
     /// and only the seeds say the sample is inside.
@@ -230,10 +250,10 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// # Where a sweep starts
 ///
 /// A sample may start a sweep only where its membership is KNOWN: with a continuation, at its own
-/// start ([`Interior`]); without one, on a fresh disc square to `direction`, `lag` behind
-/// `position`, the pose the last sweep left clear. Nothing nudges past a start: a face within a
-/// nudge ahead would be stepped over with its entry owned by nobody, and the sample would begin
-/// inside the plate and report an exit it never entered.
+/// start ([`Interior`]); without one, on a disc freshly laid square to `direction` at `position`,
+/// which only a bounce's lifted pose (and the gate's shot origin) leaves. Nothing nudges past a
+/// start: a face within a nudge ahead would be stepped over with its entry owned by nobody, and the
+/// sample would begin inside the plate and report an exit it never entered.
 #[derive(Clone, Debug)]
 pub(crate) struct Flight {
     /// WORLD position of the round's axis, for presentation and for a fresh layout.
@@ -244,23 +264,24 @@ pub(crate) struct Flight {
     /// The sampling basis for `direction`, transported through every bend so far: the frame a fresh
     /// disc is laid on. Resolution reads THIS, never a basis stored for an earlier heading.
     pub frame: DiscFrame,
-    /// How far behind `position`, along `direction`, a fresh disc starts, so that it lies behind the
-    /// plane the last sweep ended on: a disc square to `direction` laid at `position` leads that
-    /// plane by up to `r·tan θ`, θ the bend from the direction the last sweep ran along
-    /// ([`Flight::launched`]). Zero with a continuation and once any crossing has been followed.
-    pub lag: f32,
-    /// Each sample's start and membership; `None` for a fresh disc laid on `frame`.
+    /// Each sample's start and membership; `None` only for a fresh disc laid on `frame` at
+    /// `position`.
     pub continuation: Option<Interior>,
 }
 
 impl Flight {
-    /// A step's flight from the shell's persisted starts, or from a fresh disc at the clear pose
-    /// `position` when it has none.
+    /// A step's flight from the shell's persisted starts, or — on its first step — from the disc laid
+    /// on `frame` at `position`, the clear pose it was fired from.
     ///
-    /// The last sweep ran along `swept`; the flight now travels along `direction`. Persisted starts
-    /// are kept exactly where the last sweep left them and each sample's ray simply bends: moving a
-    /// start to square the disc to the new direction would put it on ground no ray has swept. `frame`
-    /// is transported through the bend by minimal rotation for the next fresh layout.
+    /// The last sweep ran along `swept`; the flight now travels along `direction`. The starts are
+    /// kept exactly where the last sweep left them and each sample's ray simply bends: moving a start
+    /// to square the disc to the new direction would put it on ground no ray has swept. No bend is
+    /// too large for this, a reversal included. `frame` is transported through the bend by minimal
+    /// rotation for the next fresh layout.
+    ///
+    /// The cost: a disc stays square to the direction it was laid on (the muzzle's, a bounce's), so
+    /// its sampled cross-section narrows by `cos` of the bend since, in the plane of the bend
+    /// (DERIVED: 0.12 % for a 2.8° drop).
     pub(crate) fn launched(
         position: Vec3,
         swept: Dir3,
@@ -270,28 +291,24 @@ impl Flight {
         radius: f32,
         starts: Option<Interior>,
     ) -> Self {
-        let cos = swept.dot(Vec3::from(direction));
-        let sin = swept.cross(Vec3::from(direction)).length();
+        let starts = starts.map_or_else(
+            || Interior::laid(position, layout(&frame, radius)),
+            Interior::rebased,
+        );
         Self {
             position,
             direction,
             speed,
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
-            lag: if starts.is_none() && sin > 0.0 {
-                radius * sin / cos.max(f32::MIN_POSITIVE)
-            } else {
-                0.0
-            },
-            continuation: starts.map(Interior::rebased),
+            continuation: Some(starts),
         }
     }
 
     /// WORLD start of the axis sample: the cast's origin and, for a fresh layout, the disc's centre.
     pub(crate) fn sweep_origin(&self) -> Vec3 {
-        self.continuation.as_ref().map_or(
-            self.position - self.direction * self.lag,
-            Interior::world_origin,
-        )
+        self.continuation
+            .as_ref()
+            .map_or(self.position, Interior::world_origin)
     }
 
     /// Each sample's offset from [`sweep_origin`](Self::sweep_origin), in canonical sample order.
@@ -318,11 +335,17 @@ impl Flight {
         self.position = to;
     }
 
+    /// The starts the next step resumes from: the continuation, or the fresh disc as it now stands.
+    pub(crate) fn starts(&self, radius: f32) -> Interior {
+        self.continuation
+            .clone()
+            .unwrap_or_else(|| Interior::laid(self.position, layout(&self.frame, radius)))
+    }
+
     /// Advance the flight along a decision: the state the next crossing starts from. The sampling
     /// frame is transported through every direction change, including the null one. Returns whether
     /// the round came to rest; the travel it charges is [`Decision::charged`].
     pub(crate) fn follow(&mut self, decision: Decision) -> bool {
-        self.lag = 0.0;
         match decision {
             Decision::Clear {
                 resume,
@@ -386,8 +409,7 @@ pub(crate) enum Decision {
     Clear {
         /// The far end of the examined corridor along the axis, where the flight resumes.
         resume: Vec3,
-        /// Metres from the flight's position to `resume`: the examined corridor less the lag it
-        /// started behind the position.
+        /// Metres from the axis start to `resume`: the examined corridor.
         travel: f32,
         /// Each sample at the far end of its own examined ray, with what its walk says it is inside
         /// there; `None` when the corridor was a fresh disc, which ends square where it began.
@@ -545,22 +567,12 @@ pub(crate) fn decide(
     // independently rounded world position (see `walk::RayCorridor::anchor`). Resuming from a
     // perforation keeps that perforation's anchor, for the same reason (see [`Interior`]).
     //
-    // `start` is the axis sample's start and `from` where travel is charged from, both
-    // anchor-relative: a fresh disc starts the lag behind the position, a continuation at it.
-    let (anchor, start, from, seeds) = match &flight.continuation {
-        Some(interior) => (
-            interior.anchor,
-            interior.origin,
-            interior.origin,
-            interior.seeds.as_slice(),
-        ),
-        None => (
-            flight.position,
-            -Vec3::from(dir) * flight.lag,
-            Vec3::ZERO,
-            &[][..],
-        ),
+    // `start` is the axis sample's start, anchor-relative, and travel is charged from it.
+    let (anchor, start, seeds) = match &flight.continuation {
+        Some(interior) => (interior.anchor, interior.origin, interior.seeds.as_slice()),
+        None => (flight.position, Vec3::ZERO, &[][..]),
     };
+    let from = start;
     let entrance = closing_walk(
         context,
         not_own,
@@ -592,7 +604,7 @@ pub(crate) fn decide(
             let examined = contact + ENTRANCE_SPAN;
             Ok(Decision::Clear {
                 resume: anchor + (start + dir * examined),
-                travel: (start + dir * examined - from).dot(Vec3::from(dir)),
+                travel: examined,
                 continuation: flight.continuation.as_ref().map(|_| Interior {
                     anchor,
                     origin: start + dir * examined,

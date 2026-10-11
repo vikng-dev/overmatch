@@ -716,9 +716,10 @@ pub(crate) struct Projectile {
     /// Where each sample's next sweep starts and what it is inside there ([`resolve::Interior`]) —
     /// SIM state, carried from one step to the next so a tick boundary never re-lays the disc.
     ///
-    /// `None` at spawn, in every spawn path, and whenever the last step ended on a fresh disc rather
-    /// than on a perforation's starts; a sanctioned re-seed clears it (it lifts the round to a pose
-    /// of its own). Never on the wire: a replica derives its own from the same spawn and march.
+    /// `None` at spawn, in every spawn path: the first step lays the disc on [`disc`](Self::disc)
+    /// at the muzzle. Each step then leaves the starts it ended on, and a sanctioned re-seed clears
+    /// them (it lifts the round to a pose of its own). Never on the wire: a replica derives its own
+    /// from the same spawn and march.
     continuation: Option<resolve::Interior>,
 }
 
@@ -2020,7 +2021,7 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
             .disc
             .transport(shell.projectile.velocity, Vec3::from(direction));
     }
-    // The catch-up moved the round without sweeping its samples: the next step starts a fresh disc.
+    // The catch-up moved the round without sweeping its samples: the next step lays a fresh disc.
     shell.projectile.continuation = None;
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
@@ -2265,7 +2266,7 @@ fn march_shell_step(
                     } => {
                         // The same step limits the authority's crossings are held to, charged from
                         // the flight's position.
-                        if let Err(error) = budget.charge(hit.distance - flight.lag + MARCH_EPS) {
+                        if let Err(error) = budget.charge(hit.distance + MARCH_EPS) {
                             warn_once!(
                                 "ballistics: a replica's step ran out of its limits, stopping the \
                                  round: {error:?}"
@@ -2286,7 +2287,6 @@ fn march_shell_step(
                             flight.direction = new_dir;
                         }
                         flight.speed = sanctioned_speed;
-                        flight.lag = 0.0;
                         flight.continuation = None;
                         // Lift the shell's BODY clear of the face it bounced off and nudge it off
                         // along the new heading, exactly as the authority's own ricochet does
@@ -2378,7 +2378,7 @@ fn march_shell_step(
     // next tick transports from where this one left off and resumes every sample where its ray
     // stopped. A held round is frozen at contact, not at a start; its re-seed lays a fresh disc.
     shell.projectile.disc = flight.frame;
-    shell.projectile.continuation = if holding { None } else { flight.continuation };
+    shell.projectile.continuation = (!holding).then(|| flight.starts(radius));
 
     Some(MarchStep {
         position: flight.position,
@@ -2407,7 +2407,7 @@ enum Ahead {
 /// §13.6 gate, so both cut successive crossings at the same places.
 ///
 /// Cast from every sample's own start ([`resolve::Flight::sample_offsets`]), not from a disc
-/// re-laid at the axis: a staggered start is the only point that sample's membership is known at.
+/// re-laid at the axis: a sample's start is the only point its membership is known at.
 ///
 /// A flight holding material ([`resolve::Flight::holds_material`]) is not done with it when the
 /// budget is: its exit lies ahead with its entry behind, and only the continuation declares that. So
@@ -2423,13 +2423,11 @@ fn next_surface(
     not_own: &dyn Fn(Entity) -> bool,
 ) -> Ahead {
     let held = flight.holds_material();
-    // Measured from the sweep origin, the lag behind the position the budget counts from.
-    let reach = flight.lag
-        + if held {
-            budget.max(resolve::MAX_CORRIDOR)
-        } else {
-            budget
-        };
+    let reach = if held {
+        budget.max(resolve::MAX_CORRIDOR)
+    } else {
+        budget
+    };
     match cast_disc_segment(
         world,
         &flight.sample_offsets(radius),
@@ -5676,10 +5674,10 @@ mod march_tests {
     /// So: spawn the shell one march nudge in front of a plate's face, and a few ULP either side of
     /// it. Whatever else happens, the round may not pass through unremarked.
     ///
-    /// Fired level, so gravity tilts the travel — and the disc laid out square to it — by `θ` in the
-    /// first tick, and the tilted disc straddles the face by up to `r·θ` (DERIVED: 9 µm for an 88 at
-    /// 800 m/s after one 16 ms bend). Its leading samples would begin inside the plate if the
-    /// entrance corridor started on the face; it starts at the last clear pose instead.
+    /// Fired level, so gravity bends the travel by `θ` in the first tick: a disc re-laid square to
+    /// the bent travel at the muzzle would straddle the face by up to `r·θ` (DERIVED: 9 µm for an 88
+    /// at 800 m/s after one 16 ms bend). The samples start where they were laid instead, on the
+    /// muzzle's clear pose.
     #[test]
     fn an_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
         let face = 0.525_f32;
@@ -5723,13 +5721,12 @@ mod march_tests {
 
     /// A ROUND LAUNCHED JUST OFF A FACE NEVER STARTS A SAMPLE INSIDE IT.
     ///
-    /// The flight's position is its last clear pose, and its next sweep starts there. Two ways of
-    /// starting past it put a sample inside a plate the fresh corridor declares it outside of: a
-    /// boundary nudge, which steps over any face within one `MARCH_EPS` ahead; and the tick's
-    /// gravity bend, which tilts the disc — laid square to the CURRENT travel — so its leading
-    /// samples lie up to `r·tan θ` ahead of the plane the last sweep cleared (DERIVED: 9 µm for an 88
-    /// at 800 m/s after one 16 ms bend). Fired level from a few ULP to half a nudge off a face, the
-    /// crossing must resolve.
+    /// Each sample's sweep starts where its membership is known. Two ways of starting past that put a
+    /// sample inside a plate it is declared outside of: a boundary nudge, which steps over any face
+    /// within one `MARCH_EPS` ahead; and re-laying the disc square to the tick's gravity-bent travel,
+    /// which puts its leading samples up to `r·sin θ` ahead of where they were laid (DERIVED: 9 µm
+    /// for an 88 at 800 m/s after one 16 ms bend). Fired level from a few ULP to half a nudge off a
+    /// face, the crossing must resolve.
     #[test]
     fn a_round_launched_just_off_a_face_never_starts_a_sample_inside_it() {
         let face = 0.525_f32;
@@ -5746,6 +5743,125 @@ mod march_tests {
                 assert_face_reported(&app, &format!("{clearance:e} m + {step} ULP off it"));
             }
         }
+    }
+
+    /// Every sample's start after `launched` is a point the last sweep left it at — the disc laid on
+    /// `frame` at `position` — whatever the bend to the new direction.
+    fn assert_starts_on_the_last_sweep(
+        flight: &resolve::Flight,
+        position: Vec3,
+        frame: &walk::DiscFrame,
+    ) {
+        let radius = resolve::disc_radius(FIXTURE_88.caliber);
+        let origin = flight.sweep_origin();
+        let starts: Vec<Vec3> = flight
+            .sample_offsets(radius)
+            .into_iter()
+            .map(|offset| origin + offset)
+            .collect();
+        let cleared: Vec<Vec3> = resolve::layout(frame, radius)
+            .into_iter()
+            .map(|offset| position + offset)
+            .collect();
+        assert_eq!(starts.len(), cleared.len(), "one start per sample");
+        for (sample, (start, cleared)) in starts.iter().zip(&cleared).enumerate() {
+            assert!(
+                start.is_finite() && start.distance(*cleared) < 1.0e-6,
+                "sample {sample} starts at {start:?}, not where the last sweep left it ({cleared:?})",
+            );
+        }
+    }
+
+    /// A BENT FRESH SWEEP STARTS ON GROUND THE LAST SWEEP CLEARED, NOT MERELY BEHIND ITS END PLANE.
+    ///
+    /// Stepping a disc square to the new travel back by `r·tan θ` puts it behind the plane the last
+    /// sweep ended on, and laterally outside that sweep: its rim reaches `r / cos θ` from the old
+    /// axis. Fixture data: an 88 (r = 44 mm) last swept along `+Z`, bent 30° toward `−Y` by one
+    /// 16 ms tick at 0.272 m/s, under a slab whose face is 47 mm above the axis. The old disc stays
+    /// at or below 44 mm; the stepped-back rim reaches 50.8 mm (DERIVED), inside a slab no sample
+    /// ever entered, and reads its exit with nothing declared.
+    #[test]
+    fn a_bent_fresh_sweep_starts_on_ground_the_last_sweep_cleared() {
+        const DT: f32 = 0.016;
+        let velocity = Vec3::Z * 0.272;
+        let (_, stepped) = advance_shell(
+            Vec3::ZERO,
+            velocity,
+            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
+        let bend = stepped.angle_between(velocity).to_degrees();
+        assert!(
+            (29.0..31.0).contains(&bend),
+            "the fixture bends the travel by about 30° in one tick (got {bend}°)",
+        );
+
+        let frame = test_disc(Vec3::Z);
+        let position = Vec3::new(0.0, 2.0, 0.0);
+        let flight = resolve::Flight::launched(
+            position,
+            Dir3::Z,
+            Dir3::new(stepped).expect("a direction"),
+            stepped.length(),
+            frame,
+            resolve::disc_radius(FIXTURE_88.caliber),
+            None,
+        );
+        assert_starts_on_the_last_sweep(&flight, position, &frame);
+
+        let face = position.y + 0.047;
+        let mut app = world_with_trimesh_plates(&[(
+            Vec3::new(3.0, 1.0, 3.0),
+            Vec3::new(0.0, face + 0.5, 0.0),
+        )]);
+        spawn_round(&mut app, FIXTURE_88, position, velocity);
+        for _ in 0..4 {
+            app.update();
+        }
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert!(
+            impacts.is_empty(),
+            "the round falls away from a slab it never reached, and nothing is reported for it: {:?}",
+            impacts
+                .iter()
+                .map(|i| (i.position, i.verdict))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    /// A NEAR-REVERSAL STARTS ITS SAMPLES WHERE THE LAST SWEEP LEFT THEM.
+    ///
+    /// Fixture data: an 88 rising at `(0.01, 0.08, 0)` m/s, the residual of a near-exhausted upward
+    /// perforation; one 16 ms tick of gravity turns it back down, past a right angle. A step-back of
+    /// `r·tan θ` has no meaning there — with the cosine clamped positive it is 9.4e35 m (DERIVED) —
+    /// so the starts must not depend on the bend at all.
+    #[test]
+    fn a_near_reversal_starts_its_samples_where_the_last_sweep_left_them() {
+        const DT: f32 = 0.016;
+        let velocity = Vec3::new(0.01, 0.08, 0.0);
+        let (_, stepped) = advance_shell(
+            Vec3::ZERO,
+            velocity,
+            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
+        assert!(
+            stepped.dot(velocity) < 0.0,
+            "the fixture turns the travel past a right angle in one tick",
+        );
+        let swept = Dir3::new(velocity).expect("a direction");
+        let frame = test_disc(velocity.normalize());
+        let position = Vec3::new(0.0, 2.0, 0.0);
+        let flight = resolve::Flight::launched(
+            position,
+            swept,
+            Dir3::new(stepped).expect("a direction"),
+            stepped.length(),
+            frame,
+            resolve::disc_radius(FIXTURE_88.caliber),
+            None,
+        );
+        assert_starts_on_the_last_sweep(&flight, position, &frame);
     }
 
     /// AN OBLIQUE PERFORATION THAT ENDS A TICK RESUMES ON ITS SEEDS.
