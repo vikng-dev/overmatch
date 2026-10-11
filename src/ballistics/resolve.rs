@@ -254,7 +254,8 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// sample would begin inside the plate and report an exit it never entered.
 #[derive(Clone, Debug)]
 pub(crate) struct Flight {
-    /// WORLD position of the round's axis, for presentation and for a fresh layout.
+    /// WORLD position of the round's axis, for presentation and for a fresh layout. With a
+    /// continuation it is that continuation's axis start in world ([`Interior::world_origin`]).
     pub position: Vec3,
     pub direction: Dir3,
     /// m/s.
@@ -294,7 +295,7 @@ impl Flight {
             Interior::rebased,
         );
         Self {
-            position,
+            position: starts.world_origin(),
             direction,
             speed,
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
@@ -324,13 +325,21 @@ impl Flight {
             .is_some_and(Interior::holds_material)
     }
 
-    /// Fly `travel` metres of open air along `direction`, the axis landing at `to`: every sample's
-    /// ray was swept that far clear, so every start advances by it.
-    pub(crate) fn fly(&mut self, to: Vec3, travel: f32) {
-        if let Some(interior) = &mut self.continuation {
-            interior.origin += self.direction * travel;
+    /// Fly `displacement` of open air: every sample's ray was swept that far clear, so every start
+    /// advances by it.
+    ///
+    /// The continuation's axis start is the one position: [`position`](Self::position) is derived
+    /// from it, never advanced alongside it. A world position advanced on its own re-rounds at world
+    /// spacing every step (DERIVED: 2.44e-4 m past 2048 m) and walks away from the starts the casts
+    /// use; the anchor-relative origin keeps what that rounding loses.
+    pub(crate) fn fly(&mut self, displacement: Vec3) {
+        match &mut self.continuation {
+            Some(interior) => {
+                interior.origin += displacement;
+                self.position = interior.world_origin();
+            }
+            None => self.position += displacement,
         }
-        self.position = to;
     }
 
     /// The starts the next step resumes from: the continuation, or the fresh disc as it now stands.

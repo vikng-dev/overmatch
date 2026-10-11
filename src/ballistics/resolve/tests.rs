@@ -216,7 +216,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
 use crate::ballistics::fuzz::{self, Drive};
 use crate::ballistics::march_tests::{FIXTURE_88, FIXTURE_MG, spawn_round};
 use crate::ballistics::{
-    ComponentHealth, RetainSpentShells, SpallMarks, Verdict, advance_shell, drag_k,
+    ComponentHealth, RetainSpentShells, SpallMarks, Verdict, drag_k, freeflight_step,
 };
 
 /// The fixture tick the plate worlds step by (`march_tests::plate_world`'s manual 16 ms).
@@ -261,12 +261,7 @@ fn volume(app: &mut App, size: Vec3, at: Transform, factor: f32, hp: Option<f32>
 
 /// The speed and travel budget the runtime march flies its first tick with, from the shared advance.
 fn first_tick(body: RoundBody, speed: f32) -> (f32, f32) {
-    let (_, stepped) = advance_shell(
-        DROP_FROM,
-        Vec3::NEG_Y * speed,
-        drag_k(body.caliber, body.mass),
-        DT,
-    );
+    let stepped = freeflight_step(Vec3::NEG_Y * speed, drag_k(body.caliber, body.mass), DT);
     let speed = stepped.length();
     (speed, speed * DT)
 }
@@ -616,8 +611,7 @@ fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
 /// the round's capability per metre, faces at exactly representable heights.
 #[test]
 fn an_exact_budget_crossing_terminates_before_the_target() {
-    let (_, stepped) = advance_shell(
-        DROP_FROM,
+    let stepped = freeflight_step(
         Vec3::NEG_Y * 755.0,
         drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
         DT,

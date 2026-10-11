@@ -106,15 +106,15 @@ pub fn freeflight_step(velocity: Vec3, drag_k: f32, dt: f32) -> Vec3 {
     (v / speed) * (speed / (1.0 + drag_k * speed * dt))
 }
 
-/// One open-air step shared by the live march and network catch-up. Collision handling belongs to
-/// the caller.
-pub(crate) fn advance_shell(position: Vec3, velocity: Vec3, drag_k: f32, dt: f32) -> (Vec3, Vec3) {
-    let velocity = freeflight_step(velocity, drag_k, dt);
-    (position + velocity * dt, velocity)
-}
-
 /// Free-flight catch-up from the muzzle. Returns the caught-up state plus its path; callers must
 /// resolve any armor crossed by the skipped chords.
+///
+/// Positionally equivalent to the live march's open air: the axis is carried as the march carries
+/// it, an anchor re-taken at each step's start plus an anchor-relative offset advanced by
+/// [`freeflight_step`]'s velocity × `dt` ([`resolve::Interior::rebased`], [`resolve::Flight::fly`]),
+/// so neither path re-rounds the accumulated position at world spacing. The two agree to the
+/// rounding of the march's rebuilt velocity, not bit for bit; the caught-up shell's next step lays
+/// a fresh disc at the returned position, dropping one world rounding's residual.
 pub(crate) fn fast_forward_shell(
     origin: Vec3,
     velocity: Vec3,
@@ -122,15 +122,17 @@ pub(crate) fn fast_forward_shell(
     dt: f32,
     ticks: u32,
 ) -> (Vec3, Vec3, Vec<Vec3>) {
-    let mut pos = origin;
+    let mut axis = resolve::Interior::laid(origin, vec![Vec3::ZERO]);
     let mut vel = velocity;
     let mut points = Vec::with_capacity(ticks as usize + 1);
-    points.push(pos);
+    points.push(origin);
     for _ in 0..ticks {
-        (pos, vel) = advance_shell(pos, vel, drag_k, dt);
-        points.push(pos);
+        axis = axis.rebased();
+        vel = freeflight_step(vel, drag_k, dt);
+        axis.origin += vel * dt;
+        points.push(axis.world_origin());
     }
-    (pos, vel, points)
+    (axis.world_origin(), vel, points)
 }
 
 /// Wrapping elapsed ticks on the same half-range rule Lightyear's `Tick - Tick -> i32` uses, kept
@@ -2070,18 +2072,11 @@ fn march_shell_step(
     // crosses) — split per [`cast_march_segment`], nearer hit wins. This filter serves the
     // interior probes (thickness / exit faces / spall), which are armor-only by construction.
     let armor = SpatialQueryFilter::from_mask(Layer::Armor);
-    // Advance free-flight (gravity + drag on the velocity, then the position step) through the
-    // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
-    // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
-    // free-flight landing point; the ray-march below overrides it only where the segment hits
-    // something. The march may *bend* the direction (normalization / ricochet), so we carry
-    // direction + speed and rebuild the velocity at the end rather than assuming a straight step.
-    let (freeflight_pos, stepped) = advance_shell(
-        shell.transform.translation,
-        shell.projectile.velocity,
-        shell.projectile.drag_k,
-        dt,
-    );
+    // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
+    // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
+    // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild the
+    // velocity at the end rather than assuming a straight step.
+    let stepped = freeflight_step(shell.projectile.velocity, shell.projectile.drag_k, dt);
     let Ok(dir) = Dir3::new(stepped) else {
         return None;
     };
@@ -2093,8 +2088,8 @@ fn march_shell_step(
     // drives the wait on subsequent ticks — distinct from `stopped` (which despawns).
     let mut holding = false;
     // Whether the march has bent the shell off its original free-flight segment. Until it does,
-    // an open-air fly-out lands exactly on `freeflight_pos` (the shared advance); after a bend the
-    // leftover budget flies along the new direction instead.
+    // an open-air fly-out moves the axis by exactly `stepped × dt` (the catch-up kernel's step);
+    // after a bend the leftover budget flies along the new direction instead.
     let mut bent = false;
     // AUTHORITY: whether this shell's ONE terminal (`ShellTerminal` — embed/perforation) has been
     // emitted. A perforated shell can keep marching through the interior across fixed ticks, so
@@ -2135,16 +2130,15 @@ fn march_shell_step(
         let dir = flight.direction;
         let hit = match next_surface(world, &flight, radius, budget.remaining(), &not_own) {
             // Open air — fly out the rest of the step. On the original (unbent) segment this is
-            // exactly the shared `advance_shell` landing point; a `continue` past this point only
-            // ever follows a bend, so `bent` is the exact discriminant.
+            // exactly the catch-up kernel's displacement; a `continue` past this point only ever
+            // follows a bend, so `bent` is the exact discriminant.
             Ahead::Open => {
-                let travel = budget.remaining();
-                let to = if bent {
-                    flight.position + dir * travel
+                let displacement = if bent {
+                    dir * budget.remaining()
                 } else {
-                    freeflight_pos
+                    stepped * dt
                 };
-                flight.fly(to, travel);
+                flight.fly(displacement);
                 break;
             }
             // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
@@ -2926,10 +2920,10 @@ mod tests {
         assert!(v1.y < 0.0, "gravity must pull the shell down");
     }
 
-    /// The "one integrator" property: fast-forwarding a shell N ticks lands it in the SAME state as
-    /// N single-tick advances. `fast_forward_shell` folds the shared `advance_shell` — the exact
-    /// per-tick kernel the live march steps in open air — so a caught-up shell can't diverge from a
-    /// natively integrated one. Guards against re-deriving the catch-up as a closed-form trajectory.
+    /// The "one integrator" property: fast-forwarding a shell N ticks folds the same per-tick
+    /// [`freeflight_step`] the live march steps in open air, so its velocity is N single-tick steps
+    /// exactly. Guards against re-deriving the catch-up as a closed-form trajectory. Its position is
+    /// held to the march's own by `march_tests::catch_up_lands_where_the_march_flies`.
     #[test]
     fn fast_forward_matches_single_tick_advances() {
         let origin = Vec3::new(1.0, 50.0, -3.0);
@@ -2938,15 +2932,13 @@ mod tests {
         let dt = 1.0 / 64.0;
         let n = 7;
 
-        // N single-tick advances by hand.
-        let (mut pos, mut vel) = (origin, v0);
+        let mut vel = v0;
         for _ in 0..n {
-            (pos, vel) = advance_shell(pos, vel, k, dt);
+            vel = freeflight_step(vel, k, dt);
         }
 
         let (ff_pos, ff_vel, path) = fast_forward_shell(origin, v0, k, dt, n);
-        assert_eq!(ff_pos, pos, "fast-forward position == N single advances");
-        assert_eq!(ff_vel, vel, "fast-forward velocity == N single advances");
+        assert_eq!(ff_vel, vel, "fast-forward velocity == N single steps");
         // One point per stepped tick plus the origin, and the trail starts AT the muzzle (requirement:
         // the tracer trail must not start 64 m behind the shell).
         assert_eq!(path.len(), n as usize + 1);
@@ -5528,7 +5520,7 @@ mod march_tests {
         // The tick's travel is the shared advance's speed × dt; place the round so that what is left
         // after the plate (`budget − approach − thickness`) is half the march's nudge.
         let velocity = Vec3::NEG_Z * 800.0;
-        let (_, stepped) = advance_shell(Vec3::ZERO, velocity, drag_k(body.caliber, body.mass), DT);
+        let stepped = freeflight_step(velocity, drag_k(body.caliber, body.mass), DT);
         let budget = stepped.length() * DT;
         let origin = Vec3::new(far.x, far.y, face + (budget - plate.z - 0.5 * MARCH_EPS));
         spawn_round(&mut app, body, origin, velocity);
@@ -5553,6 +5545,76 @@ mod march_tests {
                 .iter()
                 .map(|i| (i.position, i.verdict))
                 .collect::<Vec<_>>(),
+        );
+    }
+
+    /// THE SHELL'S POSE IS ITS CONTINUATION'S AXIS START, AT ANY MAP COORDINATE.
+    ///
+    /// Fixture data: a round at X = 2500 m flying 16 mm per step (1 m/s at the test world's 16 ms
+    /// step) through 100 open-air steps. A world f32 there is spaced 2.44e-4 m (DERIVED), so a
+    /// position re-rounded at world spacing every step drifts by up to half that per step, while the
+    /// continuation's anchor plus offset keeps what rounding lost. There is one position: the
+    /// transform may differ from the continuation's world start by one world rounding, not by an
+    /// error that grows with the steps flown.
+    #[test]
+    fn open_air_keeps_one_axis_position_at_map_scale() {
+        const STEPS: usize = 100;
+        let origin = Vec3::new(2500.0, 400.0, 0.0);
+        let mut app = world_with_trimesh_plates(&[]);
+        let shell = spawn_round(&mut app, FIXTURE_88, origin, Vec3::X);
+        for _ in 0..STEPS {
+            app.update();
+        }
+        let pose = app.world().get::<Transform>(shell).unwrap().translation;
+        let start = app
+            .world()
+            .get::<Projectile>(shell)
+            .unwrap()
+            .continuation
+            .as_ref()
+            .expect("an open-air flight carries its starts across the tick")
+            .world_origin();
+        assert!(
+            (1.5..1.7).contains(&(pose.x - origin.x)),
+            "the round flew its open-air steps: {pose}",
+        );
+        let spacing = f32::from_bits(origin.x.to_bits() + 1) - origin.x;
+        assert!(
+            (pose - start).abs().max_element() <= spacing,
+            "the shell's pose {pose} and its continuation's axis start {start} are two positions \
+             {:?} apart (one world rounding is {spacing})",
+            pose - start,
+        );
+    }
+
+    /// CATCH-UP LANDS WHERE THE MARCH FLIES, AT ANY MAP COORDINATE.
+    ///
+    /// The fixture above, flown natively, against [`fast_forward_shell`] over the same number of
+    /// steps. Both carry the axis as anchor plus offset, so they agree to a world rounding; a
+    /// catch-up that re-rounds its position at world spacing every step does not.
+    #[test]
+    fn catch_up_lands_where_the_march_flies() {
+        const STEPS: usize = 100;
+        let origin = Vec3::new(2500.0, 400.0, 0.0);
+        let mut app = world_with_trimesh_plates(&[]);
+        let shell = spawn_round(&mut app, FIXTURE_88, origin, Vec3::X);
+        for _ in 0..STEPS {
+            app.update();
+        }
+        let flown = app.world().get::<ShellPath>(shell).unwrap().points.len() - 1;
+        let pose = app.world().get::<Transform>(shell).unwrap().translation;
+        let (caught_up, _, _) = fast_forward_shell(
+            origin,
+            Vec3::X,
+            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            0.016,
+            flown as u32,
+        );
+        let spacing = f32::from_bits(origin.x.to_bits() + 1) - origin.x;
+        assert!(
+            (pose - caught_up).abs().max_element() <= spacing,
+            "the march flew to {pose} and the catch-up to {caught_up} over {flown} steps \
+             (one world rounding is {spacing})",
         );
     }
 
@@ -5784,12 +5846,7 @@ mod march_tests {
     fn a_bent_fresh_sweep_starts_on_ground_the_last_sweep_cleared() {
         const DT: f32 = 0.016;
         let velocity = Vec3::Z * 0.272;
-        let (_, stepped) = advance_shell(
-            Vec3::ZERO,
-            velocity,
-            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
-            DT,
-        );
+        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
         let bend = stepped.angle_between(velocity).to_degrees();
         assert!(
             (29.0..31.0).contains(&bend),
@@ -5839,12 +5896,7 @@ mod march_tests {
     fn a_near_reversal_starts_its_samples_where_the_last_sweep_left_them() {
         const DT: f32 = 0.016;
         let velocity = Vec3::new(0.01, 0.08, 0.0);
-        let (_, stepped) = advance_shell(
-            Vec3::ZERO,
-            velocity,
-            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
-            DT,
-        );
+        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
         assert!(
             stepped.dot(velocity) < 0.0,
             "the fixture turns the travel past a right angle in one tick",
@@ -5883,12 +5935,7 @@ mod march_tests {
         let incidence = 60.0_f32.to_radians();
         let dir = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
         let velocity = dir * 800.0;
-        let (_, stepped) = advance_shell(
-            Vec3::ZERO,
-            velocity,
-            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
-            DT,
-        );
+        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
         let budget = stepped.length() * DT;
         let face = Vec3::new(0.0, 2.0, 0.51);
         let mut failed = Vec::new();
@@ -6091,7 +6138,7 @@ mod march_tests {
         let start = Vec3::new(0.0, 2.0, 2.0);
         let dt = 0.016_f32;
         // The budget the march works from: this tick's velocity after gravity and drag, times dt.
-        let (_, stepped) = advance_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
+        let stepped = freeflight_step(Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
         let budget = stepped.length() * dt;
 
         for degrees in [0.0_f32, 40.0, 72.0] {
@@ -6166,7 +6213,8 @@ mod march_tests {
     fn a_miss_flies_the_whole_corridor_it_examined() {
         let start = Vec3::new(0.0, 2.0, 2.0);
         let dt = 0.016_f32;
-        let (free_flight, _) = advance_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
+        let (free_flight, _, _) =
+            fast_forward_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt, 1);
 
         let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
         app.world_mut().spawn((
