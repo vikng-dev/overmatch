@@ -58,6 +58,73 @@ const ENTRANCE_SPAN: f32 = 0.5;
 /// crossing.
 pub(crate) const MAX_CORRIDOR: f32 = 50.0;
 
+/// Ceiling on how far past its travel budget one step may carry the flight.
+///
+/// Past the budget a step runs only to close material a sample is held inside
+/// ([`Interior::holds_material`]): the held material's exit lies ahead with its entry behind, so it
+/// is the remainder of a crossing already begun, and the walk certifies no crossing longer than one
+/// [`MAX_CORRIDOR`]. A drain that has carried the flight a whole certified corridor past the budget
+/// is therefore closing nothing the walk could certify — a chain of continuations, each a bounded
+/// crossing, that never lets the step yield — and it stops the round instead of applying
+/// consequences ever further downrange.
+pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
+
+/// Ceiling on the crossings one step may decide.
+///
+/// Every crossing begins at a face contact the flight then leaves behind — a bite resumes past its
+/// exit, a bounce is lifted off its face — or proves a whole [`ENTRANCE_SPAN`] empty. So a step's
+/// crossings are bounded by the faces along its flight, and the collector already holds
+/// [`collect::MAX_FACES`] as the most faces any corridor through real geometry crosses: a step that
+/// decides more crossings than that has met more boundaries than one line through certified armour
+/// can, which is a runaway (a round trapped between faces, or spends lost to rounding), not a
+/// crossing sequence.
+pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
+
+/// One step's travel budget, spent by its successive crossings, and the limits nothing may pass.
+///
+/// Shared by the runtime march and the §13.6 gate's driver, so both stop a runaway step at the same
+/// crossing with the same structured error.
+pub(crate) struct Budget {
+    /// Metres of travel left; negative once a drain runs past the budget.
+    remaining: f32,
+    crossings: usize,
+}
+
+impl Budget {
+    pub(crate) fn new(travel: f32) -> Self {
+        Self {
+            remaining: travel,
+            crossings: 0,
+        }
+    }
+
+    /// Metres of travel left in the step (negative while draining past it).
+    pub(crate) fn remaining(&self) -> f32 {
+        self.remaining
+    }
+
+    /// The step has more to resolve: travel left, or material the flight is held inside, whose
+    /// crossing resolves now, past the budget if need be (see [`MAX_OVERRUN`]).
+    pub(crate) fn continues(&self, flight: &Flight) -> bool {
+        self.remaining > MARCH_EPS || flight.holds_material()
+    }
+
+    /// Charge one more crossing of `travel` metres, BEFORE its consequences are applied — or the
+    /// structured error that stops the round where it stands. Exhaustion fails closed: a round that
+    /// hits a limit stops; it is never waved through.
+    pub(crate) fn charge(&mut self, travel: f32) -> Result<(), WalkError> {
+        let crossings = self.crossings + 1;
+        let remaining = self.remaining - travel;
+        let overrun = (-remaining).max(0.0);
+        if crossings > MAX_STEP_CROSSINGS || overrun > MAX_OVERRUN {
+            return Err(WalkError::DrainExhausted { crossings, overrun });
+        }
+        self.crossings = crossings;
+        self.remaining = remaining;
+        Ok(())
+    }
+}
+
 /// Below this calibre the disc degenerates to its axis (`k = 1`).
 ///
 /// The ring sits at `calibre / 2`, so for an MG round it is 4 mm from the axis — inside the geometry
@@ -138,14 +205,6 @@ pub(crate) struct Flight {
     pub continuation: Option<Interior>,
 }
 
-/// What [`Flight::follow`] moved the flight by.
-pub(crate) struct Followed {
-    /// Line-of-sight metres charged against the travel budget, including the boundary nudge.
-    pub travel: f32,
-    /// The round came to rest.
-    pub stopped: bool,
-}
-
 impl Flight {
     /// WORLD origin of the next cast and of a corridor that has no continuation to resume from: the
     /// position, nudged off whatever face the flight is leaving.
@@ -161,20 +220,17 @@ impl Flight {
     }
 
     /// Advance the flight along a decision: the state the next crossing starts from. The sampling
-    /// frame is transported through every direction change, including the null one.
-    pub(crate) fn follow(&mut self, decision: Decision) -> Followed {
-        let nudge = MARCH_EPS;
+    /// frame is transported through every direction change, including the null one. Returns whether
+    /// the round came to rest; the travel it charges is [`Decision::charged`].
+    pub(crate) fn follow(&mut self, decision: Decision) -> bool {
         match decision {
-            Decision::Clear { resume, travel } => {
+            Decision::Clear { resume, .. } => {
                 self.frame = self
                     .frame
                     .transport(Vec3::from(self.direction), Vec3::from(self.direction));
                 self.position = resume;
                 self.continuation = None;
-                Followed {
-                    travel: nudge + travel,
-                    stopped: false,
-                }
+                false
             }
             Decision::Bounce(bounce) => {
                 self.frame = self
@@ -184,19 +240,13 @@ impl Flight {
                 self.speed = bounce.speed;
                 self.position = bounce.resume;
                 self.continuation = None;
-                Followed {
-                    travel: nudge + bounce.travel,
-                    stopped: false,
-                }
+                false
             }
             Decision::Bite(bite) => match bite.end {
                 BiteEnd::Embedded { at, .. } => {
                     self.position = at;
                     self.continuation = None;
-                    Followed {
-                        travel: nudge + bite.travel,
-                        stopped: true,
-                    }
+                    true
                 }
                 BiteEnd::Perforated {
                     resume,
@@ -212,10 +262,7 @@ impl Flight {
                     self.speed = speed;
                     self.position = resume;
                     self.continuation = Some(continuation);
-                    Followed {
-                        travel: nudge + bite.travel,
-                        stopped: false,
-                    }
+                    false
                 }
             },
         }
@@ -242,6 +289,20 @@ pub(crate) enum Decision {
     Bounce(Bounce),
     /// It bit in: stopped inside the material or came out the far side.
     Bite(Bite),
+}
+
+impl Decision {
+    /// Line-of-sight metres following this decision charges against the step's budget, including
+    /// the boundary nudge — known before anything is applied, so
+    /// [`Budget::charge`] can refuse a crossing before its consequences land.
+    pub(crate) fn charged(&self) -> f32 {
+        MARCH_EPS
+            + match self {
+                Decision::Clear { travel, .. } => *travel,
+                Decision::Bounce(bounce) => bounce.travel,
+                Decision::Bite(bite) => bite.travel,
+            }
+    }
 }
 
 /// A deflection off the entrance face (§4). The deflection ANGLE and the bleed both already carry η

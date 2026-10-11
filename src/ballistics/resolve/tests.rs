@@ -266,6 +266,12 @@ fn first_tick(body: RoundBody, speed: f32) -> (f32, f32) {
 
 /// The gate's side: the same shot, through [`fuzz::drive`], for the runtime's first-tick budget.
 fn driven(app: &mut App, body: RoundBody, speed: f32) -> Drive {
+    try_driven(app, body, speed)
+        .unwrap_or_else(|failure| panic!("the driven flight failed to walk: {failure:?}"))
+}
+
+/// [`driven`], with the driver's failure returned rather than raised.
+fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz::DriveFailure> {
     let (speed, budget) = first_tick(body, speed);
     app.world_mut()
         .run_system_once(
@@ -288,7 +294,6 @@ fn driven(app: &mut App, body: RoundBody, speed: f32) -> Drive {
             },
         )
         .expect("the driver system runs")
-        .unwrap_or_else(|failure| panic!("the driven flight failed to walk: {failure:?}"))
 }
 
 /// The runtime's side: one tick of the real march, read back as impacts.
@@ -581,4 +586,213 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
         "through the metre with nothing left, then stopped at the target's face",
     );
     assert!(!exact.admitted, "no chord into the target");
+}
+
+// ---------------------------------------------------------------------------------------------
+// The step's limits: a drain never runs unbounded past the budget
+// ---------------------------------------------------------------------------------------------
+
+/// A box whose bottom face is sheared to `slope` (rise per metre of local `+X`), as a certified
+/// trimesh: one closed shell, outward-wound, the box's own corner ids welded. Fixture geometry for an
+/// exit face that is not opposed to the next entry, so the two never ε-weld.
+fn wedge_trimesh(half: Vec3, slope: f32) -> (Collider, BallisticSurfaces) {
+    let (_, surfaces) = box_trimesh(Vec3::ONE);
+    let vertices: Vec<Vec3> = [
+        (-1.0, -1.0, -1.0),
+        (1.0, -1.0, -1.0),
+        (1.0, 1.0, -1.0),
+        (-1.0, 1.0, -1.0),
+        (-1.0, -1.0, 1.0),
+        (1.0, -1.0, 1.0),
+        (1.0, 1.0, 1.0),
+        (-1.0, 1.0, 1.0),
+    ]
+    .into_iter()
+    .map(|(x, y, z): (f32, f32, f32)| {
+        let sheared = if y < 0.0 { slope * x * half.x } else { 0.0 };
+        Vec3::new(x * half.x, y * half.y + sheared, z * half.z)
+    })
+    .collect();
+    // `box_trimesh`'s own winding, so `surfaces` (built for it) certifies this mesh too.
+    let indices = vec![
+        [0, 3, 2],
+        [0, 2, 1],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [3, 7, 6],
+        [3, 6, 2],
+        [0, 4, 7],
+        [0, 7, 3],
+        [1, 2, 6],
+        [1, 6, 5],
+    ];
+    (Collider::trimesh(vertices, indices), surfaces)
+}
+
+/// A CHAIN OF HELD CONTINUATIONS STOPS AT THE STEP'S LIMITS.
+///
+/// Each crossing is bounded; their succession is not, unless the driver bounds it. A chain of soft
+/// volumes, each entered less than a nudge after the previous one's exit, leaves every
+/// perforation's resume point inside the next volume, so the flight holds material after every
+/// crossing and the step drains on past its budget, applying consequences ever further downrange.
+/// The driver must stop it — fail closed, at the crossing a limit refuses — in the runtime march
+/// and in the gate's driver alike. Here the count trips first: a held link must be longer than a
+/// nudge, and every corridor must close in a gap shorter than one, which pins the period near a
+/// nudge (DERIVED below), so [`MAX_STEP_CROSSINGS`] links span metres, not [`MAX_OVERRUN`].
+///
+/// Generic geometry, a single-sample round falling straight down so no bend moves it off the
+/// chain: square entry faces (no normalization bend), exit faces sheared 65° (not opposed to the
+/// next entry, so no ε-weld), and the chain starting a metre short of the budget's end. Fixture
+/// data throughout.
+#[test]
+fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
+    let body = FIXTURE_MG;
+    assert!(body.caliber < DISC_MIN_CALIBER, "a one-sample round");
+    let span = ENTRANCE_SPAN as f64;
+    let nudge = MARCH_EPS as f64;
+    let gap = 0.5 * nudge;
+    // A held crossing resumes one nudge past the previous exit and reads its contact at its own
+    // volume's exit. Its entrance corridor then ends `span` past that exit, and its transit corridor
+    // `span` past the resume point; both must end in a gap, so for some `m`
+    // `m·period ∈ (span − gap, span)` and `(m + 1)·period ∈ (span + nudge − gap, span + nudge)`.
+    let m = 400.0;
+    let period = 0.5 * ((span - 0.5 * gap) / m + (span + nudge - 0.5 * gap) / (m + 1.0));
+    assert!(
+        m * period > span - gap
+            && m * period < span
+            && (m + 1.0) * period > span + nudge - gap
+            && (m + 1.0) * period < span + nudge
+            && period > nudge,
+        "the period closes both corridors in a gap and keeps each link held: {period}",
+    );
+    // The first volume is entered fresh; both its corridors end `span` past its top, which must
+    // land in a gap: `first + (m − 1)·period = span − gap/2`.
+    let first = span - 0.5 * gap - (m - 1.0) * period;
+    let slope = 65.0_f64.to_radians().tan();
+    let (_, budget) = first_tick(body, 755.0);
+    let top = DROP_FROM.y as f64 - budget as f64 + 1.0;
+    let links = MAX_STEP_CROSSINGS + 100;
+    // The ray crosses each wedge at local `x = lean`; its half-width keeps the sheared bottom below
+    // the top everywhere.
+    let lean = 1.0e-3;
+    let build = |app: &mut App| {
+        for index in 0..links {
+            let (at, along) = if index == 0 {
+                (top, first)
+            } else {
+                (
+                    top - first - gap - (index - 1) as f64 * period,
+                    period - gap,
+                )
+            };
+            let half_y = 0.5 * (along + slope * lean);
+            let half_x = 0.5 * (lean + 2.0 * half_y / slope);
+            app.world_mut().spawn((
+                Transform::from_translation(Vec3::new(
+                    DROP_FROM.x - lean as f32,
+                    (at - half_y) as f32,
+                    DROP_FROM.z,
+                )),
+                RigidBody::Static,
+                wedge_trimesh(
+                    Vec3::new(half_x as f32, half_y as f32, 2.0e-3),
+                    slope as f32,
+                ),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL * 1.0e-5,
+                    substance: "fixture".to_string(),
+                },
+            ));
+        }
+    };
+
+    let mut runtime = world_with_trimesh_plates(&[]);
+    runtime.init_resource::<Read>().add_observer(read_impact);
+    build(&mut runtime);
+    for _ in 0..8 {
+        runtime.update();
+    }
+    runtime.world_mut().resource_mut::<Read>().0.clear();
+    spawn_round(&mut runtime, body, DROP_FROM, Vec3::NEG_Y * 755.0);
+    runtime.update();
+    let read = runtime.world().resource::<Read>().0.clone();
+    let through = read
+        .iter()
+        .filter(|(verdict, _)| *verdict == Verdict::Through)
+        .count();
+    assert_eq!(
+        through, MAX_STEP_CROSSINGS,
+        "the chain is crossed until the count is spent: {through} perforations of {links} links",
+    );
+    assert!(
+        read.iter()
+            .filter(|(verdict, _)| *verdict == Verdict::Through)
+            .any(|(_, at)| at.y < DROP_FROM.y - budget),
+        "and drains past the budget to get there",
+    );
+    assert_eq!(
+        read.last().map(|(verdict, _)| *verdict),
+        Some(Verdict::Struck),
+        "the step fails closed at its limit rather than draining on",
+    );
+
+    let mut gate = world_with_trimesh_plates(&[]);
+    build(&mut gate);
+    for _ in 0..8 {
+        gate.update();
+    }
+    let failure = try_driven(&mut gate, body, 755.0)
+        .expect_err("the gate's driver stops the chain at the same limit");
+    assert!(
+        matches!(
+            failure.error,
+            WalkError::DrainExhausted { crossings, .. } if crossings == MAX_STEP_CROSSINGS + 1
+        ),
+        "the driver names the exhausted count: {failure:?}",
+    );
+}
+
+/// THE STEP REFUSES THE CROSSING THAT WOULD CARRY IT PAST ITS OVERRUN, before anything is charged.
+#[test]
+fn a_step_refuses_the_crossing_past_its_overrun() {
+    let mut budget = Budget::new(1.0);
+    budget
+        .charge(1.0 + MAX_OVERRUN)
+        .expect("exactly the overrun is within it");
+    assert_eq!(
+        budget.charge(0.5),
+        Err(WalkError::DrainExhausted {
+            crossings: 2,
+            overrun: MAX_OVERRUN + 0.5,
+        }),
+    );
+    assert_eq!(
+        budget.remaining(),
+        -MAX_OVERRUN,
+        "a refused crossing charges nothing"
+    );
+}
+
+/// THE STEP REFUSES THE CROSSING PAST ITS COUNT, before anything is charged.
+#[test]
+fn a_step_refuses_the_crossing_past_its_count() {
+    let mut budget = Budget::new(1.0);
+    for _ in 0..MAX_STEP_CROSSINGS {
+        budget.charge(0.0).expect("within the count");
+    }
+    assert_eq!(
+        budget.charge(0.0),
+        Err(WalkError::DrainExhausted {
+            crossings: MAX_STEP_CROSSINGS + 1,
+            overrun: 0.0,
+        }),
+    );
+    assert_eq!(
+        budget.remaining(),
+        1.0,
+        "a refused crossing charges nothing"
+    );
 }

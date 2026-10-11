@@ -51,7 +51,7 @@ use crate::exact::Int;
 /// The Tiger's densest ballistic primitive is a few thousand triangles TOTAL, and a ray crosses a
 /// vanishing fraction of them, so this is orders above anything real — it exists to turn a runaway
 /// (a degenerate mesh, a corridor extended past all reason) into a loud stop.
-const MAX_FACES: usize = 4096;
+pub(crate) const MAX_FACES: usize = 4096;
 
 /// Bound on the f64 evaluation of the crossing determinant `−axis · ((b − a) × (c − a))`, as a
 /// multiple of its permanent `Σ (|e1ᵤ·e2ᵥ| + |e1ᵥ·e2ᵤ|)·|axisₖ|`.
@@ -242,9 +242,10 @@ pub(crate) fn collect(
 ///   (band 5.23e-6) re-measures that face 1.42e-6 behind the transit origin — beyond
 ///   `topology_abs`, so a reach without this term drops it (`resolve::tests`).
 /// - `topology_band(scale)` — the corridor re-measures that face from an origin rounded at its own
-///   scale: the larger of the anchor-relative origin (a hand-off sits up to one tick of flight from
-///   the anchor, because the anchor is where the march segment started, not first contact) and the
-///   collider-local origin the crossing arithmetic runs in.
+///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing
+///   arithmetic runs in. The anchor is where the march segment started, not first contact, and a
+///   continuation keeps its anchor, so a hand-off sits up to one step's travel budget plus
+///   `resolve::MAX_OVERRUN` from it.
 ///
 /// A corridor with no hand-off carries only the second band.
 ///
@@ -254,7 +255,9 @@ pub(crate) fn collect(
 /// whole nudge would re-collect the EXIT face of the plate just perforated — an exit for a primitive
 /// the walk is not inside, `UnexpectedExit`, and a round stopped dead in mid-air one millimetre past
 /// the plate it punched through. DERIVED: the two bands reach a quarter of the nudge only past
-/// ~310 m of scale, which no corridor has; the ceiling is defence in depth, never reached.
+/// ~310 m of scale, and a corridor origin sits at most one step's budget plus
+/// `resolve::MAX_OVERRUN` from its anchor: about 63 m for a round at 800 m/s over a 16 ms tick. The
+/// ceiling is defence in depth, never reached.
 fn sitting_reach(handoff: Option<f64>, origin: Vec3, local_origin: Vec3, laws: &WalkLaws) -> f32 {
     let declined = handoff.map_or(0.0, |t| super::walk::topology_band(t.abs(), laws));
     let scale = origin.length().max(local_origin.length()) as f64;

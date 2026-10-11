@@ -49,9 +49,7 @@ use bevy::prelude::*;
 
 use super::resolve::{self, Decision, Flight, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
-use super::{
-    Ahead, MARCH_EPS, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for,
-};
+use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for};
 use crate::Layer;
 use crate::damage::{Ammo, CrewStation, hit_ancestor};
 use crate::tank::{TankSimSource, spawn_headless_tank};
@@ -331,7 +329,8 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         WalkError::BadCorridor { .. }
         | WalkError::CorridorMismatch { .. }
         | WalkError::UnattributedRun { .. }
-        | WalkError::DegenerateEntryNormal { .. } => None,
+        | WalkError::DegenerateEntryNormal { .. }
+        | WalkError::DrainExhausted { .. } => None,
     }
 }
 
@@ -701,27 +700,31 @@ pub(super) fn drive(
         continuation: None,
     };
     let radius = resolve::disc_radius(body.caliber);
-    let mut remaining = length;
+    let mut budget = resolve::Budget::new(length);
     let mut out = Drive::default();
-    while remaining > MARCH_EPS || flight.holds_material() {
-        let contact = match next_surface(context.world, &flight, radius, remaining, &|_| true) {
-            Ahead::Open | Ahead::Terrain { .. } => break,
-            Ahead::Held => 0.0,
-            Ahead::Armor(hit) => {
-                if hit_ancestor(hit.entity, &context.world.volumes, &context.world.parents)
-                    .is_none()
-                {
-                    break;
+    while budget.continues(&flight) {
+        let contact =
+            match next_surface(context.world, &flight, radius, budget.remaining(), &|_| {
+                true
+            }) {
+                Ahead::Open | Ahead::Terrain { .. } => break,
+                Ahead::Held => 0.0,
+                Ahead::Armor(hit) => {
+                    if hit_ancestor(hit.entity, &context.world.volumes, &context.world.parents)
+                        .is_none()
+                    {
+                        break;
+                    }
+                    hit.distance
                 }
-                hit.distance
-            }
-        };
+            };
         let decision = resolve::decide(context, &|_| true, body, &flight, contact)
             .map_err(|error| fail(error, &flight))?;
+        budget
+            .charge(decision.charged())
+            .map_err(|error| fail(error, &flight))?;
         out.decisions.push(decision.clone());
-        let followed = flight.follow(decision);
-        remaining -= followed.travel;
-        if followed.stopped {
+        if flight.follow(decision) {
             break;
         }
     }

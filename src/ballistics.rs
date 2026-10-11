@@ -2069,7 +2069,7 @@ fn march_shell_step(
         return None;
     };
     let speed = stepped.length();
-    let mut remaining = speed * dt;
+    let mut budget = resolve::Budget::new(speed * dt);
     let mut stopped = false;
     // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
     // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
@@ -2100,7 +2100,8 @@ fn march_shell_step(
     let radius = resolve::disc_radius(shell.projectile.caliber);
     // The crossing state machine shared with the §13.6 gate. Its continuation is set only between
     // the crossings of this step and never outlives it: a perforation that leaves a sample inside
-    // material is resolved on, past the travel budget if need be (see [`next_surface`]).
+    // material is resolved on, past the travel budget if need be (see [`next_surface`]), within the
+    // step's limits (`resolve::Budget`).
     let mut flight = resolve::Flight {
         position: shell.transform.translation,
         direction: dir,
@@ -2112,16 +2113,16 @@ fn march_shell_step(
         continuation: None,
     };
 
-    while remaining > EPS || flight.holds_material() {
+    while budget.continues(&flight) {
         let origin = flight.cast_origin();
         let dir = flight.direction;
-        let hit = match next_surface(world, &flight, radius, remaining, &not_own) {
+        let hit = match next_surface(world, &flight, radius, budget.remaining(), &not_own) {
             // Open air — fly out the rest of the step. On the original (unbent) segment this is
             // exactly the shared `advance_shell` landing point; a `continue` past this point only
             // ever follows a bend, so `bent` is the exact discriminant.
             Ahead::Open => {
                 flight.position = if bent {
-                    flight.position + dir * remaining
+                    flight.position + dir * budget.remaining()
                 } else {
                     freeflight_pos
                 };
@@ -2244,6 +2245,16 @@ fn march_shell_step(
                         direction,
                         speed: sanctioned_speed,
                     } => {
+                        // The same step limits the authority's crossings are held to.
+                        if let Err(error) = budget.charge(EPS + hit.distance) {
+                            warn_once!(
+                                "ballistics: a replica's step ran out of its limits, stopping the \
+                                 round: {error:?}"
+                            );
+                            flight.position = entry;
+                            stopped = true;
+                            break;
+                        }
                         if let Some(new_dir) = direction {
                             // Carry the sampling basis through the sanctioned bend, exactly as the
                             // authority's own ricochet does. A replica that re-seeds on server
@@ -2268,7 +2279,6 @@ fn march_shell_step(
                                 .normalize_or_zero()
                                 * radius;
                         bent = true;
-                        remaining -= EPS + hit.distance;
                         continue;
                     }
                     ReplicaArmorContact::Stopped => {
@@ -2295,11 +2305,14 @@ fn march_shell_step(
             laws: walk::WalkLaws::default(),
         };
         // FAIL CLOSED. A structured walk error means the corridor could not be resolved honestly —
-        // unpairable topology, an unprobeable collider, a crossing that would not close inside 50 m.
-        // The round stops where it was: no perforation, no spall, no transit damage. Free
-        // penetration is the one outcome worse than a stopped shell, because it is
-        // indistinguishable from armour that was never modelled.
-        let decision = match resolve::decide(&context, &not_own, body, &flight, contact) {
+        // unpairable topology, an unprobeable collider, a crossing that would not close inside 50 m,
+        // a step that would run past its limits. The round stops where it was: no perforation, no
+        // spall, no transit damage. Free penetration is the one outcome worse than a stopped shell,
+        // because it is indistinguishable from armour that was never modelled. The budget is charged
+        // BEFORE the crossing is applied, so a refused crossing lands none of its consequences.
+        let decided = resolve::decide(&context, &not_own, body, &flight, contact)
+            .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
+        let decision = match decided {
             Ok(decision) => decision,
             Err(error) => {
                 warn_once!(
@@ -2329,12 +2342,11 @@ fn march_shell_step(
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
         bent = true;
-        // What the crossing actually flew, summed over its segments by the only code that knows
-        // them (see `resolve::Bite::travel`) — never the distance to the NEAREST sample's contact,
-        // which at oblique incidence leads the axis handoff by `r·tan(incidence)`.
-        let followed = flight.follow(decision);
-        remaining -= followed.travel;
-        if followed.stopped {
+        // The budget was charged what the crossing actually flew, summed over its segments by the
+        // only code that knows them (see `resolve::Bite::travel`) — never the distance to the
+        // NEAREST sample's contact, which at oblique incidence leads the axis handoff by
+        // `r·tan(incidence)`.
+        if flight.follow(decision) {
             stopped = true;
             break;
         }
@@ -2373,7 +2385,8 @@ enum Ahead {
 /// budget is: its exit lies ahead with its entry behind, the continuation alone declares that, and
 /// it does not outlive the step. So such a flight looks as far as a corridor may reach
 /// ([`resolve::MAX_CORRIDOR`]) and its crossing resolves now, past the budget if need be — the
-/// continuation is drained before the step yields, never carried across a tick.
+/// continuation is drained before the step yields, never carried across a tick. How far past is
+/// bounded: [`resolve::Budget`] stops a drain at [`resolve::MAX_OVERRUN`].
 fn next_surface(
     world: &ProjectileMarchWorld,
     flight: &resolve::Flight,

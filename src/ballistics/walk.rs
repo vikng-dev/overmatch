@@ -384,8 +384,9 @@ impl Default for WalkLaws {
             // 1 µm: three orders below the weld tolerance and below any authored feature.
             topology_abs: 1.0e-6,
             // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (the driver anchors it
-            // where the march segment started, at most one tick of flight before first contact), so
-            // `t` stays within metres of the anchor and this term only has to cover intersection
+            // where the march segment started, and a continuation keeps that anchor, so it sits at
+            // most one step's travel budget plus `resolve::MAX_OVERRUN` behind any corridor), so
+            // `t` stays within tens of metres of the anchor and this term only has to cover intersection
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
@@ -491,6 +492,12 @@ pub enum WalkError {
     /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
     /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
+    /// The driver's step ran out of a limit: more crossings than `resolve::MAX_STEP_CROSSINGS`, or
+    /// travel more than `resolve::MAX_OVERRUN` past the step's budget. Each crossing was bounded;
+    /// their succession was not, and a step that never yields applies consequences ever further
+    /// downrange. `crossings` counts the refused one; `overrun` is metres past the budget it would
+    /// have reached.
+    DrainExhausted { crossings: usize, overrun: f32 },
 }
 
 // ---------------------------------------------------------------------------------------------
