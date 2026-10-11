@@ -823,6 +823,24 @@ fn a_raised_floor_reaches_a_box_after_a_bounce_no_listed_gun_takes() {
 /// trimesh: one closed shell, outward-wound, the box's own corner ids welded. Fixture geometry for an
 /// exit face that is not opposed to the next entry, so the two never ε-weld.
 fn wedge_trimesh(half: Vec3, slope: f32) -> (Collider, BallisticSurfaces) {
+    mapped_box_trimesh(|corner| {
+        let sheared = if corner.y < 0.0 {
+            slope * corner.x * half.x
+        } else {
+            0.0
+        };
+        Vec3::new(
+            corner.x * half.x,
+            corner.y * half.y + sheared,
+            corner.z * half.z,
+        )
+    })
+}
+
+/// A closed outward-wound trimesh: `box_trimesh`'s cube with corners at `±1`, each mapped by
+/// `place`, and the cube's own certificate. `place` must be affine with a positive determinant, so
+/// the cube's winding, closure and welded corner ids carry over unchanged.
+fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfaces) {
     let (_, surfaces) = box_trimesh(Vec3::ONE);
     let vertices: Vec<Vec3> = [
         (-1.0, -1.0, -1.0),
@@ -835,10 +853,7 @@ fn wedge_trimesh(half: Vec3, slope: f32) -> (Collider, BallisticSurfaces) {
         (-1.0, 1.0, 1.0),
     ]
     .into_iter()
-    .map(|(x, y, z): (f32, f32, f32)| {
-        let sheared = if y < 0.0 { slope * x * half.x } else { 0.0 };
-        Vec3::new(x * half.x, y * half.y + sheared, z * half.z)
-    })
+    .map(|(x, y, z): (f32, f32, f32)| place(Vec3::new(x, y, z)))
     .collect();
     // `box_trimesh`'s own winding, so `surfaces` (built for it) certifies this mesh too.
     let indices = vec![
@@ -1208,4 +1223,270 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
         read.iter().all(|(verdict, _)| *verdict != Verdict::Struck),
         "the march failed closed after the bounce: {read:?}",
     );
+}
+
+/// A static certified trimesh volume of steel, posed by `at`.
+fn mesh_volume(app: &mut App, mesh: (Collider, BallisticSurfaces), at: Transform) -> Entity {
+    app.world_mut()
+        .spawn((
+            at,
+            RigidBody::Static,
+            mesh,
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material_factor: STEEL,
+                substance: "fixture".to_string(),
+            },
+        ))
+        .id()
+}
+
+/// A world holding only what `build` spawns, settled so its poses and bounds are live.
+fn settled(build: impl FnOnce(&mut App) -> Vec<Entity>) -> (App, Vec<Entity>) {
+    let mut app = world_with_trimesh_plates(&[]);
+    let built = build(&mut app);
+    for _ in 0..8 {
+        app.update();
+    }
+    (app, built)
+}
+
+/// A fresh disc of `radius` laid at `at` and certified along `swept` — the certification's own
+/// result — and, when it certifies, the walk of the first corridor swept from its starts along
+/// `launch`.
+fn certified_then_resumed(
+    app: &mut App,
+    at: Vec3,
+    swept: Vec3,
+    launch: Vec3,
+    radius: f32,
+) -> Result<(Interior, Result<DiscWalk, WalkError>), WalkError> {
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    armor: &armor,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                let frame = DiscFrame::anchored(swept).expect("a real direction");
+                let flight = Flight::launched(
+                    &context,
+                    &|_| true,
+                    at,
+                    Dir3::new(swept).expect("a direction"),
+                    Dir3::new(launch).expect("a direction"),
+                    SPEED,
+                    frame,
+                    radius,
+                    None,
+                )?;
+                let starts = flight
+                    .continuation
+                    .clone()
+                    .expect("a launched flight carries its starts");
+                let walked = closing_walk(
+                    &context,
+                    &|_| true,
+                    starts.anchor,
+                    starts.origin,
+                    Vec3::from(flight.direction),
+                    flight.frame,
+                    radius,
+                    &starts.seeds,
+                    ENTRANCE_SPAN,
+                );
+                Ok((starts, walked))
+            },
+        )
+        .expect("the probe system runs")
+}
+
+/// [`certified_then_resumed`] where both the certificate and the resumed corridor must succeed.
+fn resumed(app: &mut App, at: Vec3, swept: Vec3, launch: Vec3, radius: f32) -> Interior {
+    let (starts, walked) = certified_then_resumed(app, at, swept, launch, radius)
+        .unwrap_or_else(|error| panic!("the start failed to certify: {error:?}"));
+    walked.unwrap_or_else(|error| panic!("the corridor resumed along {launch} failed: {error:?}"));
+    starts
+}
+
+/// The volumes a seed declares its sample inside, sorted.
+fn inside_volumes(seed: &SampleSeed) -> Vec<Entity> {
+    let mut volumes: Vec<Entity> = seed.inside.iter().map(|key| key.volume).collect();
+    volumes.sort();
+    volumes
+}
+
+/// Fixture data, from a DERIVED counterexample: a closed prism extruding the parallelogram
+/// `(−3,−4), (3,4), (3,5), (−3,−3)` through `z ∈ [−0.5, 0.5]` m at the identity pose. Its lower
+/// face is `y = 4x/3`; the start `(0, 2⁻²⁶, 0)` lies just inside it.
+fn grazed_prism(app: &mut App) -> Vec<Entity> {
+    let prism = mapped_box_trimesh(|corner| {
+        Vec3::new(
+            3.0 * corner.x,
+            4.0 * corner.x + 0.5 * corner.y + 0.5,
+            0.5 * corner.z,
+        )
+    });
+    vec![mesh_volume(app, prism, Transform::IDENTITY)]
+}
+
+/// The grazed prism's start and its certification direction, which runs along the lower face.
+const GRAZED_START: Vec3 = Vec3::new(0.0, 1.0 / 67_108_864.0, 0.0);
+const GRAZED_SWEPT: Vec3 = Vec3::new(0.6, 0.8, 0.0);
+
+/// A START IS CERTIFIED ON THE RAY ITS RESUMED CORRIDOR CASTS, OR NOT AT ALL.
+///
+/// The certification direction runs along the prism's lower face, so membership is decided by which
+/// side of that face the start's own line lies, at the scale of the start's last bits. A probe line
+/// formed metres behind the start rounds those bits away and reads a parallel line outside the
+/// prism; the corridor resumed along `(0.6, 0.799999, 0)` then meets the lower face's exit (DERIVED:
+/// ~15 mm ahead) with no entry owned, `UnexpectedExit`. The certificate must either read the start
+/// inside, with the resumed corridor pairing, or refuse with a structured error. One axis sample.
+///
+/// It refuses today: the start's own line crosses the lower face transversely in exact arithmetic,
+/// but the walk reads that crossing's orientation as a tangent and drops it (see
+/// [`a_crossing_the_collector_admits_is_never_read_as_a_tangent`]), so the probe does not close.
+#[test]
+fn a_start_is_certified_on_the_ray_its_corridor_resumes_along() {
+    let (mut app, built) = settled(grazed_prism);
+    let launch = Vec3::new(0.6, 0.799_999, 0.0).normalize();
+    match certified_then_resumed(&mut app, GRAZED_START, GRAZED_SWEPT, launch, 0.0) {
+        Ok((starts, walked)) => {
+            walked.unwrap_or_else(|error| panic!("the resumed corridor failed: {error:?}"));
+            assert_eq!(
+                inside_volumes(&starts.seeds[0]),
+                built,
+                "a certified start lies inside the prism",
+            );
+        }
+        Err(error) => assert!(
+            !matches!(
+                error,
+                WalkError::UnexpectedExit { .. } | WalkError::UnexpectedEntry { .. }
+            ),
+            "a refused certificate is a closure or ceiling refusal, never a pairing violation: \
+             {error:?}",
+        ),
+    }
+}
+
+/// A START A HAIR INSIDE A GRAZED FACE IS CERTIFIED INSIDE IT.
+///
+/// The grazed prism, certified one f32 step off the lower face's own direction, `(0.6000001, 0.8,
+/// 0)`: the start's line still runs within a micron of the face across the whole prism, now
+/// crossing it transversely (DERIVED: ~0.15 m ahead of the start), and its orientation survives
+/// f32. A probe line formed metres behind the start loses the start's `2⁻²⁶` and crosses the face
+/// behind it instead, reading the start outside; the corridor resumed along the same direction then
+/// meets the exit with no entry owned. Read on the start's own line, the start is inside and the
+/// resumed corridor pairs.
+#[test]
+fn a_start_a_hair_inside_a_grazed_face_is_certified_inside_it() {
+    let (mut app, built) = settled(grazed_prism);
+    let swept = Vec3::new(0.600_000_1, 0.8, 0.0);
+    let starts = resumed(&mut app, GRAZED_START, swept, swept, 0.0);
+    assert_eq!(
+        inside_volumes(&starts.seeds[0]),
+        built,
+        "the start lies inside the prism",
+    );
+}
+
+/// A CROSSING THE COLLECTOR ADMITS IS NEVER READ AS A TANGENT.
+///
+/// The collector admits a triangle whenever the exact crossing determinant is non-zero, but the
+/// walk (`walk::canonical_crossings`) signs it by the f32 dot of the axis with the face's normalized
+/// normal, and drops it as a tangent when that dot is exactly zero. Along `(0.6, 0.8, 0)` in f32 the
+/// prism's lower-face normal `(0.8, −0.6, 0)` dots to exactly zero, while the exact determinant does
+/// not vanish (DERIVED: `0.6f·8 − 0.8f·6 ≈ 1.2e-7`), so the start's own line exits through that face
+/// and the walk never sees the exit: the probe ends with the prism open, `IncompleteCorridor`.
+#[test]
+#[ignore = "open defect: a transverse crossing's orientation is read from an f32 dot that can \
+            cancel to zero, so the walk drops a crossing the collector admitted; the certificate \
+            fails closed on it"]
+fn a_crossing_the_collector_admits_is_never_read_as_a_tangent() {
+    let (mut app, built) = settled(grazed_prism);
+    let starts = resumed(&mut app, GRAZED_START, GRAZED_SWEPT, GRAZED_SWEPT, 0.0);
+    assert_eq!(inside_volumes(&starts.seeds[0]), built);
+}
+
+/// A START ON A FACE ITS RAY RUNS ALONG RESUMES CONSISTENTLY, WHICHEVER WAY THE FLIGHT BENDS.
+///
+/// Fixture data: a unit cube at the origin and a start on its top face `z = 0.5`, certified along
+/// `+X`, so every top-face triangle is coplanar with the probe and claims nothing; the probe meets
+/// the end faces at their top edges. The boundary convention reads the start inside, and the
+/// corridor resumed from it must pair straight on, bent up out of the face, and bent down into the
+/// cube.
+#[test]
+fn a_start_on_a_face_along_its_ray_resumes_consistently() {
+    let (mut app, built) = settled(|app| {
+        vec![mesh_volume(
+            app,
+            box_trimesh(Vec3::ONE),
+            Transform::IDENTITY,
+        )]
+    });
+    let at = Vec3::new(0.0, 0.1, 0.5);
+    for launch in [
+        Vec3::X,
+        Vec3::new(1.0, 0.0, 0.1).normalize(),
+        Vec3::new(1.0, 0.0, -0.1).normalize(),
+    ] {
+        let starts = resumed(&mut app, at, Vec3::X, launch, 0.0);
+        assert_eq!(
+            inside_volumes(&starts.seeds[0]),
+            built,
+            "the start on the face reads inside the cube",
+        );
+    }
+}
+
+/// A START INSIDE NESTED VOLUMES IS INSIDE EACH OF THEM, PER KEY.
+///
+/// Fixture data: a 0.5 m trimesh cube inside a 1 m convex cube inside a 2 m trimesh cube, all at the
+/// origin, and a full disc laid at the origin along a general direction. Every sample is inside all
+/// three, and the corridor resumed from the starts pairs every exit.
+#[test]
+fn a_start_inside_nested_volumes_is_inside_each() {
+    let (mut app, mut built) = settled(|app| {
+        let convex = app
+            .world_mut()
+            .spawn((
+                Transform::IDENTITY,
+                RigidBody::Static,
+                Collider::cuboid(1.0, 1.0, 1.0),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                    substance: "fixture".to_string(),
+                },
+            ))
+            .id();
+        vec![
+            mesh_volume(app, box_trimesh(Vec3::splat(2.0)), Transform::IDENTITY),
+            convex,
+            mesh_volume(app, box_trimesh(Vec3::splat(0.5)), Transform::IDENTITY),
+        ]
+    });
+    built.sort();
+    let axis = Vec3::new(0.3, -0.2, 0.9).normalize();
+    let starts = resumed(&mut app, Vec3::ZERO, axis, axis, disc_radius(ROUND.caliber));
+    assert_eq!(starts.seeds.len(), 1 + walk::DEFAULT_RING);
+    for seed in &starts.seeds {
+        assert_eq!(
+            inside_volumes(seed),
+            built,
+            "sample {} is inside both nested volumes",
+            seed.sample,
+        );
+    }
 }

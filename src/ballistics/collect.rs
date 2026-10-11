@@ -86,6 +86,14 @@ pub(crate) struct Corridor<'a> {
     /// Unit travel direction.
     pub axis: Vec3,
     pub length: f32,
+    /// Metres of the same line BEHIND [`origin`](Self::origin) the corridor also covers: it spans
+    /// `[−behind, length − behind)` of the line through `origin` along `axis`, and every reported
+    /// `t` is measured from `origin − axis · behind`. The line is still formed at `origin`, in the
+    /// arithmetic a corridor starting there runs, so every crossing is decided on the very line such
+    /// a corridor casts. Zero for a sweep; the containment probe (`resolve::certified`) reaches back
+    /// from the start it certifies this way, never from an origin re-formed metres behind it, whose
+    /// rounding would move the line off the start.
+    pub behind: f32,
     /// Shells this ray was declared to START inside.
     ///
     /// Honors the core's `(open, close]` seed contract from the driving side ([`admit_shell`]):
@@ -186,6 +194,7 @@ pub(crate) fn collect(
                     local_origin,
                     local_axis,
                     corridor.length,
+                    corridor.behind,
                     node,
                     primitive,
                     surfaces,
@@ -280,6 +289,9 @@ fn collect_trimesh(
     origin: Vec3,
     axis: Vec3,
     length: f32,
+    // [`Corridor::behind`]: the line is formed at `origin`, and `t` is reported from `behind`
+    // metres back along it.
+    behind: f32,
     node: Entity,
     primitive: Entity,
     surfaces: &BallisticSurfaces,
@@ -298,9 +310,10 @@ fn collect_trimesh(
     // prune cannot change WHICH crossings exist either way — PROVIDED it is grown by
     // [`sitting_reach`], because a box tested with a bare inequality has its own exact boundary, and
     // an origin one ULP past the face lands on the wrong side of it.
-    let far = origin + axis * length;
-    let lo = origin.min(far) - Vec3::splat(reach);
-    let hi = origin.max(far) + Vec3::splat(reach);
+    let near = origin - axis * behind;
+    let far = origin + axis * (length - behind);
+    let lo = near.min(far) - Vec3::splat(reach);
+    let hi = near.max(far) + Vec3::splat(reach);
     let shear = RayShear::new(origin, axis);
     // Every claim at its RAW `t`; the seed contract is applied per shell once all are in.
     let mut claims: Vec<(FaceHit, bool)> = Vec::new();
@@ -330,6 +343,12 @@ fn collect_trimesh(
             &surfaces.corners[index as usize],
             &claim,
         );
+        // A sweep's parameters pass through bit for bit, signed zero included.
+        let t = if behind == 0.0 {
+            t
+        } else {
+            t + f64::from(behind)
+        };
         if !t.is_finite() || t >= length as f64 {
             continue;
         }
@@ -413,6 +432,10 @@ fn collect_trimesh(
 /// Normals are re-signed from the geometry (`entry opposes the ray, exit agrees`), which for a
 /// convex solid is exact and owes parry's normal convention nothing.
 ///
+/// A probe ([`Corridor::behind`]) passes THROUGH its origin rather than starting there, so it casts
+/// from the origin both ways: whether the origin is inside is the same `solid: true` reading a
+/// corridor starting there makes, and an origin inside must find both boundaries within the probe.
+///
 /// # Inside, undeclared, and unbounded is an ERROR
 ///
 /// A corridor can lie wholly INSIDE a convex solid: both `solid: true` probes answer zero, the
@@ -455,33 +478,8 @@ fn collect_convex(
     // sandbox slabs, no production armour takes this path, and its own boundary probe already looks
     // a millimetre behind the origin — four orders more slack than the rounding could ever be.
     let world_origin = corridor.anchor + corridor.origin;
-    // Both ends are probed with `solid: true`, and that is the whole trick.
-    //
-    // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot distinguish
-    // "began inside" from "grazed an edge" (entry and exit coincide out at distance), and it answers
-    // for the wrong face whenever a cast origin lands exactly ON a surface, which the corridor's own
-    // endpoints do constantly because they ARE face positions a previous walk computed. `solid: true`
-    // answers one unambiguous question instead: zero if the origin is within, otherwise the distance
-    // to the nearest surface.
-    let entry = collider.cast_ray(
-        position,
-        rotation,
-        world_origin,
-        Vec3::from(axis),
-        corridor.length,
-        true,
-    );
-    let far = world_origin + corridor.axis * corridor.length;
-    let exit = collider.cast_ray(
-        position,
-        rotation,
-        far,
-        -Vec3::from(axis),
-        corridor.length,
-        true,
-    );
 
-    // Each boundary at its RAW `t`; the seed contract is applied once both are in.
+    // Each boundary at its RAW `t`; the seed contract is applied once all are in.
     let mut found: Vec<(Boundary, FaceHit)> = Vec::new();
     let mut push = |t: f64, normal: Vec3, entry: bool, face: u32| {
         // Re-sign from the role, not from what the query returned.
@@ -506,55 +504,105 @@ fn collect_convex(
             },
         ));
     };
+    let cast = |from: Vec3, direction: Vec3, reach: f32, solid: bool| {
+        collider.cast_ray(position, rotation, from, direction, reach, solid)
+    };
 
-    match entry {
-        // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
-        // origin lands on a face constantly, and that face is the one the ray is sitting on. Anything
-        // deeper than this probe is not: that sample should have been seeded, and if it was not, the
-        // walk says so rather than this papering over it.
-        //
-        // The trimesh path needs none of this — its own kernel reports faces at negative `t`, and
-        // `admit` places them.
-        Some((distance, _)) if distance <= 0.0 => {
-            if !seeded {
-                match collider.cast_ray(
-                    position,
-                    rotation,
-                    world_origin,
-                    -Vec3::from(axis),
-                    BOUNDARY_PROBE,
+    if corridor.behind > 0.0 {
+        // A probe through `world_origin`. Whether that point is inside is read by casts LEAVING it,
+        // the test a corridor starting there makes first; the interval's far boundaries come from
+        // casts re-formed at the probe's ends, outside the solid, where rounding moves no
+        // membership.
+        let behind = corridor.behind;
+        let ahead = corridor.length - behind;
+        let started_inside = |cast: Option<(f32, Vec3)>| cast.is_some_and(|(at, _)| at <= 0.0);
+        let forward = cast(world_origin, Vec3::from(axis), ahead, true);
+        let backward = cast(world_origin, -Vec3::from(axis), behind, true);
+        if started_inside(forward) || started_inside(backward) {
+            let (Some((entry, entry_normal)), Some((exit, exit_normal))) = (
+                cast(world_origin, -Vec3::from(axis), behind, false),
+                cast(world_origin, Vec3::from(axis), ahead, false),
+            ) else {
+                return Err(WalkError::CollectorFailed {
+                    volume: node,
+                    reason: "a probe through a convex volume does not reach its boundary",
+                });
+            };
+            push(f64::from(behind) - f64::from(entry), entry_normal, true, 0);
+            push(f64::from(behind) + f64::from(exit), exit_normal, false, 1);
+        } else if let Some((entry, entry_normal)) = forward {
+            push(f64::from(behind) + f64::from(entry), entry_normal, true, 0);
+            let far = world_origin + corridor.axis * ahead;
+            if let Some((exit, exit_normal)) = cast(far, -Vec3::from(axis), ahead, true) {
+                push(
+                    f64::from(corridor.length) - f64::from(exit),
+                    exit_normal,
                     false,
-                ) {
-                    // At `t = 0` deliberately, NOT at `-behind`. This phase has already made the
-                    // "sitting on the face" judgement itself, and BOUNDED it: the probe reaches one
-                    // `BOUNDARY_PROBE` and no further, so nothing farther behind can arrive here at
-                    // all. `admit`'s clamp is the trimesh phase's bound, where no such probe limits
-                    // how far back a sloped face may be found.
-                    Some((_, normal)) => push(0.0, normal, true, 0),
-                    // Inside, undeclared, and the entry face is nowhere near — see the note above.
-                    // Silence here is free penetration, so this is where it stops.
-                    None => {
-                        return Err(WalkError::CollectorFailed {
-                            volume: node,
-                            reason: "a sample begins inside a convex volume it was not seeded for, \
-                                     with no entry face within the boundary probe",
-                        });
+                    1,
+                );
+            }
+        } else if let Some((exit, exit_normal)) = backward {
+            let near = world_origin - corridor.axis * behind;
+            if let Some((entry, entry_normal)) = cast(near, Vec3::from(axis), behind, true) {
+                push(f64::from(entry), entry_normal, true, 0);
+            }
+            push(f64::from(behind) - f64::from(exit), exit_normal, false, 1);
+        }
+    } else {
+        // Both ends are probed with `solid: true`, and that is the whole trick.
+        //
+        // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot
+        // distinguish "began inside" from "grazed an edge" (entry and exit coincide out at
+        // distance), and it answers for the wrong face whenever a cast origin lands exactly ON a
+        // surface, which the corridor's own endpoints do constantly because they ARE face positions
+        // a previous walk computed. `solid: true` answers one unambiguous question instead: zero if
+        // the origin is within, otherwise the distance to the nearest surface.
+        let entry = cast(world_origin, Vec3::from(axis), corridor.length, true);
+        let far = world_origin + corridor.axis * corridor.length;
+        let exit = cast(far, -Vec3::from(axis), corridor.length, true);
+
+        match entry {
+            // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
+            // origin lands on a face constantly, and that face is the one the ray is sitting on.
+            // Anything deeper than this probe is not: that sample should have been seeded, and if it
+            // was not, the walk says so rather than this papering over it.
+            //
+            // The trimesh path needs none of this — its own kernel reports faces at negative `t`,
+            // and `admit` places them.
+            Some((distance, _)) if distance <= 0.0 => {
+                if !seeded {
+                    match cast(world_origin, -Vec3::from(axis), BOUNDARY_PROBE, false) {
+                        // At `t = 0` deliberately, NOT at `-behind`. This phase has already made
+                        // the "sitting on the face" judgement itself, and BOUNDED it: the probe
+                        // reaches one `BOUNDARY_PROBE` and no further, so nothing farther behind can
+                        // arrive here at all. `admit`'s clamp is the trimesh phase's bound, where no
+                        // such probe limits how far back a sloped face may be found.
+                        Some((_, normal)) => push(0.0, normal, true, 0),
+                        // Inside, undeclared, and the entry face is nowhere near — see the note
+                        // above. Silence here is free penetration, so this is where it stops.
+                        None => {
+                            return Err(WalkError::CollectorFailed {
+                                volume: node,
+                                reason: "a sample begins inside a convex volume it was not seeded \
+                                         for, with no entry face within the boundary probe",
+                            });
+                        }
                     }
                 }
             }
+            Some((distance, normal)) => push(distance as f64, normal, true, 0),
+            None => {}
         }
-        Some((distance, normal)) => push(distance as f64, normal, true, 0),
-        None => {}
-    }
 
-    match exit {
-        // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
-        // defect class: the walk reports `IncompleteCorridor` and the driver extends.
-        Some((distance, _)) if distance <= 0.0 => {}
-        Some((distance, normal)) => {
-            push(corridor.length as f64 - distance as f64, normal, false, 1)
+        match exit {
+            // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
+            // defect class: the walk reports `IncompleteCorridor` and the driver extends.
+            Some((distance, _)) if distance <= 0.0 => {}
+            Some((distance, normal)) => {
+                push(corridor.length as f64 - distance as f64, normal, false, 1)
+            }
+            None => {}
         }
-        None => {}
     }
     found.sort_by(|a, b| a.0.t.total_cmp(&b.0.t));
     let boundaries: Vec<Boundary> = found.iter().map(|(boundary, _)| *boundary).collect();
@@ -1249,6 +1297,7 @@ mod tests {
             origin,
             axis,
             length,
+            0.0,
             node,
             node,
             &surfaces,

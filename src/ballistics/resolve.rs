@@ -265,6 +265,13 @@ const PROBE_MARGIN: f32 = MARCH_EPS;
 /// hand-off clamp already share: a face within rounding of a start is left to the corridor that
 /// sweeps from it.
 ///
+/// The probe is formed AT each start and reaches back from it ([`Corridor::behind`]): its line is
+/// built from `anchor = at` and `origin = offset`, the very values the returned starts hold and the
+/// corridor resumed from them casts with, so certification and resumption decide every crossing on
+/// one line in one arithmetic. A probe origin re-formed metres behind the start would round the
+/// start's low bits away, and a face the ray runs along would then be read on the wrong side of a
+/// start it lies within rounding of.
+///
 /// Certified for the two shapes the collector reads honestly: a trimesh carrying its manifold
 /// certificate, and a convex solid. Any other shape is [`WalkError::UncertifiedStart`], as is a
 /// probe longer than [`MAX_CORRIDOR`]; every structured error fails the round closed.
@@ -338,16 +345,16 @@ pub(crate) fn certified(
         });
     }
 
-    let origin = -axis * behind;
     let mut samples = Vec::with_capacity(offsets.len());
     for offset in offsets {
         let mut hits = Vec::new();
         collect::collect(
             &Corridor {
                 anchor: at,
-                origin: origin + offset,
+                origin: offset,
                 axis,
                 length,
+                behind,
                 seeded: &[],
                 handoff: None,
                 laws: &context.laws,
@@ -364,7 +371,7 @@ pub(crate) fn certified(
     }
     let probe = DiscCorridor {
         anchor: at,
-        origin,
+        origin: -axis * behind,
         axis,
         length,
         radius,
@@ -1047,6 +1054,7 @@ pub(super) fn build_corridor(
                 origin: origin + offset,
                 axis,
                 length,
+                behind: 0.0,
                 seeded,
                 handoff: seed.map(|seed| seed.t),
                 laws: &context.laws,
