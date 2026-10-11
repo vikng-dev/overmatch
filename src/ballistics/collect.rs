@@ -575,24 +575,31 @@ struct Boundary {
 /// Admit one shell's boundaries, in order along the ray, against its seed: where each lands in this
 /// corridor, or `None` when it is not this corridor's.
 ///
-/// The seed declares whether the sample starts inside the shell. Walking the boundaries in order
-/// with that state as it stands, a boundary that would RESTATE it — an entry while inside, an exit
-/// while outside — within [`sitting_reach`] of the origin is the one the previous walk crossed at
-/// the hand-off, and is dropped ([`admit`]). Every admitted boundary moves the state, so an exit
-/// that follows an admitted entry inside the band is that entry's own exit, never the seed's: a
-/// finite interval lying wholly inside the band keeps both ends, and so does an exit followed by a
-/// re-entry.
+/// The seed accounts for exactly ONE boundary: the one the previous walk crossed at the hand-off
+/// (the entry of a seeded shell, the exit of an unseeded one). Before the first admitted transition
+/// the sample is in the seed's state, and the first boundary that restates it within
+/// [`sitting_reach`] of the origin is that one, and is dropped ([`admit`]). Nothing else is ever
+/// dropped for restating a state: from the first admitted transition, or once the seed's boundary is
+/// consumed, every forward boundary is the corridor's and goes to the core, whose parity check names
+/// a repeated entry (`UnexpectedEntry`) or a repeated exit (`UnexpectedExit`). Suppressing those by
+/// the evolving state instead would turn an unrepresentable sequence into a shorter valid chord and
+/// charge it as such. A finite interval lying wholly inside the band keeps both ends, and so does an
+/// exit followed by a re-entry: both follow the seed's state, never restate it.
 ///
 /// A tangent bounds no material; it is placed by position alone and moves nothing.
 fn admit_shell(boundaries: &[Boundary], length: f32, seeded: bool, reach: f32) -> Vec<Option<f64>> {
-    let mut inside = seeded;
+    // The seed's own boundary may still be met: no transition admitted, and none dropped as the
+    // seed's.
+    let mut owed = true;
     boundaries
         .iter()
         .map(|boundary| match boundary.entry {
             Some(entry) => {
+                let inside = if owed { seeded } else { !entry };
                 let admitted = admit(boundary.t, length, entry, inside, reach);
-                if admitted.is_some() {
-                    inside = entry;
+                let seed_owned = entry == seeded && boundary.t.abs() <= reach as f64;
+                if owed && (admitted.is_some() || seed_owned) {
+                    owed = false;
                 }
                 admitted
             }
@@ -603,7 +610,8 @@ fn admit_shell(boundaries: &[Boundary], length: f32, seeded: bool, reach: f32) -
 
 /// Whether one crossing at `t` belongs to this corridor, and where. `entry` is the face's
 /// orientation (inward along the ray); `inside` whether the sample is inside the face's shell just
-/// before it — the seed, for a shell's first boundary, carried on by [`admit_shell`].
+/// before it — the seed while [`admit_shell`] still owes the seed's boundary, otherwise the state
+/// this boundary changes.
 ///
 /// Within `reach` of the origin, IN EITHER DIRECTION, that state decides which boundary the
 /// corridor still owes:
@@ -1493,6 +1501,113 @@ mod tests {
             admit_shell(&boundaries, 0.5, true, reach),
             vec![Some(2.0e-6), Some(5.0e-6)],
             "the exit and the re-entry that follows it are both counted",
+        );
+    }
+
+    /// A REPEATED ENTRY OR EXIT INSIDE THE BAND FAILS LOUDLY; ADMISSION NEVER REPAIRS IT.
+    ///
+    /// The seed owns one boundary. Four distinct contacts of one shell ordered entry, entry, exit,
+    /// exit wholly inside the hand-off band are not a closed shell crossed transversely, and neither
+    /// is exit, exit after a seeded start: whatever admission drops, the core must still see the
+    /// repeat. Dropping each boundary that restates the evolving state leaves one entry and one exit
+    /// — a shorter valid chord charged in place of a topology error.
+    #[test]
+    fn a_repeated_boundary_inside_the_hand_off_band_fails_loudly() {
+        use super::super::walk::{RayCorridor, VolumeTable, walk_ray};
+
+        let laws = WalkLaws::default();
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let reach = sitting_reach(Some(10.0), Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO, &laws);
+        let micron = 1.0e-6;
+        assert!(
+            reach as f64 > 5.0 * micron,
+            "the fixture sits inside the band: {reach:e}"
+        );
+        let walked = |pattern: &[bool], seeded: bool| {
+            let boundaries: Vec<Boundary> = pattern
+                .iter()
+                .enumerate()
+                .map(|(index, &entry)| Boundary {
+                    t: (index + 1) as f64 * micron,
+                    entry: Some(entry),
+                })
+                .collect();
+            let admitted = admit_shell(&boundaries, 0.5, seeded, reach);
+            let hits: Vec<FaceHit> = boundaries
+                .iter()
+                .zip(&admitted)
+                .enumerate()
+                .filter_map(|(index, (boundary, admitted))| {
+                    admitted.map(|t| FaceHit {
+                        volume: node,
+                        primitive: node,
+                        shell: 0,
+                        contact: Contact::Face(index as u32),
+                        triangle: index as u32,
+                        t,
+                        true_normal: if boundary.entry == Some(true) {
+                            Vec3::Z
+                        } else {
+                            Vec3::NEG_Z
+                        },
+                    })
+                })
+                .collect();
+            let key = ShellKey {
+                volume: node,
+                primitive: node,
+                shell: 0,
+            };
+            (
+                admitted,
+                walk_ray(
+                    0,
+                    &RayCorridor {
+                        anchor: Vec3::ZERO,
+                        origin: Vec3::ZERO,
+                        axis: Vec3::NEG_Z,
+                        length: 0.5,
+                        initial_presence: if seeded { vec![key] } else { Vec::new() },
+                        hits,
+                    },
+                    &VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+                    &laws,
+                ),
+            )
+        };
+
+        let (admitted, walk) = walked(&[true, true, false, false], false);
+        assert_eq!(
+            admitted.iter().filter(|t| t.is_some()).count(),
+            4,
+            "every boundary of an unseeded repeated entry reaches the core: {admitted:?}",
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedEntry { .. })),
+            "the repeated entry is named: {walk:?}",
+        );
+
+        let (admitted, walk) = walked(&[false, false], true);
+        assert_eq!(
+            admitted.iter().filter(|t| t.is_some()).count(),
+            2,
+            "both exits of a seeded sample reach the core: {admitted:?}",
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedExit { .. })),
+            "the repeated exit is named: {walk:?}",
+        );
+
+        // Unseeded, the seed owns the first exit and nothing after it.
+        let (admitted, walk) = walked(&[false, false], false);
+        assert_eq!(
+            admitted,
+            vec![None, Some(2.0 * micron)],
+            "the seed owns one exit, not two"
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedExit { .. })),
+            "the second exit is named: {walk:?}",
         );
     }
 
