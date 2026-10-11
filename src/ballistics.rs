@@ -5299,7 +5299,7 @@ mod march_tests {
     /// A PERFORATION'S SEEDS AND THE NEXT CORRIDOR DESCRIBE ONE POINT, ANYWHERE ON THE MAP.
     ///
     /// After a perforation the march resumes one [`MARCH_EPS`] past the exit, carrying which
-    /// primitives each sample is inside there ([`resolve::Crossing::seeds`]). The seed was read on
+    /// primitives each sample is inside there ([`resolve::Interior::seeds`]). The seed was read on
     /// the transit corridor's own anchor-relative ray; the next corridor must start from that same
     /// point. A resume point rebuilt in world f32 is quantized at the world's own spacing —
     /// 2.44e-4 m past 2048 m, DERIVED — so an entry face that close to the resumption plane is

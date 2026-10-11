@@ -1,18 +1,17 @@
-//! The §13 union walk, driven against the live world — what replaced the serial resolver.
+//! The §13 union walk, driven against the live world.
 //!
-//! The old `resolve_armor_crossing` resolved ONE volume at a time and probed ahead restricted to the
-//! struck entity, so an overlapping or exactly-abutting neighbour was entered from inside, its exit
-//! probe found nothing, and it was crossed at zero cost (§13.1's table). Nothing here is
-//! entity-restricted and nothing defaults to zero: a corridor is collected, the union field is
-//! integrated over everything in it, and every failure is loud.
+//! Nothing here is entity-restricted and nothing defaults to zero: a corridor is collected, the
+//! union field is integrated over everything in it, and every failure is loud. A collection
+//! restricted to the struck entity would enter an overlapping or abutting neighbour from inside,
+//! find no exit for it, and cross it at zero cost (§13.1's table).
 //!
 //! # The atomic resolution corridor
 //!
 //! §13.4's walk is defined over a corridor that CLOSES — one that contains the whole crossing plus
 //! enough clear space past it to prove no ε-weld reaches further. So the driver does not stop at the
 //! tick's travel budget: it collects from first contact, and if the walk reports
-//! [`WalkError::IncompleteCorridor`] it EXTENDS and re-collects, up to the 50 m ceiling the serial
-//! resolver's own `PROBE` already set. It never synthesizes the missing exit. That choice is what
+//! [`WalkError::IncompleteCorridor`] it EXTENDS and re-collects, up to [`MAX_CORRIDOR`]. It never
+//! synthesizes the missing exit. That choice is what
 //! keeps continuation state out of the resolver — the only thing that survives a crossing is which
 //! primitives the disc is still inside, and that is a lookup on rays already walked
 //! ([`DiscWalk::resume_at`]), never an inference.
@@ -46,9 +45,8 @@ mod tests;
 /// driver extends when they do not, so this is a starting guess, not a limit.
 const ENTRANCE_SPAN: f32 = 0.5;
 
-/// Ceiling on corridor extension — carried verbatim from the serial resolver's `PROBE`, which probed
-/// this far ahead for a single plate's far face. A crossing that has not closed in 50 m of material
-/// is not a crossing.
+/// Ceiling on corridor extension. A crossing that has not closed in 50 m of material is not a
+/// crossing.
 const MAX_CORRIDOR: f32 = 50.0;
 
 /// Below this calibre the disc degenerates to its axis (`k = 1`).
@@ -58,12 +56,12 @@ const MAX_CORRIDOR: f32 = 50.0;
 /// Paying twelve extra casts to sample a 4 mm disc buys nothing, and the machine-gun is the round we
 /// fire by the beltful.
 ///
-/// The 20 mm VALUE is arbitrary (Yan, 2026-08-07) — it sits above every round currently fired
-/// beltwise and below every cannon shell, and nothing was tuned finer than that. Revisit when
-/// higher-caliber automatic weapons or autocannons with a high fire rate arrive: they cross or
-/// crowd the threshold, and a sub-threshold round resolves as a zero-width line that can thread
-/// gaps narrower than the real projectile. Cost basis for the revisit (M4, 2026-08-07, branch
-/// `bench/disc-min-caliber`): 40 / 177 / 400 µs per impact at k = 1 / 5 / 13; free flight is
+/// The 20 mm VALUE is arbitrary — it sits above every round currently fired beltwise and below
+/// every cannon shell, and nothing was tuned finer than that. Revisit when higher-caliber automatic
+/// weapons or autocannons with a high fire rate arrive: they cross or crowd the threshold, and a
+/// sub-threshold round resolves as a zero-width line that can thread gaps narrower than the real
+/// projectile. Cost basis for the revisit, MEASURED on the M4 (branch `bench/disc-min-caliber`):
+/// 40 / 177 / 400 µs per impact at k = 1 / 5 / 13; free flight is
 /// k-independent. Precondition: the degenerate-bake volumes on the fuzzer residue list — a ring
 /// samples 13× more surface, so fail-closed impacts scale ~4% → 14% with k on today's asset.
 pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
@@ -86,9 +84,9 @@ pub(crate) struct Crossing {
     /// round flies from the corridor origin to the AXIS handoff along the incoming direction, and
     /// from there to the exit along the BENT one. The driver knows only where its cast first touched
     /// armour — the nearest of k sample rays — and at oblique incidence that ray leads the axis by
-    /// `r·tan(incidence)`, which is 135 mm for an 88 at 72°. Charging to it skipped the approach and
-    /// handed the round that much free travel inside the same tick, which moves subsequent impacts
-    /// across tick and REV-25 accounting boundaries.
+    /// `r·tan(incidence)` — DERIVED: 135 mm for an 88 at 72° (`0.044 m × tan 72°`). Charging to it
+    /// skips the approach and hands the round that much free travel inside the same tick, which
+    /// moves subsequent impacts across tick accounting boundaries.
     ///
     /// The disc lift a ricochet resumes on is deliberately NOT counted: it is a repositioning of the
     /// body clear of the face it bounced off, not distance the round flew.
@@ -469,7 +467,7 @@ pub(super) fn volume_table(
 }
 
 /// The bounce: deflect off `n̄`, no entry, no spall (§4). The deflection ANGLE and the bleed both
-/// already carry η from the core (§13.5, ruled 2026-08-07) — a graze is a partial ricochet in
+/// already carry η from the core (§13.5) — a graze is a partial ricochet in
 /// direction as well as in speed.
 #[expect(
     clippy::too_many_arguments,
@@ -589,9 +587,11 @@ fn perforate_or_embed(
 ) -> Crossing {
     let mut damage = 0.0;
     let plan_entrance = plan.entrance;
-    // THE BOUNDARY. Everything the walk reports is anchor-relative; everything leaving this function
-    // — impacts, marks, impulse application points, the march's own resume — is world. One place to
-    // convert, so no other code has to know which frame it is holding.
+    // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves this function for
+    // presentation and physics — impacts, marks, impulse application points, the perforation's exit
+    // — is converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
+    // anchor-relative: it is the next corridor's input, and rebuilding it in world would round it
+    // at the world's spacing (see there).
     let world = |local: Vec3| transit.anchor + local;
     let entrance_position = world(plan_entrance.position);
     let struck = transit.events[0].entrance_volume;
@@ -659,8 +659,8 @@ fn perforate_or_embed(
             shell.path.points.push(exit);
 
             // Spall at every downward field step the round reached, including the exit (§13.2's
-            // field law; the "one spall per welded run" reading was superseded 2026-08-07). Each
-            // mark carries its own already-η-weighted budget.
+            // field law), not once per welded run. Each mark carries its own already-η-weighted
+            // budget.
             for mark in &plan.spall {
                 damage += throw_spall_burst(
                     shell.spall,
