@@ -637,6 +637,10 @@ impl Drive {
     /// THE ADMISSION RULE: some crossing put a positive chord into `target` before the round
     /// stopped. Deposits are clipped at the embed progress, so a round that dies short of the target
     /// never reaches it, however close.
+    ///
+    /// TRANSIT DEPOSITS ONLY. The runtime also removes HP through a bounce's shock and through spall
+    /// fragments (`resolve::apply`); neither puts the round's own chord into the volume, and neither
+    /// is observed here.
     pub(super) fn reaches(&self, target: Entity) -> bool {
         self.entered().any(|entity| entity == target)
     }

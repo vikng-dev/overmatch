@@ -23,7 +23,8 @@
 //! [`apply`] carries the runtime's consequences out of it (HP, impulses, marks, spall, events), and
 //! [`Flight::follow`] advances the flight to where the next crossing starts. The runtime march and
 //! the §13.6 gate (`fuzz`) both drive successive crossings through exactly this state machine; the
-//! gate observes the decisions and applies nothing.
+//! gate observes the decisions and applies nothing. The seam is not yet complete: spall fragments
+//! are resolved in [`apply`], not decided (see there).
 //!
 //! # Fail closed, never free
 //!
@@ -851,8 +852,12 @@ pub(super) fn volume_table(
 /// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
 /// and the impact and authority events. Returns the HP actually removed.
 ///
-/// Nothing here decides anything: every quantity comes out of the [`Decision`], so the §13.6 gate,
-/// which observes the same decisions and applies none of this, reads the outcome the runtime acts on.
+/// Transit deposits, a bounce's shock, the impulses and the events all come out of the
+/// [`Decision`]. Spall does NOT: the decision carries each spall source and its budget, but the
+/// fragment count, their directions and what each fragment hits and deposits are resolved here,
+/// against the live world ([`throw_spall_burst`]). So the §13.6 gate, which observes the decisions
+/// and applies none of this, reads every transit deposit and every bounce the runtime acts on, and
+/// no fragment's HP. Resolving fragments into the decision is step C's work.
 pub(crate) fn apply(
     decision: &Decision,
     shell: &mut MarchingShell,

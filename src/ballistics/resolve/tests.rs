@@ -215,13 +215,20 @@ fn every_entry_is_owned_once_across_the_hand_off() {
 
 use crate::ballistics::fuzz::{self, Drive};
 use crate::ballistics::march_tests::{FIXTURE_88, FIXTURE_MG, spawn_round};
-use crate::ballistics::{ComponentHealth, Verdict, advance_shell, drag_k};
+use crate::ballistics::{
+    ComponentHealth, RetainSpentShells, SpallMarks, Verdict, advance_shell, drag_k,
+};
 
 /// The fixture tick the plate worlds step by (`march_tests::plate_world`'s manual 16 ms).
 const DT: f32 = 0.016;
 /// Where every shot of this section starts: straight above the geometry, falling, so gravity and
 /// drag change the speed but never the direction, and the gate's straight flight is the runtime's.
 const DROP_FROM: Vec3 = Vec3::new(0.1, 3.0, -0.2);
+
+/// The top of a target out of reach of every spall fragment thrown from a plate at `y = 1`: 6.5 m
+/// below it, past the 6 m a fragment flies (`throw_spall_burst`'s range). Fixture data; each
+/// arrangement also asserts that no fragment deposited ([`Agreement::transit_only`]).
+const PAST_SPALL: f32 = -5.5;
 
 /// Every impact the runtime fired, as `(verdict, position)`.
 #[derive(Resource, Default)]
@@ -296,11 +303,19 @@ fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz:
         .expect("the driver system runs")
 }
 
-/// The runtime's side: one tick of the real march, read back as impacts.
-fn marched(app: &mut App, body: RoundBody, speed: f32) -> Vec<(Verdict, Vec3)> {
-    spawn_round(app, body, DROP_FROM, Vec3::NEG_Y * speed);
+/// The runtime's side: one tick of the real march, read back as impacts, and whether any spall
+/// fragment the round threw deposited HP.
+fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>, bool) {
+    let shell = spawn_round(app, body, DROP_FROM, Vec3::NEG_Y * speed);
     app.update();
-    app.world().resource::<Read>().0.clone()
+    let fragments = app.world().get::<SpallMarks>(shell).is_some_and(|marks| {
+        marks
+            .bursts
+            .iter()
+            .flat_map(|burst| &burst.fragments)
+            .any(|fragment| fragment.deposited)
+    });
+    (app.world().resource::<Read>().0.clone(), fragments)
 }
 
 /// What the runtime turns each decision into: one impact per bounce or bite, none for a clear.
@@ -323,21 +338,39 @@ fn impacts_of(drive: &Drive) -> Vec<(Verdict, Vec3)> {
 struct Agreement {
     /// The impacts both sides read, in order.
     impacts: Vec<(Verdict, Vec3)>,
-    /// The gate admitted the target: some crossing put a positive chord into it.
+    /// The gate admitted the target: some crossing put a positive TRANSIT chord into it.
     admitted: bool,
+    /// The runtime removed HP from the target, by any route.
+    damaged: bool,
+    /// A spall fragment the runtime threw deposited HP — a route the admission does not observe.
+    fragments: bool,
+    /// The round bounced off an HP-bearing volume and jarred it — a route the admission does not
+    /// observe either.
+    shock: bool,
+}
+
+impl Agreement {
+    /// The runtime's only HP route was transit, the one the admission observes.
+    fn transit_only(&self) -> bool {
+        !self.fragments && !self.shock
+    }
 }
 
 /// Build the arrangement twice, fly `body` through the runtime in one and through the gate's driver
-/// in the other, and require that they agree on every impact and on whether the target was reached.
+/// in the other, and require that they agree on every impact, and — where transit was the runtime's
+/// only HP route ([`Agreement::transit_only`]) — on whether the target was reached.
 fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> Entity) -> Agreement {
     let mut runtime = world_with_trimesh_plates(&[]);
-    runtime.init_resource::<Read>().add_observer(read_impact);
+    runtime
+        .insert_resource(RetainSpentShells(true))
+        .init_resource::<Read>()
+        .add_observer(read_impact);
     let target = build(&mut runtime);
     for _ in 0..8 {
         runtime.update();
     }
     runtime.world_mut().resource_mut::<Read>().0.clear();
-    let read = marched(&mut runtime, body, speed);
+    let (read, fragments) = marched(&mut runtime, body, speed);
     let hp = runtime
         .world()
         .get::<ComponentHealth>(target)
@@ -352,6 +385,10 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
     let flown = driven(&mut gate, body, speed);
     let decided = impacts_of(&flown);
     let admitted = flown.reaches(gate_target);
+    let shock = flown.decisions.iter().any(|decision| {
+        matches!(decision, Decision::Bounce(bounce)
+            if gate.world().get::<ComponentHealth>(bounce.struck).is_some())
+    });
 
     assert_eq!(
         read.len(),
@@ -364,14 +401,25 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
             "{name}: the runtime read {read:?}, the gate decided {decided:?}",
         );
     }
-    assert_eq!(
-        damaged, admitted,
-        "{name}: the runtime damaged the target: {damaged}; the gate admitted it: {admitted}",
-    );
-    Agreement {
+    let agreement = Agreement {
         impacts: read,
         admitted,
+        damaged,
+        fragments,
+        shock,
+    };
+    assert!(
+        !admitted || damaged,
+        "{name}: the gate admitted a transit chord into the target and the runtime removed no HP",
+    );
+    if agreement.transit_only() {
+        assert_eq!(
+            damaged, admitted,
+            "{name}: the runtime's transit damaged the target: {damaged}; the gate admitted it: \
+             {admitted}",
+        );
     }
+    agreement
 }
 
 /// A soft HP-bearing box `width` across, centred under the drop line with its top at `top`: the
@@ -408,6 +456,11 @@ fn tilted_plate(app: &mut App, thickness: f32, tilt: f32, at: f32, factor: f32) 
 /// arrangement is generic geometry with a soft HP-bearing target below it; the round falls straight
 /// down so the runtime's gravity and drag leave its direction alone, and the gate flies the
 /// runtime's own first-tick speed and budget.
+///
+/// THE PARITY IS TRANSIT PARITY. The admission observes transit deposits; the runtime also removes
+/// HP by a bounce's shock and by spall fragments. Every arrangement here is transit-only, asserted,
+/// with targets placed past spall reach where a perforation could throw any;
+/// [`shock_and_fragments_lie_outside_the_transit_parity`] shows the two routes outside it.
 #[test]
 fn the_runtime_and_the_gate_decide_the_same_crossings() {
     // Stop: a plate thicker than the round can defeat.
@@ -415,6 +468,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         tilted_plate(app, 0.6, 0.0, 1.0, STEEL);
         target_below(app, 0.0, 2.0)
     });
+    assert!(stopped.transit_only());
     assert_eq!(
         stopped.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
         [Verdict::Stopped],
@@ -440,6 +494,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         !bounced.admitted,
         "a bounced round never reaches the target"
     );
+    assert!(bounced.transit_only(), "armour has no HP to jar");
 
     // Partial coverage: a plate whose edge only part of an 88's ring overlaps; the axis misses it.
     let partial = agree("partial coverage", FIXTURE_88, 800.0, |app| {
@@ -450,8 +505,9 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
             STEEL,
             None,
         );
-        target_below(app, 0.0, 2.0)
+        target_below(app, PAST_SPALL, 6.0)
     });
+    assert!(partial.transit_only());
     assert!(
         partial.impacts.first().is_some_and(|i| i.0.entered()),
         "the ring bit into the plate edge: {:?}",
@@ -492,6 +548,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         "the plate is perforated: {:?}",
         continued.impacts,
     );
+    assert!(continued.transit_only());
 
     // Target reach: a skin too thin to stop the round, the target behind it.
     let reached = agree("target reach", FIXTURE_88, 800.0, |app| {
@@ -502,6 +559,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         reached.admitted,
         "the round reaches the target behind the skin"
     );
+    assert!(reached.transit_only());
 }
 
 /// OVERMATCH CHARGES THE PROJECTION, AND THE GATE ADMITS THROUGH IT.
@@ -532,8 +590,9 @@ fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
     );
     let overmatched = agree("overmatch", FIXTURE_88, 800.0, |app| {
         tilted_plate(app, thickness, tilt, 1.0, STEEL);
-        target_below(app, 0.0, 2.0)
+        target_below(app, PAST_SPALL, 6.0)
     });
+    assert!(overmatched.transit_only());
     assert!(
         overmatched
             .impacts
@@ -586,6 +645,180 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
         "through the metre with nothing left, then stopped at the target's face",
     );
     assert!(!exact.admitted, "no chord into the target");
+    assert!(exact.transit_only());
+}
+
+/// SHOCK AND FRAGMENTS LIE OUTSIDE THE TRANSIT PARITY.
+///
+/// Two routes by which the runtime removes HP that the admission does not observe, each with the
+/// round's own path kept clear of the HP-bearing box: a round that bounces off the box itself
+/// jars it ([`Bounce::shock`]), and a perforation's spall reaches a box beside the round's path.
+/// Both sides still agree on every impact; the box is damaged and not admitted. Fixture data.
+#[test]
+fn shock_and_fragments_lie_outside_the_transit_parity() {
+    // Shock: a machine-gun round grazes an HP-bearing soft slab at 75°, too thick for it to
+    // overmatch.
+    let shocked = agree("shock", FIXTURE_MG, 755.0, |app| {
+        let tilt = 75.0_f32.to_radians();
+        let rotation = Quat::from_rotation_z(tilt);
+        let normal = rotation * Vec3::Y;
+        volume(
+            app,
+            Vec3::new(3.0, 0.4, 3.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * 0.2)
+                .with_rotation(rotation),
+            STEEL * 0.1,
+            Some(100.0),
+        )
+    });
+    assert_eq!(
+        shocked.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
+        [Verdict::Ricochet],
+    );
+    assert!(
+        shocked.shock && shocked.damaged && !shocked.admitted,
+        "the bounce jars the box it bounced off, and that is not a transit route",
+    );
+
+    // Fragments: an 88 perforates 60 mm of steel square on; an HP-bearing box sits 0.3 m below the
+    // plate, beside the disc's path but inside the spall cone.
+    let thrown = agree("fragments", FIXTURE_88, 800.0, |app| {
+        volume(
+            app,
+            Vec3::new(2.0, 0.06, 2.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
+            STEEL,
+            None,
+        );
+        volume(
+            app,
+            Vec3::new(0.5, 0.2, 0.6),
+            Transform::from_translation(Vec3::new(DROP_FROM.x + 0.06 + 0.25, 0.54, DROP_FROM.z)),
+            STEEL * 0.1,
+            Some(100.0),
+        )
+    });
+    assert_eq!(
+        thrown.impacts.first().map(|i| i.0),
+        Some(Verdict::Through),
+        "the plate is perforated: {:?}",
+        thrown.impacts,
+    );
+    assert!(
+        thrown.fragments && thrown.damaged && !thrown.admitted,
+        "a fragment reaches the box beside the path, and that is not a transit route: fragments \
+         {}, damaged {}, admitted {}",
+        thrown.fragments,
+        thrown.damaged,
+        thrown.admitted,
+    );
+}
+
+/// A RAISED FLOOR CAN REACH A BOX AFTER A BOUNCE ON A ROUTE NO LISTED GUN TAKES.
+///
+/// The gate's findings are admitted by the floor probe — the least capable listed round, flown at
+/// the speed where its capability is the floor — and its per-region report measures each listed
+/// gun at its own speed. A raised floor flies that round faster than any gun fires it, and a bounce
+/// separates the two: the graze bleeds its speed, a gun that overmatches the grazed plate bites in
+/// and bends away instead of bouncing, and a gun that bounces with it has too little left after the
+/// bleed. So "some listed gun admits every finding" is not an invariant of a raised floor. Generic
+/// geometry: a thin plate grazed at 75°, a skin square to the bounce, and a box behind the skin.
+#[test]
+fn a_raised_floor_reaches_a_box_after_a_bounce_no_listed_gun_takes() {
+    let laws = WalkLaws::default();
+    let thickness = 0.008;
+    let tilt = 75.0_f32.to_radians();
+    let rotation = Quat::from_rotation_z(tilt);
+    let normal = rotation * Vec3::Y;
+    let struck = Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z);
+    let bounced = Vec3::NEG_Y - 2.0 * Vec3::NEG_Y.dot(normal) * normal;
+    let (probe, probe_speed) = fuzz::floor_probe(&fuzz::FuzzConfig {
+        finding_floor: Some(200.0),
+        ..default()
+    });
+    // Capability after a full-coverage bounce, which keeps `ricochet_bleed` of the speed.
+    let after_bounce = |body: RoundBody, speed: f32| capability(body, speed * laws.ricochet_bleed);
+    let bouncers: Vec<f32> = fuzz::PROBE_ROUNDS
+        .iter()
+        .filter(|round| round.caliber < laws.overmatch_ratio * thickness)
+        .map(|round| after_bounce(round.body(), round.speed))
+        .collect();
+    let strongest_bouncer = bouncers.iter().copied().fold(0.0, f32::max);
+    let probe_left = after_bounce(probe, probe_speed);
+    assert!(
+        probe.caliber < laws.overmatch_ratio * thickness && !bouncers.is_empty(),
+        "the floor probe and some guns bounce off the plate rather than overmatch it",
+    );
+    assert!(
+        strongest_bouncer < probe_left,
+        "the raised floor keeps more after the bleed than any bouncing gun: {strongest_bouncer} \
+         against {probe_left}",
+    );
+    // The skin costs more than any gun that bounces can spend, less than the probe can.
+    let skin = 0.5 * (strongest_bouncer + probe_left) / STEEL;
+
+    let mut app = world_with_trimesh_plates(&[]);
+    volume(
+        &mut app,
+        Vec3::new(0.3, thickness, 0.3),
+        Transform::from_translation(struck - normal * thickness * 0.5).with_rotation(rotation),
+        STEEL,
+        None,
+    );
+    let square = Quat::from_rotation_arc(Vec3::Y, -bounced);
+    volume(
+        &mut app,
+        Vec3::new(0.4, skin, 0.4),
+        Transform::from_translation(struck + bounced * 0.5).with_rotation(square),
+        STEEL,
+        None,
+    );
+    let target = volume(
+        &mut app,
+        Vec3::splat(0.3),
+        Transform::from_translation(struck + bounced * 0.9).with_rotation(square),
+        STEEL * 0.1,
+        Some(100.0),
+    );
+    for _ in 0..8 {
+        app.update();
+    }
+    let reaches = |app: &mut App, body: RoundBody, speed: f32| {
+        app.world_mut()
+            .run_system_once(
+                move |world: ProjectileMarchWorld,
+                      colliders: Query<(
+                    &'static Position,
+                    &'static Rotation,
+                    &'static Collider,
+                    Option<&'static BallisticSurfaces>,
+                )>| {
+                    let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                    let context = ResolveContext {
+                        world: &world,
+                        colliders: &colliders,
+                        armor: &armor,
+                        deposit: false,
+                        laws: WalkLaws::default(),
+                    };
+                    fuzz::drive(&context, body, speed, DROP_FROM, Vec3::NEG_Y, 5.0)
+                },
+            )
+            .expect("the driver system runs")
+            .unwrap_or_else(|failure| panic!("the driven flight failed to walk: {failure:?}"))
+            .reaches(target)
+    };
+    assert!(
+        reaches(&mut app, probe, probe_speed),
+        "the raised floor's probe reaches the box after the bounce",
+    );
+    for round in fuzz::PROBE_ROUNDS {
+        assert!(
+            !reaches(&mut app, round.body(), round.speed),
+            "{} reaches the box, so this is not the case",
+            round.name,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
