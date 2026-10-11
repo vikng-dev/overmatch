@@ -1,147 +1,209 @@
-//! The driver's two-stage crossing against the real bound tank at a captured, non-spawn pose.
+//! The driver's two-stage crossing: the hand-off from the entrance corridor to the transit
+//! corridor counts every entry exactly once.
 
-use avian3d::prelude::{Position, Rotation};
+use avian3d::prelude::{CollisionLayers, LayerMask, Position, RigidBody, Rotation};
 use bevy::ecs::system::RunSystemOnce;
 
 use super::*;
-use crate::ballistics::RoundBody;
-use crate::ballistics::fuzz::{ProbeTank, probe_world};
+use crate::ballistics::march_tests::{box_trimesh, world_with_trimesh_plates};
+use crate::ballistics::walk::FaceHit;
+use crate::ballistics::{BallisticVolume, RoundBody};
 
-fn v(bits: [u32; 3]) -> Vec3 {
-    Vec3::new(
-        f32::from_bits(bits[0]),
-        f32::from_bits(bits[1]),
-        f32::from_bits(bits[2]),
-    )
-}
-
-fn q(bits: [u32; 4]) -> Quat {
-    Quat::from_xyzw(
-        f32::from_bits(bits[0]),
-        f32::from_bits(bits[1]),
-        f32::from_bits(bits[2]),
-        f32::from_bits(bits[3]),
-    )
-}
-
-/// FIXTURE DATA, captured bit-exact from the headless sim (`mg_rounds_stream_tracers_and_spawn_no_shell_scene`):
-/// the target tank after a machine-gun burst had shoved it ~2 cm off its spawn pose, and the
-/// main-gun round that then met a turret side plate. The shot origin is where that march segment
-/// started, 10.58 m short of first contact. The root pose is the one that reproduces the struck
-/// primitive's live pose to the bit, which the test checks. Nothing here is a law; it is one pose at
-/// which a ring sample's entry face sits inside the seed's "on the hand-off plane" band (1.72e-6 m
-/// behind a plane 10.585 m from the anchor) and beyond `topology_abs`.
-const TANK_POSITION: [u32; 3] = [1092616860, 3181426928, 3242197090];
-const TANK_ROTATION: [u32; 4] = [956264294, 3055613835, 3092825637, 1065353216];
-const STRUCK_PRIMITIVE_POSITION: [u32; 3] = [1092617047, 1070797509, 3242196649];
-const STRUCK_PRIMITIVE_ROTATION: [u32; 4] = [956264294, 3055613835, 3092825637, 1065353216];
-const SHOT_ORIGIN: [u32; 3] = [1092339405, 1074225219, 3194200864];
-const SHOT_DIRECTION: [u32; 3] = [3156905043, 3149174561, 3212835701];
-const SHOT_SPEED: u32 = 1145096455;
-const SHOT_CONTACT: u32 = 1093220202;
-const SHOT_FRAME_U: [u32; 3] = [3093821269, 1065352979, 3148748123];
-const SHOT_FRAME_V: [u32; 3] = [1065352308, 0, 3156905213];
-const SHOT_BODY: RoundBody = RoundBody {
+/// Fixture round and plate: an 88-class disc against 50 mm of steel. Fixture data; nothing below
+/// depends on whether it perforates.
+const ROUND: RoundBody = RoundBody {
     mass: 10.2,
     caliber: 0.088,
     nose_factor: 7.0 / 24.0,
 };
+const SPEED: f32 = 800.0;
+const PLATE: Vec3 = Vec3::new(3.0, 3.0, 0.05);
+/// Steel: reference-mm per metre.
+const STEEL: f32 = 1000.0;
+/// Where the march segment starts, short of first contact — the anchor's distance from the
+/// hand-off, which sizes the seed's "on the hand-off plane" band (DERIVED: 5.2e-6 m at 10.6 m).
+const STANDOFF: f32 = 10.585;
+/// Plate orientations per map position, and shots per plate.
+const PLATES: usize = 12;
+const SHOTS: usize = 12;
 
-/// A ring sample whose entry face lies inside the seed's "on the hand-off plane" band is left
-/// unseeded, so the transit corridor must count that entry itself. Dropping it as already traversed
-/// meets the plate's exit with nothing open: `UnexpectedExit`, and the round fails closed on a plate
-/// it bit into.
-#[test]
-fn a_ring_sample_entering_on_the_hand_off_plane_is_counted_once() {
-    let mut app = probe_world().expect("the bound tank builds");
-    // Physics has to step for the colliders to follow the moved root.
-    app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
-        std::time::Duration::from_millis(16),
-    ));
-    let tank = app.world().resource::<ProbeTank>().0;
-    app.world_mut().entity_mut(tank).insert((
-        Position(v(TANK_POSITION)),
-        Rotation(q(TANK_ROTATION)),
-        Transform::from_translation(v(TANK_POSITION)).with_rotation(q(TANK_ROTATION)),
-    ));
-    for _ in 0..4 {
-        app.update();
+/// The first boundary each sample's transit corridor closes is owned exactly once: by the seed
+/// (declared presence) or by one entry crossing in the corridor before that exit.
+fn assert_single_ownership(transit: &DiscCorridor, pose: &str) {
+    for (index, sample) in transit.samples.iter().enumerate() {
+        let mut hits: Vec<&FaceHit> = sample.hits.iter().collect();
+        hits.sort_by(|a, b| a.t.total_cmp(&b.t));
+        let Some(at) = hits
+            .iter()
+            .position(|hit| hit.true_normal.dot(transit.axis) > 0.0)
+        else {
+            continue;
+        };
+        let exit = hits[at];
+        let key = ShellKey {
+            volume: exit.volume,
+            primitive: exit.primitive,
+            shell: exit.shell,
+        };
+        let entries = hits[..at]
+            .iter()
+            .filter(|hit| {
+                hit.volume == key.volume
+                    && hit.primitive == key.primitive
+                    && hit.shell == key.shell
+                    && hit.true_normal.dot(transit.axis) < 0.0
+            })
+            .count();
+        let seeded = usize::from(sample.initial_presence.contains(&key));
+        assert_eq!(
+            entries + seeded,
+            1,
+            "{pose}, sample {index}: the entry of {key:?} is owned by the seed {seeded} time(s) \
+             and by the corridor {entries} time(s)",
+        );
     }
+}
 
-    let result = app
-        .world_mut()
-        .run_system_once(
-            |world: ProjectileMarchWorld,
-             colliders: Query<(
-                &'static Position,
-                &'static Rotation,
-                &'static Collider,
-                Option<&'static BallisticSurfaces>,
-            )>| {
-                // The fixture must place the struck plate exactly where the live run had it, or it
-                // reproduces nothing.
-                assert!(
-                    colliders.iter().any(|(position, rotation, _, _)| {
-                        position.0 == v(STRUCK_PRIMITIVE_POSITION)
-                            && rotation.0 == q(STRUCK_PRIMITIVE_ROTATION)
-                    }),
-                    "the captured root pose no longer reproduces the struck primitive's live pose"
+/// THE HAND-OFF PARTITION, END TO END, ON GENERIC GEOMETRY.
+///
+/// Each ring sample's entry face lies within rounding of the mean entrance plane the transit hands
+/// off on, so whether the seed or the transit corridor owns it is decided inside the topology band
+/// — the place a dropped entry (`UnexpectedExit`) or a doubled one (`UnexpectedEntry`) lives. A
+/// plate in general orientation, struck at up to 60° anywhere on its face, near the world origin
+/// and far from it, from the march's own stand-off before contact. Every pose the round bites into must hand off with every sample's
+/// entry owned once and the transit corridor pairing; the terminal outcome is not asserted.
+#[test]
+fn every_entry_is_owned_once_across_the_hand_off() {
+    let mut transits = 0;
+    // A fixed pseudo-random sequence: general orientations, never axis-aligned, so the plate's
+    // faces are rotated in every collider-local coordinate the crossing arithmetic rounds in.
+    let mut state = 0x9e37_79b9_u32;
+    let mut unit = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    };
+    for far in [
+        Vec3::ZERO,
+        Vec3::new(37.3, 0.0, -21.9),
+        Vec3::new(1234.5, 0.0, 987.6),
+    ] {
+        for _ in 0..PLATES {
+            let mut app = world_with_trimesh_plates(&[]);
+            let centre = far + Vec3::new(unit() - 0.5, 2.0 + unit() - 0.5, unit() - 0.5);
+            let rotation = Quat::from_euler(
+                EulerRot::YXZ,
+                std::f32::consts::TAU * unit(),
+                std::f32::consts::PI * (unit() - 0.5),
+                std::f32::consts::TAU * unit(),
+            );
+            app.world_mut().spawn((
+                Transform::from_translation(centre).with_rotation(rotation),
+                RigidBody::Static,
+                box_trimesh(PLATE),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+                BallisticVolume {
+                    material_factor: STEEL,
+                    substance: "RHA".to_string(),
+                },
+            ));
+            for _ in 0..8 {
+                app.update();
+            }
+            // The plate's +Z face, struck at up to 60° from its normal.
+            let normal = rotation * Vec3::Z;
+            let (side, up) = normal.any_orthonormal_pair();
+            for _ in 0..SHOTS {
+                let tilt = Quat::from_axis_angle(
+                    (side * (unit() - 0.5) + up * (unit() - 0.5)).normalize_or(side),
+                    60.0_f32.to_radians() * unit(),
                 );
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
-                let context = ResolveContext {
-                    world: &world,
-                    colliders: &colliders,
-                    armor: &armor,
-                    deposit: false,
-                    laws: WalkLaws::default(),
-                };
-                let direction = v(SHOT_DIRECTION);
-                let speed = f32::from_bits(SHOT_SPEED);
-                let contact = f32::from_bits(SHOT_CONTACT);
-                let frame = DiscFrame {
-                    u: v(SHOT_FRAME_U),
-                    v: v(SHOT_FRAME_V),
-                };
-                let radius = SHOT_BODY.caliber * 0.5;
-                let entrance = closing_walk(
-                    &context,
-                    &|_| true,
-                    v(SHOT_ORIGIN),
-                    Vec3::ZERO,
-                    direction,
-                    frame,
-                    radius,
-                    &[],
-                    contact + ENTRANCE_SPAN,
-                )
-                .expect("the entrance corridor walks");
-                let shot = Shot {
-                    caliber: SHOT_BODY.caliber,
-                    capability: capability(SHOT_BODY, speed),
-                };
-                let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws) else {
-                    panic!("the round bites into the plate at this pose");
-                };
-                let transit = closing_walk(
-                    &context,
-                    &|_| true,
-                    request.anchor,
-                    request.origin,
-                    request.axis,
-                    request.frame,
-                    request.radius,
-                    &request.seeds,
-                    ENTRANCE_SPAN,
-                )?;
-                walk::finish(&transit, &request, &shot, &context.laws)
-            },
-        )
-        .expect("the probe system runs");
-
-    let plan = result.expect("the transit corridor pairs every sample's crossings");
+                let direction = tilt * -normal;
+                let point = centre
+                    + normal * PLATE.z * 0.5
+                    + (side * (unit() - 0.5) + up * (unit() - 0.5)) * 1.5;
+                let origin = point - direction * STANDOFF;
+                let pose =
+                    format!("plate {rotation} at {centre}, shot from {origin} along {direction}");
+                let result = app
+                    .world_mut()
+                    .run_system_once(
+                        move |world: ProjectileMarchWorld,
+                              colliders: Query<(
+                            &'static Position,
+                            &'static Rotation,
+                            &'static Collider,
+                            Option<&'static BallisticSurfaces>,
+                        )>| {
+                            let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                            let context = ResolveContext {
+                                world: &world,
+                                colliders: &colliders,
+                                armor: &armor,
+                                deposit: false,
+                                laws: WalkLaws::default(),
+                            };
+                            let frame = DiscFrame::anchored(direction).expect("a real direction");
+                            let radius = ROUND.caliber * 0.5;
+                            let entrance = closing_walk(
+                                &context,
+                                &|_| true,
+                                origin,
+                                Vec3::ZERO,
+                                direction,
+                                frame,
+                                radius,
+                                &[],
+                                STANDOFF + ENTRANCE_SPAN,
+                            )?;
+                            let shot = Shot {
+                                caliber: ROUND.caliber,
+                                capability: capability(ROUND, SPEED),
+                            };
+                            let Begin::Transit(request) =
+                                walk::begin(&entrance, &shot, &context.laws)
+                            else {
+                                return Ok(None);
+                            };
+                            let corridor = build_corridor(
+                                &context,
+                                &|_| true,
+                                request.anchor,
+                                request.origin,
+                                request.axis,
+                                ENTRANCE_SPAN,
+                                request.frame,
+                                request.radius,
+                                &request.seeds,
+                            )?;
+                            let transit = closing_walk(
+                                &context,
+                                &|_| true,
+                                request.anchor,
+                                request.origin,
+                                request.axis,
+                                request.frame,
+                                request.radius,
+                                &request.seeds,
+                                ENTRANCE_SPAN,
+                            )?;
+                            walk::finish(&transit, &request, &shot, &context.laws)?;
+                            Ok::<_, WalkError>(Some(corridor))
+                        },
+                    )
+                    .expect("the probe system runs");
+                match result {
+                    Ok(Some(corridor)) => {
+                        assert_single_ownership(&corridor, &pose);
+                        transits += 1;
+                    }
+                    Ok(None) => {}
+                    Err(error) => panic!("{pose}: the hand-off failed to pair: {error:?}"),
+                }
+            }
+        }
+    }
     assert!(
-        matches!(plan.outcome, Outcome::Perforated { .. }),
-        "the 88 perforates the plate it bit into: {:?}",
-        plan.outcome
+        transits >= 3 * PLATES * SHOTS / 2,
+        "the sweep exercised the hand-off ({transits} transits)"
     );
 }

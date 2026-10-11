@@ -175,8 +175,8 @@ fn cavity_strength(y_flow: f64, e: f64, nu: f64) -> f64 {
 
 /// The reference steel's strength term (Pa): [`cavity_strength`] on the reference steel's facts
 /// (≈ 3.711e9 Pa, DERIVED).
-fn strength_ref() -> f32 {
-    cavity_strength(Y_FLOW_REF, E_REF, NU_REF) as f32
+fn strength_ref() -> f64 {
+    cavity_strength(Y_FLOW_REF, E_REF, NU_REF)
 }
 
 /// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
@@ -191,16 +191,20 @@ pub(crate) struct RoundBody {
 
 impl RoundBody {
     /// The law's inertia coefficient `k = B_INERTIA · N · RHO_REF` (kg/m³).
-    fn inertia_coefficient(self) -> f32 {
-        B_INERTIA * self.nose_factor * RHO_REF
+    fn inertia_coefficient(self) -> f64 {
+        B_INERTIA as f64 * self.nose_factor as f64 * RHO_REF as f64
     }
 
     /// The law's two round terms: `m / (2 A k)` (m) and `k / a` (s²/m²), `a` the reference
     /// steel's strength term.
-    fn terms(self) -> (f32, f32) {
-        let area = std::f32::consts::FRAC_PI_4 * self.caliber * self.caliber;
+    ///
+    /// In f64: `m / (2 A k)` grows as `1 / N` and leaves f32's range for a nose factor near f32's
+    /// smallest normal, while the capability it multiplies stays finite.
+    fn terms(self) -> (f64, f64) {
+        let caliber = self.caliber as f64;
+        let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
         let k = self.inertia_coefficient();
-        (self.mass / (2.0 * area * k), k / strength_ref())
+        (self.mass as f64 / (2.0 * area * k), k / strength_ref())
     }
 }
 
@@ -209,10 +213,12 @@ impl RoundBody {
 /// the reference steel's strength term ([`strength_ref`]).
 ///
 /// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
-/// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it.
+/// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it. Evaluated in f64
+/// and cast once: finite for every round [`round_in_domain`] admits.
 fn capability(round: RoundBody, speed: f32) -> f32 {
     let (scale, inertia) = round.terms();
-    1000.0 * scale * (inertia * speed * speed).ln_1p()
+    let speed = speed as f64;
+    (1000.0 * scale * (inertia * speed * speed).ln_1p()) as f32
 }
 
 /// Inverse of [`capability`] for a fixed round: the speed carrying `capability` reference-mm.
@@ -220,7 +226,40 @@ fn capability(round: RoundBody, speed: f32) -> f32 {
 /// Lambert–Jonas residual-velocity shape (design doc §3).
 fn speed_for(round: RoundBody, capability: f32) -> f32 {
     let (scale, inertia) = round.terms();
-    ((capability / (1000.0 * scale)).exp_m1() / inertia).sqrt()
+    ((capability as f64 / (1000.0 * scale)).exp_m1() / inertia).sqrt() as f32
+}
+
+/// Whether the capability law can state `round` fired at `speed`: every input finite, positive
+/// and normal, `N ≤ 1`, and the capability at that speed and its inverse finite and positive.
+/// Read at spec load, so a round outside the law's domain never reaches the march.
+pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String> {
+    for (field, value) in [
+        ("mass", round.mass),
+        ("caliber", round.caliber),
+        ("nose factor", round.nose_factor),
+        ("speed", speed),
+    ] {
+        if !value.is_normal() || value < 0.0 {
+            return Err(format!(
+                "{field} must be finite, positive and normal (got {value})"
+            ));
+        }
+    }
+    if round.nose_factor > 1.0 {
+        return Err(format!(
+            "nose factor must be ≤ 1 (got {})",
+            round.nose_factor
+        ));
+    }
+    let capability = capability(round, speed);
+    if !capability.is_normal() || capability < 0.0 {
+        return Err(format!("capability at {speed} m/s is {capability}"));
+    }
+    let back = speed_for(round, capability);
+    if !back.is_normal() || back < 0.0 {
+        return Err(format!("capability {capability} inverts to {back} m/s"));
+    }
+    Ok(())
 }
 
 /// Deterministic spall-cone directions with normalized polar position `t` in `[0, 1]`.
@@ -2557,21 +2596,91 @@ mod tests {
         }
     }
 
-    /// The local speed exponent `d ln C / d ln v` tends to 2 at low speed and is below 2 near
-    /// 773 m/s.
+    /// The local speed exponent `d ln C / d ln v` is the dimensionless law's own,
+    /// `2x / ((1 + x) ln(1 + x))` with `x = k v² / a`: 2 in the limit `x → 0` and strictly below 2
+    /// at every positive speed, for every geometry.
+    ///
+    /// Swept over the round fixtures and every nose family across its parameter range, from 1 m/s
+    /// to 2 km/s. The exponent is read as a central difference of `ln C` over `v (1 ± h)`: with
+    /// `h = 1e-2` the truncation error is `O(h²)` (≈ 1e-4, DERIVED) and f32 rounding of `C`
+    /// contributes `ε / h` (≈ 1e-5, DERIVED), so a tolerance of 1e-3 cannot hide a departure from
+    /// the law and cannot be tripped by arithmetic.
     #[test]
-    fn capability_law_speed_exponent_is_two_at_low_speed() {
-        let exponent = |round: RoundBody, v1: f32, v2: f32| {
-            (capability(round, v2) / capability(round, v1)).ln() / (v2 / v1).ln()
-        };
-        for round in LAW_ROUNDS {
-            let low = exponent(round, 1.0, 2.0);
-            assert!(
-                (low - 2.0).abs() < 1.0e-2,
-                "{round:?}: low-speed exponent {low}"
-            );
-            let high = exponent(round, 760.0, 786.0);
-            assert!(high < 1.9, "{round:?}: exponent near 773 m/s {high}");
+    fn capability_law_speed_exponent_is_the_dimensionless_law_s() {
+        use crate::spec::NoseShape;
+        const H: f32 = 1.0e-2;
+        const TOLERANCE: f64 = 1.0e-3;
+        let mut noses: Vec<f32> = LAW_ROUNDS.iter().map(|round| round.nose_factor).collect();
+        for parameter in [0.5f32, 0.75, 1.0, 2.0, 5.0, 10.0, 30.0] {
+            noses.extend([
+                NoseShape::Ogive { crh: parameter }.factor(),
+                NoseShape::Cone {
+                    length_calibres: parameter,
+                }
+                .factor(),
+                NoseShape::Cap {
+                    radius_calibres: parameter,
+                }
+                .factor(),
+            ]);
+        }
+        noses.push(NoseShape::Flat.factor());
+        for body in LAW_ROUNDS {
+            for &nose_factor in &noses {
+                let round = RoundBody {
+                    nose_factor,
+                    ..body
+                };
+                let (_, inertia) = round.terms();
+                for speed in [1.0f32, 10.0, 100.0, 300.0, 773.0, 1000.0, 1500.0, 2000.0] {
+                    let measured = ((capability(round, speed * (1.0 + H))
+                        / capability(round, speed * (1.0 - H)))
+                    .ln()
+                        / ((1.0 + H) / (1.0 - H)).ln()) as f64;
+                    let x = inertia * speed as f64 * speed as f64;
+                    let law = 2.0 * x / ((1.0 + x) * x.ln_1p());
+                    assert!(
+                        law < 2.0,
+                        "{round:?} at {speed} m/s: the law's exponent {law}"
+                    );
+                    assert!(
+                        (measured - law).abs() < TOLERANCE,
+                        "{round:?} at {speed} m/s: exponent {measured} vs the law's {law}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The law keeps its finite value across the nose factor's whole normal f32 domain. As
+    /// `N → 0` it tends to the inertia-free limit `1000 · m · v² / (2 A a)`; a nose factor at the
+    /// smallest normal f32 must reproduce that limit, and its inverse the speed, rather than overflow
+    /// an intermediate (`m / (2 A k)` alone is ~1e37 m there, DERIVED, past f32's range).
+    #[test]
+    fn capability_law_is_finite_across_the_nose_domain() {
+        for body in LAW_ROUNDS {
+            for nose_factor in [f32::MIN_POSITIVE, 1.0e-37, 1.0e-30, 1.0e-12] {
+                let round = RoundBody {
+                    nose_factor,
+                    ..body
+                };
+                for speed in [100.0f32, 773.0, 2000.0] {
+                    let got = capability(round, speed);
+                    let caliber = round.caliber as f64;
+                    let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
+                    let limit = 1000.0 * round.mass as f64 * (speed as f64).powi(2)
+                        / (2.0 * area * cavity_strength(Y_FLOW_REF, E_REF, NU_REF));
+                    assert!(
+                        got.is_finite() && (got as f64 / limit - 1.0).abs() < 1.0e-4,
+                        "{round:?} at {speed} m/s: {got} vs the limit {limit}"
+                    );
+                    let back = speed_for(round, got);
+                    assert!(
+                        (back / speed - 1.0).abs() < 1.0e-4,
+                        "{round:?}: {speed} m/s round-trips to {back}"
+                    );
+                }
+            }
         }
     }
 
@@ -2594,7 +2703,7 @@ mod tests {
     #[test]
     fn capability_law_residual_matches_the_limit_speed_identity() {
         for round in LAW_ROUNDS {
-            let inertia = round.inertia_coefficient() / strength_ref();
+            let inertia = (round.inertia_coefficient() / strength_ref()) as f32;
             for speed in [400.0f32, 773.0, 1500.0] {
                 for fraction in [0.1f32, 0.5, 0.9] {
                     let limit = fraction * speed;
@@ -2636,7 +2745,7 @@ mod tests {
     fn strength_ref_is_the_cavity_term_of_the_reference_steel_facts() {
         let a = strength_ref();
         assert!(
-            (a / 3.711_258_7e9 - 1.0).abs() < f32::EPSILON,
+            (a / 3.711_258_7e9 - 1.0).abs() < f32::EPSILON as f64,
             "strength term {a}"
         );
     }
@@ -4717,7 +4826,7 @@ mod march_tests {
     /// is flipped to oppose the ray and cannot tell entry from exit), so a mesh wound inwards would
     /// invert every crossing. Each face is listed counter-clockwise seen from OUTSIDE. One closed
     /// box is one shell, so every triangle carries shell `0`.
-    fn box_trimesh(size: Vec3) -> (Collider, BallisticSurfaces) {
+    pub(super) fn box_trimesh(size: Vec3) -> (Collider, BallisticSurfaces) {
         let h = size * 0.5;
         let vertices: Vec<Vec3> = [
             (-1.0, -1.0, -1.0),
@@ -4756,7 +4865,7 @@ mod march_tests {
     }
 
     /// A world of outward-wound trimesh plates, all one substance.
-    fn world_with_trimesh_plates(plates: &[(Vec3, Vec3)]) -> App {
+    pub(super) fn world_with_trimesh_plates(plates: &[(Vec3, Vec3)]) -> App {
         let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
         for (size, at) in plates {
             app.world_mut().spawn((

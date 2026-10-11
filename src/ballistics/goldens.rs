@@ -218,11 +218,59 @@ impl Outcome {
     }
 }
 
-/// `(caliber, mass, nose_factor, speed)` of the Tiger's own 88 (`assets/tiger_1/tiger_1.tank.ron`,
-/// weapon `MainGun`).
-const EIGHTY_EIGHT: (f32, f32, f32, f32) = (0.088, 10.2, 7.0 / 24.0, 773.0);
-/// The Tiger's own 7.92 mm coax/hull MG.
-const MG: (f32, f32, f32, f32) = (0.0079, 0.0118, 0.5, 755.0);
+/// `(caliber, mass, nose_factor, speed)` of one of the bound tank's own weapons, read from its
+/// authored spec sheet, so a golden fires the round the asset declares.
+fn authored_round(weapon: &str) -> (f32, f32, f32, f32) {
+    let spec: crate::spec::TankSpec =
+        ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("the shipped sheet parses");
+    let weapon = &spec.weapons[weapon];
+    (
+        weapon.caliber,
+        weapon.mass,
+        weapon.nose.factor(),
+        weapon.speed,
+    )
+}
+
+/// The main gun.
+fn eighty_eight() -> (f32, f32, f32, f32) {
+    authored_round("MainGun")
+}
+
+/// The coaxial machine gun.
+fn mg() -> (f32, f32, f32, f32) {
+    authored_round("Coax")
+}
+
+/// Reference-mm `round` carries at its muzzle speed, by the capability law.
+fn muzzle_capability((caliber, mass, nose_factor, speed): (f32, f32, f32, f32)) -> f32 {
+    capability(
+        RoundBody {
+            mass,
+            caliber,
+            nose_factor,
+        },
+        speed,
+    )
+}
+
+/// The front plate's line-of-sight chord on [`DRIVER_LINE_FROM`] (m). MEASURED on the bound tank
+/// (see there).
+const FRONT_PLATE_CHORD: f32 = 0.101;
+
+/// Reference-mm the front plate charges on the driver's line: its chord times its substance factor,
+/// read from the bound tank. DERIVED; ~101 for RHA.
+fn front_plate_cost(app: &mut App) -> f32 {
+    let factor = app
+        .world_mut()
+        .query::<(&Name, &BallisticVolume)>()
+        .iter(app.world())
+        .find(|(name, _)| name.as_str() == "Hull_UFP_Upper")
+        .map(|(_, volume)| volume.material_factor)
+        .expect("the bound tank has its front plate");
+    FRONT_PLATE_CHORD * factor
+}
 
 /// The driver's line: dead level, HEAD ON along `+Z`, at the driver's own height.
 ///
@@ -243,10 +291,14 @@ const DRIVER_LINE_DIR: Vec3 = Vec3::Z;
 /// GOLDEN 1 — the 88 through the driver's plate.
 ///
 /// The reference shot of the whole model: a main-gun round meets the sloped front plate head on,
-/// perforates it, kills the driver behind it, and — with ~115 reference-mm against ~101 mm of front
-/// plate — bites three more plates and stops in the rear one. It also carries the
-/// §13.3 half of "an arm does not ricochet an 88": the crewman the round crosses on the way through
-/// deflects nothing, so the flight records no bounce at all.
+/// perforates it, kills the driver behind it, bites three more plates and stops in the rear one. It
+/// also carries the §13.3 half of "an arm does not ricochet an 88": the crewman the round crosses on
+/// the way through deflects nothing, so the flight records no bounce at all.
+///
+/// DERIVED: the front plate is perforated because the law's muzzle capability exceeds its cost (both
+/// read from fixture data, asserted below). FIXTURE CHARACTERISATION: the count of plates read and
+/// where the round stops are this asset's geometry against that capability (~115 reference-mm,
+/// DERIVED, against ~101 of front plate and ~79 mm of rear plate, MEASURED), not an invariant.
 #[test]
 fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     let mut app = golden_world();
@@ -259,7 +311,13 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
         .expect("the bound tank has a driver");
     assert_eq!(before, 3.0, "the driver starts at his authored hp");
 
-    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, EIGHTY_EIGHT);
+    let capability = muzzle_capability(eighty_eight());
+    let front = front_plate_cost(&mut app);
+    assert!(
+        capability > front,
+        "the law gives the 88 {capability} reference-mm against {front} of front plate"
+    );
+    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, eighty_eight());
 
     let armor: Vec<&Captured> = out
         .impacts
@@ -280,13 +338,14 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     assert_eq!(
         armor.len(),
         4,
-        "PHYSICS CHANGED — diff consciously. The 88 reads the front plate, two plates inside the \
-         hull and the rear plate on its way out: {armor:?}"
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: the 88 reads the front \
+         plate, two plates inside the hull and the rear plate: {armor:?}"
     );
     assert_eq!(
         out.survivors, 0,
-        "PHYSICS CHANGED — diff consciously. ~115 reference-mm of capability against ~101 mm of \
-         front plate, the crew behind it and ~79 mm of rear plate stops the round inside the tank"
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: {capability} reference-mm \
+         against {front} of front plate, the crew behind it and the rear plate stops the round \
+         inside the tank"
     );
     assert_eq!(
         out.ricochets, 0,
@@ -310,13 +369,22 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
 /// GOLDEN 2 — the same line, a machine-gun round.
 ///
 /// The other half of "an arm does not ricochet an 88", stated as its converse: identical geometry,
-/// opposite outcome, decided by CAPABILITY alone (~14.5 reference-mm against ~115). The MG bites into
-/// the same front plate and dies inside it; the driver behind it is untouched, and no confirmation
-/// rides the wire. The plate stops it — the crewman never gets a say either way.
+/// opposite outcome, decided by CAPABILITY alone. The MG bites into the same front plate and dies
+/// inside it; the driver behind it is untouched, and no confirmation rides the wire. The plate stops
+/// it — the crewman never gets a say either way.
+///
+/// DERIVED: the round embeds because the law's muzzle capability (~14.5 reference-mm) is below the
+/// front plate's cost (~101), both read from fixture data and asserted below.
 #[test]
 fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     let mut app = golden_world();
-    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, MG);
+    let capability = muzzle_capability(mg());
+    let front = front_plate_cost(&mut app);
+    assert!(
+        capability < front,
+        "the law gives the MG {capability} reference-mm against {front} of front plate"
+    );
+    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, mg());
 
     let armor: Vec<&Captured> = out
         .impacts
@@ -379,7 +447,7 @@ fn a_rear_shot_soaks_in_the_engine_block() {
         &mut app,
         Vec3::new(0.0, 1.2, 8.0),
         Vec3::NEG_Z,
-        EIGHTY_EIGHT,
+        eighty_eight(),
     );
 
     assert!(
@@ -414,7 +482,7 @@ fn a_rear_shot_soaks_in_the_engine_block() {
 fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
     let mut app = golden_world();
     let direction = Vec3::new(0.26, 0.0, 0.966).normalize();
-    let out = fire(&mut app, Vec3::new(-3.0, 1.5, -6.0), direction, MG);
+    let out = fire(&mut app, Vec3::new(-3.0, 1.5, -6.0), direction, mg());
 
     let bounce = out
         .impacts
@@ -483,12 +551,15 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
 /// clamp was bounded. That golden pins the whole outcome tuple; this one pins the two facts the
 /// defect destroyed, so a regression names itself.
 ///
+/// FIXTURE CHARACTERISATION: one spall cone and no survivor are this asset's geometry against the
+/// 88's law capability, not an invariant; the exit face and its cone are.
+///
 /// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
 /// whether the exit face came back or the spall model moved, not which number to re-bake.
 #[test]
 fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     let mut app = golden_world();
-    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, EIGHTY_EIGHT);
+    let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, eighty_eight());
 
     let stopped = out.impacts.iter().any(|hit| {
         hit.surface == ImpactSurface::Armor && !hit.penetrated && hit.deflection.is_none()
@@ -510,7 +581,8 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     let thickness = (exit - entry).length();
     assert!(
         (0.09..0.11).contains(&thickness),
-        "PHYSICS CHANGED — diff consciously. The first crossing is the ~101 mm front plate, entered \
+        "PHYSICS CHANGED — diff consciously. The first crossing is the front plate (~101 mm, \
+         MEASURED), entered \
          and LEFT; a thickness of {thickness} m is a different plate or a different exit face"
     );
     assert!(
@@ -535,13 +607,16 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     assert_eq!(
         out.spall_origins.len(),
         1,
-        "PHYSICS CHANGED — diff consciously. One of this line's crossings perforates into a space \
-         worth spalling into — the front plate; the round stops in the rear one: {:?}",
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: one of this line's \
+         crossings perforates into a space worth spalling into — the front plate; the round stops \
+         in the rear one: {:?}",
         out.spall_origins
     );
     assert_eq!(
-        out.survivors, 0,
-        "PHYSICS CHANGED — diff consciously. ~115 reference-mm against the front plate, the plates \
-         inside and ~79 mm of rear plate leaves nothing to fly on"
+        out.survivors,
+        0,
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: {} reference-mm against \
+         the front plate, the plates inside and the rear plate leaves nothing to fly on",
+        muzzle_capability(eighty_eight())
     );
 }
