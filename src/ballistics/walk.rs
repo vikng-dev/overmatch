@@ -379,8 +379,9 @@ impl Default for WalkLaws {
         Self {
             // 1 µm: three orders below the weld tolerance and below any authored feature.
             topology_abs: 1.0e-6,
-            // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (slice 2 anchors it at
-            // first contact), so `t` stays in metres and this term only has to cover intersection
+            // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (the driver anchors it
+            // where the march segment started, at most one tick of flight before first contact), so
+            // `t` stays within metres of the anchor and this term only has to cover intersection
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
@@ -665,8 +666,14 @@ impl RayWalk {
 /// Whether two `t` values name the same topological boundary. Scale-aware, because f32 spacing
 /// coarsens with distance and a face diagonal at 400 m must still reduce to one crossing.
 pub(crate) fn coincident(anchor: f64, t: f64, laws: &WalkLaws) -> bool {
-    (t - anchor).abs()
-        <= laws.topology_abs as f64 + laws.topology_rel as f64 * anchor.abs().max(t.abs())
+    (t - anchor).abs() <= topology_band(anchor.abs().max(t.abs()), laws)
+}
+
+/// The width of "the same boundary" for parameters of magnitude `scale` (m) — [`coincident`]'s
+/// tolerance, exposed so the collector's hand-off clamp (`collect::sitting_reach`) is stated in the
+/// same band [`RayWalk::inside_at`] judges the seed with.
+pub(crate) fn topology_band(scale: f64, laws: &WalkLaws) -> f64 {
+    laws.topology_abs as f64 + laws.topology_rel as f64 * scale
 }
 
 /// One certified crossing of one shell: where the ray goes in or out, and which faces said so.

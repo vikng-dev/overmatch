@@ -39,6 +39,9 @@ use super::{
     capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
+#[cfg(test)]
+mod tests;
+
 /// How far past first contact the first corridor reaches. Most crossings close well inside it; the
 /// driver extends when they do not, so this is a starting guess, not a limit.
 const ENTRANCE_SPAN: f32 = 0.5;
@@ -371,7 +374,8 @@ pub(super) fn build_corridor(
 
     let mut samples = Vec::with_capacity(offsets.len());
     for (index, offset) in offsets.into_iter().enumerate() {
-        let seeded: &[ShellKey] = seeds.get(index).map_or(&[], |seed| &seed.inside);
+        let seed = seeds.get(index);
+        let seeded: &[ShellKey] = seed.map_or(&[], |seed| &seed.inside);
         let mut hits = Vec::new();
         collect::collect(
             &Corridor {
@@ -380,6 +384,7 @@ pub(super) fn build_corridor(
                 axis,
                 length,
                 seeded,
+                handoff: seed.map(|seed| seed.t),
                 laws: &context.laws,
             },
             &candidates,
