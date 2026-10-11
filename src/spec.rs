@@ -74,6 +74,53 @@ pub enum Trigger {
 /// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
 /// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
 /// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-12).
+/// A projectile's nose geometry, parameters in calibres. [`Self::factor`] derives `N`, the
+/// frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1, in
+/// `(0, 1]`. `validate()` rejects a parameter outside its variant's range.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+pub enum NoseShape {
+    /// Tangent ogive of `crh` calibre-radius-head, `crh ≥ 0.5` (0.5 is a hemisphere).
+    Ogive { crh: f32 },
+    /// Cone of `length_calibres` length, `> 0`.
+    Cone { length_calibres: f32 },
+    /// Spherical cap of `radius_calibres` radius, `≥ 0.5` (0.5 is a hemisphere).
+    Cap { radius_calibres: f32 },
+    /// Flat face.
+    Flat,
+}
+
+impl NoseShape {
+    /// The nose factor `N`: ogive `(8ψ − 1) / (24ψ²)`, cone `1 / (1 + 4φ²)`, cap `1 − 1 / (8φ²)`,
+    /// flat `1`.
+    pub fn factor(self) -> f32 {
+        match self {
+            Self::Ogive { crh } => (8.0 * crh - 1.0) / (24.0 * crh * crh),
+            Self::Cone { length_calibres } => 1.0 / (1.0 + 4.0 * length_calibres * length_calibres),
+            Self::Cap { radius_calibres } => 1.0 - 1.0 / (8.0 * radius_calibres * radius_calibres),
+            Self::Flat => 1.0,
+        }
+    }
+
+    /// The variant's parameter and whether it lies in the variant's range, or `None` for `Flat`.
+    fn parameter(self) -> Option<(&'static str, f32, bool)> {
+        match self {
+            Self::Ogive { crh } => Some(("Ogive.crh (≥ 0.5)", crh, crh.is_finite() && crh >= 0.5)),
+            Self::Cone { length_calibres } => Some((
+                "Cone.length_calibres (> 0)",
+                length_calibres,
+                length_calibres.is_finite() && length_calibres > 0.0,
+            )),
+            Self::Cap { radius_calibres } => Some((
+                "Cap.radius_calibres (≥ 0.5)",
+                radius_calibres,
+                radius_calibres.is_finite() && radius_calibres >= 0.5,
+            )),
+            Self::Flat => None,
+        }
+    }
+}
+
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum FireMode {
@@ -136,6 +183,8 @@ pub struct WeaponSpec {
     pub caliber: f32,
     /// Projectile mass (kg) — primary driver of penetration capability.
     pub mass: f32,
+    /// Projectile nose geometry; the capability law reads the nose factor it derives.
+    pub nose: NoseShape,
     /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
     /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
     pub fire_mode: FireMode,
@@ -933,6 +982,12 @@ impl TankSpec {
             }
         }
         for (name, weapon) in &self.weapons {
+            if let Some((parameter, value, false)) = weapon.nose.parameter() {
+                return Err(format!(
+                    "weapon `{name}`: nose {parameter} is out of range (got {value})"
+                )
+                .into());
+            }
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
                     if reload_secs < 0.0 {
@@ -1228,12 +1283,18 @@ mod tests {
                 ("speed", weapon.speed),
                 ("caliber", weapon.caliber),
                 ("mass", weapon.mass),
+                ("nose factor", weapon.nose.factor()),
             ] {
                 assert!(
                     value.is_finite() && value > 0.0,
                     "weapon `{name}`: {field} must be finite and > 0 (got {value})"
                 );
             }
+            assert!(
+                weapon.nose.factor() <= 1.0,
+                "weapon `{name}`: nose factor must be ≤ 1 (got {})",
+                weapon.nose.factor()
+            );
             for clip in &weapon.report_clips {
                 assert!(
                     clip.ends_with(".ogg"),
@@ -1403,7 +1464,7 @@ TankSpec(
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
             barrel: "Cannon_Recoil",
-            speed: 700.0, caliber: 0.05, mass: 5.0,
+            speed: 700.0, caliber: 0.05, mass: 5.0, nose: Ogive(crh: 1.0),
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech],
@@ -1413,7 +1474,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            speed: 700.0, caliber: 0.008, mass: 0.012,
+            speed: 700.0, caliber: 0.008, mass: 0.012, nose: Cap(radius_calibres: 0.5),
             fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
             report_clips: [],
         ),
@@ -1529,6 +1590,49 @@ TankSpec(
     /// The legal edge cases (tracerless belt, instant reloads) must still pass. Guards ADR-0011's
     /// fail-fast: a weapon that parses but can never fire/cycle must be a hard load error, not a
     /// dead gun discovered mid-match.
+    #[test]
+    fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
+        for (shape, expected) in [
+            (NoseShape::Ogive { crh: 0.5 }, 0.5),
+            (
+                NoseShape::Cap {
+                    radius_calibres: 0.5,
+                },
+                0.5,
+            ),
+            (NoseShape::Flat, 1.0),
+            (
+                NoseShape::Cone {
+                    length_calibres: 0.5,
+                },
+                0.5,
+            ),
+        ] {
+            let got = shape.factor();
+            assert!((got - expected).abs() < 1.0e-6, "{shape:?}: {got}");
+        }
+        for shape in [
+            NoseShape::Ogive { crh: 0.49 },
+            NoseShape::Cone {
+                length_calibres: 0.0,
+            },
+            NoseShape::Cap {
+                radius_calibres: 0.4,
+            },
+            NoseShape::Ogive { crh: f32::NAN },
+        ] {
+            let mut spec = fixture();
+            let mut weapon = spec.weapons["MG"].clone();
+            weapon.nose = shape;
+            spec.weapons.insert("Blunt".to_string(), weapon);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("Blunt") && err.contains("nose"),
+                "{shape:?}: {err}"
+            );
+        }
+    }
+
     #[test]
     fn validate_rejects_bricked_fire_modes() {
         // Swap one bad weapon at a time into an otherwise-valid sheet.

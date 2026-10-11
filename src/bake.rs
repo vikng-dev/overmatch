@@ -1872,7 +1872,7 @@ mod tests {
         trigger: Primary,
         muzzle: "Muzzle",
         barrel: "Recoil",
-        speed: 1.0, caliber: 0.1, mass: 1.0,
+        speed: 1.0, caliber: 0.1, mass: 1.0, nose: Flat,
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
         report_clips: [],

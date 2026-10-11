@@ -93,15 +93,41 @@ well-defined.
 > overlapping volumes behave as their boolean union, and cost/damage/spall become field + boundary
 > laws over the material-factor field. Implement crossings from §13, magnitudes from here.
 
-For a fixed projectile (mass, caliber, hardness constant), penetration is a monotonic, invertible
-function of velocity (DeMarre, `pen ∝ vⁿ`). So **velocity is the stored state; penetration
-*capability* is its derivative.** The march, per volume crossed:
+For a fixed round (mass, calibre, nose factor), penetration is a monotonic, invertible function of
+velocity. So **velocity is the stored state; penetration *capability* is its derivative.** The
+march, per volume crossed:
 
-1. `capability = f(mass, velocity)` — reference-mm this shell can defeat right now. **Mass is the
-   primary driver** (sectional density / KE, `pen ∝ massᴹ·vⁿ`, M≈0.5); velocity secondary; both held
-   in the shell, mass constant so velocity stays the stored state. Caliber is *not* here — it drives
-   overmatch and spall hole-size, not raw penetration. (This is what separates a tank shell from a
-   bullet at equal speed, and is the seed of the per-shell data struct.)
+1. `capability = f(round, velocity)` — reference-mm this shell can defeat right now, by the
+   force-law (Poncelet) form:
+
+   ```
+   A        = π c² / 4                              presented area (m²), c = calibre
+   k        = N · RHO_REF                           inertia coefficient (kg/m³)
+   depth(v) = m / (2 A k) · ln(1 + k v² / A_REF)    metres of reference steel still to go
+   C        = 1000 · depth(v)                       capability, reference-mm
+   v(C)     = sqrt((A_REF / k) · (exp(C/1000 · 2 A k / m) − 1))
+   ```
+
+   Two constants. `RHO_REF = 7850 kg/m³` is the reference steel's density, a physical constant.
+   `A_REF` (Pa) is the reference steel's strength term and the one fitted constant: an effective,
+   anchor-calibrated resistance, not a steel yield stress and never compared to one. The fixture
+   calibration anchor pins it: 10.2 kg, 0.088 m, an ogive of 1 crh (`N = 7/24`) at 773 m/s
+   carries 250 reference-mm (`A_REF ≈ 1.397e9 Pa`, DERIVED). The nose factor `N` is the
+   frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1,
+   in `(0, 1]`. It is **shell data authored as geometry**: each weapon in the tank RON carries a
+   required `nose` (parameters in calibres), and `spec.rs` derives `N` once at load — `Ogive(crh:
+   ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`; `Cone(length_calibres: φ)`, `φ > 0`:
+   `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`, `φ ≥ 0.5`: `N = 1 − 1 / (8φ²)`; `Flat`:
+   `N = 1`. A parameter outside its range fails to load. The derived scalar travels with mass and
+   calibre through `FireShell`, `Projectile` and the `FireEvent` wire; the shape never leaves the
+   spec layer. Fixture noses are labelled: `Ogive(crh: 1.0)` for the main gun,
+   `Cap(radius_calibres: 0.5)` (a hemisphere, `N = 0.5`) for the machine-gun rounds. Calibre enters raw penetration through `A`: at equal mass a wider round
+   presents more area and goes less deep. The law's invariants: strictly increasing in speed;
+   replica scaling (mass ×s³, calibre
+   ×s gives capability ×s); the local speed exponent is 2 at low speed (the inertia term is
+   negligible) and falls below 2 as it grows; and spending composes, because a crossing spends
+   reference-mm and the inverse is exact. A crossing whose limit speed is `v_l` leaves
+   `v_r² = (v² − v_l²) / (1 + k v_l² / A_REF)`.
 2. `cost = LOS_distance × material_factor` (× angle effects), also reference-mm.
 3. If `capability > cost` → **perforate**: spend `cost`, invert `f` back to a reduced **residual
    velocity** (the Lambert–Jonas shape — barely-penetrate exits slow, big overmatch barely slows),
@@ -138,7 +164,7 @@ When the path reaches a volume's face:
    LOS cost; perforate→exit (spall) or embed.
 
 The *structure* is the design; the magnitudes (k, ricochet angle, normalization degrees, material
-factors, the DeMarre exponent) are **live knobs the sandbox exists to tune** — built as adjustable
+factors, the strength term `A_REF`) are **live knobs the sandbox exists to tune** — built as adjustable
 constants, not baked.
 
 ## 5. Spall — the exit cone (the primary crew-killer)
@@ -419,7 +445,7 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 - Ricochet threshold dependencies: pure angle now; later velocity/caliber-scaled.
 - HE: fuse minimum-thickness trigger + delay + dense wide cone (penetration-independent).
 - Numeric magnitudes (k overmatch ratio, ricochet angle, normalization degrees, material factors,
-  DeMarre exponent) — tuned live in the sandbox.
+  strength term `A_REF`) — tuned live in the sandbox.
 - Data homes: ballistic-volume geometry on the model (watertight); material factor + shell specs in
   RON (ADR-0010 spirit — ADR-0010 already flags per-plate armor as a genuinely node-attached case);
   crew/module/station definitions TBD.

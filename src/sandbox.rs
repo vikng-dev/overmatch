@@ -43,17 +43,20 @@ const MUZZLE_SPEED: f32 = 773.0;
 const CALIBER: f32 = 0.088;
 /// Projectile mass (kg) — the 88's PzGr 39 (~10.2 kg). Primary driver of penetration capability.
 const SHELL_MASS: f32 = 10.2;
+/// Nose factor (dimensionless, `0 < N ≤ 1`) — the 88's ogive of 1 crh, `(8ψ − 1) / (24ψ²)`.
+const NOSE_FACTOR: f32 = 7.0 / 24.0;
 
-/// The live shot parameters every fired shell reads — muzzle speed, calibre, and mass, the three
-/// penetration drivers. Seeded from the 88 mm constants above; the `dev_ui` panel's Shot section
-/// edits them so penetration can be studied against the plate ladder without a recompile. Read only
-/// by [`fire`] (no change-detection reactor), so the panel writes it back on change purely for tidy
-/// change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
+/// The live shot parameters every fired shell reads — muzzle speed, calibre, mass and nose factor,
+/// the four penetration drivers. Seeded from the 88 mm constants above; the `dev_ui` panel's Shot
+/// section edits them so penetration can be studied against the plate ladder without a recompile.
+/// Read only by [`fire`] (no change-detection reactor), so the panel writes it back on change purely
+/// for tidy change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
 #[derive(Resource, Clone, Copy, PartialEq)]
 struct ShotParams {
     muzzle_speed: f32,
     caliber: f32,
     mass: f32,
+    nose_factor: f32,
 }
 
 impl Default for ShotParams {
@@ -62,6 +65,7 @@ impl Default for ShotParams {
             muzzle_speed: MUZZLE_SPEED,
             caliber: CALIBER,
             mass: SHELL_MASS,
+            nose_factor: NOSE_FACTOR,
         }
     }
 }
@@ -837,6 +841,7 @@ fn fire(
         speed: shot.muzzle_speed,
         caliber: shot.caliber,
         mass: shot.mass,
+        nose_factor: shot.nose_factor,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
         // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the

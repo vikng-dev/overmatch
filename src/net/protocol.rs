@@ -131,7 +131,11 @@ use crate::{CombatantId, ShotId};
 /// framing under all of it does — messages serialize with postcard instead of bincode, the packet
 /// header is 13 bytes, message ids are wrapping `u16`s, and replicon 0.43+ folds marker components
 /// into its own protocol hash. REV 28 shipped (v0.5.2 onward), so this is a real bump.
-pub const PROTOCOL_REV: u32 = 29;
+///
+/// REV 30 (force-law capability): `FireEvent` carries the round's `nose_factor`, which the
+/// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
+/// never rides the wire.
+pub const PROTOCOL_REV: u32 = 30;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -303,6 +307,7 @@ pub struct FireEvent {
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
+    pub nose_factor: f32,
     pub mechanism: crate::spec::FireMechanism,
     /// Authoritative tracer selection.
     pub tracer: bool,
@@ -883,7 +888,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7926_3814_03fc_ca61;
+const WIRE_TYPES_HASH: u64 = 0xf351_af4d_d82a_d2ea;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1335,9 +1340,8 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 29 and the lightyear 0.30.1 wire dependency (the framing changed under an
-        // unchanged own-type graph).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x3f3d_9417_ec19_f150;
+        // Pins REV 30: `FireEvent` carries `nose_factor`, on the lightyear 0.30.1 wire dependency.
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x2f92_b1e6_86b4_fcd4;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

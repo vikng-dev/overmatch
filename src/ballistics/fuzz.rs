@@ -45,7 +45,7 @@ use bevy::prelude::*;
 
 use super::resolve::{self, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
-use super::{ProjectileMarchWorld, capability};
+use super::{ProjectileMarchWorld, RoundBody, capability};
 use crate::Layer;
 use crate::damage::{Ammo, CrewStation, hit_ancestor};
 use crate::tank::{TankSimSource, spawn_headless_tank};
@@ -66,6 +66,8 @@ pub struct ProbeRound {
     pub caliber: f32,
     /// Kilograms.
     pub mass: f32,
+    /// Nose factor (dimensionless, `0 < N ≤ 1`).
+    pub nose_factor: f32,
     /// Reference striking speed (m/s). Muzzle velocity, so every number in the report reads "at
     /// point blank" — the most permissive case, which is the right bias for a hole hunt.
     pub speed: f32,
@@ -75,7 +77,14 @@ impl ProbeRound {
     /// Reference-mm this round can defeat at its reference speed — the shipped [`super::capability`]
     /// law, never a table.
     pub fn capability(&self) -> f32 {
-        capability(self.mass, self.speed)
+        capability(
+            RoundBody {
+                mass: self.mass,
+                caliber: self.caliber,
+                nose_factor: self.nose_factor,
+            },
+            self.speed,
+        )
     }
 }
 
@@ -84,48 +93,56 @@ impl ProbeRound {
 ///
 /// Masses and speeds are period AP loadings for each bore; the 7.92 and the 88 are the Tiger's own
 /// spec values (`assets/tiger_1/tiger_1.tank.ron`), so the two rounds the game actually fires are
-/// measured as they are actually fired.
+/// measured as they are actually fired, nose factors included (the spec's nose geometry, derived).
+/// The other rounds' nose factor 0.3 is a labelled fixture value.
 pub const PROBE_ROUNDS: &[ProbeRound] = &[
     ProbeRound {
         name: "7.92mm",
         caliber: 0.0079,
         mass: 0.0118,
+        nose_factor: 0.5,
         speed: 755.0,
     },
     ProbeRound {
         name: "20mm",
         caliber: 0.020,
         mass: 0.148,
+        nose_factor: 0.3,
         speed: 830.0,
     },
     ProbeRound {
         name: "37mm",
         caliber: 0.037,
         mass: 0.685,
+        nose_factor: 0.3,
         speed: 762.0,
     },
     ProbeRound {
         name: "57mm",
         caliber: 0.057,
         mass: 2.87,
+        nose_factor: 0.3,
         speed: 815.0,
     },
     ProbeRound {
         name: "75mm",
         caliber: 0.075,
         mass: 6.8,
+        nose_factor: 0.3,
         speed: 790.0,
     },
     ProbeRound {
         name: "88mm",
         caliber: 0.088,
         mass: 10.2,
+        nose_factor: 7.0 / 24.0,
         speed: 773.0,
     },
     ProbeRound {
         name: "122mm",
         caliber: 0.122,
         mass: 25.0,
+        nose_factor: 0.3,
         speed: 795.0,
     },
 ];

@@ -65,6 +65,7 @@ mod tests {
             speed: 755.0,
             caliber: 0.0079,
             mass: 0.0118,
+            nose_factor: 0.5,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             // Identity, not authority — both paths name their shooter (the coax self-exclusion).

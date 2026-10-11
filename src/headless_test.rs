@@ -941,6 +941,7 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         speed: 755.0,
         caliber: 0.0079,
         mass: 0.0118,
+        nose_factor: 0.5,
         mechanism: crate::spec::FireMechanism::Automatic,
         tracer: true,
         shot_origin: FireShellOrigin::Reconstructed,
@@ -3243,6 +3244,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
         speed: 755.0,
         caliber: 0.088,
         mass: 10.2,
+        nose_factor: 0.3,
         mechanism: crate::spec::FireMechanism::Single,
         shooter: Some(ShotSource {
             tank: shooter,

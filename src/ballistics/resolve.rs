@@ -178,7 +178,7 @@ pub(crate) fn resolve_crossing(
     )?;
     let shot = Shot {
         caliber,
-        capability: capability(shell.projectile.mass, speed),
+        capability: capability(shell.projectile.body(), speed),
     };
 
     match walk::begin(&entrance, &shot, &context.laws) {
@@ -476,7 +476,7 @@ fn ricochet(
     if context.deposit
         && let Ok(mut hp) = health.get_mut(struck)
     {
-        let shock = SHOCK_K * capability(shell.projectile.mass, speed) * incidence.cos();
+        let shock = SHOCK_K * capability(shell.projectile.body(), speed) * incidence.cos();
         let before = hp.current;
         hp.current = (before - shock).max(0.0);
         damage += before - hp.current;
@@ -603,8 +603,8 @@ fn perforate_or_embed(
         }
         Outcome::Perforated { exit, t, .. } => {
             let exit = world(exit);
-            let residual = speed_for(shell.projectile.mass, {
-                let capability = capability(shell.projectile.mass, speed);
+            let residual = speed_for(shell.projectile.body(), {
+                let capability = capability(shell.projectile.body(), speed);
                 (capability - plan.cost_spent).max(0.0)
             });
             // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.

@@ -578,6 +578,7 @@ fn insert_weapons(
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
+            nose_factor: weapon.nose.factor(),
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),
             barrel,

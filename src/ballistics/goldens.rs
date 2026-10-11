@@ -119,9 +119,9 @@ fn fire(
     app: &mut App,
     local_origin: Vec3,
     local_direction: Vec3,
-    round: (f32, f32, f32),
+    round: (f32, f32, f32, f32),
 ) -> Outcome {
-    let (caliber, mass, speed) = round;
+    let (caliber, mass, nose_factor, speed) = round;
     let origin = world_at(local_origin);
     let direction = local_direction.normalize();
     app.world_mut().spawn((
@@ -129,6 +129,7 @@ fn fire(
             velocity: direction * speed,
             caliber,
             mass,
+            nose_factor,
             drag_k: drag_k(caliber, mass),
             disc: walk::DiscFrame::anchored(direction).expect("a golden fires along a real axis"),
         },
@@ -142,7 +143,14 @@ fn fire(
         SpallMarks::default(),
         ShellReadout {
             speed,
-            capability: capability(mass, speed),
+            capability: capability(
+                RoundBody {
+                    mass,
+                    caliber,
+                    nose_factor,
+                },
+                speed,
+            ),
         },
         Shot(golden_shot()),
         Transform::from_translation(origin).looking_to(direction, Vec3::Y),
@@ -208,10 +216,11 @@ impl Outcome {
     }
 }
 
-/// The Tiger's own 88 (`assets/tiger_1/tiger_1.tank.ron`, weapon `MainGun`).
-const EIGHTY_EIGHT: (f32, f32, f32) = (0.088, 10.2, 773.0);
+/// `(caliber, mass, nose_factor, speed)` of the Tiger's own 88 (`assets/tiger_1/tiger_1.tank.ron`,
+/// weapon `MainGun`).
+const EIGHTY_EIGHT: (f32, f32, f32, f32) = (0.088, 10.2, 7.0 / 24.0, 773.0);
 /// The Tiger's own 7.92 mm coax/hull MG.
-const MG: (f32, f32, f32) = (0.0079, 0.0118, 755.0);
+const MG: (f32, f32, f32, f32) = (0.0079, 0.0118, 0.5, 755.0);
 
 /// The driver's line: dead level, HEAD ON along `+Z`, at the driver's own height.
 ///
@@ -299,9 +308,9 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
 /// GOLDEN 2 — the same line, a machine-gun round.
 ///
 /// The other half of "an arm does not ricochet an 88", stated as its converse: identical geometry,
-/// opposite outcome, decided by CAPABILITY alone (8 reference-mm against 250). The MG bites into the
-/// same front plate and dies inside it; the driver behind it is untouched, and no confirmation rides
-/// the wire. The plate stops it — the crewman never gets a say either way.
+/// opposite outcome, decided by CAPABILITY alone (~29 reference-mm against 250). The MG bites into
+/// the same front plate and dies inside it; the driver behind it is untouched, and no confirmation
+/// rides the wire. The plate stops it — the crewman never gets a say either way.
 #[test]
 fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     let mut app = golden_world();

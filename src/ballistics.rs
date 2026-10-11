@@ -145,22 +145,51 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
 /// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
-/// Reference-mm penetration capability using a DeMarre-shaped mass and speed curve.
-const PEN_K: f32 = 0.005_8;
-const PEN_N: f32 = 1.43;
-/// Tunable projectile-mass exponent.
-const MASS_EXP: f32 = 0.5;
+/// Reference steel density (kg/m³), the inertia term's material constant.
+const RHO_REF: f32 = 7850.0;
 
-/// Reference-mm a projectile of `mass` kg can defeat at `speed` m/s.
-fn capability(mass: f32, speed: f32) -> f32 {
-    PEN_K * mass.powf(MASS_EXP) * speed.powf(PEN_N)
+/// Reference steel's strength term (Pa), the force law's one fitted constant: an effective,
+/// anchor-calibrated resistance of the reference steel, not a steel yield stress and never compared
+/// to one. Invariant: a round of 10.2 kg, 0.088 m calibre and nose factor 7/24 (an ogive of 1 crh)
+/// at 773 m/s carries 250 reference-mm (fixture calibration anchor).
+const A_REF: f32 = 1.397_347_5e9;
+
+/// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
+/// (dimensionless): the frictionless nose factor of the cavity-expansion form, with the inertia
+/// constant taken as 1, in `(0, 1]`, derived from the spec's nose geometry
+/// ([`crate::spec::NoseShape`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoundBody {
+    pub(crate) mass: f32,
+    pub(crate) caliber: f32,
+    pub(crate) nose_factor: f32,
 }
 
-/// Inverse of [`capability`] for a fixed projectile: the speed carrying `capability` reference-mm at
-/// this `mass`. Spending cost then inverting is the Lambert–Jonas residual-velocity shape —
-/// barely-penetrate exits slow, big overmatch barely slows (design doc §3).
-fn speed_for(mass: f32, capability: f32) -> f32 {
-    (capability / (PEN_K * mass.powf(MASS_EXP))).powf(1.0 / PEN_N)
+impl RoundBody {
+    /// The law's two round terms: `m / (2 A k)` (m) and `k / A_REF` (s²/m²).
+    fn terms(self) -> (f32, f32) {
+        let area = std::f32::consts::FRAC_PI_4 * self.caliber * self.caliber;
+        let k = self.nose_factor * RHO_REF;
+        (self.mass / (2.0 * area * k), k / A_REF)
+    }
+}
+
+/// Reference-mm `round` can still defeat at `speed` m/s — the force law
+/// `C = 1000 · m / (2 A k) · ln(1 + k v² / A_REF)`, `A = π c² / 4`, `k = N · RHO_REF`.
+///
+/// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
+/// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it.
+fn capability(round: RoundBody, speed: f32) -> f32 {
+    let (scale, inertia) = round.terms();
+    1000.0 * scale * (inertia * speed * speed).ln_1p()
+}
+
+/// Inverse of [`capability`] for a fixed round: the speed carrying `capability` reference-mm.
+/// Spending cost then inverting composes — two spends equal one spend of their sum — and gives the
+/// Lambert–Jonas residual-velocity shape (design doc §3).
+fn speed_for(round: RoundBody, capability: f32) -> f32 {
+    let (scale, inertia) = round.terms();
+    ((capability / (1000.0 * scale)).exp_m1() / inertia).sqrt()
 }
 
 /// Deterministic spall-cone directions with normalized polar position `t` in `[0, 1]`.
@@ -568,6 +597,8 @@ pub struct FireShell {
     pub caliber: f32,
     /// Projectile mass (kg).
     pub mass: f32,
+    /// Nose factor (dimensionless, `0 < N ≤ 1`), read by the capability law.
+    pub nose_factor: f32,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -588,6 +619,7 @@ pub(crate) struct Projectile {
     velocity: Vec3,
     caliber: f32,
     mass: f32,
+    nose_factor: f32,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
     drag_k: f32,
     /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
@@ -610,6 +642,15 @@ impl Projectile {
         self.caliber
     }
 
+    /// What the capability law reads off this round.
+    fn body(&self) -> RoundBody {
+        RoundBody {
+            mass: self.mass,
+            caliber: self.caliber,
+            nose_factor: self.nose_factor,
+        }
+    }
+
     /// The round's current speed (m/s) — read by view code that scales an effect off a shell in
     /// flight (the tracer streak's nominal length).
     pub(crate) fn speed(&self) -> f32 {
@@ -624,6 +665,7 @@ impl Projectile {
             velocity: Vec3::ZERO,
             caliber,
             mass: 1.0,
+            nose_factor: 0.3,
             drag_k: 0.0,
             disc: walk::DiscFrame {
                 u: Vec3::X,
@@ -1030,6 +1072,7 @@ fn on_fire_shell(
             velocity,
             caliber: fire.caliber,
             mass: fire.mass,
+            nose_factor: fire.nose_factor,
             drag_k: drag,
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
@@ -1050,7 +1093,14 @@ fn on_fire_shell(
         SpallMarks::default(),
         ShellReadout {
             speed,
-            capability: capability(fire.mass, speed),
+            capability: capability(
+                RoundBody {
+                    mass: fire.mass,
+                    caliber: fire.caliber,
+                    nose_factor: fire.nose_factor,
+                },
+                speed,
+            ),
         },
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
@@ -1385,7 +1435,7 @@ fn integrate_projectiles(
         } else {
             shell.projectile.velocity = Vec3::from(step.direction) * step.speed;
             shell.readout.speed = step.speed;
-            shell.readout.capability = capability(shell.projectile.mass, step.speed);
+            shell.readout.capability = capability(shell.projectile.body(), step.speed);
         }
     }
 
@@ -1779,7 +1829,7 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
     }
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
-    shell.readout.capability = capability(shell.projectile.mass, caught_up.velocity.length());
+    shell.readout.capability = capability(shell.projectile.body(), caught_up.velocity.length());
 }
 
 /// Ray-march one tick's travel budget for a single shell, resolving every surface it reaches.
@@ -2370,6 +2420,176 @@ fn on_impact(impact: On<Impact>) {
 mod tests {
     use super::*;
 
+    /// Rounds the capability-law invariants are swept over. Fixture data, not a spec: the laws
+    /// below hold for any round.
+    const LAW_ROUNDS: [RoundBody; 4] = [
+        RoundBody {
+            mass: 0.0118,
+            caliber: 0.0079,
+            nose_factor: 0.5,
+        },
+        RoundBody {
+            mass: 0.685,
+            caliber: 0.037,
+            nose_factor: 0.6,
+        },
+        RoundBody {
+            mass: 10.2,
+            caliber: 0.088,
+            nose_factor: 7.0 / 24.0,
+        },
+        RoundBody {
+            mass: 25.0,
+            caliber: 0.122,
+            nose_factor: 1.0,
+        },
+    ];
+
+    /// Replica scaling: mass ×s³ and calibre ×s at fixed speed and nose factor scales capability
+    /// by s.
+    #[test]
+    fn capability_law_scales_with_replica_size() {
+        for round in LAW_ROUNDS {
+            for speed in [200.0, 773.0, 1500.0] {
+                let base = capability(round, speed);
+                for s in [0.5f32, 2.0, 3.0] {
+                    let scaled = RoundBody {
+                        mass: round.mass * s * s * s,
+                        caliber: round.caliber * s,
+                        ..round
+                    };
+                    let got = capability(scaled, speed);
+                    assert!(
+                        (got / (s * base) - 1.0).abs() < 1.0e-4,
+                        "{round:?} at {speed} m/s, ×{s}: {got} vs {}",
+                        s * base
+                    );
+                }
+            }
+        }
+    }
+
+    /// At fixed mass, speed and nose factor, a wider round has strictly less capability.
+    #[test]
+    fn capability_law_strictly_decreases_in_calibre() {
+        for round in LAW_ROUNDS {
+            for speed in [200.0, 773.0, 1500.0] {
+                let mut last = f32::INFINITY;
+                for step in 1..=40 {
+                    let caliber = 0.005 * step as f32;
+                    let c = capability(RoundBody { caliber, ..round }, speed);
+                    assert!(
+                        c < last,
+                        "{round:?} at {speed} m/s: calibre {caliber} gives {c} ≥ {last}"
+                    );
+                    last = c;
+                }
+            }
+        }
+    }
+
+    /// Spending `k1` then `k2` through two inversions lands on the same speed as spending
+    /// `k1 + k2` in one.
+    #[test]
+    fn capability_law_spends_compose() {
+        for round in LAW_ROUNDS {
+            for speed in [300.0, 773.0, 1500.0] {
+                let full = capability(round, speed);
+                for (f1, f2) in [(0.1, 0.2), (0.3, 0.3), (0.05, 0.9)] {
+                    let (k1, k2) = (f1 * full, f2 * full);
+                    let after_k1 = speed_for(round, full - k1);
+                    let two = speed_for(round, capability(round, after_k1) - k2);
+                    let one = speed_for(round, full - (k1 + k2));
+                    assert!(
+                        (two - one).abs() < 1.0e-3 * speed,
+                        "{round:?} at {speed} m/s, spends {k1}+{k2}: {two} vs {one}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `speed_for` inverts `capability` across the speed range a round meets.
+    #[test]
+    fn capability_law_inverse_round_trips() {
+        for round in LAW_ROUNDS {
+            for step in 1..=60 {
+                let speed = 30.0 * step as f32;
+                let back = speed_for(round, capability(round, speed));
+                assert!(
+                    (back / speed - 1.0).abs() < 1.0e-4,
+                    "{round:?}: {speed} m/s round-trips to {back}"
+                );
+            }
+        }
+    }
+
+    /// The local speed exponent `d ln C / d ln v` tends to 2 at low speed and is below 2 at the
+    /// calibration anchor's speed.
+    #[test]
+    fn capability_law_speed_exponent_is_two_at_low_speed() {
+        let exponent = |round: RoundBody, v1: f32, v2: f32| {
+            (capability(round, v2) / capability(round, v1)).ln() / (v2 / v1).ln()
+        };
+        for round in LAW_ROUNDS {
+            let low = exponent(round, 1.0, 2.0);
+            assert!(
+                (low - 2.0).abs() < 1.0e-2,
+                "{round:?}: low-speed exponent {low}"
+            );
+            let anchor = exponent(round, 760.0, 786.0);
+            assert!(anchor < 1.9, "{round:?}: anchor-speed exponent {anchor}");
+        }
+    }
+
+    /// At a fixed round, capability strictly increases with speed.
+    #[test]
+    fn capability_law_strictly_increases_in_speed() {
+        for round in LAW_ROUNDS {
+            let mut last = 0.0;
+            for step in 1..=60 {
+                let speed = 30.0 * step as f32;
+                let c = capability(round, speed);
+                assert!(c > last, "{round:?}: {speed} m/s gives {c} ≤ {last}");
+                last = c;
+            }
+        }
+    }
+
+    /// After one crossing whose limit speed is `v_l`, the residual obeys
+    /// `v_r² = (v² − v_l²) / (1 + k v_l² / A_REF)`.
+    #[test]
+    fn capability_law_residual_matches_the_limit_speed_identity() {
+        for round in LAW_ROUNDS {
+            let inertia = round.nose_factor * RHO_REF / A_REF;
+            for speed in [400.0f32, 773.0, 1500.0] {
+                for fraction in [0.1f32, 0.5, 0.9] {
+                    let limit = fraction * speed;
+                    let residual =
+                        speed_for(round, capability(round, speed) - capability(round, limit));
+                    let expected =
+                        ((speed * speed - limit * limit) / (1.0 + inertia * limit * limit)).sqrt();
+                    assert!(
+                        (residual / expected - 1.0).abs() < 1.0e-3,
+                        "{round:?}: {speed} m/s through v_l {limit}: {residual} vs {expected}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fixture calibration: 10.2 kg, 0.088 m, nose factor 7/24 at 773 m/s carries 250 reference-mm.
+    #[test]
+    fn capability_law_meets_its_calibration_anchor() {
+        let anchor = RoundBody {
+            mass: 10.2,
+            caliber: 0.088,
+            nose_factor: 7.0 / 24.0,
+        };
+        let c = capability(anchor, 773.0);
+        assert!((c - 250.0).abs() < 0.5, "anchor capability {c}");
+    }
+
     /// `drag_k` is calibrated so the 88 keeps its hand-tuned coefficient, and a light-for-bore round
     /// (the 7.9 mm coax) bleeds far faster from sectional density alone — the reason a coax drops more
     /// than the main gun at the same range, with no per-weapon drag field.
@@ -2512,6 +2732,18 @@ mod march_tests {
     /// (matches `sandbox::spawn_targets`).
     const STEEL: f32 = 1000.0;
 
+    /// Fixture rounds: the 88 and the 7.92 mm as the fixture tank's spec authors them.
+    const FIXTURE_88: RoundBody = RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 7.0 / 24.0,
+    };
+    const FIXTURE_MG: RoundBody = RoundBody {
+        mass: 0.0118,
+        caliber: 0.0079,
+        nose_factor: 0.5,
+    };
+
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
     /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
     /// so the spatial-query pipeline includes the plate before any shell is marched.
@@ -2594,6 +2826,7 @@ mod march_tests {
                 velocity: dir * speed,
                 caliber: 0.088,
                 mass: 10.2,
+                nose_factor: 0.3,
                 drag_k: drag_k(0.088, 10.2),
                 // Anchored on THIS fixture's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(dir),
@@ -2608,7 +2841,7 @@ mod march_tests {
             SpallMarks::default(),
             ShellReadout {
                 speed,
-                capability: capability(10.2, speed),
+                capability: capability(FIXTURE_88, speed),
             },
             Transform::from_translation(origin).looking_to(dir, Vec3::Y),
         ));
@@ -2723,6 +2956,7 @@ mod march_tests {
                         velocity: dir * 755.0,
                         caliber: 0.0079,
                         mass: 0.0118,
+                        nose_factor: 0.5,
                         drag_k: drag_k(0.0079, 0.0118),
                         disc: test_disc(dir),
                     },
@@ -2736,7 +2970,7 @@ mod march_tests {
                     SpallMarks::default(),
                     ShellReadout {
                         speed: 755.0,
-                        capability: capability(0.0118, 755.0),
+                        capability: capability(FIXTURE_MG, 755.0),
                     },
                     // The attribution the shell carries from `FireShell::shooter` — on the authority's
                     // shell, the shooter's own predicted shell, AND (since the coax fix) an observer's
@@ -2822,6 +3056,7 @@ mod march_tests {
                     velocity: Vec3::NEG_Z * 800.0,
                     caliber: 0.088,
                     mass: 10.2,
+                    nose_factor: 0.3,
                     drag_k: drag_k(0.088, 10.2),
                     disc: test_disc(Vec3::NEG_Z),
                 },
@@ -2835,7 +3070,7 @@ mod march_tests {
                 SpallMarks::default(),
                 ShellReadout {
                     speed: 800.0,
-                    capability: capability(10.2, 800.0),
+                    capability: capability(FIXTURE_88, 800.0),
                 },
                 Shot(shot),
                 Transform::from_translation(origin).looking_to(Vec3::NEG_Z, Vec3::Y),
@@ -2946,6 +3181,7 @@ mod march_tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
+            nose_factor: 0.3,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -2984,6 +3220,7 @@ mod march_tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
+            nose_factor: 0.3,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
                 tank: shooter,
@@ -3061,6 +3298,7 @@ mod march_tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
+            nose_factor: 0.3,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -3171,6 +3409,7 @@ mod march_tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
+            nose_factor: 0.3,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -3390,6 +3629,7 @@ mod march_tests {
                     velocity: dir * speed,
                     caliber: 0.088,
                     mass: 10.2,
+                    nose_factor: 0.3,
                     drag_k: drag_k(0.088, 10.2),
                     disc: test_disc(dir),
                 },
@@ -3403,7 +3643,7 @@ mod march_tests {
                 SpallMarks::default(),
                 ShellReadout {
                     speed,
-                    capability: capability(10.2, speed),
+                    capability: capability(FIXTURE_88, speed),
                 },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
@@ -3426,6 +3666,7 @@ mod march_tests {
                     velocity: dir.normalize() * speed,
                     caliber: 0.088,
                     mass: 10.2,
+                    nose_factor: 0.3,
                     drag_k: drag_k(0.088, 10.2),
                     disc: test_disc(dir.normalize()),
                 },
@@ -3439,7 +3680,7 @@ mod march_tests {
                 SpallMarks::default(),
                 ShellReadout {
                     speed,
-                    capability: capability(10.2, speed),
+                    capability: capability(FIXTURE_88, speed),
                 },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
@@ -3992,6 +4233,7 @@ mod march_tests {
                     velocity: dir * speed,
                     caliber: 0.088,
                     mass: 10.2,
+                    nose_factor: 0.3,
                     drag_k: drag_k(0.088, 10.2),
                     disc: test_disc(dir),
                 },
@@ -4005,7 +4247,7 @@ mod march_tests {
                 SpallMarks::default(),
                 ShellReadout {
                     speed,
-                    capability: capability(10.2, speed),
+                    capability: capability(FIXTURE_88, speed),
                 },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
@@ -4476,6 +4718,7 @@ mod march_tests {
                     velocity: Vec3::NEG_Z * 800.0,
                     caliber: 0.088,
                     mass: 10.2,
+                    nose_factor: 0.3,
                     drag_k: drag_k(0.088, 10.2),
                     disc: test_disc(Vec3::NEG_Z),
                 },
@@ -4489,7 +4732,7 @@ mod march_tests {
                 SpallMarks::default(),
                 ShellReadout {
                     speed: 800.0,
-                    capability: capability(10.2, 800.0),
+                    capability: capability(FIXTURE_88, 800.0),
                 },
                 Transform::from_translation(Vec3::new(0.0, 2.0, 2.0))
                     .looking_to(Vec3::NEG_Z, Vec3::Y),

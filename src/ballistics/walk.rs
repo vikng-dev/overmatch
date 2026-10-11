@@ -2002,7 +2002,7 @@ pub struct Shot {
     pub caliber: f32,
     /// Reference-mm this round can defeat right now (`super::capability`). The core spends it and
     /// reports what it spent; inverting back to a residual speed stays with the caller, which owns
-    /// the DeMarre constants.
+    /// the capability law.
     pub capability: f32,
 }
 
