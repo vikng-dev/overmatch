@@ -480,14 +480,20 @@ fn cast_march_segment(
 /// by rounds big enough for the ring to mean anything (see `resolve::DISC_MIN_CALIBER`).
 fn cast_disc_segment(
     world: &ProjectileMarchWorld,
-    frame: &walk::DiscFrame,
-    radius: f32,
+    // Each sample's start relative to `origin`, the axis sample's (`offsets[0]` is zero).
+    offsets: &[Vec3],
     origin: Vec3,
     dir: Dir3,
     max: f32,
     not_own: &dyn Fn(Entity) -> bool,
 ) -> Option<SegmentHit> {
-    let armor = if radius <= 0.0 {
+    // The broad phase pads by the farthest start, which a staggered continuation puts further off
+    // the axis than the radius.
+    let reach = offsets
+        .iter()
+        .map(|offset| offset.length())
+        .fold(0.0, f32::max);
+    let armor = if offsets.len() <= 1 {
         world.spatial.cast_ray_predicate(
             origin,
             dir,
@@ -499,7 +505,7 @@ fn cast_disc_segment(
     } else {
         let mut near_armor = false;
         world.spatial.aabb_intersections_with_aabb_callback(
-            collect::swept_aabb(origin, Vec3::from(dir), max, radius),
+            collect::swept_aabb(origin, Vec3::from(dir), max, reach),
             |entity| {
                 // ACCUMULATE, never assign. Avian 0.7 walks its collider trees with `for_each`, so a
                 // `false` return ends only the CURRENT tree's traversal — the remaining trees are
@@ -514,7 +520,7 @@ fn cast_disc_segment(
         );
         if near_armor {
             let mut nearest: Option<avian3d::prelude::RayHitData> = None;
-            for offset in walk::disc_offsets(frame, radius, walk::DEFAULT_RING) {
+            for &offset in offsets {
                 let hit = world.spatial.cast_ray_predicate(
                     origin + offset,
                     dir,
@@ -707,6 +713,13 @@ pub(crate) struct Projectile {
     /// Deterministic from spawn inputs alone, so a replica reconstructs the identical frame from the
     /// same `FireShell`; nothing about it rides the wire.
     disc: walk::DiscFrame,
+    /// Where each sample's next sweep starts and what it is inside there ([`resolve::Interior`]) —
+    /// SIM state, carried from one step to the next so a tick boundary never re-lays the disc.
+    ///
+    /// `None` at spawn, in every spawn path, and whenever the last step ended on a fresh disc rather
+    /// than on a perforation's starts; a sanctioned re-seed clears it (it lifts the round to a pose
+    /// of its own). Never on the wire: a replica derives its own from the same spawn and march.
+    continuation: Option<resolve::Interior>,
 }
 
 impl Projectile {
@@ -745,6 +758,7 @@ impl Projectile {
                 u: Vec3::X,
                 v: Vec3::Y,
             },
+            continuation: None,
         }
     }
 }
@@ -1259,6 +1273,7 @@ fn on_fire_shell(
                     v: Vec3::Y,
                 },
             ),
+            continuation: None,
         },
         DamageReport::default(),
         TerminalReport::default(),
@@ -2005,6 +2020,8 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
             .disc
             .transport(shell.projectile.velocity, Vec3::from(direction));
     }
+    // The catch-up moved the round without sweeping its samples: the next step starts a fresh disc.
+    shell.projectile.continuation = None;
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
     shell.readout.capability = capability(shell.projectile.body(), caught_up.velocity.length());
@@ -2098,11 +2115,10 @@ fn march_shell_step(
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
     let body = shell.projectile.body();
     let radius = resolve::disc_radius(shell.projectile.caliber);
-    // The crossing state machine shared with the §13.6 gate. Its continuation is set only between
-    // the crossings of this step and never outlives it: a perforation that leaves a sample inside
-    // material is resolved on, past the travel budget if need be (see [`next_surface`]), within the
-    // step's limits (`resolve::Budget`).
-    // The shell's position is the last step's clear pose, and its sweep resumes from it.
+    // The crossing state machine shared with the §13.6 gate, resumed from the starts the last step
+    // left (`resolve::Interior`). A perforation that leaves a sample inside material is resolved on
+    // within this step, past the travel budget if need be (see [`next_surface`]), within the step's
+    // limits (`resolve::Budget`); what crosses the tick is the starts, never an owed exit.
     let mut flight = resolve::Flight::launched(
         shell.transform.translation,
         previous,
@@ -2110,6 +2126,7 @@ fn march_shell_step(
         speed,
         shell.projectile.disc,
         radius,
+        shell.projectile.continuation.take(),
     );
 
     while budget.continues(&flight) {
@@ -2120,11 +2137,13 @@ fn march_shell_step(
             // exactly the shared `advance_shell` landing point; a `continue` past this point only
             // ever follows a bend, so `bent` is the exact discriminant.
             Ahead::Open => {
-                flight.position = if bent {
-                    flight.position + dir * budget.remaining()
+                let travel = budget.remaining();
+                let to = if bent {
+                    flight.position + dir * travel
                 } else {
                     freeflight_pos
                 };
+                flight.fly(to, travel);
                 break;
             }
             // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
@@ -2268,6 +2287,7 @@ fn march_shell_step(
                         }
                         flight.speed = sanctioned_speed;
                         flight.lag = 0.0;
+                        flight.continuation = None;
                         // Lift the shell's BODY clear of the face it bounced off and nudge it off
                         // along the new heading, exactly as the authority's own ricochet does
                         // (`resolve::Bounce::resume`), so it resumes at a clear pose. At oblique incidence a disc's lateral
@@ -2354,9 +2374,11 @@ fn march_shell_step(
             break;
         }
     }
-    // Carry the (possibly re-rolled) basis back onto the shell so the next tick transports from
-    // where this one left off rather than re-anchoring.
+    // Carry the (possibly re-rolled) basis and the per-sample starts back onto the shell, so the
+    // next tick transports from where this one left off and resumes every sample where its ray
+    // stopped. A held round is frozen at contact, not at a start; its re-seed lays a fresh disc.
     shell.projectile.disc = flight.frame;
+    shell.projectile.continuation = if holding { None } else { flight.continuation };
 
     Some(MarchStep {
         position: flight.position,
@@ -2384,12 +2406,15 @@ enum Ahead {
 /// The next surface a flight meets within `budget` metres — shared by the runtime march and the
 /// §13.6 gate, so both cut successive crossings at the same places.
 ///
+/// Cast from every sample's own start ([`resolve::Flight::sample_offsets`]), not from a disc
+/// re-laid at the axis: a staggered start is the only point that sample's membership is known at.
+///
 /// A flight holding material ([`resolve::Flight::holds_material`]) is not done with it when the
-/// budget is: its exit lies ahead with its entry behind, the continuation alone declares that, and
-/// it does not outlive the step. So such a flight looks as far as a corridor may reach
-/// ([`resolve::MAX_CORRIDOR`]) and its crossing resolves now, past the budget if need be — the
-/// continuation is drained before the step yields, never carried across a tick. How far past is
-/// bounded: [`resolve::Budget`] stops a drain at [`resolve::MAX_OVERRUN`].
+/// budget is: its exit lies ahead with its entry behind, and only the continuation declares that. So
+/// such a flight looks as far as a corridor may reach ([`resolve::MAX_CORRIDOR`]) and its crossing
+/// resolves now, past the budget if need be: a step never yields owing an exit, so what crosses a
+/// tick is the per-sample starts alone. How far past is bounded: [`resolve::Budget`] stops a drain
+/// at [`resolve::MAX_OVERRUN`].
 fn next_surface(
     world: &ProjectileMarchWorld,
     flight: &resolve::Flight,
@@ -2407,8 +2432,7 @@ fn next_surface(
         };
     match cast_disc_segment(
         world,
-        &flight.frame,
-        radius,
+        &flight.sample_offsets(radius),
         flight.sweep_origin(),
         flight.direction,
         reach,
@@ -3044,6 +3068,7 @@ mod march_tests {
                 drag_k: drag_k(body.caliber, body.mass),
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),
+                continuation: None,
             },
             ShellReadout {
                 speed,
@@ -5725,23 +5750,20 @@ mod march_tests {
 
     /// AN OBLIQUE PERFORATION THAT ENDS A TICK RESUMES ON ITS SEEDS.
     ///
-    /// A disc that perforates an oblique plate resumes on its SEEDS: each sample one nudge past the
-    /// aggregate exit along its own ray, so the samples' clear points are staggered along the plate
-    /// — up to `r·tan(incidence)` ahead of or behind the axis (DERIVED: 76 mm for an 88 at 60°).
-    /// Within the step the next crossing starts from those seeds. When the perforation is the step's
-    /// last crossing, the continuation does not hold material and lapses with the step, and the next
-    /// tick lays a fresh disc square to its travel at the axis's resume point: every sample the
-    /// stagger put ahead of it now starts inside the plate it already left, reads that plate's exit
-    /// with nothing declared, and the round fails closed in mid-air past the plate.
+    /// A disc that perforates an oblique plate resumes each sample one nudge past the aggregate exit
+    /// along its own ray, so the starts are staggered along the plate — up to `r·tan(incidence)`
+    /// ahead of or behind the axis (DERIVED: 76 mm for an 88 at 60°). When that perforation is the
+    /// step's last crossing, the next tick must resume from those same starts
+    /// ([`resolve::Interior`]); a disc laid square at the axis's resume point puts every sample the
+    /// stagger had ahead of it back inside the plate it left, reading that plate's exit with nothing
+    /// declared, and the round fails closed in mid-air past the plate.
     ///
-    /// MEASURED at this commit and at its parent: an 88 at 60° through 20 mm, fired from stand-offs
-    /// 1 mm apart across a 4 cm window around the tick's end, fails closed on the next tick for
-    /// about half of them. Ignored until it is decided how a staggered clear pose crosses a tick.
+    /// Fixture data: an 88 at 60° through 20 mm, from 200 stand-offs 0.2 mm apart across a 4 cm
+    /// window centred on the tick's end, so the perforation lands at every phase of the boundary.
     #[test]
-    #[ignore = "a staggered continuation lapses at the tick boundary; needs a decision on how \
-                per-sample clear poses cross a tick"]
     fn an_oblique_perforation_that_ends_a_tick_resumes_on_its_seeds() {
         const DT: f32 = 0.016;
+        const STANDOFFS: usize = 200;
         let incidence = 60.0_f32.to_radians();
         let dir = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
         let velocity = dir * 800.0;
@@ -5754,10 +5776,10 @@ mod march_tests {
         let budget = stepped.length() * DT;
         let face = Vec3::new(0.0, 2.0, 0.51);
         let mut failed = Vec::new();
-        for millimetres in 0..40 {
+        for index in 0..STANDOFFS {
             // The face lies this far short of the tick's travel: the crossing ends the tick for
             // stand-offs whose perforation spends what is left of it.
-            let short = 0.02 - 1.0e-3 * millimetres as f32;
+            let short = 0.02 - 0.04 * index as f32 / STANDOFFS as f32;
             let mut app = world_with_trimesh_plates(&[slab(0.02, 0.5)]);
             spawn_round(
                 &mut app,
@@ -5775,8 +5797,9 @@ mod march_tests {
         }
         assert!(
             failed.is_empty(),
-            "the round failed closed past the plate it perforated, with the face this far short of \
-             the tick's travel: {failed:?}",
+            "{} of {STANDOFFS} stand-offs failed closed past the plate they perforated, with the face \
+             this far short of the tick's travel: {failed:?}",
+            failed.len(),
         );
     }
 

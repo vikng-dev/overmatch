@@ -134,6 +134,7 @@ fn fire(
             nose_factor,
             drag_k: drag_k(caliber, mass),
             disc: walk::DiscFrame::anchored(direction).expect("a golden fires along a real axis"),
+            continuation: None,
         },
         DamageReport::default(),
         TerminalReport::default(),
