@@ -15,7 +15,7 @@
 
 use bevy::prelude::*;
 
-use super::{MAX_COSMETIC_CATCH_UP_TICKS, elapsed_ticks, fast_forward_shell};
+use super::{MAX_COSMETIC_CATCH_UP_TICKS, Verdict, elapsed_ticks, fast_forward_shell};
 use crate::ShotId;
 
 /// A server-sanctioned ricochet consumed by a client cosmetic shell.
@@ -40,8 +40,9 @@ pub(crate) struct SanctionedTerminal {
     pub position: Vec3,
     /// The struck face's outward normal, straight from the server's raycast.
     pub normal: Vec3,
-    /// The server's penetration verdict — gates the flame lick, exactly as the authority's read did.
-    pub penetrated: bool,
+    /// The server's verdict at the struck face — gates the flame lick, exactly as the authority's read
+    /// did.
+    pub verdict: Verdict,
     /// Server tick where this terminal resolved.
     pub impact_tick: u32,
     /// Required number of prior bounces before this terminal may be consumed.
@@ -507,7 +508,7 @@ mod tests {
         let terminal = SanctionedTerminal {
             position: Vec3::new(3.5, 3.5, 0.0),
             normal: Vec3::NEG_Y,
-            penetrated: true,
+            verdict: Verdict::Through,
             impact_tick: 108,
             after_bounces: 2,
         };
@@ -674,7 +675,7 @@ mod tests {
         let terminal = SanctionedTerminal {
             position: Vec3::ONE,
             normal: Vec3::Y,
-            penetrated: false,
+            verdict: Verdict::Stopped,
             impact_tick: second.bounce_tick + MAX_COSMETIC_CATCH_UP_TICKS,
             after_bounces: 2,
         };

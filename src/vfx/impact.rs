@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER};
+use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER, Verdict};
 use crate::view::PlayerView;
 
 use super::ViewRng;
@@ -139,8 +139,8 @@ const GROUND_MARK_CAP: usize = 16;
 // --- The 88 on ARMOR (caliber ≥ TRACER_MAX_CALIBER, surface Armor): steel is categorically NOT dirt
 // (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
 // spark fan, and a small gray spall/smoke puff — NO plume, NO shock ring, NO ground scar, NO lingering
-// brown cloud. A brief flame lick is added ONLY when the round bit into the steel (`Impact.penetrated`
-// — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
+// brown cloud. A brief flame lick is added ONLY when the round bit into the steel
+// (`Impact.verdict.entered()` — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
 // spark / flame) and Blend (spall) pipelines as the terrain read — no new pipeline permutations.
 
 /// Armor contact flash: bigger and hotter than the terrain splash flash ([`SPLASH_FLASH_SIZE`] 2.3)
@@ -531,7 +531,7 @@ fn spawn_impact_read(
                     impact.position,
                     normal,
                     to_camera,
-                    impact.penetrated,
+                    impact.verdict,
                     impact.deflection,
                     &assets,
                     &mut materials,
@@ -932,7 +932,7 @@ fn spawn_big_splash(
 /// white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff, all on the
 /// shared ring. NO plume, NO shock ring, NO lingering cloud, and — deliberately — NO ground scar
 /// (steel isn't gouged like soil; the armor read touches only the shared billboard ring). A brief
-/// flame lick is appended ONLY when `penetrated` (the round bit into the steel). When `deflection` is
+/// flame lick is appended ONLY when `verdict.entered()` (the round bit into the steel). When `deflection` is
 /// present (a ricochet) the spark fan leans toward the bounce direction; otherwise it splays off the
 /// surface normal. Physical read (module doc), not screen-relative.
 #[allow(clippy::too_many_arguments)]
@@ -940,7 +940,7 @@ fn spawn_big_armor(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
-    penetrated: bool,
+    verdict: Verdict,
     deflection: Option<Vec3>,
     assets: &ImpactAssets,
     materials: &mut Assets<VfxBillboardMaterial>,
@@ -1054,7 +1054,7 @@ fn spawn_big_armor(
     // --- Flame lick: penetration ONLY (the round bit into the steel — embed-that-defeats or a clean
     // perforation, never a ricochet). One brief warm additive flame off the breach, rising. Full
     // width on frame one; it collapses rather than blooms (the burn is at the instant of the bite).
-    if penetrated {
+    if verdict.entered() {
         spawn_billboard(
             commands,
             materials,
@@ -1163,16 +1163,23 @@ mod tests {
     /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-
     /// byte, including the RNG draw order the small read pins.
     fn trigger_impact(app: &mut App, normal: Vec3, caliber: f32) {
-        trigger_surface(app, normal, caliber, ImpactSurface::Terrain, false, None);
+        trigger_surface(
+            app,
+            normal,
+            caliber,
+            ImpactSurface::Terrain,
+            Verdict::Ricochet,
+            None,
+        );
     }
 
-    /// Fire an impact on an explicit surface (with penetration + deflection) — the armor tests.
+    /// Fire an impact on an explicit surface (with verdict + deflection) — the armor tests.
     fn trigger_surface(
         app: &mut App,
         normal: Vec3,
         caliber: f32,
         surface: ImpactSurface,
-        penetrated: bool,
+        verdict: Verdict,
         deflection: Option<Vec3>,
     ) {
         app.world_mut().trigger(Impact {
@@ -1180,7 +1187,7 @@ mod tests {
             normal,
             caliber,
             surface,
-            penetrated,
+            verdict,
             deflection,
         });
         app.world_mut().flush();
@@ -1320,7 +1327,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            false,
+            Verdict::Ricochet,
             None,
         );
         assert_eq!(
@@ -1454,7 +1461,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            false,
+            Verdict::Ricochet,
             None,
         );
         assert_eq!(
@@ -1488,7 +1495,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            false,
+            Verdict::Ricochet,
             None,
         );
         let n0 = billboards(&mut no_pen);
@@ -1499,7 +1506,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            true,
+            Verdict::Through,
             None,
         );
         let n1 = billboards(&mut pen);
@@ -1526,7 +1533,7 @@ mod tests {
             Vec3::Y,
             MG_CALIBER,
             ImpactSurface::Armor,
-            false,
+            Verdict::Ricochet,
             None,
         );
         let na = billboards(&mut armor);
@@ -1554,7 +1561,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            false,
+            Verdict::Ricochet,
             Some(deflect),
         );
         let fan = sparks(&mut app);

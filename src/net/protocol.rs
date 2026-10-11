@@ -16,7 +16,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
-use crate::ballistics::ComponentHealth;
+use crate::ballistics::{ComponentHealth, Verdict};
 use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
@@ -135,7 +135,11 @@ use crate::{CombatantId, ShotId};
 /// REV 30 (force-law capability): `FireEvent` carries the round's `nose_factor`, which the
 /// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
 /// never rides the wire.
-pub const PROTOCOL_REV: u32 = 30;
+///
+/// REV 31 (a three-way public impact outcome): [`ImpactConfirm`]'s `penetrated` bool becomes a
+/// [`Verdict`] (`Through` / `Stopped` / `Ricochet`), so a peer can tell a round that stopped in the
+/// plate from one that went through. New embedded enum: own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 31;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -432,8 +436,9 @@ pub struct ImpactConfirm {
     /// The struck face's outward normal, from the server's raycast. No `Dir3` guard on receipt:
     /// `Impact` consumers normalize with a fallback by contract (see `ballistics::Impact::normal`).
     pub normal: Vec3,
-    /// The server's penetration verdict — gates the flame lick exactly as the local read does.
-    pub penetrated: bool,
+    /// The server's verdict at the struck face: whether the round stopped in the material or went
+    /// through. Its `entered()` gates the flame lick exactly as the local read does.
+    pub verdict: Verdict,
     /// The server `Tick` the impact resolved on. Audit / future RTT-adaptive use, like
     /// [`RicochetKeyframe::bounce_tick`] — the client resolves on receipt, not by re-aging.
     pub impact_tick: Tick,
@@ -888,7 +893,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf351_af4d_d82a_d2ea;
+const WIRE_TYPES_HASH: u64 = 0xdd43_19dd_6769_3ffc;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1340,8 +1345,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 30: `FireEvent` carries `nose_factor`, on the lightyear 0.30.1 wire dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x2f92_b1e6_86b4_fcd4;
+        // Pins REV 31: `ImpactConfirm` carries a three-way `Verdict`, on the lightyear 0.30.1 wire
+        // dependency.
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xc1a9_46af_0b60_3b3a;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1590,6 +1596,7 @@ mod tests {
         ("src/spec.rs", "FireMechanism"),
         ("src/net/protocol.rs", "RicochetKeyframe"),
         ("src/net/protocol.rs", "ImpactConfirm"),
+        ("src/ballistics.rs", "Verdict"),
         ("src/net/protocol.rs", "DamageReceipt"),
         ("src/net/protocol.rs", "DamageConfirm"),
         ("src/net/protocol.rs", "SetSpawnPoint"),

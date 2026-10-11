@@ -35,8 +35,8 @@ use super::walk::{
 };
 use super::{
     ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactSurface, MarchingShell,
-    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, apply_hit_impulse,
-    capability, hit_ancestor, speed_for, throw_spall_burst,
+    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, Verdict,
+    apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
 #[cfg(test)]
@@ -507,7 +507,7 @@ fn ricochet(
         normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
-        penetrated: false,
+        verdict: Verdict::Ricochet,
         deflection: Some(Vec3::from(out)),
     });
     shell.marks.ricochets.push(position);
@@ -666,9 +666,12 @@ fn perforate_or_embed(
         }
     };
 
-    // The struck FACE reads at the entrance, where the round punched in — the one place "penetrated"
-    // is unambiguously true, and (for an embed) the visible surface, since the embed point is inside
-    // the steel.
+    let verdict = match plan.outcome {
+        Outcome::Embedded { .. } => Verdict::Stopped,
+        Outcome::Perforated { .. } => Verdict::Through,
+    };
+    // The struck FACE reads at the entrance, where the round punched in, and (for an embed) the
+    // visible surface, since the embed point is inside the steel.
     commands.trigger(Impact {
         position: match plan.outcome {
             Outcome::Embedded { at, .. } => world(at),
@@ -677,7 +680,7 @@ fn perforate_or_embed(
         normal: plan_entrance.normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
-        penetrated: true,
+        verdict,
         deflection: None,
     });
     if let Some(shot) = shell.shot
@@ -689,7 +692,7 @@ fn perforate_or_embed(
             shot: shot.0,
             position: terminal_at,
             normal: plan_entrance.normal,
-            penetrated: true,
+            verdict,
             after_bounces: shell.marks.ricochets.len() as u32,
         });
     }

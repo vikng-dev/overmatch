@@ -38,7 +38,7 @@ use crate::damage::CrewStation;
 #[derive(Clone, Copy, Debug)]
 struct Captured {
     surface: ImpactSurface,
-    penetrated: bool,
+    verdict: Verdict,
     deflection: Option<Vec3>,
     normal: Vec3,
     position: Vec3,
@@ -50,7 +50,7 @@ struct ImpactLog(Vec<Captured>);
 fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
     log.0.push(Captured {
         surface: impact.surface,
-        penetrated: impact.penetrated,
+        verdict: impact.verdict,
         deflection: impact.deflection,
         normal: impact.normal,
         position: impact.position,
@@ -271,7 +271,7 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
         out.impacts
     );
     assert!(
-        armor.iter().all(|hit| hit.penetrated),
+        armor.iter().all(|hit| hit.verdict.entered()),
         "PHYSICS CHANGED — diff consciously. Every armour read on this line should be a bite, not a \
          bounce and not a fail-closed stop: {armor:?}"
     );
@@ -328,10 +328,11 @@ fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
          once: {:?}",
         out.impacts
     );
-    assert!(
-        armor[0].penetrated,
-        "PHYSICS CHANGED — diff consciously. `penetrated` means the round BIT STEEL (an embed reads \
-         it too); an MG round on a head-on plate is not a ricochet"
+    assert_eq!(
+        armor[0].verdict,
+        Verdict::Stopped,
+        "PHYSICS CHANGED — diff consciously. The MG round bites the head-on plate and stops in it; it \
+         is neither a ricochet nor a perforation"
     );
     assert_eq!(
         out.health_of("Driver"),
@@ -383,7 +384,7 @@ fn a_rear_shot_soaks_in_the_engine_block() {
     assert!(
         out.impacts
             .iter()
-            .any(|hit| hit.surface == ImpactSurface::Armor && hit.penetrated),
+            .any(|hit| hit.surface == ImpactSurface::Armor && hit.verdict.entered()),
         "PHYSICS CHANGED — diff consciously. The rear plate should be bitten: {:?}",
         out.impacts
     );
@@ -430,8 +431,9 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
         ImpactSurface::Armor,
         "PHYSICS CHANGED — diff consciously. The bounce is off armour"
     );
-    assert!(
-        !bounce.penetrated,
+    assert_eq!(
+        bounce.verdict,
+        Verdict::Ricochet,
         "PHYSICS CHANGED — diff consciously. A ricochet bit no steel"
     );
     assert!(
@@ -489,7 +491,9 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, EIGHTY_EIGHT);
 
     let stopped = out.impacts.iter().any(|hit| {
-        hit.surface == ImpactSurface::Armor && !hit.penetrated && hit.deflection.is_none()
+        hit.surface == ImpactSurface::Armor
+            && hit.verdict == Verdict::Ricochet
+            && hit.deflection.is_none()
     });
     assert!(
         !stopped,
