@@ -436,6 +436,44 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
     assert_eq!(result.runs[0].start, 0.0);
 }
 
+/// A declared presence is handed on at EVERY hand-off, the corridor origin included.
+///
+/// A resumed corridor that begins inside a shell reads that crossing's entrance plane at its own
+/// origin, so the transit seed is read at `t ≈ 0`. The shell's entry was the seed's, behind that
+/// origin; reading it as "on the plane" leaves the transit unseeded, its entry face already behind
+/// it, and the shell's exit with nothing open.
+#[test]
+fn declared_presence_is_seeded_at_the_corridor_origin() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let key = ShellKey {
+        volume: volume(1),
+        primitive: prim(0),
+        shell: 0,
+    };
+    let mut corridor = corridor(
+        4.0,
+        vec![FaceHit {
+            volume: volume(1),
+            primitive: prim(0),
+            shell: 0,
+            contact: Contact::Face(0),
+            triangle: 0,
+            t: 0.25,
+            true_normal: AXIS,
+        }],
+    );
+    corridor.initial_presence = vec![key];
+    let walked = walk(&corridor, &volumes);
+    for t in [-0.0, 0.0, 1.0e-9, 0.1, 0.25] {
+        assert_eq!(walked.inside_at(t, &laws), vec![key], "seeded at {t}");
+    }
+    assert!(
+        walked.inside_at(0.5, &laws).is_empty(),
+        "and closed past its exit"
+    );
+}
+
 /// The same hit list WITHOUT the declaration is an error, never inferred topology. "The first hit is
 /// an exit, so we must have started inside" is exactly how a dropped entry face becomes free armour.
 #[test]

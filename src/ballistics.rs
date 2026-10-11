@@ -1961,9 +1961,11 @@ fn march_shell_step(
     } else {
         0.0
     };
-    // Which primitives each disc sample is still inside. Non-empty only between the crossings of one
-    // multi-plate step; the resolver hands it forward so the next corridor never has to infer it.
-    let mut interior: Vec<walk::SampleSeed> = Vec::new();
+    // Where the last perforation resumes and which primitives each disc sample is still inside
+    // there, in that perforation's anchor frame. Set only between the crossings of one multi-plate
+    // step; the resolver hands it forward so the next corridor never has to infer it, and the march
+    // never rebuilds it from the world-space `pos` (see `resolve::Interior`).
+    let mut interior: Option<resolve::Interior> = None;
 
     while remaining > EPS {
         let origin = pos + dir * EPS;
@@ -2150,7 +2152,7 @@ fn march_shell_step(
             dir,
             speed,
             hit.distance,
-            &interior,
+            interior.as_ref(),
             &mut terminal_emitted,
             health,
             bodies,
@@ -2182,7 +2184,7 @@ fn march_shell_step(
             }
         };
         damage_dealt += crossing.damage;
-        interior = crossing.seeds;
+        interior = crossing.interior;
         let crossing_resume = crossing.resume;
         // What the crossing actually flew, summed over its segments by the only code that knows them
         // (see `resolve::Crossing::travel`). `travelled` — the distance to the NEAREST sample's
@@ -2792,6 +2794,27 @@ mod march_tests {
         caliber: 0.0079,
         nose_factor: 0.5,
     };
+
+    /// A fixture round's flight state and its initial readout, both from one body, so the readout
+    /// the march starts from is the capability of the round it marches.
+    fn fixture_round(body: RoundBody, velocity: Vec3) -> (Projectile, ShellReadout) {
+        let speed = velocity.length();
+        (
+            Projectile {
+                velocity,
+                caliber: body.caliber,
+                mass: body.mass,
+                nose_factor: body.nose_factor,
+                drag_k: drag_k(body.caliber, body.mass),
+                // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
+                disc: test_disc(velocity.normalize()),
+            },
+            ShellReadout {
+                speed,
+                capability: capability(body, speed),
+            },
+        )
+    }
 
     /// Build an Avian world with one static steel plate (full extents `size`, centred at `at`, facing
     /// ±Z) on the `Armor` layer, register the real march + the impact capture, and settle the physics
@@ -4939,11 +4962,11 @@ mod march_tests {
         }
         // Nothing may be reported in the air itself: a fabricated weld across the gap would report
         // ONE crossing spanning both plates, and a fabricated surface would report a third read
-        // between them.
+        // between them. The faces themselves are read to the same 1 mm the reads above are.
         assert!(
             impacts
                 .iter()
-                .all(|impact| !(-0.425..=0.475).contains(&impact.position.z)),
+                .all(|impact| !(-0.425 + 1.0e-3..=0.475 - 1.0e-3).contains(&impact.position.z)),
             "no armour was invented in 900 mm of air: {impacts:?}",
             impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
         );
@@ -5008,6 +5031,108 @@ mod march_tests {
         let terminals = app.world().resource::<TerminalLog>().0.clone();
         assert_eq!(terminals.len(), 1, "one terminal per shot");
         assert!(terminals[0].penetrated);
+    }
+
+    /// A PERFORATION'S SEEDS AND THE NEXT CORRIDOR DESCRIBE ONE POINT, ANYWHERE ON THE MAP.
+    ///
+    /// After a perforation the march resumes one [`MARCH_EPS`] past the exit, carrying which
+    /// primitives each sample is inside there ([`resolve::Crossing::seeds`]). The seed was read on
+    /// the transit corridor's own anchor-relative ray; the next corridor must start from that same
+    /// point. A resume point rebuilt in world f32 is quantized at the world's own spacing —
+    /// 2.44e-4 m past 2048 m, DERIVED — so an entry face that close to the resumption plane is
+    /// owned by the seed AND re-collected ahead of the origin (`UnexpectedEntry`), or by nobody
+    /// (`UnexpectedExit`), and the round fails closed on armour it had already bitten.
+    ///
+    /// The near-origin half pins the other link of the same chain: the resumed corridor's crossing
+    /// of the volume it began inside hands off at its own origin, and the declared presence must be
+    /// seeded there too ([`walk::ShellPresence::spans`]).
+    ///
+    /// Generic geometry: a thin plate, then a second volume tilted so its entry face does not weld
+    /// to the plate's exit, its entry swept across the resumption plane in steps finer than that
+    /// spacing. Every arrangement must resolve without a walk error, near the world origin and far
+    /// from it. A sub-disc round keeps the case to the axis sample, which is the sample the
+    /// resumption plane is read on.
+    #[test]
+    fn a_perforation_resumes_where_its_seeds_were_read_far_from_the_origin() {
+        const TILT: f32 = 65.0;
+        let body = FIXTURE_MG;
+        assert!(
+            body.caliber < resolve::DISC_MIN_CALIBER,
+            "a one-sample round"
+        );
+        let plate = Vec3::new(1.0, 1.0, 0.005);
+        let tilted = Vec3::new(1.0, 1.0, 0.1);
+        for far in [Vec3::new(0.0, 2.0, 2.0), Vec3::new(2500.0, 2.0, 2500.0)] {
+            // The plate's exit face and the resumption plane one nudge past it, along −Z.
+            let exit = far.z as f64 - 1.0 - plate.z as f64 * 0.5;
+            let resume = exit - MARCH_EPS as f64;
+            let centre_z = (resume - 0.12) as f32;
+            let mut failed = Vec::new();
+            for step in -20i32..=20 {
+                // `ahead > 0`: the tilted volume's entry lies BEFORE the resumption plane, so the
+                // seed owns it; `< 0`: after it, so the next corridor does.
+                let ahead = step as f64 * 2.0e-5;
+                let entry = resume + ahead;
+                // Its +Z face, rotated by TILT about Y, crosses the axis `half / cos(TILT)` in front
+                // of its centre.
+                let half = ((entry - centre_z as f64) * (TILT as f64).to_radians().cos()) as f32;
+                let mut app =
+                    world_with_trimesh_plates(&[(plate, far + Vec3::new(0.0, 0.0, -1.0))]);
+                app.world_mut().spawn((
+                    Transform::from_translation(Vec3::new(far.x, far.y, centre_z))
+                        .with_rotation(Quat::from_rotation_y(TILT.to_radians())),
+                    RigidBody::Static,
+                    box_trimesh(Vec3::new(tilted.x, tilted.y, half * 2.0)),
+                    CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                    BallisticVolume {
+                        material_factor: STEEL * 0.01,
+                        substance: "soft".to_string(),
+                    },
+                ));
+                for _ in 0..8 {
+                    app.update();
+                }
+                let origin = far + Vec3::new(0.0, 0.0, 2.0);
+                app.world_mut().spawn((
+                    fixture_round(body, Vec3::NEG_Z * 800.0),
+                    DamageReport::default(),
+                    TerminalReport::default(),
+                    ShellPath {
+                        points: vec![origin],
+                        segment_starts: Vec::new(),
+                    },
+                    PenetrationMarks::default(),
+                    SpallMarks::default(),
+                    Transform::from_translation(origin).looking_to(Vec3::NEG_Z, Vec3::Y),
+                ));
+                for _ in 0..4 {
+                    app.update();
+                }
+                let impacts = app.world().resource::<ImpactLog>().0.clone();
+                assert!(
+                    impacts.first().is_some_and(|impact| impact.penetrated),
+                    "the plate is perforated at {far} ({ahead:e} m): {:?}",
+                    impacts
+                        .iter()
+                        .map(|i| (i.position, i.penetrated))
+                        .collect::<Vec<_>>(),
+                );
+                // A walk error stops the round with a bare armour spark: not penetrated, not
+                // deflected. Nothing else in this arrangement reads that way.
+                if impacts.iter().any(|impact| {
+                    matches!(impact.surface, ImpactSurface::Armor)
+                        && !impact.penetrated
+                        && impact.deflection.is_none()
+                }) {
+                    failed.push(ahead);
+                }
+            }
+            assert!(
+                failed.is_empty(),
+                "at {far} the march failed closed with the tilted entry these distances ahead of \
+                 the resumption plane: {failed:?}",
+            );
+        }
     }
 
     /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL.

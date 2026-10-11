@@ -608,7 +608,10 @@ pub struct EntityPresence {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellPresence {
     pub key: ShellKey,
-    /// Disjoint, ordered, half-open `[open, close)`.
+    /// Disjoint, ordered, half-open `[open, close)`. A span the ray BEGAN inside (declared
+    /// [`RayCorridor::initial_presence`]) opens at `−∞`: its entry was owned by the seed that
+    /// declared it, behind every hand-off this walk can make, so [`RayWalk::inside_at`] hands it on
+    /// even at `t = 0`.
     pub spans: Vec<(f64, f64)>,
 }
 
@@ -649,7 +652,10 @@ impl RayWalk {
             .iter()
             .filter(|presence| {
                 presence.spans.iter().any(|(open, close)| {
-                    let entered = *open < t && !coincident(*open, t, laws);
+                    // A declared span (`open = −∞`) was entered before any `t`; `coincident`
+                    // would read `∞ ≤ ∞` as the same boundary.
+                    let entered =
+                        *open == f64::NEG_INFINITY || (*open < t && !coincident(*open, t, laws));
                     let still_inside = t <= *close || coincident(*close, t, laws);
                     entered && still_inside
                 })
@@ -1046,6 +1052,13 @@ pub fn walk_ray(
         .into_iter()
         .map(|(key, mut spans)| {
             spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            // The field opened a declared shell at the corridor origin, which is where its CHORD
+            // starts; its ENTRY is the seed's, and lies behind the origin.
+            if corridor.initial_presence.contains(&key)
+                && let Some(first) = spans.first_mut()
+            {
+                first.0 = f64::NEG_INFINITY;
+            }
             ShellPresence { key, spans }
         })
         .collect();

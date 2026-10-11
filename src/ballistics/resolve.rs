@@ -93,13 +93,13 @@ pub(crate) struct Crossing {
     /// The disc lift a ricochet resumes on is deliberately NOT counted: it is a repositioning of the
     /// body clear of the face it bounced off, not distance the round flew.
     pub travel: f32,
-    /// Which primitives each disc sample is still inside where the march resumes.
+    /// Where the march resumes and which primitives each disc sample is still inside there.
     ///
-    /// Empty unless the round perforated. This is the ONLY state a crossing leaves behind, and it
+    /// `None` unless the round perforated. This is the ONLY state a crossing leaves behind, and it
     /// exists because the alternative is guessing: a shell that punches an outer plate while one ring
     /// sample is already inside the crewman behind it must resume knowing that, or the next corridor
     /// reports an exit it never entered.
-    pub seeds: Vec<SampleSeed>,
+    pub interior: Option<Interior>,
     /// Where the march must resume, when the contact point itself is not far enough clear.
     ///
     /// A bounce is the case that needs it. The point model could resume one boundary nudge along the
@@ -109,6 +109,24 @@ pub(crate) struct Crossing {
     /// surface the round just left. So a ricochet lifts the shell clear along `n̄` by the disc's own
     /// radius: the same statement the 1 mm nudge makes for a point, sized for a body.
     pub resume: Option<Vec3>,
+}
+
+/// The resume point of a perforation and the seeds read there, in ONE anchor frame.
+///
+/// INVARIANT: the next corridor starts at exactly the point the seeds were read at. Both are
+/// anchor-relative — `origin` is `transit.origin + axis · (t + MARCH_EPS)` in the transit's own
+/// frame, `seeds` are [`DiscWalk::resume_at`] that same progress — so they agree to corridor-scale
+/// rounding wherever on the map the shot is. A resume point rebuilt in world f32 is quantized at
+/// the world's spacing (2.44e-4 m past 2048 m, DERIVED), far wider than the topology band the seeds
+/// were judged in, and an entry face that close to the plane is then owned by the seed AND
+/// re-collected ahead of the origin, or by nobody. The march carries this unchanged into the next
+/// crossing and converts to world only for its cast and for presentation.
+pub(crate) struct Interior {
+    /// WORLD anchor of the corridor the seeds were read on.
+    pub anchor: Vec3,
+    /// The resume point, RELATIVE to [`anchor`](Self::anchor).
+    pub origin: Vec3,
+    pub seeds: Vec<SampleSeed>,
 }
 
 /// Everything the driver borrows from the march. Grouped so the phase takes one parameter rather
@@ -139,14 +157,15 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 pub(crate) fn resolve_crossing(
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
-    // Corridor origin — the shell's position, nudged off whatever face it is leaving.
+    // Corridor origin in WORLD — the shell's position, nudged off whatever face it is leaving. Used
+    // as the anchor only when there is no `interior` to resume from.
     origin: Vec3,
     dir: Dir3,
     speed: f32,
     // Distance from `origin` to the nearest sample's first armour contact.
     contact: f32,
-    // Which primitives each sample is already inside (empty in open air).
-    seeds: &[SampleSeed],
+    // The previous perforation's resume point and seeds (`None` in open air).
+    interior: Option<&Interior>,
     terminal_emitted: &mut bool,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
@@ -166,13 +185,17 @@ pub(crate) fn resolve_crossing(
     // The march's contact point becomes the corridor ANCHOR, and every position from here to the end
     // of the crossing is measured from it. The transit corridor inherits the same anchor, which is
     // what makes its handoff a small offset from the face positions the entrance measured rather
-    // than an independently rounded world position (see `walk::RayCorridor::anchor`).
-    let anchor = origin;
+    // than an independently rounded world position (see `walk::RayCorridor::anchor`). Resuming from
+    // a perforation keeps that perforation's anchor, for the same reason (see [`Interior`]).
+    let (anchor, start, seeds) = match interior {
+        Some(interior) => (interior.anchor, interior.origin, interior.seeds.as_slice()),
+        None => (origin, Vec3::ZERO, &[][..]),
+    };
     let entrance = closing_walk(
         context,
         not_own,
         anchor,
-        Vec3::ZERO,
+        start,
         Vec3::from(dir),
         frame,
         radius,
@@ -194,13 +217,13 @@ pub(crate) fn resolve_crossing(
             let examined = contact + ENTRANCE_SPAN;
             Ok(Crossing {
                 outcome: ArmorCrossing::Perforated {
-                    exit: anchor + dir * examined,
+                    exit: anchor + (start + dir * examined),
                     direction: dir,
                     speed,
                 },
                 damage: 0.0,
                 travel: examined,
-                seeds: Vec::new(),
+                interior: None,
                 resume: None,
             })
         }
@@ -214,6 +237,7 @@ pub(crate) fn resolve_crossing(
                 shell,
                 context,
                 anchor,
+                start,
                 read.position,
                 read.normal,
                 read.incidence,
@@ -250,6 +274,7 @@ pub(crate) fn resolve_crossing(
                 context,
                 &transit,
                 &plan,
+                start,
                 dir,
                 bent,
                 speed,
@@ -455,6 +480,8 @@ fn ricochet(
     context: &ResolveContext<'_, '_, '_>,
     // The corridor's world anchor; `position` and the geometry around it are relative to it.
     anchor: Vec3,
+    // Where the entrance corridor started, RELATIVE to the anchor.
+    start: Vec3,
     // Struck face, RELATIVE to the anchor.
     local_position: Vec3,
     normal: Vec3,
@@ -532,8 +559,8 @@ fn ricochet(
         damage,
         // To the face it bounced off, along the way in. The lift the resume point carries is not
         // travel — see [`Crossing::travel`].
-        travel: local_position.dot(Vec3::from(incoming)).max(0.0),
-        seeds: Vec::new(),
+        travel: (local_position - start).dot(Vec3::from(incoming)).max(0.0),
+        interior: None,
         resume: Some(position + normal * radius),
     }
 }
@@ -549,6 +576,8 @@ fn perforate_or_embed(
     context: &ResolveContext<'_, '_, '_>,
     transit: &DiscWalk,
     plan: &walk::ResolutionPlan,
+    // Where the entrance corridor started, RELATIVE to the transit's anchor.
+    start: Vec3,
     incoming: Dir3,
     bent: Dir3,
     speed: f32,
@@ -589,9 +618,9 @@ fn perforate_or_embed(
     // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
     // then measures the rest, along the bend. Two segments, and the driver is told their sum rather
     // than left to guess it from a contact distance that belongs to a different ray.
-    let approach = transit.origin.dot(Vec3::from(incoming)).max(0.0);
+    let approach = (transit.origin - start).dot(Vec3::from(incoming)).max(0.0);
 
-    let (outcome, terminal_at, seeds, flown) = match plan.outcome {
+    let (outcome, terminal_at, interior, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => {
             let at = world(at);
             shell.marks.events.push(PenetrationEvent {
@@ -604,7 +633,7 @@ fn perforate_or_embed(
             if let Some(body) = body {
                 apply_hit_impulse(bodies, body, shell.projectile.mass * v_in, at);
             }
-            (ArmorCrossing::Embedded { at }, at, Vec::new(), approach + t)
+            (ArmorCrossing::Embedded { at }, at, None, approach + t)
         }
         Outcome::Perforated { exit, t, .. } => {
             let exit = world(exit);
@@ -652,7 +681,12 @@ fn perforate_or_embed(
             // Read at the point the NEXT corridor will actually start from — the march nudges every
             // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
             // plate the round has already cleared.
-            let seeds = transit.resume_at((t + super::MARCH_EPS) as f64, &context.laws);
+            let resume = t + super::MARCH_EPS;
+            let interior = Interior {
+                anchor: transit.anchor,
+                origin: transit.origin + transit.axis * resume,
+                seeds: transit.resume_at(resume as f64, &context.laws),
+            };
             (
                 ArmorCrossing::Perforated {
                     exit: world(transit.origin + transit.axis * t),
@@ -660,7 +694,7 @@ fn perforate_or_embed(
                     speed: residual,
                 },
                 entrance_position,
-                seeds,
+                Some(interior),
                 approach + t,
             )
         }
@@ -698,7 +732,7 @@ fn perforate_or_embed(
         outcome,
         damage,
         travel: flown,
-        seeds,
+        interior,
         resume: None,
     }
 }
