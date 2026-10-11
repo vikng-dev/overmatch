@@ -102,19 +102,23 @@ march, per volume crossed:
 
    ```
    A        = π c² / 4                              presented area (m²), c = calibre
-   k        = N · RHO_REF                           inertia coefficient (kg/m³)
-   depth(v) = m / (2 A k) · ln(1 + k v² / A_REF)    metres of reference steel still to go
+   k        = B · N · RHO_REF                       inertia coefficient (kg/m³)
+   depth(v) = m / (2 A k) · ln(1 + k v² / a)        metres of reference steel still to go
    C        = 1000 · depth(v)                       capability, reference-mm
-   v(C)     = sqrt((A_REF / k) · (exp(C/1000 · 2 A k / m) − 1))
+   v(C)     = sqrt((a / k) · (exp(C/1000 · 2 A k / m) − 1))
    ```
 
-   Two constants. `RHO_REF = 7850 kg/m³` is the reference steel's density, a physical constant.
-   `A_REF` (Pa) is the reference steel's strength term and the one fitted constant: an effective,
-   anchor-calibrated resistance, not a steel yield stress and never compared to one. The fixture
-   calibration anchor pins it: 10.2 kg, 0.088 m, an ogive of 1 crh (`N = 7/24`) at 773 m/s
-   carries 250 reference-mm (`A_REF ≈ 1.397e9 Pa`, DERIVED). The nose factor `N` is the
-   frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1,
-   in `(0, 1]`. It is **shell data authored as geometry**: each weapon in the tank RON carries a
+   No fitted constant. The reference steel is armour-class rolled homogeneous steel, given by its
+   material facts: flow stress `Y = 1.0e9 Pa` (mean of proof stress and tensile strength), Young's
+   modulus `E = 205e9 Pa`, Poisson's ratio `ν = 0.29`, density `RHO_REF = 7850 kg/m³`
+   (`.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` Q2). The strength
+   term `a` (Pa) is the compressible elastic–perfectly-plastic cavity-expansion term
+   `a = (2/3) · (1 + ln(E / (3 (1 − ν) Y))) · Y ≈ 3.711e9 Pa` (DERIVED): a prior from material
+   facts, not validated against thick-steel depth data, and the compressible form was read in
+   restatement, not in its primary. `B = 1` is the target inertia factor, a named approximation
+   weakly constrained by the available plate data. The fixture rounds at muzzle carry about
+   115 reference-mm (main gun, 773 m/s) and 14.5 reference-mm (machine gun, 755 m/s), DERIVED.
+   The nose factor `N` is the frictionless nose factor of the cavity-expansion form, in `(0, 1]`. It is **shell data authored as geometry**: each weapon in the tank RON carries a
    required `nose` (parameters in calibres), and `spec.rs` derives `N` once at load — `Ogive(crh:
    ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`; `Cone(length_calibres: φ)`, `φ > 0`:
    `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`, `φ ≥ 0.5`: `N = 1 − 1 / (8φ²)`; `Flat`:
@@ -127,7 +131,7 @@ march, per volume crossed:
    ×s gives capability ×s); the local speed exponent is 2 at low speed (the inertia term is
    negligible) and falls below 2 as it grows; and spending composes, because a crossing spends
    reference-mm and the inverse is exact. A crossing whose limit speed is `v_l` leaves
-   `v_r² = (v² − v_l²) / (1 + k v_l² / A_REF)`.
+   `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
 2. `cost = LOS_distance × material_factor` (× angle effects), also reference-mm.
 3. If `capability > cost` → **perforate**: spend `cost`, invert `f` back to a reduced **residual
    velocity** (the Lambert–Jonas shape — barely-penetrate exits slow, big overmatch barely slows),
@@ -164,7 +168,7 @@ When the path reaches a volume's face:
    LOS cost; perforate→exit (spall) or embed.
 
 The *structure* is the design; the magnitudes (k, ricochet angle, normalization degrees, material
-factors, the strength term `A_REF`) are **live knobs the sandbox exists to tune** — built as adjustable
+factors) are **live knobs the sandbox exists to tune** — built as adjustable
 constants, not baked.
 
 ## 5. Spall — the exit cone (the primary crew-killer)
@@ -444,8 +448,8 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
   whether to split out a dedicated `spall_factor` (brittleness) from `material_factor`.
 - Ricochet threshold dependencies: pure angle now; later velocity/caliber-scaled.
 - HE: fuse minimum-thickness trigger + delay + dense wide cone (penetration-independent).
-- Numeric magnitudes (k overmatch ratio, ricochet angle, normalization degrees, material factors,
-  strength term `A_REF`) — tuned live in the sandbox.
+- Numeric magnitudes (k overmatch ratio, ricochet angle, normalization degrees, material factors)
+  — tuned live in the sandbox.
 - Data homes: ballistic-volume geometry on the model (watertight); material factor + shell specs in
   RON (ADR-0010 spirit — ADR-0010 already flags per-plate armor as a genuinely node-attached case);
   crew/module/station definitions TBD.

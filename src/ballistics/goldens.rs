@@ -64,13 +64,15 @@ fn capture_damage(damage: On<ShellDamage>, mut log: ResMut<DamageLog>) {
     log.0.push(damage.amount);
 }
 
-/// The probe world plus the REAL march and the two sinks a shot's outcome is read from.
+/// The probe world plus the REAL march and the two sinks a shot's outcome is read from. Spent
+/// shells are retained, so a round that stops inside the tick it entered still leaves its marks to
+/// read; a retained shell carries no `Projectile` and is not counted as a survivor.
 fn golden_world() -> App {
     let mut app = probe_world().expect("the bound Tiger builds");
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         16,
     )))
-    .init_resource::<RetainSpentShells>()
+    .insert_resource(RetainSpentShells(true))
     .insert_resource(MgShortCircuit(false))
     .init_resource::<ImpactLog>()
     .init_resource::<DamageLog>()
@@ -241,8 +243,8 @@ const DRIVER_LINE_DIR: Vec3 = Vec3::Z;
 /// GOLDEN 1 — the 88 through the driver's plate.
 ///
 /// The reference shot of the whole model: a main-gun round meets the sloped front plate head on,
-/// perforates it, kills the driver behind it, and — with 250 reference-mm against ~101 mm of front
-/// plate — keeps going, out through three more plates and the rear of the tank. It also carries the
+/// perforates it, kills the driver behind it, and — with ~115 reference-mm against ~101 mm of front
+/// plate — bites three more plates and stops in the rear one. It also carries the
 /// §13.3 half of "an arm does not ricochet an 88": the crewman the round crosses on the way through
 /// deflects nothing, so the flight records no bounce at all.
 #[test]
@@ -282,9 +284,9 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
          hull and the rear plate on its way out: {armor:?}"
     );
     assert_eq!(
-        out.survivors, 1,
-        "PHYSICS CHANGED — diff consciously. 250 reference-mm of capability against ~101 mm of \
-         front plate, the crew behind it and ~79 mm of rear plate leaves the round flying"
+        out.survivors, 0,
+        "PHYSICS CHANGED — diff consciously. ~115 reference-mm of capability against ~101 mm of \
+         front plate, the crew behind it and ~79 mm of rear plate stops the round inside the tank"
     );
     assert_eq!(
         out.ricochets, 0,
@@ -308,7 +310,7 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
 /// GOLDEN 2 — the same line, a machine-gun round.
 ///
 /// The other half of "an arm does not ricochet an 88", stated as its converse: identical geometry,
-/// opposite outcome, decided by CAPABILITY alone (~29 reference-mm against 250). The MG bites into
+/// opposite outcome, decided by CAPABILITY alone (~14.5 reference-mm against ~115). The MG bites into
 /// the same front plate and dies inside it; the driver behind it is untouched, and no confirmation
 /// rides the wire. The plate stops it — the crewman never gets a say either way.
 #[test]
@@ -532,14 +534,14 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     );
     assert_eq!(
         out.spall_origins.len(),
-        2,
-        "PHYSICS CHANGED — diff consciously. Two of this line's four crossings perforate into a \
-         space worth spalling into — the front plate and the rear one: {:?}",
+        1,
+        "PHYSICS CHANGED — diff consciously. One of this line's crossings perforates into a space \
+         worth spalling into — the front plate; the round stops in the rear one: {:?}",
         out.spall_origins
     );
     assert_eq!(
-        out.survivors, 1,
-        "PHYSICS CHANGED — diff consciously. The round is not despawned at a contact it could not \
-         resolve any more; it leaves the tank"
+        out.survivors, 0,
+        "PHYSICS CHANGED — diff consciously. ~115 reference-mm against the front plate, the plates \
+         inside and ~79 mm of rear plate leaves nothing to fly on"
     );
 }

@@ -145,19 +145,43 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
 /// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
-/// Reference steel density (kg/m³), the inertia term's material constant.
+/// Reference steel: armour-class rolled homogeneous steel. Material facts, from the research
+/// report `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` (Q2, material
+/// facts table): flow stress at large strain (Pa),
+/// the mean of proof stress and tensile strength (DERIVED from MEASURED datasheet ranges); Young's
+/// modulus (Pa) and Poisson's ratio, inside the published ranges 190–210 GPa and 0.27–0.30;
+/// density (kg/m³).
+const Y_FLOW_REF: f64 = 1.0e9;
+const E_REF: f64 = 205.0e9;
+const NU_REF: f64 = 0.29;
 const RHO_REF: f32 = 7850.0;
 
-/// Reference steel's strength term (Pa), the force law's one fitted constant: an effective,
-/// anchor-calibrated resistance of the reference steel, not a steel yield stress and never compared
-/// to one. Invariant: a round of 10.2 kg, 0.088 m calibre and nose factor 7/24 (an ogive of 1 crh)
-/// at 773 m/s carries 250 reference-mm (fixture calibration anchor).
-const A_REF: f32 = 1.397_347_5e9;
+/// Target inertia factor `B` of the force law (dimensionless): a named approximation, weakly
+/// constrained by the available plate data (published compressible fits 1.0–1.3, incompressible
+/// theory 1.5).
+const B_INERTIA: f32 = 1.0;
+
+/// Cavity-expansion strength term `a = A_CE · Y` (Pa) of a target with flow stress `y_flow` (Pa),
+/// Young's modulus `e` (Pa) and Poisson's ratio `nu`, in the compressible elastic–perfectly-plastic
+/// form `A_CE = (2/3) · (1 + ln(E / (3 (1 − ν) Y)))`. At `ν = ½` it is the incompressible form
+/// `(2/3) · (1 + ln(2E / (3Y)))`.
+///
+/// A DERIVED prior from material facts, not validated against thick-steel depth data; the
+/// compressible form was read in restatement, not in its primary (Hill 1950; Forrestal & Luk 1988).
+fn cavity_strength(y_flow: f64, e: f64, nu: f64) -> f64 {
+    let a_ce = 2.0 / 3.0 * (1.0 + (e / (3.0 * (1.0 - nu) * y_flow)).ln());
+    a_ce * y_flow
+}
+
+/// The reference steel's strength term (Pa): [`cavity_strength`] on the reference steel's facts
+/// (≈ 3.711e9 Pa, DERIVED).
+fn strength_ref() -> f32 {
+    cavity_strength(Y_FLOW_REF, E_REF, NU_REF) as f32
+}
 
 /// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
-/// (dimensionless): the frictionless nose factor of the cavity-expansion form, with the inertia
-/// constant taken as 1, in `(0, 1]`, derived from the spec's nose geometry
-/// ([`crate::spec::NoseShape`]).
+/// (dimensionless): the frictionless nose factor of the cavity-expansion form, in `(0, 1]`, derived
+/// from the spec's nose geometry ([`crate::spec::NoseShape`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RoundBody {
     pub(crate) mass: f32,
@@ -166,16 +190,23 @@ pub(crate) struct RoundBody {
 }
 
 impl RoundBody {
-    /// The law's two round terms: `m / (2 A k)` (m) and `k / A_REF` (s²/m²).
+    /// The law's inertia coefficient `k = B_INERTIA · N · RHO_REF` (kg/m³).
+    fn inertia_coefficient(self) -> f32 {
+        B_INERTIA * self.nose_factor * RHO_REF
+    }
+
+    /// The law's two round terms: `m / (2 A k)` (m) and `k / a` (s²/m²), `a` the reference
+    /// steel's strength term.
     fn terms(self) -> (f32, f32) {
         let area = std::f32::consts::FRAC_PI_4 * self.caliber * self.caliber;
-        let k = self.nose_factor * RHO_REF;
-        (self.mass / (2.0 * area * k), k / A_REF)
+        let k = self.inertia_coefficient();
+        (self.mass / (2.0 * area * k), k / strength_ref())
     }
 }
 
 /// Reference-mm `round` can still defeat at `speed` m/s — the force law
-/// `C = 1000 · m / (2 A k) · ln(1 + k v² / A_REF)`, `A = π c² / 4`, `k = N · RHO_REF`.
+/// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B_INERTIA · N · RHO_REF`, `a`
+/// the reference steel's strength term ([`strength_ref`]).
 ///
 /// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
 /// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it.
@@ -2524,8 +2555,8 @@ mod tests {
         }
     }
 
-    /// The local speed exponent `d ln C / d ln v` tends to 2 at low speed and is below 2 at the
-    /// calibration anchor's speed.
+    /// The local speed exponent `d ln C / d ln v` tends to 2 at low speed and is below 2 near
+    /// 773 m/s.
     #[test]
     fn capability_law_speed_exponent_is_two_at_low_speed() {
         let exponent = |round: RoundBody, v1: f32, v2: f32| {
@@ -2537,8 +2568,8 @@ mod tests {
                 (low - 2.0).abs() < 1.0e-2,
                 "{round:?}: low-speed exponent {low}"
             );
-            let anchor = exponent(round, 760.0, 786.0);
-            assert!(anchor < 1.9, "{round:?}: anchor-speed exponent {anchor}");
+            let high = exponent(round, 760.0, 786.0);
+            assert!(high < 1.9, "{round:?}: exponent near 773 m/s {high}");
         }
     }
 
@@ -2557,11 +2588,11 @@ mod tests {
     }
 
     /// After one crossing whose limit speed is `v_l`, the residual obeys
-    /// `v_r² = (v² − v_l²) / (1 + k v_l² / A_REF)`.
+    /// `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
     #[test]
     fn capability_law_residual_matches_the_limit_speed_identity() {
         for round in LAW_ROUNDS {
-            let inertia = round.nose_factor * RHO_REF / A_REF;
+            let inertia = round.inertia_coefficient() / strength_ref();
             for speed in [400.0f32, 773.0, 1500.0] {
                 for fraction in [0.1f32, 0.5, 0.9] {
                     let limit = fraction * speed;
@@ -2578,16 +2609,34 @@ mod tests {
         }
     }
 
-    /// Fixture calibration: 10.2 kg, 0.088 m, nose factor 7/24 at 773 m/s carries 250 reference-mm.
+    /// At `ν = ½` the compressible cavity form reduces to the incompressible one,
+    /// `(2/3) · (1 + ln(2E / (3Y))) · Y`, for any material.
     #[test]
-    fn capability_law_meets_its_calibration_anchor() {
-        let anchor = RoundBody {
-            mass: 10.2,
-            caliber: 0.088,
-            nose_factor: 7.0 / 24.0,
-        };
-        let c = capability(anchor, 773.0);
-        assert!((c - 250.0).abs() < 0.5, "anchor capability {c}");
+    fn cavity_strength_reduces_to_the_incompressible_form() {
+        for (y_flow, e) in [
+            (1.0e9f64, 205.0e9f64),
+            (0.276e9, 69.0e9),
+            (0.4e9, 190.0e9),
+            (2.7e9, 600.0e9),
+        ] {
+            let incompressible = 2.0 / 3.0 * (1.0 + (2.0 * e / (3.0 * y_flow)).ln()) * y_flow;
+            let got = cavity_strength(y_flow, e, 0.5);
+            assert!(
+                (got / incompressible - 1.0).abs() < 1.0e-12,
+                "Y {y_flow}, E {e}: {got} vs {incompressible}"
+            );
+        }
+    }
+
+    /// The reference steel's facts give the DERIVED strength term
+    /// `(2/3) · (1 + ln(205e9 / (3 · 0.71 · 1e9))) · 1e9 ≈ 3.711_258_7e9` Pa, to f32 precision.
+    #[test]
+    fn strength_ref_is_the_cavity_term_of_the_reference_steel_facts() {
+        let a = strength_ref();
+        assert!(
+            (a / 3.711_258_7e9 - 1.0).abs() < f32::EPSILON,
+            "strength term {a}"
+        );
     }
 
     /// `drag_k` is calibrated so the 88 keeps its hand-tuned coefficient, and a light-for-bore round
@@ -4752,30 +4801,30 @@ mod march_tests {
     /// plate from inside, found no exit face ahead, and crossed it for FREE; the union charges the
     /// space once — neither zero nor twice.
     ///
-    /// Two arrangements, each pinning one direction against the 88's capability (~261 reference-mm):
-    /// a union of 325 mm must defeat the round even though its first plate alone (150 mm) would not,
-    /// and a union of 250 mm must let it through even though the two plates SUMMED (300 mm) would
-    /// not.
+    /// Two arrangements, each pinning one direction against the test round's capability (~121
+    /// reference-mm, DERIVED): a union of 160 mm must defeat the round even though its first plate
+    /// alone (70 mm) would not, and a union of 115 mm must let it through even though the two plates
+    /// SUMMED (140 mm) would not.
     #[test]
     fn overlapping_trimesh_plates_charge_their_union_once() {
-        // Undercharge — the defect that shipped. Union 325 mm.
+        // Undercharge — the defect that shipped. Union 160 mm.
         assert!(
-            perforates(&[slab(0.15, 0.05)]),
+            perforates(&[slab(0.07, 0.025)]),
             "the first plate alone does not defeat the round",
         );
         assert!(
-            !perforates(&[slab(0.15, 0.05), slab(0.20, -0.10)]),
+            !perforates(&[slab(0.07, 0.025), slab(0.10, -0.05)]),
             "the overlapped second plate is charged, not crossed for free",
         );
 
-        // Overcharge — War Thunder's failure mode. Union 250 mm, sum 300 mm.
+        // Overcharge — War Thunder's failure mode. Union 115 mm, sum 140 mm.
         assert!(
-            perforates(&[slab(0.15, 0.05), slab(0.15, -0.05)]),
-            "the shared 50 mm is charged ONCE; summing it would have defeated the round",
+            perforates(&[slab(0.07, 0.0225), slab(0.07, -0.0225)]),
+            "the shared 25 mm is charged ONCE; summing it would have defeated the round",
         );
         assert!(
-            !perforates(&[slab(0.30, 0.0)]),
-            "300 mm really is beyond it — the control that makes the line above mean something",
+            !perforates(&[slab(0.14, 0.0)]),
+            "140 mm really is beyond it — the control that makes the line above mean something",
         );
     }
 
@@ -4785,9 +4834,13 @@ mod march_tests {
     /// the authoring standard and the resolver had to be redesigned together.
     #[test]
     fn exactly_abutting_trimesh_plates_resolve_as_one_plate() {
+        assert!(
+            perforates(&[slab(0.115, 0.0)]) && !perforates(&[slab(0.16, 0.0)]),
+            "the two totals straddle the test round's capability",
+        );
         for (total, split) in [
-            (0.25f32, [slab(0.125, 0.0625), slab(0.125, -0.0625)]),
-            (0.325, [slab(0.15, 0.0875), slab(0.175, -0.0875)]),
+            (0.115f32, [slab(0.0575, 0.02875), slab(0.0575, -0.02875)]),
+            (0.16, [slab(0.07, 0.045), slab(0.09, -0.035)]),
         ] {
             assert_eq!(
                 perforates(&split),
