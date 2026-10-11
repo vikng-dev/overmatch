@@ -384,8 +384,8 @@ impl Default for WalkLaws {
             // 1 µm: three orders below the weld tolerance and below any authored feature.
             topology_abs: 1.0e-6,
             // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (the driver anchors it
-            // where the march segment started, and a continuation keeps that anchor, so it sits at
-            // most one step's travel budget plus `resolve::MAX_OVERRUN` behind any corridor), so
+            // where the march segment started, and a continuation keeps that anchor within a step and
+            // is re-anchored between steps, so it sits at most one step's travel budget plus `resolve::MAX_OVERRUN` behind any corridor), so
             // `t` stays within tens of metres of the anchor and this term only has to cover intersection
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.

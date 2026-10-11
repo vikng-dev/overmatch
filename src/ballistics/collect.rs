@@ -244,7 +244,8 @@ pub(crate) fn collect(
 /// - `topology_band(scale)` — the corridor re-measures that face from an origin rounded at its own
 ///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing
 ///   arithmetic runs in. The anchor is where the march segment started, not first contact, and a
-///   continuation keeps its anchor, so a hand-off sits up to one step's travel budget plus
+///   continuation keeps its anchor within a step (it is re-anchored at the start of each,
+///   `resolve::Interior::rebased`), so a hand-off sits up to one step's travel budget plus
 ///   `resolve::MAX_OVERRUN` from it.
 ///
 /// A corridor with no hand-off carries only the second band.

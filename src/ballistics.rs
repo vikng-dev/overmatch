@@ -466,9 +466,9 @@ fn cast_march_segment(
 
 /// First contact along one march segment, with ARMOUR probed as the caliber-wide disc it is.
 ///
-/// The axis alone is not first contact (codex finding 5): §13.5's shell meets the world as a disc, so
-/// a round whose centre threads a gap while its rim clips a plate MUST resolve — otherwise the whole
-/// η law is unreachable in the live march and every graze silently becomes a clean miss.
+/// The axis alone is not first contact: §13.5's shell meets the world as a disc, so a round whose
+/// centre threads a gap while its rim clips a plate MUST resolve — otherwise the whole η law is
+/// unreachable in the live march and every graze silently becomes a clean miss.
 ///
 /// Terrain stays axis-only. The ground is one continuous surface that stops the round outright; there
 /// is no η to grade and no union to integrate, and [`HeightGrid::cast_ray`] is the deterministic
