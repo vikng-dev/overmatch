@@ -1490,3 +1490,141 @@ fn a_start_inside_nested_volumes_is_inside_each() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// A containment probe reads only what could contain a start, within its work ceilings
+// ---------------------------------------------------------------------------------------------
+
+/// [`certified`] for a disc of `radius` laid at `at` along `axis`, on the frame anchored there.
+fn certify(app: &mut App, at: Vec3, axis: Vec3, radius: f32) -> Result<Interior, WalkError> {
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    armor: &armor,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                certified(
+                    &context,
+                    &|_| true,
+                    at,
+                    Dir3::new(axis).expect("a direction"),
+                    DiscFrame::anchored(axis).expect("a real direction"),
+                    radius,
+                )
+            },
+        )
+        .expect("the probe system runs")
+}
+
+/// A CANDIDATE WHOSE BOUNDS CONTAIN NO START IS NOT PROBED.
+///
+/// Fixture data, from a DERIVED counterexample: a disc of radius 0.044 m laid at the origin along
+/// `+Z`, and a box over `x, y ∈ [0.030, 0.040]`, `z ∈ [−30, 30]` m. Its bounds meet the disc's
+/// enclosing cube, but neither the axis nor any ring sample lies in its `xy` rectangle, so it cannot
+/// contain a start. Probing through its bounds would need a 60 m probe, past [`MAX_CORRIDOR`]; read
+/// only for what could contain a start, every sample is outside everything.
+#[test]
+fn a_candidate_whose_bounds_contain_no_start_is_not_probed() {
+    let (mut app, _) = settled(|app| {
+        vec![mesh_volume(
+            app,
+            box_trimesh(Vec3::new(0.010, 0.010, 60.0)),
+            Transform::from_translation(Vec3::new(0.035, 0.035, 0.0)),
+        )]
+    });
+    let radius = 0.044;
+    let frame = DiscFrame::anchored(Vec3::Z).expect("a real direction");
+    assert!(
+        layout(&frame, radius).iter().all(|offset| {
+            !(0.030..=0.040).contains(&offset.x) || !(0.030..=0.040).contains(&offset.y)
+        }),
+        "the fixture keeps every sample out of the box's rectangle",
+    );
+    let starts = certify(&mut app, Vec3::ZERO, Vec3::Z, radius)
+        .unwrap_or_else(|error| panic!("the start failed to certify: {error:?}"));
+    assert_eq!(starts.seeds.len(), 1 + walk::DEFAULT_RING);
+    assert!(
+        starts.seeds.iter().all(|seed| seed.inside.is_empty()),
+        "every sample is outside everything: {:?}",
+        starts.seeds,
+    );
+}
+
+/// A PROBE PAST ITS CANDIDATE CEILING FAILS CLOSED.
+///
+/// Fixture data: [`MAX_PROBE_CANDIDATES`] + 1 nested cubes around the start, every one of which
+/// could contain it.
+#[test]
+fn a_probe_past_its_candidate_ceiling_fails_closed() {
+    let (mut app, _) = settled(|app| {
+        (0..=MAX_PROBE_CANDIDATES)
+            .map(|index| {
+                let size = 0.5 + 0.01 * index as f32;
+                mesh_volume(app, box_trimesh(Vec3::splat(size)), Transform::IDENTITY)
+            })
+            .collect()
+    });
+    let error = certify(&mut app, Vec3::ZERO, Vec3::Z, 0.0)
+        .expect_err("a probe past its candidate ceiling is refused");
+    assert!(
+        matches!(error, WalkError::UncertifiedStart { reason, .. } if reason.contains("candidates")),
+        "the refusal names the candidate ceiling: {error:?}",
+    );
+}
+
+/// A PROBE PAST ITS FACE CEILING FAILS CLOSED.
+///
+/// Fixture data: one trimesh of `count` separate closed boxes stacked along the probe at a 0.1 m
+/// pitch, so every sample crosses two faces of each and the disc's thirteen samples collect more
+/// than [`MAX_PROBE_FACES`] between them.
+#[test]
+fn a_probe_past_its_face_ceiling_fails_closed() {
+    let count = MAX_PROBE_FACES / (2 * (1 + walk::DEFAULT_RING)) + 1;
+    let (cube, cube_surfaces) = box_trimesh(Vec3::ONE);
+    let (cube_vertices, cube_indices) = {
+        let mesh = cube.shape().as_trimesh().expect("a trimesh");
+        (mesh.vertices().to_vec(), mesh.indices().to_vec())
+    };
+    assert_eq!(cube_surfaces.corners.as_ref(), cube_indices.as_slice());
+    let mut vertices = Vec::new();
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+    let mut shells = Vec::new();
+    for index in 0..count {
+        let base = vertices.len() as u32;
+        let centre = 0.1 * index as f32 - 0.05 * count as f32;
+        vertices.extend(
+            cube_vertices
+                .iter()
+                .map(|corner| Vec3::new(corner.x * 0.2, corner.y * 0.2, corner.z * 0.05 + centre)),
+        );
+        indices.extend(
+            cube_indices
+                .iter()
+                .map(|tri| tri.map(|corner| corner + base)),
+        );
+        shells.extend(std::iter::repeat_n(index as u32, cube_indices.len()));
+    }
+    let surfaces = BallisticSurfaces {
+        shells: shells.into(),
+        corners: indices.as_slice().into(),
+    };
+    let stack = (Collider::trimesh(vertices, indices), surfaces);
+    let (mut app, _) = settled(|app| vec![mesh_volume(app, stack, Transform::IDENTITY)]);
+    let error = certify(&mut app, Vec3::new(0.0, 0.0, 0.05), Vec3::Z, 0.044)
+        .expect_err("a probe past its face ceiling is refused");
+    assert!(
+        matches!(error, WalkError::UncertifiedStart { reason, .. } if reason.contains("faces")),
+        "the refusal names the face ceiling: {error:?}",
+    );
+}

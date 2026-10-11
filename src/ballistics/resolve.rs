@@ -40,8 +40,8 @@ use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
 use super::walk::{
-    self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, SampleCorridor, SampleSeed, ShellKey,
-    Shot, VolumeTable, WalkError, WalkLaws,
+    self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
+    SampleSeed, ShellKey, Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
     BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
@@ -243,27 +243,51 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
     }
 }
 
-/// How far outside the candidates' bounds a containment probe starts and ends.
+/// How far outside the candidates' bounds a containment probe starts and ends, and how far a
+/// candidate's bounds are grown when asked whether they contain a start.
 ///
 /// It must exceed the collector's sitting reach (at most a quarter of [`MARCH_EPS`],
 /// `collect::sitting_reach`), so no face of a candidate lies within reach of either end and the
-/// probe's own origin is never read as sitting on one.
+/// probe's own origin is never read as sitting on one, and no face within reach of a start belongs
+/// to a candidate the probe set aside.
 const PROBE_MARGIN: f32 = MARCH_EPS;
+
+/// Ceiling on the volumes one containment probe reads — a chosen resource limit, not a derived
+/// bound.
+///
+/// A probe runs one narrow phase per candidate per sample, so its work grows with the candidates
+/// whose bounds contain a start; nothing in the geometry bounds how many of those there are. The
+/// value is policy, set well above what probes read today (MEASURED: at most 4 candidates and 78
+/// faces per probe over the 25 402 probes the library's test suite runs, the §13.6 gate's CI-scale
+/// run included), and a start that reaches it fails closed ([`WalkError::UncertifiedStart`]),
+/// whether or not the geometry was well formed.
+pub(crate) const MAX_PROBE_CANDIDATES: usize = 64;
+
+/// Ceiling on the faces one containment probe collects, summed over its samples — a chosen
+/// resource limit, not a derived bound. It reuses one corridor's [`collect::MAX_FACES`] as policy;
+/// a probe that reaches it fails closed ([`WalkError::UncertifiedStart`]).
+///
+/// With [`MAX_PROBE_CANDIDATES`] it bounds what a probe COLLECTS and walks. It does not bound the
+/// triangles a candidate's narrow phase tests to find them: that is each candidate's own mesh, finite
+/// asset data with no geometry-independent cap.
+pub(crate) const MAX_PROBE_FACES: usize = collect::MAX_FACES;
 
 /// A fresh disc laid on `frame` at the world point `at`, travelling `axis`, with every sample's
 /// membership ESTABLISHED rather than declared.
 ///
 /// Only armour whose bounds contain a sample can contain it, so the broad phase over the disc's
 /// own box names every candidate ([`candidates`], with the march's own self-exclusion) — as
-/// current as Avian's collider AABBs, which every corridor's broad phase relies on equally. With
-/// none, every sample is outside everything. Otherwise each sample's ray is walked from a point
-/// outside all the candidates' bounds — a world AABB contains its collider — through its start to
+/// current as Avian's collider AABBs, which every corridor's broad phase relies on equally — and the
+/// probe reads only those whose bounds, grown by [`PROBE_MARGIN`], contain some sample's start.
+/// With none, every sample is outside everything. Otherwise each sample's ray is walked from a point
+/// outside all those candidates' bounds — a world AABB contains its collider — through its start to
 /// the far side of them, with nothing declared: the same collector and the same pairing walk as any
 /// corridor, so a sample's membership is the parity of oriented crossings behind it, and the
 /// corridor must close or the walk errors. The seeds are read at the start
-/// ([`DiscWalk::resume_at`]), under the band [`walk::RayWalk::inside_at`] and the collector's
-/// hand-off clamp already share: a face within rounding of a start is left to the corridor that
-/// sweeps from it.
+/// ([`walk::RayWalk::inside_at`]), under the band that and the collector's hand-off clamp already
+/// share: a face within rounding of a start is left to the corridor that sweeps from it. Each
+/// sample's ray is walked alone ([`walk::walk_ray`]): membership needs no association across the
+/// disc.
 ///
 /// The probe is formed AT each start and reaches back from it ([`Corridor::behind`]): its line is
 /// built from `anchor = at` and `origin = offset`, the very values the returned starts hold and the
@@ -274,7 +298,8 @@ const PROBE_MARGIN: f32 = MARCH_EPS;
 ///
 /// Certified for the two shapes the collector reads honestly: a trimesh carrying its manifold
 /// certificate, and a convex solid. Any other shape is [`WalkError::UncertifiedStart`], as is a
-/// probe longer than [`MAX_CORRIDOR`]; every structured error fails the round closed.
+/// probe longer than [`MAX_CORRIDOR`] or past its work ceilings ([`MAX_PROBE_CANDIDATES`],
+/// [`MAX_PROBE_FACES`]); every structured error fails the round closed.
 pub(crate) fn certified(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
@@ -289,20 +314,26 @@ pub(crate) fn certified(
         .iter()
         .map(|offset| offset.length())
         .fold(0.0, f32::max);
-    let near = candidates(context, not_own, at, axis, 0.0, reach);
-    if near.is_empty() {
-        return Ok(Interior::laid(at, offsets));
-    }
 
-    // The candidates' bounds, relative to `at`.
+    // The candidates whose bounds contain a start, and the union of those bounds, relative to `at`.
+    let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for &(node, primitive) in &near {
+    for (node, primitive) in candidates(context, not_own, at, axis, 0.0, reach) {
         let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
             return Err(WalkError::CollectorFailed {
                 volume: node,
                 reason: "a candidate collider has no resolved pose",
             });
         };
+        let bounds = collider.aabb(position.0, *rotation);
+        let (min, max) = (bounds.min - at, bounds.max - at);
+        let margin = Vec3::splat(PROBE_MARGIN);
+        if !offsets
+            .iter()
+            .any(|&offset| offset.cmpge(min - margin).all() && offset.cmple(max + margin).all())
+        {
+            continue;
+        }
         let shape = collider.shape_scaled();
         if !matches!(shape.as_typed_shape(), TypedShape::TriMesh(_)) && !shape.is_convex() {
             return Err(WalkError::UncertifiedStart {
@@ -310,9 +341,18 @@ pub(crate) fn certified(
                 reason: "a candidate is neither a certified trimesh nor convex",
             });
         }
-        let bounds = collider.aabb(position.0, *rotation);
-        lo = lo.min(bounds.min - at);
-        hi = hi.max(bounds.max - at);
+        lo = lo.min(min);
+        hi = hi.max(max);
+        near.push((node, primitive));
+    }
+    if near.is_empty() {
+        return Ok(Interior::laid(at, offsets));
+    }
+    if near.len() > MAX_PROBE_CANDIDATES {
+        return Err(WalkError::UncertifiedStart {
+            volume: near[0].0,
+            reason: "the containment probe reads more candidates than its ceiling",
+        });
     }
     // How far along `direction` the point leaves the box: past the first slab it leaves, it is
     // outside the box.
@@ -346,6 +386,7 @@ pub(crate) fn certified(
     }
 
     let mut samples = Vec::with_capacity(offsets.len());
+    let mut faces = 0;
     for offset in offsets {
         let mut hits = Vec::new();
         collect::collect(
@@ -363,6 +404,13 @@ pub(crate) fn certified(
             context.colliders,
             &mut hits,
         )?;
+        faces += hits.len();
+        if faces > MAX_PROBE_FACES {
+            return Err(WalkError::UncertifiedStart {
+                volume: near[0].0,
+                reason: "the containment probe collects more faces than its ceiling",
+            });
+        }
         samples.push(SampleCorridor {
             offset,
             initial_presence: Vec::new(),
@@ -379,11 +427,37 @@ pub(crate) fn certified(
         samples,
     };
     let volumes = volume_table(context, &probe)?;
-    let walked = walk::walk_disc(&probe, &volumes, &context.laws)?;
+    let handoff = behind as f64;
+    let seeds = probe
+        .samples
+        .into_iter()
+        .enumerate()
+        .map(|(sample, corridor)| {
+            let walked = walk::walk_ray(
+                sample,
+                &RayCorridor {
+                    anchor: at,
+                    origin: probe.origin + corridor.offset,
+                    axis,
+                    length,
+                    initial_presence: Vec::new(),
+                    hits: corridor.hits,
+                },
+                &volumes,
+                &context.laws,
+            )?;
+            Ok(SampleSeed {
+                sample,
+                offset: corridor.offset,
+                t: handoff,
+                inside: walked.inside_at(handoff, &context.laws),
+            })
+        })
+        .collect::<Result<Vec<_>, WalkError>>()?;
     Ok(Interior {
         anchor: at,
         origin: Vec3::ZERO,
-        seeds: walked.resume_at(behind as f64, &context.laws),
+        seeds,
     })
 }
 
