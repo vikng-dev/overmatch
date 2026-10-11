@@ -420,9 +420,15 @@ impl Flight {
     /// too large for this, a reversal included. `frame` is transported through the bend by minimal
     /// rotation for the next fresh layout.
     ///
-    /// The cost: a disc stays square to the direction it was laid on (the muzzle's, a bounce's), so
-    /// its sampled cross-section narrows by `cos` of the bend since, in the plane of the bend
-    /// (DERIVED: 0.12 % for a 2.8° drop).
+    /// The cost is the footprint, and this representation of it is provisional, for the bounded
+    /// bends of the rounds fired today. An untouched laid disc stays square to the direction it was
+    /// laid on (the muzzle's, a bounce's), so its sampled cross-section projects by `|cos θ|` of
+    /// the bend since, in the plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop, 13.4 %
+    /// at 30°, 50 % at 60°, a line at 90°). A perforation's starts are no square disc at all —
+    /// staggered at the entrance plane, then bent — and that footprint can be WIDER than the
+    /// calibre, and stays so into later ticks (DERIVED: full coverage at 60° incidence bends 12°
+    /// under the default normalization, a width factor of `cos 12° + tan 60° · sin 12° ≈ 1.338`).
+    /// Slow rounds and steep lobs need the starts transported along per-sample paths instead.
     #[expect(
         clippy::too_many_arguments,
         reason = "the flight's whole state plus the world its fresh starts are certified against"
@@ -628,12 +634,14 @@ pub(crate) struct Bounce {
     /// nudge off it. The lift to `resume` is not travel: it repositions the body clear of the face
     /// it bounced off.
     pub travel: f32,
-    /// Where the flight resumes — a clear pose: lifted off the face along `n̄` by the disc's own
-    /// radius, then one [`MARCH_EPS`] along the outgoing direction. At oblique incidence a disc's
-    /// lateral offsets lie mostly ALONG the struck surface's normal, so resuming at the contact
-    /// point leaves half the ring behind the face and first contact fires again on the very surface
-    /// just left. A point needs only the nudge, which steps off the face this bounce resolved, never
-    /// past one nobody owns; a body needs its radius too.
+    /// Where the flight resumes: lifted off the face along `n̄` by the disc's own radius, then one
+    /// [`MARCH_EPS`] along the outgoing direction. At oblique incidence a disc's lateral offsets
+    /// lie mostly ALONG the struck surface's normal, so resuming at the contact point leaves half
+    /// the ring behind the face and first contact fires again on the very surface just left. A
+    /// point needs only the nudge, which steps off the face this bounce resolved, never past one
+    /// nobody owns; a body needs its radius too. The lift clears the struck face, not the world:
+    /// the fresh disc laid here can start inside neighbouring armour, and its membership is
+    /// established before it sweeps ([`Flight::settle`]).
     pub resume: Vec3,
 }
 

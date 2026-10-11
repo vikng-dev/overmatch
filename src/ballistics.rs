@@ -71,8 +71,8 @@ use sanctioned::{SanctionedCatchUp, catch_up_sanctioned_chain};
 
 /// The march's boundary nudge: a crossing that leaves a face it resolved — a perforation's exit, a
 /// bounce's struck face — resumes this far past it, so the next sweep does not re-touch it. Never
-/// applied past a face nothing resolved: a fresh sweep starts at the flight's last clear pose
-/// ([`resolve::Flight`]).
+/// applied past a face nothing resolved: a fresh disc starts where it is laid, with its membership
+/// established there ([`resolve::certified`]).
 ///
 /// Shared with [`resolve`] because the two must agree: the interior seed a crossing hands forward
 /// describes the point the NEXT corridor starts from, and that point is nudged. A seed read one
@@ -719,9 +719,11 @@ pub(crate) struct Projectile {
     /// SIM state, carried from one step to the next so a tick boundary never re-lays the disc.
     ///
     /// `None` at spawn, in every spawn path: the first step lays the disc on [`disc`](Self::disc)
-    /// at the muzzle. Each step then leaves the starts it ended on, and a sanctioned re-seed clears
-    /// them (it lifts the round to a pose of its own). Never on the wire: a replica derives its own
-    /// from the same spawn and march.
+    /// at the muzzle. Each step then leaves the starts it ended on. A sanctioned catch-up clears
+    /// them: it moved the round without sweeping its samples, so the next step lays a fresh disc
+    /// and establishes its membership ([`resolve::certified`]); nothing about the catch-up's own
+    /// path is certified. Never on the wire: a replica derives its own from the same spawn and
+    /// march.
     continuation: Option<resolve::Interior>,
 }
 
@@ -2362,12 +2364,14 @@ fn march_shell_step(
                         flight.continuation = None;
                         // Lift the shell's BODY clear of the face it bounced off and nudge it off
                         // along the new heading, exactly as the authority's own ricochet does
-                        // (`resolve::Bounce::resume`), so it resumes at a clear pose. At oblique incidence a disc's lateral
+                        // (`resolve::Bounce::resume`). At oblique incidence a disc's lateral
                         // offsets lie mostly along the struck surface's normal, so resuming at the
                         // contact point leaves half the ring behind the face and first contact
                         // fires again on the very surface just left — which on a replica means
-                        // holding for a keyframe that was already consumed. The RECORDED bounce
-                        // point is untouched; only where the march resumes moves.
+                        // holding for a keyframe that was already consumed. The lift clears that
+                        // face only; the fresh disc's membership against everything else is
+                        // established before it sweeps (`resolve::Flight::settle`). The RECORDED
+                        // bounce point is untouched; only where the march resumes moves.
                         flight.position = origin
                             + Vec3::new(hit_normal.x, hit_normal.y, hit_normal.z)
                                 .normalize_or_zero()
@@ -5881,8 +5885,8 @@ mod march_tests {
     ///
     /// Fired level, so gravity bends the travel by `θ` in the first tick: a disc re-laid square to
     /// the bent travel at the muzzle would straddle the face by up to `r·θ` (DERIVED: 9 µm for an 88
-    /// at 800 m/s after one 16 ms bend). The samples start where they were laid instead, on the
-    /// muzzle's clear pose.
+    /// at 800 m/s after one 16 ms bend). The samples start where they were laid instead, square to
+    /// the fire direction at the muzzle.
     #[test]
     fn an_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
         let face = 0.525_f32;

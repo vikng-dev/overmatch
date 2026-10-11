@@ -21,7 +21,9 @@ use crate::ShotId;
 /// A server-sanctioned ricochet consumed by a client cosmetic shell.
 #[derive(Clone, Copy)]
 pub(crate) struct SanctionedBounce {
-    /// The exact server bounce point — where the re-seeded shell restarts.
+    /// The exact server bounce point, on the struck face — where the re-seeded shell's trail and
+    /// recorded ricochet are anchored. Its flight restarts lifted off the face wherever the client
+    /// holds the face's normal (`resume_from_catch_up`, the march's re-seed).
     pub origin: Vec3,
     /// The post-bounce travel direction (unit; the receiver guards it before use).
     pub direction: Vec3,
