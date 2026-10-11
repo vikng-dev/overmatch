@@ -3159,7 +3159,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     use crate::damage::VolumeOf;
     use avian3d::prelude::{Collider, Position, Rotation, SimpleCollider};
 
-    /// Every armour impact the round produced.
+    /// Whether each armour impact the round produced entered the material.
     #[derive(Resource, Default)]
     struct ArmorImpacts(Vec<bool>);
 
@@ -3176,7 +3176,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     app.init_resource::<ArmorImpacts>();
     app.add_observer(|impact: On<Impact>, mut log: ResMut<ArmorImpacts>| {
         if impact.surface == crate::ballistics::ImpactSurface::Armor {
-            log.0.push(impact.penetrated);
+            log.0.push(impact.verdict.entered());
         }
     });
 

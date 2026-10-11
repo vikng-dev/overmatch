@@ -639,8 +639,9 @@ pub(crate) struct ShellTerminal {
     pub position: Vec3,
     /// The struck face's outward normal.
     pub normal: Vec3,
-    /// The server's penetration verdict (gates the flame lick on the client, as in the local read).
-    pub penetrated: bool,
+    /// The server's verdict at the struck face (its `entered()` gates the flame lick on the client, as
+    /// in the local read).
+    pub verdict: Verdict,
     /// Ricochets resolved before this terminal.
     pub after_bounces: u32,
 }
@@ -900,6 +901,25 @@ pub(crate) enum ImpactSurface {
     Armor,
 }
 
+/// What the round did at the surface it struck: the public three-way outcome of an impact.
+///
+/// `Ricochet` is every contact that entered no material — a deflection off armour, a terrain strike,
+/// or an armour contact that stopped at the face without resolving a crossing (a fail-closed stop).
+/// `Stopped` entered the material and ended inside it; `Through` came out the far side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+pub enum Verdict {
+    Through,
+    Stopped,
+    Ricochet,
+}
+
+impl Verdict {
+    /// The round entered the material: it stopped inside it or went through.
+    pub fn entered(self) -> bool {
+        matches!(self, Self::Stopped | Self::Through)
+    }
+}
+
 /// A local shell impact consumed by simulation and view observers.
 #[derive(Event)]
 pub(crate) struct Impact {
@@ -910,8 +930,8 @@ pub(crate) struct Impact {
     pub(crate) caliber: f32,
     /// Surface class resolved from volume ancestry.
     pub(crate) surface: ImpactSurface,
-    /// Whether the round entered armor rather than ricocheting or striking terrain.
-    pub(crate) penetrated: bool,
+    /// What the round did at the struck surface; [`Verdict::Ricochet`] for terrain.
+    pub(crate) verdict: Verdict,
     /// Deflected direction for a ricochet; absent for other impacts.
     pub(crate) deflection: Option<Vec3>,
 }
@@ -1106,7 +1126,7 @@ fn on_fire_shell(
                         normal,
                         caliber: fire.caliber,
                         surface,
-                        penetrated: false,
+                        verdict: Verdict::Ricochet,
                         deflection: None,
                     });
                 }
@@ -1597,7 +1617,7 @@ fn resolve_held_shell(
                 },
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Armor,
-                penetrated: false,
+                verdict: Verdict::Ricochet,
                 deflection: Some(segment.bounce.direction),
             });
             if index == 0 {
@@ -1634,7 +1654,7 @@ fn resolve_held_shell(
                 "overdue",
                 now,
                 shot_id,
-                || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
+                || json!({ "res": "terminal", "late": late, "pen": terminal.verdict.entered(), "via": "chain" }),
             );
             crate::shot_trace::record(
                 shot_trace,
@@ -1665,7 +1685,7 @@ fn resolve_held_shell(
                     "held": held.waited,
                     "res": "terminal",
                     "it": terminal.impact_tick,
-                    "pen": terminal.penetrated,
+                    "pen": terminal.verdict.entered(),
                 })
             });
             crate::shot_trace::record(
@@ -1789,7 +1809,7 @@ fn consume_overdue_sanctioned_outcome(
                     normal: segment.bounce.direction,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Armor,
-                    penetrated: false,
+                    verdict: Verdict::Ricochet,
                     deflection: Some(segment.bounce.direction),
                 });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
@@ -1809,7 +1829,7 @@ fn consume_overdue_sanctioned_outcome(
                     "overdue",
                     now,
                     shot.0,
-                    || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated, "via": "chain" }),
+                    || json!({ "res": "terminal", "late": late, "pen": terminal.verdict.entered(), "via": "chain" }),
                 );
                 crate::shot_trace::record(
                     shot_trace,
@@ -1828,7 +1848,7 @@ fn consume_overdue_sanctioned_outcome(
         && let Some(late) = elapsed_ticks(present, terminal.impact_tick)
         && late > OVERDUE_MARGIN_TICKS
     {
-        // Finalize at the server's read — position, normal, and the `penetrated` verdict
+        // Finalize at the server's read — position, normal, and the verdict
         // that gates the flame lick — the full honest armor read the authority resolved,
         // even though this client's shell never touched the (mis-posed) plate. The trail
         // reaches the server impact point, then the shell ends. (The `else if` is keyed on NO
@@ -1840,7 +1860,7 @@ fn consume_overdue_sanctioned_outcome(
             "overdue",
             now,
             shot.0,
-            || json!({ "res": "terminal", "late": late, "pen": terminal.penetrated }),
+            || json!({ "res": "terminal", "late": late, "pen": terminal.verdict.entered() }),
         );
         crate::shot_trace::record(
             shot_trace,
@@ -1857,7 +1877,7 @@ fn consume_overdue_sanctioned_outcome(
 }
 
 /// Draw the shell's trail to the authority's terminal and read that impact exactly as the server did
-/// — position, struck-face normal, and the `penetrated` verdict that gates the flame lick.
+/// — position, struck-face normal, and the verdict that gates the flame lick.
 ///
 /// The server's read is spatially disconnected from wherever this client's shell actually was, so
 /// the trail begins a new view segment rather than inventing a correction chord to it.
@@ -1874,7 +1894,7 @@ fn finish_at_sanctioned_terminal(
         normal: terminal.normal,
         caliber,
         surface: ImpactSurface::Armor,
-        penetrated: terminal.penetrated,
+        verdict: terminal.verdict,
         deflection: None,
     });
 }
@@ -2032,7 +2052,7 @@ fn march_shell_step(
                     normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Terrain,
-                    penetrated: false,
+                    verdict: Verdict::Ricochet,
                     deflection: None,
                 });
                 // A terrain stop is the one shot terminal that needs NO confirm: static,
@@ -2067,7 +2087,7 @@ fn march_shell_step(
         if shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
             // Classify the first surface from the hit's volume ancestry (the same `hit_ancestor`
             // rule the full march uses just below) so the read is honest even in the B-arm. The
-            // short-circuit stops dead without resolving penetration, so `penetrated: false`.
+            // short-circuit stops dead without resolving penetration, so `Verdict::Ricochet`.
             let surface = if hit_ancestor(hit.entity, &world.volumes, &world.parents).is_some() {
                 ImpactSurface::Armor
             } else {
@@ -2078,7 +2098,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface,
-                penetrated: false,
+                verdict: Verdict::Ricochet,
                 deflection: None,
             });
             pos = entry;
@@ -2099,7 +2119,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Terrain,
-                penetrated: false,
+                verdict: Verdict::Ricochet,
                 deflection: None,
             });
             // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
@@ -2212,7 +2232,7 @@ fn march_shell_step(
                     normal: hit.normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Armor,
-                    penetrated: false,
+                    verdict: Verdict::Ricochet,
                     deflection: None,
                 });
                 pos = entry;
@@ -2322,7 +2342,7 @@ fn resolve_replica_armor_contact(
             normal: hit_normal,
             caliber,
             surface: ImpactSurface::Armor,
-            penetrated: false,
+            verdict: Verdict::Ricochet,
             deflection: Some(bounce.direction),
         });
         shell.path.begin_segment();
@@ -2356,7 +2376,7 @@ fn resolve_replica_armor_contact(
                 "contact",
                 now,
                 shot.0,
-                || json!({ "res": "pre_term", "it": terminal.impact_tick, "pen": terminal.penetrated }),
+                || json!({ "res": "pre_term", "it": terminal.impact_tick, "pen": terminal.verdict.entered() }),
             );
             crate::shot_trace::record(
                 shot_trace,
@@ -2392,7 +2412,7 @@ fn resolve_replica_armor_contact(
         normal: hit_normal,
         caliber,
         surface: ImpactSurface::Armor,
-        penetrated: false,
+        verdict: Verdict::Ricochet,
         deflection: None,
     });
     ReplicaArmorContact::Stopped
@@ -2862,7 +2882,7 @@ mod march_tests {
     struct Captured {
         position: Vec3,
         surface: ImpactSurface,
-        penetrated: bool,
+        verdict: Verdict,
         deflection: Option<Vec3>,
     }
 
@@ -2874,7 +2894,7 @@ mod march_tests {
         log.0.push(Captured {
             position: impact.position,
             surface: impact.surface,
-            penetrated: impact.penetrated,
+            verdict: impact.verdict,
             deflection: impact.deflection,
         });
     }
@@ -3277,9 +3297,10 @@ mod march_tests {
             ImpactSurface::Armor,
             "the struck face is armor"
         );
-        assert!(
-            hit.penetrated,
-            "a clean perforation is a penetration (flame lick earned)"
+        assert_eq!(
+            hit.verdict,
+            Verdict::Through,
+            "a clean perforation goes through (flame lick earned)"
         );
         assert!(hit.deflection.is_none(), "a perforation does not deflect");
         assert!(
@@ -3307,13 +3328,52 @@ mod march_tests {
             ImpactSurface::Armor,
             "the struck face is armor"
         );
-        assert!(!hit.penetrated, "a ricochet bit no steel — no flame lick");
+        assert_eq!(
+            hit.verdict,
+            Verdict::Ricochet,
+            "a ricochet bit no steel — no flame lick"
+        );
         let deflect = hit
             .deflection
             .expect("a ricochet carries its outgoing direction");
         assert!(
             deflect.z > 0.0,
             "the bounce deflects back off the face (+Z), got {deflect:?}"
+        );
+    }
+
+    /// The public verdict names all three armour outcomes from the real resolution: a graze that
+    /// deflects is `Ricochet`, a round that bites a plate thicker than its capability is `Stopped`, and
+    /// one that comes out the far side is `Through`. Plate thicknesses and the 75° graze are fixture
+    /// data.
+    #[test]
+    fn the_impact_verdict_names_ricochet_stopped_and_through() {
+        let armor_verdicts = |size: Vec3, origin: Vec3, dir: Vec3| -> Vec<Verdict> {
+            let mut app = world_with_plate(size, Vec3::new(0.0, 2.0, 0.0));
+            fire_and_capture(&mut app, origin, dir, 800.0)
+                .iter()
+                .filter(|hit| hit.surface == ImpactSurface::Armor)
+                .map(|hit| hit.verdict)
+                .collect()
+        };
+        let graze = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let head_on = Vec3::new(0.0, 2.0, 2.0);
+        assert_eq!(
+            armor_verdicts(Vec3::new(3.0, 3.0, 0.10), Vec3::new(-1.0, 2.0, 0.6), graze),
+            [Verdict::Ricochet],
+        );
+        assert_eq!(
+            armor_verdicts(Vec3::new(3.0, 3.0, 0.5), head_on, Vec3::NEG_Z),
+            [Verdict::Stopped],
+        );
+        assert_eq!(
+            armor_verdicts(Vec3::new(3.0, 3.0, 0.05), head_on, Vec3::NEG_Z),
+            [Verdict::Through],
         );
     }
 
@@ -3716,7 +3776,7 @@ mod march_tests {
             hits[0].deflection.is_none(),
             "no improvised bounce fan — the client cannot know the outcome"
         );
-        assert!(!hits[0].penetrated, "no flame lick — neutral spark");
+        assert!(!hits[0].verdict.entered(), "no flame lick — neutral spark");
         assert_eq!(
             survivors, 0,
             "the cosmetic shell stops dead at contact (trail ends there)"
@@ -3731,7 +3791,10 @@ mod march_tests {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
         let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
         assert_eq!(hits.len(), 1, "one perforation impact");
-        assert!(hits[0].penetrated, "authority perforates (flame lick)");
+        assert!(
+            hits[0].verdict.entered(),
+            "authority perforates (flame lick)"
+        );
     }
 
     // --- Keyframe carry-through (piece 2) ------------------------------------------------------------
@@ -4242,7 +4305,7 @@ mod march_tests {
 
     /// CLIENT-MISS / SERVER-HIT (terminal). Same pose-divergence, but the server resolved an
     /// embed/perforation. The overdue path finalizes the shell at the SERVER's impact with the honest
-    /// armor read (position, normal, `penetrated`) rather than holding for a contact that never comes.
+    /// armor read (position, normal, `verdict`) rather than holding for a contact that never comes.
     #[test]
     fn overdue_terminal_finalizes_a_pose_divergent_miss() {
         let shot = a_shot();
@@ -4256,7 +4319,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: impact_pos,
                     normal: Vec3::Z,
-                    penetrated: true,
+                    verdict: Verdict::Through,
                     impact_tick: shot.fire_tick + 5,
                     after_bounces: 0,
                 },
@@ -4276,7 +4339,7 @@ mod march_tests {
             "at the SERVER's impact position",
         );
         assert!(
-            impacts[0].penetrated,
+            impacts[0].verdict.entered(),
             "with the server's penetration verdict (the flame lick MP would otherwise miss)",
         );
     }
@@ -4324,7 +4387,7 @@ mod march_tests {
     #[derive(Clone, Copy)]
     struct CapturedTerminal {
         position: Vec3,
-        penetrated: bool,
+        verdict: Verdict,
         after_bounces: u32,
     }
 
@@ -4334,7 +4397,7 @@ mod march_tests {
     fn capture_terminal(terminal: On<ShellTerminal>, mut log: ResMut<TerminalLog>) {
         log.0.push(CapturedTerminal {
             position: terminal.position,
-            penetrated: terminal.penetrated,
+            verdict: terminal.verdict,
             after_bounces: terminal.after_bounces,
         });
     }
@@ -4368,9 +4431,9 @@ mod march_tests {
     }
 
     /// AUTHORITY EMISSION — embed. A 500 mm plate defeats the 88 head-on (cost 500 > ~263 cap): the
-    /// march raises exactly ONE `ShellTerminal`, penetrated (an embed bit steel), zero prior bounces.
+    /// march raises exactly ONE `ShellTerminal`, `Stopped` (an embed bit steel), zero prior bounces.
     #[test]
-    fn authority_embed_emits_one_penetrated_terminal() {
+    fn authority_embed_emits_one_stopped_terminal() {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.5), Vec3::new(0.0, 2.0, 0.0));
         app.init_resource::<TerminalLog>();
         app.add_observer(capture_terminal);
@@ -4383,7 +4446,11 @@ mod march_tests {
         }
         let terminals = app.world().resource::<TerminalLog>().0.clone();
         assert_eq!(terminals.len(), 1, "an embed emits exactly one terminal");
-        assert!(terminals[0].penetrated, "an embed bit steel — flame lick");
+        assert_eq!(
+            terminals[0].verdict,
+            Verdict::Stopped,
+            "an embed bit steel and stayed in it"
+        );
         assert_eq!(terminals[0].after_bounces, 0);
     }
 
@@ -4421,7 +4488,11 @@ mod march_tests {
             1,
             "one terminal per shot — the perforation; the later embed is muted",
         );
-        assert!(terminals[0].penetrated, "a perforation breached the plate");
+        assert_eq!(
+            terminals[0].verdict,
+            Verdict::Through,
+            "a perforation breached the plate"
+        );
         assert!(
             (terminals[0].position.z - 0.025).abs() < 0.05,
             "the terminal reads at the plate's ENTRY face, got z={}",
@@ -4440,7 +4511,7 @@ mod march_tests {
 
     /// HELD SHELL + CONFIRM: the full honest armor read, at the server's position, on receipt — the
     /// neutral fail-closed spark never fires. This is the read that gives MP the SP-grade armor
-    /// feedback (flame lick via `penetrated: true`), typically ≈(P−S)+OWL after contact instead of
+    /// feedback (flame lick via `verdict.entered()`), typically ≈(P−S)+OWL after contact instead of
     /// the fail-closed window.
     #[test]
     fn held_shell_resolves_on_confirm_with_full_honest_read() {
@@ -4468,7 +4539,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: server_pos,
                     normal: Vec3::Z,
-                    penetrated: true,
+                    verdict: Verdict::Through,
                     impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
@@ -4486,7 +4557,7 @@ mod march_tests {
             "exactly one impact — no neutral spark ever"
         );
         assert!(
-            impacts[0].penetrated,
+            impacts[0].verdict.entered(),
             "the SERVER's penetration verdict rides through — the flame lick is earned in MP",
         );
         assert!(
@@ -4512,7 +4583,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: server_pos,
                 normal: Vec3::Z,
-                penetrated: true,
+                verdict: Verdict::Through,
                 impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 0,
             },
@@ -4533,7 +4604,7 @@ mod march_tests {
         );
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert_eq!(impacts.len(), 1, "one impact, immediately at contact");
-        assert!(impacts[0].penetrated, "server verdict rides through");
+        assert!(impacts[0].verdict.entered(), "server verdict rides through");
         assert!(impacts[0].position.distance(server_pos) < 1.0e-4);
     }
 
@@ -4551,7 +4622,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: server_pos,
                 normal: Vec3::Z,
-                penetrated: false,
+                verdict: Verdict::Stopped,
                 impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 1,
             },
@@ -4631,7 +4702,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: Vec3::new(0.0, 2.0, 0.07),
                     normal: Vec3::Z,
-                    penetrated: true,
+                    verdict: Verdict::Through,
                     impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
@@ -4644,7 +4715,10 @@ mod march_tests {
         );
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert_eq!(impacts.len(), 1);
-        assert!(impacts[0].penetrated, "own hit shows the flame lick in MP");
+        assert!(
+            impacts[0].verdict.entered(),
+            "own hit shows the flame lick in MP"
+        );
     }
 
     /// TERMINAL DEDUP: a shot has at most one terminal, so first insert wins.
@@ -4657,7 +4731,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: Vec3::X,
                 normal: Vec3::Z,
-                penetrated: true,
+                verdict: Verdict::Through,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 0,
             },
@@ -4668,14 +4742,18 @@ mod march_tests {
             SanctionedTerminal {
                 position: Vec3::Y * 99.0,
                 normal: Vec3::Z,
-                penetrated: false,
+                verdict: Verdict::Stopped,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 3,
             },
         );
         let stored = buf.terminal(shot, 0).expect("terminal stored");
         assert_eq!(stored.position, Vec3::X, "first insert wins");
-        assert!(stored.penetrated, "first insert's verdict kept");
+        assert_eq!(
+            stored.verdict,
+            Verdict::Through,
+            "first insert's verdict kept"
+        );
     }
 
     /// A flat [`HeightGrid`] at `height` metres spanning the world square (raw meters, like the
@@ -4702,7 +4780,10 @@ mod march_tests {
         assert_eq!(impacts.len(), 1, "one terrain stop");
         let hit = impacts[0];
         assert_eq!(hit.surface, ImpactSurface::Terrain);
-        assert!(!hit.penetrated, "terrain never reads as a penetration");
+        assert!(
+            !hit.verdict.entered(),
+            "terrain never reads as a penetration"
+        );
         assert!(
             (hit.position - Vec3::new(10.0, 30.0, -20.0)).length() < 1e-2,
             "the shell must stop ON the grid surface, got {:?}",
@@ -4731,7 +4812,7 @@ mod march_tests {
         );
         let armor = impacts[0];
         assert_eq!(armor.surface, ImpactSurface::Armor, "the nearer plate wins");
-        assert!(armor.penetrated, "an 88 perforates 50 mm flat");
+        assert!(armor.verdict.entered(), "an 88 perforates 50 mm flat");
         assert!((armor.position.y - 50.0).abs() < 0.2, "at the plate face");
         let last = *impacts.last().unwrap();
         assert_eq!(last.surface, ImpactSurface::Terrain);
@@ -4959,7 +5040,7 @@ mod march_tests {
     /// origin IS the entry face's own position, and one ULP of rounding put it past that face, so
     /// the face's degenerate AABB fell outside the corridor's box, the entry vanished, and the walk
     /// reported an exit it had never entered. The round stopped dead on a plate it should have gone
-    /// through — no terminal, no perforation, one bare `penetrated: false` spark.
+    /// through — no terminal, no perforation, one bare `Verdict::Ricochet` spark.
     #[test]
     fn plates_across_a_900_mm_gap_are_two_crossings_and_both_perforate() {
         let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5), slab(0.05, -0.45)]);
@@ -4979,7 +5060,7 @@ mod march_tests {
         for (impact, face) in impacts.iter().zip([0.525, -0.425]) {
             assert!(matches!(impact.surface, ImpactSurface::Armor));
             assert!(
-                impact.penetrated,
+                impact.verdict.entered(),
                 "an 88 goes through 50 mm of RHA head-on: {:?}",
                 impact.position,
             );
@@ -5002,7 +5083,10 @@ mod march_tests {
 
         let terminals = app.world().resource::<TerminalLog>().0.clone();
         assert_eq!(terminals.len(), 1, "one terminal per shot");
-        assert!(terminals[0].penetrated, "the terminal breached the plate");
+        assert!(
+            terminals[0].verdict.entered(),
+            "the terminal breached the plate"
+        );
         assert_eq!(terminals[0].after_bounces, 0, "nothing deflected head-on");
         assert!(
             (terminals[0].position.z - 0.525).abs() < 1.0e-3,
@@ -5049,7 +5133,10 @@ mod march_tests {
         );
         for (impact, face) in impacts.iter().zip([-1.975, -2.925]) {
             assert!(matches!(impact.surface, ImpactSurface::Armor));
-            assert!(impact.penetrated, "an 88 still goes through 50 mm out here");
+            assert!(
+                impact.verdict.entered(),
+                "an 88 still goes through 50 mm out here"
+            );
             assert!(
                 (impact.position.z - (far.z + face)).abs() < 1.0e-3,
                 "the read is at the plate's own entry face (expected z={}, got {})",
@@ -5059,7 +5146,7 @@ mod march_tests {
         }
         let terminals = app.world().resource::<TerminalLog>().0.clone();
         assert_eq!(terminals.len(), 1, "one terminal per shot");
-        assert!(terminals[0].penetrated);
+        assert!(terminals[0].verdict.entered());
     }
 
     /// A PERFORATION'S SEEDS AND THE NEXT CORRIDOR DESCRIBE ONE POINT, ANYWHERE ON THE MAP.
@@ -5139,18 +5226,18 @@ mod march_tests {
                 }
                 let impacts = app.world().resource::<ImpactLog>().0.clone();
                 assert!(
-                    impacts.first().is_some_and(|impact| impact.penetrated),
+                    impacts.first().is_some_and(|impact| impact.verdict.entered()),
                     "the plate is perforated at {far} ({ahead:e} m): {:?}",
                     impacts
                         .iter()
-                        .map(|i| (i.position, i.penetrated))
+                        .map(|i| (i.position, i.verdict))
                         .collect::<Vec<_>>(),
                 );
                 // A walk error stops the round with a bare armour spark: not penetrated, not
                 // deflected. Nothing else in this arrangement reads that way.
                 if impacts.iter().any(|impact| {
                     matches!(impact.surface, ImpactSurface::Armor)
-                        && !impact.penetrated
+                        && !impact.verdict.entered()
                         && impact.deflection.is_none()
                 }) {
                     failed.push(ahead);
@@ -5205,7 +5292,7 @@ mod march_tests {
             );
             // With the face collected the crossing resolves honestly: an 88 through 50 mm.
             assert!(
-                impacts[0].penetrated,
+                impacts[0].verdict.entered(),
                 "at {step} ULP the crossing resolved, rather than failing closed",
             );
             assert_eq!(
@@ -5355,7 +5442,7 @@ mod march_tests {
         );
         assert!(matches!(impacts[0].surface, ImpactSurface::Armor));
         assert!(
-            !impacts[0].penetrated,
+            !impacts[0].verdict.entered(),
             "fail-closed is a neutral read: no perforation was resolved, so none is claimed",
         );
         assert!(
@@ -5566,7 +5653,7 @@ mod march_tests {
             impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
         );
         assert!(
-            impacts.iter().all(|impact| impact.penetrated),
+            impacts.iter().all(|impact| impact.verdict.entered()),
             "an 88 crosses 20 mm at 38° here exactly as it does at the world origin",
         );
         assert_eq!(

@@ -1435,7 +1435,7 @@ fn consume_impact_confirm(
         SanctionedTerminal {
             position: confirm.position,
             normal: confirm.normal,
-            penetrated: confirm.penetrated,
+            verdict: confirm.verdict,
             impact_tick: confirm.impact_tick.0,
             after_bounces: confirm.after_bounces,
         },
@@ -1445,7 +1445,7 @@ fn consume_impact_confirm(
         "cf_rx",
         now.0,
         confirm.shot,
-        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.penetrated }),
+        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.verdict.entered() }),
     );
 }
 

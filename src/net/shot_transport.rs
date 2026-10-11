@@ -534,13 +534,13 @@ fn queue_terminal(
         "cf",
         timeline.tick().0,
         terminal.shot,
-        || json!({ "pen": terminal.penetrated, "ab": terminal.after_bounces }),
+        || json!({ "pen": terminal.verdict.entered(), "ab": terminal.after_bounces }),
     );
     let confirm = ImpactConfirm {
         shot: terminal.shot,
         position: terminal.position,
         normal: terminal.normal,
-        penetrated: terminal.penetrated,
+        verdict: terminal.verdict,
         impact_tick: timeline.tick(),
         after_bounces: terminal.after_bounces,
     };
@@ -1360,7 +1360,7 @@ mod tests {
             shot,
             position: Vec3::X,
             normal: Vec3::NEG_X,
-            penetrated: false,
+            verdict: crate::ballistics::Verdict::Stopped,
             impact_tick: Tick(108),
             after_bounces: 1,
         });
