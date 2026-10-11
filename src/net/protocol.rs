@@ -136,9 +136,10 @@ use crate::{CombatantId, ShotId};
 /// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
 /// never rides the wire.
 ///
-/// REV 31 (a three-way public impact outcome): [`ImpactConfirm`]'s `penetrated` bool becomes a
-/// [`Verdict`] (`Through` / `Stopped` / `Ricochet`), so a peer can tell a round that stopped in the
-/// plate from one that went through. New embedded enum: own-type graph and REV move.
+/// REV 31 (a public impact outcome): [`ImpactConfirm`]'s `penetrated` bool becomes a [`Verdict`]
+/// (`Through` / `Stopped` / `Ricochet` / `Struck`), so a peer can tell a round that stopped in the
+/// plate from one that went through, and a deflection from a stop that resolved no crossing. New
+/// embedded enum: own-type graph and REV move.
 pub const PROTOCOL_REV: u32 = 31;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -893,7 +894,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xdd43_19dd_6769_3ffc;
+const WIRE_TYPES_HASH: u64 = 0xf0bf_c3ef_9a90_e904;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1345,9 +1346,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 31: `ImpactConfirm` carries a three-way `Verdict`, on the lightyear 0.30.1 wire
+        // Pins REV 31: `ImpactConfirm` carries a four-way `Verdict`, on the lightyear 0.30.1 wire
         // dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xc1a9_46af_0b60_3b3a;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x4d85_af40_b6af_0c81;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

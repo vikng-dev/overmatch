@@ -17,6 +17,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// The sim's impact outcome: one vocabulary for the sim, the wire and the record.
+pub use crate::ballistics::Verdict;
+
 /// A finished shot against one tank, in causal order.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PenetrationReport {
@@ -52,13 +55,6 @@ pub struct Impact {
     /// Angle between `-incoming` and `normal`.
     pub incidence_deg: f32,
     pub verdict: Verdict,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verdict {
-    Through,
-    Stopped,
-    Ricochet,
 }
 
 /// One plate crossing. Thickness is three numbers: the geometric chord along the path, its normal
@@ -216,7 +212,7 @@ mod tests {
                     "{file}: a plate without an exit is the last plate"
                 );
             }
-            if report.impact.verdict != Verdict::Ricochet {
+            if report.impact.verdict.entered() {
                 let plate = report.plates.last().expect("a plate");
                 match plate.exit {
                     None => {

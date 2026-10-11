@@ -229,7 +229,7 @@ mod tests {
             normal: Vec3::Y,
             caliber: 0.088,
             surface: ImpactSurface::Terrain,
-            verdict: Verdict::Ricochet,
+            verdict: Verdict::Struck,
             deflection: None,
         });
         app.world_mut().flush();
@@ -247,7 +247,7 @@ mod tests {
                 normal: Vec3::Y,
                 caliber: 0.088,
                 surface: ImpactSurface::Terrain,
-                verdict: Verdict::Ricochet,
+                verdict: Verdict::Struck,
                 deflection: None,
             });
             app.world_mut().flush();

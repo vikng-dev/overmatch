@@ -642,7 +642,7 @@ fn crossing(report: &PenetrationReport, index: usize) -> (Vec3, Vec3) {
     let entry = Vec3::from(plate.entry);
     let far = match plate.exit {
         Some(exit) => Vec3::from(exit),
-        None if report.impact.verdict == Verdict::Ricochet => entry,
+        None if !report.impact.verdict.entered() => entry,
         None => report.path.last().map_or(entry, |p| Vec3::from(p.point)),
     };
     (entry, far)
@@ -1451,7 +1451,7 @@ fn draw_section_plate(
             let exit = Vec3::from(exit);
             Some((exit, (exit - entry).normalize_or(incoming)))
         }
-        None if report.impact.verdict == Verdict::Ricochet => None,
+        None if !report.impact.verdict.entered() => None,
         None => {
             let along = (head - entry).normalize_or(incoming);
             let depth = (head - entry)
@@ -1619,6 +1619,7 @@ fn verdict_word(verdict: Verdict) -> (&'static str, Color) {
         Verdict::Through => ("THROUGH", SPAN),
         Verdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
         Verdict::Ricochet => ("RICOCHET", RICOCHET),
+        Verdict::Struck => ("STRUCK", Color::srgb(0.6, 0.6, 0.6)),
     }
 }
 

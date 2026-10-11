@@ -906,16 +906,20 @@ pub(crate) enum ImpactSurface {
     Armor,
 }
 
-/// What the round did at the surface it struck: the public three-way outcome of an impact.
+/// What the round did at the surface it struck: the public outcome of an impact.
 ///
-/// `Ricochet` is every contact that entered no material — a deflection off armour, a terrain strike,
-/// or an armour contact that stopped at the face without resolving a crossing (a fail-closed stop).
-/// `Stopped` entered the material and ended inside it; `Through` came out the far side.
+/// Invariant: `Ricochet` is exactly a resolved deflection off armour, and only it carries a
+/// deflected direction (`Impact::deflection` is `Some` iff the verdict is `Ricochet`). `Struck`
+/// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
+/// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark, the
+/// short-circuit probe). `Stopped` entered the material and ended inside it; `Through` came out the
+/// far side.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Through,
     Stopped,
     Ricochet,
+    Struck,
 }
 
 impl Verdict {
@@ -935,9 +939,9 @@ pub(crate) struct Impact {
     pub(crate) caliber: f32,
     /// Surface class resolved from volume ancestry.
     pub(crate) surface: ImpactSurface,
-    /// What the round did at the struck surface; [`Verdict::Ricochet`] for terrain.
+    /// What the round did at the struck surface; [`Verdict::Struck`] for terrain.
     pub(crate) verdict: Verdict,
-    /// Deflected direction for a ricochet; absent for other impacts.
+    /// Deflected direction; `Some` iff `verdict` is [`Verdict::Ricochet`].
     pub(crate) deflection: Option<Vec3>,
 }
 
@@ -1131,7 +1135,7 @@ fn on_fire_shell(
                         normal,
                         caliber: fire.caliber,
                         surface,
-                        verdict: Verdict::Ricochet,
+                        verdict: Verdict::Struck,
                         deflection: None,
                     });
                 }
@@ -2057,7 +2061,7 @@ fn march_shell_step(
                     normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Terrain,
-                    verdict: Verdict::Ricochet,
+                    verdict: Verdict::Struck,
                     deflection: None,
                 });
                 // A terrain stop is the one shot terminal that needs NO confirm: static,
@@ -2092,7 +2096,7 @@ fn march_shell_step(
         if shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
             // Classify the first surface from the hit's volume ancestry (the same `hit_ancestor`
             // rule the full march uses just below) so the read is honest even in the B-arm. The
-            // short-circuit stops dead without resolving penetration, so `Verdict::Ricochet`.
+            // short-circuit stops dead without resolving penetration, so `Verdict::Struck`.
             let surface = if hit_ancestor(hit.entity, &world.volumes, &world.parents).is_some() {
                 ImpactSurface::Armor
             } else {
@@ -2103,7 +2107,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface,
-                verdict: Verdict::Ricochet,
+                verdict: Verdict::Struck,
                 deflection: None,
             });
             pos = entry;
@@ -2124,7 +2128,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Terrain,
-                verdict: Verdict::Ricochet,
+                verdict: Verdict::Struck,
                 deflection: None,
             });
             // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
@@ -2237,7 +2241,7 @@ fn march_shell_step(
                     normal: hit.normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Armor,
-                    verdict: Verdict::Ricochet,
+                    verdict: Verdict::Struck,
                     deflection: None,
                 });
                 pos = entry;
@@ -2417,7 +2421,7 @@ fn resolve_replica_armor_contact(
         normal: hit_normal,
         caliber,
         surface: ImpactSurface::Armor,
-        verdict: Verdict::Ricochet,
+        verdict: Verdict::Struck,
         deflection: None,
     });
     ReplicaArmorContact::Stopped
@@ -3380,6 +3384,54 @@ mod march_tests {
             armor_verdicts(Vec3::new(3.0, 3.0, 0.05), head_on, Vec3::NEG_Z),
             [Verdict::Through],
         );
+    }
+
+    /// `Ricochet` is only a resolved deflection off armour: every impact carries a deflected
+    /// direction iff its verdict is `Ricochet`, and a stop that resolved no crossing — the terrain,
+    /// a replica's fail-closed armour contact — is `Struck`. The 75° graze is fixture data.
+    #[test]
+    fn ricochet_is_only_a_deflection_off_armour() {
+        let graze = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let graze_from = Vec3::new(-1.0, 2.0, 0.6);
+        let plate =
+            |thickness: f32| world_with_plate(Vec3::new(3.0, 3.0, thickness), Vec3::Y * 2.0);
+        let head_on = Vec3::new(0.0, 2.0, 2.0);
+
+        let bounce = fire_and_capture(&mut plate(0.10), graze_from, graze, 800.0);
+        let stopped = fire_and_capture(&mut plate(0.5), head_on, Vec3::NEG_Z, 800.0);
+        let through = fire_and_capture(&mut plate(0.05), head_on, Vec3::NEG_Z, 800.0);
+        let mut replica = plate(0.10);
+        replica.insert_resource(crate::ClientReplica);
+        let replica = fire_and_capture(&mut replica, graze_from, graze, 800.0);
+        let mut ground = world_with_plate(Vec3::splat(0.5), Vec3::splat(900.0));
+        ground.insert_resource(flat_grid(30.0));
+        let ground = fire_and_capture(
+            &mut ground,
+            Vec3::new(10.0, 80.0, -20.0),
+            Vec3::NEG_Y,
+            800.0,
+        );
+
+        let read = |hits: &[Captured]| -> Vec<(ImpactSurface, Verdict)> {
+            hits.iter().map(|hit| (hit.surface, hit.verdict)).collect()
+        };
+        assert_eq!(read(&bounce), [(ImpactSurface::Armor, Verdict::Ricochet)]);
+        assert_eq!(read(&replica), [(ImpactSurface::Armor, Verdict::Struck)]);
+        assert_eq!(read(&ground), [(ImpactSurface::Terrain, Verdict::Struck)]);
+        for hit in [bounce, stopped, through, replica, ground].iter().flatten() {
+            assert_eq!(
+                hit.verdict == Verdict::Ricochet,
+                hit.deflection.is_some(),
+                "a deflected direction iff a ricochet: {:?} {:?}",
+                hit.verdict,
+                hit.deflection,
+            );
+        }
     }
 
     /// Raise an unkeyed catch-up shell and return its fallback impacts.
@@ -5045,7 +5097,7 @@ mod march_tests {
     /// origin IS the entry face's own position, and one ULP of rounding put it past that face, so
     /// the face's degenerate AABB fell outside the corridor's box, the entry vanished, and the walk
     /// reported an exit it had never entered. The round stopped dead on a plate it should have gone
-    /// through — no terminal, no perforation, one bare `Verdict::Ricochet` spark.
+    /// through — no terminal, no perforation, one bare `Verdict::Struck` spark.
     #[test]
     fn plates_across_a_900_mm_gap_are_two_crossings_and_both_perforate() {
         let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5), slab(0.05, -0.45)]);
@@ -5231,19 +5283,20 @@ mod march_tests {
                 }
                 let impacts = app.world().resource::<ImpactLog>().0.clone();
                 assert!(
-                    impacts.first().is_some_and(|impact| impact.verdict.entered()),
+                    impacts
+                        .first()
+                        .is_some_and(|impact| impact.verdict.entered()),
                     "the plate is perforated at {far} ({ahead:e} m): {:?}",
                     impacts
                         .iter()
                         .map(|i| (i.position, i.verdict))
                         .collect::<Vec<_>>(),
                 );
-                // A walk error stops the round with a bare armour spark: not penetrated, not
+                // A walk error stops the round with a bare armour spark (`Struck`): no crossing, not
                 // deflected. Nothing else in this arrangement reads that way.
                 if impacts.iter().any(|impact| {
                     matches!(impact.surface, ImpactSurface::Armor)
-                        && !impact.verdict.entered()
-                        && impact.deflection.is_none()
+                        && impact.verdict == Verdict::Struck
                 }) {
                     failed.push(ahead);
                 }

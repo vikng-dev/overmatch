@@ -563,11 +563,10 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     let mut app = golden_world();
     let out = fire(&mut app, DRIVER_LINE_FROM, DRIVER_LINE_DIR, eighty_eight());
 
-    let stopped = out.impacts.iter().any(|hit| {
-        hit.surface == ImpactSurface::Armor
-            && hit.verdict == Verdict::Ricochet
-            && hit.deflection.is_none()
-    });
+    let stopped = out
+        .impacts
+        .iter()
+        .any(|hit| hit.surface == ImpactSurface::Armor && hit.verdict == Verdict::Struck);
     assert!(
         !stopped,
         "PHYSICS CHANGED — diff consciously. The sloped-plate exit-face defect is BACK: a round \

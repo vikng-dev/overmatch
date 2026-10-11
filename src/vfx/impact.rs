@@ -1168,7 +1168,7 @@ mod tests {
             normal,
             caliber,
             ImpactSurface::Terrain,
-            Verdict::Ricochet,
+            Verdict::Struck,
             None,
         );
     }
@@ -1327,7 +1327,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Ricochet,
+            Verdict::Struck,
             None,
         );
         assert_eq!(
@@ -1461,7 +1461,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Ricochet,
+            Verdict::Struck,
             None,
         );
         assert_eq!(
@@ -1495,7 +1495,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Ricochet,
+            Verdict::Struck,
             None,
         );
         let n0 = billboards(&mut no_pen);
@@ -1533,7 +1533,7 @@ mod tests {
             Vec3::Y,
             MG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Ricochet,
+            Verdict::Struck,
             None,
         );
         let na = billboards(&mut armor);
