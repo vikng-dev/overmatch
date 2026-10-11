@@ -41,6 +41,9 @@ const NET_AWARE_FILES: &[&str] = &[
     // The world-anchored nameplate prefixes `[BOT]` from the replicated `net::protocol::NetBot`
     // marker. View layer, not sim.
     "src/hud.rs",
+    // The dev frame capture hides its window with the client's macOS activation revocation. Dev
+    // instrumentation, not sim: it writes no sim state.
+    "src/dev_capture.rs",
 ];
 
 /// The tokens that constitute naming the netcode layer from outside it: the dependency itself,
