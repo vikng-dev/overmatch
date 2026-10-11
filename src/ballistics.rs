@@ -69,8 +69,10 @@ pub(crate) use sanctioned::{
 };
 use sanctioned::{SanctionedCatchUp, catch_up_sanctioned_chain};
 
-/// The march's boundary nudge: every segment cast starts this far along the direction so a shell
-/// does not immediately re-touch the face it is leaving.
+/// The march's boundary nudge: a crossing that leaves a face it resolved — a perforation's exit, a
+/// bounce's struck face — resumes this far past it, so the next sweep does not re-touch it. Never
+/// applied past a face nothing resolved: a fresh sweep starts at the flight's last clear pose
+/// ([`resolve::Flight`]).
 ///
 /// Shared with [`resolve`] because the two must agree: the interior seed a crossing hands forward
 /// describes the point the NEXT corridor starts from, and that point is nudged. A seed read one
@@ -2050,9 +2052,6 @@ fn march_shell_step(
     // crosses) — split per [`cast_march_segment`], nearer hit wins. This filter serves the
     // interior probes (thickness / exit faces / spall), which are armor-only by construction.
     let armor = SpatialQueryFilter::from_mask(Layer::Armor);
-    // Nudge past each boundary we resolve so we don't immediately re-hit it.
-    const EPS: f32 = MARCH_EPS;
-
     // Advance free-flight (gravity + drag on the velocity, then the position step) through the
     // shared per-tick kernel — the SAME [`advance_shell`] the FireEvent catch-up folds, so a
     // caught-up shell and a natively-flown one can't diverge. `freeflight_pos` is this tick's
@@ -2092,9 +2091,10 @@ fn march_shell_step(
     // perforate or embed) — and keep marching the leftover budget along the new direction.
     // The disc's sampling basis, carried through this tick's gravity bend so the ring never re-rolls
     // (§13.5: the frame is spawn-anchored and transported, never rebuilt from the current direction).
-    // Transported from the direction the frame was LAST left on — the pre-step velocity — not from
-    // the shell's visual forward: `looking_to` is degenerate for a round travelling straight down,
-    // and the sampling basis is sim state that must not read a view detail.
+    // Transported from the direction the frame was LAST left on — the pre-step velocity, which is
+    // also the direction the last step's sweep ran along — not from the shell's visual forward:
+    // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
+    // state that must not read a view detail.
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
     let body = shell.projectile.body();
     let radius = resolve::disc_radius(shell.projectile.caliber);
@@ -2102,19 +2102,18 @@ fn march_shell_step(
     // the crossings of this step and never outlives it: a perforation that leaves a sample inside
     // material is resolved on, past the travel budget if need be (see [`next_surface`]), within the
     // step's limits (`resolve::Budget`).
-    let mut flight = resolve::Flight {
-        position: shell.transform.translation,
-        direction: dir,
+    // The shell's position is the last step's clear pose, and its sweep resumes from it.
+    let mut flight = resolve::Flight::launched(
+        shell.transform.translation,
+        previous,
+        dir,
         speed,
-        frame: shell
-            .projectile
-            .disc
-            .transport(Vec3::from(previous), Vec3::from(dir)),
-        continuation: None,
-    };
+        shell.projectile.disc,
+        radius,
+    );
 
     while budget.continues(&flight) {
-        let origin = flight.cast_origin();
+        let origin = flight.sweep_origin();
         let dir = flight.direction;
         let hit = match next_surface(world, &flight, radius, budget.remaining(), &not_own) {
             // Open air — fly out the rest of the step. On the original (unbent) segment this is
@@ -2245,8 +2244,9 @@ fn march_shell_step(
                         direction,
                         speed: sanctioned_speed,
                     } => {
-                        // The same step limits the authority's crossings are held to.
-                        if let Err(error) = budget.charge(EPS + hit.distance) {
+                        // The same step limits the authority's crossings are held to, charged from
+                        // the flight's position.
+                        if let Err(error) = budget.charge(hit.distance - flight.lag + MARCH_EPS) {
                             warn_once!(
                                 "ballistics: a replica's step ran out of its limits, stopping the \
                                  round: {error:?}"
@@ -2267,8 +2267,10 @@ fn march_shell_step(
                             flight.direction = new_dir;
                         }
                         flight.speed = sanctioned_speed;
-                        // Lift the shell's BODY clear of the face it bounced off, exactly as the
-                        // authority's own ricochet does. At oblique incidence a disc's lateral
+                        flight.lag = 0.0;
+                        // Lift the shell's BODY clear of the face it bounced off and nudge it off
+                        // along the new heading, exactly as the authority's own ricochet does
+                        // (`resolve::Bounce::resume`), so it resumes at a clear pose. At oblique incidence a disc's lateral
                         // offsets lie mostly along the struck surface's normal, so resuming at the
                         // contact point leaves half the ring behind the face and first contact
                         // fires again on the very surface just left — which on a replica means
@@ -2277,7 +2279,8 @@ fn march_shell_step(
                         flight.position = origin
                             + Vec3::new(hit_normal.x, hit_normal.y, hit_normal.z)
                                 .normalize_or_zero()
-                                * radius;
+                                * radius
+                            + flight.direction * MARCH_EPS;
                         bent = true;
                         continue;
                     }
@@ -2395,16 +2398,18 @@ fn next_surface(
     not_own: &dyn Fn(Entity) -> bool,
 ) -> Ahead {
     let held = flight.holds_material();
-    let reach = if held {
-        budget.max(resolve::MAX_CORRIDOR)
-    } else {
-        budget
-    };
+    // Measured from the sweep origin, the lag behind the position the budget counts from.
+    let reach = flight.lag
+        + if held {
+            budget.max(resolve::MAX_CORRIDOR)
+        } else {
+            budget
+        };
     match cast_disc_segment(
         world,
         &flight.frame,
         radius,
-        flight.cast_origin(),
+        flight.sweep_origin(),
         flight.direction,
         reach,
         not_own,
@@ -5601,6 +5606,38 @@ mod march_tests {
         );
     }
 
+    /// Whether a round fired at a face from one march nudge in front reports it: impacts, all on
+    /// armour, the first an entry, and exactly one terminal.
+    fn assert_face_reported(app: &App, at: &str) {
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert!(
+            !impacts.is_empty(),
+            "the round met the plate {at} and something was reported for it — a silent \
+             pass-through is free armour",
+        );
+        assert!(
+            impacts
+                .iter()
+                .all(|impact| matches!(impact.surface, ImpactSurface::Armor)),
+            "and what was reported is the plate, not the ground beyond it: {impacts:?}",
+            impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
+        );
+        // With the face collected the crossing resolves honestly: an 88 through 50 mm.
+        assert!(
+            impacts[0].verdict.entered(),
+            "{at} the crossing resolved, rather than failing closed: {impacts:?}",
+            impacts = impacts
+                .iter()
+                .map(|i| (i.position, i.verdict))
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            app.world().resource::<TerminalLog>().0.len(),
+            1,
+            "and it reported its one terminal",
+        );
+    }
+
     /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL.
     ///
     /// Every observed instance of the prune defect landed on a TRANSIT corridor, where a dropped
@@ -5611,17 +5648,33 @@ mod march_tests {
     /// is armour that was never modelled, which is precisely the defect class §13 exists to kill,
     /// and it would leave no trace in any log.
     ///
-    /// So: put the entrance corridor's origin exactly on a plate's face, and a few ULP either side
-    /// of it, by spawning the shell one march nudge in front. Whatever else happens, the round may
-    /// not pass through unremarked.
+    /// So: spawn the shell one march nudge in front of a plate's face, and a few ULP either side of
+    /// it. Whatever else happens, the round may not pass through unremarked.
     ///
-    /// The round falls straight down onto a level plate, so gravity cannot tilt its travel and the
-    /// disc — laid out square to the CURRENT travel — stays flush with the face. A disc tilted by `θ`
-    /// against the face straddles it by up to `r·θ` (DERIVED: 9 µm for an 88 at 800 m/s after one
-    /// 16 ms gravity bend), and its leading samples then begin inside the plate, which is a
-    /// different fixture.
+    /// Fired level, so gravity tilts the travel — and the disc laid out square to it — by `θ` in the
+    /// first tick, and the tilted disc straddles the face by up to `r·θ` (DERIVED: 9 µm for an 88 at
+    /// 800 m/s after one 16 ms bend). Its leading samples would begin inside the plate if the
+    /// entrance corridor started on the face; it starts at the last clear pose instead.
     #[test]
     fn an_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
+        let face = 0.525_f32;
+        for step in -4i32..=4 {
+            let spawn = f32::from_bits((face + MARCH_EPS).to_bits().wrapping_add_signed(step));
+            let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
+            app.init_resource::<TerminalLog>();
+            app.add_observer(capture_terminal);
+            spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, spawn));
+            for _ in 0..8 {
+                app.update();
+            }
+            assert_face_reported(&app, &format!("at {step} ULP"));
+        }
+    }
+
+    /// The same, falling straight down onto a level plate: gravity cannot tilt the travel, so the
+    /// disc stays flush with the face and every sample meets it at the same `t`.
+    #[test]
+    fn a_falling_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
         let face = 0.525_f32;
         for step in -4i32..=4 {
             let spawn = f32::from_bits((face + MARCH_EPS).to_bits().wrapping_add_signed(step));
@@ -5639,31 +5692,92 @@ mod march_tests {
             for _ in 0..8 {
                 app.update();
             }
-
-            let impacts = app.world().resource::<ImpactLog>().0.clone();
-            assert!(
-                !impacts.is_empty(),
-                "the round met the plate at {step} ULP and something was reported for it — a \
-                 silent pass-through is free armour",
-            );
-            assert!(
-                impacts
-                    .iter()
-                    .all(|impact| matches!(impact.surface, ImpactSurface::Armor)),
-                "and what was reported is the plate, not the ground beyond it: {impacts:?}",
-                impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
-            );
-            // With the face collected the crossing resolves honestly: an 88 through 50 mm.
-            assert!(
-                impacts[0].verdict.entered(),
-                "at {step} ULP the crossing resolved, rather than failing closed",
-            );
-            assert_eq!(
-                app.world().resource::<TerminalLog>().0.len(),
-                1,
-                "and it reported its one terminal",
-            );
+            assert_face_reported(&app, &format!("at {step} ULP"));
         }
+    }
+
+    /// A ROUND LAUNCHED JUST OFF A FACE NEVER STARTS A SAMPLE INSIDE IT.
+    ///
+    /// The flight's position is its last clear pose, and its next sweep starts there. Two ways of
+    /// starting past it put a sample inside a plate the fresh corridor declares it outside of: a
+    /// boundary nudge, which steps over any face within one `MARCH_EPS` ahead; and the tick's
+    /// gravity bend, which tilts the disc — laid square to the CURRENT travel — so its leading
+    /// samples lie up to `r·tan θ` ahead of the plane the last sweep cleared (DERIVED: 9 µm for an 88
+    /// at 800 m/s after one 16 ms bend). Fired level from a few ULP to half a nudge off a face, the
+    /// crossing must resolve.
+    #[test]
+    fn a_round_launched_just_off_a_face_never_starts_a_sample_inside_it() {
+        let face = 0.525_f32;
+        for clearance in [0.0, 1.0e-6, 4.0e-6, 8.0e-6, 2.0e-5, 0.5 * MARCH_EPS] {
+            for step in 0i32..=2 {
+                let spawn = f32::from_bits((face + clearance).to_bits().wrapping_add_signed(step));
+                let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
+                app.init_resource::<TerminalLog>();
+                app.add_observer(capture_terminal);
+                spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, spawn));
+                for _ in 0..8 {
+                    app.update();
+                }
+                assert_face_reported(&app, &format!("{clearance:e} m + {step} ULP off it"));
+            }
+        }
+    }
+
+    /// AN OBLIQUE PERFORATION THAT ENDS A TICK RESUMES ON ITS SEEDS.
+    ///
+    /// A disc that perforates an oblique plate resumes on its SEEDS: each sample one nudge past the
+    /// aggregate exit along its own ray, so the samples' clear points are staggered along the plate
+    /// — up to `r·tan(incidence)` ahead of or behind the axis (DERIVED: 76 mm for an 88 at 60°).
+    /// Within the step the next crossing starts from those seeds. When the perforation is the step's
+    /// last crossing, the continuation does not hold material and lapses with the step, and the next
+    /// tick lays a fresh disc square to its travel at the axis's resume point: every sample the
+    /// stagger put ahead of it now starts inside the plate it already left, reads that plate's exit
+    /// with nothing declared, and the round fails closed in mid-air past the plate.
+    ///
+    /// MEASURED at this commit and at its parent: an 88 at 60° through 20 mm, fired from stand-offs
+    /// 1 mm apart across a 4 cm window around the tick's end, fails closed on the next tick for
+    /// about half of them. Ignored until it is decided how a staggered clear pose crosses a tick.
+    #[test]
+    #[ignore = "a staggered continuation lapses at the tick boundary; needs a decision on how \
+                per-sample clear poses cross a tick"]
+    fn an_oblique_perforation_that_ends_a_tick_resumes_on_its_seeds() {
+        const DT: f32 = 0.016;
+        let incidence = 60.0_f32.to_radians();
+        let dir = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
+        let velocity = dir * 800.0;
+        let (_, stepped) = advance_shell(
+            Vec3::ZERO,
+            velocity,
+            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
+        let budget = stepped.length() * DT;
+        let face = Vec3::new(0.0, 2.0, 0.51);
+        let mut failed = Vec::new();
+        for millimetres in 0..40 {
+            // The face lies this far short of the tick's travel: the crossing ends the tick for
+            // stand-offs whose perforation spends what is left of it.
+            let short = 0.02 - 1.0e-3 * millimetres as f32;
+            let mut app = world_with_trimesh_plates(&[slab(0.02, 0.5)]);
+            spawn_round(
+                &mut app,
+                FIXTURE_88,
+                face - dir * (budget - short),
+                velocity,
+            );
+            for _ in 0..3 {
+                app.update();
+            }
+            let impacts = app.world().resource::<ImpactLog>().0.clone();
+            if failed_closed(&impacts) {
+                failed.push(short);
+            }
+        }
+        assert!(
+            failed.is_empty(),
+            "the round failed closed past the plate it perforated, with the face this far short of \
+             the tick's travel: {failed:?}",
+        );
     }
 
     /// A SANCTIONED BOUNCE IS A DIRECTION CHANGE, SO IT TRANSPORTS THE SAMPLING BASIS.

@@ -1304,7 +1304,7 @@ mod tests {
 
     /// THE MARGIN MUST NOT REACH A FACE THE MARCH DELIBERATELY STEPPED PAST.
     ///
-    /// The other side of the same squeeze. Every corridor after the first resumes one
+    /// The other side of the same squeeze. A corridor after a perforation resumes one
     /// [`super::MARCH_EPS`] beyond the face it is leaving, so a margin that grew to a whole nudge
     /// would re-collect the EXIT face of the plate just perforated — [`admit`] would clamp it to
     /// `t = 0`, and the walk would see an exit for a primitive it is not inside: `UnexpectedExit`,

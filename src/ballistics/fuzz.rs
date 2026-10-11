@@ -659,7 +659,7 @@ impl Drive {
 #[derive(Clone, Debug)]
 pub(super) struct DriveFailure {
     pub error: WalkError,
-    /// WORLD cast origin and direction of the failing leg.
+    /// WORLD sweep origin and direction of the failing leg.
     pub origin: Vec3,
     pub direction: Vec3,
 }
@@ -681,7 +681,7 @@ pub(super) fn drive(
 ) -> Result<Drive, DriveFailure> {
     let fail = |error: WalkError, flight: &Flight| DriveFailure {
         error,
-        origin: flight.cast_origin(),
+        origin: flight.sweep_origin(),
         direction: Vec3::from(flight.direction),
     };
     let bad = |reason| DriveFailure {
@@ -692,11 +692,14 @@ pub(super) fn drive(
     let direction = Dir3::new(direction).map_err(|_| bad("the shot line has no direction"))?;
     let frame = DiscFrame::anchored(Vec3::from(direction))
         .ok_or_else(|| bad("the shot line has no usable sampling basis"))?;
+    // The shot line's origin is clear and the line never bends before its first crossing, so the
+    // sweep starts square to it, at the origin.
     let mut flight = Flight {
         position: origin,
         direction,
         speed,
         frame,
+        lag: 0.0,
         continuation: None,
     };
     let radius = resolve::disc_radius(body.caliber);

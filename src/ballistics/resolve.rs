@@ -191,9 +191,18 @@ impl Interior {
 ///
 /// The runtime march and the §13.6 gate drive the SAME state through the same [`decide`] and
 /// [`Flight::follow`], so a crossing sequence is one state machine wherever it is run.
+///
+/// # The last clear pose
+///
+/// A fresh corridor declares every sample outside material, so it must start where that is KNOWN:
+/// `position`, the pose the last sweep left clear — the end of an open-air flight or of a corridor
+/// that met nothing, a bounce lifted off its face — or, after a perforation, the resume point its
+/// seeds were read at. Nothing nudges past it: a face within a nudge ahead would be stepped over
+/// with its entry owned by nobody, and the sample would begin inside the plate and report an exit
+/// it never entered.
 #[derive(Clone, Debug)]
 pub(crate) struct Flight {
-    /// WORLD position the next cast starts from (one [`MARCH_EPS`] along `direction` from here).
+    /// WORLD position of the last clear pose: where the next sweep starts ([`Flight::sweep_origin`]).
     pub position: Vec3,
     pub direction: Dir3,
     /// m/s.
@@ -201,15 +210,52 @@ pub(crate) struct Flight {
     /// The sampling basis for `direction`, transported through every bend so far. Resolution reads
     /// THIS, never a basis stored for an earlier heading.
     pub frame: DiscFrame,
+    /// How far behind `position`, along `direction`, a fresh sweep starts, so that every sample
+    /// starts on ground the last sweep cleared. The last sweep ran square to the direction the
+    /// flight was launched from; a disc square to `direction` laid at `position` leads that plane by
+    /// up to `r·tan θ`, θ the bend between the two ([`Flight::launched`]). Zero once any crossing
+    /// has been followed: each decision leaves the flight square to its own direction.
+    pub lag: f32,
     /// The last perforation's resume point and seeds, anchor-relative; `None` in open air.
     pub continuation: Option<Interior>,
 }
 
 impl Flight {
-    /// WORLD origin of the next cast and of a corridor that has no continuation to resume from: the
-    /// position, nudged off whatever face the flight is leaving.
-    pub(crate) fn cast_origin(&self) -> Vec3 {
-        self.position + self.direction * MARCH_EPS
+    /// A flight starting at the clear pose `position`, whose last sweep ran along `swept` and which
+    /// now travels along `direction`: the frame is transported through the bend by minimal rotation
+    /// and stays square to `direction`, and the sweep steps back by [`lag`](Self::lag) to the plane
+    /// the last sweep cleared.
+    ///
+    /// The bend is the one gravity and drag make between two steps — microradians — and the lag is
+    /// exact for any bend short of a right angle, which no step boundary approaches.
+    pub(crate) fn launched(
+        position: Vec3,
+        swept: Dir3,
+        direction: Dir3,
+        speed: f32,
+        frame: DiscFrame,
+        radius: f32,
+    ) -> Self {
+        let cos = swept.dot(Vec3::from(direction));
+        let sin = swept.cross(Vec3::from(direction)).length();
+        Self {
+            position,
+            direction,
+            speed,
+            frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
+            lag: if sin > 0.0 {
+                radius * sin / cos.max(f32::MIN_POSITIVE)
+            } else {
+                0.0
+            },
+            continuation: None,
+        }
+    }
+
+    /// WORLD origin of the next sweep — the cast and, with no continuation, the entrance corridor:
+    /// the last clear pose, stepped back by the lag.
+    pub(crate) fn sweep_origin(&self) -> Vec3 {
+        self.position - self.direction * self.lag
     }
 
     /// A continuation holds a sample inside material ([`Interior::holds_material`]).
@@ -223,6 +269,7 @@ impl Flight {
     /// frame is transported through every direction change, including the null one. Returns whether
     /// the round came to rest; the travel it charges is [`Decision::charged`].
     pub(crate) fn follow(&mut self, decision: Decision) -> bool {
+        self.lag = 0.0;
         match decision {
             Decision::Clear { resume, .. } => {
                 self.frame = self
@@ -282,7 +329,8 @@ pub(crate) enum Decision {
     Clear {
         /// The far end of the examined corridor, where the flight resumes.
         resume: Vec3,
-        /// The examined corridor's length.
+        /// Metres from the flight's position to `resume`: the examined corridor less the lag it
+        /// started behind the position.
         travel: f32,
     },
     /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
@@ -292,16 +340,15 @@ pub(crate) enum Decision {
 }
 
 impl Decision {
-    /// Line-of-sight metres following this decision charges against the step's budget, including
-    /// the boundary nudge — known before anything is applied, so
-    /// [`Budget::charge`] can refuse a crossing before its consequences land.
+    /// Line-of-sight metres following this decision charges against the step's budget, measured
+    /// from the flight's position — known before anything is applied, so [`Budget::charge`] can
+    /// refuse a crossing before its consequences land.
     pub(crate) fn charged(&self) -> f32 {
-        MARCH_EPS
-            + match self {
-                Decision::Clear { travel, .. } => *travel,
-                Decision::Bounce(bounce) => bounce.travel,
-                Decision::Bite(bite) => bite.travel,
-            }
+        match self {
+            Decision::Clear { travel, .. } => *travel,
+            Decision::Bounce(bounce) => bounce.travel,
+            Decision::Bite(bite) => bite.travel,
+        }
     }
 }
 
@@ -325,13 +372,16 @@ pub(crate) struct Bounce {
     pub speed: f32,
     /// Momentum handed to `owner` at `position`.
     pub impulse: Vec3,
-    /// Line-of-sight metres flown to the face, along the way in. The lift to `resume` is not travel:
-    /// it repositions the body clear of the face it bounced off.
+    /// Line-of-sight metres flown from the flight's position to the face, along the way in, and the
+    /// nudge off it. The lift to `resume` is not travel: it repositions the body clear of the face
+    /// it bounced off.
     pub travel: f32,
-    /// Where the flight resumes: lifted clear of the face along `n̄` by the disc's own radius. At
-    /// oblique incidence a disc's lateral offsets lie mostly ALONG the struck surface's normal, so
-    /// resuming at the contact point leaves half the ring behind the face and first contact fires
-    /// again on the very surface just left. A point needs only the nudge; a body needs its radius.
+    /// Where the flight resumes — a clear pose: lifted off the face along `n̄` by the disc's own
+    /// radius, then one [`MARCH_EPS`] along the outgoing direction. At oblique incidence a disc's
+    /// lateral offsets lie mostly ALONG the struck surface's normal, so resuming at the contact
+    /// point leaves half the ring behind the face and first contact fires again on the very surface
+    /// just left. A point needs only the nudge, which steps off the face this bounce resolved, never
+    /// past one nobody owns; a body needs its radius too.
     pub resume: Vec3,
 }
 
@@ -349,8 +399,9 @@ pub(crate) struct Bite {
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
     /// first plate deposits nothing behind it.
     pub deposits: Vec<walk::EntityDeposit>,
-    /// Line-of-sight metres flown, summed over the segments actually flown: the approach to the
-    /// AXIS hand-off along the way in, then the transit along the bend.
+    /// Line-of-sight metres flown from the flight's position, summed over the segments actually
+    /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
+    /// and for a perforation the nudge on to the resume point.
     ///
     /// Not reconstructible from the cast. The cast knows only where its nearest sample ray first
     /// touched armour, and at oblique incidence that ray leads the axis by `r·tan(incidence)` —
@@ -370,7 +421,9 @@ pub(crate) enum BiteEnd {
     Perforated {
         /// The aggregate exit face — what the crossing's marks record.
         exit: Vec3,
-        /// The axis at the exit, where the flight resumes.
+        /// Where the flight resumes: the axis one [`MARCH_EPS`] past the exit, the point the
+        /// continuation's seeds were read at — WORLD, for the cast; the corridor resumes from the
+        /// continuation's own anchor-relative origin.
         resume: Vec3,
         direction: Dir3,
         /// Residual speed (m/s).
@@ -411,7 +464,7 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 /// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the bend,
 /// [`walk::finish`], the residual speed, the travel and the continuation.
 ///
-/// `contact` is the distance from [`Flight::cast_origin`] to the nearest sample's first armour
+/// `contact` is the distance from [`Flight::sweep_origin`] to the nearest sample's first armour
 /// contact; it sizes the first corridor and nothing else.
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
@@ -426,14 +479,27 @@ pub(crate) fn decide(
 
     // --- ENTRANCE: the disc as it meets the surface, along the incoming axis.
     //
-    // The cast origin becomes the corridor ANCHOR, and every position from here to the end of the
-    // crossing is measured from it. The transit corridor inherits the same anchor, which is what
+    // The flight's position becomes the corridor ANCHOR, and every position from here to the end of
+    // the crossing is measured from it. The transit corridor inherits the same anchor, which is what
     // makes its handoff a small offset from the face positions the entrance measured rather than an
     // independently rounded world position (see `walk::RayCorridor::anchor`). Resuming from a
     // perforation keeps that perforation's anchor, for the same reason (see [`Interior`]).
-    let (anchor, start, seeds) = match &flight.continuation {
-        Some(interior) => (interior.anchor, interior.origin, interior.seeds.as_slice()),
-        None => (flight.cast_origin(), Vec3::ZERO, &[][..]),
+    //
+    // `start` is where the corridor begins and `from` where the flight's position is, both
+    // anchor-relative: a fresh corridor starts the lag behind the position, a continuation at it.
+    let (anchor, start, from, seeds) = match &flight.continuation {
+        Some(interior) => (
+            interior.anchor,
+            interior.origin,
+            interior.origin,
+            interior.seeds.as_slice(),
+        ),
+        None => (
+            flight.position,
+            -Vec3::from(dir) * flight.lag,
+            Vec3::ZERO,
+            &[][..],
+        ),
     };
     let entrance = closing_walk(
         context,
@@ -466,7 +532,7 @@ pub(crate) fn decide(
             let examined = contact + ENTRANCE_SPAN;
             Ok(Decision::Clear {
                 resume: anchor + (start + dir * examined),
-                travel: examined,
+                travel: (start + dir * examined - from).dot(Vec3::from(dir)),
             })
         }
         Begin::Ricochet {
@@ -488,8 +554,8 @@ pub(crate) fn decide(
                 direction: out,
                 speed: bled,
                 impulse: body.mass * (v_in - Vec3::from(out) * bled),
-                travel: (read.position - start).dot(Vec3::from(dir)).max(0.0),
-                resume: position + read.normal * radius,
+                travel: (read.position - from).dot(Vec3::from(dir)).max(0.0) + MARCH_EPS,
+                resume: position + read.normal * radius + out * MARCH_EPS,
             }))
         }
         Begin::Transit(request) => {
@@ -513,7 +579,7 @@ pub(crate) fn decide(
                 plan,
                 body,
                 capability_in,
-                start,
+                from,
                 dir,
                 bent,
                 v_in,
@@ -534,8 +600,8 @@ fn bite(
     plan: walk::ResolutionPlan,
     body: RoundBody,
     capability_in: f32,
-    // Where the entrance corridor started, RELATIVE to the transit's anchor.
-    start: Vec3,
+    // Where the flight's position is, RELATIVE to the transit's anchor.
+    from: Vec3,
     incoming: Dir3,
     bent: Dir3,
     v_in: Vec3,
@@ -549,11 +615,11 @@ fn bite(
     // the world's spacing (see there).
     let world = |local: Vec3| transit.anchor + local;
     let struck = transit.events[0].entrance_volume;
-    // The APPROACH: corridor origin to the axis handoff, along the way in. The transit's own `t`
-    // then measures the rest, along the bend.
-    let approach = (transit.origin - start).dot(Vec3::from(incoming)).max(0.0);
+    // The APPROACH: the flight's position to the axis handoff, along the way in. The transit's own
+    // `t` then measures the rest, along the bend.
+    let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
     let entrance = world(plan.entrance.position);
-    let (end, t) = match plan.outcome {
+    let (end, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
                 at: world(at),
@@ -563,14 +629,14 @@ fn bite(
         ),
         Outcome::Perforated { exit, t, .. } => {
             let residual = speed_for(body, (capability_in - plan.cost_spent).max(0.0));
-            // Read at the point the NEXT corridor will actually start from — the flight nudges every
-            // cast origin off the face it is leaving, and a seed taken one nudge earlier describes a
-            // plate the round has already cleared.
+            // Read at the point the NEXT corridor will actually start from — the flight resumes one
+            // nudge past the exit it is leaving, and a seed taken one nudge earlier describes a plate
+            // the round has already cleared.
             let resume = t + MARCH_EPS;
             (
                 BiteEnd::Perforated {
                     exit: world(exit),
-                    resume: world(transit.origin + transit.axis * t),
+                    resume: world(transit.origin + transit.axis * resume),
                     direction: bent,
                     speed: residual,
                     impulse: body.mass * (v_in - Vec3::from(bent) * residual),
@@ -585,7 +651,7 @@ fn bite(
                         seeds: transit.resume_at(resume as f64, laws),
                     },
                 },
-                t,
+                resume,
             )
         }
     };
@@ -596,7 +662,7 @@ fn bite(
         overmatched: plan.entrance.overmatched,
         owner: owner(struck),
         deposits: plan.deposits,
-        travel: approach + t,
+        travel: approach + flown,
         end,
     }
 }
