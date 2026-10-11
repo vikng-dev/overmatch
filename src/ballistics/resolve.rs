@@ -59,26 +59,24 @@ const ENTRANCE_SPAN: f32 = 0.5;
 /// crossing.
 pub(crate) const MAX_CORRIDOR: f32 = 50.0;
 
-/// Ceiling on how far past its travel budget one step may carry the flight.
+/// Ceiling on how far past its travel budget one step may carry the flight — a chosen travel
+/// limit, not a certified bound.
 ///
 /// Past the budget a step runs only to close material a sample is held inside
-/// ([`Interior::holds_material`]): the held material's exit lies ahead with its entry behind, so it
-/// is the remainder of a crossing already begun, and the walk certifies no crossing longer than one
-/// [`MAX_CORRIDOR`]. A drain that has carried the flight a whole certified corridor past the budget
-/// is therefore closing nothing the walk could certify — a chain of continuations, each a bounded
-/// crossing, that never lets the step yield — and it stops the round instead of applying
-/// consequences ever further downrange.
+/// ([`Interior::holds_material`]). Each such crossing closes within one [`MAX_CORRIDOR`], but a
+/// succession of them does not: held crossings chained end to end can carry the flight arbitrarily
+/// far while each one stays certifiable, so exceeding this does not prove the geometry malformed. It
+/// bounds how far downrange one step may apply consequences; the value is set at the corridor's
+/// scale as policy, and a step that reaches it stops the round (fail closed).
 pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 
-/// Ceiling on the crossings one step may decide.
+/// Ceiling on the crossings one step may decide — a chosen resource limit, not a certified bound.
 ///
-/// Every crossing begins at a face contact the flight then leaves behind — a bite resumes past its
-/// exit, a bounce is lifted off its face — or proves a whole [`ENTRANCE_SPAN`] empty. So a step's
-/// crossings are bounded by the faces along its flight, and the collector already holds
-/// [`collect::MAX_FACES`] as the most faces any corridor through real geometry crosses: a step that
-/// decides more crossings than that has met more boundaries than one line through certified armour
-/// can, which is a runaway (a round trapped between faces, or spends lost to rounding), not a
-/// crossing sequence.
+/// Nothing maps a step's crossings onto a bounded set of faces: successive corridors can meet
+/// disjoint faces, a bounce can return to a face already struck, and an empty span consumes distance
+/// rather than a face. [`collect::MAX_FACES`] bounds one corridor's collection, not a step. So the
+/// value reuses that scale as policy, bounding the work one step may do; a step that reaches it
+/// stops the round (fail closed), whether or not the geometry was well formed.
 pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
 
 /// One step's travel budget, spent by its successive crossings, and the limits nothing may pass.
