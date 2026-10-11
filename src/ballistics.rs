@@ -625,8 +625,9 @@ pub(crate) struct Held {
     waited: u32,
     /// Re-age fallback when [`ShotClock`] is unavailable.
     age: u32,
-    /// Local contact normal for the first sanctioned bounce after this hold re-seeds.
-    normal: Vec3,
+    /// Local contact normal for the first sanctioned bounce after this hold re-seeds; `None` for a
+    /// hold with no struck face (a fresh start that could not be certified, [`uncertified_start`]).
+    normal: Option<Vec3>,
 }
 
 /// Configured replica grace window. It bounds the time an unresolved armor contact remains hidden;
@@ -1213,7 +1214,7 @@ fn on_fire_shell(
                     catch_up_hold = Some(Held {
                         waited: 0,
                         age: fire.catch_up_ticks.saturating_sub(contact_tick),
-                        normal,
+                        normal: Some(normal),
                     });
                     if let Some(shot) = fire.shot {
                         crate::shot_trace::record(&mut shot_trace, "catchup", now, shot, || {
@@ -1719,11 +1720,10 @@ fn resolve_held_shell(
             shell.marks.ricochets.push(segment.bounce.origin);
             commands.trigger(Impact {
                 position: segment.bounce.origin,
-                normal: if index == 0 {
-                    held.normal
-                } else {
-                    segment.bounce.direction
-                },
+                normal: held
+                    .normal
+                    .filter(|_| index == 0)
+                    .unwrap_or(segment.bounce.direction),
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Armor,
                 outcome: ImpactOutcome::Ricochet {
@@ -1778,8 +1778,9 @@ fn resolve_held_shell(
         }
 
         // The one contact normal this client has is the hold's own, for the bounce it held on: only
-        // a chain ending on that bounce can be lifted off its face.
-        let lift = (caught_up.segments.len() == 1).then_some(held.normal);
+        // a chain ending on that bounce can be lifted off its face, and a hold with no struck face
+        // lifts nothing.
+        let lift = held.normal.filter(|_| caught_up.segments.len() == 1);
         resume_from_catch_up(shell, &caught_up, lift);
         // Release the hold and resume marching next tick. `Held` is the whole fact — the view's
         // `Remove` adapter un-hides a dressed shell off it.
@@ -2163,24 +2164,16 @@ fn march_shell_step(
     let mut flight = match launched {
         Ok(flight) => flight,
         Err(error) => {
-            // FAIL CLOSED, as for any walk error: a start whose membership cannot be established
-            // is never declared outside.
-            warn_once!(
-                "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+            let position = shell.transform.translation;
+            let holding = uncertified_start(
+                shell, deposit, position, dir, &error, now, shot_trace, commands,
             );
-            commands.trigger(Impact {
-                position: shell.transform.translation,
-                normal: -Vec3::from(dir),
-                caliber: shell.projectile.caliber,
-                surface: ImpactSurface::Armor,
-                outcome: ImpactOutcome::Struck,
-            });
             return Some(MarchStep {
-                position: shell.transform.translation,
+                position,
                 direction: dir,
                 speed,
-                stopped: true,
-                holding: false,
+                stopped: !holding,
+                holding,
                 damage_dealt,
             });
         }
@@ -2188,19 +2181,19 @@ fn march_shell_step(
 
     loop {
         // A bounce or a re-seed leaves a fresh disc: its membership is established before anything
-        // sweeps from it, or the round stops (fail closed).
+        // sweeps from it, or the round ends here ([`uncertified_start`]).
         if let Err(error) = flight.settle(&context, &not_own, radius) {
-            warn_once!(
-                "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+            holding = uncertified_start(
+                shell,
+                deposit,
+                flight.position,
+                flight.direction,
+                &error,
+                now,
+                shot_trace,
+                commands,
             );
-            commands.trigger(Impact {
-                position: flight.position,
-                normal: -Vec3::from(flight.direction),
-                caliber: shell.projectile.caliber,
-                surface: ImpactSurface::Armor,
-                outcome: ImpactOutcome::Struck,
-            });
-            stopped = true;
+            stopped = !holding;
             break;
         }
         if !budget.continues(&flight) {
@@ -2464,6 +2457,63 @@ fn march_shell_step(
     })
 }
 
+/// End the step at a fresh start whose membership could not be established
+/// ([`resolve::certified`]); the start is never declared outside. Returns whether the shell holds;
+/// otherwise it has stopped.
+///
+/// The authority fails the round closed where it stands, as for any walk error. A replica owns no
+/// armour verdict to show for it: a keyed shell holds hidden for the authority's next outcome, the
+/// lifecycle of an unresolved armour contact ([`resolve_replica_armor_contact`]) with no struck face
+/// to lift off, and an unkeyed one, which no outcome can reach, ends quietly.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the march's own state threaded through; a struct would be built for this one call"
+)]
+fn uncertified_start(
+    shell: &mut MarchingShell,
+    deposit: bool,
+    position: Vec3,
+    direction: Dir3,
+    error: &walk::WalkError,
+    now: u32,
+    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
+    commands: &mut Commands,
+) -> bool {
+    if deposit {
+        warn_once!(
+            "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+        );
+        commands.trigger(Impact {
+            position,
+            normal: -Vec3::from(direction),
+            caliber: shell.projectile.caliber,
+            surface: ImpactSurface::Armor,
+            outcome: ImpactOutcome::Struck,
+        });
+        return false;
+    }
+    warn_once!(
+        "ballistics: a replica's fresh start could not be certified, awaiting the authority: \
+         {error:?}"
+    );
+    let Some(shot) = shell.shot else {
+        return false;
+    };
+    commands.entity(shell.entity).insert(Held {
+        waited: 0,
+        age: 0,
+        normal: None,
+    });
+    crate::shot_trace::record(
+        shot_trace,
+        "contact",
+        now,
+        shot.0,
+        || json!({ "res": "hold", "why": "uncertified" }),
+    );
+    true
+}
+
 /// What lies ahead of a flight, for the next crossing.
 enum Ahead {
     Open,
@@ -2600,7 +2650,7 @@ fn resolve_replica_armor_contact(
         commands.entity(entity).insert(Held {
             waited: 0,
             age: 0,
-            normal: hit_normal,
+            normal: Some(hit_normal),
         });
         // The corresponding `hold` row closes this trace interval.
         crate::shot_trace::record(
@@ -4427,6 +4477,91 @@ mod march_tests {
             "NO spark — a fabricated contact the authority never confirmed would violate the honesty \
              doctrine; the shell dissolves quietly",
         );
+    }
+
+    /// Where the uncertifiable fixture sits: far from the plate, in open air. Fixture data.
+    const UNCERTIFIABLE_AT: Vec3 = Vec3::new(0.0, 20.0, 5.0);
+
+    /// An armour volume no containment probe can read — a compound, neither a certified trimesh nor
+    /// convex — around [`UNCERTIFIABLE_AT`], so a fresh start laid there cannot be certified.
+    /// Settled before returning.
+    fn spawn_uncertifiable(app: &mut App) {
+        app.world_mut().spawn((
+            Transform::from_translation(UNCERTIFIABLE_AT),
+            RigidBody::Static,
+            Collider::compound(vec![(
+                Vec3::ZERO,
+                Quat::IDENTITY,
+                Collider::cuboid(1.0, 1.0, 1.0),
+            )]),
+            CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material_factor: STEEL,
+                substance: "fixture".to_string(),
+            },
+        ));
+        for _ in 0..8 {
+            app.update();
+        }
+    }
+
+    /// A REPLICA THAT CANNOT CERTIFY A FRESH START SHOWS NO ARMOUR VERDICT FOR IT.
+    ///
+    /// The authority owns every armour verdict. A keyed replica whose fresh start cannot be
+    /// certified holds hidden, as at an unresolved armour contact, emitting nothing; the authority's
+    /// next outcome then governs it.
+    #[test]
+    fn a_replica_that_cannot_certify_a_start_holds_for_the_authority() {
+        let shot = a_shot();
+        let mut app = replica_world(SanctionedShots::default());
+        spawn_uncertifiable(&mut app);
+        let shell = spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, shot);
+        app.update();
+        assert!(
+            app.world().resource::<ImpactLog>().0.is_empty(),
+            "no armour verdict is fabricated for an uncertified start",
+        );
+        assert!(
+            app.world().get::<Held>(shell).is_some(),
+            "the shell holds for the authority's outcome rather than ending",
+        );
+
+        let server_pos = UNCERTIFIABLE_AT + Vec3::Z * 0.4;
+        app.world_mut()
+            .resource_mut::<SanctionedShots>()
+            .insert_terminal(
+                shot,
+                SanctionedTerminal {
+                    position: server_pos,
+                    normal: Vec3::Z,
+                    verdict: TerminalVerdict::Through,
+                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
+                    after_bounces: 0,
+                },
+            );
+        app.update();
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 1, "the authority's terminal is the one read");
+        assert_eq!(impacts[0].verdict, Verdict::Through);
+        assert!(impacts[0].position.distance(server_pos) < 1.0e-6);
+        assert!(
+            app.world().get_entity(shell).is_err(),
+            "the sanctioned terminal ends the shell",
+        );
+    }
+
+    /// The authority fails an uncertified fresh start closed, where it stands.
+    #[test]
+    fn the_authority_fails_an_uncertified_start_closed() {
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
+        spawn_uncertifiable(&mut app);
+        let shell = spawn_free_shell(&mut app, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
+        app.update();
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(impacts.len(), 1, "one fail-closed read: {}", impacts.len());
+        assert_eq!(impacts[0].verdict, Verdict::Struck);
+        assert!(impacts[0].position.distance(UNCERTIFIABLE_AT) < 1.0e-6);
+        assert!(app.world().get_entity(shell).is_err(), "the round stops");
     }
 
     /// Regression: sanctioned bounces are consumed strictly by ordinal.
