@@ -2021,11 +2021,14 @@ fn finish_at_sanctioned_terminal(
 /// The catch-up flies from the sanctioned bounce point, which lies on the struck face; the
 /// authority resumed from that point lifted off the face along its normal by the disc's radius and
 /// nudged one [`MARCH_EPS`] along the outgoing direction (`resolve::Bounce::resume`). With `lift` —
-/// the struck face's outward normal, when this client knows it — the resume takes the same lift,
-/// translated along the caught-up flight, so a fresh disc laid there does not start behind the face
-/// it bounced off. Without it the resume stays on the authority's unlifted chain: a cosmetic
-/// discontinuity the next authority outcome governs, and the next step's fresh disc still has its
-/// membership established ([`resolve::certified`]) rather than declared.
+/// the struck face's outward normal as THIS client's raycast read it — the resume takes an
+/// approximate cosmetic lift: the radius along that client-local normal, plus the nudge along the
+/// CAUGHT-UP direction rather than the bounce's outgoing one, applied at the end of the caught-up
+/// flight. It is not the authority's lift, and an aged catch-up, which nothing sweeps, is not
+/// guaranteed to stay outside the face it bounced off; it only keeps a zero-age release from laying
+/// its fresh disc behind that face. Without it the resume stays on the authority's unlifted chain.
+/// Either way any discontinuity is cosmetic, the next authority outcome governs, and the next
+/// step's fresh disc has its membership established ([`resolve::certified`]) rather than declared.
 fn resume_from_catch_up(
     shell: &mut MarchingShell,
     caught_up: &SanctionedCatchUp,
