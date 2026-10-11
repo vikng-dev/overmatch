@@ -70,10 +70,6 @@ pub enum Trigger {
     Secondary,
 }
 
-/// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
-/// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
-/// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
-/// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-12).
 /// A projectile's nose geometry, parameters in calibres. [`Self::factor`] derives `N`, the
 /// frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1, in
 /// `(0, 1]`. `validate()` rejects a parameter outside its variant's range.
@@ -133,6 +129,10 @@ impl NoseShape {
     }
 }
 
+/// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
+/// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
+/// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
+/// by design — a future overheat model adds fields to `Automatic` (deferred).
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum FireMode {
@@ -1611,10 +1611,9 @@ TankSpec(
         }
     }
 
-    /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.
-    /// The legal edge cases (tracerless belt, instant reloads) must still pass. Guards ADR-0011's
-    /// fail-fast: a weapon that parses but can never fire/cycle must be a hard load error, not a
-    /// dead gun discovered mid-match.
+    /// Each nose family derives its factor by its own formula (a hemisphere and a half-calibre
+    /// cone are `½`, DERIVED; a flat face `1`), and a parameter outside the family's range is a
+    /// load error naming the weapon.
     #[test]
     fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
         for (shape, expected) in [
@@ -1720,6 +1719,10 @@ TankSpec(
         }
     }
 
+    /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.
+    /// The legal edge cases (tracerless belt, instant reloads) must still pass. Guards ADR-0011's
+    /// fail-fast: a weapon that parses but can never fire/cycle must be a hard load error, not a
+    /// dead gun discovered mid-match.
     #[test]
     fn validate_rejects_bricked_fire_modes() {
         // Swap one bad weapon at a time into an otherwise-valid sheet.

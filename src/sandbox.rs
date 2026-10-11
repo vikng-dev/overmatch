@@ -36,18 +36,12 @@ use crate::world;
 #[cfg(feature = "dev_ui")]
 mod panel;
 
-/// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. The seed for
-/// [`ShotParams::default`]; live-tunable from the panel.
-const MUZZLE_SPEED: f32 = 773.0;
-/// Shell calibre (m) — the 88. Drives overmatch against the thin plates.
-const CALIBER: f32 = 0.088;
-/// Projectile mass (kg) — the 88's PzGr 39 (~10.2 kg). Primary driver of penetration capability.
-const SHELL_MASS: f32 = 10.2;
-/// Nose factor (dimensionless, `0 < N ≤ 1`) — the 88's ogive of 1 crh, `(8ψ − 1) / (24ψ²)`.
-const NOSE_FACTOR: f32 = 7.0 / 24.0;
+/// The spec sheet of the tank the sandbox spawns; [`ShotParams::default`] fires its primary weapon
+/// as authored there.
+const SEED_SPEC: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
 /// The live shot parameters every fired shell reads — muzzle speed, calibre, mass and nose factor,
-/// the four penetration drivers. Seeded from the 88 mm constants above; the `dev_ui` panel's Shot
+/// the four penetration drivers. Seeded from the seed tank's primary weapon; the `dev_ui` panel's Shot
 /// section edits them so penetration can be studied against the plate ladder without a recompile.
 /// Read only by [`fire`] (no change-detection reactor), so the panel writes it back on change purely
 /// for tidy change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
@@ -61,11 +55,18 @@ struct ShotParams {
 
 impl Default for ShotParams {
     fn default() -> Self {
+        let sheet: spec::TankSpec =
+            ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
+        let weapon = sheet
+            .weapons
+            .values()
+            .find(|weapon| weapon.trigger == spec::Trigger::Primary)
+            .expect("the seed tank authors a primary weapon");
         Self {
-            muzzle_speed: MUZZLE_SPEED,
-            caliber: CALIBER,
-            mass: SHELL_MASS,
-            nose_factor: NOSE_FACTOR,
+            muzzle_speed: weapon.speed,
+            caliber: weapon.caliber,
+            mass: weapon.mass,
+            nose_factor: weapon.nose.factor(),
         }
     }
 }
@@ -844,7 +845,7 @@ fn fire(
         nose_factor: shot.nose_factor,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
-        // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the
+        // spent shells and draws its own path gizmos, and the default calibre is main-gun-sized so it keeps the
         // shell scene regardless), but keeps the field honest.
         tracer: true,
         // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is

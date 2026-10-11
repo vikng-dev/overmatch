@@ -3003,15 +3003,7 @@ mod march_tests {
     /// captured (or the bound trips). Returns every impact fired.
     fn fire_and_capture(app: &mut App, origin: Vec3, dir: Vec3, speed: f32) -> Vec<Captured> {
         app.world_mut().spawn((
-            Projectile {
-                velocity: dir * speed,
-                caliber: 0.088,
-                mass: 10.2,
-                nose_factor: 0.3,
-                drag_k: drag_k(0.088, 10.2),
-                // Anchored on THIS fixture's fire direction, exactly as `on_fire_shell` would.
-                disc: test_disc(dir),
-            },
+            fixture_round(FIXTURE_88, dir * speed),
             DamageReport::default(),
             TerminalReport::default(),
             ShellPath {
@@ -3020,10 +3012,6 @@ mod march_tests {
             },
             PenetrationMarks::default(),
             SpallMarks::default(),
-            ShellReadout {
-                speed,
-                capability: capability(FIXTURE_88, speed),
-            },
             Transform::from_translation(origin).looking_to(dir, Vec3::Y),
         ));
         for _ in 0..8 {
@@ -3133,14 +3121,7 @@ mod march_tests {
             let shell = app
                 .world_mut()
                 .spawn((
-                    Projectile {
-                        velocity: dir * 755.0,
-                        caliber: 0.0079,
-                        mass: 0.0118,
-                        nose_factor: 0.5,
-                        drag_k: drag_k(0.0079, 0.0118),
-                        disc: test_disc(dir),
-                    },
+                    fixture_round(FIXTURE_MG, dir * 755.0),
                     DamageReport::default(),
                     TerminalReport::default(),
                     ShellPath {
@@ -3149,10 +3130,6 @@ mod march_tests {
                     },
                     PenetrationMarks::default(),
                     SpallMarks::default(),
-                    ShellReadout {
-                        speed: 755.0,
-                        capability: capability(FIXTURE_MG, 755.0),
-                    },
                     // The attribution the shell carries from `FireShell::shooter` — on the authority's
                     // shell, the shooter's own predicted shell, AND (since the coax fix) an observer's
                     // replica shell alike.
@@ -3233,14 +3210,7 @@ mod march_tests {
         let shell = app
             .world_mut()
             .spawn((
-                Projectile {
-                    velocity: Vec3::NEG_Z * 800.0,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    nose_factor: 0.3,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(Vec3::NEG_Z),
-                },
+                fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
                 DamageReport::default(),
                 TerminalReport::default(),
                 ShellPath {
@@ -3249,10 +3219,6 @@ mod march_tests {
                 },
                 PenetrationMarks::default(),
                 SpallMarks::default(),
-                ShellReadout {
-                    speed: 800.0,
-                    capability: capability(FIXTURE_88, 800.0),
-                },
                 Shot(shot),
                 Transform::from_translation(origin).looking_to(Vec3::NEG_Z, Vec3::Y),
             ))
@@ -3360,9 +3326,9 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
+            caliber: FIXTURE_88.caliber,
+            mass: FIXTURE_88.mass,
+            nose_factor: FIXTURE_88.nose_factor,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -3399,9 +3365,9 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
+            caliber: FIXTURE_88.caliber,
+            mass: FIXTURE_88.mass,
+            nose_factor: FIXTURE_88.nose_factor,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
                 tank: shooter,
@@ -3477,9 +3443,9 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
+            caliber: FIXTURE_88.caliber,
+            mass: FIXTURE_88.mass,
+            nose_factor: FIXTURE_88.nose_factor,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -3588,9 +3554,9 @@ mod march_tests {
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
+            caliber: FIXTURE_88.caliber,
+            mass: FIXTURE_88.mass,
+            nose_factor: FIXTURE_88.nose_factor,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -3806,14 +3772,7 @@ mod march_tests {
         let speed = 800.0;
         app.world_mut()
             .spawn((
-                Projectile {
-                    velocity: dir * speed,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    nose_factor: 0.3,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(dir),
-                },
+                fixture_round(FIXTURE_88, dir * speed),
                 DamageReport::default(),
                 TerminalReport::default(),
                 ShellPath {
@@ -3822,10 +3781,6 @@ mod march_tests {
                 },
                 PenetrationMarks::default(),
                 SpallMarks::default(),
-                ShellReadout {
-                    speed,
-                    capability: capability(FIXTURE_88, speed),
-                },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
             ))
@@ -3843,14 +3798,7 @@ mod march_tests {
     ) -> Entity {
         app.world_mut()
             .spawn((
-                Projectile {
-                    velocity: dir.normalize() * speed,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    nose_factor: 0.3,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(dir.normalize()),
-                },
+                fixture_round(FIXTURE_88, dir.normalize() * speed),
                 DamageReport::default(),
                 TerminalReport::default(),
                 ShellPath {
@@ -3859,10 +3807,6 @@ mod march_tests {
                 },
                 PenetrationMarks::default(),
                 SpallMarks::default(),
-                ShellReadout {
-                    speed,
-                    capability: capability(FIXTURE_88, speed),
-                },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
             ))
@@ -4410,14 +4354,7 @@ mod march_tests {
         let speed = 800.0;
         app.world_mut()
             .spawn((
-                Projectile {
-                    velocity: dir * speed,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    nose_factor: 0.3,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(dir),
-                },
+                fixture_round(FIXTURE_88, dir * speed),
                 DamageReport::default(),
                 TerminalReport::default(),
                 ShellPath {
@@ -4426,10 +4363,6 @@ mod march_tests {
                 },
                 PenetrationMarks::default(),
                 SpallMarks::default(),
-                ShellReadout {
-                    speed,
-                    capability: capability(FIXTURE_88, speed),
-                },
                 Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 Shot(shot),
             ))
@@ -4895,14 +4828,7 @@ mod march_tests {
         let shell = app
             .world_mut()
             .spawn((
-                Projectile {
-                    velocity: Vec3::NEG_Z * 800.0,
-                    caliber: 0.088,
-                    mass: 10.2,
-                    nose_factor: 0.3,
-                    drag_k: drag_k(0.088, 10.2),
-                    disc: test_disc(Vec3::NEG_Z),
-                },
+                fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
                 DamageReport::default(),
                 TerminalReport::default(),
                 ShellPath {
@@ -4911,10 +4837,6 @@ mod march_tests {
                 },
                 PenetrationMarks::default(),
                 SpallMarks::default(),
-                ShellReadout {
-                    speed: 800.0,
-                    capability: capability(FIXTURE_88, 800.0),
-                },
                 Transform::from_translation(Vec3::new(0.0, 2.0, 2.0))
                     .looking_to(Vec3::NEG_Z, Vec3::Y),
             ))
