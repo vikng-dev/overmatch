@@ -55,6 +55,11 @@ pub mod fuzz;
 #[cfg(test)]
 mod goldens;
 
+/// The spall-cloud casts digested to the bit and compared with a pinned digest, run on every
+/// shipped target by CI: the instrument for whether a client may re-cast a cloud itself.
+#[cfg(test)]
+mod cloud_casts;
+
 /// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
 /// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
 /// composes [`sim_plugin`] and therefore opens no view artifact and emits no render component.
