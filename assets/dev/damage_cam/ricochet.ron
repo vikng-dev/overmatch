@@ -1,0 +1,52 @@
+// ricochet: 88 mm PzGr 39 on the upper front plate at ~60 deg; deflected, nothing inside.
+// Synthetic demo clip: plausible numbers, not sim output. Hull-local frame (glb axes,
+// -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
+(
+    synthetic: true,
+    projectile: (name: "88mm PzGr 39", caliber_mm: 88.0, mass_kg: 10.20, speed_mps: 700.0),
+    impact: (
+        point: (0.950, 1.560, -2.226),
+        normal: (0.000, 0.156, -0.988),
+        incoming: (-0.874, -0.017, 0.485),
+        incidence_deg: 61.2,
+        verdict: Ricochet,
+    ),
+    plates: [
+        (
+            name: "Hull_UFP_Upper",
+            t: 0.00000,
+            entry: (0.950, 1.560, -2.226),
+            exit: None,
+            chord_mm: 207.5,
+            steel_equiv_mm: 201.3,
+            cost_mm: 0.0,
+            overmatched: false,
+        ),
+    ],
+    path: [
+        (t: -0.03571, point: (22.806, 1.997, -14.356)),
+        (t: 0.00000, point: (0.950, 1.560, -2.226)),
+        (t: 0.00096, point: (0.486, 1.673, -2.375)),
+        (t: 0.00385, point: (-0.905, 2.013, -2.820)),
+        (t: 0.01154, point: (-4.616, 2.918, -4.009)),
+        (t: 0.02692, point: (-12.036, 4.729, -6.387)),
+    ],
+    spall: [
+    ],
+    consequences: [
+    ],
+    internals: [
+        (name: "Driver", role: Crew, center: (-0.574, 1.093, -1.615), half_extents: (0.221, 0.554, 0.342)),
+        (name: "BowGunner", role: Crew, center: (0.647, 1.093, -1.419), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Commander", role: Crew, center: (-0.501, 1.996, 0.389), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Gunner", role: Crew, center: (-0.500, 1.936, -0.489), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Loader", role: Crew, center: (0.647, 1.996, 0.009), half_extents: (0.221, 0.554, 0.342)),
+        (name: "Engine", role: Engine, center: (0.000, 1.088, 1.987), half_extents: (0.352, 0.624, 0.634)),
+        (name: "Transmission", role: Module, center: (0.000, 0.713, -1.619), half_extents: (0.906, 0.250, 0.841)),
+        (name: "Breech", role: Module, center: (0.000, 2.185, -0.416), half_extents: (0.228, 0.215, 0.687)),
+        (name: "Ammo_L_0", role: Ammo, center: (-1.242, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_L_1", role: Ammo, center: (-1.242, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_R_0", role: Ammo, center: (1.278, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
+        (name: "Ammo_R_1", role: Ammo, center: (1.278, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+    ],
+)

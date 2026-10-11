@@ -1,9 +1,9 @@
 //! The §13 union field walk — the pure core.
 //!
-//! NOT YET WIRED. The live march still runs the serial resolver ([`super::resolve_armor_crossing`]);
-//! slice 2 replaces it with this. Everything here is a pure function over pre-collected data: no
-//! ECS, no spatial queries, no commands, no wall clock, no RNG. Those live outside (slice 2's Avian
-//! adapter), which is what makes the laws testable to the bit.
+//! The live march runs it through `super::resolve::resolve_crossing`. Everything here is a pure
+//! function over pre-collected data: no ECS, no spatial queries, no commands, no wall clock, no
+//! RNG. Those live in the Avian adapter (`super::resolve`, `super::collect`), which is what makes
+//! the laws testable to the bit.
 //!
 //! # What it replaces
 //!
@@ -263,6 +263,10 @@ pub struct RayCorridor {
     /// `(2499.9, 924.963, 1524.939)`, 38° incidence) and let a real entry face be pruned in-envelope.
     /// Anchoring kills it at the source: the world-scale subtraction happens ONCE, on the anchor, and
     /// every relationship the walk cares about is then arithmetic on small numbers.
+    #[expect(
+        dead_code,
+        reason = "the frame `origin` is measured from; the walk reads the disc corridor's copy, which every ray corridor inherits unchanged"
+    )]
     pub anchor: Vec3,
     /// Corridor start, RELATIVE to [`anchor`](Self::anchor).
     pub origin: Vec3,

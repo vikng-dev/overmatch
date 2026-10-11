@@ -128,6 +128,11 @@ name = "armor_sandbox"
 path = "src/bin/armor_sandbox.rs"
 required-features = ["dev_ui"]
 
+[[bin]]
+name = "damage_cam_demo"
+path = "src/bin/damage_cam_demo.rs"
+required-features = ["dev_tools"]
+
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"

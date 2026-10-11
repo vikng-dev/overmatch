@@ -52,6 +52,9 @@ mod cost;
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
 pub(crate) mod damage;
+/// The damage cam: the `PenetrationReport` record and its clip player, mounted by
+/// `bin/damage_cam_demo`. Not part of `GamePlugin`.
+pub mod damage_cam;
 #[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
@@ -93,6 +96,9 @@ mod map;
 mod net;
 pub(crate) use net::{env_flag, env_parse, env_value};
 pub use net::{run_client, run_server};
+/// Documentation frames to disk; inert without `OVERMATCH_CAPTURE`. Public so the damage cam demo
+/// can mount it; the offline root mounts it too, the network client never.
+pub mod dev_capture;
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
 /// because it is pure view-state that the always-sim `sight` module also declares into — putting it
@@ -882,6 +888,8 @@ pub fn run_offline() {
         app.add_systems(Startup, net::revoke_macos_activation);
     }
     app.add_plugins(GamePlugin);
+    // Documentation frames; inert without `OVERMATCH_CAPTURE`.
+    app.add_plugins(dev_capture::plugin);
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to
     // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles
