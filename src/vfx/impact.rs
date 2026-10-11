@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use crate::ballistics::{Impact, ImpactSurface, TRACER_MAX_CALIBER, Verdict};
+use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface, TRACER_MAX_CALIBER};
 use crate::view::PlayerView;
 
 use super::ViewRng;
@@ -140,7 +140,7 @@ const GROUND_MARK_CAP: usize = 16;
 // (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
 // spark fan, and a small gray spall/smoke puff — NO plume, NO shock ring, NO ground scar, NO lingering
 // brown cloud. A brief flame lick is added ONLY when the round bit into the steel
-// (`Impact.verdict.entered()` — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
+// (`Impact.outcome.verdict().entered()` — a defeated embed or a clean perforation, never a ricochet). Rides the SAME warmed Add (flash /
 // spark / flame) and Blend (spall) pipelines as the terrain read — no new pipeline permutations.
 
 /// Armor contact flash: bigger and hotter than the terrain splash flash ([`SPLASH_FLASH_SIZE`] 2.3)
@@ -531,8 +531,7 @@ fn spawn_impact_read(
                     impact.position,
                     normal,
                     to_camera,
-                    impact.verdict,
-                    impact.deflection,
+                    impact.outcome,
                     &assets,
                     &mut materials,
                     &mut ring,
@@ -940,8 +939,7 @@ fn spawn_big_armor(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
-    verdict: Verdict,
-    deflection: Option<Vec3>,
+    outcome: ImpactOutcome,
     assets: &ImpactAssets,
     materials: &mut Assets<VfxBillboardMaterial>,
     ring: &mut BillboardRing,
@@ -950,7 +948,7 @@ fn spawn_big_armor(
 ) {
     // The spark fan's axis: straight off the surface normal, or leaned toward the deflected outgoing
     // direction on a ricochet (a bounce throws its sparks the way it kicked off).
-    let axis = match deflection.and_then(|d| d.try_normalize()) {
+    let axis = match outcome.deflection().and_then(|d| d.try_normalize()) {
         Some(defl) => (normal * (1.0 - ARMOR_SPARK_DEFLECT_BIAS) + defl * ARMOR_SPARK_DEFLECT_BIAS)
             .try_normalize()
             .unwrap_or(normal),
@@ -1054,7 +1052,7 @@ fn spawn_big_armor(
     // --- Flame lick: penetration ONLY (the round bit into the steel — embed-that-defeats or a clean
     // perforation, never a ricochet). One brief warm additive flame off the breach, rising. Full
     // width on frame one; it collapses rather than blooms (the burn is at the instant of the bite).
-    if verdict.entered() {
+    if outcome.verdict().entered() {
         spawn_billboard(
             commands,
             materials,
@@ -1168,8 +1166,7 @@ mod tests {
             normal,
             caliber,
             ImpactSurface::Terrain,
-            Verdict::Struck,
-            None,
+            ImpactOutcome::Struck,
         );
     }
 
@@ -1179,16 +1176,14 @@ mod tests {
         normal: Vec3,
         caliber: f32,
         surface: ImpactSurface,
-        verdict: Verdict,
-        deflection: Option<Vec3>,
+        outcome: ImpactOutcome,
     ) {
         app.world_mut().trigger(Impact {
             position: Vec3::ZERO,
             normal,
             caliber,
             surface,
-            verdict,
-            deflection,
+            outcome,
         });
         app.world_mut().flush();
     }
@@ -1327,8 +1322,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Struck,
-            None,
+            ImpactOutcome::Struck,
         );
         assert_eq!(
             falling(&mut armor),
@@ -1461,8 +1455,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Struck,
-            None,
+            ImpactOutcome::Struck,
         );
         assert_eq!(
             armor.world().resource::<GroundMarkRing>().0.len(),
@@ -1495,8 +1488,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Struck,
-            None,
+            ImpactOutcome::Struck,
         );
         let n0 = billboards(&mut no_pen);
 
@@ -1506,8 +1498,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Through,
-            None,
+            ImpactOutcome::Through,
         );
         let n1 = billboards(&mut pen);
 
@@ -1533,8 +1524,7 @@ mod tests {
             Vec3::Y,
             MG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Struck,
-            None,
+            ImpactOutcome::Struck,
         );
         let na = billboards(&mut armor);
 
@@ -1561,8 +1551,7 @@ mod tests {
             Vec3::Y,
             BIG_CALIBER,
             ImpactSurface::Armor,
-            Verdict::Ricochet,
-            Some(deflect),
+            ImpactOutcome::Ricochet { direction: deflect },
         );
         let fan = sparks(&mut app);
         assert!(!fan.is_empty(), "a ricochet must throw a spark fan");

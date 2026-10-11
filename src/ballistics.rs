@@ -646,7 +646,7 @@ pub(crate) struct ShellTerminal {
     pub normal: Vec3,
     /// The server's verdict at the struck face (its `entered()` gates the flame lick on the client, as
     /// in the local read).
-    pub verdict: Verdict,
+    pub verdict: TerminalVerdict,
     /// Ricochets resolved before this terminal.
     pub after_bounces: u32,
 }
@@ -909,7 +909,7 @@ pub(crate) enum ImpactSurface {
 /// What the round did at the surface it struck: the public outcome of an impact.
 ///
 /// Invariant: `Ricochet` is exactly a resolved deflection off armour, and only it carries a
-/// deflected direction (`Impact::deflection` is `Some` iff the verdict is `Ricochet`). `Struck`
+/// deflected direction (the local [`ImpactOutcome`] makes that structural). `Struck`
 /// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
 /// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark, the
 /// short-circuit probe). `Stopped` entered the material and ended inside it; `Through` came out the
@@ -929,6 +929,87 @@ impl Verdict {
     }
 }
 
+/// What the round did at the surface it struck, carrying the outgoing direction exactly when there
+/// is one. The public unit [`Verdict`] is derived from it ([`verdict`](Self::verdict)), so a
+/// deflection without a ricochet, or a ricochet without a direction, cannot be written.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum ImpactOutcome {
+    Through,
+    Stopped,
+    Struck,
+    /// Deflected off armour, leaving along `direction`.
+    Ricochet {
+        direction: Vec3,
+    },
+}
+
+impl ImpactOutcome {
+    pub(crate) fn verdict(self) -> Verdict {
+        match self {
+            Self::Through => Verdict::Through,
+            Self::Stopped => Verdict::Stopped,
+            Self::Struck => Verdict::Struck,
+            Self::Ricochet { .. } => Verdict::Ricochet,
+        }
+    }
+
+    /// The deflected direction, for a ricochet.
+    pub(crate) fn deflection(self) -> Option<Vec3> {
+        match self {
+            Self::Ricochet { direction } => Some(direction),
+            _ => None,
+        }
+    }
+}
+
+/// How an armour terminal ended: the round entered the material and stayed in it or came out.
+///
+/// A terminal is never a bounce — a ricochet is a [`ShellRicochet`], and the march goes on — so the
+/// type has no such variant. Wire receipt validates into it ([`TryFrom<Verdict>`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum TerminalVerdict {
+    Through,
+    Stopped,
+}
+
+impl TerminalVerdict {
+    /// Every terminal entered the material; kept so trace call sites read as the public verdict does.
+    pub(crate) fn entered(self) -> bool {
+        Verdict::from(self).entered()
+    }
+}
+
+impl From<TerminalVerdict> for Verdict {
+    fn from(terminal: TerminalVerdict) -> Self {
+        match terminal {
+            TerminalVerdict::Through => Verdict::Through,
+            TerminalVerdict::Stopped => Verdict::Stopped,
+        }
+    }
+}
+
+impl From<TerminalVerdict> for ImpactOutcome {
+    fn from(terminal: TerminalVerdict) -> Self {
+        match terminal {
+            TerminalVerdict::Through => ImpactOutcome::Through,
+            TerminalVerdict::Stopped => ImpactOutcome::Stopped,
+        }
+    }
+}
+
+impl TryFrom<Verdict> for TerminalVerdict {
+    type Error = Verdict;
+
+    /// `Err` carries a verdict no terminal can have: `Ricochet` or `Struck`.
+    fn try_from(verdict: Verdict) -> Result<Self, Verdict> {
+        match verdict {
+            Verdict::Through => Ok(Self::Through),
+            Verdict::Stopped => Ok(Self::Stopped),
+            other => Err(other),
+        }
+    }
+}
+
 /// A local shell impact consumed by simulation and view observers.
 #[derive(Event)]
 pub(crate) struct Impact {
@@ -939,10 +1020,8 @@ pub(crate) struct Impact {
     pub(crate) caliber: f32,
     /// Surface class resolved from volume ancestry.
     pub(crate) surface: ImpactSurface,
-    /// What the round did at the struck surface; [`Verdict::Struck`] for terrain.
-    pub(crate) verdict: Verdict,
-    /// Deflected direction; `Some` iff `verdict` is [`Verdict::Ricochet`].
-    pub(crate) deflection: Option<Vec3>,
+    /// What the round did at the struck surface; [`ImpactOutcome::Struck`] for terrain.
+    pub(crate) outcome: ImpactOutcome,
 }
 
 /// Tags a debug impact marker for view observers.
@@ -1135,8 +1214,7 @@ fn on_fire_shell(
                         normal,
                         caliber: fire.caliber,
                         surface,
-                        verdict: Verdict::Struck,
-                        deflection: None,
+                        outcome: ImpactOutcome::Struck,
                     });
                 }
                 // The shot's picture ends here without a tracer ever flying — its whole flight fitted
@@ -1626,8 +1704,9 @@ fn resolve_held_shell(
                 },
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Armor,
-                verdict: Verdict::Ricochet,
-                deflection: Some(segment.bounce.direction),
+                outcome: ImpactOutcome::Ricochet {
+                    direction: segment.bounce.direction,
+                },
             });
             if index == 0 {
                 crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
@@ -1818,8 +1897,9 @@ fn consume_overdue_sanctioned_outcome(
                     normal: segment.bounce.direction,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Armor,
-                    verdict: Verdict::Ricochet,
-                    deflection: Some(segment.bounce.direction),
+                    outcome: ImpactOutcome::Ricochet {
+                        direction: segment.bounce.direction,
+                    },
                 });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
                 crate::shot_trace::record(
@@ -1903,8 +1983,7 @@ fn finish_at_sanctioned_terminal(
         normal: terminal.normal,
         caliber,
         surface: ImpactSurface::Armor,
-        verdict: terminal.verdict,
-        deflection: None,
+        outcome: terminal.verdict.into(),
     });
 }
 
@@ -2061,8 +2140,7 @@ fn march_shell_step(
                     normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Terrain,
-                    verdict: Verdict::Struck,
-                    deflection: None,
+                    outcome: ImpactOutcome::Struck,
                 });
                 // A terrain stop is the one shot terminal that needs NO confirm: static,
                 // pose-independent geometry, so both ends already agree (ADR-0021's
@@ -2107,8 +2185,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface,
-                verdict: Verdict::Struck,
-                deflection: None,
+                outcome: ImpactOutcome::Struck,
             });
             pos = entry;
             stopped = true;
@@ -2128,8 +2205,7 @@ fn march_shell_step(
                 normal: hit.normal,
                 caliber: shell.projectile.caliber,
                 surface: ImpactSurface::Terrain,
-                verdict: Verdict::Struck,
-                deflection: None,
+                outcome: ImpactOutcome::Struck,
             });
             // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
             // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so
@@ -2241,8 +2317,7 @@ fn march_shell_step(
                     normal: hit.normal,
                     caliber: shell.projectile.caliber,
                     surface: ImpactSurface::Armor,
-                    verdict: Verdict::Struck,
-                    deflection: None,
+                    outcome: ImpactOutcome::Struck,
                 });
                 pos = entry;
                 stopped = true;
@@ -2351,8 +2426,9 @@ fn resolve_replica_armor_contact(
             normal: hit_normal,
             caliber,
             surface: ImpactSurface::Armor,
-            verdict: Verdict::Ricochet,
-            deflection: Some(bounce.direction),
+            outcome: ImpactOutcome::Ricochet {
+                direction: bounce.direction,
+            },
         });
         shell.path.begin_segment();
         shell.path.points.push(bounce.origin);
@@ -2421,8 +2497,7 @@ fn resolve_replica_armor_contact(
         normal: hit_normal,
         caliber,
         surface: ImpactSurface::Armor,
-        verdict: Verdict::Struck,
-        deflection: None,
+        outcome: ImpactOutcome::Struck,
     });
     ReplicaArmorContact::Stopped
 }
@@ -2903,8 +2978,8 @@ mod march_tests {
         log.0.push(Captured {
             position: impact.position,
             surface: impact.surface,
-            verdict: impact.verdict,
-            deflection: impact.deflection,
+            verdict: impact.outcome.verdict(),
+            deflection: impact.outcome.deflection(),
         });
     }
 
@@ -3384,6 +3459,21 @@ mod march_tests {
             armor_verdicts(Vec3::new(3.0, 3.0, 0.05), head_on, Vec3::NEG_Z),
             [Verdict::Through],
         );
+    }
+
+    /// A terminal entered the material, so the public verdicts it round-trips through are exactly
+    /// `Through` and `Stopped`; a received verdict of any other kind is refused, not buffered.
+    #[test]
+    fn a_terminal_is_never_a_ricochet() {
+        for terminal in [TerminalVerdict::Through, TerminalVerdict::Stopped] {
+            let public = Verdict::from(terminal);
+            assert!(public.entered());
+            assert_eq!(TerminalVerdict::try_from(public), Ok(terminal));
+            assert_eq!(ImpactOutcome::from(terminal).verdict(), public);
+        }
+        for refused in [Verdict::Ricochet, Verdict::Struck] {
+            assert_eq!(TerminalVerdict::try_from(refused), Err(refused));
+        }
     }
 
     /// `Ricochet` is only a resolved deflection off armour: every impact carries a deflected
@@ -4376,7 +4466,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: impact_pos,
                     normal: Vec3::Z,
-                    verdict: Verdict::Through,
+                    verdict: TerminalVerdict::Through,
                     impact_tick: shot.fire_tick + 5,
                     after_bounces: 0,
                 },
@@ -4454,7 +4544,7 @@ mod march_tests {
     fn capture_terminal(terminal: On<ShellTerminal>, mut log: ResMut<TerminalLog>) {
         log.0.push(CapturedTerminal {
             position: terminal.position,
-            verdict: terminal.verdict,
+            verdict: terminal.verdict.into(),
             after_bounces: terminal.after_bounces,
         });
     }
@@ -4596,7 +4686,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: server_pos,
                     normal: Vec3::Z,
-                    verdict: Verdict::Through,
+                    verdict: TerminalVerdict::Through,
                     impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
@@ -4640,7 +4730,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: server_pos,
                 normal: Vec3::Z,
-                verdict: Verdict::Through,
+                verdict: TerminalVerdict::Through,
                 impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 0,
             },
@@ -4679,7 +4769,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: server_pos,
                 normal: Vec3::Z,
-                verdict: Verdict::Stopped,
+                verdict: TerminalVerdict::Stopped,
                 impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                 after_bounces: 1,
             },
@@ -4759,7 +4849,7 @@ mod march_tests {
                 SanctionedTerminal {
                     position: Vec3::new(0.0, 2.0, 0.07),
                     normal: Vec3::Z,
-                    verdict: Verdict::Through,
+                    verdict: TerminalVerdict::Through,
                     impact_tick: 0, // inert (no `ShotClock` — overdue path off)
                     after_bounces: 0,
                 },
@@ -4788,7 +4878,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: Vec3::X,
                 normal: Vec3::Z,
-                verdict: Verdict::Through,
+                verdict: TerminalVerdict::Through,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 0,
             },
@@ -4799,7 +4889,7 @@ mod march_tests {
             SanctionedTerminal {
                 position: Vec3::Y * 99.0,
                 normal: Vec3::Z,
-                verdict: Verdict::Stopped,
+                verdict: TerminalVerdict::Stopped,
                 impact_tick: 0, // inert (dedup test — buffer semantics, not the march)
                 after_bounces: 3,
             },
@@ -4808,7 +4898,7 @@ mod march_tests {
         assert_eq!(stored.position, Vec3::X, "first insert wins");
         assert_eq!(
             stored.verdict,
-            Verdict::Through,
+            TerminalVerdict::Through,
             "first insert's verdict kept"
         );
     }

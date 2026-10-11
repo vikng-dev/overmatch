@@ -623,7 +623,7 @@ fn collect_catch_up_armor_holds(
 struct ClientBounces(u32);
 
 fn collect_client_bounces(impact: On<Impact>, mut bounces: ResMut<ClientBounces>) {
-    if impact.deflection.is_some() {
+    if impact.outcome.deflection().is_some() {
         bounces.0 += 1;
     }
 }

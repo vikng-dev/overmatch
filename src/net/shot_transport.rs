@@ -540,7 +540,7 @@ fn queue_terminal(
         shot: terminal.shot,
         position: terminal.position,
         normal: terminal.normal,
-        verdict: terminal.verdict,
+        verdict: terminal.verdict.into(),
         impact_tick: timeline.tick(),
         after_bounces: terminal.after_bounces,
     };

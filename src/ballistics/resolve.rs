@@ -34,9 +34,9 @@ use super::walk::{
     Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactSurface, MarchingShell,
-    PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal, Verdict,
-    apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
+    ArmorCrossing, BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface,
+    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
+    TerminalVerdict, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
 };
 
 #[cfg(test)]
@@ -534,8 +534,9 @@ fn ricochet(
         normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
-        verdict: Verdict::Ricochet,
-        deflection: Some(Vec3::from(out)),
+        outcome: ImpactOutcome::Ricochet {
+            direction: Vec3::from(out),
+        },
     });
     shell.marks.ricochets.push(position);
     shell.path.points.push(position);
@@ -701,8 +702,8 @@ fn perforate_or_embed(
     };
 
     let verdict = match plan.outcome {
-        Outcome::Embedded { .. } => Verdict::Stopped,
-        Outcome::Perforated { .. } => Verdict::Through,
+        Outcome::Embedded { .. } => TerminalVerdict::Stopped,
+        Outcome::Perforated { .. } => TerminalVerdict::Through,
     };
     // The struck FACE reads at the entrance, where the round punched in, and (for an embed) the
     // visible surface, since the embed point is inside the steel.
@@ -714,8 +715,7 @@ fn perforate_or_embed(
         normal: plan_entrance.normal,
         caliber: shell.projectile.caliber,
         surface: ImpactSurface::Armor,
-        verdict,
-        deflection: None,
+        outcome: verdict.into(),
     });
     if let Some(shot) = shell.shot
         && !*terminal_emitted

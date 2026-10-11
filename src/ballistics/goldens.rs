@@ -50,8 +50,8 @@ struct ImpactLog(Vec<Captured>);
 fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
     log.0.push(Captured {
         surface: impact.surface,
-        verdict: impact.verdict,
-        deflection: impact.deflection,
+        verdict: impact.outcome.verdict(),
+        deflection: impact.outcome.deflection(),
         normal: impact.normal,
         position: impact.position,
     });

@@ -27,7 +27,7 @@ use super::protocol::{
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
     MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
-    SanctionedTerminal, ShotSource,
+    SanctionedTerminal, ShotSource, TerminalVerdict,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -1430,12 +1430,24 @@ fn consume_impact_confirm(
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    // A terminal entered the material; a confirm naming any other verdict is malformed and is not
+    // buffered as one.
+    let Ok(verdict) = TerminalVerdict::try_from(confirm.verdict) else {
+        crate::shot_trace::record(
+            shot_trace,
+            "cf_rx",
+            now.0,
+            confirm.shot,
+            || json!({ "res": "not_terminal" }),
+        );
+        return;
+    };
     let fresh = sanctioned.insert_terminal(
         confirm.shot,
         SanctionedTerminal {
             position: confirm.position,
             normal: confirm.normal,
-            verdict: confirm.verdict,
+            verdict,
             impact_tick: confirm.impact_tick.0,
             after_bounces: confirm.after_bounces,
         },

@@ -3176,7 +3176,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     app.init_resource::<ArmorImpacts>();
     app.add_observer(|impact: On<Impact>, mut log: ResMut<ArmorImpacts>| {
         if impact.surface == crate::ballistics::ImpactSurface::Armor {
-            log.0.push(impact.verdict.entered());
+            log.0.push(impact.outcome.verdict().entered());
         }
     });
 
