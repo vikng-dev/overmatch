@@ -1023,3 +1023,189 @@ fn a_step_refuses_the_crossing_past_its_count() {
         "a refused crossing charges nothing"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// A fresh start's membership is established, never declared
+// ---------------------------------------------------------------------------------------------
+
+/// Where the graze fixture's axis meets the plate's outer face, the plane `z = BOUNCE.z`.
+const BOUNCE: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+
+/// The graze's incoming direction: 75° from the face normal `+Z`.
+fn graze_incoming() -> Vec3 {
+    let incidence = 75.0_f32.to_radians();
+    Vec3::new(incidence.sin(), 0.0, -incidence.cos())
+}
+
+/// A thick plate grazed at 75° (no overmatch), and a small box beside the bounce that one outgoing
+/// ring sample starts inside once the bounce lifts the disc off the face. Fixture data. DERIVED:
+/// that sample sits near `(−0.0104, 0, 0.0868)` m from the bounce point, inside the box, while the
+/// incoming footprint reaches at most ~0.0496 m in `z` across the box's `x` interval, so the round
+/// never entered the box. Returns the box.
+fn graze_beside_a_neighbour(app: &mut App) -> Entity {
+    volume(
+        app,
+        Vec3::new(3.0, 3.0, 0.1),
+        Transform::from_translation(BOUNCE - Vec3::Z * 0.05),
+        STEEL,
+        None,
+    );
+    volume(
+        app,
+        Vec3::new(0.007, 0.008, 0.030),
+        Transform::from_translation(BOUNCE + Vec3::new(-0.0115, 0.0, 0.085)),
+        STEEL,
+        None,
+    )
+}
+
+/// A BOUNCE LIFTED INTO A NEIGHBOUR RESOLVES THE NEIGHBOUR.
+///
+/// The lift clears the struck face, not the world: the fresh outgoing disc has a sample starting
+/// inside untouched neighbouring armour. Declared outside everything, that sample's corridor meets
+/// an exit nobody entered and the round fails closed; with its membership established, the walk
+/// pairs and the neighbour is resolved like any other material. The terminal outcome is not
+/// asserted.
+#[test]
+fn a_bounce_lifted_into_a_neighbour_resolves_it() {
+    let incoming = graze_incoming();
+    let origin = BOUNCE - incoming;
+
+    let mut gate = world_with_trimesh_plates(&[]);
+    let neighbour = graze_beside_a_neighbour(&mut gate);
+    for _ in 0..8 {
+        gate.update();
+    }
+    // The fresh disc after the bounce: its membership established, the neighbour's entry owned by
+    // the seed of the sample that starts inside it, and the corridor from those starts pairing.
+    let settled = gate
+        .world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    armor: &armor,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                let radius = disc_radius(ROUND.caliber);
+                let direction = Dir3::new(incoming).expect("a direction");
+                let frame = DiscFrame::anchored(incoming).expect("a real direction");
+                let mut flight = Flight {
+                    position: origin,
+                    direction,
+                    speed: SPEED,
+                    frame,
+                    continuation: None,
+                };
+                flight.settle(&context, &|_| true, radius)?;
+                // Short of the nearest sample's first contact; it only sizes the first corridor.
+                let contact = 0.8;
+                let decision = decide(&context, &|_| true, ROUND, &flight, contact)?;
+                assert!(
+                    matches!(decision, Decision::Bounce(_)),
+                    "the graze bounces: {decision:?}"
+                );
+                flight.follow(decision);
+                flight.settle(&context, &|_| true, radius)?;
+                let starts = flight
+                    .continuation
+                    .clone()
+                    .expect("a settled flight carries its starts");
+                let corridor = build_corridor(
+                    &context,
+                    &|_| true,
+                    starts.anchor,
+                    starts.origin,
+                    Vec3::from(flight.direction),
+                    ENTRANCE_SPAN,
+                    flight.frame,
+                    radius,
+                    &starts.seeds,
+                )?;
+                closing_walk(
+                    &context,
+                    &|_| true,
+                    starts.anchor,
+                    starts.origin,
+                    Vec3::from(flight.direction),
+                    flight.frame,
+                    radius,
+                    &starts.seeds,
+                    ENTRANCE_SPAN,
+                )?;
+                Ok::<_, WalkError>((starts, corridor))
+            },
+        )
+        .expect("the probe system runs");
+    let (starts, corridor) =
+        settled.unwrap_or_else(|error| panic!("the bounce's fresh start failed: {error:?}"));
+    assert!(
+        starts
+            .seeds
+            .iter()
+            .any(|seed| seed.inside.iter().any(|key| key.volume == neighbour)),
+        "the fixture puts a fresh sample inside the neighbour: {:?}",
+        starts.seeds,
+    );
+    assert_single_ownership(&corridor, "the bounce's fresh disc");
+
+    let flown = gate
+        .world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>| {
+                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    armor: &armor,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                fuzz::drive(&context, ROUND, SPEED, origin, incoming, 1.5)
+            },
+        )
+        .expect("the driver system runs")
+        .unwrap_or_else(|failure| panic!("the driver failed closed after the bounce: {failure:?}"));
+    assert!(
+        matches!(flown.decisions.first(), Some(Decision::Bounce(_))),
+        "the graze bounces: {:?}",
+        impacts_of(&flown),
+    );
+
+    let mut runtime = world_with_trimesh_plates(&[]);
+    runtime.init_resource::<Read>().add_observer(read_impact);
+    graze_beside_a_neighbour(&mut runtime);
+    for _ in 0..8 {
+        runtime.update();
+    }
+    runtime.world_mut().resource_mut::<Read>().0.clear();
+    spawn_round(&mut runtime, ROUND, origin, incoming * SPEED);
+    for _ in 0..3 {
+        runtime.update();
+    }
+    let read = runtime.world().resource::<Read>().0.clone();
+    assert_eq!(
+        read.first().map(|(verdict, _)| *verdict),
+        Some(Verdict::Ricochet),
+        "the graze bounces: {read:?}",
+    );
+    assert!(
+        read.iter().all(|(verdict, _)| *verdict != Verdict::Struck),
+        "the march failed closed after the bounce: {read:?}",
+    );
+}

@@ -1775,7 +1775,10 @@ fn resolve_held_shell(
             return;
         }
 
-        resume_from_catch_up(shell, &caught_up);
+        // The one contact normal this client has is the hold's own, for the bounce it held on: only
+        // a chain ending on that bounce can be lifted off its face.
+        let lift = (caught_up.segments.len() == 1).then_some(held.normal);
+        resume_from_catch_up(shell, &caught_up, lift);
         // Release the hold and resume marching next tick. `Held` is the whole fact — the view's
         // `Remove` adapter un-hides a dressed shell off it.
         commands.entity(entity).remove::<Held>();
@@ -1950,7 +1953,9 @@ fn consume_overdue_sanctioned_outcome(
                 commands.entity(entity).despawn();
                 return true;
             }
-            resume_from_catch_up(shell, &caught_up);
+            // The keyframes carry no surface normal, so nothing lifts this resume off a face: a
+            // cosmetic discontinuity the next authority outcome governs (see there).
+            resume_from_catch_up(shell, &caught_up, None);
             return true;
         }
     } else if let Some(terminal) = buf.terminal(shot.0, consumed)
@@ -2009,9 +2014,27 @@ fn finish_at_sanctioned_terminal(
 
 /// Re-anchor a cosmetic shell on the state its authority catch-up ended at, and refresh the readout
 /// the sandbox's info layer reads.
-fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp) {
+///
+/// The catch-up flies from the sanctioned bounce point, which lies on the struck face; the
+/// authority resumed from that point lifted off the face along its normal by the disc's radius and
+/// nudged one [`MARCH_EPS`] along the outgoing direction (`resolve::Bounce::resume`). With `lift` —
+/// the struck face's outward normal, when this client knows it — the resume takes the same lift,
+/// translated along the caught-up flight, so a fresh disc laid there does not start behind the face
+/// it bounced off. Without it the resume stays on the authority's unlifted chain: a cosmetic
+/// discontinuity the next authority outcome governs, and the next step's fresh disc still has its
+/// membership established ([`resolve::certified`]) rather than declared.
+fn resume_from_catch_up(
+    shell: &mut MarchingShell,
+    caught_up: &SanctionedCatchUp,
+    lift: Option<Vec3>,
+) {
     shell.transform.translation = caught_up.position;
     if let Ok(direction) = Dir3::new(caught_up.velocity) {
+        if let Some(normal) = lift {
+            shell.transform.translation += normal.normalize_or_zero()
+                * resolve::disc_radius(shell.projectile.caliber)
+                + direction * MARCH_EPS;
+        }
         shell.transform.look_to(direction, Vec3::Y);
         // The sampling basis is carried through the catch-up's direction change, exactly as the
         // march carries it through gravity's bend and the authority's own ricochet. A frame left
@@ -2023,7 +2046,8 @@ fn resume_from_catch_up(shell: &mut MarchingShell, caught_up: &SanctionedCatchUp
             .disc
             .transport(shell.projectile.velocity, Vec3::from(direction));
     }
-    // The catch-up moved the round without sweeping its samples: the next step lays a fresh disc.
+    // The catch-up moved the round without sweeping its samples: the next step lays a fresh disc
+    // and establishes its membership.
     shell.projectile.continuation = None;
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
@@ -2111,11 +2135,21 @@ fn march_shell_step(
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
     let body = shell.projectile.body();
     let radius = resolve::disc_radius(shell.projectile.caliber);
+    let context = resolve::ResolveContext {
+        world,
+        colliders,
+        armor: &armor,
+        deposit,
+        laws: walk::WalkLaws::default(),
+    };
     // The crossing state machine shared with the §13.6 gate, resumed from the starts the last step
-    // left (`resolve::Interior`). A perforation that leaves a sample inside material is resolved on
-    // within this step, past the travel budget if need be (see [`next_surface`]), within the step's
-    // limits (`resolve::Budget`); what crosses the tick is the starts, never an owed exit.
-    let mut flight = resolve::Flight::launched(
+    // left (`resolve::Interior`), or from a fresh disc whose membership it establishes. A
+    // perforation that leaves a sample inside material is resolved on within this step, past the
+    // travel budget if need be (see [`next_surface`]), within the step's limits
+    // (`resolve::Budget`); what crosses the tick is the starts, never an owed exit.
+    let launched = resolve::Flight::launched(
+        &context,
+        &not_own,
         shell.transform.translation,
         previous,
         dir,
@@ -2124,8 +2158,52 @@ fn march_shell_step(
         radius,
         shell.projectile.continuation.take(),
     );
+    let mut flight = match launched {
+        Ok(flight) => flight,
+        Err(error) => {
+            // FAIL CLOSED, as for any walk error: a start whose membership cannot be established
+            // is never declared outside.
+            warn_once!(
+                "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+            );
+            commands.trigger(Impact {
+                position: shell.transform.translation,
+                normal: -Vec3::from(dir),
+                caliber: shell.projectile.caliber,
+                surface: ImpactSurface::Armor,
+                outcome: ImpactOutcome::Struck,
+            });
+            return Some(MarchStep {
+                position: shell.transform.translation,
+                direction: dir,
+                speed,
+                stopped: true,
+                holding: false,
+                damage_dealt,
+            });
+        }
+    };
 
-    while budget.continues(&flight) {
+    loop {
+        // A bounce or a re-seed leaves a fresh disc: its membership is established before anything
+        // sweeps from it, or the round stops (fail closed).
+        if let Err(error) = flight.settle(&context, &not_own, radius) {
+            warn_once!(
+                "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+            );
+            commands.trigger(Impact {
+                position: flight.position,
+                normal: -Vec3::from(flight.direction),
+                caliber: shell.projectile.caliber,
+                surface: ImpactSurface::Armor,
+                outcome: ImpactOutcome::Struck,
+            });
+            stopped = true;
+            break;
+        }
+        if !budget.continues(&flight) {
+            break;
+        }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
         let hit = match next_surface(world, &flight, radius, budget.remaining(), &not_own) {
@@ -2314,13 +2392,6 @@ fn march_shell_step(
 
         // The §13 union walk: decide the crossing from the flight as it stands, apply its
         // consequences, and advance the flight to where the next one starts.
-        let context = resolve::ResolveContext {
-            world,
-            colliders,
-            armor: &armor,
-            deposit,
-            laws: walk::WalkLaws::default(),
-        };
         // FAIL CLOSED. A structured walk error means the corridor could not be resolved honestly —
         // unpairable topology, an unprobeable collider, a crossing that would not close inside 50 m,
         // a step that would run past its limits. The round stops where it was: no perforation, no
@@ -2370,9 +2441,14 @@ fn march_shell_step(
     }
     // Carry the (possibly re-rolled) basis and the per-sample starts back onto the shell, so the
     // next tick transports from where this one left off and resumes every sample where its ray
-    // stopped. A held round is frozen at contact, not at a start; its re-seed lays a fresh disc.
+    // stopped. A held round is frozen at contact, not at a start; its release lays a fresh disc, as
+    // does the next step of a flight whose bounce ended this one before it settled.
     shell.projectile.disc = flight.frame;
-    shell.projectile.continuation = (!holding).then(|| flight.starts(radius));
+    shell.projectile.continuation = if holding {
+        None
+    } else {
+        flight.continuation.take()
+    };
 
     Some(MarchStep {
         position: flight.position,
@@ -2988,6 +3064,7 @@ mod march_tests {
         AngularInertia, AngularVelocity, Collider, CollisionLayers, GravityScale, LayerMask,
         LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass, PhysicsPlugins, RigidBody,
     };
+    use bevy::ecs::system::RunSystemOnce;
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
@@ -4240,19 +4317,23 @@ mod march_tests {
             "the tracer clamp re-anchors at the true bounce point",
         );
         // Re-aged forward by the hold: the resumed position is the sanctioned state fast-forwarded
-        // HELD_EXTRA ticks — the exact shared integrator, so it is consistent with the present timeline.
+        // HELD_EXTRA ticks — the exact shared integrator, so it is consistent with the present
+        // timeline — lifted off the struck face (the plate's `+Z`) as the authority's resume was.
         let dt = 0.016; // the test world's ManualDuration
-        let (expected_pos, _, _) = fast_forward_shell(
+        let (caught_up, velocity, _) = fast_forward_shell(
             bounce.origin,
             bounce.direction.normalize() * bounce.speed,
             drag_k(0.088, 10.2),
             dt,
             HELD_EXTRA,
         );
+        let expected_pos = caught_up
+            + Vec3::Z * resolve::disc_radius(FIXTURE_88.caliber)
+            + velocity.normalize() * MARCH_EPS;
         let pos = app.world().get::<Transform>(shell).unwrap().translation;
         assert!(
             pos.distance(expected_pos) < 1.0e-3,
-            "resumed position = sanctioned bounce fast-forwarded by the hold duration (got {pos}, want {expected_pos})",
+            "resumed position = sanctioned bounce fast-forwarded by the hold duration, lifted (got {pos}, want {expected_pos})",
         );
         assert!(
             pos.distance(bounce.origin) > 1.0e-2,
@@ -4261,6 +4342,64 @@ mod march_tests {
         assert!(
             app.world().get::<Projectile>(shell).is_some(),
             "the shell survives and continues after the delayed re-seed",
+        );
+    }
+
+    /// A HELD ROUND RELEASED WITH NO AGE LEAVES THE FACE IT BOUNCED OFF.
+    ///
+    /// The keyframe lands the tick after the hold, so the catch-up is zero ticks old and ends on
+    /// the sanctioned bounce point itself — on the struck face. A fresh outgoing disc laid there
+    /// has half its ring behind that face, inside the plate, and its next step contacts the plate
+    /// again and holds for a second bounce the authority never sent. The released round must fly on
+    /// instead.
+    #[test]
+    fn a_round_released_with_no_age_does_not_contact_the_consumed_face() {
+        let shot = a_shot();
+        let bounce = authority_bounce(shot);
+
+        let mut app = replica_world(SanctionedShots::default());
+        let shell = spawn_oblique_shell(&mut app, shot);
+        let mut froze = false;
+        for _ in 0..8 {
+            app.update();
+            if app.world().get::<Held>(shell).is_some() {
+                froze = true;
+                break;
+            }
+        }
+        assert!(
+            froze,
+            "the shell holds at armor contact awaiting its keyframe"
+        );
+        app.world_mut().resource_mut::<SanctionedShots>().insert(
+            shot,
+            SanctionedBounce {
+                origin: bounce.origin,
+                direction: bounce.direction,
+                speed: bounce.speed,
+                // Inert: no `ShotClock`, so the age is the hold's own, zero on its first tick.
+                bounce_tick: 0,
+                sequence: 0,
+            },
+        );
+        app.update(); // released, zero ticks old
+        assert!(
+            app.world().get::<Held>(shell).is_none(),
+            "the hold clears on re-seed"
+        );
+        for _ in 0..4 {
+            app.update();
+            assert!(
+                app.world().get::<Held>(shell).is_none(),
+                "the released round contacted the face it already bounced off and holds again",
+            );
+        }
+        assert_eq!(
+            app.world()
+                .get::<PenetrationMarks>(shell)
+                .map(|marks| marks.ricochets.len()),
+            Some(1),
+            "the round flies on with the one sanctioned bounce",
         );
     }
 
@@ -4401,15 +4540,19 @@ mod march_tests {
             1,
             "the sanctioned bounce re-anchored the clamp"
         );
-        // Re-aged by the held ticks — the same present − bounce_tick arithmetic as an observer shell.
+        // Re-aged by the held ticks — the same present − bounce_tick arithmetic as an observer
+        // shell — and lifted off the struck face like it.
         let dt = 0.016;
-        let (expected_pos, _, _) = fast_forward_shell(
+        let (caught_up, velocity, _) = fast_forward_shell(
             bounce.origin,
             bounce.direction.normalize() * bounce.speed,
             drag_k(0.088, 10.2),
             dt,
             HELD_EXTRA,
         );
+        let expected_pos = caught_up
+            + Vec3::Z * resolve::disc_radius(FIXTURE_88.caliber)
+            + velocity.normalize() * MARCH_EPS;
         let pos = app.world().get::<Transform>(shell).unwrap().translation;
         assert!(
             pos.distance(expected_pos) < 1.0e-3,
@@ -5807,6 +5950,49 @@ mod march_tests {
         }
     }
 
+    /// A step's flight launched in open air from a fresh start: [`resolve::Flight::launched`] with
+    /// no persisted starts, in a world with no armour near.
+    fn launched_in_open_air(
+        position: Vec3,
+        swept: Dir3,
+        stepped: Vec3,
+        frame: walk::DiscFrame,
+    ) -> resolve::Flight {
+        let mut app = world_with_trimesh_plates(&[]);
+        app.world_mut()
+            .run_system_once(
+                move |world: ProjectileMarchWorld,
+                      colliders: Query<(
+                    &'static Position,
+                    &'static Rotation,
+                    &'static Collider,
+                    Option<&'static BallisticSurfaces>,
+                )>| {
+                    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+                    let context = resolve::ResolveContext {
+                        world: &world,
+                        colliders: &colliders,
+                        armor: &armor,
+                        deposit: false,
+                        laws: walk::WalkLaws::default(),
+                    };
+                    resolve::Flight::launched(
+                        &context,
+                        &|_| true,
+                        position,
+                        swept,
+                        Dir3::new(stepped).expect("a direction"),
+                        stepped.length(),
+                        frame,
+                        resolve::disc_radius(FIXTURE_88.caliber),
+                        None,
+                    )
+                },
+            )
+            .expect("the launch system runs")
+            .expect("open air certifies")
+    }
+
     /// Every sample's start after `launched` is a point the last sweep left it at — the disc laid on
     /// `frame` at `position` — whatever the bend to the new direction.
     fn assert_starts_on_the_last_sweep(
@@ -5855,15 +6041,7 @@ mod march_tests {
 
         let frame = test_disc(Vec3::Z);
         let position = Vec3::new(0.0, 2.0, 0.0);
-        let flight = resolve::Flight::launched(
-            position,
-            Dir3::Z,
-            Dir3::new(stepped).expect("a direction"),
-            stepped.length(),
-            frame,
-            resolve::disc_radius(FIXTURE_88.caliber),
-            None,
-        );
+        let flight = launched_in_open_air(position, Dir3::Z, stepped, frame);
         assert_starts_on_the_last_sweep(&flight, position, &frame);
 
         let face = position.y + 0.047;
@@ -5904,15 +6082,7 @@ mod march_tests {
         let swept = Dir3::new(velocity).expect("a direction");
         let frame = test_disc(velocity.normalize());
         let position = Vec3::new(0.0, 2.0, 0.0);
-        let flight = resolve::Flight::launched(
-            position,
-            swept,
-            Dir3::new(stepped).expect("a direction"),
-            stepped.length(),
-            frame,
-            resolve::disc_radius(FIXTURE_88.caliber),
-            None,
-        );
+        let flight = launched_in_open_air(position, swept, stepped, frame);
         assert_starts_on_the_last_sweep(&flight, position, &frame);
     }
 

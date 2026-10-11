@@ -492,6 +492,14 @@ pub enum WalkError {
     /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
     /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
+    /// A fresh start's membership could not be established against a candidate volume: its shape is
+    /// neither a certified trimesh nor convex, so no containment probe can be trusted on it, or the
+    /// probe through the candidates' bounds would exceed the corridor ceiling. The start is never
+    /// declared outside instead.
+    UncertifiedStart {
+        volume: Entity,
+        reason: &'static str,
+    },
     /// The driver's step ran out of a limit: more crossings than `resolve::MAX_STEP_CROSSINGS`, or
     /// travel more than `resolve::MAX_OVERRUN` past the step's budget. Each crossing was bounded;
     /// their succession was not, and a step that never yields applies consequences ever further

@@ -321,7 +321,8 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         WalkError::BadFactor { volume, .. }
         | WalkError::UnknownVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
-        | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
+        | WalkError::CorridorOverflow { volume, .. }
+        | WalkError::UncertifiedStart { volume, .. } => Some(*volume),
         WalkError::UnexpectedExit { key, .. }
         | WalkError::UnexpectedEntry { key, .. }
         | WalkError::UnrepresentableChord { key, .. } => Some(key.volume),
@@ -696,8 +697,8 @@ pub(super) fn drive(
     let direction = Dir3::new(direction).map_err(|_| bad("the shot line has no direction"))?;
     let frame = DiscFrame::anchored(Vec3::from(direction))
         .ok_or_else(|| bad("the shot line has no usable sampling basis"))?;
-    // The shot line's origin is clear and the line never bends before its first crossing, so the
-    // sweep starts square to it, at the origin.
+    // The line never bends before its first crossing, so the sweep starts square to it, at the
+    // origin, on a fresh disc whose membership [`Flight::settle`] establishes like any other.
     let mut flight = Flight {
         position: origin,
         direction,
@@ -708,7 +709,13 @@ pub(super) fn drive(
     let radius = resolve::disc_radius(body.caliber);
     let mut budget = resolve::Budget::new(length);
     let mut out = Drive::default();
-    while budget.continues(&flight) {
+    loop {
+        flight
+            .settle(context, &|_| true, radius)
+            .map_err(|error| fail(error, &flight))?;
+        if !budget.continues(&flight) {
+            break;
+        }
         let contact =
             match next_surface(context.world, &flight, radius, budget.remaining(), &|_| {
                 true
