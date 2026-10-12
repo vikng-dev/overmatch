@@ -85,4 +85,20 @@
         turret_yaw_deg: 30.0,
         verdict: Penetration,
     ),
+    (
+        name: "s10_gun_barrel_struck",
+        shows: "an 88 from the side through the main gun barrel ahead of the hull: no armour crossed, the barrel dosed",
+        weapon: "MainGun",
+        from: (-4.0, 2.196, -4.0),
+        toward: (0.0, 2.196, -4.0),
+        verdict: Damaged,
+    ),
+    (
+        name: "s11_mg_barrel_struck",
+        shows: "a machine-gun round from above into the bow machine gun's barrel where it leaves the ball mount",
+        weapon: "Coax",
+        from: (0.579, 5.0, -2.35),
+        toward: (0.579, 1.591, -2.35),
+        verdict: Damaged,
+    ),
 ]
