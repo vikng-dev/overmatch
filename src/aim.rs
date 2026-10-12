@@ -286,17 +286,23 @@ fn spawn_hud(mut commands: Commands) {
 /// crosshair — [`commit_aim`] casts through screen centre, so the dot marks the ray. In the gunner
 /// optic nothing is picked at screen centre (the intent is a bearing off the gun's sight line), and
 /// the graticule's zero mark already stands on that line, so the dot would be a second centre
-/// claiming an aim it does not have.
+/// claiming an aim it does not have. With no controlled tank nothing aims at all.
+pub(crate) fn centre_dot_visible(mode: SightMode, has_tank: bool) -> bool {
+    has_tank && mode == SightMode::ThirdPerson
+}
+
 fn update_centre_reticle(
     mode: Res<SightMode>,
+    controlled: Query<(), With<Controlled>>,
     mut reticle: Query<&mut Visibility, With<CentreReticle>>,
 ) {
     let Ok(mut visibility) = reticle.single_mut() else {
         return;
     };
-    visibility.set_if_neq(match *mode {
-        SightMode::Gunner => Visibility::Hidden,
-        SightMode::ThirdPerson => Visibility::Visible,
+    visibility.set_if_neq(if centre_dot_visible(*mode, !controlled.is_empty()) {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
     });
 }
 
@@ -500,7 +506,11 @@ fn update_bore_indicator(
     mut indicator: Query<(&mut Node, &mut Visibility), With<BoreIndicator>>,
 ) {
     let (camera, cam_transform) = *camera_query;
+    let Ok((mut node, mut visibility)) = indicator.single_mut() else {
+        return;
+    };
     let Ok((tank, rig)) = controlled.single() else {
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     // The VIEW muzzle (design §6C): the bore dot must ride the render-smoothed chain — the sim
@@ -509,9 +519,7 @@ fn update_bore_indicator(
         view_nodes.get(rig.muzzle).ok(),
         rig.muzzle,
     )) else {
-        return;
-    };
-    let Ok((mut node, mut visibility)) = indicator.single_mut() else {
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
 
@@ -565,6 +573,7 @@ fn update_aim_indicator(
         return;
     };
     let Ok(hull) = hull.get(rig.hull) else {
+        *visibility = Visibility::Hidden;
         return;
     };
 
@@ -1382,6 +1391,7 @@ mod tests {
     fn the_centre_dot_is_drawn_in_third_person_and_gone_in_the_optic() {
         let mut world = World::new();
         world.run_system_once(spawn_hud).expect("the HUD spawns");
+        world.spawn(Controlled);
 
         let dot = |world: &mut World, mode: SightMode| {
             world.insert_resource(mode);
@@ -1407,6 +1417,17 @@ mod tests {
             Visibility::Visible,
             "and it comes back on the way out",
         );
+    }
+
+    /// No controlled tank, no crosshair: the dot names an aim, and with nothing to aim (a menu, a
+    /// connect screen, the tank replicating in) it would mark nothing. Pure, both views.
+    #[test]
+    fn the_centre_dot_needs_a_controlled_tank() {
+        for mode in [SightMode::ThirdPerson, SightMode::Gunner] {
+            assert!(!centre_dot_visible(mode, false), "no tank → no dot");
+        }
+        assert!(centre_dot_visible(SightMode::ThirdPerson, true));
+        assert!(!centre_dot_visible(SightMode::Gunner, true));
     }
 
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a

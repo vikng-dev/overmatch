@@ -242,17 +242,24 @@ fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
     ));
 }
 
+/// Whether the dialed-range readout shows: in the gunner optic, and only over a controlled tank —
+/// `SightMode` outlives a match, so the mode alone would print a range with nothing to range.
+pub(crate) fn range_readout_visible(mode: SightMode, has_tank: bool) -> bool {
+    has_tank && mode == SightMode::Gunner
+}
+
 /// Show the dialed range in the optic so the player can read and correct their estimate; hidden in
 /// third-person (where scroll is the camera dolly, not ranging).
 fn update_range_readout(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
+    controlled: Query<(), With<Controlled>>,
     mut readout: Query<(&mut Text, &mut Visibility), With<RangeReadout>>,
 ) {
     let Ok((mut text, mut visibility)) = readout.single_mut() else {
         return;
     };
-    if *mode == SightMode::Gunner {
+    if range_readout_visible(*mode, !controlled.is_empty()) {
         *text = Text::new(format!("RANGE {} m", ranging.range as i32));
         *visibility = Visibility::Visible;
     } else {
@@ -1629,6 +1636,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The range readout is gunner furniture over a tank: the optic alone, with no controlled tank
+    /// (between matches, `SightMode` left on Gunner), shows no range.
+    #[test]
+    fn the_range_readout_needs_the_optic_and_a_controlled_tank() {
+        assert!(range_readout_visible(SightMode::Gunner, true));
+        assert!(!range_readout_visible(SightMode::Gunner, false));
+        assert!(!range_readout_visible(SightMode::ThirdPerson, true));
+        assert!(!range_readout_visible(SightMode::ThirdPerson, false));
     }
 
     /// `update_view_death_overlay` must declare `ViewDead` presence even when the overlay node is

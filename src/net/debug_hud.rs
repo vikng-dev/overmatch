@@ -2,8 +2,7 @@
 //! client's version (`net::CLIENT_VERSION`). Net-only —
 //! ping is meaningless in single-player, so this lives in the net module and is mounted solely by
 //! `NetClientPlugin` (never SP, never the headless server). WIP instrumentation: hardcoded styling
-//! mirrored from `crew_ui`'s top-left status card, one spawn system + one update system, no config
-//! knobs (per the minimalism directive).
+//! mirrored from `crew_ui`'s top-left status card. The card shows only over a connected link.
 //!
 //! Jitter is the delay law's instability term — `ArrivalStats::spread()` less
 //! `extrapolate::horizon()`, floored at zero: the exact milliseconds `net::interp_delay` buffers
@@ -48,6 +47,16 @@ const JITTER_WARN: Color = Color::srgb(1.0, 0.8, 0.3);
 /// [`JITTER_WARN`].
 const JITTER_ALARM: Color = Color::srgb(1.0, 0.3, 0.2);
 
+/// The card's root node.
+#[derive(Component)]
+struct DebugCard;
+
+/// Whether the card shows: only over a connected link — every row but the version reads a live
+/// session, and without one the ping is meaningless.
+fn card_shown(connected: bool) -> bool {
+    connected
+}
+
 /// Which metric a value column renders. Lets one update system fan out over the value nodes.
 #[derive(Component, Clone, Copy)]
 enum Metric {
@@ -62,7 +71,21 @@ pub fn plugin(app: &mut App) {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     }
     app.add_systems(Startup, spawn_debug_hud)
-        .add_systems(Update, update_debug_hud);
+        .add_systems(Update, (show_debug_card, update_debug_hud));
+}
+
+fn show_debug_card(
+    links: Query<(), (With<Connected>, With<Link>)>,
+    mut card: Query<&mut Visibility, With<DebugCard>>,
+) {
+    let shown = card_shown(!links.is_empty());
+    for mut visibility in &mut card {
+        visibility.set_if_neq(if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
 }
 
 fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
@@ -72,6 +95,8 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // horizontal padding.
     commands
         .spawn((
+            DebugCard,
+            Visibility::Hidden,
             Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(10.0),
@@ -238,7 +263,14 @@ mod tests {
 
     use crate::ui_font::TEXT;
 
-    use super::{JITTER_ALARM, JITTER_WARN, jitter_readout};
+    use super::{JITTER_ALARM, JITTER_WARN, card_shown, jitter_readout};
+
+    /// No connected link, no card: the lobby, the connect screen and a dropped link show none.
+    #[test]
+    fn the_card_shows_only_over_a_connected_link() {
+        assert!(card_shown(true));
+        assert!(!card_shown(false));
+    }
 
     /// The game's fixed tick (64 Hz), spelled out rather than read from the runtime binding — the
     /// sibling-test discipline (cf. `net::interp_delay`'s tests).
