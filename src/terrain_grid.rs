@@ -1437,7 +1437,7 @@ pub(crate) mod tests {
     /// downsampled ONCE to [`GRID_RESOLUTION`]² (the ONE surface). Every bound below is read off
     /// the manifest, so re-authoring or re-scaling the map needs no edit here. Also the LFS
     /// tripwire — a pointer file (~130 text bytes) fails the size guard here in CI instead of
-    /// panicking at first boot on the droplet.
+    /// panicking at first boot on a hosted server.
     #[test]
     fn shipped_heightmap_decodes_full_range_through_the_real_path() {
         let manifest = shipped_manifest();

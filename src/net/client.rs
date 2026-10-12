@@ -40,13 +40,10 @@ use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 
 const SERVER_PORT: u16 = 5888;
 const LOCAL_SERVER: &str = "127.0.0.1:5888";
-const DEFAULT_SERVER: &str = match option_env!("OVERMATCH_DEFAULT_SERVER") {
-    Some(server) => server,
-    None => "droplet.overmatch.win:5888",
-};
 /// The matchmaking Worker's base URL baked in at build time (the release workflow sets
-/// `OVERMATCH_DEFAULT_API`); when set, a client with neither `--local` nor `OVERMATCH_SERVER`
-/// starts in the Join menu instead of connecting to [`DEFAULT_SERVER`].
+/// `OVERMATCH_DEFAULT_API` and refuses to ship a client without it); when set, a client with
+/// neither `--local` nor `OVERMATCH_SERVER` starts in the Join menu instead of connecting to
+/// [`LOCAL_SERVER`].
 const DEFAULT_API: Option<&str> = option_env!("OVERMATCH_DEFAULT_API");
 
 /// Where the Worker base URL came from.
@@ -74,15 +71,14 @@ enum ClientMode<'a> {
 
 /// `--local` and `OVERMATCH_SERVER` select their direct paths whatever else is set; otherwise a
 /// non-empty Worker URL — `OVERMATCH_API`, then the baked one — selects matchmaking; otherwise the
-/// baked server.
+/// local server.
 fn choose_mode<'a>(
     local: bool,
     server: Option<&'a str>,
     api: Option<&'a str>,
     baked_api: Option<&'a str>,
-    baked_server: &'a str,
 ) -> ClientMode<'a> {
-    let direct = ClientMode::Direct(choose_server(local, server, baked_server));
+    let direct = ClientMode::Direct(choose_server(local, server));
     if local || server.is_some() {
         return direct;
     }
@@ -173,7 +169,7 @@ impl ClientLinkTemplate {
 enum ServerSource {
     LocalFlag,
     Environment,
-    BakedDefault,
+    LocalDefault,
 }
 
 impl ServerSource {
@@ -181,7 +177,7 @@ impl ServerSource {
         match self {
             Self::LocalFlag => "--local",
             Self::Environment => "OVERMATCH_SERVER",
-            Self::BakedDefault => "baked default",
+            Self::LocalDefault => "local default",
         }
     }
 }
@@ -192,11 +188,7 @@ struct ServerSelection<'a> {
     source: ServerSource,
 }
 
-fn choose_server<'a>(
-    local: bool,
-    environment: Option<&'a str>,
-    baked_default: &'a str,
-) -> ServerSelection<'a> {
+fn choose_server(local: bool, environment: Option<&str>) -> ServerSelection<'_> {
     if local {
         ServerSelection {
             raw: LOCAL_SERVER,
@@ -209,8 +201,8 @@ fn choose_server<'a>(
         }
     } else {
         ServerSelection {
-            raw: baked_default,
-            source: ServerSource::BakedDefault,
+            raw: LOCAL_SERVER,
+            source: ServerSource::LocalDefault,
         }
     }
 }
@@ -437,15 +429,9 @@ pub fn run() {
     let environment = std::env::var("OVERMATCH_SERVER").ok();
     let api = std::env::var("OVERMATCH_API").ok();
     let mode = if simulate {
-        ClientMode::Direct(choose_server(local, environment.as_deref(), DEFAULT_SERVER))
+        ClientMode::Direct(choose_server(local, environment.as_deref()))
     } else {
-        choose_mode(
-            local,
-            environment.as_deref(),
-            api.as_deref(),
-            DEFAULT_API,
-            DEFAULT_SERVER,
-        )
+        choose_mode(local, environment.as_deref(), api.as_deref(), DEFAULT_API)
     };
     let direct_target = match mode {
         ClientMode::Direct(selection) => {
@@ -2191,16 +2177,16 @@ mod tests {
             ServerEndpoint::Socket("[2001:db8::10]:6000".parse().unwrap())
         );
         assert_eq!(
-            parse_server_endpoint("droplet.overmatch.win").unwrap(),
+            parse_server_endpoint("server.example").unwrap(),
             ServerEndpoint::Host {
-                name: "droplet.overmatch.win".to_string(),
+                name: "server.example".to_string(),
                 port: SERVER_PORT,
             }
         );
         assert_eq!(
-            parse_server_endpoint("droplet.overmatch.win:6000").unwrap(),
+            parse_server_endpoint("server.example:6000").unwrap(),
             ServerEndpoint::Host {
-                name: "droplet.overmatch.win".to_string(),
+                name: "server.example".to_string(),
                 port: 6000,
             }
         );
@@ -2223,8 +2209,8 @@ mod tests {
     }
 
     #[test]
-    fn local_server_flag_beats_environment_and_baked_default() {
-        let selected = choose_server(true, Some("environment.example:6000"), "baked.example:7000");
+    fn local_server_flag_beats_environment_beats_local_default() {
+        let selected = choose_server(true, Some("environment.example:6000"));
         assert_eq!(
             selected,
             ServerSelection {
@@ -2234,17 +2220,17 @@ mod tests {
         );
 
         assert_eq!(
-            choose_server(false, Some("environment.example"), "baked.example"),
+            choose_server(false, Some("environment.example")),
             ServerSelection {
                 raw: "environment.example",
                 source: ServerSource::Environment,
             }
         );
         assert_eq!(
-            choose_server(false, None, "baked.example"),
+            choose_server(false, None),
             ServerSelection {
-                raw: "baked.example",
-                source: ServerSource::BakedDefault,
+                raw: LOCAL_SERVER,
+                source: ServerSource::LocalDefault,
             }
         );
     }
@@ -2263,12 +2249,12 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                choose_mode(true, Some("env.example"), api, baked_api, "baked.example"),
-                ClientMode::Direct(choose_server(true, Some("env.example"), "baked.example")),
+                choose_mode(true, Some("env.example"), api, baked_api),
+                ClientMode::Direct(choose_server(true, Some("env.example"))),
             );
             assert_eq!(
-                choose_mode(false, Some("env.example"), api, baked_api, "baked.example"),
-                ClientMode::Direct(choose_server(false, Some("env.example"), "baked.example")),
+                choose_mode(false, Some("env.example"), api, baked_api),
+                ClientMode::Direct(choose_server(false, Some("env.example"))),
             );
         }
     }
@@ -2281,7 +2267,6 @@ mod tests {
                 None,
                 Some(" https://api.example "),
                 Some("https://baked-api.example"),
-                "baked.example"
             ),
             ClientMode::Matchmaking {
                 api: "https://api.example",
@@ -2289,13 +2274,7 @@ mod tests {
             }
         );
         assert_eq!(
-            choose_mode(
-                false,
-                None,
-                Some(""),
-                Some("https://baked-api.example"),
-                "baked.example"
-            ),
+            choose_mode(false, None, Some(""), Some("https://baked-api.example"),),
             ClientMode::Matchmaking {
                 api: "https://baked-api.example",
                 source: ApiSource::BakedDefault,
@@ -2304,14 +2283,14 @@ mod tests {
         );
     }
 
-    /// With no Worker URL anywhere the client connects to the baked server, as before.
+    /// With no Worker URL anywhere the client connects to the local server.
     #[test]
-    fn no_worker_url_keeps_the_baked_server() {
+    fn no_worker_url_falls_back_to_the_local_server() {
         assert_eq!(
-            choose_mode(false, None, None, Some("  "), "baked.example"),
+            choose_mode(false, None, None, Some("  ")),
             ClientMode::Direct(ServerSelection {
-                raw: "baked.example",
-                source: ServerSource::BakedDefault,
+                raw: LOCAL_SERVER,
+                source: ServerSource::LocalDefault,
             })
         );
     }

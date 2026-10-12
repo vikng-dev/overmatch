@@ -3,33 +3,28 @@ name: Release
 # The single build + deploy + publish pipeline for the PRODUCT (`overmatch`, the PVP client) and
 # the `overmatch-server` (dedicated server).
 #
-# THE SERVER RUNS TWO WAYS, and every tag feeds both: the droplet (one long-lived server, the
-# release client's `OVERMATCH_DEFAULT_SERVER`) and Edgegap (one server per match, started by the
-# matchmaking Worker for the version a joining client reports, the release client's
-# `OVERMATCH_DEFAULT_API`). The droplet path retires once the Edgegap path is verified end to end.
+# THE SERVER RUNS ON EDGEGAP: one server per match, started by the matchmaking Worker (`backend/`)
+# for the version a joining client reports. A release client finds it only through the Worker URL
+# baked in as `OVERMATCH_DEFAULT_API`; it carries no server address. `OVERMATCH_SERVER` / `--local`
+# stay as runtime overrides for dev and LAN play.
 #
-# WHAT IS GUARANTEED: no Release becomes visible unless the droplet is already running this run's
-# server artifact, Edgegap version `<CARGO_PKG_VERSION>` already runs this run's server image, AND
-# both packaged clients have been unpacked and driven through a real connect. The Release stays a
-# DRAFT until every one of those has passed.
+# WHAT IS GUARANTEED: no Release becomes visible unless Edgegap version `<CARGO_PKG_VERSION>` —
+# the version its clients report to the Worker — already runs this run's server image, both
+# packaged clients carry the Worker URL, AND both have been unpacked and driven through a real
+# connect. The Release stays a DRAFT until every one of those has passed.
 #
-# WHAT IS NOT: the reverse. `deploy-server` and `register-edgegap` precede `publish-release` and
-# nothing rolls them back, so a run whose deploy succeeded and whose smoke then failed leaves the
-# DROPLET on the new build with the new Release unpublished — the visible Release is then older
-# than the droplet, and a client downloaded from it is refused at the handshake until the next tag
-# lands. ACCEPTED, not overlooked: the fix would be rollback machinery on a droplet that ephemeral
-# per-version servers are about to replace, and at zero players the cost of that window is a
-# message in chat. The Edgegap side has no such window: its version is named for this release, so
-# no published client reports it until this run publishes.
+# A failed run leaves no window: `register-edgegap` precedes `publish-release` and is not rolled
+# back, but its version is named for this release, so no published client reports it until this
+# run publishes. (A re-tag of the same version re-points that version at the new image.)
 #
 # A `vX.Y.Z` TAG runs the whole pipeline from the tag SHA:
 #
 #     create-release (draft) ─┬─ build-client (windows, linux) ─┬─ smoke (win, linux) ─┐
 #                             └─ build-server (linux) ──────────┘                      │
-#            upload-client / upload-server / deploy-server / register-edgegap ─────────┴─ publish
+#                     upload-client / upload-server / register-edgegap ────────────────┴─ publish
 #
-#   * Windows `overmatch`        — the PVP client (zip), droplet address and Worker URL baked in.
-#   * Linux   `overmatch`        — the PVP client (tar.gz), droplet address and Worker URL baked in.
+#   * Windows `overmatch`        — the PVP client (zip), Worker URL baked in.
+#   * Linux   `overmatch`        — the PVP client (tar.gz), Worker URL baked in.
 #   * Linux   `overmatch-server` — the dedicated server, tar with its asset allowlist; the same
 #                                  tar is the container image Edgegap runs
 #                                  (`ghcr.io/vikng-dev/overmatch-server:<version>`, public).
@@ -54,11 +49,9 @@ name: Release
 #     builds and the smoke are gated OFF here on purpose: they would run from the dispatched ref,
 #     which is not the commit being attached to, and their verdict about it means nothing.
 #   * `tag` EMPTY — build-only smoke mode: server + both clients + the archive smoke off the
-#     dispatched ref, plus the unsigned .app as an artifact. Neither the droplet, Edgegap nor any
-#     Release is touched, and no Apple secret is materialized.
-#
-# The server tarball is kept as a plain artifact on both build paths for `scp` redeploys to the
-# test droplet (see DEPLOY.md).
+#     dispatched ref, plus the unsigned .app as an artifact. Neither Edgegap nor any Release is
+#     touched, and no Apple secret is materialized. (`edgegap-version.yml` registers a dispatched
+#     ref's server without a release.)
 #
 # Phase 1 (now): GitHub Releases. Phase 2 (later): the same output feeds Steam via SteamPipe.
 
@@ -81,14 +74,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The DigitalOcean test droplet (DEPLOY.md). Baked into the release client at compile time via
-  # `option_env!("OVERMATCH_DEFAULT_SERVER")` (net::client::run), so a friend's double-clicked build
-  # connects to the droplet with no env set. Overridable at runtime with `OVERMATCH_SERVER`. Every
-  # step's cargo build inherits this workflow-level env, so the client jobs need no extra wiring.
-  OVERMATCH_DEFAULT_SERVER: droplet.overmatch.win:5888
-  # The matchmaking Worker (backend/), baked the same way through
-  # `option_env!("OVERMATCH_DEFAULT_API")` for a client that reads it; overridable at runtime with
-  # `OVERMATCH_API`. Not a secret: the Worker's public hostname.
+  # The matchmaking Worker (backend/), baked into the release client at compile time through
+  # `option_env!("OVERMATCH_DEFAULT_API")` (net::client::run), so a double-clicked build opens the
+  # Join menu against it with no env set; overridable at runtime with `OVERMATCH_API`. Every step's
+  # cargo build inherits this workflow-level env. Each client build refuses to start without it,
+  # and each smoke lane refuses a shipped client that does not carry it: a client built without it
+  # would fall back to `127.0.0.1:5888` and find nobody. Not a secret: the Worker's public hostname.
   OVERMATCH_DEFAULT_API: https://overmatch-backend.vikng.workers.dev
 
 jobs:
@@ -96,7 +87,7 @@ jobs:
   # it is launched from a tag ref. The client and server build jobs `needs` this with `always()`,
   # so they wait for it on a tag and still run on a tag-less dispatch (see their `if`); `build-macos`
   # runs only on a dispatch. Every upload job below attaches to this draft; `publish-release`
-  # un-drafts it once the droplet runs this build.
+  # un-drafts it once Edgegap runs this build and both smokes pass.
   create-release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -271,11 +262,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: The client is built with a Worker URL
+        shell: bash
+        run: |
+          if [[ -z "${OVERMATCH_DEFAULT_API// }" ]]; then
+            echo "::error::OVERMATCH_DEFAULT_API is empty — the client would ship with nowhere to connect"
+            exit 1
+          fi
+
       # Build, archive, and checksum without uploading. In dry-run mode the action deliberately
       # withholds github.token from its composite shell, including cargo/build.rs subprocesses.
-      # The workflow-level OVERMATCH_DEFAULT_SERVER and OVERMATCH_DEFAULT_API are baked in via
-      # option_env!. Off a non-tag ref (dispatch smoke mode) `$tag` resolves to `dry-run`, so the
-      # artifact path below reads the action's `archive` output rather than assuming the tag name.
+      # The workflow-level OVERMATCH_DEFAULT_API is baked in via option_env!. Off a non-tag ref
+      # (dispatch smoke mode) `$tag` resolves to `dry-run`, so the artifact path below reads the
+      # action's `archive` output rather than assuming the tag name.
       - name: Build and package client
         id: package-client
         uses: taiki-e/upload-rust-binary-action@v1
@@ -360,13 +359,11 @@ jobs:
           gh release upload "${GITHUB_REF_NAME}" "${assets[@]}" \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
-  # Build and package the Linux dedicated server without a release-write token. Always uploads a
-  # plain workflow artifact for scp redeploys (DEPLOY.md). Runs on the same two occasions as
-  # `build-client` above, for the same reason and by the same condition: a tag, or a dispatch with
-  # no tag input.
-  # This one tarball is the ONLY server build in the run: `deploy-server` ships these exact bytes
-  # to the droplet, `upload-server` attaches them to the Release, and `register-edgegap` wraps them
-  # in the image Edgegap runs.
+  # Build and package the Linux dedicated server without a release-write token, as a plain workflow
+  # artifact. Runs on the same two occasions as `build-client` above, for the same reason and by
+  # the same condition: a tag, or a dispatch with no tag input.
+  # This one tarball is the ONLY server build in the run: the smokes use it, `upload-server`
+  # attaches it to the Release, and `register-edgegap` wraps it in the image Edgegap runs.
   build-server:
     needs: create-release
     if: ${{ always() && (needs.create-release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.tag == '')) }}
@@ -386,13 +383,13 @@ jobs:
 
       # The canonical server build + package recipe (toolchain -> allowlist -> scoped LFS pull ->
       # deps -> cache -> build -> tar). deployed-sha: true bakes a DEPLOYED_SHA marker into the tar,
-      # so the tarball on the droplet and the one attached to the Release both name the commit they
+      # so the image Edgegap runs and the tarball attached to the Release both name the commit they
       # were built from. Leaves overmatch-server.tar.gz in the workspace root.
       - uses: ./.github/actions/build-server
         with:
           deployed-sha: 'true'
 
-      # Plain artifact: the deploy job's input, and the workflow_dispatch → scp redeploy payload.
+      # Plain artifact: the input of the smokes, the image and the Release upload.
       - uses: actions/upload-artifact@v4
         with:
           name: overmatch-server-x86_64-linux
@@ -401,10 +398,12 @@ jobs:
           if-no-files-found: error
 
   # THE ARCHIVE SMOKE, Linux lane: the tarballs a user downloads, extracted the way a user extracts
-  # them, connected to each other. Nothing here is rebuilt and no path is edited — the shipped
-  # server tar boots the shipped server, the shipped client tar runs the shipped client, and the
-  # only thing overridden is the server address (`scripts/ci/archive-smoke.sh` documents the whole
-  # env contract and the assertions).
+  # them, connected to each other on this runner. Nothing here is rebuilt and no path is edited —
+  # the shipped server tar boots the shipped server, the shipped client tar runs the shipped
+  # client, and the only thing overridden is the server address, so the client dials the local
+  # server instead of opening the Join menu (`scripts/ci/archive-smoke.sh` documents the whole env
+  # contract and the assertions, including that the client carries the Worker URL). The Worker and
+  # Edgegap are not in this path: `register-edgegap` gates their side.
   #
   # WHAT IT CATCHES that no earlier gate can: the packaged BYTES. The handshake's `protocol_id`
   # digests shipped assets raw (ADR-0018), so a `level.json` line-ending rewrite, a truncated LFS
@@ -466,7 +465,8 @@ jobs:
           set -euo pipefail
           client="$(find smoke -maxdepth 2 -type f -name overmatch -perm -u+x | head -1)"
           test -n "${client}"
-          bash scripts/ci/archive-smoke.sh smoke/overmatch-server/overmatch-server "${client}"
+          SMOKE_EXPECT_API="${OVERMATCH_DEFAULT_API}" \
+            bash scripts/ci/archive-smoke.sh smoke/overmatch-server/overmatch-server "${client}"
 
   # THE ARCHIVE SMOKE, Windows lane — the platform the CRLF defect actually shipped on, and the
   # only client anyone but the author runs.
@@ -476,7 +476,7 @@ jobs:
   # no Linux sandbox to borrow either). So the server EXECUTABLE is the `smoke-fixture-server-*`
   # artifact — this same commit, compiled for MSVC on `build-client`'s Windows leg where the target
   # dir is warm — while its ASSETS are the shipped server tarball's, unpacked and handed to it
-  # through `BEVY_ASSET_ROOT` exactly as the droplet's unit does. That keeps the whole claim intact:
+  # through `BEVY_ASSET_ROOT` exactly as the server image does. That keeps the whole claim intact:
   # the client under test is the shipped archive, byte for byte, and both halves of the
   # `protocol_id` still have to agree — the compile-time fingerprint (same commit) and the runtime
   # map digest (the shipped map bytes on the server side, the archive's own on the client's).
@@ -536,85 +536,10 @@ jobs:
           root="$(pwd -W 2>/dev/null || pwd)"
           # The server binary is this run's build; its asset root is the shipped tarball's tree.
           SMOKE_SERVER_ASSET_ROOT="${root}/smoke/overmatch-server" \
+          SMOKE_EXPECT_API="${OVERMATCH_DEFAULT_API}" \
             bash scripts/ci/archive-smoke.sh \
               fixture/overmatch-server.exe \
               "${client}"
-
-  # Tag pushes only: put the server artifact built above on the droplet, before any Release becomes
-  # visible. No checkout and no compilation — the deployed bytes are the artifact `build-server`
-  # produced, never a rebuild here or on the droplet. Auth is the `DROPLET_SSH_KEY` repo secret.
-  deploy-server:
-    needs: build-server
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Serialize droplet deploys. `cancel-in-progress: false` (queue, don't cancel): a running job
-    # may be mid-scp / mid-extract / mid-restart on the droplet, and cancelling there could leave a
-    # half-written payload.
-    concurrency:
-      group: deploy-droplet
-      cancel-in-progress: false
-    env:
-      # The DigitalOcean test droplet. Not a secret — it's public in DEPLOY.md and baked into
-      # release clients. Its host key is pinned below; a re-IP updates exactly this one place.
-      DROPLET_HOST: 157.245.48.161
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: overmatch-server-x86_64-linux
-          path: .
-
-      # Install the deploy key (0600, in RUNNER_TEMP), pin the droplet's host key, ship the payload,
-      # extract into a fresh staging dir and swap it into /opt/overmatch-server (a clean install, not
-      # a merge over the old tree), restart the unit, and verify (is-active + live SHA).
-      - name: Deploy to droplet
-        env:
-          DROPLET_SSH_KEY: ${{ secrets.DROPLET_SSH_KEY }}
-        run: |
-          set -euo pipefail
-
-          KEY="${RUNNER_TEMP}/deploy_key"
-          KNOWN="${RUNNER_TEMP}/known_hosts"
-
-          # Private key from the secret, readable only by us.
-          install -m 600 /dev/null "$KEY"
-          printf '%s\n' "$DROPLET_SSH_KEY" > "$KEY"
-
-          # Pin the droplet's ed25519 host key (from DEPLOY.md) instead of disabling checking. The
-          # host is `$DROPLET_HOST` (interpolated); only the key material is a literal.
-          printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHj3I4r44u/XAIAGlqKqGwLPTrXit3dthCHfcBJo390G\n' \
-            "${DROPLET_HOST}" > "$KNOWN"
-
-          SSH_OPTS=(-i "$KEY" -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o "UserKnownHostsFile=$KNOWN")
-
-          # Ship the payload to /opt, then extract into a FRESH staging dir, swap it into place, and
-          # restart + verify on the droplet.
-          scp "${SSH_OPTS[@]}" overmatch-server.tar.gz "root@${DROPLET_HOST}:/opt/"
-          ssh "${SSH_OPTS[@]}" "root@${DROPLET_HOST}" '
-            set -e
-            cd /opt
-            # Extract into a clean staging dir, NOT over the live tree: a plain `tar xzf` over
-            # /opt/overmatch-server leaves files deleted/renamed since the last release lingering on
-            # the droplet forever — an invisible skew vs a clean install. The tar unpacks a
-            # top-level `overmatch-server/`, so stage it aside first.
-            rm -rf overmatch-server.staging
-            mkdir overmatch-server.staging
-            tar xzf overmatch-server.tar.gz -C overmatch-server.staging
-            # Swap the freshly-staged tree into place, THEN restart. The service is still running
-            # from the old dir during extract, so we swap before touching the unit: retire the old
-            # tree and move the new one in, so the restart below launches the clean install.
-            rm -rf overmatch-server.old
-            if [ -d overmatch-server ]; then mv overmatch-server overmatch-server.old; fi
-            mv overmatch-server.staging/overmatch-server overmatch-server
-            rm -rf overmatch-server.staging overmatch-server.old
-            systemctl restart overmatch-server
-            systemctl is-active overmatch-server
-            echo "Deployed SHA on droplet: $(cat /opt/overmatch-server/DEPLOYED_SHA)"
-          '
-          echo "Deployed ${GITHUB_REF_NAME} (${GITHUB_SHA}) to the droplet."
 
   # Tag pushes only: wrap the server artifact built above in a container image, push it publicly
   # to GHCR, and point Edgegap version `<CARGO_PKG_VERSION>` of app `Overmatch` at it — the version
@@ -682,8 +607,8 @@ jobs:
   # graph, arbitrary build.rs / proc-macros) and holds NO Apple signing secrets — no cert import, no
   # notary key. That isolation is the whole point of the split: a compromised transitive crate here
   # cannot reach the Developer ID cert or notary key, because they are never materialized on this
-  # runner. It inherits the workflow-level OVERMATCH_DEFAULT_SERVER and OVERMATCH_DEFAULT_API,
-  # baking both in.
+  # runner. It inherits the workflow-level OVERMATCH_DEFAULT_API, bakes it in, and refuses an
+  # .app that does not carry it (no smoke lane covers macOS).
   # If you ever add an Apple secret here, STOP — it belongs in sign-macos below.
   #
   # ON DEMAND ONLY. A tag no longer waits on this job: ~1h20m of arm64 build + notarization for the
@@ -720,15 +645,25 @@ jobs:
           key: macos-aarch64
 
       # With a `tag` input the bundle version is that tag; without one VERSION stays unset and the
-      # script falls back to the Cargo.toml version.
+      # script falls back to the Cargo.toml version. The Worker URL is checked on both sides of the
+      # build: set before it, present in the bundled binary after.
       - name: Build the unsigned .app (arm64)
         env:
           TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
+          if [[ -z "${OVERMATCH_DEFAULT_API// }" ]]; then
+            echo "::error::OVERMATCH_DEFAULT_API is empty — the client would ship with nowhere to connect"
+            exit 1
+          fi
           if [[ -n "${TAG}" ]]; then
             export VERSION="${TAG#v}"
           fi
           ./scripts/package-macos.sh --build-only
+          if ! grep -q -a -F "${OVERMATCH_DEFAULT_API}" dist/Overmatch.app/Contents/MacOS/overmatch; then
+            echo "::error::the bundled client does not carry the Worker URL ${OVERMATCH_DEFAULT_API}"
+            exit 1
+          fi
 
       # actions/upload-artifact zips its input and drops the executable bit + mac metadata, which
       # corrupts a .app bundle. Pack the bundle with `ditto -c -k --keepParent` first — a ditto zip
@@ -809,19 +744,17 @@ jobs:
             dist/overmatch-*-aarch64-apple-darwin.dmg.sha256 \
             --repo "${GITHUB_REPOSITORY}" --clobber
 
-  # The invariant's hinge: the draft becomes visible only here, downstream of a live droplet running
-  # this run's server artifact, of the Edgegap version running its image, of every client archive
-  # being attached, AND of both smoke lanes having connected a freshly extracted client to a
-  # server. Any failure upstream leaves the draft unpublished, so no visible Release is ever ahead
-  # of the droplet or of Edgegap — and none can be one whose client never booted. (The droplet CAN
-  # be ahead of it: a deploy that succeeds before a smoke failure is not rolled back — see the
-  # header.)
+  # The invariant's hinge: the draft becomes visible only here, downstream of the Edgegap version
+  # running this run's server image, of every client archive being attached, AND of both smoke
+  # lanes having found the Worker URL in a freshly extracted client and connected it to a server.
+  # Any failure upstream leaves the draft unpublished, so no visible Release has clients whose
+  # version Edgegap cannot serve — and none can be one whose client never booted.
   #
   # `sign-macos` is deliberately NOT a need: it never runs on a tag, and a skipped need would skip
   # this job with it. Every job named below runs on every tag push, so the plain `if` is enough —
-  # no `always()` is needed, and none is wanted (it would publish over a failed deploy).
+  # no `always()` is needed, and none is wanted (it would publish over a failed registration).
   publish-release:
-    needs: [deploy-server, register-edgegap, upload-client, upload-server, smoke-linux, smoke-windows]
+    needs: [register-edgegap, upload-client, upload-server, smoke-linux, smoke-windows]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write

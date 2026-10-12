@@ -51,8 +51,8 @@ for _ in {1..150}; do
 done
 grep -q "listening" "$OUT/server.log"
 
-# OVERMATCH_SERVER: without it the client dials the BAKED PRODUCTION droplet, not the local
-# server this script just started.
+# OVERMATCH_SERVER: the local server this script just started, named explicitly (a scripted
+# client with no target falls back to the same address).
 # SPIKE_SIM_WINDOWED: a headless client cannot load the mipped-KTX2 tank glb — bevy_image 0.19
 # slices the UASTC source with the RGBA32 destination block geometry on the uncompressed
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to

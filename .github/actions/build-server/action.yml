@@ -16,13 +16,13 @@ description: >-
 #   * THIS action then does everything build-shaped and leaves
 #     `overmatch-server.tar.gz` in the workspace root (exposed as the `tar`
 #     output). What the caller does with that tar (upload-artifact / attach to
-#     release / scp to droplet) is the caller's business.
+#     release / wrap in the server image) is the caller's business.
 
 inputs:
   deployed-sha:
     description: >-
       When 'true', embed a DEPLOYED_SHA marker (GITHUB_SHA) inside the tar so the
-      droplet + run log can state exactly which commit is live. The marker is a
+      server image + run log can state exactly which commit is live. The marker is a
       packaging detail that goes INSIDE the tar, so it belongs with the packaging
       step here rather than as a caller-side re-tar — one canonical tar.
     required: false
@@ -66,7 +66,7 @@ runs:
     #
     # The vehicles are DISCOVERED by the same trio rule the door and the hook use, so a second
     # vehicle ships without a line here. A named path that is missing is a FAILURE, not a smaller
-    # tarball: the server would boot and panic on the droplet — so the check is here, before the
+    # tarball: the server would boot and panic on its host — so the check is here, before the
     # twenty-minute build, rather than at `cp` time.
     #
     # ONE LIST, TWO CONSUMERS: the file written here is what the LFS pull hydrates AND what the tar
@@ -117,7 +117,7 @@ runs:
     # `.tank.ron`) are simply not matched by any pointer and cost nothing to name.
     #
     # Then the tripwire: a `--include` that fails to match leaves a ~130-byte pointer file in place,
-    # which `cp` would cheerfully pack and the droplet would panic on. Refuse instead.
+    # which `cp` would cheerfully pack and the hosted server would panic on. Refuse instead.
     - name: Git LFS pull (R2, the allowlist only)
       shell: bash
       env:
@@ -154,7 +154,7 @@ runs:
       shell: bash
       run: cargo build --release --locked --bin overmatch-server
 
-    # Stage a self-contained folder: the binary alongside the assets it opens, so on the droplet
+    # Stage a self-contained folder: the binary alongside the assets it opens, so on its host
     # `BEVY_ASSET_ROOT=<extracted dir>` finds them and `./overmatch-server` just runs. The assets
     # are the allowlist resolved above — the same list the LFS pull hydrated, read back rather than
     # recomputed. With deployed-sha=true, also drop a DEPLOYED_SHA marker inside the folder before

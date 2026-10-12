@@ -237,7 +237,7 @@ mod tests {
         assert_close(
             derived_min_delay(Duration::from_millis(100), &spread(0.0), TICK),
             Duration::from_nanos(65_625_000),
-            "droplet clean",
+            "rtt 100 ms clean",
         );
         // rtt 100 ms over the measured burst link (Qp − min = 60 ms): 50 + (60 − g*) + 15.625 —
         // the extrapolator absorbs the first g* ≈ 52.3 ms of the burst invisibly, so the buffer
@@ -245,7 +245,7 @@ mod tests {
         assert_close(
             derived_min_delay(Duration::from_millis(100), &spread(60.0), TICK),
             Duration::from_millis(100) / 2 + (Duration::from_millis(60) - g_star()) + TICK,
-            "droplet burst",
+            "rtt 100 ms burst",
         );
     }
 

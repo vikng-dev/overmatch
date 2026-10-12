@@ -8,7 +8,7 @@
 #   env:   OUT   output dir (default /tmp/mg-cost)
 #          BIN   target dir (default target/debug — deps are opt-3 even in dev, see the report)
 #          SERVER_BIN / CLIENT_BIN  per-binary overrides of BIN, so the server can run the release
-#                profile (matching the droplet) while clients stay dev (matching local playtest
+#                profile (matching the hosted server) while clients stay dev (matching local playtest
 #                reality):  SERVER_BIN=target/release scripts/cost/run.sh idle1 fire1 fire2
 #          TICKS long-run script length (default 2560 ≈ 40 s); WARMUP recorder skip (default 384)
 #

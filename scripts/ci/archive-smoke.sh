@@ -10,14 +10,17 @@
 # netcode `protocol_id` (ADR-0018) — the connect token then decrypts to nothing and the server logs
 # a bad protocol id. That release shipped three times before this lane existed.
 #
-# WHAT IS OVERRIDDEN, and nothing else: `OVERMATCH_SERVER`, so the client dials this machine
-# instead of the baked droplet, and the `SPIKE_*` harness contract (`src/net/harness.rs`), which is
+# WHAT IS OVERRIDDEN, and nothing else: `OVERMATCH_SERVER`, so the client dials this machine (a
+# scripted client always connects directly; a player's opens the Join menu against the baked
+# Worker), and the `SPIKE_*` harness contract (`src/net/harness.rs`), which is
 # how a client with no window, no GPU and no human runs a scripted session and exits on its own.
 # `SPIKE_SIMULATE_INPUT` without `SPIKE_SIM_WINDOWED` selects the GPU-less composition root
 # (`net::client::run` → `gpu_less_default_plugins`: wgpu `backends: None`, `WinitPlugin` disabled),
 # which is what makes this runnable on a headless runner at all.
 #
 # THE ASSERTION is the client's own observable evidence, in order:
+#   0. with `SMOKE_EXPECT_API` set, the client binary carries that Worker URL — a client built
+#      without one would fall back to `127.0.0.1:5888` and find nobody
 #   1. `client: connected` — the netcode handshake completed (a poisoned digest never reaches it)
 #   2. `— input slot`      — the server replicated a tank this client controls
 #   3. `simulation script complete` + exit status 0 — it played its script out and left cleanly
@@ -32,6 +35,8 @@
 #   SMOKE_TICKS              scripted client run length in 64 Hz ticks (default 256 ≈ 4 s).
 #   SMOKE_DEADLINE           wall-clock seconds the client gets before it is killed (default 120).
 #   SMOKE_LOGS               directory for `server.log` / `client.log` (default a temp dir).
+#   SMOKE_EXPECT_API         the Worker URL the client must have baked in (`OVERMATCH_DEFAULT_API`
+#                            in release.yml). Unset: not checked, for a locally built client.
 set -uo pipefail
 
 if [ "$#" -ne 2 ]; then
@@ -53,6 +58,10 @@ client_log="$logs/client.log"
 # described by the line it prints.
 [ -x "$server_bin" ] || { echo "smoke: $server_bin is not executable" >&2; exit 1; }
 [ -x "$client_bin" ] || { echo "smoke: $client_bin is not executable" >&2; exit 1; }
+if [ -n "${SMOKE_EXPECT_API:-}" ] && ! grep -q -a -F -- "$SMOKE_EXPECT_API" "$client_bin"; then
+    echo "smoke: $client_bin does not carry the Worker URL $SMOKE_EXPECT_API" >&2
+    exit 1
+fi
 
 # From here on, both logs on every failure — the runner is gone the moment this job ends, and a
 # failure whose evidence was not printed is a failure nobody can diagnose.
@@ -66,7 +75,7 @@ dump() {
 
 # The server is started from its own directory: with no `BEVY_ASSET_ROOT` and no
 # `CARGO_MANIFEST_DIR`, `crate::assets::asset_root` resolves `assets/` beside the executable, which
-# is exactly how the shipped tarball is laid out (and how the droplet runs it).
+# is exactly how the shipped tarball is laid out (and where the server image points it).
 echo "smoke: starting $server_bin"
 (
     cd "$(dirname "$server_bin")" || exit 1

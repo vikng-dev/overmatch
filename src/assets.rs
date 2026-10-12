@@ -21,9 +21,10 @@ use std::path::{Path, PathBuf};
 ///
 /// [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
 fn asset_root_from(exe_dir: &Path, manifest_dir: Option<&str>, env_root: Option<&str>) -> PathBuf {
-    // `BEVY_ASSET_ROOT` wins over everything — the dedicated server sets it (DEPLOY.md), and every
-    // test/harness run inherits it or `CARGO_MANIFEST_DIR`, which is why the exe-dir path below is
-    // only ever taken by a real double-clicked bundle.
+    // `BEVY_ASSET_ROOT` wins over everything — the server image sets it
+    // (`.github/actions/server-image/Dockerfile`), and every test/harness run inherits it or
+    // `CARGO_MANIFEST_DIR`, which is why the exe-dir path below is only ever taken by a real
+    // double-clicked bundle.
     if let Some(root) = env_root {
         return Path::new(root).join("assets");
     }

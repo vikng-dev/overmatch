@@ -2,7 +2,7 @@ name: Edgegap version
 
 # Registers the DISPATCHED REF's server as Edgegap version `<CARGO_PKG_VERSION>` without cutting a
 # release: the same server build, image and registration `release.yml` runs on a tag, and nothing
-# else — no client, no smoke, no droplet, no GitHub Release.
+# else — no client, no smoke, no GitHub Release.
 #
 #     gh workflow run edgegap-version.yml --ref main
 #

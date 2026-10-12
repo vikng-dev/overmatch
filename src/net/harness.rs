@@ -38,7 +38,7 @@
 //! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
 //! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |
-//! | `--local` | client flag; off | Force `127.0.0.1:5888`, ahead of env/baked targets. |
+//! | `--local` | client flag; off | Force `127.0.0.1:5888`, ahead of `OVERMATCH_SERVER` and any Worker URL. |
 //! | `--capture` | client/server flag; off | Auto-path `SPIKE_TRACE` capture with sim fields on. |
 //!
 //! Seeded jitter is active only when latency and jitter are both nonzero. For example,
