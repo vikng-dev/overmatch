@@ -72,6 +72,8 @@ export class FakeEdgegap {
 	private gate: Promise<void> | null = null;
 	private seq = 0;
 
+	/** Deployment ids whose status call never answers. */
+	hangStatus = new Set<string>();
 	/** The next this-many stop calls answer 503 and stop nothing. */
 	failStops = 0;
 	private stopGate: Promise<void> | null = null;
@@ -166,6 +168,7 @@ export class FakeEdgegap {
 		}
 		let m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
 		if (req.method === "GET" && m) {
+			if (this.hangStatus.has(m[1])) return new Promise<Response>(() => {});
 			const d = this.deployments.get(m[1]);
 			if (!d) return Response.json({ message: "not found" }, { status: 404 });
 			const ready = d.status === "Status.READY";

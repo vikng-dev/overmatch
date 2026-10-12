@@ -10,7 +10,10 @@
 // - Nothing lives only in memory; every field survives eviction. After any `await`, rows are re-read
 //   before they are acted on, and transitions are guarded by `WHERE state = …`.
 // - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
-//   with no rows left it is cleared and the object goes idle.
+//   with no rows left it is cleared and the object goes idle. It makes every due transition and
+//   persists every row's next attempt time synchronously, re-arms itself, and only then does the
+//   outbound work — each call bounded (PROVIDER_TIMEOUT_S) and independent of the others, so one
+//   slow call delays no other row.
 // - A deployment is forgotten only once Edgegap confirms it stopped. Ending a server moves its row to
 //   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
 //   gone), and only then is the row `ended` and its history closed.
@@ -20,7 +23,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { config, type Config, type Env } from "./config";
 import { Edgegap, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
-import { recordEvent, type Outcome } from "./history";
+import { settleAll } from "./deadline";
+import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
 import { diag, REASONS, serverReason } from "./reasons";
@@ -149,7 +153,7 @@ export class Registry extends DurableObject<Env> {
 		super(ctx, env);
 		this.sql = ctx.storage.sql;
 		this.cfg = config(env);
-		this.provider = new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME);
+		this.provider = new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, this.cfg.providerTimeoutMs);
 		this.sql.exec(SCHEMA);
 	}
 
@@ -271,34 +275,32 @@ export class Registry extends DurableObject<Env> {
 
 	async alarm(): Promise<void> {
 		const now = Date.now();
-		const starting = this.sql.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'starting'").toArray();
-		for (const { id } of starting) {
-			// Re-read: an earlier iteration's await lets heartbeats and webhooks promote this row.
-			const s = this.server(id);
-			if (s?.state !== "starting") continue;
-			if (s.created_at + this.cfg.startDeadlineMs <= now) {
-				await this.finish(s.id, "failed", REASONS.startTimeout, "starting");
-			} else if (s.deployment_id && (s.next_poll_at ?? 0) <= now) {
-				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, s.id);
-				await this.refreshStatus(s.id);
+		const retry: string[] = [];
+		const work: (() => Promise<unknown>)[] = [];
+
+		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray()) {
+			if (r.created_at + this.cfg.startDeadlineMs <= now) {
+				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting") ?? []));
+			} else if (r.deployment_id && (r.next_poll_at ?? 0) <= now) {
+				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, r.id);
+				work.push(() => this.refreshStatus(r.id));
 			}
 		}
 		const silent = this.sql
 			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'ready' AND last_seen <= ?", now - this.cfg.heartbeatDeadlineMs)
 			.toArray();
-		for (const { id } of silent) {
-			// Re-read: a heartbeat may have landed while an earlier finish() awaited.
-			const s = this.server(id);
-			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", REASONS.serverLost, "ready");
-		}
-
+		for (const { id } of silent) retry.push(...(this.beginStop(id, "lost", REASONS.serverLost, "ready") ?? []));
 		const stopping = this.sql
 			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'stopping' AND COALESCE(stop_at, 0) <= ?", now)
 			.toArray();
-		for (const { id } of stopping) await this.tryStop(id);
+		for (const { id } of stopping) work.push(() => this.tryStop(id));
 
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
 		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
+		await this.reschedule();
+
+		await settleAll(work, OUTBOUND_CONCURRENCY);
+		await this.replace(retry);
 		await this.reschedule();
 	}
 
@@ -416,7 +418,7 @@ export class Registry extends DurableObject<Env> {
 		// eviction from here on still leaves an alarm that reaps the row.
 		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
 
-		await recordEvent(this.env.DB, { kind: "requested", serverId, version, location: where, at: now });
+		await this.record({ kind: "requested", serverId, version, location: where, at: now });
 		let deploymentId: string;
 		try {
 			deploymentId = await this.provider.deploy({
@@ -445,7 +447,7 @@ export class Registry extends DurableObject<Env> {
 		// Recorded whatever the row's state: a claim that ended while the call was in flight is
 		// `stopping`, and its stop needs this id.
 		this.sql.exec("UPDATE servers SET deployment_id = ?, deploy_pending = 0 WHERE id = ?", deploymentId, serverId);
-		await recordEvent(this.env.DB, { kind: "deployed", serverId, deploymentId });
+		await this.record({ kind: "deployed", serverId, deploymentId });
 		if (this.server(serverId)?.state === "stopping") await this.tryStop(serverId);
 	}
 
@@ -486,7 +488,7 @@ export class Registry extends DurableObject<Env> {
 			now,
 			serverId,
 		).rowsWritten;
-		if (n) await recordEvent(this.env.DB, { kind: "ready", serverId, at: now });
+		if (n) await this.record({ kind: "ready", serverId, at: now });
 		return n > 0;
 	}
 
@@ -494,8 +496,18 @@ export class Registry extends DurableObject<Env> {
 	 *  another placement (bounded by JOIN_ATTEMPTS), and try the stop. The row stays until the stop
 	 *  is confirmed (`tryStop`). */
 	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): Promise<void> {
+		const retry = this.beginStop(serverId, outcome, reason, from);
+		if (retry === null) return;
+		await this.tryStop(serverId);
+		await this.replace(retry);
+		await this.reschedule();
+	}
+
+	/** The synchronous half of `finish`: the transition and the ticket bookkeeping. Returns the
+	 *  tickets to place again, or null when the row was not live (or not in `from`). */
+	private beginStop(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): string[] | null {
 		const s = this.server(serverId);
-		if (!s || !live(s) || (from && s.state !== from)) return;
+		if (!s || !live(s) || (from && s.state !== from)) return null;
 		const now = Date.now();
 		const moved = this.sql.exec(
 			"UPDATE servers SET state = 'stopping', outcome = ?, reason = ?, stop_at = ? WHERE id = ? AND state = ?",
@@ -505,7 +517,7 @@ export class Registry extends DurableObject<Env> {
 			serverId,
 			s.state,
 		).rowsWritten;
-		if (!moved) return;
+		if (!moved) return null;
 		const orphans =
 			s.state === "starting"
 				? this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", serverId).toArray()
@@ -528,11 +540,18 @@ export class Registry extends DurableObject<Env> {
 				retry.push(t.id);
 			}
 		}
+		return retry;
+	}
 
-		await this.tryStop(serverId);
-		const version = versionOf(serverId);
-		for (const id of retry) if (version) await this.place(version, id);
-		await this.reschedule();
+	private async replace(ticketIds: string[]): Promise<void> {
+		for (const id of ticketIds) {
+			const version = versionOf(id);
+			if (version) await this.place(version, id);
+		}
+	}
+
+	private record(e: SessionEvent): Promise<void> {
+		return recordEvent(this.env.DB, e, this.cfg.providerTimeoutMs);
 	}
 
 	/** One stop attempt for a `stopping` row. Success (or Edgegap no longer knowing the deployment)
@@ -562,7 +581,7 @@ export class Registry extends DurableObject<Env> {
 		if (s?.state !== "stopping") return;
 		const now = Date.now();
 		if (!this.sql.exec("UPDATE servers SET state = 'ended', ended_at = ? WHERE id = ? AND state = 'stopping'", now, serverId).rowsWritten) return;
-		await recordEvent(this.env.DB, {
+		await this.record({
 			kind: "ended",
 			serverId,
 			at: now,
@@ -620,6 +639,9 @@ function deployFailure(err: unknown): string {
 	if (err instanceof ProviderError && err.status >= 400 && err.status < 500) return REASONS.startRefused;
 	return REASONS.providerUnavailable;
 }
+
+/** Below the platform's six simultaneous outbound connections per invocation. */
+const OUTBOUND_CONCURRENCY = 5;
 
 function live(s: ServerRow): boolean {
 	return s.state === "starting" || s.state === "ready";

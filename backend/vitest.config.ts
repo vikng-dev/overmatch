@@ -11,6 +11,7 @@ export default defineConfig({
 					TEST_MIGRATIONS: await readD1Migrations(path.join(import.meta.dirname, "migrations")),
 					EDGEGAP_API: "https://edgegap.test",
 					EDGEGAP_TOKEN: "test-token",
+					PROVIDER_TIMEOUT_S: "0.5",
 					EDGEGAP_WEBHOOK_SECRET: "test-webhook-secret",
 					ACCESS_TEAM_DOMAIN: "https://team.access.test",
 					ACCESS_AUD: "test-aud",

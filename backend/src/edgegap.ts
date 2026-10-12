@@ -9,6 +9,8 @@
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
+import { bounded } from "./deadline";
+
 export interface LocationData {
 	city: string;
 	country: string;
@@ -72,15 +74,27 @@ export class Edgegap implements Provider {
 		private readonly token: string,
 		private readonly app: string,
 		private readonly portName: string,
+		private readonly timeoutMs: number,
 	) {}
 
-	private async call(method: string, path: string, body?: unknown): Promise<Response> {
+	/** One HTTP exchange, request through body read, bounded by `timeoutMs`. A timeout or a network
+	 *  failure is a ProviderError with status 0: the provider gave no answer. */
+	private async request<T>(op: string, method: string, path: string, body: unknown, handle: (res: Response) => Promise<T>): Promise<T> {
 		const auth = this.token.startsWith("token ") ? this.token : `token ${this.token}`;
-		return fetch(`${this.api}${path}`, {
-			method,
-			headers: { authorization: auth, "content-type": "application/json", accept: "application/json" },
-			body: body === undefined ? undefined : JSON.stringify(body),
-		});
+		try {
+			return await bounded(this.timeoutMs, async (signal) => {
+				const res = await fetch(`${this.api}${path}`, {
+					method,
+					headers: { authorization: auth, "content-type": "application/json", accept: "application/json" },
+					body: body === undefined ? undefined : JSON.stringify(body),
+					signal,
+				});
+				return handle(res);
+			});
+		} catch (err) {
+			if (err instanceof ProviderError) throw err;
+			throw new ProviderError(op, 0);
+		}
 	}
 
 	private async json<T>(res: Response, what: string): Promise<T> {
@@ -100,35 +114,37 @@ export class Edgegap implements Provider {
 			env_vars: req.env.map((e) => ({ key: e.key, value: e.value, is_hidden: e.hidden })),
 			webhook_url: req.webhookUrl,
 		};
-		const out = await this.json<{ request_id: string }>(await this.call("POST", "/v1/deploy", body), "deploy");
+		const out = await this.request("deploy", "POST", "/v1/deploy", body, (res) => this.json<{ request_id: string }>(res, "deploy"));
 		if (!out.request_id) throw new ProviderError("deploy", 502);
 		return out.request_id;
 	}
 
 	async status(deploymentId: string): Promise<DeploymentStatus> {
-		const res = await this.call("GET", `/v1/status/${encodeURIComponent(deploymentId)}`);
-		if (res.status === 404 || res.status === 410) {
-			await res.body?.cancel();
-			return { phase: "gone", address: null, port: null };
-		}
-		const s = await this.json<V1DeploymentStatus>(res, "status");
-		return interpretStatus(s, this.portName);
+		return this.request("status", "GET", `/v1/status/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
+			if (res.status === 404 || res.status === 410) {
+				await res.body?.cancel();
+				return { phase: "gone", address: null, port: null };
+			}
+			return interpretStatus(await this.json<V1DeploymentStatus>(res, "status"), this.portName);
+		});
 	}
 
 	async stop(deploymentId: string): Promise<void> {
-		const res = await this.call("DELETE", `/v1/stop/${encodeURIComponent(deploymentId)}`);
-		if (res.ok || res.status === 404 || res.status === 410) {
-			await res.body?.cancel();
-			return;
-		}
-		await this.json(res, "stop");
+		await this.request("stop", "DELETE", `/v1/stop/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
+			if (res.ok || res.status === 404 || res.status === 410) {
+				await res.body?.cancel();
+				return;
+			}
+			await this.json(res, "stop");
+		});
 	}
 
 	async locations(): Promise<LocationData[]> {
 		const all: LocationData[] = [];
 		for (let page = 1; page <= MAX_PAGES; page++) {
-			const res = await this.call("GET", `/v1/locations?page=${page}&limit=${PAGE_LIMIT}`);
-			const out = await this.json<{ locations?: LocationData[]; pagination?: { has_next?: boolean } }>(res, "locations");
+			const out = await this.request("locations", "GET", `/v1/locations?page=${page}&limit=${PAGE_LIMIT}`, undefined, (res) =>
+				this.json<{ locations?: LocationData[]; pagination?: { has_next?: boolean } }>(res, "locations"),
+			);
 			all.push(...(out.locations ?? []));
 			if (!out.pagination?.has_next) return all;
 		}
@@ -136,7 +152,9 @@ export class Edgegap implements Provider {
 	}
 
 	async beacons(): Promise<Beacon[]> {
-		const out = await this.json<{ locations?: Partial<Beacon>[] }>(await this.call("GET", "/v1/locations/beacons"), "beacons");
+		const out = await this.request("beacons", "GET", "/v1/locations/beacons", undefined, (res) =>
+			this.json<{ locations?: Partial<Beacon>[] }>(res, "beacons"),
+		);
 		return (out.locations ?? [])
 			.filter((b): b is Partial<Beacon> & { host: string; location: LocationData } => !!b.host && !!b.location)
 			.map((b) => ({

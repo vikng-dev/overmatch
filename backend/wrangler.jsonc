@@ -45,6 +45,8 @@
 		"ENDED_RETENTION_S": "600",
 		"JOIN_ATTEMPTS": "2",
 		"LOCATIONS_CACHE_S": "600",
+		// Bound on every Edgegap call and D1 history write, request through body read.
+		"PROVIDER_TIMEOUT_S": "10",
 		"VCPU_PER_SERVER": "1",
 		// Edgegap Edge Cloud list price, edgegap.com/pricing.md reviewed 2026-09-04. Dashboard cost is DERIVED.
 		"USD_PER_VCPU_MINUTE": "0.00115",

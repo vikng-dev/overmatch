@@ -212,6 +212,21 @@ describe("the alarm", () => {
 	});
 });
 
+describe("cleanup is bounded", () => {
+	it("a provider call that never answers stalls neither the sweep nor other rows' cleanup", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} }); // A: starting, its status will hang
+		await join({ version: V, locations: ["London"], pings: {} });
+		const b = await bringUp(1, 1); // B: ready, about to go silent
+		edgegap.hangStatus.add(launched(0).deploymentId);
+		await age(V, 16 * S); // A is due a status poll; B is past HEARTBEAT_DEADLINE_S
+		const sweep = runDurableObjectAlarm(registry(V)).then(() => "done");
+		const outcome = await Promise.race([sweep, new Promise((r) => setTimeout(() => r("stalled"), 3000))]);
+		expect(outcome).toBe("done");
+		expect(edgegap.deployment(1).status).toBe("Status.TERMINATED");
+		expect((await registry(V).snapshot()).find((s) => s.id === b.id)?.state).toBe("ended");
+	});
+});
+
 describe("cleanup is durable", () => {
 	it("a failed stop is retried by the alarm until Edgegap confirms, and only then is history ended", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });

@@ -1,9 +1,10 @@
+import { bounded } from "./deadline";
 import { diag } from "./reasons";
 
 // `recordEvent` is the single writer of D1 `sessions` (migrations/0001_sessions.sql): one row per
-// server lifetime, touched only on transitions. Writes are best effort — a D1 failure is logged and
-// never fails the registry operation that caused it. A durable outbox, or a second sink such as
-// Analytics Engine, would be added here and nowhere else.
+// server lifetime, touched only on transitions. Writes are best effort and bounded — a D1 failure or
+// stall is logged and never fails or holds up the registry operation that caused it. A durable
+// outbox, or a second sink such as Analytics Engine, would be added here and nowhere else.
 
 export type Outcome = "ended" | "failed" | "lost";
 
@@ -13,36 +14,40 @@ export type SessionEvent =
 	| { kind: "ready"; serverId: string; at: number }
 	| { kind: "ended"; serverId: string; at: number; outcome: Outcome; reason: string; peakPlayers: number };
 
-export async function recordEvent(db: D1Database, e: SessionEvent): Promise<void> {
+export async function recordEvent(db: D1Database, e: SessionEvent, timeoutMs: number): Promise<void> {
 	try {
-		switch (e.kind) {
-			case "requested":
-				await db
-					.prepare(
-						"INSERT INTO sessions (server_id, version, location, requested_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (server_id) DO NOTHING",
-					)
-					.bind(e.serverId, e.version, e.location, e.at)
-					.run();
-				return;
-			case "deployed":
-				await db.prepare("UPDATE sessions SET deployment_id = ?2 WHERE server_id = ?1").bind(e.serverId, e.deploymentId).run();
-				return;
-			case "ready":
-				await db.prepare("UPDATE sessions SET ready_at = ?2 WHERE server_id = ?1 AND ready_at IS NULL").bind(e.serverId, e.at).run();
-				return;
-			case "ended":
-				await db
-					.prepare(
-						`UPDATE sessions SET ended_at = ?2, outcome = ?3, reason = ?4,
-						   peak_players = MAX(peak_players, ?5),
-						   minutes = (?2 - requested_at) / 60000.0
-						 WHERE server_id = ?1 AND ended_at IS NULL`,
-					)
-					.bind(e.serverId, e.at, e.outcome, e.reason, e.peakPlayers)
-					.run();
-				return;
-		}
+		await bounded(timeoutMs, () => write(db, e));
 	} catch (err) {
 		console.error("recordEvent failed", e.kind, e.serverId, diag(err));
+	}
+}
+
+async function write(db: D1Database, e: SessionEvent): Promise<void> {
+	switch (e.kind) {
+		case "requested":
+			await db
+				.prepare(
+					"INSERT INTO sessions (server_id, version, location, requested_at) VALUES (?1, ?2, ?3, ?4) ON CONFLICT (server_id) DO NOTHING",
+				)
+				.bind(e.serverId, e.version, e.location, e.at)
+				.run();
+			return;
+		case "deployed":
+			await db.prepare("UPDATE sessions SET deployment_id = ?2 WHERE server_id = ?1").bind(e.serverId, e.deploymentId).run();
+			return;
+		case "ready":
+			await db.prepare("UPDATE sessions SET ready_at = ?2 WHERE server_id = ?1 AND ready_at IS NULL").bind(e.serverId, e.at).run();
+			return;
+		case "ended":
+			await db
+				.prepare(
+					`UPDATE sessions SET ended_at = ?2, outcome = ?3, reason = ?4,
+					   peak_players = MAX(peak_players, ?5),
+					   minutes = (?2 - requested_at) / 60000.0
+					 WHERE server_id = ?1 AND ended_at IS NULL`,
+				)
+				.bind(e.serverId, e.at, e.outcome, e.reason, e.peakPlayers)
+				.run();
+			return;
 	}
 }

@@ -21,6 +21,7 @@ export interface Env {
 	ENDED_RETENTION_S: string;
 	JOIN_ATTEMPTS: string;
 	LOCATIONS_CACHE_S: string;
+	PROVIDER_TIMEOUT_S: string;
 	VCPU_PER_SERVER: string;
 	USD_PER_VCPU_MINUTE: string;
 	LOCATION_HINT: string;
@@ -40,6 +41,7 @@ export interface Config {
 	endedRetentionMs: number;
 	joinAttempts: number;
 	locationsCacheMs: number;
+	providerTimeoutMs: number;
 	vcpuPerServer: number;
 	usdPerVcpuMinute: number;
 }
@@ -65,6 +67,7 @@ export function config(env: Env): Config {
 		endedRetentionMs: num(env, "ENDED_RETENTION_S", 0) * s,
 		joinAttempts: num(env, "JOIN_ATTEMPTS", 1),
 		locationsCacheMs: num(env, "LOCATIONS_CACHE_S", 0) * s,
+		providerTimeoutMs: num(env, "PROVIDER_TIMEOUT_S", 0.05) * s,
 		vcpuPerServer: num(env, "VCPU_PER_SERVER", 0),
 		usdPerVcpuMinute: num(env, "USD_PER_VCPU_MINUTE", 0),
 	};
