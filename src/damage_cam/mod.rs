@@ -5,10 +5,11 @@
 //! it unchanged. It is not on the wire.
 //!
 //! The record carries no geometry. It holds the shot's inputs (round, origin, shooter, struck
-//! vehicle, turret pose), the struck tank's state at the shot (each component's hit points, so a
-//! part already lost reads zero), and the authority's outcome (path, verdict, how the round's flight
-//! ended, dose and fate per component), every volume named. A component's shape is the tank
-//! asset's, resolved by name ([`shapes`]).
+//! vehicle, every servo's angle), the struck tank's state at the shot (each component's hit points,
+//! so a part already lost reads zero), and the authority's outcome against that one tank (path,
+//! verdict, how the round's flight ended, dose and fate per component), every volume named. A
+//! component's shape is the tank asset's, resolved by name and posed by the record's servo angles
+//! ([`shapes`]).
 //!
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
@@ -22,6 +23,7 @@ pub mod player;
 pub mod record;
 pub mod shapes;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -125,10 +127,14 @@ pub struct PenetrationReport {
     /// The struck vehicle's tank file, relative to the asset root; `None` on a hand-authored clip.
     #[serde(default)]
     pub vehicle: Option<String>,
-    /// The struck turret's traverse from its spawn pose at the shot (degrees, about `+Y`,
-    /// positive from `-Z` toward `-X`).
-    #[serde(default)]
-    pub turret_yaw_deg: f32,
+    /// Every servo of the struck tank at the shot, by its node name in the tank file: the sim's own
+    /// servo angle (degrees), the turn about the servo's axis from its authored rest rotation,
+    /// composed as [`crate::tank::servo_pose`] composes it. A servo the record does not name is
+    /// at rest; a hand-authored clip names none.
+    pub servo_deg: BTreeMap<String, f32>,
+    /// The round fired: a key in the round registry (`assets/ballistics/rounds.ron`). A synthetic
+    /// clip may name a round the registry does not hold.
+    pub round: String,
     /// Who fired; `None` on a hand-authored clip.
     #[serde(default)]
     pub shooter: Option<Shooter>,

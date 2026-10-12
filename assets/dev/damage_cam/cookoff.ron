@@ -3,6 +3,8 @@
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
     synthetic: true,
+    servo_deg: {},
+    round: "75mm_PzGr_39_42",
     origin: (-25.985, 1.469, -0.897),
     projectile: (name: "75mm PzGr 39/42", caliber_mm: 75.0, mass_kg: 6.80, speed_mps: 820.0),
     impact: (

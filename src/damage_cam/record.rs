@@ -1,7 +1,7 @@
 //! The sim-side fill: a [`PenetrationReport`] read off a shell the authority marched.
 //!
 //! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's components and their
-//! HP before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
+//! HP, and every servo's angle, before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
 //! spall cones and the components' HP after it, and states it all in the struck hull's frame.
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the log's
@@ -11,6 +11,8 @@
 //! The path's times are DERIVED, not marched: each leg's length over the speed in effect on it
 //! (the round's speed between crossings, the mean of its entry and exit speeds inside one, half
 //! its entry speed inside the crossing it stops in).
+
+use std::collections::BTreeMap;
 
 use bevy::math::Affine3A;
 use bevy::prelude::*;
@@ -25,7 +27,7 @@ use crate::ballistics::{
     ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
-use crate::tank::Rig;
+use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos};
 
 /// What a volume is to the record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -41,19 +43,21 @@ struct BoxAtShot {
     state: ComponentState,
 }
 
-/// The struck tank before the shot: its hull frame and its components.
+/// The struck tank before the shot: its hull frame, its servos' angles and its components.
 pub struct StruckTank {
     tank: Entity,
     /// World → hull-local.
     to_hull: Affine3A,
     /// World → hull-local, rotation only: for directions.
     to_hull_rotation: Quat,
+    /// Every servo's angle (degrees), by node name.
+    servo_deg: BTreeMap<String, f32>,
     boxes: Vec<BoxAtShot>,
 }
 
 impl StruckTank {
-    /// The tank's hull frame and every component it owns, by name. `None` for an entity with no
-    /// rig.
+    /// The tank's hull frame, every servo's angle and every component it owns, by name. `None` for
+    /// an entity with no rig.
     pub fn capture(world: &mut World, tank: Entity) -> Option<Self> {
         let hull = world.get::<Rig>(tank)?.hull;
         let (_, hull_rotation, _) = world
@@ -87,6 +91,7 @@ impl StruckTank {
             tank,
             to_hull,
             to_hull_rotation,
+            servo_deg: servo_angles(world, tank),
             boxes,
         })
     }
@@ -109,9 +114,34 @@ pub struct ShotFacts {
     pub projectile: String,
     pub caliber_mm: f32,
     pub mass_kg: f32,
+    /// The round fired: its key in the round registry.
+    pub round: String,
     /// The struck vehicle's tank file, relative to the asset root.
     pub vehicle: Option<String>,
-    pub turret_yaw_deg: f32,
+}
+
+/// Every servo of `tank` by node name, at the sim's own angle (degrees): the integrator state its
+/// node is posed from, a replica's [`RemoteServos`] before the authority's [`TankServos`], the
+/// precedence `restore_servo_truth` reads them in.
+fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, f32> {
+    let remote = world
+        .get::<RemoteServos>(tank)
+        .map(|servos| servos.0.clone());
+    let authority = world
+        .get::<TankServos>(tank)
+        .map(|servos| servos.states.clone());
+    let Some(states) = remote.or(authority) else {
+        return BTreeMap::new();
+    };
+    let mut servos = world.query::<(&Name, &ServoIndex, &TankRoot)>();
+    servos
+        .iter(world)
+        .filter(|(_, _, root)| root.0 == tank)
+        .filter_map(|(name, slot, _)| {
+            let angle = states.get(slot.0)?.current();
+            Some((name.as_str().to_owned(), angle.to_degrees()))
+        })
+        .collect()
 }
 
 /// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
@@ -422,7 +452,8 @@ pub fn report(
     Some(PenetrationReport {
         synthetic: false,
         vehicle: facts.vehicle.clone(),
-        turret_yaw_deg: facts.turret_yaw_deg,
+        servo_deg: struck.servo_deg.clone(),
+        round: facts.round.clone(),
         shooter: facts.shooter.clone(),
         origin: struck.point(facts.launch),
         projectile: Projectile {

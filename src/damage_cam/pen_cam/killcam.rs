@@ -79,24 +79,22 @@ pub struct Killer {
 }
 
 impl Killer {
-    /// The killer of a record fired by `shooter` from its weapon `weapon`: the vehicle and the
-    /// round read from the shooter's own tank file and the round registry.
-    pub fn of(shooter: &Shooter, weapon: &str) -> Result<Self, String> {
+    /// The killer of a record fired by `shooter` with the round `round` (a round registry key):
+    /// the vehicle read from the shooter's own tank file, the muzzle speed from the registry.
+    pub fn of(shooter: &Shooter, round: &str) -> Result<Self, String> {
         let path = crate::assets::asset_root().join(&shooter.vehicle);
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let spec: TankSpec =
             ron::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let fired = spec
-            .weapons
-            .get(weapon)
-            .ok_or_else(|| format!("{}: no weapon {weapon:?}", shooter.vehicle))?;
-        let round = fired.resolved_round().map_err(|e| e.to_string())?;
+        let fired = crate::rounds::RoundRegistry::shipped()
+            .get(round)
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             name: shooter.name.clone(),
             vehicle: spec.display_name.clone(),
-            round: fired.round.clone(),
-            muzzle_speed: round.muzzle_speed,
+            round: round.to_owned(),
+            muzzle_speed: fired.muzzle_speed,
         })
     }
 }
@@ -644,8 +642,14 @@ pub fn camera(
         cam.hit = Rig::player_look();
         cam.death = None;
     }
-    let (Some(shooter_root), Some(ground_y), Some((victim_turret, _))) =
-        (shooter_root, views.ground_y, views.turret[0])
+    let victim_named = |wanted: &str| {
+        children
+            .iter_descendants(views.world)
+            .find(|node| names.get(*node).is_ok_and(|n| n.as_str() == wanted))
+    };
+    let victim_turret = view::turret_node(spec, &victim_named, &parents, &names);
+    let (Some(shooter_root), Some(ground_y), Some(victim_turret)) =
+        (shooter_root, views.ground_y, victim_turret)
     else {
         return;
     };

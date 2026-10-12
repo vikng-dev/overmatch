@@ -4,6 +4,8 @@
 // The path ends 2 m past the last exit at the residual speed; departure leg length is an open item.
 (
     synthetic: true,
+    servo_deg: {},
+    round: "122mm_BR-471B",
     origin: (-25.292, 1.750, -7.752),
     projectile: (name: "122mm BR-471B", caliber_mm: 122.0, mass_kg: 25.00, speed_mps: 781.0),
     impact: (

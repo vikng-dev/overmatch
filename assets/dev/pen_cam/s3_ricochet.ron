@@ -4,7 +4,13 @@
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),
-    turret_yaw_deg: 0.0,
+    servo_deg: {
+        "Hull_MG_Pitch": 0.0,
+        "Hull_MG_Yaw": 0.0,
+        "Main_Gun_Pitch": 0.0,
+        "Turret_Yaw": 0.0,
+    },
+    round: "88mm_AP",
     shooter: Some((
         name: "Fixture Gunner",
         vehicle: "tiger_1/tiger_1.tank.ron",

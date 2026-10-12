@@ -1,8 +1,8 @@
 //! The struck tank's two views: one on the battlefield, seen through the shooter's sight, and one
 //! on the pen cam stage. Both are the vehicle's view glb, named by the record's tank file, placed
-//! so the hull node sits at the origin (the record's frame), with collision proxies hidden and the
-//! turret traversed to the record's pose. The turret is the yaw servo above the gunner view's node
-//! (the tank file's `views` and `servos`), as the rig binder finds it.
+//! so the hull node sits at the origin (the record's frame), with collision proxies hidden and every
+//! servo the tank file declares turned to the record's angle for it, posed as the sim poses it
+//! ([`servo_pose`] of the node's authored rotation).
 
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
@@ -11,7 +11,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 use super::{Corner, Library, Ready, Run};
 use crate::render_policy::VisualScope;
 use crate::spec::{TankSpec, ViewKind};
-use crate::tank::ServoRole;
+use crate::tank::{ServoRole, servo_pose};
 
 /// The hull node every tank view names; the record's frame is its frame.
 pub(super) const HULL_NODE: &str = "Hull";
@@ -46,13 +46,21 @@ impl ViewMesh {
 #[derive(Component)]
 pub struct Proxy;
 
+/// One servo node of a view: its name in the tank file, its role and its authored rest rotation.
+struct ServoNode {
+    entity: Entity,
+    name: String,
+    role: ServoRole,
+    rest: Quat,
+}
+
 #[derive(Resource)]
 pub struct Views {
     spec: Handle<TankSpec>,
     pub world: Entity,
     pub stage: Entity,
-    /// The turret node and its rest rotation, per root (world, stage).
-    pub(super) turret: [Option<(Entity, Quat)>; 2],
+    /// Every servo node, per root.
+    servos: [Vec<ServoNode>; 2],
     /// The hull node, per root (world, stage): its frame is the record's.
     pub hull: [Option<Entity>; 2],
     placed: [bool; 2],
@@ -84,7 +92,7 @@ pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Re
         spec: asset_server.load(library.vehicle.clone()),
         world,
         stage,
-        turret: [None, None],
+        servos: [Vec::new(), Vec::new()],
         hull: [None, None],
         placed: [false, false],
         ground_y: None,
@@ -186,15 +194,22 @@ pub fn prepare(
             *root_transform = Transform::from_matrix(hull_pose.inverse());
         }
         views.hull[index] = Some(hull);
-        views.turret[index] = turret_node(spec, &named, &parents, &names).and_then(|node| {
-            transforms
-                .get(node)
-                .ok()
-                .map(|transform| (node, transform.rotation))
-        });
-        if views.turret[index].is_none() {
-            warn!("pen cam: no turret node found; the record's turret pose is not shown");
+        let mut servos = Vec::new();
+        for (name, servo) in &spec.servos {
+            let Some(node) = named(name) else {
+                warn!("pen cam: no node {name} for the tank file's servo; it is drawn at rest");
+                continue;
+            };
+            if let Ok(transform) = transforms.get(node) {
+                servos.push(ServoNode {
+                    entity: node,
+                    name: name.clone(),
+                    role: servo.role(),
+                    rest: transform.rotation,
+                });
+            }
         }
+        views.servos[index] = servos;
         views.placed[index] = true;
     }
     if views.placed.iter().all(|placed| *placed) && views.ground_y.is_none() {
@@ -242,8 +257,8 @@ pub(super) fn turret_node(
         })
 }
 
-/// Traverse each view's turret to the record it shows: the run's first shot on the battlefield,
-/// the corner's record on the stage.
+/// Turn each view's servos to the record it shows: the run's first shot on the battlefield, the
+/// corner's record on the stage.
 pub fn pose(
     views: Res<Views>,
     library: Res<Library>,
@@ -255,17 +270,17 @@ pub fn pose(
     let world_record = run.shots.first().map(|shot| shot.record);
     let stage_record = corner.showing.map(|showing| showing.record);
     for (index, record) in [(0, world_record), (1, stage_record)] {
-        let Some((turret, rest)) = views.turret[index] else {
-            continue;
-        };
         let Some(record) = record else {
             continue;
         };
-        let yaw = library.records[record].report.turret_yaw_deg.to_radians();
-        if let Ok(mut transform) = transforms.get_mut(turret) {
-            let want = Quat::from_rotation_y(yaw) * rest;
-            if transform.rotation != want {
-                transform.rotation = want;
+        let angles = &library.records[record].report.servo_deg;
+        for servo in &views.servos[index] {
+            let angle = angles.get(&servo.name).copied().unwrap_or(0.0).to_radians();
+            if let Ok(mut transform) = transforms.get_mut(servo.entity) {
+                let want = servo_pose(servo.role, servo.rest, angle);
+                if transform.rotation != want {
+                    transform.rotation = want;
+                }
             }
         }
     }

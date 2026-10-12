@@ -3,6 +3,8 @@
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
     synthetic: true,
+    servo_deg: {},
+    round: "88mm_AP",
     origin: (2.186, 2.246, -27.101),
     projectile: (name: "88mm PzGr 39", caliber_mm: 88.0, mass_kg: 10.20, speed_mps: 690.0),
     impact: (

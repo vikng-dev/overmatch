@@ -21,9 +21,12 @@ use super::march_tests::{FIXTURE_88, fixture_round};
 use super::*;
 use crate::damage::VolumeOf;
 use crate::damage_cam::record::{self, ShotFacts, StruckTank};
+use crate::damage_cam::shapes::{ComponentShape, TankAsset, TankShapes};
 use crate::damage_cam::{PenetrationReport, PlateClass, RoundEnd, Shooter, ShotVerdict};
 use crate::spec::VolumeSpec;
-use crate::tank::Rig;
+use crate::tank::{Rig, ServoIndex, ServoState, TankServos, restore_servo_truth};
+use bevy::ecs::system::RunSystemOnce;
+use std::collections::BTreeMap;
 
 /// The scenario list and its records, relative to the asset root.
 const SCENARIO_DIR: &str = "dev/pen_cam";
@@ -59,9 +62,12 @@ struct Scenario {
     /// The hull's yaw about `+Y` (degrees).
     #[serde(default)]
     hull_yaw_deg: f32,
-    /// The turret's traverse from its spawn pose about the hull's `+Y` (degrees).
+    /// The rig's turret servo's angle (degrees), posed as the sim poses it.
     #[serde(default)]
     turret_yaw_deg: f32,
+    /// The rig's gun servo's angle (degrees), posed as the sim poses it.
+    #[serde(default)]
+    gun_elevation_deg: f32,
     /// The verdict the shot earns on the bound tank today: a physics change that flips it fails by
     /// name.
     verdict: ShotVerdict,
@@ -76,39 +82,34 @@ fn scenario_world(scenario: &Scenario) -> App {
         .insert_resource(RetainSpentShells(true))
         .insert_resource(MgShortCircuit(false))
         .add_systems(Update, integrate_projectiles);
-    if scenario.turret_yaw_deg != 0.0 {
+    if scenario.turret_yaw_deg != 0.0 || scenario.gun_elevation_deg != 0.0 {
         let tank = app.world().resource::<ProbeTank>().0;
-        let turret = app
-            .world()
-            .get::<Rig>(tank)
-            .expect("the tank has a rig")
-            .turret;
-        let mut transform = app
-            .world_mut()
-            .get_mut::<Transform>(turret)
-            .expect("the turret is posed");
-        transform.rotation =
-            Quat::from_rotation_y(scenario.turret_yaw_deg.to_radians()) * transform.rotation;
-        // The turret's colliders follow its new pose before anything is cast.
+        let rig = app.world().get::<Rig>(tank).expect("the tank has a rig");
+        for (node, deg) in [
+            (rig.turret, scenario.turret_yaw_deg),
+            (rig.gun, scenario.gun_elevation_deg),
+        ] {
+            let slot = app
+                .world()
+                .get::<ServoIndex>(node)
+                .expect("the rig's turret and gun are servos")
+                .0;
+            let angle = deg.to_radians();
+            app.world_mut()
+                .get_mut::<TankServos>(tank)
+                .expect("the tank integrates its servos")
+                .states[slot] = ServoState::test_new(angle, angle, 0.0);
+        }
+        // The sim's own pose law writes the nodes, and the colliders follow before anything is
+        // cast.
+        app.world_mut()
+            .run_system_once(restore_servo_truth)
+            .expect("the servos restore");
         for _ in 0..4 {
             app.update();
         }
     }
     app
-}
-
-/// The turret's yaw relative to the hull (degrees).
-fn turret_yaw(world: &World, tank: Entity) -> f32 {
-    let rig = world.get::<Rig>(tank).expect("the tank has a rig");
-    let rotation = |entity: Entity| {
-        world
-            .get::<GlobalTransform>(entity)
-            .expect("a posed node")
-            .to_scale_rotation_translation()
-            .1
-    };
-    let relative = rotation(rig.hull).inverse() * rotation(rig.turret);
-    relative.to_euler(EulerRot::YXZ).0.to_degrees()
 }
 
 /// Fire `scenario` at the bound tank and read back its record.
@@ -161,8 +162,8 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
         projectile: scenario.weapon.clone(),
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
+        round: weapon.round.clone(),
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
-        turret_yaw_deg: turret_yaw(app.world(), tank),
     };
     record::report(app.world_mut(), &struck, shell, &facts)
         .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name))
@@ -184,6 +185,7 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
             toward: turn * Vec3::new(-0.57, 1.45, 0.0),
             hull_yaw_deg: yaw_deg,
             turret_yaw_deg: 0.0,
+            gun_elevation_deg: 0.0,
             verdict: ShotVerdict::Penetration,
         })
     };
@@ -208,6 +210,123 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
     for (a, b) in still.path.iter().zip(&turned.path) {
         assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
     }
+}
+
+/// The distance along `direction` (unit) from `origin` to the nearest triangle of `shape`, if the
+/// ray meets one (Möller–Trumbore).
+fn ray_hit(shape: &ComponentShape, origin: Vec3, direction: Vec3) -> Option<f32> {
+    shape
+        .indices
+        .chunks_exact(3)
+        .filter_map(|tri| {
+            let [a, b, c] = [0, 1, 2].map(|k| shape.positions[tri[k] as usize]);
+            let (e1, e2) = (b - a, c - a);
+            let p = direction.cross(e2);
+            let det = e1.dot(p);
+            if det.abs() < 1.0e-12 {
+                return None;
+            }
+            let s = origin - a;
+            let u = s.dot(p) / det;
+            let q = s.cross(e1);
+            let v = direction.dot(q) / det;
+            let t = e2.dot(q) / det;
+            (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 0.0).then_some(t)
+        })
+        .min_by(f32::total_cmp)
+}
+
+/// A shot across an elevated gun is recorded with the gun servo at the sim's own angle, and the
+/// record's servo pose draws the struck component where the path crosses it: the line's recorded
+/// entry lies on that component's mesh posed by the record, and not on its mesh at rest. The
+/// component is whichever under the gun's servo the elevation moves farthest; the 12° elevation
+/// and the 4 m stand-off are fixture data. The entry is the march's mean over the round's calibre
+/// disc, so on a face curved across the disc it sits off the centre line's hit by up to the face's
+/// sagitta over the disc, at most half a calibre (DERIVED): that is the tolerance on the entry, and
+/// the mesh at rest must miss by more than two calibres.
+#[test]
+fn an_elevated_gun_shot_draws_the_barrel_where_the_path_crosses_it() {
+    const ELEVATION_DEG: f32 = 12.0;
+    let posed_scenario = |from: Vec3, toward: Vec3| Scenario {
+        name: "elevated gun".to_owned(),
+        shows: String::new(),
+        weapon: "MainGun".to_owned(),
+        speed: None,
+        from,
+        toward,
+        hull_yaw_deg: 0.0,
+        turret_yaw_deg: 0.0,
+        gun_elevation_deg: ELEVATION_DEG,
+        verdict: ShotVerdict::Damaged,
+    };
+    let app = scenario_world(&posed_scenario(Vec3::X, Vec3::ZERO));
+    let tank = app.world().resource::<ProbeTank>().0;
+    let rig = app.world().get::<Rig>(tank).expect("the tank has a rig");
+    let gun = app
+        .world()
+        .get::<Name>(rig.gun)
+        .expect("the gun servo is named")
+        .as_str()
+        .to_owned();
+    let hull = *app
+        .world()
+        .get::<GlobalTransform>(rig.hull)
+        .expect("a posed hull");
+    let asset = TankAsset::load(crate::tank::TIGER_SPEC_PATH).expect("the bound tank loads");
+    let at_rest = asset.shapes(&BTreeMap::new());
+    let elevated = asset.shapes(&BTreeMap::from([(gun.clone(), ELEVATION_DEG)]));
+    let spec = app
+        .world()
+        .resource::<crate::bake::TankBlueprint>()
+        .spec
+        .clone();
+    let (component, _) = spec
+        .volumes
+        .iter()
+        .filter(|(_, volume)| volume.component().is_some())
+        .map(|(name, _)| {
+            let moved = at_rest
+                .get(name)
+                .expect("a component resolves")
+                .center()
+                .distance(elevated.get(name).expect("a component resolves").center());
+            (name.clone(), moved)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("the tank has components");
+    let target = elevated.get(&component).unwrap().center();
+    let across = Vec3::X * 4.0;
+    let world = |hull_local: Vec3| hull.transform_point(hull_local) - PROBE_TANK_AT;
+    let report = record_scenario(&posed_scenario(world(target + across), world(target)));
+
+    let recorded = report.servo_deg.get(&gun).copied();
+    assert!(
+        recorded.is_some_and(|deg| (deg - ELEVATION_DEG).abs() < 1.0e-4),
+        "the record holds the gun servo's own angle: {recorded:?}"
+    );
+    let entered = report
+        .doses
+        .iter()
+        .find(|dose| dose.volume == component)
+        .and_then(|dose| dose.entered)
+        .map(Vec3::from)
+        .unwrap_or_else(|| panic!("the line enters {component}: {:?}", report.doses));
+    let origin = Vec3::from(report.origin);
+    let direction = (entered - origin).normalize();
+    let drawn = |shapes: &TankShapes| {
+        ray_hit(shapes.get(&component).unwrap(), origin, direction).map(|t| origin + direction * t)
+    };
+    let calibre = report.projectile.caliber_mm * 1.0e-3;
+    let posed_hit = drawn(&asset.shapes(&report.servo_deg));
+    assert!(
+        posed_hit.is_some_and(|hit| hit.distance(entered) <= 0.5 * calibre),
+        "{component} is drawn where the path enters it, {entered}: met at {posed_hit:?}"
+    );
+    let rest_hit = drawn(&at_rest);
+    assert!(
+        rest_hit.is_none_or(|hit| hit.distance(entered) > 2.0 * calibre),
+        "{component} at rest is met where the elevated one is: {rest_hit:?}"
+    );
 }
 
 /// A record as its file holds it.
@@ -253,6 +372,14 @@ fn the_pen_cam_scenarios_are_current() {
             scenario.name
         );
         crate::damage_cam::tests::assert_self_consistent(&scenario.name, &report);
+        assert!(
+            crate::rounds::RoundRegistry::shipped()
+                .get(&report.round)
+                .is_ok(),
+            "{}: the record's round {} is not a registry key",
+            scenario.name,
+            report.round
+        );
         let text = render(scenario, &report);
         let path = dir.join(format!("{}.ron", scenario.name));
         if bless {
@@ -452,8 +579,8 @@ fn fixture_shot_along(volumes: &[FixtureVolume], from: Vec3, direction: Vec3) ->
         projectile: "fixture".to_owned(),
         caliber_mm: FIXTURE_88.caliber * 1000.0,
         mass_kg: FIXTURE_88.mass,
+        round: "fixture".to_owned(),
         vehicle: None,
-        turret_yaw_deg: 0.0,
     };
     let report = record::report(app.world_mut(), &struck, shell, &facts).expect("a pen cam opens");
     assert_eq!(

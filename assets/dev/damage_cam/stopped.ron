@@ -3,6 +3,8 @@
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
     synthetic: true,
+    servo_deg: {},
+    round: "76mm_M62_APC",
     origin: (1.449, 2.500, -26.377),
     projectile: (name: "76mm M62 APC", caliber_mm: 76.2, mass_kg: 7.00, speed_mps: 710.0),
     impact: (

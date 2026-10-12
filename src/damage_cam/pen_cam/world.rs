@@ -592,7 +592,7 @@ mod tests {
             report.end = RoundEnd::Rest {
                 volume: report.components[0].name.clone(),
             };
-            let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
+            let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
             let speed = report.projectile.speed_mps;
             assert!(plan.stop.is_some(), "{}: rests", record.stem);
             assert!(onward(&plan, speed).is_none(), "{}: flies on", record.stem);

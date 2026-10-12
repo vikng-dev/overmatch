@@ -454,7 +454,7 @@ mod tests {
             .expect("a recorded scenario names its vehicle");
         crate::damage_cam::shapes::TankAsset::load(vehicle)
             .unwrap()
-            .shapes(report.turret_yaw_deg)
+            .shapes(&report.servo_deg)
     }
 
     fn record(name: &str) -> PenetrationReport {
@@ -489,7 +489,7 @@ mod tests {
             crate::damage_cam::shapes::TankAsset::load(all[0].1.vehicle.as_deref().unwrap())
                 .unwrap();
         for (name, report) in all {
-            let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
+            let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
             assert!(plan.start_arc <= plan.contact_arc, "{name}");
             assert!(plan.contact_arc <= plan.end_arc + 1e-4, "{name}");
             assert!(plan.end_arc <= plan.line.length() + 1e-4, "{name}");

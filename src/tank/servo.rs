@@ -133,12 +133,19 @@ impl ServoState {
     }
 }
 
+/// A servo node's local rotation at `angle` (radians): its authored rest rotation, then the turn
+/// about the role's axis in the node's own frame, `rest * axis(angle)`. The one composition the
+/// sim, the pen cam record's playback and every view of a record pose a servo with.
+pub fn servo_pose(role: ServoRole, rest: Quat, angle: f32) -> Quat {
+    rest * Quat::from_axis_angle(role.axis(), angle)
+}
+
 fn servo_rotation(spec: &ServoSpec, rest: &ServoRest, angle: f32) -> Quat {
-    rest.0 * Quat::from_axis_angle(spec.role.axis(), angle)
+    servo_pose(spec.role, rest.0, angle)
 }
 
 /// Restore sim-node transforms from rollback state before any fixed-step gameplay reader runs.
-pub(super) fn restore_servo_truth(
+pub(crate) fn restore_servo_truth(
     mut q: Query<(
         &mut Transform,
         &ServoSpec,

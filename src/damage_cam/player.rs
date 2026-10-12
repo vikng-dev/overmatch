@@ -162,7 +162,7 @@ struct ViewReady(bool);
 #[derive(Resource)]
 struct Scenarios {
     clips: Vec<(&'static str, PenetrationReport)>,
-    /// The fixture tank's component shapes; the clips leave the turret at its spawn pose.
+    /// The fixture tank's component shapes; the clips name no servo, so every servo is at rest.
     shapes: TankShapes,
 }
 
@@ -170,7 +170,7 @@ fn load_scenarios() -> Scenarios {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
     let shapes = TankAsset::load(TANK_SPEC)
         .unwrap_or_else(|e| panic!("damage cam tank failed to load: {e}"))
-        .shapes(0.0);
+        .shapes(&Default::default());
     Scenarios {
         clips: SCENARIOS
             .iter()
@@ -1854,7 +1854,8 @@ mod tests {
         PenetrationReport {
             synthetic: true,
             vehicle: None,
-            turret_yaw_deg: 0.0,
+            servo_deg: Default::default(),
+            round: "fixture".into(),
             shooter: None,
             origin: [0.0; 3],
             projectile: Projectile {

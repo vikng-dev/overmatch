@@ -190,10 +190,10 @@ impl Library {
                     report.vehicle.as_deref() == Some(vehicle.as_str()),
                     "{stem}: the demo stages one vehicle, {vehicle}"
                 );
-                let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
+                let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
                 let knockout = killcam::knockout(&report);
                 let killer = report.shooter.as_ref().map(|shooter| {
-                    killcam::Killer::of(shooter, &report.projectile.name)
+                    killcam::Killer::of(shooter, &report.round)
                         .unwrap_or_else(|err| panic!("{stem}: the shooter: {err}"))
                 });
                 Record {
