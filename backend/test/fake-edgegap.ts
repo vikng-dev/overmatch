@@ -60,6 +60,9 @@ export class FakeEdgegap {
 	readonly calls: { method: string; path: string }[] = [];
 	/** Cities whose deploy is refused synchronously (HTTP 422), as a full location is. */
 	refuse = new Set<string>();
+	/** Error bodies and error_detail echo the request back, env values and webhook URL included:
+	 *  the worst case for what a provider error may carry. */
+	echoInErrors = false;
 	/** Server-side page-size cap, so a client asking for more must still follow `has_next`. */
 	maxPageSize = 4;
 	/** When set, the location and beacon endpoints answer 500. */
@@ -140,7 +143,8 @@ export class FakeEdgegap {
 			if (this.gate) await this.gate;
 			const city = (body.filters as { values: string[] }[])[0].values[0];
 			if (this.refuse.has(city)) {
-				return Response.json({ message: "Not enough space on locations or no locations available" }, { status: 422 });
+				const echo = this.echoInErrors ? ` request: ${JSON.stringify(body)}` : "";
+				return Response.json({ message: `Not enough space on locations or no locations available${echo}` }, { status: 422 });
 			}
 			const id = `dep${++this.seq}`;
 			this.deployments.set(id, { id, body, status: "Status.DEPLOYING", publicIp: `198.51.100.${this.seq}`, port: 31000 + this.seq });
@@ -163,7 +167,7 @@ export class FakeEdgegap {
 				elapsed_time: 0,
 				max_duration: 30,
 				error: d.status === "Status.ERROR",
-				error_detail: d.status === "Status.ERROR" ? "Not enough space on locations" : "",
+				error_detail: d.status === "Status.ERROR" ? `Not enough space on locations${this.echoInErrors ? ` ${JSON.stringify(d.body)}` : ""}` : "",
 				ports: { game: { name: "game", internal: 5888, external: d.port, protocol: "UDP", link: `${d.id}:${d.port}`, tls_upgrade: false } },
 			});
 		}

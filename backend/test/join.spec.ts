@@ -117,7 +117,7 @@ describe("join-or-create", () => {
 		const t = await join({ version: V, locations: ["Frankfurt", "Paris"], pings: { Frankfurt: 10, Paris: 20 } });
 		const out = await ticket(t);
 		expect(out.state).toBe("failed");
-		expect(out.reason).toMatch(/Not enough space/);
+		expect(out.reason).toBe("no capacity in the selected location");
 	});
 
 	it("rejects unknown locations and malformed bodies", async () => {

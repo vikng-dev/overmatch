@@ -121,7 +121,7 @@ describe("the alarm", () => {
 		expect(await runDurableObjectAlarm(registry(V))).toBe(true);
 		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
 		expect((await registry(V).snapshot())[0]).toMatchObject({ state: "ended", outcome: "failed" });
-		expect(await session(s.id)).toMatchObject({ outcome: "failed", reason: "never became ready before the start deadline" });
+		expect(await session(s.id)).toMatchObject({ outcome: "failed", reason: "the server did not become ready in time" });
 		// The ticket gets one more placement (JOIN_ATTEMPTS = 2), away from the location that failed.
 		expect(edgegap.deployment(1).body.filters).toEqual([{ field: "city", values: ["London"], filter_type: "any" }]);
 		expect(await ticket(t)).toEqual({ state: "starting" });
@@ -132,7 +132,7 @@ describe("the alarm", () => {
 		await age(V, 61 * S);
 		await runDurableObjectAlarm(registry(V));
 		expect(edgegap.deployments.size).toBe(1);
-		expect(await ticket(t)).toEqual({ state: "failed", reason: "never became ready before the start deadline" });
+		expect(await ticket(t)).toEqual({ state: "failed", reason: "the server did not become ready in time" });
 	});
 
 	it("drops a silent server, stops it, and records it lost", async () => {

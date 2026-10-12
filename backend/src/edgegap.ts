@@ -39,7 +39,6 @@ export interface DeploymentStatus {
 	phase: DeploymentPhase;
 	address: string | null;
 	port: number | null;
-	detail: string | null;
 }
 
 export interface Provider {
@@ -52,12 +51,15 @@ export interface Provider {
 	beacons(): Promise<Beacon[]>;
 }
 
+/** A failed provider call. It carries the operation and HTTP status only; the response body is
+ *  discarded unread, because it may echo request values (see reasons.ts). */
 export class ProviderError extends Error {
 	constructor(
-		message: string,
+		readonly op: string,
 		readonly status: number,
 	) {
-		super(message);
+		super(`edgegap ${op}: HTTP ${status}`);
+		this.name = "ProviderError";
 	}
 }
 
@@ -83,8 +85,8 @@ export class Edgegap implements Provider {
 
 	private async json<T>(res: Response, what: string): Promise<T> {
 		if (!res.ok) {
-			const text = await res.text();
-			throw new ProviderError(`edgegap ${what}: HTTP ${res.status} ${text.slice(0, 300)}`, res.status);
+			await res.body?.cancel();
+			throw new ProviderError(what, res.status);
 		}
 		return (await res.json()) as T;
 	}
@@ -99,7 +101,7 @@ export class Edgegap implements Provider {
 			webhook_url: req.webhookUrl,
 		};
 		const out = await this.json<{ request_id: string }>(await this.call("POST", "/v1/deploy", body), "deploy");
-		if (!out.request_id) throw new ProviderError("edgegap deploy: no request_id", 502);
+		if (!out.request_id) throw new ProviderError("deploy", 502);
 		return out.request_id;
 	}
 
@@ -107,7 +109,7 @@ export class Edgegap implements Provider {
 		const res = await this.call("GET", `/v1/status/${encodeURIComponent(deploymentId)}`);
 		if (res.status === 404 || res.status === 410) {
 			await res.body?.cancel();
-			return { phase: "gone", address: null, port: null, detail: `HTTP ${res.status}` };
+			return { phase: "gone", address: null, port: null };
 		}
 		const s = await this.json<V1DeploymentStatus>(res, "status");
 		return interpretStatus(s, this.portName);
@@ -130,7 +132,7 @@ export class Edgegap implements Provider {
 			all.push(...(out.locations ?? []));
 			if (!out.pagination?.has_next) return all;
 		}
-		throw new ProviderError(`edgegap locations: more than ${MAX_PAGES} pages`, 502);
+		throw new ProviderError("locations", 502);
 	}
 
 	async beacons(): Promise<Beacon[]> {
@@ -151,7 +153,6 @@ interface V1DeploymentStatus {
 	current_status?: string;
 	running?: boolean;
 	error?: boolean;
-	error_detail?: string;
 	public_ip?: string;
 	ports?: Record<string, { external?: number } | undefined>;
 }
@@ -160,10 +161,9 @@ interface V1DeploymentStatus {
  *  test); the booleans are read first because they are the documented fields. */
 export function interpretStatus(s: V1DeploymentStatus, portName: string): DeploymentStatus {
 	const current = (s.current_status ?? "").toUpperCase();
-	const detail = s.error_detail || s.current_status || null;
-	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null, detail };
-	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null, detail };
+	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null };
+	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null };
 	const port = s.ports?.[portName]?.external ?? null;
-	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, detail };
-	return { phase: "pending", address: null, port: null, detail };
+	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port };
+	return { phase: "pending", address: null, port: null };
 }

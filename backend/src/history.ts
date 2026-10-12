@@ -1,3 +1,5 @@
+import { diag } from "./reasons";
+
 // `recordEvent` is the single writer of D1 `sessions` (migrations/0001_sessions.sql): one row per
 // server lifetime, touched only on transitions. Writes are best effort — a D1 failure is logged and
 // never fails the registry operation that caused it. A durable outbox, or a second sink such as
@@ -41,6 +43,6 @@ export async function recordEvent(db: D1Database, e: SessionEvent): Promise<void
 				return;
 		}
 	} catch (err) {
-		console.error("recordEvent failed", e.kind, e.serverId, err);
+		console.error("recordEvent failed", e.kind, e.serverId, diag(err));
 	}
 }

@@ -1,4 +1,4 @@
 {
   "state": "failed",
-  "reason": "never became ready before the start deadline"
+  "reason": "the server did not become ready in time"
 }

@@ -20,6 +20,7 @@ import { Edgegap, ProviderError, type Beacon, type DeploymentStatus, type Locati
 import { recordEvent, type Outcome } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
 import { groupLocations, locationId } from "./locations";
+import { diag, REASONS, serverReason } from "./reasons";
 import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
 
 type ServerState = "starting" | "ready" | "ended";
@@ -199,7 +200,7 @@ export class Registry extends DurableObject<Env> {
 		const s = t.server_id ? this.server(t.server_id) : null;
 		if (!s) return { state: "starting" };
 		if (s.state === "ready") return { state: "ready", address: s.address!, port: s.port!, key: s.netcode_key };
-		if (s.state === "ended") return { state: "failed", reason: s.reason ?? "server ended" };
+		if (s.state === "ended") return { state: "failed", reason: publicReason(s.reason) };
 		return { state: "starting" };
 	}
 
@@ -232,7 +233,7 @@ export class Registry extends DurableObject<Env> {
 		const s = this.server(serverId);
 		if (!s || s.state === "ended") return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
-		await this.finish(serverId, "ended", `server: ${reason}`);
+		await this.finish(serverId, "ended", serverReason(reason));
 		return { status: 204 };
 	}
 
@@ -263,7 +264,7 @@ export class Registry extends DurableObject<Env> {
 		const starting = this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray();
 		for (const s of starting) {
 			if (s.created_at + this.cfg.startDeadlineMs <= now) {
-				await this.finish(s.id, "failed", "never became ready before the start deadline");
+				await this.finish(s.id, "failed", REASONS.startTimeout);
 			} else if (s.deployment_id && (s.next_poll_at ?? 0) <= now) {
 				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, s.id);
 				await this.refreshStatus(s.id);
@@ -275,7 +276,7 @@ export class Registry extends DurableObject<Env> {
 		for (const { id } of silent) {
 			// Re-read: a heartbeat may have landed while an earlier finish() awaited.
 			const s = this.server(id);
-			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", "heartbeats stopped");
+			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", REASONS.serverLost);
 		}
 
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
@@ -307,7 +308,7 @@ export class Registry extends DurableObject<Env> {
 			return cat;
 		} catch (err) {
 			if (row) {
-				console.warn("location refresh failed, serving the stale list", err);
+				console.warn("location refresh failed, serving the stale list", diag(err));
 				return JSON.parse(row.body) as Catalog;
 			}
 			throw err;
@@ -355,7 +356,7 @@ export class Registry extends DurableObject<Env> {
 			.filter(({ loc }) => !excluded.has(loc))
 			.sort((a, b) => ping(a.loc) - ping(b.loc) || a.i - b.i)[0]?.loc;
 		if (!where) {
-			this.sql.exec("UPDATE tickets SET failed_reason = ? WHERE id = ?", "no selected location could start a server", ticketId);
+			this.sql.exec("UPDATE tickets SET failed_reason = ? WHERE id = ?", REASONS.noLocation, ticketId);
 			return;
 		}
 
@@ -393,15 +394,15 @@ export class Registry extends DurableObject<Env> {
 				],
 			});
 		} catch (err) {
-			const reason = err instanceof ProviderError ? err.message : `deploy failed: ${String(err)}`;
-			await this.finish(serverId, "failed", reason);
+			console.warn("deploy failed", serverId, diag(err));
+			await this.finish(serverId, "failed", deployFailure(err));
 			return;
 		}
 
 		const still = this.sql.exec("UPDATE servers SET deployment_id = ? WHERE id = ? AND state = 'starting'", deploymentId, serverId).rowsWritten;
 		if (!still) {
 			// Ended while the deploy call was in flight: the deployment has no row to report to.
-			await this.provider.stop(deploymentId).catch((err) => console.error("stop of orphan failed", deploymentId, err));
+			await this.provider.stop(deploymentId).catch((err) => console.error("stop of orphan failed", deploymentId, diag(err)));
 		}
 		await recordEvent(this.env.DB, { kind: "deployed", serverId, deploymentId });
 		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
@@ -414,7 +415,7 @@ export class Registry extends DurableObject<Env> {
 		try {
 			st = await this.provider.status(before.deployment_id);
 		} catch (err) {
-			console.warn("status poll failed", serverId, err);
+			console.warn("status poll failed", serverId, diag(err));
 			return;
 		}
 		const s = this.server(serverId);
@@ -425,11 +426,11 @@ export class Registry extends DurableObject<Env> {
 				await this.promote(serverId);
 				return;
 			case "error":
-				await this.finish(serverId, "failed", `edgegap error: ${st.detail ?? "unknown"}`);
+				await this.finish(serverId, "failed", REASONS.startFailed);
 				return;
 			case "terminated":
 			case "gone":
-				await this.finish(serverId, s.state === "starting" ? "failed" : "ended", `edgegap: deployment ${st.phase}`);
+				await this.finish(serverId, s.state === "starting" ? "failed" : "ended", s.state === "starting" ? REASONS.startFailed : REASONS.providerTerminated);
 				return;
 			case "pending":
 				return;
@@ -479,7 +480,7 @@ export class Registry extends DurableObject<Env> {
 		}
 
 		if (s.deployment_id) {
-			await this.provider.stop(s.deployment_id).catch((err) => console.error("stop failed", s.deployment_id, err));
+			await this.provider.stop(s.deployment_id).catch((err) => console.error("stop failed", s.deployment_id, diag(err)));
 		}
 		await recordEvent(this.env.DB, { kind: "ended", serverId, at: now, outcome, reason, peakPlayers: s.peak_players });
 
@@ -520,4 +521,18 @@ export class Registry extends DurableObject<Env> {
 export function registryFor(env: Env, version: string): DurableObjectStub<Registry> {
 	const hint = env.LOCATION_HINT as DurableObjectLocationHint | "";
 	return env.REGISTRY.getByName(version, hint ? { locationHint: hint } : undefined);
+}
+
+/** Ticket-facing reason for an ended server: an allowlisted text, or the generic one. A server's own
+ *  end reason (`server: …`) is history only. */
+function publicReason(stored: string | null): string {
+	return (Object.values(REASONS) as string[]).includes(stored ?? "") ? stored! : REASONS.serverEnded;
+}
+
+/** A refused deploy (4xx) is the provider's "no"; 422 is its no-capacity answer (MEASURED in the
+ *  risk test). Anything else is the provider not answering. */
+function deployFailure(err: unknown): string {
+	if (err instanceof ProviderError && err.status === 422) return REASONS.noCapacity;
+	if (err instanceof ProviderError && err.status >= 400 && err.status < 500) return REASONS.startRefused;
+	return REASONS.providerUnavailable;
 }

@@ -4,6 +4,7 @@
 import { accessDenied, adminPage } from "./admin";
 import type { Env } from "./config";
 import { timingSafeEqual, validVersion, versionOf } from "./ids";
+import { diag } from "./reasons";
 import { registryFor } from "./registry";
 import type { HeartbeatRequest, JoinRequest } from "./types";
 
@@ -133,7 +134,7 @@ export default {
 		try {
 			return await route(req, env);
 		} catch (err) {
-			console.error("unhandled", err);
+			console.error("unhandled", diag(err));
 			return error(500, "internal error");
 		}
 	},
