@@ -3,7 +3,7 @@
 
 import { accessDenied, adminPage } from "./admin";
 import type { Env } from "./config";
-import { timingSafeEqual, validVersion, versionOf } from "./ids";
+import { validVersion, versionOf } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 import type { HeartbeatRequest, JoinRequest } from "./types";
@@ -80,16 +80,17 @@ async function route(req: Request, env: Env): Promise<Response> {
 		return r.ok ? json({ ticket: r.ticket }) : error(r.status, r.error);
 	}
 
-	let m = /^\/v1\/join\/([^/]+)$/.exec(path);
-	if (m && method === "GET") {
-		const ticket = decodeURIComponent(m[1]);
-		const version = versionOf(ticket);
-		if (!version) return error(404, "unknown ticket");
+	// The ticket is a bearer credential: it travels in the body, never in the URL.
+	if (path === "/v1/join/status" && method === "POST") {
+		const b = await body(req);
+		const ticket = typeof b === "object" && b !== null ? (b as { ticket?: unknown }).ticket : undefined;
+		const version = typeof ticket === "string" ? versionOf(ticket) : null;
+		if (typeof ticket !== "string" || !version) return error(404, "unknown ticket");
 		const t = await registryFor(env, version).ticket(ticket);
 		return t ? json(t) : error(404, "unknown ticket");
 	}
 
-	m = /^\/v1\/servers\/([^/]+)\/(heartbeat|end)$/.exec(path);
+	let m = /^\/v1\/servers\/([^/]+)\/(heartbeat|end)$/.exec(path);
 	if (m && method === "POST") {
 		const id = decodeURIComponent(m[1]);
 		const version = versionOf(id);
@@ -109,17 +110,18 @@ async function route(req: Request, env: Env): Promise<Response> {
 		return error(r.status, r.error ?? (r.status === 410 ? "unknown server" : "error"));
 	}
 
-	if (path === "/v1/edgegap/webhook" && method === "POST") {
+	// Edgegap's webhook_url takes no headers, so the path names the server and carries its own nonce.
+	// It authorizes nothing but a status re-read for that one server, so a logged URL is no key.
+	m = /^\/v1\/edgegap\/webhook\/([^/]+)\/([0-9a-f]{32})$/.exec(path);
+	if (m && method === "POST") {
+		const id = decodeURIComponent(m[1]);
+		const version = versionOf(id);
 		const hook = await body(req);
+		if (!version) return error(404, "unknown webhook");
 		const rid = typeof hook === "object" && hook !== null ? (hook as { request_id?: unknown }).request_id : undefined;
 		const requestId = typeof rid === "string" && /^[A-Za-z0-9-]{1,64}$/.test(rid) ? rid : null;
-		const token = url.searchParams.get("token") ?? req.headers.get("x-webhook-token") ?? "";
-		const secret = env.EDGEGAP_WEBHOOK_SECRET ?? "";
-		if (!secret || !timingSafeEqual(token, secret)) return error(401, "bad webhook token");
-		const id = url.searchParams.get("server") ?? "";
-		const version = versionOf(id);
-		if (version) await registryFor(env, version).webhook(id, requestId);
-		return new Response(null, { status: 204 });
+		const known = await registryFor(env, version).webhook(id, m[2], requestId);
+		return known ? new Response(null, { status: 204 }) : error(404, "unknown webhook");
 	}
 
 	if (path === "/admin" && method === "GET") {

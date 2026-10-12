@@ -9,7 +9,6 @@ export interface Env {
 	EDGEGAP_APP: string;
 	EDGEGAP_PORT_NAME: string;
 	EDGEGAP_TOKEN: string;
-	EDGEGAP_WEBHOOK_SECRET: string;
 	CAPACITY: string;
 	HEARTBEAT_INTERVAL_S: string;
 	HEARTBEAT_DEADLINE_S: string;

@@ -60,6 +60,7 @@ type ServerRow = {
 	 *  deployment id is known; refused: Edgegap answered no. */
 	deploy: "calling" | "unknown" | "placed" | "refused";
 	stop_at: number | null;
+	webhook_nonce: string;
 }
 
 type TicketRow = {
@@ -127,7 +128,8 @@ CREATE TABLE IF NOT EXISTS servers (
 	ended_at INTEGER,
 	peak_players INTEGER NOT NULL DEFAULT 0,
 	deploy TEXT NOT NULL DEFAULT 'calling',
-	stop_at INTEGER
+	stop_at INTEGER,
+	webhook_nonce TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tickets (
 	id TEXT PRIMARY KEY,
@@ -261,23 +263,24 @@ export class Registry extends DurableObject<Env> {
 	/** An Edgegap webhook is a hint only (unsigned, never retried): re-read the status and act on
 	 *  that. Its body's request id is adopted for a claim whose deploy response was lost, but only
 	 *  once the status read shows the claim's tag. */
-	async webhook(serverId: string, requestId: string | null): Promise<void> {
+	async webhook(serverId: string, nonce: string, requestId: string | null): Promise<boolean> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended") return;
+		if (!s || !timingSafeEqual(nonce, s.webhook_nonce)) return false;
+		if (s.state === "ended") return true;
 		if (!s.deployment_id) {
-			if (!requestId) return;
+			if (!requestId) return true;
 			let st: DeploymentStatus;
 			try {
 				st = await this.provider.status(requestId);
 			} catch (err) {
 				console.warn("webhook status read failed", serverId, diag(err));
-				return;
+				return true;
 			}
-			if (!st.tags.includes(tagOf(serverId))) return;
-			await this.adopt(serverId, requestId);
-			return;
+			if (st.tags.includes(tagOf(serverId))) await this.adopt(serverId, requestId);
+			return true;
 		}
 		if (live(s)) await this.refreshStatus(serverId);
+		return true;
 	}
 
 	// ---- dashboard ----------------------------------------------------------------------------
@@ -427,9 +430,10 @@ export class Registry extends DurableObject<Env> {
 
 		const serverId = newId(version);
 		const netcodeKey = randomHex(32);
+		const webhookNonce = randomHex(16);
 		this.sql.exec(
-			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy)
-			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling')`,
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy, webhook_nonce)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling', ?)`,
 			serverId,
 			where,
 			this.cfg.capacity,
@@ -437,6 +441,7 @@ export class Registry extends DurableObject<Env> {
 			secretHash,
 			now,
 			now + this.cfg.statusPollMs,
+			webhookNonce,
 		);
 		this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", serverId, now, ticketId);
 		// The claim's deadline is durable before any outbound await (D1, Edgegap): a stalled call or an
@@ -451,7 +456,7 @@ export class Registry extends DurableObject<Env> {
 				city: where,
 				tag: tagOf(serverId),
 				clientIp: t.client_ip,
-				webhookUrl: `${t.origin}/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(this.env.EDGEGAP_WEBHOOK_SECRET)}`,
+				webhookUrl: `${t.origin}/v1/edgegap/webhook/${encodeURIComponent(serverId)}/${webhookNonce}`,
 				env: [
 					{ key: "OVERMATCH_SERVER_ID", value: serverId, hidden: false },
 					{ key: "OVERMATCH_API", value: t.origin, hidden: false },

@@ -24,13 +24,18 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 |---|---|---|---|
 | `GET /v1/locations?version=V` | client | none | Continents → locations, each with a same-city beacon or `null` and the live match count for V |
 | `POST /v1/join` | client | none | `{ticket}`. Body: `{version, locations, pings}` |
-| `GET /v1/join/{ticket}` | client | the ticket | `{state: starting\|ready\|failed, address?, port?, key?, reason?}`; poll until not `starting` |
+| `POST /v1/join/status` | client | the ticket, in the body `{ticket}` | `{state: starting\|ready\|failed, address?, port?, key?, reason?}`; poll until not `starting` |
 | `POST /v1/servers/{id}/heartbeat` | game server | `Authorization: Bearer <OVERMATCH_REPORT_SECRET>` | 204; **410 = unknown server, exit now**; 401 bad secret |
 | `POST /v1/servers/{id}/end` | game server | same | 204 (the Worker stops the deployment); 410 unknown |
-| `POST /v1/edgegap/webhook?server=ID&token=T` | Edgegap | `token` (or `X-Webhook-Token` header) = `EDGEGAP_WEBHOOK_SECRET` | 204; the body is ignored, status is re-read |
+| `POST /v1/edgegap/webhook/{id}/{nonce}` | Edgegap | the per-server nonce in the path | 204, or 404 for a wrong nonce; triggers only a status re-read for that server (a body `request_id` is adopted if its status shows the server's tag) |
 | `GET /admin` | Yan | Cloudflare Access | HTML dashboard |
 
 Errors are `{error}` with a 4xx/5xx status. Examples: `contract/`.
+
+**No credential is ever in a URL.** The ticket travels in a request body; the report secret in a
+header; the webhook path carries a per-server nonce that authorizes nothing beyond a status re-read
+(Edgegap's `webhook_url` takes no headers). Invocation logs, which record request URLs, are off in
+`wrangler.jsonc` regardless.
 
 **Join rules.** Among `starting` and `ready` servers of the version in the selected locations that
 are `open` and not full (players + tickets attached within `RESERVATION_TTL_S` < capacity), the
@@ -78,7 +83,6 @@ rate, Durable Object location hint). Secrets, set with `wrangler secret put`:
 | Secret | What |
 |---|---|
 | `EDGEGAP_TOKEN` | Edgegap API token (with or without the `token ` prefix) |
-| `EDGEGAP_WEBHOOK_SECRET` | Random string; Edgegap webhooks must carry it as `token` |
 
 `ACCESS_TEAM_DOMAIN` (e.g. `https://<team>.cloudflareaccess.com`) and `ACCESS_AUD` are plain vars,
 set in `wrangler.jsonc` once the Access application exists. While either is empty, `/admin` answers
@@ -93,8 +97,7 @@ npm test                 # vitest in the Workers runtime, Edgegap mocked; no net
 npm run typecheck        # generates src/worker-configuration.d.ts (gitignored), then tsc
 ```
 
-`npm run dev` (`wrangler dev`) needs a `.dev.vars` (gitignored) with `EDGEGAP_TOKEN` and
-`EDGEGAP_WEBHOOK_SECRET`, plus `npx wrangler d1 migrations apply overmatch-sessions --local`. It
+`npm run dev` (`wrangler dev`) needs a `.dev.vars` (gitignored) with `EDGEGAP_TOKEN`, plus `npx wrangler d1 migrations apply overmatch-sessions --local`. It
 calls the real Edgegap API, so a join there starts a billed deployment.
 
 ## Deploy (by hand; CI only tests)
@@ -103,7 +106,7 @@ calls the real Edgegap API, so a join there starts a billed deployment.
 2. `npx wrangler d1 create overmatch-sessions`; paste the printed `database_id` into
    `wrangler.jsonc`.
 3. `npx wrangler d1 migrations apply overmatch-sessions --remote`.
-4. `npx wrangler secret put EDGEGAP_TOKEN`, then `npx wrangler secret put EDGEGAP_WEBHOOK_SECRET`.
+4. `npx wrangler secret put EDGEGAP_TOKEN`.
 5. `npx wrangler deploy`.
 6. **Access for `/admin`** (Zero Trust dashboard → Access controls → Applications → Add → Self-hosted):
    the application domain is the Worker's hostname with path `admin`; add an Allow policy for

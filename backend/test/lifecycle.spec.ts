@@ -83,10 +83,10 @@ describe("readiness", () => {
 		expect(await ticket(t)).toEqual({ state: "starting" });
 	});
 
-	it("a webhook with the wrong token is refused before any status call", async () => {
+	it("a webhook with the wrong nonce is refused before any status call", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
-		const res = await webhook(launched().id, "wrong");
-		expect(res.status).toBe(401);
+		const res = await call("POST", `/v1/edgegap/webhook/${launched().id}/${"0".repeat(32)}`, {});
+		expect(res.status).toBe(404);
 		await res.text();
 		expect(edgegap.count("GET", "/v1/status/")).toBe(0);
 	});

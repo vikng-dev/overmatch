@@ -48,7 +48,7 @@ describe("join-or-create", () => {
 		]);
 		expect(vars.filter((v) => v.is_hidden).map((v) => v.key).sort()).toEqual(["OVERMATCH_NETCODE_KEY", "OVERMATCH_REPORT_SECRET"]);
 		expect(launched().key).toMatch(/^[0-9a-f]{64}$/);
-		expect(d.body.webhook_url).toMatch(/^https:\/\/api\.overmatch\.test\/v1\/edgegap\/webhook\?server=/);
+		expect(d.body.webhook_url).toMatch(/^https:\/\/api\.overmatch\.test\/v1\/edgegap\/webhook\/[^/?]+\/[0-9a-f]{32}$/);
 	});
 
 	it("a location without a ping ranks after every location with one", async () => {
@@ -147,7 +147,7 @@ describe("join-or-create", () => {
 	});
 
 	it("an unknown ticket is 404", async () => {
-		const res = await call("GET", "/v1/join/MC41LjA.00000000000000000000000000000000");
+		const res = await call("POST", "/v1/join/status", { ticket: "MC41LjA.00000000000000000000000000000000" });
 		expect(res.status).toBe(404);
 		await res.text();
 	});

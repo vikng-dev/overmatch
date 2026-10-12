@@ -29,9 +29,9 @@ describe("a deploy whose outcome is unknown", () => {
 		edgegap.loseDeployResponses = 1;
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = launched(0);
-		await webhook(s.id, undefined, "dep-not-ours"); // unknown id: ignored
+		await webhook(s.id, "dep-not-ours"); // unknown id: ignored
 		expect((await registry(V).snapshot())[0].deployment_id).toBeNull();
-		await webhook(s.id, undefined, s.deploymentId);
+		await webhook(s.id, s.deploymentId);
 		expect((await registry(V).snapshot())[0].deployment_id).toBe(s.deploymentId);
 	});
 

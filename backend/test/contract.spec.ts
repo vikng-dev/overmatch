@@ -13,6 +13,7 @@ import locationsRes from "../contract/locations.response.json";
 import serverEnv from "../contract/server-env.json";
 import failedRes from "../contract/ticket.failed.response.json";
 import readyRes from "../contract/ticket.ready.response.json";
+import ticketStatusReq from "../contract/ticket.request.json";
 import startingRes from "../contract/ticket.starting.response.json";
 import { age, call, join, launched, registry, webhook } from "./helpers";
 import { runDurableObjectAlarm } from "cloudflare:test";
@@ -61,14 +62,15 @@ describe("contract/*.json matches the handlers", () => {
 		expect(res.status).toBe(200);
 		const body = (await res.json()) as { ticket: string };
 		conforms(body, joinRes);
-		conforms(await (await call("GET", `/v1/join/${body.ticket}`)).json(), startingRes);
+		const ticketReq = { ...ticketStatusReq, ticket: body.ticket };
+		conforms(await (await call("POST", "/v1/join/status", ticketReq)).json(), startingRes);
 
 		const s = launched();
 		edgegap.ready(edgegap.deployment(0));
 		await webhook(s.id);
 		const hb = await call("POST", `/v1/servers/${s.id}/heartbeat`, heartbeatReq, { authorization: `Bearer ${s.secret}` });
 		expect(hb.status).toBe(204);
-		conforms(await (await call("GET", `/v1/join/${body.ticket}`)).json(), readyRes);
+		conforms(await (await call("POST", "/v1/join/status", ticketReq)).json(), readyRes);
 
 		const end = await call("POST", `/v1/servers/${s.id}/end`, endReq, { authorization: `Bearer ${s.secret}` });
 		expect(end.status).toBe(204);
@@ -78,7 +80,7 @@ describe("contract/*.json matches the handlers", () => {
 		const t = await join({ version: "0.5.0", locations: ["Paris"], pings: {} });
 		await age("0.5.0", 61_000);
 		await runDurableObjectAlarm(registry("0.5.0"));
-		conforms(await (await call("GET", `/v1/join/${t}`)).json(), failedRes);
+		conforms(await (await call("POST", "/v1/join/status", { ticket: t })).json(), failedRes);
 	});
 
 	it("error", async () => {

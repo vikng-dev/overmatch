@@ -3,7 +3,9 @@
 	"name": "overmatch-backend",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-10-01",
-	"observability": { "enabled": true },
+	// Custom logs only. Invocation logs record every request URL and are off: no URL here carries a
+	// credential, and this keeps it that way should one ever slip in.
+	"observability": { "enabled": true, "logs": { "invocation_logs": false } },
 
 	// One Registry object per game version (`registryFor` in src/index.ts).
 	"durable_objects": {
@@ -24,7 +26,7 @@
 	],
 
 	// Set with `wrangler secret put <NAME>`; never in this file. See README.md.
-	"secrets": { "required": ["EDGEGAP_TOKEN", "EDGEGAP_WEBHOOK_SECRET"] },
+	"secrets": { "required": ["EDGEGAP_TOKEN"] },
 
 	// Tunables. Every one is data read through src/config.ts; none is restated in logic.
 	"vars": {

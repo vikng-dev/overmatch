@@ -27,7 +27,7 @@ export async function join(req: JoinRequest): Promise<string> {
 }
 
 export async function ticket(t: string): Promise<TicketResponse> {
-	const res = await call("GET", `/v1/join/${t}`);
+	const res = await call("POST", "/v1/join/status", { ticket: t });
 	if (res.status !== 200) throw new Error(`ticket ${res.status}: ${await res.text()}`);
 	return (await res.json()) as TicketResponse;
 }
@@ -36,8 +36,11 @@ export function heartbeat(serverId: string, secret: string, hb: HeartbeatRequest
 	return call("POST", `/v1/servers/${serverId}/heartbeat`, hb, { authorization: `Bearer ${secret}` });
 }
 
-export function webhook(serverId: string, token = "test-webhook-secret", requestId = "ignored"): Promise<Response> {
-	return call("POST", `/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(token)}`, { request_id: requestId });
+/** POST to the webhook URL the server's deploy call gave Edgegap, as Edgegap would. */
+export function webhook(serverId: string, requestId = "ignored"): Promise<Response> {
+	const d = [...edgegap.deployments.values()].find((x) => edgegap.env(x, "OVERMATCH_SERVER_ID") === serverId);
+	if (!d) throw new Error(`no deployment for ${serverId}`);
+	return call("POST", new URL(d.body.webhook_url as string).pathname, { request_id: requestId });
 }
 
 export function registry(version: string): DurableObjectStub<Registry> {

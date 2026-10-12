@@ -23,7 +23,7 @@ afterEach(() => {
 /** Every secret a deploy body carries. */
 function secretsOf(n: number): string[] {
 	const d = edgegap.deployment(n);
-	return [edgegap.env(d, "OVERMATCH_NETCODE_KEY"), edgegap.env(d, "OVERMATCH_REPORT_SECRET"), "test-webhook-secret"];
+	return [edgegap.env(d, "OVERMATCH_NETCODE_KEY"), edgegap.env(d, "OVERMATCH_REPORT_SECRET")];
 }
 
 describe("provider error text never reaches clients, history or logs", () => {
