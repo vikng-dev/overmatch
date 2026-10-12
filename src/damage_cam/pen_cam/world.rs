@@ -13,7 +13,7 @@ use bevy::ui::IsDefaultUiCamera;
 
 use super::material::GlowMaterial;
 use super::view::Views;
-use super::{Library, PLAYLIST, Run};
+use super::{Library, PLAYLIST, Record, Run, ShotRun};
 use crate::render_policy::{CameraProfile, LightProfile, VisualScope};
 
 /// The staged range from shooter to target (m), inside the spec's 600–1000 m.
@@ -216,27 +216,9 @@ pub fn animate(
             continue;
         };
         let record = &library.records[shot.record];
-        let plan = &record.plan;
-        let impact = Vec3::from(record.report.impact.point);
         let speed = record.report.projectile.speed_mps.max(1.0);
-        let calibre = plan.calibre;
-        let head = if t >= shot.fire && t < shot.impact {
-            let f = (t - shot.fire) / (shot.impact - shot.fire);
-            Some((
-                shot.muzzle.lerp(impact, f),
-                (impact - shot.muzzle).normalize(),
-            ))
-        } else if t >= shot.impact && t < shot.impact + ONWARD_S {
-            onward(plan, speed).map(|(from, direction, onward_speed)| {
-                (
-                    from + direction * onward_speed * (t - shot.impact),
-                    direction,
-                )
-            })
-        } else {
-            None
-        };
-        match head {
+        let calibre = record.plan.calibre;
+        match tracer_head(shot, record, t) {
             Some((head, direction)) if head.distance(eye) > TRACER_NEAR_M => {
                 let length = speed * STREAK_S;
                 *transform = Transform::from_translation(head - direction * length * 0.5)
@@ -290,6 +272,31 @@ pub fn animate(
     }
 }
 
+/// The tracer's head and direction of travel at run time `t`, in the battlefield's frame, or
+/// `None` while the round is not in flight. The battlefield's frame is the record's hull frame:
+/// `view::prepare` places the tank view with its hull node at the origin, unrotated.
+pub(super) fn tracer_head(shot: &ShotRun, record: &Record, t: f32) -> Option<(Vec3, Vec3)> {
+    let plan = &record.plan;
+    let impact = Vec3::from(record.report.impact.point);
+    let speed = record.report.projectile.speed_mps.max(1.0);
+    if t >= shot.fire && t < shot.impact {
+        let f = (t - shot.fire) / (shot.impact - shot.fire);
+        Some((
+            shot.muzzle.lerp(impact, f),
+            (impact - shot.muzzle).normalize(),
+        ))
+    } else if t >= shot.impact && t < shot.impact + ONWARD_S {
+        onward(plan, speed).map(|(from, direction, onward_speed)| {
+            (
+                from + direction * onward_speed * (t - shot.impact),
+                direction,
+            )
+        })
+    } else {
+        None
+    }
+}
+
 /// Where and how fast the round flies on after the struck tank, if the record has it leave: off
 /// the face of its bounce, or out along its path's last leg, at the striking speed scaled by the
 /// last leg's `(v/v₀)²`.
@@ -328,4 +335,133 @@ pub fn face_mark(point: Vec3, normal: Vec3, travel: Vec3, calibre: f32) -> Trans
     Transform::from_translation(point + normal * 0.002)
         .with_rotation(rotation)
         .with_scale(Vec3::new(calibre * 0.5 / cos, calibre * 0.5, 1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::plan::REST_DEPTH_M;
+    use super::super::{Settings, ShotRun};
+    use super::*;
+
+    /// Tolerances: the angle (deg) between the tracer's travel and the record's leg, and the
+    /// distance (m) of its head off that leg's line. A bounce's recorded outgoing direction and the
+    /// marched leg after it differ by 0.34° on the recorded ricochet (MEASURED), under the angle.
+    const ANGLE_TOL_DEG: f32 = 0.5;
+    const POSITION_TOL_M: f32 = 1.0e-3;
+    /// The run clock is sampled at this step (s).
+    const SAMPLE_S: f32 = 1.0e-3;
+
+    fn angle_deg(a: Vec3, b: Vec3) -> f32 {
+        a.normalize()
+            .dot(b.normalize())
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    }
+
+    /// The distance of `p` from the line through `on` along `direction`.
+    fn off_line(p: Vec3, on: Vec3, direction: Vec3) -> f32 {
+        let d = direction.normalize();
+        let v = p - on;
+        (v - d * v.dot(d)).length()
+    }
+
+    /// Why the tracer of `shot` departs from its record's path, if it does.
+    fn departures(shot: &ShotRun, record: &Record) -> Vec<String> {
+        let report = &record.report;
+        let mut path: Vec<Vec3> = Vec::new();
+        for node in &report.path {
+            let p = Vec3::from(node.point);
+            if path.last().is_none_or(|last| last.distance(p) > 1.0e-6) {
+                path.push(p);
+            }
+        }
+        let mut out = Vec::new();
+        let entry = path[1];
+        let first_leg = path[1] - path[0];
+        let last = path[path.len() - 1];
+        let leg_start = path[path.len() - 2];
+        let last_leg = last - leg_start;
+        if entry.distance(Vec3::from(report.impact.point)) > POSITION_TOL_M {
+            out.push(format!(
+                "impact {:?} is not the path's entry {entry}",
+                report.impact.point
+            ));
+        }
+        let rested_in_plate = report.plates.last().is_some_and(|p| p.exit.is_none());
+        let rested_in_box = report.internals.iter().any(|b| {
+            let rotation = Quat::from_array(b.rotation).normalize();
+            let local = rotation.inverse() * (last - Vec3::from(b.center));
+            (local.abs() - Vec3::from(b.half_extents)).max_element() < -REST_DEPTH_M
+        });
+        let leaves = !rested_in_plate && !rested_in_box;
+        let (mut approach, mut onward) = (0, 0);
+        let mut t = shot.fire;
+        while t < shot.impact + 1.0 {
+            if let Some((head, direction)) = tracer_head(shot, record, t) {
+                if t < shot.impact {
+                    approach += 1;
+                    let angle = angle_deg(direction, first_leg);
+                    let off = off_line(head, entry, first_leg);
+                    let beyond = (head - entry).dot(first_leg.normalize());
+                    if angle > ANGLE_TOL_DEG || off > POSITION_TOL_M || beyond > POSITION_TOL_M {
+                        out.push(format!(
+                            "t {t:.3}: approach {angle:.2} deg and {off:.4} m off the first leg, \
+                             {beyond:.4} m past the entry"
+                        ));
+                        break;
+                    }
+                } else {
+                    onward += 1;
+                    if !leaves {
+                        out.push(format!(
+                            "t {t:.3}: flies on at {head} although the path ends at rest at {last}"
+                        ));
+                        break;
+                    }
+                    let angle = angle_deg(direction, last_leg);
+                    let off = off_line(head, last, last_leg);
+                    let allowed = POSITION_TOL_M
+                        + head.distance(leg_start) * ANGLE_TOL_DEG.to_radians().sin();
+                    if angle > ANGLE_TOL_DEG || off > allowed {
+                        out.push(format!(
+                            "t {t:.3}: onward {angle:.2} deg and {off:.4} m off the last leg"
+                        ));
+                        break;
+                    }
+                }
+            }
+            t += SAMPLE_S;
+        }
+        if approach == 0 {
+            out.push("no tracer before the impact".to_owned());
+        }
+        if leaves && onward == 0 {
+            out.push("the path leaves the tank and no tracer flies on".to_owned());
+        }
+        out
+    }
+
+    /// The battlefield's tracer flies the record's path, in the record's hull frame (the
+    /// battlefield's, [`tracer_head`]), for every shot the playlist fires: before
+    /// the impact along the path's first leg (within [`ANGLE_TOL_DEG`]) into its entry, which is
+    /// the record's impact point (within [`POSITION_TOL_M`]); after it only when the path leaves
+    /// the tank — its last point inside no recorded box and no plate it rested in — and then along
+    /// the path's last leg.
+    #[test]
+    fn the_world_tracer_flies_the_records_path() {
+        let library = Library::load();
+        let settings = Settings::default();
+        let mut failures = Vec::new();
+        for entry in 0..PLAYLIST.len() {
+            let run = Run::new(entry, &library, &settings, true);
+            for shot in &run.shots {
+                let record = &library.records[shot.record];
+                for why in departures(shot, record) {
+                    failures.push(format!("{}: {why}", record.stem));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
 }

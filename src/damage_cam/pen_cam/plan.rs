@@ -18,6 +18,9 @@ use crate::damage_cam::{
 pub const LEAD_M: f32 = 1.5;
 /// A path that leaves the tank is drawn this far (m) past its last event.
 pub const RUN_OUT_M: f32 = 1.5;
+/// A path that ends more than this far (m) inside a box ended at rest there; a crossing's exit
+/// lies on the box's face.
+pub const REST_DEPTH_M: f32 = 1.0e-3;
 /// The line's brightness never falls below this: a diagram rule for legibility, not physics.
 pub const LINE_FLOOR: f32 = 0.35;
 
@@ -38,7 +41,7 @@ pub struct Plan {
     pub impact_normal: Vec3,
     pub incidence: f32,
     pub bounce: Option<Bounce>,
-    /// Where the round came to rest inside armour, if it did.
+    /// Where the round came to rest, inside armour or a box, if it did.
     pub stop: Option<Vec3>,
     pub cones: Vec<Cone>,
     pub boxes: Vec<BoxPlan>,
@@ -219,10 +222,7 @@ impl Plan {
         let line = polyline(report);
         let contact = Vec3::from(report.impact.point);
         let contact_arc = line.arc_of(contact);
-        let rested = report
-            .plates
-            .last()
-            .is_some_and(|plate| plate.exit.is_none());
+        let rested = rested(report, &line);
         let n = line.points.len();
         let end_arc = if rested || n < 3 {
             line.length()
@@ -356,6 +356,27 @@ impl Plan {
     }
 }
 
+/// Whether the round came to rest: in the last plate it crossed, when that plate has no exit, or
+/// in a box, when the path ends more than [`REST_DEPTH_M`] inside one. A round that flies on has a
+/// path ending outside the tank, at the march's next point past its last crossing or bounce.
+fn rested(report: &PenetrationReport, line: &Polyline) -> bool {
+    if report
+        .plates
+        .last()
+        .is_some_and(|plate| plate.exit.is_none())
+    {
+        return true;
+    }
+    let Some(&end) = line.points.last() else {
+        return false;
+    };
+    report.internals.iter().any(|internal| {
+        let rotation = Quat::from_array(internal.rotation).normalize();
+        let local = rotation.inverse() * (end - Vec3::from(internal.center));
+        (local.abs() - Vec3::from(internal.half_extents)).max_element() < -REST_DEPTH_M
+    })
+}
+
 fn polyline(report: &PenetrationReport) -> Polyline {
     let mut points: Vec<Vec3> = Vec::with_capacity(report.path.len());
     let mut times: Vec<f32> = Vec::with_capacity(report.path.len());
@@ -453,8 +474,9 @@ mod tests {
     }
 
     /// For every recorded scenario: the drawn span starts before contact and ends at or after
-    /// it, the energy never rises along the path, every cone ray reaches somewhere, and a box is
-    /// reached exactly when it took a dose.
+    /// it, the energy never rises along the path, every cone ray reaches somewhere, a box is
+    /// reached exactly when it took a dose, and a round rested in a plate stops, where the drawn
+    /// line ends.
     #[test]
     fn every_record_plans_a_drawable_picture() {
         for (name, report) in records() {
@@ -472,10 +494,13 @@ mod tests {
             for b in &plan.boxes {
                 assert_eq!(b.dose() > 0.0, b.reached_at.is_some(), "{name}: {}", b.name);
             }
-            assert_eq!(
-                plan.stop.is_some(),
-                report.plates.last().is_some_and(|p| p.exit.is_none())
-            );
+            if report.plates.last().is_some_and(|p| p.exit.is_none()) {
+                assert!(plan.stop.is_some(), "{name}: rested in a plate");
+            }
+            if let Some(stop) = plan.stop {
+                assert_eq!(Some(&stop), plan.line.points.last(), "{name}");
+                assert_eq!(plan.end_arc, plan.line.length(), "{name}");
+            }
         }
     }
 
