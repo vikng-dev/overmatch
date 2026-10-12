@@ -135,6 +135,8 @@ in `src/damage.rs`; cookoff hook on `CookedOff` (§8).
 
 The server owns disclosure. A live client must receive only the detail the current rule permits; hiding privileged truth in the UI is not concealment from a modified client. Armor inspection and scientific diagnostics may use a separate privileged adapter.
 
+**Direction chosen 2026-10-10 (not yet wired).** One frame per verdict: a ricochet shows the deflection from outside, a stopped round the plate slice, a penetration the see-through path and clouds with each box tinted by the dose it took and no state shown live; the full record with its consequences after the match. "Detailed disclosure" stays the alternative as live state tint in the same frame; the authority holds the consequences either way, so the flip is a delivery-policy change on the same record. Decision: `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`, "Corner call, by verdict". Queued beside it, to register when the burst integrator lands: whether boxes shadow a bursting round's cloud (default yes; alternative plates only).
+
 **Why it's a playtest call.** The correct point depends on whether feedback improves comprehension and learning or erodes observation, uncertainty, and tank knowledge. It cannot be settled from implementation convenience.
 
 **Revert cost.** Expected to be low for presentation once the confirmation seam is complete: the required interface is a discrete, shot-attributed authoritative damage fact, deduplicated by `ShotId`, rather than a cue inferred from replicated health snapshots. Changing how much detail the server discloses may widen or narrow that semantic fact, but no presentation belongs in ballistics or damage truth.
