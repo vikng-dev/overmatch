@@ -404,6 +404,66 @@ mod tests {
         }
     }
 
+    /// A fixture chain: a yaw servo with a tilted rest off the hull's origin, a pitch servo under it
+    /// with its own tilted rest off the yaw servo's origin, and a cube component under the pitch
+    /// servo. Composed poses are filled the extraction's way. Every number is fixture data.
+    fn nested_fixture() -> TankGeometry {
+        let mut geometry = tilted_fixture();
+        let cube = geometry.nodes.pop().expect("the cube");
+        geometry.nodes.push(node(
+            "Child",
+            2,
+            Vec3::new(-0.2, 0.4, -0.6),
+            Quat::from_rotation_y(0.3) * Quat::from_rotation_z(-0.15),
+        ));
+        geometry.nodes.push(NodeGeometry {
+            parent: Some(3),
+            ..cube
+        });
+        for index in 1..geometry.nodes.len() {
+            let parent = geometry.nodes[index].parent.unwrap();
+            let (position, rotation) = (
+                geometry.nodes[parent].root_position,
+                geometry.nodes[parent].root_rotation,
+            );
+            let local = geometry.nodes[index].transform;
+            geometry.nodes[index].root_position = position + rotation * local.translation;
+            geometry.nodes[index].root_rotation = rotation * local.rotation;
+        }
+        geometry.by_name = geometry
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (node.name.clone(), index))
+            .collect();
+        geometry.ballistic_volumes = vec![4];
+        geometry
+    }
+
+    /// A parent yaw servo and a child pitch servo turned together, both with tilted rests: each
+    /// vertex is the child's turn about its rest frame, then the parent's about its own, so a
+    /// posing that drops either turn, or composes them in the wrong order, misses.
+    #[test]
+    fn nested_servos_compose_parent_yaw_and_child_pitch() {
+        let geometry = nested_fixture();
+        let (yaw, pitch) = (0.5_f32, -0.35_f32);
+        let rest = TankShapes::posed(&geometry, ["Box"], |_| None);
+        let posed = TankShapes::posed(&geometry, ["Box"], |name| match name {
+            "Servo" => Some((ServoRole::Yaw, yaw)),
+            "Child" => Some((ServoRole::Pitch, pitch)),
+            _ => None,
+        });
+        let (before, after) = (rest.get("Box").unwrap(), posed.get("Box").unwrap());
+        for (a, b) in before.positions.iter().zip(&after.positions) {
+            let child = expected(&geometry, 3, ServoRole::Pitch, pitch, *a);
+            let want = expected(&geometry, 2, ServoRole::Yaw, yaw, child);
+            assert!(
+                b.distance(want) < VERTEX_TOL_M,
+                "{a} drawn at {b}, expected {want}"
+            );
+        }
+    }
+
     /// On a servo with a tilted rest, off its parent's origin, every role at a positive and a
     /// negative angle draws each vertex where the independent expectation puts it.
     #[test]

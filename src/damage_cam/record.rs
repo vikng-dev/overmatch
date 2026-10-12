@@ -30,7 +30,11 @@ use crate::ballistics::{
     ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
-use crate::tank::{RemoteServos, Rig, ServoIndex, TankRoot, TankServos};
+use crate::tank::{
+    Muzzle, RemoteServos, Rig, ServoIndex, TankRoot, TankServos, Weapon, rig_world_pose,
+};
+use avian3d::prelude::{Position, Rotation};
+use bevy::ecs::system::SystemState;
 
 /// What a volume is to the record.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -114,6 +118,8 @@ pub struct ShotFacts {
     pub shooter: Option<Shooter>,
     /// Where the round started (WORLD).
     pub launch: Vec3,
+    /// The shooter's muzzle at fire time (WORLD), [`muzzle_of`].
+    pub muzzle: Option<Vec3>,
     pub projectile: String,
     pub caliber_mm: f32,
     pub mass_kg: f32,
@@ -121,6 +127,24 @@ pub struct ShotFacts {
     pub round: String,
     /// The struck vehicle's tank file, relative to the asset root.
     pub vehicle: Option<String>,
+}
+
+/// Where `shooter`'s weapon `weapon` fires from now (WORLD): its muzzle node's tick-truth pose,
+/// composed from the shooter's root through its rig's local transforms, the pose `shooting::fire`
+/// launches a round from. `None` where the shooter has no such weapon.
+pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec3> {
+    let position = world.get::<Position>(shooter)?.0;
+    let rotation = world.get::<Rotation>(shooter)?.0;
+    let mut state = SystemState::<(
+        Query<(Entity, &Weapon, &TankRoot), With<Muzzle>>,
+        Query<&ChildOf>,
+        Query<&Transform>,
+    )>::new(world);
+    let (weapons, parents, locals) = state.get(world).ok()?;
+    let (muzzle, ..) = weapons
+        .iter()
+        .find(|(_, fired, root)| root.0 == shooter && fired.name == weapon)?;
+    rig_world_pose(muzzle, shooter, position, rotation, &parents, &locals).map(|(at, _)| at)
 }
 
 /// Every servo of `tank` by node name, at the sim's own angle (degrees): the integrator state its
@@ -169,8 +193,12 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
     let mut steps = Vec::new();
     for mark in &marks.log {
         let (step, dosed_here) = match mark {
-            ArmourMark::Bounce { struck, shock, .. } => (PathStep::Bounce, dosed(*struck, *shock)),
+            ArmourMark::Bounce { struck, shock, .. } => {
+                (Some(PathStep::Bounce), dosed(*struck, *shock))
+            }
             ArmourMark::Crossing {
+                entrance,
+                incoming,
                 volumes,
                 end,
                 cones,
@@ -185,17 +213,20 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
                 let line = volumes
                     .iter()
                     .any(|crossed| dosed(crossed.volume, crossed.cost * TRANSIT_K));
-                let step = PathStep::Crossing {
-                    perforated_armour: volumes.iter().any(|crossed| {
-                        crossed.perforated && class_of(world, crossed.volume) == VolumeClass::Main
-                    }),
-                    rested: matches!(end, CrossingEnd::Rest { .. }),
-                };
+                let step = share(world, *entrance, *incoming, volumes, end, tank).map(|share| {
+                    PathStep::Crossing {
+                        perforated_armour: share.perforated_armour,
+                        rested: matches!(share.end, ShareEnd::Rest { .. }),
+                    }
+                });
                 (step, line || field)
             }
-            ArmourMark::Failed => (PathStep::Failed, false),
+            ArmourMark::Failed => (Some(PathStep::Failed), false),
         };
-        if tank.is_none_or(|tank| touches(world, mark, tank)) {
+        // A crossing has a step for the tank only where one of its volumes is the tank's.
+        if let Some(step) = step
+            && tank.is_none_or(|tank| touches(world, mark, tank))
+        {
             steps.push(step);
         }
         if dosed_here {
@@ -203,6 +234,77 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
         }
     }
     steps
+}
+
+/// One tank's part of a crossing, whose volumes may belong to several tanks where hulls overlap:
+/// where the line entered the tank's first volume, how the crossing ended for the tank, and whether
+/// it perforated the tank's armour. The tank's own volumes decide all three, so a round that
+/// perforates one tank and rests in another inside one crossing has left the first and rests in
+/// the second.
+struct Share {
+    entry: Vec3,
+    end: ShareEnd,
+    perforated_armour: bool,
+}
+
+enum ShareEnd {
+    /// It came to rest in one of the tank's volumes (`None`: none is named by the march).
+    Rest { volume: Option<Entity> },
+    /// It left the tank's volumes at `at` (WORLD).
+    Left { at: Vec3 },
+}
+
+/// `tank`'s share of a crossing (every volume's, for `None`); `None` when it crossed none of the
+/// tank's volumes. A crossing all of whose volumes are the tank's keeps the march's own entrance
+/// and end points.
+fn share(
+    world: &World,
+    entrance: Vec3,
+    incoming: Vec3,
+    volumes: &[VolumeCrossing],
+    end: &CrossingEnd,
+    tank: Option<Entity>,
+) -> Option<Share> {
+    let mine: Vec<&VolumeCrossing> = volumes
+        .iter()
+        .filter(|crossed| tank.is_none_or(|tank| owned_by(world, crossed.volume, tank)))
+        .collect();
+    if mine.is_empty() {
+        return None;
+    }
+    let whole = mine.len() == volumes.len();
+    let along = |point: Vec3| (point - entrance).dot(incoming);
+    let entry = if whole {
+        entrance
+    } else {
+        mine.iter()
+            .map(|crossed| crossed.entry)
+            .min_by(|a, b| along(*a).total_cmp(&along(*b)))?
+    };
+    let last_out = || {
+        mine.iter()
+            .map(|crossed| crossed.end)
+            .max_by(|a, b| along(*a).total_cmp(&along(*b)))
+    };
+    let end = match *end {
+        CrossingEnd::Rest { at } => match rested_in(volumes, at) {
+            rest if whole => ShareEnd::Rest { volume: rest },
+            Some(rest) if mine.iter().any(|crossed| crossed.volume == rest) => {
+                ShareEnd::Rest { volume: Some(rest) }
+            }
+            _ => ShareEnd::Left { at: last_out()? },
+        },
+        CrossingEnd::Exit { at, .. } => ShareEnd::Left {
+            at: if whole { at } else { last_out()? },
+        },
+    };
+    Some(Share {
+        entry,
+        end,
+        perforated_armour: mine.iter().any(|crossed| {
+            crossed.perforated && class_of(world, crossed.volume) == VolumeClass::Main
+        }),
+    })
 }
 
 /// Whether a mark belongs to `tank`. A failed walk names no volume and belongs to every tank.
@@ -256,6 +358,16 @@ pub fn report(
     let mut last = facts.launch;
     let mut flying = true;
     let mut contact = 0;
+    let mine = |mark: &ArmourMark| match mark {
+        ArmourMark::Crossing {
+            entrance,
+            incoming,
+            volumes,
+            end,
+            ..
+        } => share(world, *entrance, *incoming, volumes, end, Some(struck.tank)),
+        _ => None,
+    };
     for (index, mark) in marks[..=last_touch].iter().enumerate() {
         if index == first_touch {
             contact = legs.len();
@@ -277,6 +389,15 @@ pub fn report(
                 ..
             } => {
                 legs.push((*entrance, *speed_in));
+                // The struck tank's first contact is its own first volume, which an overlapping
+                // tank's volume may precede inside the crossing.
+                if index == first_touch
+                    && let Some(share) = mine(mark)
+                    && share.entry.distance(*entrance) > 1.0e-6
+                {
+                    contact = legs.len();
+                    legs.push((share.entry, *speed_in));
+                }
                 match *end {
                     CrossingEnd::Rest { at } => {
                         legs.push((at, 0.5 * speed_in));
@@ -367,16 +488,14 @@ pub fn report(
                 volumes,
                 overmatched,
                 cones: count,
-                end: crossing_end,
                 ..
             } => {
-                end = Some(match *crossing_end {
-                    CrossingEnd::Exit { at, .. } => RoundEnd::Left {
+                end = mine(mark).map(|share| match share.end {
+                    ShareEnd::Left { at } => RoundEnd::Left {
                         at: struck.point(at),
                     },
-                    CrossingEnd::Rest { at } => RoundEnd::Rest {
-                        volume: rested_in(volumes, at)
-                            .map_or_else(String::new, |volume| name_of(world, volume)),
+                    ShareEnd::Rest { volume } => RoundEnd::Rest {
+                        volume: volume.map_or_else(String::new, |volume| name_of(world, volume)),
                     },
                 });
                 for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
@@ -451,12 +570,18 @@ pub fn report(
             incoming,
             ..
         } => (*position, *normal, *incoming),
+        // The crossing's entrance normal: the march marks no face normal where a volume is entered
+        // inside a crossing.
         ArmourMark::Crossing {
             entrance,
             normal,
             incoming,
             ..
-        } => (*entrance, *normal, *incoming),
+        } => (
+            mine(first).map_or(*entrance, |share| share.entry),
+            *normal,
+            *incoming,
+        ),
         ArmourMark::Failed => return None,
     };
     let normal = normal.normalize_or_zero();
@@ -474,6 +599,7 @@ pub fn report(
         round: facts.round.clone(),
         shooter: facts.shooter.clone(),
         origin: struck.point(facts.launch),
+        muzzle: facts.muzzle.map(|muzzle| struck.point(muzzle)),
         projectile: Projectile {
             name: facts.projectile.clone(),
             caliber_mm: facts.caliber_mm,
@@ -650,5 +776,97 @@ fn role_of(world: &World, volume: Entity) -> Role {
         Role::Engine
     } else {
         Role::Module
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two overlapping tanks inside one crossing: the round perforates A's plate and comes to rest
+    /// in B's, 5 cm further along. Fixture geometry.
+    fn shared_crossing() -> (World, Entity, Entity, Entity, Vec3, Vec3) {
+        let mut world = World::new();
+        let (a, b) = (world.spawn_empty().id(), world.spawn_empty().id());
+        let plate_a = world.spawn(VolumeOf(a)).id();
+        let plate_b = world.spawn(VolumeOf(b)).id();
+        let entrance = Vec3::new(1.0, 1.5, 0.0);
+        let incoming = Vec3::Z;
+        let rest = entrance + incoming * 0.2;
+        let crossing = ArmourMark::Crossing {
+            entrance,
+            normal: -Vec3::Z,
+            incoming,
+            speed_in: 800.0,
+            overmatched: false,
+            volumes: vec![
+                VolumeCrossing {
+                    volume: plate_a,
+                    entry: entrance,
+                    end: entrance + incoming * 0.1,
+                    chord: 0.1,
+                    cost: 100.0,
+                    perforated: true,
+                },
+                VolumeCrossing {
+                    volume: plate_b,
+                    entry: entrance + incoming * 0.15,
+                    end: rest,
+                    chord: 0.05,
+                    cost: 50.0,
+                    perforated: false,
+                },
+            ],
+            end: CrossingEnd::Rest { at: rest },
+            cones: 0,
+        };
+        let shell = world
+            .spawn(PenetrationMarks {
+                log: vec![crossing],
+                ..PenetrationMarks::default()
+            })
+            .id();
+        (world, shell, a, b, entrance, rest)
+    }
+
+    /// Each tank reads only its own volumes of a shared crossing: A was perforated and the round
+    /// left it; B was not perforated and holds the round; the whole crossing has both.
+    #[test]
+    fn a_shared_crossing_is_scoped_to_each_tank() {
+        let (world, shell, a, b, entrance, _) = shared_crossing();
+        let crossing = |perforated_armour, rested| PathStep::Crossing {
+            perforated_armour,
+            rested,
+        };
+        assert_eq!(
+            path_steps(&world, shell, Some(a)),
+            vec![crossing(true, false)]
+        );
+        assert_eq!(
+            path_steps(&world, shell, Some(b)),
+            vec![crossing(false, true)]
+        );
+        assert_eq!(path_steps(&world, shell, None), vec![crossing(true, true)]);
+
+        let marks = &world.get::<PenetrationMarks>(shell).unwrap().log;
+        let ArmourMark::Crossing {
+            entrance: at,
+            incoming,
+            volumes,
+            end,
+            ..
+        } = &marks[0]
+        else {
+            unreachable!()
+        };
+        let of = |tank| share(&world, *at, *incoming, volumes, end, Some(tank)).unwrap();
+        let (share_a, share_b) = (of(a), of(b));
+        assert!(share_a.entry.distance(entrance) < 1e-6);
+        assert!(
+            matches!(share_a.end, ShareEnd::Left { at } if at.distance(entrance + Vec3::Z * 0.1) < 1e-6),
+            "A is left at its plate's far face"
+        );
+        assert!(share_b.entry.distance(entrance + Vec3::Z * 0.15) < 1e-6);
+        assert!(matches!(share_b.end, ShareEnd::Rest { volume: Some(_) }));
     }
 }

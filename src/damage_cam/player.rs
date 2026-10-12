@@ -1841,6 +1841,7 @@ mod tests {
             round: "fixture".into(),
             shooter: None,
             origin: [0.0; 3],
+            muzzle: None,
             projectile: Projectile {
                 name: "fixture".into(),
                 caliber_mm: 88.0,

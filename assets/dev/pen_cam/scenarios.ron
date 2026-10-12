@@ -42,6 +42,8 @@
         weapon: "MainGun",
         from: (-4.0, 1.5, -3.7),
         toward: (-1.0, 1.5, 0.584),
+        // Fixture muzzle: 620 m back along the shot's own line, the shooter's gun.
+        muzzle: (-359.6421, 1.5, -511.5569),
         verdict: Penetration,
     ),
     (

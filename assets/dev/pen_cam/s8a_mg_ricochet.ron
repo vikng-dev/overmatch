@@ -16,6 +16,7 @@
         vehicle: "tiger_1/tiger_1.tank.ron",
     )),
     origin: (-3.0, 1.5, -6.0),
+    muzzle: None,
     projectile: (
         name: "Coax",
         caliber_mm: 7.8999996,

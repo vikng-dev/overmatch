@@ -16,6 +16,7 @@
         vehicle: "tiger_1/tiger_1.tank.ron",
     )),
     origin: (1.1999998, 5.0, 2.4),
+    muzzle: None,
     projectile: (
         name: "MainGun",
         caliber_mm: 88.0,

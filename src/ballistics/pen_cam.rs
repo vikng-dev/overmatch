@@ -59,6 +59,10 @@ struct Scenario {
     speed: Option<f32>,
     from: Vec3,
     toward: Vec3,
+    /// Where the shooter's gun stood, as a fixture: the recorder fires from `from` and has no
+    /// shooter's rig to read a muzzle off.
+    #[serde(default)]
+    muzzle: Option<Vec3>,
     /// The hull's yaw about `+Y` (degrees).
     #[serde(default)]
     hull_yaw_deg: f32,
@@ -159,6 +163,7 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
             vehicle: crate::tank::TIGER_SPEC_PATH.to_owned(),
         }),
         launch: origin,
+        muzzle: scenario.muzzle.map(|muzzle| PROBE_TANK_AT + muzzle),
         projectile: scenario.weapon.clone(),
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
@@ -183,6 +188,7 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
             speed: None,
             from: turn * Vec3::new(-0.57, 1.45, -6.5),
             toward: turn * Vec3::new(-0.57, 1.45, 0.0),
+            muzzle: None,
             hull_yaw_deg: yaw_deg,
             turret_yaw_deg: 0.0,
             gun_elevation_deg: 0.0,
@@ -256,6 +262,7 @@ fn an_elevated_gun_shot_draws_the_barrel_where_the_path_crosses_it() {
         speed: None,
         from,
         toward,
+        muzzle: None,
         hull_yaw_deg: 0.0,
         turret_yaw_deg: 0.0,
         gun_elevation_deg: ELEVATION_DEG,
@@ -600,6 +607,7 @@ fn fixture_shot_at(
     let facts = ShotFacts {
         shooter: None,
         launch: from,
+        muzzle: None,
         projectile: "fixture".to_owned(),
         caliber_mm: FIXTURE_88.caliber * 1000.0,
         mass_kg: FIXTURE_88.mass,
@@ -941,4 +949,40 @@ fn a_bounce_then_a_stop_rests_where_it_stopped() {
         }
     );
     assert_eq!(report.impact.verdict, ShotVerdict::NonPen);
+}
+
+/// The record's muzzle is read off the shooter's rig: the bound tank's main gun, turned and
+/// elevated, fires from where its muzzle node stands. Fixture angles; 1 mm is the tolerance.
+#[test]
+fn the_muzzle_is_read_off_the_shooters_rig() {
+    let mut app = scenario_world(&Scenario {
+        name: "muzzle".to_owned(),
+        shows: String::new(),
+        weapon: "MainGun".to_owned(),
+        speed: None,
+        from: Vec3::ZERO,
+        toward: Vec3::NEG_Z,
+        muzzle: None,
+        hull_yaw_deg: 20.0,
+        turret_yaw_deg: 35.0,
+        gun_elevation_deg: 8.0,
+        verdict: ShotVerdict::Penetration,
+    });
+    let tank = app.world().resource::<ProbeTank>().0;
+    let muzzle = app.world().get::<Rig>(tank).expect("a rig").muzzle;
+    let node = app
+        .world()
+        .get::<GlobalTransform>(muzzle)
+        .expect("the muzzle is placed")
+        .translation();
+    let read = record::muzzle_of(app.world_mut(), tank, "MainGun").expect("the main gun");
+    assert!(
+        read.distance(node) < 1.0e-3,
+        "read {read}, the node at {node}"
+    );
+    assert!(
+        read.distance(PROBE_TANK_AT) > 1.0,
+        "the muzzle is not the tank's root"
+    );
+    assert!(record::muzzle_of(app.world_mut(), tank, "NoSuchGun").is_none());
 }
