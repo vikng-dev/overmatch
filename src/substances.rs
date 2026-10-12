@@ -31,6 +31,8 @@ use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 use std::collections::BTreeMap;
 
+use crate::provenance::Sourced;
+
 /// The shipped registry, embedded so the walk never depends on asset-server timing (the same reason
 /// [`crate::bake`] embeds the Tiger spec).
 const MATERIALS_RON: &str = include_str!("../assets/materials/materials.ron");
@@ -40,8 +42,7 @@ const MATERIALS_RON: &str = include_str!("../assets/materials/materials.ron");
 pub const REFERENCE_FACTOR: f32 = 1000.0;
 
 /// The facts a structural metal is stated by. SI units throughout.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFacts {
     /// kg/m³.
     pub density: f64,
@@ -99,7 +100,7 @@ impl MaterialFacts {
 }
 
 /// How a substance resists a round's force law.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Resistance {
     /// The reference steel: its facts are the force law's reference constants, and one metre of it
     /// is [`REFERENCE_FACTOR`] reference-mm by definition.
@@ -132,8 +133,7 @@ impl SubstanceId {
 }
 
 /// One substance's entry.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Substance {
     pub resistance: Resistance,
     /// Whether the runtime livery composes onto this substance — exterior steels yes,
@@ -150,6 +150,50 @@ impl Substance {
         match self.resistance {
             Resistance::Reference => REFERENCE_FACTOR,
             Resistance::Effective(factor) => factor,
+        }
+    }
+}
+
+/// One entry as authored: every number with its provenance ([`crate::provenance`]). `paintable` is
+/// a livery flag, not a number, and carries none; the reference's resistance is the unit's
+/// definition and carries none either.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubstanceFile {
+    resistance: ResistanceFile,
+    paintable: bool,
+    facts: Option<FactsFile>,
+}
+
+#[derive(Deserialize)]
+enum ResistanceFile {
+    Reference,
+    Effective(Sourced<f32>),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactsFile {
+    density: Sourced<f64>,
+    flow_strength: Sourced<f64>,
+    youngs_modulus: Sourced<f64>,
+    poisson_ratio: Sourced<f64>,
+}
+
+impl From<SubstanceFile> for Substance {
+    fn from(file: SubstanceFile) -> Self {
+        Self {
+            resistance: match file.resistance {
+                ResistanceFile::Reference => Resistance::Reference,
+                ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
+            },
+            paintable: file.paintable,
+            facts: file.facts.map(|facts| MaterialFacts {
+                density: facts.density.0,
+                flow_strength: facts.flow_strength.0,
+                youngs_modulus: facts.youngs_modulus.0,
+                poisson_ratio: facts.poisson_ratio.0,
+            }),
         }
     }
 }
@@ -198,8 +242,8 @@ impl<'de> Deserialize<'de> for SubstanceMap {
                 // BTreeMap, not HashMap: the diagnostic vocabulary and any future iteration are then
                 // ordered by construction rather than by hash seed.
                 let mut out: BTreeMap<String, Substance> = BTreeMap::new();
-                while let Some((name, substance)) = access.next_entry::<String, Substance>()? {
-                    let substance = checked(&name, substance).map_err(de::Error::custom)?;
+                while let Some((name, substance)) = access.next_entry::<String, SubstanceFile>()? {
+                    let substance = checked(&name, substance.into()).map_err(de::Error::custom)?;
                     if out.insert(name.clone(), substance).is_some() {
                         return Err(de::Error::custom(format!(
                             "substance {name:?} is declared twice — the datablock name is the join \
@@ -396,8 +440,11 @@ mod tests {
     fn with(extra: &str) -> String {
         format!(
             r#"(substances: {{
-                "Ref": (resistance: Reference, paintable: true, facts: Some((density: 7850.0,
-                        flow_strength: 1.0e9, youngs_modulus: 205.0e9, poisson_ratio: 0.29))),
+                "Ref": (resistance: Reference, paintable: true, facts: Some((
+                        density: (7850.0, Tuned("fixture")),
+                        flow_strength: (1.0e9, Tuned("fixture")),
+                        youngs_modulus: (205.0e9, Tuned("fixture")),
+                        poisson_ratio: (0.29, Tuned("fixture"))))),
                 {extra}
             }})"#
         )
@@ -462,10 +509,27 @@ mod tests {
     #[test]
     fn an_unknown_field_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Steel": (resistance: Effective(900.0), paintable: true, facts: None, hardness: 3.0),"#,
+            r#""Steel": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None, hardness: 3.0),"#,
         ))
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
+    }
+
+    /// A factor or a fact authored without its provenance does not load.
+    #[test]
+    fn a_number_without_provenance_fails_the_parse() {
+        let bare_factor =
+            with(r#""Cast": (resistance: Effective(900.0), paintable: true, facts: None),"#);
+        let bare_fact = with(
+            r#""Mild": (resistance: Effective((800.0, Tuned("fixture"))), paintable: true,
+                facts: Some((density: 7900.0, flow_strength: (0.4e9, Tuned("fixture")),
+                youngs_modulus: (190.0e9, Tuned("fixture")), poisson_ratio: (0.29, Tuned("fixture"))))),"#,
+        );
+        for text in [bare_factor, bare_fact] {
+            let err = SubstanceRegistry::from_ron(&text).expect_err("a bare number must not load");
+            assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+            assert!(err.to_string().contains("provenance"), "{err}");
+        }
     }
 
     /// A duplicated datablock name means two different answers for one join key. Serde's default
@@ -473,8 +537,8 @@ mod tests {
     #[test]
     fn a_duplicated_substance_name_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Cast": (resistance: Effective(900.0), paintable: true, facts: None),
-               "Cast": (resistance: Effective(10.0), paintable: false, facts: None),"#,
+            r#""Cast": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None),
+               "Cast": (resistance: Effective((10.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect_err("a duplicate key must not silently overwrite");
         assert!(err.to_string().contains("Cast"), "{err}");
@@ -485,7 +549,7 @@ mod tests {
     #[test]
     fn a_negative_factor_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Rubber": (resistance: Effective(-50.0), paintable: false, facts: None),"#,
+            r#""Rubber": (resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
@@ -497,7 +561,7 @@ mod tests {
     fn a_non_finite_factor_fails_the_parse() {
         for literal in ["NaN", "inf", "-inf"] {
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Flesh": (resistance: Effective({literal}), paintable: false, facts: None),"#
+                r#""Flesh": (resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, facts: None),"#
             )))
             .unwrap_err();
             assert!(
@@ -513,7 +577,7 @@ mod tests {
     #[test]
     fn negative_zero_is_canonicalized() {
         let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": (resistance: Effective(-0.0), paintable: false, facts: None),"#,
+            r#""Void": (resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect("zero resistance is legal, it is just nothing");
         assert_eq!(
@@ -544,12 +608,13 @@ mod tests {
             let facts = base
                 .iter()
                 .map(|(name, value)| {
-                    format!("{name}: {}", if *name == field { bad } else { value })
+                    let value = if *name == field { bad } else { value };
+                    format!(r#"{name}: ({value}, Tuned("fixture"))"#)
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Odd": (resistance: Effective(500.0), paintable: true, facts: Some(({facts}))),"#
+                r#""Odd": (resistance: Effective((500.0, Tuned("fixture"))), paintable: true, facts: Some(({facts}))),"#
             )))
             .expect_err("facts out of domain must not parse");
             assert!(
@@ -570,14 +635,17 @@ mod tests {
         assert!(factless.to_string().contains("Ref"), "{factless}");
 
         let none = SubstanceRegistry::from_ron(
-            r#"(substances: { "Cast": (resistance: Effective(900.0), paintable: true, facts: None) })"#,
+            r#"(substances: { "Cast": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None) })"#,
         )
         .expect_err("a registry without a reference must not load");
         assert!(matches!(none, SubstanceError::Reference(_)), "{none}");
 
         let two = SubstanceRegistry::from_ron(&with(
-            r#""Other": (resistance: Reference, paintable: true, facts: Some((density: 7800.0,
-                flow_strength: 1.18e9, youngs_modulus: 190.0e9, poisson_ratio: 0.29))),"#,
+            r#""Other": (resistance: Reference, paintable: true, facts: Some((
+                density: (7800.0, Tuned("fixture")),
+                flow_strength: (1.18e9, Tuned("fixture")),
+                youngs_modulus: (190.0e9, Tuned("fixture")),
+                poisson_ratio: (0.29, Tuned("fixture"))))),"#,
         ))
         .expect_err("two references must not load");
         assert!(matches!(two, SubstanceError::Reference(_)), "{two}");

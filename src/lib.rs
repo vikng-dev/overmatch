@@ -107,6 +107,9 @@ pub mod dev_capture;
 mod overlay;
 /// OS-level process and window helpers that belong to no game layer.
 mod platform;
+/// Provenance of authored data values: a ballistic data value is authored with where it comes from
+/// (MEASURED / DERIVED / TUNED / RESOLUTION / UNKNOWN), and one authored without does not load.
+mod provenance;
 /// Shutting down: the macOS `Cmd+Q` route into [`AppExit`](bevy::app::AppExit), and the recall of
 /// bevy's render `SubApp` that keeps its exit teardown from deadlocking against its own render
 /// thread. Both are pure exit-path plumbing with no per-frame cost; mounted once per windowed root

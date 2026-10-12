@@ -12,15 +12,21 @@
 // force at every speed. Declared, never inferred from facts or from a fill fraction.
 //
 // `facts` = the material facts of a structural metal (density kg/m³, flow strength Pa at large
-// strain, Young's modulus Pa, Poisson's ratio), each row from the research table in
-// `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` (Q2). `None` where no
-// row is sourced; non-metals (crew, ammunition, rubber, engine block) never carry facts. Facts on
-// an `Effective` entry are recorded for the mechanisms that will read them; the force law does not
-// read them yet, and the strength ratio they give (DERIVED, at the strength-limited end) differs
-// from the declared factor:
+// strain, Young's modulus Pa, Poisson's ratio). `None` where no row is sourced; non-metals (crew,
+// ammunition, rubber, engine block) never carry facts. Facts on an `Effective` entry are recorded
+// for the mechanisms that will read them; the force law does not read them yet, and the strength
+// ratio they give (DERIVED, at the strength-limited end) differs from the declared factor:
 //   - GunSteel, 4340-class quenched-and-tempered analogue: a / a_ref ≈ 1.129 (≈ 1129), ρ / ρ_ref ≈ 0.994.
 //   - MildSteel, 1020 analogue: a / a_ref ≈ 0.460 (≈ 460), ρ / ρ_ref ≈ 1.006.
 //   Cast armour has no sourced row.
+//
+// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
+// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a number without one does not load.
+// "Q2" below is the research table in
+// `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md`. "Research pass
+// 2026-08-07" is the Tiger metallurgy pass whose sources live in that session's record, not in the
+// repo. `paintable` is a livery flag and the reference's resistance the unit's definition; neither
+// is a number with a provenance.
 //
 // Effective factors: baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
 // material research pass 2026-08-07 (Tiger metallurgy, sources in the session record):
@@ -73,19 +79,84 @@
 // those counts, because a second vehicle is a different model and not a broken one.
 (
     substances: {
-        "RHA":         (resistance: Reference, paintable: true,
-                        facts: Some((density: 7850.0, flow_strength: 1.0e9,
-                                     youngs_modulus: 205.0e9, poisson_ratio: 0.29))),
-        "GunSteel":    (resistance: Effective(1000.0), paintable: true,
-                        facts: Some((density: 7800.0, flow_strength: 1.18e9,
-                                     youngs_modulus: 190.0e9, poisson_ratio: 0.29))),
-        "Cast":        (resistance: Effective( 900.0), paintable: true,  facts: None),
-        "MildSteel":   (resistance: Effective( 800.0), paintable: true,
-                        facts: Some((density: 7900.0, flow_strength: 0.40e9,
-                                     youngs_modulus: 190.0e9, poisson_ratio: 0.29))),
-        "EngineBlock": (resistance: Effective( 150.0), paintable: false, facts: None),
-        "Ammunition":  (resistance: Effective( 200.0), paintable: false, facts: None),
-        "Rubber":      (resistance: Effective(  50.0), paintable: false, facts: None),
-        "Flesh":       (resistance: Effective(  10.0), paintable: false, facts: None),
+        "RHA": (
+            resistance: Reference,
+            paintable: true,
+            facts: Some((
+                density: (7850.0, Unknown("generic structural-steel density, carried as the force
+                    law's former reference density; Q2 read no RHA-specific value (4340 MEASURED at
+                    7800). Settled by an RHA datasheet density")),
+                flow_strength: (1.0e9, Derived("mean of an RHA-class product's Rp0.2 900 MPa and
+                    Rm 1150 MPa (MEASURED: SSAB Armox 370T Class 1 datasheet, Cimpoeru 2016 Table
+                    I), the flow-stress convention of Q2; range 0.85–1.25 GPa across thickness bands")),
+                youngs_modulus: (205.0e9, Tuned("chosen inside the steel range 190–210 GPa
+                    (MEASURED 190 for Q&T 4340 and 1020, MakeItFrom; 210 generic); Q2 found no
+                    RHA-specific value. Moves results about 1 % (Q5)")),
+                poisson_ratio: (0.29, Tuned("chosen inside the steel range 0.27–0.30; Q2 found no
+                    RHA-specific value. Moves results about 1 % (Q5)")),
+            )),
+        ),
+        "GunSteel": (
+            resistance: Effective((1000.0, Tuned("declared effective factor: forged autofrettaged
+                gun steel taken as RHA quality, unified at the reference (research pass
+                2026-08-07). Not derived from the facts below, which give ≈ 1129 (DERIVED)"))),
+            paintable: true,
+            facts: Some((
+                density: (7800.0, Measured("4340, MakeItFrom 'Quenched and Tempered 4340 Ni-Cr-Mo
+                    Steel' (read, secondary), Q2")),
+                flow_strength: (1.18e9, Derived("mean of Rp0.2 1150 MPa and Rm 1210 MPa (MEASURED,
+                    one temper, MakeItFrom 4340, read, secondary), the flow-stress convention of Q2")),
+                youngs_modulus: (190.0e9, Measured("Q&T 4340, MakeItFrom (read, secondary), Q2")),
+                poisson_ratio: (0.29, Measured("Q&T 4340, MakeItFrom (read, secondary), Q2")),
+            )),
+        ),
+        "Cast": (
+            resistance: Effective((900.0, Derived("mid of cast armour running ~5–15 % below rolled
+                ballistically (research pass 2026-08-07)"))),
+            paintable: true,
+            facts: None,
+        ),
+        "MildSteel": (
+            resistance: Effective((800.0, Tuned("non-armour structural and machinery steel taken
+                at ~0.8× RHA (research pass 2026-08-07). Not derived from the facts below, which
+                give ≈ 460 (DERIVED)"))),
+            paintable: true,
+            facts: Some((
+                density: (7900.0, Measured("1020, MakeItFrom via search excerpt (read, secondary;
+                    the page redirected), Q2")),
+                flow_strength: (0.40e9, Derived("from yield 240–380 MPa and Rm 430–460 MPa
+                    (MEASURED, MakeItFrom 1020 via search excerpt), the flow-stress convention of
+                    Q2")),
+                youngs_modulus: (190.0e9, Measured("1020, MakeItFrom via search excerpt, Q2")),
+                poisson_ratio: (0.29, Measured("1020, MakeItFrom via search excerpt, Q2")),
+            )),
+        ),
+        "EngineBlock": (
+            resistance: Effective((150.0, Derived("grey cast iron ~0.4× RHA times a ~30–40 % metal
+                fraction along a shot line ≈ 140, rounded to 150 (research pass 2026-08-07). The
+                fill scaling is an assumption, not a fact"))),
+            paintable: false,
+            facts: None,
+        ),
+        "Ammunition": (
+            resistance: Effective((200.0, Unknown("no derivation recorded; carried from the
+                per-node factors of the first tank file (2026-08-06). Settled by an effective
+                resistance for stowed rounds and propellant"))),
+            paintable: false,
+            facts: None,
+        ),
+        "Rubber": (
+            resistance: Effective((50.0, Unknown("no derivation recorded; carried from the
+                per-node factors of the first tank file (2026-08-06). Settled by a penetration
+                equivalence for road-wheel rubber"))),
+            paintable: false,
+            facts: None,
+        ),
+        "Flesh": (
+            resistance: Effective((10.0, Tuned("low end of a ballistic-gelatin equivalence
+                ~0.010–0.015 of RHA, taken low for AP (research pass 2026-08-07)"))),
+            paintable: false,
+            facts: None,
+        ),
     },
 )

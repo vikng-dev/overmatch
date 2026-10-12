@@ -4,24 +4,28 @@
 // `.agents/docs/design/armor-penetration-and-damage.md`; this file holds only its shape data.
 //
 // Every value here is a choice the owner can change by editing this file alone; none is a
-// constant of the law. The playtest fork on the half-angle and the axis is recorded in
+// constant of the law. The playtest fork on the half-angle and the axis is F5 in
 // `.agents/scratch/playtest-forks/README.md`.
+//
+// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
+// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
     // Half-angle α (degrees) of the cone: the rim where the profile's strength reaches zero.
-    // TUNED/provisional, owner 2026-10-12; MEASURED normal-impact outer extents ~26° (Qi et al.
-    // 2026, see .agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md).
-    half_angle_deg: 25.0,
+    half_angle_deg: (25.0, Tuned("provisional default, owner 2026-10-12 (playtest fork F5);
+        comparable MEASURED normal-impact outer extents ~26° (Qi et al. 2026,
+        .agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md)")),
 
     // The cone's axis. `RearNormalBisector`: normalize(rear-face outward normal + exit direction)
     // at a genuine exit, the exit direction at an internal step (which has no face).
     // `ExitDirection`: the exit direction everywhere.
-    // ENGINEERING ASSUMPTION, MEASURED support Verolme 1997, Recht & Howell 1967 (debris axis about
-    // halfway between the shot line and the plate normal; 25° measured against 22.5° predicted at
-    // 45° obliquity — research/cloud-angle-deep.md).
-    axis: RearNormalBisector,
+    axis: (RearNormalBisector, Tuned("engineering assumption (playtest fork F5) with MEASURED
+        support: debris axis about halfway between the shot line and the plate normal, 25°
+        measured against 22.5° predicted at 45° obliquity (Verolme 1997, Recht & Howell 1967;
+        research/cloud-angle-deep.md)")),
 
     // N, the number of directions the cone is sampled by, in equal-solid-angle strata of weight
-    // 1/N. Resolution, not balance: the emitted total is S/2 at every N, so N changes how finely a
-    // box's dose is resolved, never how much the cone carries.
-    directions: 24,
+    // 1/N. The emitted total is S/2 at every N, so N changes how finely a box's dose is resolved,
+    // never how much the cone carries.
+    directions: (24, Resolution("sampling of the cone; changes how finely a box's dose is
+        resolved, never the emitted total")),
 )

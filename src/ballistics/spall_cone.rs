@@ -22,6 +22,8 @@
 use bevy::prelude::*;
 use serde::Deserialize;
 
+use crate::provenance::Sourced;
+
 /// The shipped shape, embedded so a throw never waits on the asset server (ADR-0014: built from
 /// data, synchronously).
 const SPALL_CONE_RON: &str = include_str!("../../assets/ballistics/spall_cone.ron");
@@ -38,12 +40,13 @@ pub(crate) enum AxisRule {
     ExitDirection,
 }
 
+/// The file as authored: every value with its provenance ([`crate::provenance`]).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeFile {
-    half_angle_deg: f64,
-    axis: AxisRule,
-    directions: usize,
+    half_angle_deg: Sourced<f64>,
+    axis: Sourced<AxisRule>,
+    directions: Sourced<usize>,
 }
 
 /// One direction of the cone in the cone's own frame: `cos θ`, the two lateral components
@@ -156,9 +159,9 @@ impl ConeShape {
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
         Self::new(
-            file.half_angle_deg * std::f64::consts::PI / 180.0,
-            file.axis,
-            file.directions,
+            file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
+            file.axis.0,
+            file.directions.0,
         )
     }
 
@@ -234,11 +237,32 @@ mod tests {
             assert!(ConeShape::new(half_angle, AxisRule::ExitDirection, directions).is_err());
         }
         assert!(ConeShape::new(ALPHA, AxisRule::ExitDirection, 0).is_err());
-        let text = "(half_angle_deg: 25.0, axis: ExitDirection, directions: 24, range: 6.0)";
+        let text = r#"(half_angle_deg: (25.0, Tuned("fixture")),
+            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
+            range: (6.0, Tuned("fixture")))"#;
         assert!(
             ConeShape::from_ron(text).is_err(),
             "an unknown field is refused"
         );
+    }
+
+    /// A shape value authored without its provenance is refused at parse.
+    #[test]
+    fn a_shape_value_without_provenance_is_refused() {
+        let sourced = r#"(half_angle_deg: (25.0, Tuned("fixture")),
+            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")))"#;
+        assert!(ConeShape::from_ron(sourced).is_ok());
+        for bare in [
+            r#"(half_angle_deg: 25.0, axis: (ExitDirection, Tuned("fixture")),
+                directions: (24, Resolution("fixture")))"#,
+            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: ExitDirection,
+                directions: (24, Resolution("fixture")))"#,
+            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
+                directions: 24)"#,
+        ] {
+            let error = ConeShape::from_ron(bare).expect_err(bare);
+            assert!(error.contains("provenance"), "{bare}: {error}");
+        }
     }
 
     /// A half-angle the profile cannot resolve is refused at parse: at `1e-9` rad `cos α` rounds to

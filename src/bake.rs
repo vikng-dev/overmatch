@@ -1526,7 +1526,11 @@ mod tests {
         // which is the whole reason the file has to come from the right revision.
         std::fs::write(
             &elsewhere,
-            "SubstanceRegistry(substances: {\"Cheese\": (resistance: Reference, paintable: false, facts: Some((density: 1000.0, flow_strength: 1.0e6, youngs_modulus: 1.0e9, poisson_ratio: 0.4)))})",
+            r#"SubstanceRegistry(substances: {"Cheese": (resistance: Reference, paintable: false,
+                facts: Some((density: (1000.0, Tuned("fixture")),
+                    flow_strength: (1.0e6, Tuned("fixture")),
+                    youngs_modulus: (1.0e9, Tuned("fixture")),
+                    poisson_ratio: (0.4, Tuned("fixture")))))})"#,
         )
         .expect("the fixture registry is writable");
         let findings = verify_asset(&asset.glb, Some(&elsewhere));
