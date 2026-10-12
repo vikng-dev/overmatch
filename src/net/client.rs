@@ -618,6 +618,14 @@ pub fn run() {
             .add_systems(
                 Update,
                 update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
+            )
+            // The screen is derived after this frame's connection state and before any owner
+            // declares an overlay from it.
+            .add_systems(
+                Update,
+                derive_flow
+                    .after(drive_connection)
+                    .before(crate::overlay::OverlaySet::Declare),
             );
     }
 
@@ -862,6 +870,24 @@ fn drive_connection(
         }
         Some(_) => {}
     }
+}
+
+/// The screen this client is on, from its link (`flow::flow_of`): no link is the Join menu, a link
+/// that has never connected is the connect screen, and one that has is the match.
+fn derive_flow(
+    links: Query<(), With<NetcodeClient>>,
+    retry: Res<ConnectRetry>,
+    state: Res<State<AppState>>,
+    mut next: ResMut<NextState<crate::flow::Flow>>,
+) {
+    crate::flow::write(
+        &mut next,
+        crate::flow::FlowFacts::Net {
+            link: !links.is_empty(),
+            connected_once: retry.connected_once,
+            playing: *state.get() != AppState::Loading,
+        },
+    );
 }
 
 /// Matchmaking mode: spawn the client link for a ready match, with that match's key, and start the

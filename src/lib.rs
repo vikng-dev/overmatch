@@ -67,6 +67,9 @@ mod exact;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
+/// Which screen a windowed client is on (`Flow`): view state that owns the UI trees, never read by
+/// the fixed clock.
+mod flow;
 mod frame_cost;
 /// The tank build's certificate applied at runtime (ADR-0035): `<id>.lod.json` read as data, the
 /// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung on every
@@ -644,6 +647,9 @@ pub struct ClientPlugin;
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         gate_player_input(app);
+        // The screen state, derived from `AppState` (`Boot` while loading, then `InMatch`), mounted
+        // before every plugin that spawns or gates on it.
+        app.add_plugins(flow::offline_plugin);
         app.add_plugins((
             // Load the bundled UI font first: it inserts `UiFonts` at build time, so the HUD/crew
             // spawn systems below always find it (see `ui_font`).
@@ -728,6 +734,9 @@ pub struct NetClientPlugin;
 impl Plugin for NetClientPlugin {
     fn build(&self, app: &mut App) {
         gate_player_input(app);
+        // The screen state, mounted before every plugin that spawns or gates on it; its writer is
+        // `net::client`'s, which owns the link facts it derives from.
+        app.add_plugins(flow::plugin);
         app.add_plugins((
             // Load the bundled UI font first (inserts `UiFonts` at build time; see `ui_font`).
             ui_font::plugin,
