@@ -15,6 +15,11 @@ fleet footprint was debuginfo, 37 GB of it our own crate's `.o` files):
 - `com.overmatch.target-sweep.plist` — launchd user agent that runs `sweep.sh` weekly,
   Sunday 04:00. Logs to `/tmp/overmatch-target-sweep.log`.
 
+- `warm-target.sh` — run from a fresh worktree's root: clones the main checkout's `target/`
+  (APFS, seconds) and gives every tracked file identical to main's copy main's mtime, so cargo
+  reuses everything main already compiled — including Bevy above the `vendor/` path crates,
+  which a plain `cp -c -R` rebuilds because checkout stamps them newer than the clone.
+
 Requires `cargo-sweep` (`cargo install cargo-sweep`; 0.8.0 at time of writing).
 
 ## Install the weekly agent
