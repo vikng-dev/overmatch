@@ -21,5 +21,8 @@ export default defineConfig({
 	],
 	test: {
 		setupFiles: ["./test/setup.ts"],
+		// The Edgegap fake is reached through the global `fetch` stub (test/setup.ts); files running
+		// at once would swap each other's fake mid-test.
+		fileParallelism: false,
 	},
 });

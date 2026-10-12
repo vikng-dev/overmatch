@@ -301,7 +301,7 @@ export class Registry extends DurableObject<Env> {
 
 		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray()) {
 			if (r.created_at + this.cfg.startDeadlineMs <= now) {
-				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting") ?? []));
+				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting", now) ?? []));
 			} else if ((r.next_poll_at ?? 0) <= now) {
 				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, r.id);
 				if (r.deployment_id) work.push(() => this.refreshStatus(r.id));
@@ -311,11 +311,14 @@ export class Registry extends DurableObject<Env> {
 		const silent = this.sql
 			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'ready' AND last_seen <= ?", now - this.cfg.heartbeatDeadlineMs)
 			.toArray();
-		for (const { id } of silent) retry.push(...(this.beginStop(id, "lost", REASONS.serverLost, "ready") ?? []));
+		for (const { id } of silent) retry.push(...(this.beginStop(id, "lost", REASONS.serverLost, "ready", now) ?? []));
 		const stopping = this.sql
 			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'stopping' AND COALESCE(stop_at, 0) <= ?", now)
 			.toArray();
-		for (const { id } of stopping) work.push(() => this.tryStop(id));
+		for (const { id } of stopping) {
+			this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, id);
+			work.push(() => this.tryStop(id));
+		}
 
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
 		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
@@ -603,10 +606,9 @@ export class Registry extends DurableObject<Env> {
 
 	/** The synchronous half of `finish`: the transition and the ticket bookkeeping. Returns the
 	 *  tickets to place again, or null when the row was not live (or not in `from`). */
-	private beginStop(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): string[] | null {
+	private beginStop(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready", now = Date.now()): string[] | null {
 		const s = this.server(serverId);
 		if (!s || !live(s) || (from && s.state !== from)) return null;
-		const now = Date.now();
 		const moved = this.sql.exec(
 			"UPDATE servers SET state = 'stopping', outcome = ?, reason = ?, stop_at = ? WHERE id = ? AND state = ?",
 			outcome,
