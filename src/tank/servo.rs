@@ -44,6 +44,11 @@ pub struct ServoSpec {
 }
 
 impl ServoSpec {
+    /// The degree of freedom this servo drives.
+    pub fn role(&self) -> ServoRole {
+        self.role
+    }
+
     /// Authored travel window converted to runtime radians; `None` means continuous rotation.
     pub fn travel_limits(&self) -> Option<(f32, f32)> {
         match self.travel {

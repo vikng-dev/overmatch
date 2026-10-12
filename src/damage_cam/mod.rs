@@ -11,6 +11,7 @@
 //! `synthetic` marks a report whose numbers were authored, not simulated; the player prints it on
 //! screen.
 
+pub mod pen_cam;
 pub mod player;
 pub mod record;
 

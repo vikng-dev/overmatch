@@ -17,7 +17,7 @@
 //!   1. A layer carries a stable rendering DOMAIN — a fact about the world, not about this frame.
 //!   2. Cast-versus-draw is PER-OBJECT policy, not a layer.
 //!
-//! So: three semantic [`Channel`]s that never change meaning, chosen per-object through
+//! So: four semantic [`Channel`]s that never change meaning, chosen per-object through
 //! [`VisualScope`]; cameras and lights subscribe to sets of channels through named profiles; and
 //! the shadow half of the decision rides the same component instead of a second bitmask.
 //!
@@ -28,6 +28,7 @@
 //! | `BattlefieldWorld` | everything, by default — terrain, opponents, shells, every effect   |
 //! | `ViewSubjectBody`  | the body whose view the local camera currently occupies             |
 //! | `ShadowOnly`       | invisible caster geometry standing in for something expensive       |
+//! | `PenCamStage`      | the pen cam inset's own stage: the struck tank as the record draws it |
 //!
 //! `ViewSubjectBody` is deliberately NOT called `Self` or `Local`: the channel means "the body this
 //! camera is riding", which is the right answer for a future spectator or replay camera too, and
@@ -39,12 +40,16 @@
 //!
 //! # The invariant worth stating out loud
 //!
-//! **Every camera always draws `BattlefieldWorld`.** The gunner optic does not stop drawing the
+//! **Every battlefield camera always draws `BattlefieldWorld`.** The gunner optic does not stop drawing the
 //! world; it merely stops drawing `ViewSubjectBody`. That is what makes the rest of the codebase
 //! able to ignore this module completely: an effect, a gizmo, an impact marker or a prewarm rig
 //! that carries no [`VisualScope`] at all is on `BattlefieldWorld` by construction and is therefore
 //! visible in every view, in every mode, forever. Nothing outside a tank body needs scoping, and
 //! "helpfully" scoping it is a regression.
+//!
+//! The one camera that is not a battlefield camera is the pen cam inset
+//! ([`CameraProfile::PenCamInset`]): it draws `PenCamStage` alone, a stage no battlefield camera
+//! draws, so the record's picture and the battlefield never see each other.
 //!
 //! # Shadows depend on the LIGHT's mask now
 //!
@@ -86,6 +91,8 @@ enum Channel {
     ViewSubjectBody,
     /// Invisible caster geometry — drawn by no camera, seen by every light.
     ShadowOnly,
+    /// The pen cam inset's stage, drawn by that inset alone.
+    PenCamStage,
 }
 
 impl Channel {
@@ -95,6 +102,7 @@ impl Channel {
             Self::BattlefieldWorld => 0,
             Self::ViewSubjectBody => 1,
             Self::ShadowOnly => 2,
+            Self::PenCamStage => 3,
         }
     }
 
@@ -193,6 +201,12 @@ impl VisualScope {
         channel: None,
         shadow: ShadowRole::ReceiveOnly,
     };
+
+    /// The pen cam inset's stage: drawn by the inset alone, in no shadow pass.
+    pub(crate) const PEN_CAM_STAGE: Self = Self {
+        channel: Some(Channel::PenCamStage),
+        shadow: ShadowRole::Neither,
+    };
 }
 
 /// Which channels a camera draws. Put this on a `Camera3d` and change it to switch views; the mask
@@ -205,6 +219,8 @@ pub(crate) enum CameraProfile {
     /// The gunner optic: the world, and NOT the body it is riding. Note what this does not say —
     /// the optic never stops drawing `BattlefieldWorld`; it drops exactly one channel.
     BattlefieldOptic,
+    /// The pen cam inset: its own stage and nothing of the battlefield.
+    PenCamInset,
 }
 
 impl CameraProfile {
@@ -214,6 +230,7 @@ impl CameraProfile {
                 Channel::mask(&[Channel::BattlefieldWorld, Channel::ViewSubjectBody])
             }
             Self::BattlefieldOptic => Channel::mask(&[Channel::BattlefieldWorld]),
+            Self::PenCamInset => Channel::mask(&[Channel::PenCamStage]),
         }
     }
 }
@@ -234,6 +251,8 @@ pub(crate) enum LightProfile {
     BattlefieldSun,
     /// A transient muzzle flash.
     BattlefieldMuzzleFlash,
+    /// The pen cam stage's key light: the stage alone.
+    PenCamKey,
 }
 
 impl LightProfile {
@@ -244,8 +263,15 @@ impl LightProfile {
                 Channel::ViewSubjectBody,
                 Channel::ShadowOnly,
             ]),
+            Self::PenCamKey => Channel::mask(&[Channel::PenCamStage]),
         }
     }
+}
+
+/// The mask a gizmo group drawn on the pen cam stage takes: gizmos carry no [`VisualScope`], so
+/// their group's config names the channel instead.
+pub(crate) fn pen_cam_gizmo_layers() -> RenderLayers {
+    Channel::mask(&[Channel::PenCamStage])
 }
 
 /// Resolve profiles and scopes into bevy's own components, before anything reads them.
@@ -543,6 +569,38 @@ mod tests {
         for camera in [f.third_person, f.optic] {
             assert!(!f.reaches(camera, f.shadow_proxy));
         }
+    }
+
+    /// The pen cam inset and the battlefield never see each other: the inset draws its stage and
+    /// nothing else, no battlefield camera or light reaches the stage, and the stage's key light
+    /// reaches the stage alone.
+    #[test]
+    fn the_pen_cam_inset_and_the_battlefield_are_disjoint() {
+        let mut f = Fixture::new();
+        let world = f.app.world_mut();
+        let inset = world.spawn(CameraProfile::PenCamInset).id();
+        let key = world.spawn(LightProfile::PenCamKey).id();
+        let stage = world
+            .spawn((Mesh3d(Handle::default()), VisualScope::PEN_CAM_STAGE))
+            .id();
+        let under_stage = world.spawn(Mesh3d(Handle::default())).id();
+        world.entity_mut(under_stage).insert(ChildOf(stage));
+        f.app.update();
+        for target in [stage, under_stage] {
+            assert!(f.reaches(inset, target));
+            assert!(f.reaches(key, target));
+            for viewer in [f.third_person, f.optic, f.sun] {
+                assert!(!f.reaches(viewer, target), "the battlefield sees the stage");
+            }
+        }
+        for target in [f.world_solid, f.view_subject, f.effect, f.unscoped] {
+            assert!(!f.reaches(inset, target), "the inset draws the battlefield");
+            assert!(
+                !f.reaches(key, target),
+                "the stage light lights the battlefield"
+            );
+        }
+        assert!(!casts_shadow(f.app.world(), stage));
     }
 
     /// The shadow roles land as bevy markers.

@@ -76,6 +76,12 @@ impl Overlay {
     /// of the VIEW the overlays cover, not one of them.
     pub(crate) const SIGHT_FURNITURE_Z: i32 = -10;
 
+    /// The z-layer for the pen cam corner, the inset that explains a hit (`damage_cam::pen_cam`):
+    /// above the unindexed HUD nodes at 0, whose fixed slot it shares with nothing, and below
+    /// every overlay, so a death screen, a map, a menu or a connect screen covers it whole. It
+    /// carries no [`OverlayNode`]: it declares no presence, captures no input and owns no scrim.
+    pub(crate) const PEN_CAM_CORNER_Z: i32 = 20;
+
     /// Whether this overlay CAPTURES input while active — play stops and the cursor frees. The menu is
     /// the obvious one; connect status too (there is no tank to drive until the link is up, and a
     /// visible cursor over "CONNECTING…" is the honest state). Death and view-death do NOT block: the

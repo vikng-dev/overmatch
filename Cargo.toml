@@ -137,6 +137,11 @@ name = "damage_cam_demo"
 path = "src/bin/damage_cam_demo.rs"
 required-features = ["dev_tools"]
 
+[[bin]]
+name = "pen_cam_demo"
+path = "src/bin/pen_cam_demo.rs"
+required-features = ["dev_tools"]
+
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
