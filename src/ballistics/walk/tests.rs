@@ -687,6 +687,30 @@ fn non_finite_and_negative_factors_are_rejected_at_construction() {
     assert_eq!(table.factor(volume(1)).unwrap().to_bits(), 0.0f32.to_bits());
 }
 
+/// One substance carries one factor, and one volume one entry: either violation is a named load
+/// error, never a silent choice between the two.
+#[test]
+fn a_substance_has_one_factor_and_a_volume_one_entry() {
+    let steel = VolumeMaterial::fixture(1000.0);
+    let conflicting = VolumeMaterial {
+        factor: 2000.0,
+        ..steel
+    };
+    assert_eq!(
+        VolumeTable::new([(volume(1), steel), (volume(2), conflicting)]).unwrap_err(),
+        WalkError::SubstanceFactorConflict {
+            substance: steel.substance,
+            first: 1000.0,
+            second: 2000.0,
+        }
+    );
+    assert_eq!(
+        VolumeTable::new([(volume(1), steel), (volume(1), steel)]).unwrap_err(),
+        WalkError::RepeatedVolume { volume: volume(1) }
+    );
+    assert!(VolumeTable::new([(volume(1), steel), (volume(2), steel)]).is_ok());
+}
+
 /// A hit naming a volume with no factor is a bind gap, and a bind gap must not resolve to a default.
 #[test]
 fn an_unbound_volume_is_an_error_not_a_default_factor() {

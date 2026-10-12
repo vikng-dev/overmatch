@@ -122,6 +122,13 @@ impl SubstanceId {
     pub(crate) fn fixture(factor: f32) -> Self {
         Self(1 << 32 | factor.to_bits() as u64)
     }
+
+    /// The §13.6 gate's probe substance: the stronger copy its monotonicity check adds beside a
+    /// real volume. Disjoint from every registry and fixture id.
+    #[cfg(any(feature = "dev_tools", test))]
+    pub(crate) fn probe() -> Self {
+        Self(2 << 32)
+    }
 }
 
 /// One substance's entry.

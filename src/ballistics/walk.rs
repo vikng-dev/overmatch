@@ -247,22 +247,36 @@ impl VolumeTable {
     /// sum. A `NaN` poisons both the field maximum and the sort; a negative factor breaks
     /// monotonicity (§13.6). Zero is canonicalized so `-0.0` cannot produce a second bit pattern
     /// for "no material" and defeat the bit-equality coalescing in [`walk_ray`].
+    ///
+    /// One volume, one entry; one substance, one factor. Interfaces compare substance identity
+    /// while mechanisms read factors, so a substance carrying two factors would change resistance
+    /// where no interface is reported ([`WalkError::SubstanceFactorConflict`]), and a repeated
+    /// volume would have one of its materials silently dropped ([`WalkError::RepeatedVolume`]).
     pub fn new(
         entries: impl IntoIterator<Item = (Entity, VolumeMaterial)>,
     ) -> Result<Self, WalkError> {
         let mut materials = BTreeMap::new();
+        let mut factors: BTreeMap<SubstanceId, f32> = BTreeMap::new();
         for (volume, material) in entries {
             let factor = material.factor;
             if !factor.is_finite() || factor < 0.0 {
                 return Err(WalkError::BadFactor { volume, factor });
             }
-            materials.insert(
-                volume,
-                VolumeMaterial {
-                    factor: if factor == 0.0 { 0.0 } else { factor },
-                    ..material
-                },
-            );
+            let factor = if factor == 0.0 { 0.0 } else { factor };
+            let declared = *factors.entry(material.substance).or_insert(factor);
+            if declared.to_bits() != factor.to_bits() {
+                return Err(WalkError::SubstanceFactorConflict {
+                    substance: material.substance,
+                    first: declared,
+                    second: factor,
+                });
+            }
+            if materials
+                .insert(volume, VolumeMaterial { factor, ..material })
+                .is_some()
+            {
+                return Err(WalkError::RepeatedVolume { volume });
+            }
         }
         Ok(Self { materials })
     }
@@ -467,6 +481,14 @@ impl Default for WalkLaws {
 pub enum WalkError {
     /// A factor that cannot participate in `max` or in a deterministic sum.
     BadFactor { volume: Entity, factor: f32 },
+    /// One substance declared at two factors in one volume table.
+    SubstanceFactorConflict {
+        substance: SubstanceId,
+        first: f32,
+        second: f32,
+    },
+    /// One volume supplied twice to a volume table.
+    RepeatedVolume { volume: Entity },
     /// A hit named a volume the table does not carry — a bind gap, never a defaultable factor.
     UnknownVolume { volume: Entity },
     /// The corridor itself is malformed (non-unit axis, non-finite length, a hit behind the origin).

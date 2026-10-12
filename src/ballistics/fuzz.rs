@@ -52,6 +52,7 @@ use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeT
 use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for};
 use crate::Layer;
 use crate::damage::{Ammo, CrewStation, hit_ancestor};
+use crate::substances::SubstanceId;
 use crate::tank::{TankSimSource, spawn_headless_tank};
 
 // ---------------------------------------------------------------------------------------------
@@ -320,6 +321,7 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
     match error {
         WalkError::BadFactor { volume, .. }
         | WalkError::UnknownVolume { volume }
+        | WalkError::RepeatedVolume { volume }
         | WalkError::CollectorFailed { volume, .. }
         | WalkError::CorridorOverflow { volume, .. }
         | WalkError::UncertifiedStart { volume, .. } => Some(*volume),
@@ -331,6 +333,7 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::CorridorMismatch { .. }
         | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. }
+        | WalkError::SubstanceFactorConflict { .. }
         | WalkError::UnsupportedControl
         | WalkError::DrainExhausted { .. } => None,
     }
@@ -888,20 +891,18 @@ impl Pass<'_, '_, '_> {
         doubled.hits.extend(copies);
 
         out.duplication_checks += 1;
-        for (scale, kind) in [
-            (1.0_f32, ViolationKind::DuplicationChangedCost),
-            (2.0, ViolationKind::DuplicationLoweredCost),
+        // The idempotence probe duplicates the seed in its own substance; the monotonicity probe
+        // duplicates it in a distinct substance at twice its factor (one substance, one factor).
+        let stronger = walk::VolumeMaterial {
+            substance: SubstanceId::probe(),
+            factor: material.factor * 2.0,
+        };
+        for (scale, copy, kind) in [
+            (1.0_f32, material, ViolationKind::DuplicationChangedCost),
+            (2.0, stronger, ViolationKind::DuplicationLoweredCost),
         ] {
-            // The duplicate is the seed's substance; at 2× it is a stronger copy of it, the
-            // monotonicity probe.
             let mut entries: Vec<(Entity, walk::VolumeMaterial)> = volumes.entries().collect();
-            entries.push((
-                self.spares.volume,
-                walk::VolumeMaterial {
-                    factor: material.factor * scale,
-                    ..material
-                },
-            ));
+            entries.push((self.spares.volume, copy));
             let Ok(table) = VolumeTable::new(entries) else {
                 continue;
             };
