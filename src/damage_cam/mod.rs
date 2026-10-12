@@ -19,37 +19,60 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// The pen cam's verdict on a whole shot against one tank, read from the path the authority
-/// resolved, never from damage. A pen cam exists only for a hit on a player's tank.
+/// resolved: its crossings, its bounces and the doses they gave the tank's components. The first
+/// variant whose rule holds is the verdict, in declaration order. A pen cam exists only for a hit on
+/// a player's tank.
 ///
-/// External armour ([`crate::spec::VolumeSpec::External`]) does not count: perforating a skirt
-/// or a road wheel is not perforating the tank.
+/// Armour is a volume that is neither a component (an hp pool) nor external armour
+/// ([`crate::spec::VolumeSpec::External`]): perforating a skirt or a road wheel is not perforating
+/// the tank, and crossing a component is a dose, not a perforation.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShotVerdict {
-    /// The round perforated main armour, whatever happened after: it stopped in a far plate or
-    /// left the tank.
+    /// The round perforated armour, whatever happened after: it stopped in a far plate, left the
+    /// tank, or dosed nothing.
     Penetration,
-    /// It bounced away without perforating main armour.
+    /// No penetration, and a component took a dose: from the line, a spall cone or a bounce's
+    /// shock. An exposed component, or a barrel clipped on the way into armour.
+    Damaged,
+    /// No penetration, no dose, and the round bounced away.
     Ricochet,
-    /// It came to rest without perforating main armour. A round that crossed only external armour
-    /// or exterior boxes and flew on is one too: it neither bounced nor got through the tank.
+    /// Everything else: stopped by armour or external armour, or through external armour alone
+    /// and flown on.
     NonPen,
 }
 
-/// One armour event of a shot's path, as the verdict reads it, in path order.
+/// How the pen cam frames a verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PenCamFrame {
+    /// The hull drawn see-through around the path inside it.
+    SeeThroughHull,
+    /// The struck plate cut along the path.
+    PlateSlice,
+    /// The tank from outside; a damaged component is tinted.
+    Outside,
+}
+
+/// One event of a shot's path, as the verdict reads it. Crossings and bounces are in path order; a
+/// dose's place among them is not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathStep {
     /// Deflected off a face without entering it.
     Bounce,
-    /// Entered the material: `perforated_main` when the whole round came out of a main armour
-    /// volume, `rested` when it came to rest inside this crossing.
-    Crossing { perforated_main: bool, rested: bool },
+    /// Entered the material: `perforated_armour` when the whole round came out of an armour volume,
+    /// `rested` when it came to rest inside this crossing.
+    Crossing {
+        perforated_armour: bool,
+        rested: bool,
+    },
+    /// A component of the struck tank took a dose above zero.
+    Dosed,
     /// A walk that failed closed: an error, never a pen cam.
     Failed,
 }
 
 impl ShotVerdict {
-    /// The verdict a path earns, or `None` when it opens no pen cam: no armour event at all (a
-    /// ground hit), or any walk that failed closed.
+    /// The verdict a path earns, or `None` when it opens no pen cam: no event at all (a ground
+    /// hit), or any walk that failed closed.
     pub fn of_path(steps: &[PathStep]) -> Option<Self> {
         if steps.is_empty() || steps.contains(&PathStep::Failed) {
             return None;
@@ -58,19 +81,32 @@ impl ShotVerdict {
             matches!(
                 step,
                 PathStep::Crossing {
-                    perforated_main: true,
+                    perforated_armour: true,
                     ..
                 }
             )
         });
-        let rested = matches!(steps.last(), Some(PathStep::Crossing { rested: true, .. }));
+        let rested = steps
+            .iter()
+            .any(|step| matches!(step, PathStep::Crossing { rested: true, .. }));
         Some(if perforated {
             Self::Penetration
+        } else if steps.contains(&PathStep::Dosed) {
+            Self::Damaged
         } else if !rested && steps.contains(&PathStep::Bounce) {
             Self::Ricochet
         } else {
             Self::NonPen
         })
+    }
+
+    /// The frame the pen cam opens on for this verdict.
+    pub fn frame(self) -> PenCamFrame {
+        match self {
+            Self::Penetration => PenCamFrame::SeeThroughHull,
+            Self::NonPen => PenCamFrame::PlateSlice,
+            Self::Ricochet | Self::Damaged => PenCamFrame::Outside,
+        }
     }
 }
 
@@ -125,7 +161,8 @@ pub struct Impact {
     pub verdict: ShotVerdict,
 }
 
-/// Which armour a plate is: the shot verdict counts perforating main armour only.
+/// Which armour a plate is: `Main` is armour ([`ShotVerdict`]), the only class whose perforation
+/// is a penetration.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlateClass {
     #[default]
@@ -278,14 +315,15 @@ impl PenetrationReport {
     }
 
     /// The record's path as the verdict reads it: its plates and bounces in time order, each
-    /// plate a crossing of its own. A plate without an exit is where the round rested.
+    /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box took a dose. A plate
+    /// without an exit is where the round rested.
     pub fn steps(&self) -> Vec<PathStep> {
         let mut steps: Vec<(f32, PathStep)> = self
             .plates
             .iter()
             .map(|plate| {
                 let step = PathStep::Crossing {
-                    perforated_main: plate.class == PlateClass::Main && plate.exit.is_some(),
+                    perforated_armour: plate.class == PlateClass::Main && plate.exit.is_some(),
                     rested: plate.exit.is_none(),
                 };
                 (plate.t, step)
@@ -297,7 +335,12 @@ impl PenetrationReport {
             )
             .collect();
         steps.sort_by(|a, b| a.0.total_cmp(&b.0));
-        steps.into_iter().map(|(_, step)| step).collect()
+        let dosed = self.doses.iter().any(|dose| dose.line + dose.field > 0.0);
+        steps
+            .into_iter()
+            .map(|(_, step)| step)
+            .chain(dosed.then_some(PathStep::Dosed))
+            .collect()
     }
 }
 
@@ -305,41 +348,86 @@ impl PenetrationReport {
 pub(crate) mod tests {
     use super::*;
 
-    const MAIN_THROUGH: PathStep = PathStep::Crossing {
-        perforated_main: true,
+    const ARMOUR_THROUGH: PathStep = PathStep::Crossing {
+        perforated_armour: true,
         rested: false,
     };
-    const MAIN_RESTED: PathStep = PathStep::Crossing {
-        perforated_main: false,
+    const ARMOUR_RESTED: PathStep = PathStep::Crossing {
+        perforated_armour: false,
         rested: true,
     };
-    const EXTERNAL_THROUGH: PathStep = PathStep::Crossing {
-        perforated_main: false,
+    /// Through external armour or a component only: nothing perforated counts, nothing rested.
+    const NOTHING_PERFORATED: PathStep = PathStep::Crossing {
+        perforated_armour: false,
         rested: false,
     };
 
-    /// The verdict reads the whole path: perforating main armour anywhere is a penetration,
-    /// whatever follows; short of that a round that comes to rest is a non-pen and one that
-    /// bounces away is a ricochet. No armour event, or any failed walk, opens no pen cam.
+    /// The verdict reads the whole path, first rule wins: perforating armour anywhere is a
+    /// penetration, whatever follows and whether or not anything was dosed; short of that any dose
+    /// is damage, wherever it sits among the path's events; short of that a round that bounces
+    /// away is a ricochet and any other a non-pen. No event, or any failed walk, opens no pen cam.
     #[test]
     fn the_shot_verdict_reads_the_whole_path() {
-        use PathStep::{Bounce, Failed};
-        let cases: [(&[PathStep], Option<ShotVerdict>); 12] = [
+        use PathStep::{Bounce, Dosed, Failed};
+        let cases: [(&[PathStep], Option<ShotVerdict>); 21] = [
             (&[], None),
             (&[Failed], None),
-            (&[MAIN_THROUGH, Failed], None),
+            (&[ARMOUR_THROUGH, Failed], None),
+            (&[ARMOUR_THROUGH, Dosed, Failed], None),
             (&[Bounce], Some(ShotVerdict::Ricochet)),
-            (&[MAIN_RESTED], Some(ShotVerdict::NonPen)),
-            (&[MAIN_THROUGH], Some(ShotVerdict::Penetration)),
-            (&[MAIN_THROUGH, MAIN_RESTED], Some(ShotVerdict::Penetration)),
-            (&[EXTERNAL_THROUGH, MAIN_RESTED], Some(ShotVerdict::NonPen)),
-            (&[EXTERNAL_THROUGH, Bounce], Some(ShotVerdict::Ricochet)),
-            (&[Bounce, MAIN_RESTED], Some(ShotVerdict::NonPen)),
-            (&[Bounce, MAIN_THROUGH], Some(ShotVerdict::Penetration)),
-            (&[EXTERNAL_THROUGH], Some(ShotVerdict::NonPen)),
+            (&[ARMOUR_RESTED], Some(ShotVerdict::NonPen)),
+            (&[ARMOUR_THROUGH], Some(ShotVerdict::Penetration)),
+            (
+                &[ARMOUR_THROUGH, ARMOUR_RESTED],
+                Some(ShotVerdict::Penetration),
+            ),
+            (
+                &[NOTHING_PERFORATED, ARMOUR_RESTED],
+                Some(ShotVerdict::NonPen),
+            ),
+            (&[NOTHING_PERFORATED, Bounce], Some(ShotVerdict::Ricochet)),
+            (&[Bounce, ARMOUR_RESTED], Some(ShotVerdict::NonPen)),
+            (&[Bounce, ARMOUR_THROUGH], Some(ShotVerdict::Penetration)),
+            (&[NOTHING_PERFORATED], Some(ShotVerdict::NonPen)),
+            // A dose never outranks a penetration.
+            (&[ARMOUR_THROUGH, Dosed], Some(ShotVerdict::Penetration)),
+            (
+                &[Dosed, Bounce, ARMOUR_THROUGH],
+                Some(ShotVerdict::Penetration),
+            ),
+            // An exposed component dosed with no armour crossed.
+            (&[NOTHING_PERFORATED, Dosed], Some(ShotVerdict::Damaged)),
+            (&[Dosed], Some(ShotVerdict::Damaged)),
+            // A bounce that shocks a component is damage, not a ricochet.
+            (&[Bounce, Dosed], Some(ShotVerdict::Damaged)),
+            // A barrel clipped, then the round stopped in armour.
+            (
+                &[NOTHING_PERFORATED, Dosed, ARMOUR_RESTED],
+                Some(ShotVerdict::Damaged),
+            ),
+            (&[ARMOUR_RESTED, Dosed], Some(ShotVerdict::Damaged)),
+            // A dose from external armour's spall cone, the round flying on.
+            (
+                &[NOTHING_PERFORATED, Dosed, Bounce],
+                Some(ShotVerdict::Damaged),
+            ),
         ];
         for (steps, verdict) in cases {
             assert_eq!(ShotVerdict::of_path(steps), verdict, "{steps:?}");
+        }
+    }
+
+    /// Penetration shows the hull see-through, a non-pen the plate slice, a ricochet and damage
+    /// the outside view.
+    #[test]
+    fn each_verdict_opens_on_its_frame() {
+        for (verdict, frame) in [
+            (ShotVerdict::Penetration, PenCamFrame::SeeThroughHull),
+            (ShotVerdict::NonPen, PenCamFrame::PlateSlice),
+            (ShotVerdict::Ricochet, PenCamFrame::Outside),
+            (ShotVerdict::Damaged, PenCamFrame::Outside),
+        ] {
+            assert_eq!(verdict.frame(), frame, "{verdict:?}");
         }
     }
 
@@ -357,8 +445,8 @@ pub(crate) mod tests {
     /// Every name a scenario's hits and consequences cite resolves to one of its internals, every
     /// timed list is in time order, and the path ends in or past the last plate: the sim marches a
     /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
-    /// end and a perforated last plate has it beyond the exit. A ricochet's deflection leg is
-    /// unconstrained.
+    /// end and a perforated last plate has it beyond the exit. A deflection leg that ends the path
+    /// (a ricochet's, or a bounce after the last plate) is unconstrained.
     #[test]
     fn scenarios_are_self_consistent() {
         for (_, file) in player::SCENARIOS {
@@ -405,8 +493,12 @@ pub(crate) mod tests {
                 "{file}: a plate without an exit is the last plate"
             );
         }
-        if report.impact.verdict != ShotVerdict::Ricochet {
-            let plate = report.plates.last().expect("a plate");
+        let bounced_last = report.impact.verdict == ShotVerdict::Ricochet
+            || report
+                .ricochets
+                .last()
+                .is_some_and(|bounce| report.plates.last().is_none_or(|plate| bounce.t >= plate.t));
+        if !bounced_last && let Some(plate) = report.plates.last() {
             match plate.exit {
                 None => {
                     let gap = distance(last.point, plate.entry);

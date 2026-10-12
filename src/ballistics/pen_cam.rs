@@ -330,8 +330,10 @@ fn external_armour_marks_exactly_the_tagged_volumes() {
 enum Kind {
     Main,
     External,
-    /// A box with this HP pool.
+    /// A box with this HP pool, of a soft substance.
     Box(f32),
+    /// A box with this HP pool, of steel: an exposed component a round can glance off.
+    SteelBox(f32),
 }
 
 /// Reference-mm per metre: steel, and the box's soft substance. Fixture data.
@@ -393,7 +395,7 @@ fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
             Kind::External => {
                 volume.insert(ExternalArmour);
             }
-            Kind::Box(hp) => {
+            Kind::Box(hp) | Kind::SteelBox(hp) => {
                 volume.insert(ComponentHealth {
                     current: hp,
                     max: hp,
@@ -409,9 +411,15 @@ fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
 
 /// Fire the fixture 88 from `from` along `-Z` at 800 m/s (fixture data) and read back its record.
 fn fixture_shot(volumes: &[FixtureVolume], from: Vec3) -> PenetrationReport {
+    fixture_shot_along(volumes, from, Vec3::NEG_Z)
+}
+
+/// Fire the fixture 88 from `from` along `direction` at 800 m/s (fixture data), read back its
+/// record, and check the record's own path and the march's logged path read its verdict.
+fn fixture_shot_along(volumes: &[FixtureVolume], from: Vec3, direction: Vec3) -> PenetrationReport {
     let (mut app, tank) = fixture_world(volumes);
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
-    let (projectile, readout) = fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0);
+    let (projectile, readout) = fixture_round(FIXTURE_88, direction * 800.0);
     let shell = app
         .world_mut()
         .spawn((
@@ -425,12 +433,13 @@ fn fixture_shot(volumes: &[FixtureVolume], from: Vec3) -> PenetrationReport {
             },
             PenetrationMarks::default(),
             SpallMarks::default(),
-            Transform::from_translation(from).looking_to(Vec3::NEG_Z, Vec3::Y),
+            Transform::from_translation(from).looking_to(direction, Vec3::Y),
         ))
         .id();
     for _ in 0..STEPS {
         app.update();
     }
+    let logged = ShotVerdict::of_path(&record::path_steps(app.world(), shell, Some(tank)));
     let facts = ShotFacts {
         launch: from,
         projectile: "fixture".to_owned(),
@@ -444,6 +453,11 @@ fn fixture_shot(volumes: &[FixtureVolume], from: Vec3) -> PenetrationReport {
         ShotVerdict::of_path(&report.steps()),
         Some(report.impact.verdict),
         "the record's own path reads its verdict"
+    );
+    assert_eq!(
+        logged,
+        Some(report.impact.verdict),
+        "the logged path reads its verdict"
     );
     report
 }
@@ -554,4 +568,96 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
     assert_eq!(dose.volume, "box");
     assert!(dose.line > 0.0 && dose.field > 0.0, "{dose:?}");
     assert!(!report.spall.is_empty(), "the plate's exit throws a cone");
+}
+
+/// A shot through external armour alone that flies on is a non-pen: no armour perforated, nothing
+/// dosed, no bounce.
+#[test]
+fn through_external_armour_alone_is_a_non_pen() {
+    let report = fixture_shot(&[plate("skirt", 0.01, 0.0, Kind::External)], LINE_FROM);
+    assert_eq!(report.impact.verdict, ShotVerdict::NonPen);
+    assert!(report.doses.is_empty(), "{:?}", report.doses);
+    let last = report.path.last().expect("a path");
+    assert!(last.point[2] < -0.01, "the path flies on past the skirt");
+}
+
+/// A component on the line with no armour in front of it is damaged by the line through it, and
+/// the round flies on.
+#[test]
+fn an_exposed_component_dosed_with_no_armour_crossed_is_damaged() {
+    let report = fixture_shot(
+        &[(
+            "box",
+            Vec3::splat(0.5),
+            Vec3::new(0.0, 2.0, 0.0),
+            Kind::Box(1000.0),
+        )],
+        LINE_FROM,
+    );
+    assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
+    assert!(report.plates.is_empty(), "{:?}", report.plates);
+    let dose = report.doses.first().expect("the box is dosed");
+    assert!(dose.line > 0.0, "{dose:?}");
+}
+
+/// A component clipped on the way into armour that stops the round is damaged, not a non-pen.
+#[test]
+fn a_component_clipped_then_stopped_in_armour_is_damaged() {
+    let report = fixture_shot(
+        &[
+            (
+                "barrel",
+                Vec3::splat(0.2),
+                Vec3::new(0.0, 2.0, 0.5),
+                Kind::Box(1000.0),
+            ),
+            plate("mantlet", THICK, 0.0, Kind::Main),
+        ],
+        LINE_FROM,
+    );
+    assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
+    let exits: Vec<bool> = report.plates.iter().map(|p| p.exit.is_some()).collect();
+    assert_eq!(exits, [false], "the armour stops the round");
+    assert_eq!(report.doses.len(), 1, "{:?}", report.doses);
+    assert_eq!(report.doses[0].volume, "barrel");
+}
+
+/// A round glancing off a component jars its shock into it: damage, not a ricochet. The 75° graze
+/// is fixture data.
+#[test]
+fn a_bounce_that_shocks_a_component_is_damaged_not_a_ricochet() {
+    let graze = Vec3::new(
+        75.0_f32.to_radians().sin(),
+        0.0,
+        -75.0_f32.to_radians().cos(),
+    );
+    let report = fixture_shot_along(
+        &[plate("component", 0.10, 0.0, Kind::SteelBox(1000.0))],
+        Vec3::new(-1.0, 2.0, 0.6),
+        graze,
+    );
+    assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
+    assert_eq!(report.ricochets.len(), 1, "the round bounces away");
+    let dose = report
+        .doses
+        .first()
+        .expect("the bounce shocks the component");
+    assert!(dose.line > 0.0 && dose.field == 0.0, "{dose:?}");
+}
+
+/// The same glance off armour doses nothing and is a ricochet.
+#[test]
+fn a_bounce_off_armour_that_doses_nothing_is_a_ricochet() {
+    let graze = Vec3::new(
+        75.0_f32.to_radians().sin(),
+        0.0,
+        -75.0_f32.to_radians().cos(),
+    );
+    let report = fixture_shot_along(
+        &[plate("plate", 0.10, 0.0, Kind::Main)],
+        Vec3::new(-1.0, 2.0, 0.6),
+        graze,
+    );
+    assert_eq!(report.impact.verdict, ShotVerdict::Ricochet);
+    assert!(report.doses.is_empty(), "{:?}", report.doses);
 }

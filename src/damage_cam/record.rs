@@ -117,42 +117,78 @@ pub struct ShotFacts {
     pub turret_yaw_deg: f32,
 }
 
-/// The armour path `shell` took through `tank` (every volume, for `None`), as the verdict reads
-/// it: its bounces off and crossings of the tank's volumes, and every walk that failed closed, in
-/// march order.
+/// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
+/// bounces off and crossings of the tank's volumes and every walk that failed closed, in march
+/// order, each followed by [`PathStep::Dosed`] when it dosed one of the tank's components. A
+/// component's dose is the record's: a crossing's line through it, a bounce's shock off it, a
+/// spall cone direction entering it. A cone is read with the crossing that threw it, whichever
+/// tank that crossing touched.
 pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<PathStep> {
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
     };
-    marks
-        .log
-        .iter()
-        .filter(|mark| tank.is_none_or(|tank| touches(world, mark, tank)))
-        .map(|mark| match mark {
-            ArmourMark::Bounce { .. } => PathStep::Bounce,
-            ArmourMark::Crossing { volumes, end, .. } => PathStep::Crossing {
-                perforated_main: volumes.iter().any(|crossed| {
-                    crossed.perforated && class_of(world, crossed.volume) == VolumeClass::Main
-                }),
-                rested: matches!(end, CrossingEnd::Rest { .. }),
-            },
-            ArmourMark::Failed => PathStep::Failed,
-        })
-        .collect()
+    let cones = world
+        .get::<SpallMarks>(shell)
+        .map_or(&[][..], |marks| &marks.cones[..]);
+    let dosed = |volume: Entity, dose: f32| {
+        dose > 0.0
+            && class_of(world, volume) == VolumeClass::Box
+            && tank.is_none_or(|tank| owned_by(world, volume, tank))
+    };
+    let mut thrown = cones.iter();
+    let mut steps = Vec::new();
+    for mark in &marks.log {
+        let (step, dosed_here) = match mark {
+            ArmourMark::Bounce { struck, shock, .. } => (PathStep::Bounce, dosed(*struck, *shock)),
+            ArmourMark::Crossing {
+                volumes,
+                end,
+                cones,
+                ..
+            } => {
+                let field = thrown.by_ref().take(*cones).any(|cone| {
+                    cone.rays
+                        .iter()
+                        .flat_map(|ray| &ray.doses)
+                        .any(|&(volume, dose)| dosed(volume, dose))
+                });
+                let line = volumes
+                    .iter()
+                    .any(|crossed| dosed(crossed.volume, crossed.cost * TRANSIT_K));
+                let step = PathStep::Crossing {
+                    perforated_armour: volumes.iter().any(|crossed| {
+                        crossed.perforated && class_of(world, crossed.volume) == VolumeClass::Main
+                    }),
+                    rested: matches!(end, CrossingEnd::Rest { .. }),
+                };
+                (step, line || field)
+            }
+            ArmourMark::Failed => (PathStep::Failed, false),
+        };
+        if tank.is_none_or(|tank| touches(world, mark, tank)) {
+            steps.push(step);
+        }
+        if dosed_here {
+            steps.push(PathStep::Dosed);
+        }
+    }
+    steps
 }
 
 /// Whether a mark belongs to `tank`. A failed walk names no volume and belongs to every tank.
 fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
-    let owned = |volume: Entity| {
-        world
-            .get::<VolumeOf>(volume)
-            .is_some_and(|owner| owner.tank() == tank)
-    };
+    let owned = |volume: Entity| owned_by(world, volume, tank);
     match mark {
         ArmourMark::Bounce { struck, .. } => owned(*struck),
         ArmourMark::Crossing { volumes, .. } => volumes.iter().any(|crossed| owned(crossed.volume)),
         ArmourMark::Failed => true,
     }
+}
+
+fn owned_by(world: &World, volume: Entity, tank: Entity) -> bool {
+    world
+        .get::<VolumeOf>(volume)
+        .is_some_and(|owner| owner.tank() == tank)
 }
 
 /// One timed node of the path, WORLD.

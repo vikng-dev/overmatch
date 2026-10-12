@@ -4587,7 +4587,7 @@ mod march_tests {
         );
     }
 
-    /// A pen cam opens only for a hit on armour that resolved one of its three verdicts, read
+    /// A pen cam opens only for a hit on armour that resolved one of its verdicts, read
     /// from the shell's whole logged path: the ricochet, the stop and the perforation each open
     /// one; a ground hit and a fail-closed armour contact open none. Plate thicknesses and the 75°
     /// graze are fixture data.

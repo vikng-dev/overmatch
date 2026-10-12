@@ -1618,6 +1618,7 @@ fn update_hud(
 fn verdict_word(verdict: ShotVerdict) -> (&'static str, Color) {
     match verdict {
         ShotVerdict::Penetration => ("PENETRATION", SPAN),
+        ShotVerdict::Damaged => ("DAMAGED", Color::srgb(0.95, 0.6, 0.2)),
         ShotVerdict::NonPen => ("NON-PEN", Color::srgb(0.45, 0.6, 0.85)),
         ShotVerdict::Ricochet => ("RICOCHET", RICOCHET),
     }
