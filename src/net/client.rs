@@ -135,32 +135,6 @@ pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
 }
 
-/// Renounce macOS app activation for a hidden capture client — registered only on the `hidden`
-/// path (here and in `run_offline`, whose hidden-capture mode shares this contract); see the
-/// registration site in [`run`] for the winit launch mechanism that makes a post-launch revocation
-/// the only option.
-///
-/// `Prohibited` means the process can never own the menu bar or become the active application
-/// again — exactly right for a headless-in-spirit capture — and the `deactivate` yields the focus
-/// winit already stole back to whatever the user had. The `NonSendMarker` pins the system to the
-/// main thread (the repo's `settings::probe` idiom), which is what makes the CHECKED
-/// `MainThreadMarker` constructor infallible here.
-#[cfg(target_os = "macos")]
-pub(crate) fn revoke_macos_activation(_non_send_marker: bevy::ecs::system::NonSendMarker) {
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-    let mtm = objc2_foundation::MainThreadMarker::new()
-        .expect("NonSendMarker pinned this system to the main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    // The returned bool is "did the policy switch take"; a capture run has no UI to degrade, so
-    // log-and-continue is the right failure mode.
-    if !app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited) {
-        warn!("capture client: macOS refused ActivationPolicy::Prohibited — focus may be stolen");
-    }
-    // SAFETY: a plain AppKit call with no invariants beyond main-thread, which `mtm` proves;
-    // `unsafe` only because the objc2 0.2 generation did not audit it as safe.
-    unsafe { app.deactivate() };
-}
-
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
@@ -277,7 +251,7 @@ pub fn run() {
             // `Startup` runs after winit's didFinishLaunching, so it both revokes the policy and
             // hands focus straight back.
             #[cfg(target_os = "macos")]
-            app.add_systems(Startup, revoke_macos_activation);
+            app.add_systems(Startup, crate::platform::revoke_macos_activation);
         }
     }
 

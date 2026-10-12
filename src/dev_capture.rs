@@ -157,7 +157,7 @@ fn hide_window(app: &mut App) {
     }
     window.visible = false;
     #[cfg(target_os = "macos")]
-    app.add_systems(Startup, crate::net::revoke_macos_activation);
+    app.add_systems(Startup, crate::platform::revoke_macos_activation);
 }
 
 fn capture(
