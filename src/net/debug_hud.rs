@@ -23,7 +23,7 @@
 //! Anti-jitter: the card is a **fixed-width** row of label/value columns. Each metric is its own
 //! two-column flex row (`SpaceBetween`), so the value's *right* edge is pinned to the card's right
 //! padding — the numbers stay right-aligned and the whole card's left edge never moves as the digit
-//! count changes (`42` -> `138`). The default Bevy font is proportional (no monospace bundled), so
+//! count changes (`42` -> `138`). The bundled Barlow Condensed font is proportional, so
 //! right-pinning the value column is what keeps the digits from shimmering, not space padding. The
 //! readout is also refreshed at ~1 Hz off a *rolling average* (not the raw per-frame value) so the
 //! numbers are legible instead of churning every frame — the usual game-overlay treatment.
@@ -35,7 +35,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::TickDuration;
 use lightyear::prelude::*;
 
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::settings::{DebugPanel, Settings};
 use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -80,7 +80,7 @@ pub fn plugin(app: &mut App) {
     app.add_systems(OnEnter(Flow::InMatch), spawn_debug_hud)
         .add_systems(
             Update,
-            (show_debug_card, update_debug_hud).run_if(in_state(Flow::InMatch)),
+            (show_debug_card, update_debug_hud).in_set(InMatchSystems),
         );
 }
 

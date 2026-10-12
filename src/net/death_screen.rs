@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
@@ -62,7 +62,7 @@ pub fn plugin(app: &mut App) {
                 // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
                 apply_death_status_line.after(overlay::OverlaySet::Toggle),
             )
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 

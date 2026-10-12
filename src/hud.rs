@@ -10,7 +10,7 @@ use crate::net::NetBot;
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::camera::GunnerCameraPlaced;
 use crate::damage::{Ammo, CrewStation, FunctionRole};
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::tank::{Tank, ViewNode};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
@@ -28,17 +28,17 @@ pub fn plugin(app: &mut App) {
     app.add_systems(OnEnter(Flow::InMatch), spawn_labels)
         .add_systems(
             PostUpdate,
-            // Reproject AFTER the frame's rendered pose is final: transform propagation has run and the
-            // gunner camera has been placed (`GunnerCameraPlaced`, itself after `Propagate`). Read in
-            // `Update` (where these used to live) the systems saw *last* frame's propagated tank and
-            // camera globals while the mesh renders from *this* frame's — a one-frame skew that isn't
-            // constant (Avian re-interpolates the overstep and the orbit camera re-tracks every frame),
-            // so the labels swam/jittered against the model. Same read-after-Propagate idiom as the
-            // gunner reticles (`sight`) and the trace recorder.
+            // Reprojection runs after propagation and gunner-camera placement (`GunnerCameraPlaced`,
+            // itself after `Propagate`), so labels use the same frame's transforms as the rendered
+            // model. Read any earlier, they see the previous frame's tank and camera globals while the
+            // mesh renders from this frame's — a skew that is not constant (Avian re-interpolates the
+            // overstep and the orbit camera re-tracks every frame), so the labels jitter against the
+            // model. Same read-after-Propagate idiom as the gunner reticles (`sight`) and the trace
+            // recorder.
             (update_component_hp_labels, update_tank_nameplates)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced)
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 

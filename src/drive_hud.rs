@@ -7,7 +7,7 @@
 use avian3d::prelude::{LinearVelocity, Rotation};
 use bevy::prelude::*;
 
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::tank::Controlled;
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest};
 use crate::track::transmission::{
@@ -39,7 +39,7 @@ pub(crate) fn plugin(app: &mut App) {
             Update,
             (toggle_drive_debug, update_drive_hud.in_set(DriveHudUpdate))
                 .chain()
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 
@@ -66,8 +66,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         Visibility::Hidden,
     ));
 
-    // The diagnostic block keeps the old offline HUD's top-right placement and bare-text treatment.
-    // Like the standard row it is ordinary non-interactive HUD, never a second overlay/scrim.
+    // Diagnostic block: top-right, bare text, ordinary non-interactive HUD (never an overlay/scrim).
     commands.spawn((
         FlowScoped(Flow::InMatch),
         DriveDebugHudText,

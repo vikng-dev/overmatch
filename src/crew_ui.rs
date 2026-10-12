@@ -9,7 +9,7 @@ use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::spec::{FireMode, ViewKind};
 use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
@@ -43,7 +43,7 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnEnter(Flow::InMatch), (spawn_crew_bar, spawn_status_panel))
         .add_systems(
             Update,
-            (crew_swap_input, update_crew_bar, update_status_panel).run_if(in_state(Flow::InMatch)),
+            (crew_swap_input, update_crew_bar, update_status_panel).in_set(InMatchSystems),
         );
 }
 
@@ -132,8 +132,8 @@ fn weapon_status(
 }
 
 /// Render the controlled tank's vitals card: crew alive/total, Drive + Gunner-sight effectiveness,
-/// and each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`). A pure view over the same
-/// local components the world-space status block used to show — the seed of the designed player HUD.
+/// and each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`). A pure view over the
+/// controlled tank's local components.
 fn update_status_panel(
     tank: Query<
         (

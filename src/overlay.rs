@@ -10,7 +10,7 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
-use crate::flow::Flow;
+use crate::flow::{Flow, InMatchSystems};
 
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
 /// declared LOW→HIGH, so the greatest is the top layer: `Lobby` is the maximum (the pre-connect
@@ -285,9 +285,7 @@ pub(crate) fn plugin(app: &mut App) {
             Update,
             (
                 // Esc's routing READS the set, so it runs in the toggle stage. The menu is a match's.
-                esc_toggle
-                    .in_set(OverlaySet::Toggle)
-                    .run_if(in_state(Flow::InMatch)),
+                esc_toggle.in_set(OverlaySet::Toggle).in_set(InMatchSystems),
                 cursor_owner.in_set(OverlaySet::Cursor),
                 // The ONE scrim reconciler for every marked overlay node. Ordered after every writer —
                 // the connect / death / view-death owners in `Declare` AND the Esc / `M` toggles in

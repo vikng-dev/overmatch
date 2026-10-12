@@ -941,16 +941,10 @@ pub(super) fn connect_screen_plugin(app: &mut App) {
 #[derive(Component)]
 struct ConnectStatusText;
 
-/// Spawn the connect-status overlay once, hidden by default (the first frame is pre-connect anyway;
-/// [`update_connect_status`] reveals it). Mirrors the menu/death overlays' node+text shape so the
-/// three read as one UI family.
+/// Spawn the persistent connect overlay; [`update_connect_status`] declares presence and updates its
+/// label, while `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps
+/// its z; the text child carries [`ConnectStatusText`] for the in-place label rewrite.
 fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
-    // The only site to mark the text child too (`ConnectStatusText`), so `update_connect_status` can
-    // rewrite the label in place. Spawned with default (visible) `Visibility` — the first frame is
-    // pre-connect, and `update_connect_status` drives it from there.
-    // The `OverlayNode` marker stamps the one-scrim `GlobalZIndex` (highest of the four, so a
-    // connect/reconnect covers everything) via its hook and hands visibility to the shared
-    // `overlay::apply_overlay_visibility` reconciler; only the text child keeps a bespoke marker.
     crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,

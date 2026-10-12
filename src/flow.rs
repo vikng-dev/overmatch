@@ -70,11 +70,22 @@ pub(crate) fn write(next: &mut NextState<Flow>, facts: FlowFacts) {
     next.set_if_neq(flow_of(facts));
 }
 
-/// Registers [`Flow`] and logs its transitions. Mounted by every windowed root before any plugin
-/// that spawns or gates on it.
+/// The view systems that run only on the match screen, in `Update` and `PostUpdate`. Never a
+/// fixed-clock set: `Flow` stays off the fixed clock (`tests/flow_boundary.rs`).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct InMatchSystems;
+
+fn configure_in_match(app: &mut App) {
+    app.configure_sets(Update, InMatchSystems.run_if(in_state(Flow::InMatch)))
+        .configure_sets(PostUpdate, InMatchSystems.run_if(in_state(Flow::InMatch)));
+}
+
+/// Registers [`Flow`] and [`InMatchSystems`] and logs transitions. Mounted by every windowed root
+/// before any plugin that spawns or gates on it.
 pub(crate) fn plugin(app: &mut App) {
     app.init_state::<Flow>()
         .add_systems(Update, log_flow.run_if(state_changed::<Flow>));
+    configure_in_match(app);
 }
 
 /// [`plugin`] plus the offline root's writer.
@@ -86,6 +97,7 @@ pub(crate) fn offline_plugin(app: &mut App) {
 /// A root that is always in a match: no writer, no transitions.
 pub(crate) fn in_match_plugin(app: &mut App) {
     app.insert_state(Flow::InMatch);
+    configure_in_match(app);
 }
 
 /// Panics unless [`Flow`] is registered: a plugin that spawns on `OnEnter(Flow::…)` or gates on

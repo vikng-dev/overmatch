@@ -10,7 +10,7 @@ use lightyear::prelude::client::Remote;
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::damage::{CrewStation, TankVolumes};
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
@@ -96,7 +96,7 @@ pub fn plugin(app: &mut App) {
                 drive_damage_flash,
                 drive_hit_confirm.after(super::client::receive_damage_confirms),
             )
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 

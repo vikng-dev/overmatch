@@ -13,7 +13,7 @@ use bevy::window::PrimaryWindow;
 use lightyear::prelude::*;
 
 use super::protocol::{SetSpawnPoint, SpawnChannel};
-use crate::flow::Flow;
+use crate::flow::InMatchSystems;
 use crate::overlay::{self, Overlay, OverlayNode, Overlays};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
@@ -131,7 +131,7 @@ pub fn plugin(app: &mut App) {
                     .chain()
                     .after(overlay::OverlaySet::Toggle),
             )
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 

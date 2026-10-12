@@ -25,7 +25,7 @@ use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::sight::{SightMode, SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
@@ -219,7 +219,7 @@ pub fn client_plugin(app: &mut App) {
             update_centre_reticle
                 .after(SightToggled)
                 .in_set(GameplaySet)
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         )
         // HUD markers reproject through the camera, so they run after the camera's pose is final
         // for the frame — after propagation and after the gunner camera places itself — or they
@@ -230,7 +230,7 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced)
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 
@@ -296,7 +296,7 @@ fn spawn_hud(mut commands: Commands) {
 /// optic nothing is picked at screen centre (the intent is a bearing off the gun's sight line), and
 /// the graticule's zero mark already stands on that line, so the dot would be a second centre
 /// claiming an aim it does not have. With no controlled tank nothing aims at all.
-pub(crate) fn centre_dot_visible(mode: SightMode, has_tank: bool) -> bool {
+fn centre_dot_visible(mode: SightMode, has_tank: bool) -> bool {
     has_tank && mode == SightMode::ThirdPerson
 }
 

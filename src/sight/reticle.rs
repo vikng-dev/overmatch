@@ -16,7 +16,7 @@ use crate::aim::CommittedAim;
 use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
-use crate::flow::{Flow, FlowScoped};
+use crate::flow::{Flow, FlowScoped, InMatchSystems};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
@@ -120,7 +120,7 @@ pub(super) fn plugin(app: &mut App) {
                 // `PlayerInputSet` here.
                 .after(super::toggle_sight)
                 .in_set(GameplaySet)
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         )
         // Both reprojections run after the camera's pose is final for the frame, and after
         // propagation: the graticule anchors on the VIEW gun's own `GlobalTransform` as well as
@@ -138,7 +138,7 @@ pub(super) fn plugin(app: &mut App) {
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced)
-                .run_if(in_state(Flow::InMatch)),
+                .in_set(InMatchSystems),
         );
 }
 
@@ -254,7 +254,7 @@ fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
 
 /// Whether the dialed-range readout shows: in the gunner optic, and only over a controlled tank —
 /// `SightMode` outlives a match, so the mode alone would print a range with nothing to range.
-pub(crate) fn range_readout_visible(mode: SightMode, has_tank: bool) -> bool {
+fn range_readout_visible(mode: SightMode, has_tank: bool) -> bool {
     has_tank && mode == SightMode::Gunner
 }
 
@@ -517,7 +517,7 @@ impl UiMaterial for OpticMaskMaterial {
 #[derive(Component)]
 struct OpticMask;
 
-/// Spawn the optic surround once, hidden. It sits on the overlay ladder's own sight-furniture rung
+/// Spawn the optic surround on entering a match, hidden. It sits on the overlay ladder's own sight-furniture rung
 /// (`overlay::Overlay::SIGHT_FURNITURE_Z`), below the graticule and the intent cursor it surrounds
 /// and below every overlay that has to cover the sight picture whole.
 fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMaskMaterial>>) {
