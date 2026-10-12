@@ -17,6 +17,9 @@
 		"Registry": { "type": "durable-object", "storage": "sqlite" }
 	},
 
+	// The orphan sweep (src/sweep.ts), every minute.
+	"triggers": { "crons": ["* * * * *"] },
+
 	// Per-server-lifetime history.
 	"d1_databases": [
 		{

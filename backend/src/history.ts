@@ -10,7 +10,7 @@ export type Outcome = "ended" | "failed" | "lost";
 
 export type SessionEvent =
 	| { kind: "requested"; serverId: string; version: string; location: string; at: number }
-	| { kind: "deployed"; serverId: string; deploymentId: string }
+	| { kind: "deployed"; serverId: string; version: string; location: string; requestedAt: number; deploymentId: string }
 	| { kind: "ready"; serverId: string; at: number }
 	| { kind: "ended"; serverId: string; at: number; outcome: Outcome; reason: string; peakPlayers: number };
 
@@ -33,7 +33,15 @@ async function write(db: D1Database, e: SessionEvent): Promise<void> {
 				.run();
 			return;
 		case "deployed":
-			await db.prepare("UPDATE sessions SET deployment_id = ?2 WHERE server_id = ?1").bind(e.serverId, e.deploymentId).run();
+			// An upsert, so a lost `requested` write is repaired here: the orphan sweep (src/sweep.ts)
+			// stops a deployment whose tag matches no row.
+			await db
+				.prepare(
+					`INSERT INTO sessions (server_id, version, location, requested_at, deployment_id) VALUES (?1, ?2, ?3, ?4, ?5)
+					 ON CONFLICT (server_id) DO UPDATE SET deployment_id = excluded.deployment_id`,
+				)
+				.bind(e.serverId, e.version, e.location, e.requestedAt, e.deploymentId)
+				.run();
 			return;
 		case "ready":
 			await db.prepare("UPDATE sessions SET ready_at = ?2 WHERE server_id = ?1 AND ready_at IS NULL").bind(e.serverId, e.at).run();

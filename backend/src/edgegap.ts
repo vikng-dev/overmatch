@@ -7,9 +7,11 @@
 //   GET    /v1/status/{id}            V1DeploymentStatus
 //   DELETE /v1/stop/{id}
 //   GET    /v1/deployments?query=     active deployments, filtered here by one tag
+//   GET    /v1/deployments?page&limit every active deployment, paginated (`pagination.has_next`)
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
+import type { Env } from "./config";
 import { bounded } from "./deadline";
 
 export interface LocationData {
@@ -47,12 +49,20 @@ export interface DeploymentStatus {
 	tags: string[];
 }
 
+export interface ListedDeployment {
+	id: string;
+	tags: string[];
+}
+
 export interface Provider {
 	/** Resolves to the deployment id. Rejects with `ProviderError`; `definiteRejection` tells a
 	 *  refusal (nothing was created) from an unknown outcome (something may have been). */
 	deploy(req: DeployRequest): Promise<string>;
 	/** The active deployment carrying `tag`, or null. */
 	findByTag(tag: string): Promise<string | null>;
+	/** Every active deployment of the account, all pages up to `maxPages`; `truncated` when more
+	 *  pages remained. */
+	deployments(maxPages: number): Promise<{ items: ListedDeployment[]; truncated: boolean }>;
 	status(deploymentId: string): Promise<DeploymentStatus>;
 	/** Idempotent: an already-stopped or unknown deployment is success. */
 	stop(deploymentId: string): Promise<void>;
@@ -70,6 +80,11 @@ export class ProviderError extends Error {
 		super(`edgegap ${op}: HTTP ${status}`);
 		this.name = "ProviderError";
 	}
+}
+
+/** The provider the Worker's env names, every call bounded by `timeoutMs`. */
+export function edgegapFor(env: Env, timeoutMs: number): Provider {
+	return new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, timeoutMs);
 }
 
 const PAGE_LIMIT = 100;
@@ -143,6 +158,18 @@ export class Edgegap implements Provider {
 			this.json<{ data?: { request_id?: string; tags?: string[] }[] }>(res, "list"),
 		);
 		return (out.data ?? []).find((d) => d.request_id && (d.tags ?? []).includes(tag))?.request_id ?? null;
+	}
+
+	async deployments(maxPages: number): Promise<{ items: ListedDeployment[]; truncated: boolean }> {
+		const items: ListedDeployment[] = [];
+		for (let page = 1; page <= maxPages; page++) {
+			const out = await this.request("list", "GET", `/v1/deployments?page=${page}&limit=${PAGE_LIMIT}`, undefined, (res) =>
+				this.json<{ data?: { request_id?: string; tags?: string[] }[]; pagination?: { has_next?: boolean } }>(res, "list"),
+			);
+			for (const d of out.data ?? []) if (d.request_id) items.push({ id: d.request_id, tags: d.tags ?? [] });
+			if (!out.pagination?.has_next) return { items, truncated: false };
+		}
+		return { items, truncated: true };
 	}
 
 	async stop(deploymentId: string): Promise<void> {

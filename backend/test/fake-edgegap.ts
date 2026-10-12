@@ -80,6 +80,8 @@ export class FakeEdgegap {
 	hangStatus = new Set<string>();
 	/** The next this-many stop calls answer 503 and stop nothing. */
 	failStops = 0;
+	/** Deployment ids whose stop call never answers. */
+	hangStops = new Set<string>();
 	private stopGate: Promise<void> | null = null;
 
 	/** Hold every stop response until the returned function is called. */
@@ -117,6 +119,14 @@ export class FakeEdgegap {
 		const v = vars.find((e) => e.key === key);
 		if (!v) throw new Error(`deployment ${d.id} has no ${key}`);
 		return v.value;
+	}
+
+	/** A running deployment this Worker did not start in this test, carrying `tags`. */
+	foreign(tags: string[]): Deployment {
+		const id = `dep${++this.seq}`;
+		const d: Deployment = { id, body: { tags, env_vars: [] }, status: "Status.READY", publicIp: `198.51.100.${this.seq}`, port: 31000 + this.seq };
+		this.deployments.set(id, d);
+		return d;
 	}
 
 	ready(d: Deployment): void {
@@ -179,14 +189,22 @@ export class FakeEdgegap {
 			return Response.json({ request_id: id, request_dns: `${id}.pr.edgegap.test`, request_app: body.app_name, request_version: body.version_name, request_user_count: 1, filters: body.filters });
 		}
 		if (req.method === "GET" && url.pathname === "/v1/deployments") {
-			// Only the filter src/edgegap.ts sends: one `tags eq` filter. Lists active deployments.
+			// Only the filter src/edgegap.ts sends: one `tags eq` filter. Lists active deployments, paged
+			// like /v1/locations.
 			const query = JSON.parse(url.searchParams.get("query") ?? "{}") as { filters?: { field: string; operator: string; value: string }[] };
 			const tag = query.filters?.find((f) => f.field === "tags" && f.operator === "eq")?.value;
-			const data = [...this.deployments.values()]
+			const all = [...this.deployments.values()]
 				.filter((d) => d.status === "Status.DEPLOYING" || d.status === "Status.READY")
 				.filter((d) => tag === undefined || ((d.body.tags as string[] | undefined) ?? []).includes(tag))
 				.map((d) => ({ request_id: d.id, fqdn: `${d.id}.pr.edgegap.test`, ready: d.status === "Status.READY", start_time: "", public_ip: d.publicIp, tags: d.body.tags ?? [] }));
-			return Response.json({ data, total_count: data.length, pagination: { number: 1, has_next: false } });
+			const page = Number(url.searchParams.get("page") ?? "1");
+			const limit = Math.min(this.maxPageSize, Number(url.searchParams.get("limit") ?? "10"));
+			const pages = Math.max(1, Math.ceil(all.length / limit));
+			return Response.json({
+				data: all.slice((page - 1) * limit, page * limit),
+				total_count: all.length,
+				pagination: { number: page, next_page_number: page < pages ? page + 1 : null, previous_page_number: page > 1 ? page - 1 : null, paginator: { num_pages: pages }, has_next: page < pages, has_previous: page > 1 },
+			});
 		}
 		let m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
 		if (req.method === "GET" && m) {
@@ -213,6 +231,7 @@ export class FakeEdgegap {
 		}
 		m = /^\/v1\/stop\/(.+)$/.exec(url.pathname);
 		if (req.method === "DELETE" && m) {
+			if (this.hangStops.has(m[1])) return new Promise<Response>(() => {});
 			if (this.stopGate) await this.stopGate;
 			if (this.failStops > 0) {
 				this.failStops--;

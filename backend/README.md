@@ -13,6 +13,7 @@ Design and decisions: `.agents/scratch/hosting-2026-10/` (`decisions.md`, `state
 | `src/registry.ts` | `Registry` Durable Object, one per game version: servers, tickets, alarm |
 | `src/edgegap.ts` | The provider adapter; the only Edgegap-specific code |
 | `src/history.ts` | `recordEvent`, the single writer of D1 `sessions` |
+| `src/sweep.ts` | The per-minute orphan sweep (cron trigger) |
 | `src/admin.ts` | `/admin` dashboard and its Access JWT check |
 | `src/types.ts` | The `/v1` wire types |
 | `contract/*.json` | One example per request and response; `test/contract.spec.ts` holds them to the handlers |
@@ -62,6 +63,16 @@ the row `ended` and its D1 history closed; retention never deletes a row whose s
 Every Edgegap call and D1 write is bounded by `PROVIDER_TIMEOUT_S`, and the alarm makes all its
 transitions and re-arms itself before running that outbound work, so one slow call holds up no
 other row.
+
+**Orphan sweep.** Every minute (`triggers.crons`) the Worker lists every Edgegap deployment (all
+pages) and stops each one tagged `om-<hex>` that no live claim owns: its D1 history row is ended,
+or its version's Registry row is not `starting`/`ready` with that deployment id (or none yet), or no
+history row matches its tag for `START_DEADLINE_S` from the sweep's first sight of it. A failed stop
+is retried by the next sweep until Edgegap no longer lists the deployment. D1 or a Registry not
+answering stops nothing it would have judged. The last result shows on `/admin`. **The sweep stops
+every `om-` deployment the production D1 does not know**, so a deployment started from `wrangler
+dev` (local D1, real Edgegap) is stopped within a few minutes, and running the scheduled handler
+locally against the real token would stop production servers: never trigger it outside tests.
 
 **Failure reasons** shown to clients and on `/admin` come from a fixed list (`src/reasons.ts`);
 provider error text is never read, stored or logged.
@@ -123,7 +134,8 @@ calls the real Edgegap API, so a join there starts a billed deployment.
 1. `npx wrangler login`.
 2. `npx wrangler d1 create overmatch-sessions`; paste the printed `database_id` into
    `wrangler.jsonc`.
-3. `npx wrangler d1 migrations apply overmatch-sessions --remote`.
+3. `npx wrangler d1 migrations apply overmatch-sessions --remote` (again whenever `migrations/`
+   gains a file).
 4. `npx wrangler secret put EDGEGAP_TOKEN`.
 5. `npx wrangler deploy`.
 6. **Access for `/admin`** (Zero Trust dashboard → Access controls → Applications → Add → Self-hosted):
@@ -137,7 +149,7 @@ calls the real Edgegap API, so a join there starts a billed deployment.
    `ghcr.io/vikng-dev/overmatch-server` (public; tags `<version>` and `<version>-<sha7>`) and
    creates or updates version `<version>` of app `Overmatch` (`EDGEGAP_APP`): the version named
    exactly as the client's `CARGO_PKG_VERSION`, image tag `<version>-<sha7>`, UDP 5888 named `game`
-   (`EDGEGAP_PORT_NAME`), `restart_policy: never`, `max_duration` 360 min, 1 vCPU / 1 GB, no env vars
+   (`EDGEGAP_PORT_NAME`), `restart_policy: never`, `max_duration` 1440 min, 1 vCPU / 1 GB, no env vars
    (the Worker passes the game-server contract above per deployment). The Release is published
    only after that registration. To register a commit without a release, dispatch
    `gh workflow run edgegap-version.yml --ref <branch>`. Both run

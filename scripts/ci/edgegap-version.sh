@@ -30,11 +30,11 @@ app="${EDGEGAP_APP:-Overmatch}"
 # `game` is the Worker's `EDGEGAP_PORT_NAME`; 5888 is the server's fixed listen port. `to_check`
 # off is the setting the risk test connected through (risk-test.md).
 #
-# max_duration 360 min — the backstop for a server that never exits. Servers run rounds back to
-# back while anyone is on them and exit after OVERMATCH_EMPTY_EXIT_S empty, so this only ever cuts
-# an occupied server past six hours (its players Join again into a fresh one) or a leaked one. A
-# leak costs at most 360 × $0.00115/vCPU-min ≈ $0.41 (DERIVED, list price) against ≈ $1.66 at
-# Edgegap's 1440-min default.
+# max_duration 1440 min — the last defence for a server that never exits, behind the Worker's
+# per-minute orphan sweep: it acts only when the Worker is down and a server hangs. Servers run
+# rounds back to back while anyone is on them and exit after OVERMATCH_EMPTY_EXIT_S empty, so this
+# only ever cuts an occupied server past 24 h (its players Join again into a fresh one) or a leaked
+# one. A leak costs at most 1440 × $0.00115/vCPU-min ≈ $1.66 per vCPU (DERIVED, list price).
 #
 # time_to_deploy 60 s = the Worker's START_DEADLINE_S: past it the Worker stops the deployment
 # anyway, so Edgegap marking it failed at the same moment changes nothing but its own report.
@@ -48,7 +48,7 @@ body="$(jq -n \
     docker_tag: $tag,
     req_cpu: 1024,
     req_memory: 1024,
-    max_duration: 360,
+    max_duration: 1440,
     time_to_deploy: 60,
     verify_image: true,
     ports: [{port: 5888, protocol: "UDP", name: "game", to_check: false}],

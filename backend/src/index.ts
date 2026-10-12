@@ -6,6 +6,7 @@ import type { Env } from "./config";
 import { validVersion, versionOf } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
+import { sweep } from "./sweep";
 import type { HeartbeatRequest, JoinRequest } from "./types";
 
 export { Registry } from "./registry";
@@ -140,6 +141,15 @@ export default {
 		} catch (err) {
 			console.error("unhandled", diag(err));
 			return error(500, "internal error");
+		}
+	},
+
+	// The orphan sweep (src/sweep.ts), on the `triggers.crons` schedule in wrangler.jsonc.
+	async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+		try {
+			await sweep(env);
+		} catch (err) {
+			console.error("sweep failed", diag(err));
 		}
 	},
 } satisfies ExportedHandler<Env>;

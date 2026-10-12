@@ -21,12 +21,15 @@
 // - A deployment is forgotten only once Edgegap confirms it stopped. Ending a server moves its row to
 //   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
 //   gone), and only then is the row `ended` and its history closed.
+// - A deployment carries its claim's tag (`tagOf`) from the deploy request on, and the claim's row
+//   (here) and history row (D1) are written before that request. The orphan sweep (src/sweep.ts)
+//   relies on it: a tagged deployment whose row is not live (`liveDeployments`) is stopped.
 // - Secrets: the netcode key leaves this object only in a ticket answer for that server; the report
 //   secret is stored only as its SHA-256 and never leaves.
 
 import { DurableObject } from "cloudflare:workers";
 import { config, type Config, type Env } from "./config";
-import { definiteRejection, Edgegap, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
+import { definiteRejection, edgegapFor, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
 import { settleAll } from "./deadline";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
@@ -161,7 +164,7 @@ export class Registry extends DurableObject<Env> {
 		super(ctx, env);
 		this.sql = ctx.storage.sql;
 		this.cfg = config(env);
-		this.provider = new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME, this.cfg.providerTimeoutMs);
+		this.provider = edgegapFor(env, this.cfg.providerTimeoutMs);
 		this.sql.exec(SCHEMA);
 	}
 
@@ -293,6 +296,20 @@ export class Registry extends DurableObject<Env> {
 				 FROM servers ORDER BY created_at`,
 			)
 			.toArray();
+	}
+
+	// ---- orphan sweep -------------------------------------------------------------------------
+
+	/** Of the listed deployments, the ones this registry still runs: the claim's row is `starting` or
+	 *  `ready` and its deployment id is the listed one or not yet known (deploy in flight or of
+	 *  unknown outcome, which `reconcile` settles by tag). Every other one is the sweep's to stop. */
+	liveDeployments(claims: { serverId: string; deploymentId: string }[]): string[] {
+		return claims
+			.filter(({ serverId, deploymentId }) => {
+				const s = this.server(serverId);
+				return !!s && live(s) && (s.deployment_id === null || s.deployment_id === deploymentId);
+			})
+			.map((c) => c.deploymentId);
 	}
 
 	// ---- alarm --------------------------------------------------------------------------------
@@ -511,7 +528,7 @@ export class Registry extends DurableObject<Env> {
 			serverId,
 		).rowsWritten;
 		if (!written) return;
-		await this.record({ kind: "deployed", serverId, deploymentId });
+		await this.record({ kind: "deployed", serverId, version: versionOf(serverId)!, location: row.location, requestedAt: row.created_at, deploymentId });
 		const s = this.server(serverId);
 		if (s?.state === "stopping") {
 			// The id makes the claim's fate known: its deferred tickets may now be placed elsewhere.

@@ -5,6 +5,7 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { config, type Env } from "./config";
 import { registryFor, type ServerSnapshot } from "./registry";
+import { lastSweep } from "./sweep";
 
 /** Concurrent Registry calls per request; the platform allows six outgoing connections. */
 const FANOUT = 5;
@@ -44,7 +45,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 	const cfg = config(env);
 	const monthStart = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), 1);
 
-	const [liveVersions, totals, recent] = await Promise.all([
+	const [liveVersions, totals, recent, swept] = await Promise.all([
 		env.DB.prepare("SELECT DISTINCT version FROM sessions WHERE ended_at IS NULL ORDER BY version").all<{ version: string }>(),
 		env.DB.prepare(
 			`SELECT
@@ -58,6 +59,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 			.bind(now, monthStart)
 			.first<{ all_minutes: number; month_minutes: number; sessions: number; failures: number }>(),
 		env.DB.prepare("SELECT * FROM sessions ORDER BY requested_at DESC LIMIT 30").all<SessionRow>(),
+		lastSweep(env),
 	]);
 
 	const versions = liveVersions.results.map((r) => r.version);
@@ -102,6 +104,11 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		)
 		.join("");
 
+	const sweepLine = swept
+		? `Orphan sweep ${ago(now, swept.at)} ago: ${swept.listed} tagged deployments, ${swept.stopped} stopped, ${swept.failed} stops failed` +
+			(swept.error ? `; last error: ${esc(swept.error)}` : "")
+		: "Orphan sweep: none recorded";
+
 	return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Overmatch servers</title>
@@ -128,6 +135,7 @@ th{color:var(--mute);font-weight:500}.n{text-align:right;font-variant-numeric:ta
 <h2>Live</h2>
 <div class="wrap"><table><tr><th>version</th><th>location</th><th>state</th><th class="n">players</th><th>address</th><th class="n">age</th><th class="n">last heartbeat</th></tr>
 ${liveRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
+<p style="color:var(--mute)">${sweepLine}</p>
 <h2>Recent sessions</h2>
 <div class="wrap"><table><tr><th>requested (UTC)</th><th>version</th><th>location</th><th>outcome</th><th class="n">peak</th><th class="n">minutes</th><th>reason</th></tr>
 ${recentRows || '<tr><td colspan="7">none</td></tr>'}</table></div>
