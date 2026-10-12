@@ -476,9 +476,9 @@ const SOFT: f32 = 10.0;
 /// One fixture volume: name, full extents and centre (m), kind.
 type FixtureVolume = (&'static str, Vec3, Vec3, Kind);
 
-/// A static fixture tank owning `volumes`, each its own static cuboid on the `Armor` layer, and
-/// the real march driven on [`STEP`] with spent shells kept.
-fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
+/// Static fixture tanks, each volume its own static cuboid on the `Armor` layer owned by the tank
+/// its index names, and the real march driven on [`STEP`] with spent shells kept.
+fn fixture_tanks(volumes: &[(FixtureVolume, usize)]) -> (App, Vec<Entity>) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -495,17 +495,27 @@ fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
     }
     app.finish();
     app.cleanup();
-    let tank = app
-        .world_mut()
-        .spawn((Transform::default(), RigidBody::Static))
-        .id();
-    app.world_mut().entity_mut(tank).insert(Rig {
-        hull: tank,
-        turret: tank,
-        gun: tank,
-        muzzle: tank,
-    });
-    for &(name, size, at, kind) in volumes {
+    let count = volumes
+        .iter()
+        .map(|(_, owner)| owner + 1)
+        .max()
+        .unwrap_or(1);
+    let tanks: Vec<Entity> = (0..count)
+        .map(|_| {
+            let tank = app
+                .world_mut()
+                .spawn((Transform::default(), RigidBody::Static))
+                .id();
+            app.world_mut().entity_mut(tank).insert(Rig {
+                hull: tank,
+                turret: tank,
+                gun: tank,
+                muzzle: tank,
+            });
+            tank
+        })
+        .collect();
+    for &((name, size, at, kind), owner) in volumes {
         let factor = if matches!(kind, Kind::Box(_)) {
             SOFT
         } else {
@@ -521,7 +531,7 @@ fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
                 material: walk::VolumeMaterial::fixture(factor),
                 substance: "fixture".to_owned(),
             },
-            VolumeOf(tank),
+            VolumeOf(tanks[owner]),
         ));
         match kind {
             Kind::Main => {}
@@ -539,7 +549,7 @@ fn fixture_world(volumes: &[FixtureVolume]) -> (App, Entity) {
     for _ in 0..8 {
         app.update();
     }
-    (app, tank)
+    (app, tanks)
 }
 
 /// Fire the fixture 88 from `from` along `-Z` at 800 m/s (fixture data) and read back its record.
@@ -550,7 +560,19 @@ fn fixture_shot(volumes: &[FixtureVolume], from: Vec3) -> PenetrationReport {
 /// Fire the fixture 88 from `from` along `direction` at 800 m/s (fixture data), read back its
 /// record, and check the record's own path and the march's logged path read its verdict.
 fn fixture_shot_along(volumes: &[FixtureVolume], from: Vec3, direction: Vec3) -> PenetrationReport {
-    let (mut app, tank) = fixture_world(volumes);
+    let owned: Vec<(FixtureVolume, usize)> = volumes.iter().map(|&volume| (volume, 0)).collect();
+    fixture_shot_at(&owned, from, direction, 0)
+}
+
+/// [`fixture_shot_along`] among several fixture tanks, recorded against tank `struck`.
+fn fixture_shot_at(
+    volumes: &[(FixtureVolume, usize)],
+    from: Vec3,
+    direction: Vec3,
+    struck: usize,
+) -> PenetrationReport {
+    let (mut app, tanks) = fixture_tanks(volumes);
+    let tank = tanks[struck];
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
     let (projectile, readout) = fixture_round(FIXTURE_88, direction * 800.0);
     let shell = app
@@ -842,4 +864,79 @@ fn a_bounce_off_armour_that_doses_nothing_is_a_ricochet() {
         },
         "it leaves off the face it bounced from"
     );
+}
+
+/// A round's outcome is recorded against the selected tank alone: through tank A's plate and
+/// stopped in tank B's behind it, A's record has the round leave A where it came out of A's plate,
+/// lists A's plate only, and starts its clock at A; B's record has it rest in B's plate, its first
+/// contact and its clock at B. The plates' places are fixture data.
+#[test]
+fn a_record_holds_the_selected_tanks_outcome_alone() {
+    let volumes = [
+        (plate("front", THIN, 0.0, Kind::Main), 0),
+        (plate("far", THICK, -3.0, Kind::Main), 1),
+    ];
+    let a = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 0);
+    assert_eq!(a.impact.verdict, ShotVerdict::Penetration);
+    let names: Vec<&str> = a.plates.iter().map(|plate| plate.name.as_str()).collect();
+    assert_eq!(names, ["front"]);
+    let exit = Vec3::from(a.plates[0].exit.expect("perforated"));
+    let RoundEnd::Left { at } = a.end else {
+        panic!("A's record has the round leave A: {:?}", a.end);
+    };
+    assert!(Vec3::from(at).distance(exit) < 1.0e-3, "{at:?} vs {exit}");
+    let b = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 1);
+    assert_eq!(b.impact.verdict, ShotVerdict::NonPen);
+    assert_eq!(
+        b.end,
+        RoundEnd::Rest {
+            volume: "far".to_owned()
+        }
+    );
+    // B's near face, at z = -3 + 0.25, fixture data.
+    assert!(
+        (b.impact.point[2] + 2.75).abs() < 1.0e-3,
+        "{:?}",
+        b.impact.point
+    );
+    let contact = b
+        .path
+        .iter()
+        .find(|node| (node.point[2] + 2.75).abs() < 1.0e-3)
+        .expect("B's contact is a node of B's path");
+    assert_eq!(contact.t, 0.0, "B's clock starts at B");
+}
+
+/// A round that glances off one plate and then stops in another rests in the second: the recorder's
+/// end is the last mark's, not the bounce's. The 75° graze and the far plate's place are fixture
+/// data.
+#[test]
+fn a_bounce_then_a_stop_rests_where_it_stopped() {
+    let graze = Vec3::new(
+        75.0_f32.to_radians().sin(),
+        0.0,
+        -75.0_f32.to_radians().cos(),
+    );
+    let report = fixture_shot_along(
+        &[
+            plate("plate", 0.10, 0.0, Kind::Main),
+            (
+                "wall",
+                Vec3::new(THICK, FACE, FACE),
+                Vec3::new(2.5, 2.0, 0.5),
+                Kind::Main,
+            ),
+        ],
+        Vec3::new(-1.0, 2.0, 0.6),
+        graze,
+    );
+    assert_eq!(report.ricochets.len(), 1, "it glances off the plate");
+    assert_eq!(report.ricochets[0].volume, "plate");
+    assert_eq!(
+        report.end,
+        RoundEnd::Rest {
+            volume: "wall".to_owned()
+        }
+    );
+    assert_eq!(report.impact.verdict, ShotVerdict::NonPen);
 }

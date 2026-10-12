@@ -3,7 +3,8 @@
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, every spall cone as a translucent reach surface, and each component's real mesh tinted by
 //! the dose it took.
-//! The shell rests where the record ends; a round whose path runs on past the drawn span leaves.
+//! The shell rests where the record ends; a round the record has leave the tank runs on out of the
+//! frame.
 //! Rebuilt when the corner's record or a look setting changes; animated every frame from the
 //! corner's clock alone, so a scrub lands on the same picture.
 //!
@@ -37,9 +38,9 @@ const BACKGROUND: Color = Color::srgb_u8(0x0F, 0x13, 0x18);
 /// The glass hull's colour and the trail's.
 const GLASS: Color = Color::srgb_u8(0x9F, 0xB0, 0xC0);
 const LINE: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
-/// The trail's emission at full capability, for the bloom.
+/// The trail's emission at full capability, for the bloom. TUNED.
 const LINE_GLOW: f32 = 1.8;
-/// The trail's width in calibres: a diagram choice, thin beside the shell it follows.
+/// The trail's width in calibres: a diagram choice, thin beside the shell it follows. TUNED.
 const TRAIL_CALIBRES: f32 = 0.3;
 /// The game's shell model, the one `ballistics::view` dresses the main-gun round with: origin at
 /// the tip, body along +Z, so `looking_to(travel)` puts the nose forward.
@@ -48,16 +49,17 @@ const SHELL_SCENE: &str = "shell/shell.glb";
 /// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
 const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
 const SHELL_MODEL_LENGTH_M: f32 = 0.263;
-/// The framed radius is at most this many calibres, about the stop or else the contact: the main
-/// gun's whole-hull frame (7.0 m for 88 mm, DERIVED) is untouched, a 7.9 mm round's is held to
-/// 0.63 m.
+/// The framed radius is at most this many calibres (TUNED), about the stop or else the contact:
+/// the main gun's whole-hull frame (7.0 m for 88 mm, DERIVED) is untouched, a 7.9 mm round's is
+/// held to 0.63 m (DERIVED).
 const FRAME_CALIBRES: f32 = 80.0;
-/// A ring at a crossing: a calibre across, this thick (fraction of its radius).
+/// A ring at a crossing: a calibre across, this thick (fraction of its radius). TUNED, as is its
+/// glow.
 const RING_THICKNESS: f32 = 0.12;
 const RING_GLOW: f32 = 2.0;
 /// The spall cone is drawn as this many nested copies of its reach surface, scaled about its
 /// origin, so its density reads as depth; the on-axis brightness of all of them together is
-/// [`CONE_PEAK`] at the top of the dose scale.
+/// [`CONE_PEAK`] at the top of the dose scale. TUNED, as are the cone's and the boxes' glows below.
 const CONE_SHELLS: usize = 4;
 const CONE_PEAK: f32 = 0.35;
 /// The shells' emission gain over [`CONE_PEAK`], for the bloom: a diagram choice.
@@ -74,6 +76,7 @@ const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 const CORNER_FOV_DEG: f32 = 30.0;
 /// The outside view frames this much of each leg either side of the contact (m). This and every
 /// other framing length below is taken through [`Plan::reach`], so a small calibre frames tighter.
+/// TUNED, as are the slice's figures below.
 const LEG_FRAME_M: f32 = 1.5;
 /// A slice cut along a shot within this angle (deg) of vertical spans no vertical plane, and is
 /// cut through the shot and the struck face's normal instead.
@@ -102,11 +105,10 @@ pub(super) struct LineSeg {
     brightness: f32,
 }
 
-/// A mark that appears at an arc length of the line (`None`: at a fixed corner time).
+/// A mark that appears when the shell's nose reaches an arc length of the line.
 #[derive(Component)]
 pub(super) struct MarkItem {
-    at_arc: Option<f32>,
-    at_c: f32,
+    at_arc: f32,
 }
 
 /// One copy of cone `cone`'s reach surface at scale `k`; `rim` marks the outer surface's glow.
@@ -435,7 +437,7 @@ pub fn spawn_glass(
     // Rings where the round crossed each plate, and the gouge of a bounce. The stop is the shell's
     // nose, so it gets no ring.
     let ring = meshes.add(Torus::new(1.0 - RING_THICKNESS, 1.0 + RING_THICKNESS));
-    let mut mark = |commands: &mut Commands, transform: Transform, at_arc, at_c, glow: f32| {
+    let mut mark = |commands: &mut Commands, transform: Transform, at_arc, glow: f32| {
         let mut material = GlowMaterial::additive(LINE.into(), glow);
         material.set_fade(0.0);
         commands.spawn((
@@ -443,7 +445,7 @@ pub fn spawn_glass(
             MeshMaterial3d(glows.add(material)),
             transform,
             Visibility::Hidden,
-            MarkItem { at_arc, at_c },
+            MarkItem { at_arc },
             scope,
             StageItem,
             ChildOf(hull),
@@ -462,20 +464,13 @@ pub fn spawn_glass(
             } else {
                 ring_across(crossing.entry, travel, radius)
             };
-            mark(
-                commands,
-                transform,
-                Some(crossing.entry_arc),
-                0.0,
-                RING_GLOW,
-            );
+            mark(commands, transform, crossing.entry_arc, RING_GLOW);
             if let Some(exit) = crossing.exit {
                 let exit_arc = line.arc_of(exit);
                 mark(
                     commands,
                     ring_across(exit, travel, radius),
-                    Some(exit_arc),
-                    0.0,
+                    exit_arc,
                     RING_GLOW,
                 );
             }
@@ -485,8 +480,7 @@ pub fn spawn_glass(
         mark(
             commands,
             ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
-            Some(bounce.arc),
-            0.0,
+            bounce.arc,
             RING_GLOW,
         );
     }
@@ -647,18 +641,53 @@ fn time_at_arc(plan: &Plan, kind: CornerKind, s: f32, reduce: bool) -> f32 {
     from + (s - plan.start_arc).max(0.0) / travel_speed(plan, kind)
 }
 
-/// Whether the shell is drawn at corner time `c`: from the travel window on, until a round that
-/// left runs off the end of its recorded path. Under reduce motion a round that left is never
-/// drawn, since it would stand parked in the air at the span's end.
+/// Whether the shell is drawn at corner time `c`: from the travel window on, until a round the
+/// record has leave the tank runs off the end of its recorded path. Under reduce motion a round
+/// that left is never drawn, since it would stand parked in the air at the span's end.
 fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
     let (from, _) = kind.line_window();
     if c < from {
         return false;
     }
-    if !plan.left {
+    if !plan.left() {
         return true;
     }
     !reduce && head_arc(plan, kind, c, reduce) < plan.line.length() - 1e-4
+}
+
+/// The shell model's transform with its nose at arc `head`: the tip on the line, the body back
+/// along the travel there, scaled from the model's calibre to the record's.
+fn shell_transform(plan: &Plan, head: f32) -> Transform {
+    Transform::from_translation(plan.line.at(head))
+        .looking_to(plan.line.direction_at(head), Vec3::Y)
+        .with_scale(Vec3::splat(plan.calibre / SHELL_MODEL_CALIBRE_M))
+}
+
+/// Where the trail ends: its arc along the line and its point. Behind a drawn shell it ends at the
+/// model's tail, which on a leg just past a bend stands off the line behind the bend; otherwise at
+/// the nose.
+fn trail_end(plan: &Plan, head: f32, drawn: bool) -> (f32, Vec3) {
+    if !drawn {
+        return (head, plan.line.at(head));
+    }
+    let length = SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M;
+    let tail = shell_transform(plan, head).transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
+    (head - length, tail)
+}
+
+/// The drawn extent of the trail leg between arcs `from` and `to`, cut at the trail's end: the
+/// leg holding that end runs to its point.
+fn trail_span(plan: &Plan, from: f32, to: f32, end: (f32, Vec3)) -> Option<(Vec3, Vec3)> {
+    let (end_arc, end_point) = end;
+    if end_arc <= from {
+        return None;
+    }
+    let b = if end_arc <= to {
+        end_point
+    } else {
+        plan.line.at(to)
+    };
+    Some((plan.line.at(from), b))
 }
 
 /// Animate the stage from the corner's clock and frame the corner camera.
@@ -716,7 +745,7 @@ pub fn animate(
     let Ok((mut camera, mut eye, mut projection)) = camera.single_mut() else {
         return;
     };
-    let Ok((mut shell_transform, mut shell_visibility)) = shell.single_mut() else {
+    let Ok((mut shell_pose, mut shell_visibility)) = shell.single_mut() else {
         return;
     };
     let Some(showing) = corner.showing else {
@@ -745,19 +774,12 @@ pub fn animate(
     };
 
     // The shell, nose at the head, at the record's calibre; the trail ends at its tail.
-    let scale = plan.calibre / SHELL_MODEL_CALIBRE_M;
     let drawn = shell_drawn(plan, kind, c, reduce);
-    let trail_end = if drawn {
-        head - SHELL_MODEL_LENGTH_M * scale
-    } else {
-        head
-    };
+    let end = trail_end(plan, head, drawn);
     if drawn {
-        let want = Transform::from_translation(plan.line.at(head))
-            .looking_to(plan.line.direction_at(head), Vec3::Y)
-            .with_scale(Vec3::splat(scale));
-        if *shell_transform != want {
-            *shell_transform = want;
+        let want = shell_transform(plan, head);
+        if *shell_pose != want {
+            *shell_pose = want;
         }
         shell_visibility.set_if_neq(Visibility::Inherited);
     } else {
@@ -766,12 +788,10 @@ pub fn animate(
 
     let trail_width = plan.calibre * TRAIL_CALIBRES;
     for (seg, material, mut transform, mut visibility) in &mut lines {
-        let to = seg.to.min(trail_end);
-        if to <= seg.from {
+        let Some((a, b)) = trail_span(plan, seg.from, seg.to, end) else {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
-        }
-        let (a, b) = (plan.line.at(seg.from), plan.line.at(to));
+        };
         let span = b - a;
         let length = span.length();
         if length < 1e-5 {
@@ -789,11 +809,7 @@ pub fn animate(
     }
 
     for (mark, material, mut visibility) in &mut marks {
-        let start = match mark.at_arc {
-            Some(arc) => time_at_arc(plan, kind, arc, reduce),
-            None => mark.at_c,
-        };
-        let fade = fade_from(start);
+        let fade = fade_from(time_at_arc(plan, kind, mark.at_arc, reduce));
         if let Some(mut m) = glows.get_mut(&material.0) {
             m.set_fade(fade);
         }
@@ -894,12 +910,6 @@ fn framing(
     orbit: Vec2,
 ) -> (Transform, Projection) {
     let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
-    let perspective = || {
-        Projection::Perspective(PerspectiveProjection {
-            fov: CORNER_FOV_DEG.to_radians(),
-            ..default()
-        })
-    };
     let motion = |rate_deg: f32, from: f32| {
         if settings.reduce_motion {
             0.0
@@ -977,41 +987,41 @@ fn framing(
         }
         CornerKind::Slice => {
             let (normal, _) = stage.plane.unwrap_or((Vec3::X, Vec3::ZERO));
-            let d = plan.chord_direction();
-            let lead = plan.reach(SLICE_LEAD_M);
-            let start = plan
-                .crossings
-                .first()
-                .map_or(plan.impact_point, |crossing| crossing.entry)
-                - d * lead;
-            let end = plan.stop.unwrap_or(plan.line.at(plan.end_arc)) + d * (lead * 0.6);
             let up = (Vec3::Y - normal * normal.y)
                 .try_normalize()
                 .unwrap_or_else(|| normal.any_orthonormal_vector());
-            let right = (-normal).cross(up);
-            let center = 0.5 * (start + end);
-            let width = (end - start).dot(right).abs();
-            let height = ((end - start).dot(up).abs() + 6.0 * plan.calibre)
-                .max(plan.reach(SLICE_MIN_HEIGHT_M))
-                .max(width / 1.6);
-            let width = width.max(height * 1.6);
             let yawed = Quat::from_axis_angle(up, orbit.x) * normal;
+            let wide = slice_frame(plan, normal, up, SLICE_LEAD_M, SLICE_MIN_HEIGHT_M);
+            let tight = slice_frame(
+                plan,
+                normal,
+                up,
+                plan.reach(SLICE_LEAD_M),
+                plan.reach(SLICE_MIN_HEIGHT_M),
+            );
             if settings.slice_ortho {
                 (
-                    Transform::from_translation(center + yawed * 10.0).looking_to(-yawed, up),
+                    Transform::from_translation(tight.center + yawed * 10.0).looking_to(-yawed, up),
                     Projection::Orthographic(OrthographicProjection {
                         scaling_mode: ScalingMode::AutoMin {
-                            min_width: width * 1.1,
-                            min_height: height * 1.1,
+                            min_width: tight.width * 1.1,
+                            min_height: tight.height * 1.1,
                         },
                         ..OrthographicProjection::default_3d()
                     }),
                 )
             } else {
-                let distance = 0.55 * height.max(width / 1.6) / half_fov.tan();
+                // The eye stands as far off the plane as the metre figures put it; the tight frame
+                // is held by narrowing the field from there, never by closing the distance.
+                let distance = 0.55 * wide.height / half_fov.tan();
+                let half = (0.55 * tight.height / distance).atan().min(half_fov);
                 (
-                    Transform::from_translation(center + yawed * distance).looking_to(-yawed, up),
-                    perspective(),
+                    Transform::from_translation(tight.center + yawed * distance)
+                        .looking_to(-yawed, up),
+                    Projection::Perspective(PerspectiveProjection {
+                        fov: 2.0 * half,
+                        ..default()
+                    }),
                 )
             }
         }
@@ -1064,6 +1074,45 @@ fn framing(
     }
 }
 
+/// The slice's frame on its plane: centre, and width and height across and up the plane at a 1.6
+/// aspect, at most [`FRAME_CALIBRES`] calibres either side of the stop (else the contact).
+struct SliceFrame {
+    center: Vec3,
+    width: f32,
+    height: f32,
+}
+
+/// The slice frame for a `lead` before the first crossing and past the stop (that shortened by
+/// 0.6), at least `min_height` tall across the shot.
+fn slice_frame(plan: &Plan, normal: Vec3, up: Vec3, lead: f32, min_height: f32) -> SliceFrame {
+    let d = plan.chord_direction();
+    let start = plan
+        .crossings
+        .first()
+        .map_or(plan.impact_point, |crossing| crossing.entry)
+        - d * lead;
+    let end = plan.stop.unwrap_or(plan.line.at(plan.end_arc)) + d * (lead * 0.6);
+    let right = (-normal).cross(up);
+    let width = (end - start).dot(right).abs();
+    let height = ((end - start).dot(up).abs() + 6.0 * plan.calibre)
+        .max(min_height)
+        .max(width / 1.6);
+    let width = width.max(height * 1.6);
+    let cap = FRAME_CALIBRES * plan.calibre;
+    if 0.5 * width <= cap {
+        return SliceFrame {
+            center: 0.5 * (start + end),
+            width,
+            height,
+        };
+    }
+    SliceFrame {
+        center: plan.stop.unwrap_or(plan.impact_point),
+        width: 2.0 * cap,
+        height: 2.0 * cap / 1.6,
+    }
+}
+
 /// The sphere the corner frames: the one around `points`, or, when that is wider than
 /// [`FRAME_CALIBRES`] calibres, one that wide about the stop, else the contact.
 fn framed(plan: &Plan, points: &[Vec3]) -> (Vec3, f32) {
@@ -1091,37 +1140,85 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::damage_cam::RoundEnd;
 
-    /// The shell model is one calibre of [`SHELL_MODEL_CALIBRE_M`] across, its tip at the origin and
-    /// its body along +Z for [`SHELL_MODEL_LENGTH_M`], so the scale law and the nose placement hold.
+    /// Tolerance on a drawn position (m): DERIVED, f32 rounding of a transform over a few metres
+    /// is under 1e-5 m.
+    const POSITION_TOL_M: f32 = 1.0e-4;
+
+    /// The model's bounds in scene 0, every mesh's accessor bounds carried through the transforms of
+    /// its node and all its ancestors.
+    fn scene_bounds(document: &gltf::Document) -> (Vec3, Vec3) {
+        fn walk(node: gltf::Node, parent: Mat4, bounds: &mut (Vec3, Vec3)) {
+            let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+            if let Some(mesh) = node.mesh() {
+                for primitive in mesh.primitives() {
+                    let b = primitive.bounding_box();
+                    for corner in 0..8 {
+                        let pick = |bit: usize, axis: usize| {
+                            if corner & bit == 0 {
+                                b.min[axis]
+                            } else {
+                                b.max[axis]
+                            }
+                        };
+                        let p =
+                            world.transform_point3(Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)));
+                        bounds.0 = bounds.0.min(p);
+                        bounds.1 = bounds.1.max(p);
+                    }
+                }
+            }
+            for child in node.children() {
+                walk(child, world, bounds);
+            }
+        }
+        let mut bounds = (Vec3::MAX, Vec3::MIN);
+        let scene = document.scenes().next().expect("a scene");
+        for node in scene.nodes() {
+            walk(node, Mat4::IDENTITY, &mut bounds);
+        }
+        bounds
+    }
+
+    /// Whether the scene's bounds are one model calibre across, its tip at the origin and its body
+    /// along +Z for the model length: what the scale law and the nose placement assume.
+    fn model_fits((lo, hi): (Vec3, Vec3)) -> bool {
+        let size = hi - lo;
+        (size.x - SHELL_MODEL_CALIBRE_M).abs() < 1e-3
+            && (size.y - SHELL_MODEL_CALIBRE_M).abs() < 1e-3
+            && lo.z.abs() < 1e-4
+            && (hi.z - SHELL_MODEL_LENGTH_M).abs() < 1e-3
+            && (lo.x + hi.x).abs() < 1e-4
+            && (lo.y + hi.y).abs() < 1e-4
+    }
+
+    /// The shell model, as scene 0 places it (every ancestor's transform included), is one
+    /// calibre of [`SHELL_MODEL_CALIBRE_M`] across, its tip at the origin and its body along +Z for
+    /// [`SHELL_MODEL_LENGTH_M`]. A mesh node of identity transform under a scaled parent fails it.
     #[test]
     fn the_shell_model_has_its_tip_at_the_origin() {
         let path = crate::assets::asset_root().join(SHELL_SCENE);
         let model = gltf::Gltf::open(&path).unwrap();
-        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
-        for node in model.nodes() {
-            let Some(mesh) = node.mesh() else {
-                continue;
-            };
-            assert_eq!(node.transform().matrix(), Mat4::IDENTITY.to_cols_array_2d());
-            for primitive in mesh.primitives() {
-                let bounds = primitive.bounding_box();
-                lo = lo.min(Vec3::from(bounds.min));
-                hi = hi.max(Vec3::from(bounds.max));
-            }
-        }
-        let size = hi - lo;
-        assert!((size.x - SHELL_MODEL_CALIBRE_M).abs() < 1e-3, "{size}");
-        assert!((size.y - SHELL_MODEL_CALIBRE_M).abs() < 1e-3, "{size}");
-        assert!(lo.z.abs() < 1e-4, "{lo}");
-        assert!((hi.z - SHELL_MODEL_LENGTH_M).abs() < 1e-3, "{hi}");
-        assert!((lo.x + hi.x).abs() < 1e-4 && (lo.y + hi.y).abs() < 1e-4);
+        let bounds = scene_bounds(&model.document);
+        assert!(model_fits(bounds), "{bounds:?}");
+
+        // The same bounds under a parent scaled 2×: the mesh node itself stays identity.
+        let text = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
+            "nodes":[{"scale":[2,2,2],"children":[1]},{"mesh":0}],
+            "meshes":[{"primitives":[{"attributes":{"POSITION":0}}]}],
+            "buffers":[{"byteLength":36}],"bufferViews":[{"buffer":0,"byteLength":36}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3",
+                "min":[-0.044,-0.044,0.0],"max":[0.044,0.044,0.263]}]}"#;
+        let scaled = gltf::Gltf::from_slice(text.as_bytes()).unwrap();
+        assert!(!model_fits(scene_bounds(&scaled.document)));
     }
 
-    /// For every record: the shell sets off from the drawn span's start as its travel window opens
-    /// and crosses the span by the window's end; a round that came to rest keeps its nose on the
-    /// record's last point to the end of the frame, and one that left is drawn no longer once its
-    /// nose runs off the end of its path; every arc is reached at the time named for it.
+    /// For every record: the shell sets off from the drawn span's start as its travel window opens,
+    /// crosses the span at one constant speed, and is drawn nose first on the line at the record's
+    /// calibre; a round the record has rest keeps its nose on the record's last point to the end of
+    /// the frame, and one the record has leave is drawn no longer once its nose runs off the end of
+    /// its path, and never under reduce motion.
     #[test]
     fn the_shell_ends_where_the_record_ends() {
         let library = Library::load();
@@ -1135,17 +1232,47 @@ mod tests {
                 (head_arc(plan, kind, to, false) - plan.end_arc).abs() < 1e-3,
                 "{name}"
             );
+            let samples = 16;
+            let step = (to - from) / samples as f32;
+            let increments: Vec<f32> = (0..samples)
+                .map(|k| {
+                    let c = from + step * k as f32;
+                    head_arc(plan, kind, c + step, false) - head_arc(plan, kind, c, false)
+                })
+                .collect();
+            for d in &increments {
+                assert!((d - increments[0]).abs() < 1e-4, "{name}: {increments:?}");
+            }
+            for k in 0..=samples {
+                let head = head_arc(plan, kind, from + step * k as f32, false);
+                let pose = shell_transform(plan, head);
+                assert!(
+                    pose.translation.distance(plan.line.at(head)) < POSITION_TOL_M,
+                    "{name}: the nose is off the line"
+                );
+                let forward = pose.rotation * Vec3::NEG_Z;
+                assert!(
+                    forward.dot(plan.line.direction_at(head)) > 1.0 - 1e-5,
+                    "{name}: the nose does not lead"
+                );
+                let across = pose.scale.x * SHELL_MODEL_CALIBRE_M;
+                assert!((across - plan.calibre).abs() < 1e-6, "{name}: {across}");
+                assert_eq!(pose.scale, Vec3::splat(pose.scale.x), "{name}");
+            }
             let last = *plan.line.points.last().unwrap();
-            if plan.left {
-                let gone = time_at_arc(plan, kind, plan.line.length(), false) + 1e-3;
-                assert!(!shell_drawn(plan, kind, gone, false), "{name}");
-                assert!(!shell_drawn(plan, kind, to, true), "{name}");
-            } else {
-                for reduce in [false, true] {
-                    let end = kind.duration();
-                    assert!(shell_drawn(plan, kind, end, reduce), "{name}");
-                    let nose = plan.line.at(head_arc(plan, kind, end, reduce));
-                    assert!(nose.distance(last) < 1e-4, "{name}");
+            match record.report.end {
+                RoundEnd::Left { .. } => {
+                    let gone = time_at_arc(plan, kind, plan.line.length(), false) + 1e-3;
+                    assert!(!shell_drawn(plan, kind, gone, false), "{name}");
+                    assert!(!shell_drawn(plan, kind, to, true), "{name}");
+                }
+                RoundEnd::Rest { .. } => {
+                    for reduce in [false, true] {
+                        let end = kind.duration();
+                        assert!(shell_drawn(plan, kind, end, reduce), "{name}");
+                        let nose = plan.line.at(head_arc(plan, kind, end, reduce));
+                        assert!(nose.distance(last) < 1e-4, "{name}");
+                    }
                 }
             }
             for s in [plan.contact_arc, plan.end_arc] {
@@ -1153,5 +1280,191 @@ mod tests {
                 assert!((head_arc(plan, kind, at, false) - s).abs() < 1e-3, "{name}");
             }
         }
+    }
+
+    /// A round the record has leave the tank is never left parked: with its recorded run past the
+    /// point it left shorter than the drawn run-out, it is gone once its nose runs off the path,
+    /// and never drawn under reduce motion. Each leaving record restated with its path cut 5 cm past
+    /// the point it left (fixture data).
+    #[test]
+    fn a_round_that_left_is_never_parked() {
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        let mut leaving = 0;
+        for record in &library.records {
+            let mut report = record.report.clone();
+            let RoundEnd::Left { at } = report.end else {
+                continue;
+            };
+            let at = Vec3::from(at);
+            let k = report
+                .path
+                .iter()
+                .position(|p| Vec3::from(p.point).distance(at) < 1e-5)
+                .unwrap();
+            let Some(next) = report.path.get(k + 1).copied() else {
+                continue;
+            };
+            let leg = Vec3::from(next.point) - at;
+            report.path.truncate(k + 1);
+            report.path.push(crate::damage_cam::PathPoint {
+                t: report.path[k].t + (next.t - report.path[k].t) * 0.05 / leg.length(),
+                point: (at + leg.normalize() * 0.05).to_array(),
+            });
+            let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
+            let kind = plan.kind;
+            let end = kind.duration();
+            assert!(!shell_drawn(&plan, kind, end, false), "{}", record.stem);
+            assert!(!shell_drawn(&plan, kind, end, true), "{}", record.stem);
+            leaving += 1;
+        }
+        assert!(leaving > 0, "a record leaves the tank");
+    }
+
+    /// The trail meets the shell's rendered tail at every sample, across a bend too: the trail leg
+    /// holding the trail's end ends at the model's tail, carried by the shell's own transform, and
+    /// the drawn legs join end to end. Sampled at every record's bounce with the nose half a model
+    /// length past it.
+    #[test]
+    fn the_trail_meets_the_shells_tail_across_a_bend() {
+        let library = Library::load();
+        let mut bends = 0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let Some(bounce) = &plan.bounce else {
+                continue;
+            };
+            let length = SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M;
+            let head = bounce.arc + 0.5 * length;
+            let pose = shell_transform(plan, head);
+            let tail = pose.translation - pose.rotation * Vec3::NEG_Z * length;
+            let end = trail_end(plan, head, true);
+            let line = &plan.line;
+            let spans: Vec<(Vec3, Vec3)> = (1..line.points.len())
+                .filter_map(|i| {
+                    let (from, to) = (line.arc[i - 1].max(plan.start_arc), line.arc[i]);
+                    (to > from)
+                        .then(|| trail_span(plan, from, to, end))
+                        .flatten()
+                })
+                .collect();
+            let (_, trail_tip) = *spans.last().expect("a trail is drawn");
+            assert!(
+                trail_tip.distance(tail) < POSITION_TOL_M,
+                "{}: the trail ends {} m from the shell's tail",
+                record.stem,
+                trail_tip.distance(tail)
+            );
+            for pair in spans.windows(2) {
+                assert!(
+                    pair[0].1.distance(pair[1].0) < POSITION_TOL_M,
+                    "{}",
+                    record.stem
+                );
+            }
+            bends += 1;
+        }
+        assert!(bends > 0, "a record bounces");
+    }
+
+    /// The slice frames a small round from where the metre figures put the eye, narrowing the
+    /// field rather than closing the distance, and never frames wider than [`FRAME_CALIBRES`]
+    /// calibres either side of the stop: every slice record, as recorded and with its calibre cut
+    /// to 2 mm (fixture data).
+    #[test]
+    fn the_slice_narrows_the_field_and_holds_the_calibre_cap() {
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        let mut slices = 0;
+        for record in &library.records {
+            if record.plan.kind != CornerKind::Slice {
+                continue;
+            }
+            for calibre_mm in [record.report.projectile.caliber_mm, 2.0] {
+                let mut report = record.report.clone();
+                report.projectile.caliber_mm = calibre_mm;
+                let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
+                let stage = Stage {
+                    plane: Some(slice_plane(&plan)),
+                    ..default()
+                };
+                let (normal, _) = stage.plane.unwrap();
+                let up = (Vec3::Y - normal * normal.y).normalize();
+                let wide = slice_frame(&plan, normal, up, SLICE_LEAD_M, SLICE_MIN_HEIGHT_M);
+                let wide_distance = 0.55 * wide.height / (0.5 * CORNER_FOV_DEG.to_radians()).tan();
+                let cap = 2.0 * FRAME_CALIBRES * plan.calibre * 1.1 + 1e-5;
+                let perspective = Settings {
+                    slice_ortho: false,
+                    ..Settings::default()
+                };
+                let (eye, projection) = framing(
+                    &plan,
+                    CornerKind::Slice,
+                    0.0,
+                    &perspective,
+                    &stage,
+                    Vec2::ZERO,
+                );
+                let off_plane = (eye.translation - wide.center).dot(normal);
+                assert!(
+                    (off_plane - wide_distance).abs() < 1e-3,
+                    "{} at {calibre_mm} mm: the eye stands {off_plane} m off, not {wide_distance}",
+                    record.stem
+                );
+                let Projection::Perspective(lens) = projection else {
+                    panic!("perspective");
+                };
+                assert!(lens.fov <= CORNER_FOV_DEG.to_radians() + 1e-6);
+                let seen = 2.0 * off_plane * (0.5 * lens.fov).tan();
+                assert!(seen <= cap / 1.6 + 1e-3, "{}: {seen} m tall", record.stem);
+                let (_, projection) = framing(
+                    &plan,
+                    CornerKind::Slice,
+                    0.0,
+                    &Settings::default(),
+                    &stage,
+                    Vec2::ZERO,
+                );
+                let Projection::Orthographic(ortho) = projection else {
+                    panic!("orthographic");
+                };
+                let ScalingMode::AutoMin { min_width, .. } = ortho.scaling_mode else {
+                    panic!("auto min");
+                };
+                assert!(min_width <= cap, "{}: {min_width} m wide", record.stem);
+            }
+            slices += 1;
+        }
+        assert!(slices > 0, "a record opens on the slice");
+    }
+
+    /// Each of a tank's meshes belongs to the component its nearest named node of the plan's
+    /// names is: a component nested in another is its own, a component of several meshes owns
+    /// each, a mesh under no component belongs to none. The names are the first record's own.
+    #[test]
+    fn each_mesh_belongs_to_its_nearest_component() {
+        let library = Library::load();
+        let plan = &library.records[0].plan;
+        let (outer, inner) = (plan.boxes[0].name.clone(), plan.boxes[1].name.clone());
+        let none = "a node no component names".to_owned();
+        let e = |i: u32| Entity::from_raw_u32(i).unwrap();
+        let chains: Vec<(Entity, Vec<String>)> = vec![
+            (e(1), vec![outer.clone()]),
+            (e(2), vec![none.clone(), outer.clone()]),
+            (e(3), vec![inner.clone(), outer.clone()]),
+            (
+                e(4),
+                vec![none.clone(), inner.clone(), none.clone(), outer.clone()],
+            ),
+            (e(5), vec![none.clone()]),
+        ];
+        let found = component_meshes(
+            plan,
+            chains
+                .iter()
+                .map(|(entity, names)| (*entity, names.as_slice(), Handle::default())),
+        );
+        let got: Vec<(Entity, usize)> = found.iter().map(|m| (m.entity, m.index)).collect();
+        assert_eq!(got, [(e(1), 0), (e(2), 0), (e(3), 1), (e(4), 1)]);
     }
 }

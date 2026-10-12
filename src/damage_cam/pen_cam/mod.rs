@@ -14,8 +14,10 @@
 //! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
 //! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion.
 //!
-//! A view over the record: nothing here marches a shell or reads the sim. Every position comes
-//! from the record (hull-local, the stage's frame), every timing from [`timeline`], and the
+//! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
+//! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
+//! servo angles ([`super::shapes`]), supplies only each component's shape and so the centres the
+//! camera frames. Every timing comes from [`timeline`] and the record's own places, and the
 //! record's few derived quantities are named in [`plan`].
 //!
 //! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
@@ -189,6 +191,11 @@ impl Library {
                 assert!(
                     report.vehicle.as_deref() == Some(vehicle.as_str()),
                     "{stem}: the demo stages one vehicle, {vehicle}"
+                );
+                let unresolved = report.unresolved();
+                assert!(
+                    report.synthetic || unresolved.is_empty(),
+                    "{stem}: {unresolved:?}"
                 );
                 let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
                 let knockout = killcam::knockout(&report);

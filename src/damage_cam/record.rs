@@ -4,8 +4,11 @@
 //! HP, and every servo's angle, before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
 //! spall cones and the components' HP after it, and states it all in the struck hull's frame.
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
-//! the logged path, plate classes come from the volumes' components, the round's end is the log's
-//! last crossing or bounce, and every dose is one the march recorded. No component geometry is
+//! the logged path, plate classes come from the volumes' components, the round's end is the last
+//! crossing or bounce the log has on the struck tank, and every dose is one the march recorded.
+//! The outcome is the struck tank's alone: first contact, plates, bounces, cones and their
+//! fragments' hits are read only off marks and volumes the tank owns, and the path stops one leg
+//! past the struck tank's last mark. No component geometry is
 //! read: the record names each component, and its shape stays the tank asset's.
 //!
 //! The path's times are DERIVED, not marched: each leg's length over the speed in effect on it
@@ -238,8 +241,12 @@ pub fn report(
     let world: &World = world;
     let cones = &world.get::<SpallMarks>(shell)?.cones;
     let tail = world.get::<ShellPath>(shell)?.points.clone();
+    let owns = |mark: &ArmourMark| touches(world, mark, struck.tank);
+    let first_touch = marks.iter().position(owns)?;
+    let last_touch = marks.iter().rposition(owns)?;
 
-    // The path's nodes, each with the speed of the leg that reaches it.
+    // The path's nodes up to the struck tank's last mark, each with the speed of the leg that
+    // reaches it; `contact` is the node of the struck tank's first contact.
     let mut legs: Vec<(Vec3, f32)> = Vec::new();
     let mut speed = match marks.first()? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
@@ -248,7 +255,11 @@ pub fn report(
     legs.push((facts.launch, speed));
     let mut last = facts.launch;
     let mut flying = true;
-    for mark in &marks {
+    let mut contact = 0;
+    for (index, mark) in marks[..=last_touch].iter().enumerate() {
+        if index == first_touch {
+            contact = legs.len();
+        }
         match mark {
             ArmourMark::Bounce {
                 position,
@@ -299,10 +310,10 @@ pub fn report(
         }
         nodes.push(Node { point, t });
     }
-    // First contact is t = 0.
-    let contact = nodes.get(1)?.t;
+    // The struck tank's first contact is t = 0.
+    let contact_t = nodes.get(contact)?.t;
     for node in &mut nodes {
-        node.t -= contact;
+        node.t -= contact_t;
     }
     let time_at = |point: Vec3| time_on(&nodes, point);
 
@@ -315,8 +326,16 @@ pub fn report(
     let mut entered: Vec<(Entity, f32, Vec3)> = Vec::new();
     let mut end = None;
     let mut thrown = cones.iter();
-    let first = marks.first()?;
-    for mark in &marks {
+    let first = &marks[first_touch];
+    let owned = |volume: Entity| owned_by(world, volume, struck.tank);
+    for mark in &marks[..=last_touch] {
+        if !owns(mark) {
+            // Its cones are another tank's; the cone log stays aligned with the crossings.
+            if let ArmourMark::Crossing { cones: count, .. } = mark {
+                thrown.by_ref().take(*count).for_each(drop);
+            }
+            continue;
+        }
         match mark {
             ArmourMark::Bounce {
                 position,
@@ -360,7 +379,7 @@ pub fn report(
                             .map_or_else(String::new, |volume| name_of(world, volume)),
                     },
                 });
-                for crossed in volumes {
+                for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
                     let t = time_at(crossed.entry);
                     let class = class_of(world, crossed.volume);
                     if class == VolumeClass::Box {
@@ -395,15 +414,14 @@ pub fn report(
                         .rays
                         .iter()
                         .map(|ray| {
-                            for &(volume, dose) in &ray.doses {
+                            let doses = ray.doses.iter().filter(|(volume, _)| owned(*volume));
+                            for &(volume, dose) in doses.clone() {
                                 field.push((volume, dose, t));
                             }
                             Fragment {
                                 end: struck.point(ray.end),
                                 strength: ray.strength,
-                                hits: ray
-                                    .doses
-                                    .iter()
+                                hits: doses
                                     .map(|&(volume, dose)| FragmentHit {
                                         volume: name_of(world, volume),
                                         damage: dose,
@@ -460,7 +478,7 @@ pub fn report(
             name: facts.projectile.clone(),
             caliber_mm: facts.caliber_mm,
             mass_kg: facts.mass_kg,
-            speed_mps: legs.get(1).map_or(0.0, |(_, speed)| *speed),
+            speed_mps: legs.get(contact).map_or(0.0, |(_, speed)| *speed),
         },
         impact: Impact {
             point: struck.point(impact_point),

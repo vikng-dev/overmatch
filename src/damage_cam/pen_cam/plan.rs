@@ -5,10 +5,11 @@
 //!
 //! Whether the round stopped, where it left the tank and where the line entered a component are the
 //! record's own facts; nothing here re-derives them from geometry. A component's shape serves only
-//! framing (its centre). Two things are derived rather than read, and are labelled where they are
-//! made: the line's remaining capability, `(v/v₀)²` from the path's times (the record carries no
-//! capability), and the moment a component is reached (the arc of the line's recorded entry, or
-//! the cone that dosed it).
+//! framing (its centre), never timing. Two things are derived rather than read, and are labelled
+//! where they are made: the line's remaining capability, `(v/v₀)²` from the path's times (the
+//! record carries no capability), and the moment a component is reached (the arc of the line's
+//! recorded entry, or the cone that dosed it; a synthetic clip that names neither is reached at
+//! contact).
 
 use bevy::prelude::*;
 
@@ -18,9 +19,10 @@ use crate::damage_cam::{
     ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, ShotVerdict, SpallCone,
 };
 
-/// The line is drawn from this far (m) before first contact.
+/// The line is drawn from this far (m) before first contact. TUNED: a diagram choice.
 pub const LEAD_M: f32 = 1.5;
-/// A path that leaves the tank is drawn this far (m) past the point it left.
+/// A path that leaves the tank is drawn this far (m) past the point it left. TUNED: a diagram
+/// choice.
 pub const RUN_OUT_M: f32 = 1.5;
 /// Two arc lengths this close (m) name the same point of the line: a node's arc against the arc
 /// [`Polyline::arc_of`] finds for that node. DERIVED: arc lengths are f32 sums of legs under 100 m,
@@ -30,9 +32,10 @@ pub const LEG_EPS_M: f32 = 1.0e-4;
 /// Every length the corner draws or frames around the round, [`LEAD_M`] and [`RUN_OUT_M`]
 /// included, is at most this many calibres ([`Plan::reach`]), so a small round is framed as tightly
 /// as its size asks: 0.16 m for a 7.9 mm round, while an 88 mm round's 1.76 m leaves every metre
-/// figure in force (DERIVED).
+/// figure in force (DERIVED from the TUNED 20).
 pub const REACH_CALIBRES: f32 = 20.0;
 /// The line's brightness never falls below this: a diagram rule for legibility, not physics.
+/// TUNED.
 pub const LINE_FLOOR: f32 = 0.35;
 
 /// The record, prepared for drawing.
@@ -46,9 +49,8 @@ pub struct Plan {
     pub start_arc: f32,
     pub contact_arc: f32,
     pub end_arc: f32,
-    /// The record's path runs on past the drawn span: the round left.
-    pub left: bool,
-    /// Where the record has the round leave the tank, and its arc length; `None` when it rested.
+    /// Where the record has the round leave the tank ([`RoundEnd::Left`]), and its arc length;
+    /// `None` when it rested.
     pub left_at: Option<(Vec3, f32)>,
     pub crossings: Vec<Crossing>,
     /// Outward normal and incidence (rad) at first contact.
@@ -195,8 +197,8 @@ pub struct BoxPlan {
     pub count: f32,
     pub line: f32,
     pub field: f32,
-    /// When the picture reaches it: the arc where the record has the line enter it, else the arc of
-    /// the first cone that dosed it.
+    /// When the picture reaches it: the arc where the record has the line enter it, else the first
+    /// cone that dosed it, else (a synthetic clip that names neither) the contact.
     pub reached_at: Option<Reach>,
     /// Lost before the shot (no hit points left at it), or lost or cooked off by it.
     pub lost: bool,
@@ -275,13 +277,8 @@ impl Plan {
                         })
                     })
                     .map(Reach::Cone);
-                let reached_at = if line_dose + field_dose > 0.0 {
-                    by_line.or(by_cone).or(Some(Reach::Line(
-                        center.map_or(contact_arc, |c| line.arc_of(c)),
-                    )))
-                } else {
-                    None
-                };
+                let reached_at = (line_dose + field_dose > 0.0)
+                    .then(|| by_line.or(by_cone).unwrap_or(Reach::Line(contact_arc)));
                 let lost_before = component.count > 0.0 && component.hp <= 0.0;
                 BoxPlan {
                     name: component.name.clone(),
@@ -310,7 +307,6 @@ impl Plan {
             start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
             contact_arc,
             end_arc,
-            left: end_arc < line.length() - 1e-4,
             left_at,
             crossings,
             impact_point: contact,
@@ -322,6 +318,11 @@ impl Plan {
             boxes,
             line,
         }
+    }
+
+    /// Whether the record has the round leave the tank.
+    pub fn left(&self) -> bool {
+        self.left_at.is_some()
     }
 
     /// `metres`, or [`REACH_CALIBRES`] calibres if that is shorter.
@@ -514,6 +515,88 @@ mod tests {
                 assert_eq!(plan.end_arc, plan.line.length(), "{name}");
             }
         }
+    }
+
+    /// When the picture reaches a component never reads the asset's geometry: every record restated
+    /// with its places stripped (a synthetic clip naming no entry and no fragment) plans the same
+    /// reach with the asset's shapes as with none.
+    #[test]
+    fn a_components_reach_never_reads_the_assets_geometry() {
+        let all = records();
+        let asset =
+            crate::damage_cam::shapes::TankAsset::load(all[0].1.vehicle.as_deref().unwrap())
+                .unwrap();
+        let mut stripped_any = false;
+        for (name, mut report) in all {
+            report.synthetic = true;
+            for dose in &mut report.doses {
+                stripped_any |= dose.line > 0.0 && dose.entered.is_some();
+                dose.entered = None;
+            }
+            for fragment in report.spall.iter_mut().flat_map(|c| &mut c.fragments) {
+                fragment.hits.clear();
+            }
+            let with = Plan::new(&report, &asset.shapes(&report.servo_deg));
+            let without = Plan::new(&report, &TankShapes::default());
+            for (a, b) in with.boxes.iter().zip(&without.boxes) {
+                assert_eq!(a.reached_at, b.reached_at, "{name}: {}", a.name);
+            }
+        }
+        assert!(stripped_any, "a record's line entered a component");
+    }
+
+    /// Every recorded outcome is placed by the record itself, and a line dose stripped of its entry
+    /// is reported.
+    #[test]
+    fn every_recorded_outcome_is_placed() {
+        let mut stripped = 0;
+        for (name, report) in records() {
+            assert_eq!(report.unresolved(), Vec::<String>::new(), "{name}");
+            let mut broken = report.clone();
+            for dose in &mut broken.doses {
+                if dose.line > 0.0 {
+                    dose.entered = None;
+                    stripped += 1;
+                }
+            }
+            if broken != report {
+                assert!(!broken.unresolved().is_empty(), "{name}");
+            }
+        }
+        assert!(stripped > 0, "a record's line dosed a component");
+    }
+
+    /// A round the record has leave the tank is a round that left, however short the recorded run
+    /// past the point it left: the record's own end decides, not the drawn span. Each leaving
+    /// record is restated with its path cut 5 cm past the point it left (fixture data).
+    #[test]
+    fn a_round_that_left_left_however_short_its_run_out() {
+        let mut leaving = 0;
+        for (name, mut report) in records() {
+            let RoundEnd::Left { at } = report.end else {
+                continue;
+            };
+            let at = Vec3::from(at);
+            let k = report
+                .path
+                .iter()
+                .position(|p| Vec3::from(p.point).distance(at) < 1.0e-5)
+                .expect("where the round left is a point of its path");
+            let Some(next) = report.path.get(k + 1).copied() else {
+                continue;
+            };
+            let leg = Vec3::from(next.point) - at;
+            report.path.truncate(k + 1);
+            report.path.push(crate::damage_cam::PathPoint {
+                t: report.path[k].t + (next.t - report.path[k].t) * 0.05 / leg.length(),
+                point: (at + leg.normalize() * 0.05).to_array(),
+            });
+            let plan = Plan::new(&report, &shapes(&report));
+            assert!(plan.left(), "{name}");
+            assert!(plan.stop.is_none(), "{name}");
+            leaving += 1;
+        }
+        assert!(leaving > 0, "a record leaves the tank");
     }
 
     /// The line's brightness steps down after a crossing and never under the floor.

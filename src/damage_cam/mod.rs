@@ -352,6 +352,31 @@ impl PenetrationReport {
             .find(|component| component.name == name)
     }
 
+    /// Every outcome the record states without the reference that places it: a line dose with no
+    /// [`BoxDose::entered`], a field dose no spall cone's fragment names, a name no component of
+    /// the record holds. Empty for every record the recorder writes; a synthetic clip may lack the
+    /// places, and its picture reaches such a component at contact.
+    pub fn unresolved(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for dose in &self.doses {
+            if self.component(&dose.volume).is_none() {
+                out.push(format!("a dose names no component: {}", dose.volume));
+            }
+            if dose.line > 0.0 && dose.entered.is_none() {
+                out.push(format!("{}: a line dose with no entry", dose.volume));
+            }
+            let thrown = self.spall.iter().flat_map(|cone| &cone.fragments).any(|f| {
+                f.hits
+                    .iter()
+                    .any(|hit| hit.volume == dose.volume && hit.damage > 0.0)
+            });
+            if dose.field > 0.0 && !thrown {
+                out.push(format!("{}: a field dose no fragment names", dose.volume));
+            }
+        }
+        out
+    }
+
     /// Whether the round came to rest in the struck tank.
     pub fn rested(&self) -> bool {
         matches!(self.end, RoundEnd::Rest { .. })

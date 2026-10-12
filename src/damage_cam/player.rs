@@ -22,7 +22,7 @@ use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::shapes::{TankAsset, TankShapes};
-use super::{ConsequenceState, PenetrationReport, Role, ShotVerdict, SpallCone};
+use super::{ConsequenceState, PenetrationReport, Role, RoundEnd, ShotVerdict, SpallCone};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -37,7 +37,8 @@ pub const SCENARIOS: [(&str, &str); 5] = [
 ];
 
 /// The demo's tank fixture: the view the clips are drawn over and the spec that names its collision
-/// proxies. The record carries no vehicle id yet.
+/// proxies. The clips are hand-authored against this tank and name no vehicle
+/// ([`PenetrationReport::vehicle`] is `None` on them), so the binding is this constant's.
 const TANK_SPEC: &str = "tiger_1/tiger_1.tank.ron";
 
 /// Beat boundaries in clip seconds.
@@ -58,12 +59,9 @@ const FRAGMENT_THETA_MAX: f32 = std::f32::consts::FRAC_PI_4;
 const FRAGMENT_SPEED_FLOOR: f32 = 0.1;
 /// Minimum axial length (m) drawn for a burst's cone envelope.
 const CONE_MIN_LENGTH_M: f32 = 0.3;
-/// Path points past the shell's departure from the armour (a ricochet's deflection leg, a
-/// through-and-through's exit leg) count toward framing only this far (m) from where it left;
-/// points between plates are never clamped.
+/// Path points past where the record has the round leave the tank ([`RoundEnd::Left`]) count
+/// toward framing only this far (m) from that point; points before it are never clamped. TUNED.
 const FRAME_REACH_M: f32 = 3.0;
-/// A path segment passing within this distance (m) of the last exit holds the shell's departure.
-const DEPARTURE_TOLERANCE_M: f32 = 0.02;
 /// Section view: below this incidence (deg) the struck normal is too close to the shot line to
 /// span an incidence cut, which is then cut vertically.
 const SECTION_MIN_INCIDENCE_DEG: f32 = 3.0;
@@ -514,49 +512,34 @@ fn framed_points(report: &PenetrationReport, shapes: &TankShapes) -> Vec<Vec3> {
     points
 }
 
-/// Where the shell left the armour for good (the ricochet point, or the last plate's exit) and
-/// the record time it was there: the point interpolated onto the first path segment ending at or
-/// after the plate's entry that passes within [`DEPARTURE_TOLERANCE_M`] of it, or the nearest
-/// sample's time when no segment does. `None` when the path ends in material.
+/// Where the record has the round leave the struck tank ([`RoundEnd::Left`]) and the record time it
+/// was there, interpolated along the path leg nearest that point. `None` when it came to rest.
 fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
-    let (anchor, from) = match report.impact.verdict {
-        ShotVerdict::Ricochet => (report.impact.point, 0.0),
-        _ => {
-            let plate = report.plates.last()?;
-            (plate.exit?, plate.t)
-        }
+    let RoundEnd::Left { at } = report.end else {
+        return None;
     };
-    let anchor = Vec3::from(anchor);
-    let on_path = report
-        .path
-        .windows(2)
-        .filter(|pair| pair[1].t >= from)
-        .find_map(|pair| {
+    let at = Vec3::from(at);
+    let first = report.path.first()?;
+    let (_, left_at) = report.path.windows(2).fold(
+        (Vec3::from(first.point).distance(at), first.t),
+        |best, pair| {
             let (a, b) = (Vec3::from(pair[0].point), Vec3::from(pair[1].point));
             let span = b - a;
             let along = span.length_squared();
             let s = if along > 0.0 {
-                ((anchor - a).dot(span) / along).clamp(0.0, 1.0)
+                ((at - a).dot(span) / along).clamp(0.0, 1.0)
             } else {
                 0.0
             };
-            (anchor.distance(a + span * s) <= DEPARTURE_TOLERANCE_M)
-                .then(|| pair[0].t + (pair[1].t - pair[0].t) * s)
-        });
-    let left_at = match on_path {
-        Some(t) => t,
-        None => {
-            report
-                .path
-                .iter()
-                .min_by(|a, b| {
-                    let gap = |p: &super::PathPoint| Vec3::from(p.point).distance_squared(anchor);
-                    gap(a).total_cmp(&gap(b))
-                })?
-                .t
-        }
-    };
-    Some((left_at, anchor))
+            let gap = at.distance(a + span * s);
+            if gap < best.0 {
+                (gap, pair[0].t + (pair[1].t - pair[0].t) * s)
+            } else {
+                best
+            }
+        },
+    );
+    Some((left_at, at))
 }
 
 fn bounds(points: &[Vec3]) -> (Vec3, Vec3) {
@@ -2186,6 +2169,26 @@ mod tests {
         assert_eq!(path_speed_at(&report, 0.003), 900.0);
     }
 
+    /// The departure is the record's own end: a round that perforates armour and comes to rest in a
+    /// component has none, whatever plate it left; one that leaves through an exposed component,
+    /// no plate crossed, departs where the record has it leave, at that path point's time.
+    #[test]
+    fn departure_is_the_records_end() {
+        let mut rested = scenario("overpen.ron");
+        assert!(rested.plates.iter().all(|plate| plate.exit.is_some()));
+        rested.end = RoundEnd::Rest {
+            volume: rested.components[0].name.clone(),
+        };
+        assert_eq!(departure(&rested), None);
+        let mut exposed = scenario("overpen.ron");
+        exposed.plates.clear();
+        let node = exposed.path[exposed.path.len() - 2];
+        exposed.end = RoundEnd::Left { at: node.point };
+        let (t, at) = departure(&exposed).expect("it leaves");
+        assert_eq!(at, Vec3::from(node.point));
+        assert!((t - node.t).abs() < 1.0e-6, "{t} vs {}", node.t);
+    }
+
     /// Samples at 0, 0.1 and 16 m with the exit at 10 m: the sample nearest the exit is the
     /// path's end, so only a search along the segments finds the departure and clamps the rest.
     #[test]
@@ -2211,6 +2214,9 @@ mod tests {
             class: PlateClass::Main,
             factor: 1000.0,
         }];
+        report.end = RoundEnd::Left {
+            at: [0.0, 0.0, 10.0],
+        };
         let (left_at, anchor) = departure(&report).unwrap();
         assert!((left_at - 10.0 / speed).abs() < 1.0e-6);
         assert_eq!(anchor, Vec3::new(0.0, 0.0, 10.0));
