@@ -38,15 +38,33 @@ header; the webhook path carries a per-server nonce that authorizes nothing beyo
 `wrangler.jsonc` regardless.
 
 **Join rules.** Among `starting` and `ready` servers of the version in the selected locations that
-are `open` and not full (players + tickets attached within `RESERVATION_TTL_S` < capacity), the
-lowest client ping wins, then the fullest, then the oldest. A location with no ping ranks after all
-pinged ones. Otherwise a `starting` row is written, then Edgegap `/v1/deploy` is called with a city
-filter for the lowest-ping selected location. Joins arriving meanwhile attach to that row. If the
-start fails (refused, Edgegap error, or no ready within `START_DEADLINE_S`), each waiting ticket is
-placed once more (`JOIN_ATTEMPTS` = 2 in all), never in a location that already failed it.
+are `open` and not full, the lowest client ping wins, then the fullest, then the oldest. Load is the
+heartbeat's `players` plus reservations: tickets attached within `RESERVATION_TTL_S` that have not
+yet arrived (a heartbeat's player increase marks that many of the oldest as arrived). A location
+with no ping ranks after all pinged ones. Otherwise a `starting` row is written and its alarm set,
+then Edgegap `/v1/deploy` is called with a city filter for the lowest-ping selected location and a
+tag naming the claim. Joins arriving meanwhile attach to that row. If the start fails (refused,
+Edgegap error, or no ready within `START_DEADLINE_S`), each waiting ticket is placed once more
+(`JOIN_ATTEMPTS` = 2 in all), never in or onto a location that already failed it.
+
+**Unknown deploy outcome.** Only a 4xx answer (not 408) is a refusal. A timeout, lost connection
+or 5xx may have created a deployment, so the claim keeps its tickets and no replacement starts; the
+alarm looks the deployment up by its tag and adopts it (a ready webhook's `request_id` is adopted
+too, once its status shows the tag). Past the start deadline a found deployment is stopped; only a
+lookup past the deadline that finds nothing frees the tickets.
 
 **Ready** means Edgegap has reported the address (ready webhook, or the alarm polling status every
 `STATUS_POLL_S`) **and** the server has sent a heartbeat.
+
+**Ending.** An ended, lost or failed server moves to `stopping`; the alarm retries the Edgegap stop
+every `STATUS_POLL_S` until it succeeds (or Edgegap no longer knows the deployment). Only then is
+the row `ended` and its D1 history closed; retention never deletes a row whose stop is unconfirmed.
+Every Edgegap call and D1 write is bounded by `PROVIDER_TIMEOUT_S`, and the alarm makes all its
+transitions and re-arms itself before running that outbound work, so one slow call holds up no
+other row.
+
+**Failure reasons** shown to clients and on `/admin` come from a fixed list (`src/reasons.ts`);
+provider error text is never read, stored or logged.
 
 **Locations.** The account's full Edgegap list (every page), cached `LOCATIONS_CACHE_S` per version
 object and served stale if Edgegap is down. A location carries a beacon only when one is in the
@@ -77,8 +95,8 @@ stops its deployment.
 ## Configuration
 
 Tunables are `vars` in `wrangler.jsonc` (capacity, heartbeat interval and deadline, start deadline,
-status poll, reservation TTL, ticket TTL, empty exit, retention, join attempts, cache TTL, cost
-rate, Durable Object location hint). Secrets, set with `wrangler secret put`:
+status poll, reservation TTL, ticket TTL, empty exit, retention, join attempts, cache TTL, provider
+timeout, cost rate, Durable Object location hint). Secrets, set with `wrangler secret put`:
 
 | Secret | What |
 |---|---|
