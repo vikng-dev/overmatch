@@ -904,6 +904,8 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
 struct Field {
     /// Per open shell: where its presence opened.
     open: BTreeMap<ShellKey, f64>,
+    /// Per entity with a shell open: how many. An entity whose count reaches zero is removed, so
+    /// the field's maximum reads only what is open.
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -1069,6 +1071,9 @@ pub fn walk_ray(
                 };
                 if let Some(count) = field.per_entity.get_mut(&key.volume) {
                     *count -= 1;
+                    if *count == 0 {
+                        field.per_entity.remove(&key.volume);
+                    }
                 }
                 intervals.push((key, open_at, t));
                 exit_normal += crossing.normal;
@@ -1220,26 +1225,52 @@ fn layers(
     cuts.retain(|t| (0.0..=length).contains(t));
     cuts.sort_by(f64::total_cmp);
     cuts.dedup();
+    let materials = presence
+        .iter()
+        .map(|entity| volumes.material(entity.entity))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A sweep over the span ends in order. Every span end inside the corridor is a cut, so a span
+    // covers the window opening at `start` exactly when `open <= start < close`.
+    let mut opens: Vec<(f64, usize)> = Vec::new();
+    let mut closes: Vec<(f64, usize)> = Vec::new();
+    for (index, entity) in presence.iter().enumerate() {
+        for (open, close) in &entity.spans {
+            opens.push((*open, index));
+            closes.push((*close, index));
+        }
+    }
+    opens.sort_by(|a, b| a.0.total_cmp(&b.0));
+    closes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut next_open, mut next_close) = (0, 0);
+    // Per presence index (volume order), how many of its spans cover the window.
+    let mut active: BTreeMap<usize, u32> = BTreeMap::new();
     let mut out = Vec::with_capacity(cuts.len());
     for window in cuts.windows(2) {
         let (start, end) = (window[0], window[1]);
-        let mut present = Vec::new();
-        for entity in presence {
-            if entity
-                .spans
-                .iter()
-                .any(|(open, close)| *open <= start && end <= *close)
-            {
-                present.push(Presence {
-                    volume: entity.entity,
-                    material: volumes.material(entity.entity)?,
-                });
+        while next_open < opens.len() && opens[next_open].0 <= start {
+            *active.entry(opens[next_open].1).or_insert(0) += 1;
+            next_open += 1;
+        }
+        while next_close < closes.len() && closes[next_close].0 <= start {
+            let index = closes[next_close].1;
+            if let Some(count) = active.get_mut(&index) {
+                *count -= 1;
+                if *count == 0 {
+                    active.remove(&index);
+                }
             }
+            next_close += 1;
         }
         out.push(Layer {
             start,
             end,
-            present,
+            present: active
+                .keys()
+                .map(|&index| Presence {
+                    volume: presence[index].entity,
+                    material: materials[index],
+                })
+                .collect(),
         });
     }
     Ok(out)
@@ -2035,11 +2066,15 @@ fn build_event(
     for (&sample, runs) in &by_sample {
         for &run in runs {
             let extent = &walks[sample].runs[run];
-            for span in &walks[sample].spans {
-                if span.end > extent.start && span.start < extent.end {
-                    breaks.push(span.start);
-                    breaks.push(span.end);
-                }
+            let spans = &walks[sample].spans;
+            // Spans tile the corridor in order: those overlapping the run, by bisection.
+            let from = spans.partition_point(|span| span.end <= extent.start);
+            let to = spans
+                .partition_point(|span| span.start < extent.end)
+                .max(from);
+            for span in &spans[from..to] {
+                breaks.push(span.start);
+                breaks.push(span.end);
             }
         }
     }
@@ -2063,10 +2098,10 @@ fn build_event(
             if !inside {
                 continue;
             }
-            if let Some(span) = walks[sample]
-                .spans
-                .iter()
-                .find(|span| span.start <= mid && mid < span.end)
+            let spans = &walks[sample].spans;
+            if let Some(span) = spans
+                .get(spans.partition_point(|span| span.end <= mid))
+                .filter(|span| span.start <= mid && mid < span.end)
             {
                 slope += span.factor as f64;
             }
@@ -2208,6 +2243,14 @@ fn build_event(
     })
 }
 
+/// The layers of `layers` (one sample's, which tile its corridor in order) that touch
+/// `[start, end]`, found by bisection: a corridor of many crossings is not rescanned per crossing.
+fn layers_over(layers: &[Layer], start: f64, end: f64) -> &[Layer] {
+    let from = layers.partition_point(|layer| layer.end < start);
+    let to = layers.partition_point(|layer| layer.start <= end).max(from);
+    &layers[from..to]
+}
+
 /// The ordered encounters of one disc crossing: `[start, end]` cut at every boundary of every
 /// contributing sample's layers, each stretch listing what each sample inside the crossing meets.
 fn encounters(
@@ -2219,14 +2262,14 @@ fn encounters(
 ) -> Vec<Encounter> {
     let mut cuts: Vec<f64> = vec![start, end];
     for &sample in by_sample.keys() {
-        for layer in &walks[sample].layers {
+        for layer in layers_over(&walks[sample].layers, start, end) {
             cuts.push(layer.start);
             cuts.push(layer.end);
         }
     }
+    cuts.retain(|t| *t >= start && *t <= end);
     cuts.sort_by(f64::total_cmp);
     cuts.dedup();
-    cuts.retain(|t| *t >= start && *t <= end);
 
     let mut out: Vec<Encounter> = Vec::with_capacity(cuts.len());
     let mut before: BTreeMap<usize, Vec<SubstanceId>> = BTreeMap::new();
@@ -2243,8 +2286,7 @@ fn encounters(
             if !inside {
                 continue;
             }
-            let Some(layer) = walks[sample]
-                .layers
+            let Some(layer) = layers_over(&walks[sample].layers, a, b)
                 .iter()
                 .find(|layer| layer.start <= mid && mid < layer.end)
             else {
