@@ -299,7 +299,7 @@ fn classify(
     let substance = registry.get(material).ok()?;
     Some(PrimitiveSubstance {
         name: material.to_owned(),
-        factor: substance.factor,
+        factor: substance.factor(),
     })
 }
 
@@ -1522,7 +1522,7 @@ mod tests {
         // which is the whole reason the file has to come from the right revision.
         std::fs::write(
             &elsewhere,
-            "SubstanceRegistry(substances: {\"Cheese\": (factor: 1.0, paintable: false)})",
+            "SubstanceRegistry(substances: {\"Cheese\": (resistance: Reference, paintable: false, facts: Some((density: 1000.0, flow_strength: 1.0e6, youngs_modulus: 1.0e9, poisson_ratio: 0.4)))})",
         )
         .expect("the fixture registry is writable");
         let findings = verify_asset(&asset.glb, Some(&elsewhere));

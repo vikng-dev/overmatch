@@ -150,38 +150,26 @@ fn elapsed_ticks(now: u32, then: u32) -> Option<u32> {
 /// or corrupt off the wire and fails closed rather than drawing a shortened, invented trajectory.
 pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 
-/// Reference steel: armour-class rolled homogeneous steel. Material facts, from the research
-/// report `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` (Q2, material
-/// facts table): flow stress at large strain (Pa),
-/// the mean of proof stress and tensile strength (DERIVED from MEASURED datasheet ranges); Young's
-/// modulus (Pa) and Poisson's ratio, inside the published ranges 190–210 GPa and 0.27–0.30;
-/// density (kg/m³).
-const Y_FLOW_REF: f64 = 1.0e9;
-const E_REF: f64 = 205.0e9;
-const NU_REF: f64 = 0.29;
-const RHO_REF: f32 = 7850.0;
+/// Reference steel's material facts: the substance registry's `Reference` entry
+/// (`assets/materials/materials.ron`), parsed once from the embedded file — data, never an asset,
+/// so it is in hand synchronously wherever a round is bound.
+fn reference_steel() -> &'static crate::substances::MaterialFacts {
+    static FACTS: std::sync::LazyLock<crate::substances::MaterialFacts> =
+        std::sync::LazyLock::new(|| {
+            crate::substances::SubstanceRegistry::shipped().reference_facts()
+        });
+    &FACTS
+}
 
 /// Target inertia factor `B` of the force law (dimensionless): a named approximation, weakly
 /// constrained by the available plate data (published compressible fits 1.0–1.3, incompressible
 /// theory 1.5).
 const B_INERTIA: f32 = 1.0;
 
-/// Cavity-expansion strength term `a = A_CE · Y` (Pa) of a target with flow stress `y_flow` (Pa),
-/// Young's modulus `e` (Pa) and Poisson's ratio `nu`, in the compressible elastic–perfectly-plastic
-/// form `A_CE = (2/3) · (1 + ln(E / (3 (1 − ν) Y)))`. At `ν = ½` it is the incompressible form
-/// `(2/3) · (1 + ln(2E / (3Y)))`.
-///
-/// A DERIVED prior from material facts, not validated against thick-steel depth data; the
-/// compressible form was read in restatement, not in its primary (Hill 1950; Forrestal & Luk 1988).
-fn cavity_strength(y_flow: f64, e: f64, nu: f64) -> f64 {
-    let a_ce = 2.0 / 3.0 * (1.0 + (e / (3.0 * (1.0 - nu) * y_flow)).ln());
-    a_ce * y_flow
-}
-
-/// The reference steel's strength term (Pa): [`cavity_strength`] on the reference steel's facts
-/// (≈ 3.711e9 Pa, DERIVED).
+/// The reference steel's strength term (Pa): the cavity-expansion term of its facts
+/// ([`crate::substances::MaterialFacts::cavity_strength`], ≈ 3.711e9 Pa, DERIVED).
 fn strength_ref() -> f64 {
-    cavity_strength(Y_FLOW_REF, E_REF, NU_REF)
+    reference_steel().cavity_strength()
 }
 
 /// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
@@ -195,9 +183,10 @@ pub(crate) struct RoundBody {
 }
 
 impl RoundBody {
-    /// The law's inertia coefficient `k = B_INERTIA · N · RHO_REF` (kg/m³).
+    /// The law's inertia coefficient `k = B_INERTIA · N · ρ_ref` (kg/m³), `ρ_ref` the reference
+    /// steel's density.
     fn inertia_coefficient(self) -> f64 {
-        B_INERTIA as f64 * self.nose_factor as f64 * RHO_REF as f64
+        B_INERTIA as f64 * self.nose_factor as f64 * reference_steel().density
     }
 
     /// The law's two round terms: `m / (2 A k)` (m) and `k / a` (s²/m²), `a` the reference
@@ -214,7 +203,7 @@ impl RoundBody {
 }
 
 /// Reference-mm `round` can still defeat at `speed` m/s — the force law
-/// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B_INERTIA · N · RHO_REF`, `a`
+/// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B_INERTIA · N · ρ_ref`, `a`
 /// the reference steel's strength term ([`strength_ref`]).
 ///
 /// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
@@ -2945,7 +2934,7 @@ mod tests {
                     let caliber = round.caliber as f64;
                     let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
                     let limit = 1000.0 * round.mass as f64 * (speed as f64).powi(2)
-                        / (2.0 * area * cavity_strength(Y_FLOW_REF, E_REF, NU_REF));
+                        / (2.0 * area * strength_ref());
                     assert!(
                         got.is_finite() && (got as f64 / limit - 1.0).abs() < 1.0e-4,
                         "{round:?} at {speed} m/s: {got} vs the limit {limit}"
@@ -2994,36 +2983,6 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// At `ν = ½` the compressible cavity form reduces to the incompressible one,
-    /// `(2/3) · (1 + ln(2E / (3Y))) · Y`, for any material.
-    #[test]
-    fn cavity_strength_reduces_to_the_incompressible_form() {
-        for (y_flow, e) in [
-            (1.0e9f64, 205.0e9f64),
-            (0.276e9, 69.0e9),
-            (0.4e9, 190.0e9),
-            (2.7e9, 600.0e9),
-        ] {
-            let incompressible = 2.0 / 3.0 * (1.0 + (2.0 * e / (3.0 * y_flow)).ln()) * y_flow;
-            let got = cavity_strength(y_flow, e, 0.5);
-            assert!(
-                (got / incompressible - 1.0).abs() < 1.0e-12,
-                "Y {y_flow}, E {e}: {got} vs {incompressible}"
-            );
-        }
-    }
-
-    /// The reference steel's facts give the DERIVED strength term
-    /// `(2/3) · (1 + ln(205e9 / (3 · 0.71 · 1e9))) · 1e9 ≈ 3.711_258_7e9` Pa, to f32 precision.
-    #[test]
-    fn strength_ref_is_the_cavity_term_of_the_reference_steel_facts() {
-        let a = strength_ref();
-        assert!(
-            (a / 3.711_258_7e9 - 1.0).abs() < f32::EPSILON as f64,
-            "strength term {a}"
-        );
     }
 
     /// `drag_k` is calibrated so the 88 keeps its hand-tuned coefficient, and a light-for-bore round
