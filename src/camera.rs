@@ -110,7 +110,7 @@ pub struct OrbitCameraSet;
 struct TurretPivot(Option<Vec3>);
 
 /// Height of the orbit pivot above the turret ring.
-const PIVOT_LIFT: f32 = 2.5;
+pub(crate) const PIVOT_LIFT: f32 = 2.5;
 
 /// The orbit radius at full zoom-out — how far the camera body can sit from [`orbit_pivot`] along
 /// the view axis. A feel knob for [`orbit_camera`], and a BOUND for anything that has to reason
@@ -131,7 +131,7 @@ const ORBIT_NEAR: f32 = 5.0;
 /// ([`reaim_orbit_on_optic_exit`]) — one formula, because the re-aim's collinearity guarantee
 /// (pivot, camera body, committed point on one line) holds only if it reconstructs exactly the
 /// pivot the body placement will use.
-fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec3 {
+pub(crate) fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec3 {
     tank_transform.transform_point(turret_local) + Vec3::Y * PIVOT_LIFT
 }
 
@@ -295,16 +295,33 @@ fn orbit_look(
         return;
     }
     let mut transform = camera.into_inner();
-    // Free look: yaw/pitch read back from the current rotation, so no orientation state is stored.
-    // Mouse delta is already per-frame — do NOT multiply by dt. Stop pitch just short of vertical,
-    // where euler angles hit gimbal lock.
+    transform.rotation = orbit_rotation(transform.rotation, mouse_motion.delta);
+}
+
+/// The orbit's look law: `rotation` turned by one frame's mouse delta. Yaw and pitch are read back
+/// from the rotation, so no orientation state is stored; the delta is already per-frame, so it is
+/// not scaled by dt. Pitch stops just short of vertical, where euler angles hit gimbal lock.
+pub(crate) fn orbit_rotation(rotation: Quat, mouse_delta: Vec2) -> Quat {
     const PITCH_LIMIT: f32 = std::f32::consts::FRAC_PI_2 - 0.001;
     const YAW_SENSITIVITY: f32 = 0.004;
     const PITCH_SENSITIVITY: f32 = 0.003;
-    let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
-    let yaw = yaw - mouse_motion.delta.x * YAW_SENSITIVITY;
-    let pitch = (pitch - mouse_motion.delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
-    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+    let (yaw, pitch, _) = rotation.to_euler(EulerRot::YXZ);
+    let yaw = yaw - mouse_delta.x * YAW_SENSITIVITY;
+    let pitch = (pitch - mouse_delta.y * PITCH_SENSITIVITY).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+    Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0)
+}
+
+/// The orbit's placement law: the camera body on the line through `pivot` along the view axis
+/// `forward`, `distance` behind it, pulled in by `ground` — the distance along a ray, capped at the
+/// second argument, at which the ray meets the ground.
+pub(crate) fn orbit_body(
+    pivot: Vec3,
+    forward: Dir3,
+    distance: f32,
+    ground: impl FnOnce(Ray3d, f32) -> f32,
+) -> Vec3 {
+    let back_ray = Ray3d::new(pivot, -forward);
+    back_ray.get_point(ground(back_ray, distance))
 }
 
 fn orbit_camera(
@@ -350,8 +367,9 @@ fn orbit_camera(
     // near terrain.
     let pivot_point = orbit_pivot(tank_transform, turret_local);
     let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
-    let back_ray = Ray3d::new(pivot_point, -transform.forward());
-    transform.translation = back_ray.get_point(ground_distance(&spatial, back_ray, distance));
+    transform.translation = orbit_body(pivot_point, transform.forward(), distance, |ray, max| {
+        ground_distance(&spatial, ray, max)
+    });
 }
 
 /// Re-aim the orbit camera through the committed point when leaving the gunner view.
@@ -529,6 +547,29 @@ mod tests {
     /// product, which loses most of the f32 mantissa near 1, and these are angles that should be 0.
     fn angle_between(a: Vec3, b: Vec3) -> f32 {
         a.cross(b).length().atan2(a.dot(b))
+    }
+
+    /// The placement law: the body sits `distance` behind the pivot along the view axis, unless the
+    /// ground is nearer along that ray.
+    #[test]
+    fn the_orbit_body_sits_behind_the_pivot_unless_the_ground_is_nearer() {
+        let pivot = Vec3::new(3.0, 4.0, -2.0);
+        let forward = Dir3::new(Vec3::new(0.2, -0.3, -1.0)).unwrap();
+        let free = orbit_body(pivot, forward, ORBIT_FAR, |_, max| max);
+        assert!((free - (pivot - *forward * ORBIT_FAR)).length() < 1e-4);
+        let pulled = orbit_body(pivot, forward, ORBIT_FAR, |_, max| max.min(5.0));
+        assert!((pulled.distance(pivot) - 5.0).abs() < 1e-4);
+    }
+
+    /// The look law turns yaw and pitch by the delta and stops pitch short of vertical.
+    #[test]
+    fn the_orbit_look_clamps_pitch() {
+        let turned = orbit_rotation(Quat::IDENTITY, Vec2::new(-100.0, 0.0));
+        let (yaw, pitch, _) = turned.to_euler(EulerRot::YXZ);
+        assert!((yaw - 0.4).abs() < 1e-5 && pitch.abs() < 1e-5);
+        let up = orbit_rotation(Quat::IDENTITY, Vec2::new(0.0, -1.0e6));
+        let (_, pitch, _) = up.to_euler(EulerRot::YXZ);
+        assert!(pitch < std::f32::consts::FRAC_PI_2 && pitch > 1.5);
     }
 
     /// Angular tolerance (rad) for a law asserted through the yaw/pitch round trip — a hundredth of

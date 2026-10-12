@@ -48,8 +48,10 @@
 //! "helpfully" scoping it is a regression.
 //!
 //! The one camera that is not a battlefield camera is the pen cam inset
-//! ([`CameraProfile::PenCamInset`]): it draws `PenCamStage` alone, a stage no battlefield camera
-//! draws, so the record's picture and the battlefield never see each other.
+//! ([`CameraProfile::PenCamInset`]): it draws `PenCamStage` alone, so the record's picture never
+//! sees the battlefield. One battlefield view draws the stage: the victim kill cam's lesson
+//! ([`CameraProfile::KillCamLesson`]) lays the record's glass over the live world in place of the
+//! body it rides, which is how that body "turns to glass" — one camera's mask changing.
 //!
 //! # Shadows depend on the LIGHT's mask now
 //!
@@ -221,6 +223,8 @@ pub(crate) enum CameraProfile {
     BattlefieldOptic,
     /// The pen cam inset: its own stage and nothing of the battlefield.
     PenCamInset,
+    /// The victim kill cam's lesson: the world, the pen cam stage in place of the body it rides.
+    KillCamLesson,
 }
 
 impl CameraProfile {
@@ -231,6 +235,9 @@ impl CameraProfile {
             }
             Self::BattlefieldOptic => Channel::mask(&[Channel::BattlefieldWorld]),
             Self::PenCamInset => Channel::mask(&[Channel::PenCamStage]),
+            Self::KillCamLesson => {
+                Channel::mask(&[Channel::BattlefieldWorld, Channel::PenCamStage])
+            }
         }
     }
 }
@@ -601,6 +608,24 @@ mod tests {
             );
         }
         assert!(!casts_shadow(f.app.world(), stage));
+    }
+
+    /// The kill cam's lesson draws the world and the pen cam stage, and not the body it rides: the
+    /// victim's own tank leaves the view as its glass arrives.
+    #[test]
+    fn the_kill_cam_lesson_swaps_the_ridden_body_for_the_stage() {
+        let mut f = Fixture::new();
+        let world = f.app.world_mut();
+        let lesson = world.spawn(CameraProfile::KillCamLesson).id();
+        let stage = world
+            .spawn((Mesh3d(Handle::default()), VisualScope::PEN_CAM_STAGE))
+            .id();
+        f.app.update();
+        for target in [stage, f.world_solid, f.effect, f.unscoped] {
+            assert!(f.reaches(lesson, target));
+        }
+        assert!(!f.reaches(lesson, f.view_subject));
+        assert!(!f.reaches(lesson, f.shadow_proxy));
     }
 
     /// The shadow roles land as bevy markers.
