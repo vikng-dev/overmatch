@@ -36,32 +36,37 @@ use crate::world;
 #[cfg(feature = "dev_ui")]
 mod panel;
 
-/// Muzzle speed for sandbox shots (m/s) — the 88 mm, matching the game's gun for now. The seed for
-/// [`ShotParams::default`]; live-tunable from the panel.
-const MUZZLE_SPEED: f32 = 773.0;
-/// Shell calibre (m) — the 88. Drives overmatch against the thin plates.
-const CALIBER: f32 = 0.088;
-/// Projectile mass (kg) — the 88's PzGr 39 (~10.2 kg). Primary driver of penetration capability.
-const SHELL_MASS: f32 = 10.2;
+/// The spec sheet of the tank the sandbox spawns; [`ShotParams::default`] fires its primary weapon
+/// as authored there.
+const SEED_SPEC: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
-/// The live shot parameters every fired shell reads — muzzle speed, calibre, and mass, the three
-/// penetration drivers. Seeded from the 88 mm constants above; the `dev_ui` panel's Shot section
-/// edits them so penetration can be studied against the plate ladder without a recompile. Read only
-/// by [`fire`] (no change-detection reactor), so the panel writes it back on change purely for tidy
-/// change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
+/// The live shot parameters every fired shell reads — muzzle speed, calibre, mass and nose factor,
+/// the four penetration drivers. Seeded from the seed tank's primary weapon; the `dev_ui` panel's Shot
+/// section edits them so penetration can be studied against the plate ladder without a recompile.
+/// Read only by [`fire`] (no change-detection reactor), so the panel writes it back on change purely
+/// for tidy change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
 #[derive(Resource, Clone, Copy, PartialEq)]
 struct ShotParams {
     muzzle_speed: f32,
     caliber: f32,
     mass: f32,
+    nose_factor: f32,
 }
 
 impl Default for ShotParams {
     fn default() -> Self {
+        let sheet: spec::TankSpec =
+            ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
+        let weapon = sheet
+            .weapons
+            .values()
+            .find(|weapon| weapon.trigger == spec::Trigger::Primary)
+            .expect("the seed tank authors a primary weapon");
         Self {
-            muzzle_speed: MUZZLE_SPEED,
-            caliber: CALIBER,
-            mass: SHELL_MASS,
+            muzzle_speed: weapon.speed,
+            caliber: weapon.caliber,
+            mass: weapon.mass,
+            nose_factor: weapon.nose.factor(),
         }
     }
 }
@@ -462,8 +467,7 @@ fn spawn_targets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Steel: reference-mm of armor per metre of material, so a plate's cost ≈ its thickness in mm.
-    const STEEL: f32 = 1000.0;
+    // RHA, the reference steel: a plate's cost in reference-mm is its thickness in mm.
     // (x, thickness_m, tint) — 15 mm (overmatched), 50 mm, 100 mm, 300 mm (defeats it head-on).
     let plates = [
         (-6.0_f32, 0.015_f32, Color::srgba(0.72, 0.74, 0.82, 0.40)),
@@ -485,7 +489,11 @@ fn spawn_targets(
             Collider::cuboid(3.0, 3.0, thickness),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: crate::ballistics::VolumeMaterial::of(
+                    crate::substances::SubstanceRegistry::shipped_static(),
+                    "RHA",
+                )
+                .expect("the shipped registry names RHA"),
                 substance: "RHA".to_string(),
             },
         ));
@@ -837,9 +845,10 @@ fn fire(
         speed: shot.muzzle_speed,
         caliber: shot.caliber,
         mass: shot.mass,
+        nose_factor: shot.nose_factor,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
-        // spent shells and draws its own path gizmos, and CALIBER is main-gun-sized so it keeps the
+        // spent shells and draws its own path gizmos, and the default calibre is main-gun-sized so it keeps the
         // shell scene regardless), but keeps the field honest.
         tracer: true,
         // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
@@ -1051,36 +1060,36 @@ fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks>) {
     }
 }
 
-/// Spall draw: each fragment ray from a perforation exit — hot orange where it deposited HP into a
-/// component, dim grey where it merely shadowed (armor) or flew into air. The spray *is* the cone;
-/// its density reads the material × residual-energy budget (design §5).
+/// Spall draw: each direction of a body exit's spall cone, from the exit to where it stopped — hot
+/// orange where it dosed a box, dim grey where it only shadowed (armour) or left the tank. Each
+/// direction runs until material exhausts its strength (design doc §5).
 fn draw_spall(mut gizmos: Gizmos, marks: Query<&SpallMarks>) {
-    // A short representative length for the cone outline (fragments stop where they hit).
+    // A short representative length for the cone outline (directions stop where they are spent).
     const OUTLINE: f32 = 1.2;
     for mark in &marks {
-        for burst in &mark.bursts {
+        for cone in &mark.cones {
             // Faint cone outline: the axis and a rim circle, so the cone's aim + spread read even
-            // when only a few fragments are thrown.
-            let axis = Vec3::from(burst.axis);
-            let tip = burst.origin + axis * OUTLINE;
-            let rim = OUTLINE * burst.half_angle.tan();
+            // where its directions stop short.
+            let axis = Vec3::from(cone.axis);
+            let tip = cone.origin + axis * OUTLINE;
+            let rim = OUTLINE * cone.half_angle.tan();
             let facing = Quat::from_rotation_arc(Vec3::Z, axis);
-            gizmos.line(burst.origin, tip, Color::srgb(0.35, 0.37, 0.42));
+            gizmos.line(cone.origin, tip, Color::srgb(0.35, 0.37, 0.42));
             gizmos.circle(
                 Isometry3d::new(tip, facing),
                 rim,
                 Color::srgb(0.35, 0.37, 0.42),
             );
-            for frag in &burst.fragments {
-                let color = if frag.deposited {
+            for ray in &cone.rays {
+                let color = if ray.deposited {
                     Color::srgb(1.0, 0.4, 0.1)
                 } else {
                     Color::srgb(0.45, 0.47, 0.52)
                 };
-                gizmos.line(burst.origin, frag.end, color);
-                if frag.deposited {
+                gizmos.line(cone.origin, ray.end, color);
+                if ray.deposited {
                     gizmos.sphere(
-                        Isometry3d::from_translation(frag.end),
+                        Isometry3d::from_translation(ray.end),
                         0.05,
                         Color::srgb(1.0, 0.2, 0.1),
                     );

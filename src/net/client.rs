@@ -27,7 +27,7 @@ use super::protocol::{
 use super::{diagnostics, harness, open_gameplay_gate, physics, rig};
 use crate::ballistics::{
     MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
-    SanctionedTerminal, ShotSource,
+    SanctionedTerminal, ShotSource, TerminalVerdict,
 };
 use crate::command::TankCommand;
 use crate::state::{AppState, GameplaySet};
@@ -1404,12 +1404,24 @@ fn consume_impact_confirm(
     sanctioned: &mut SanctionedShots,
     shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
 ) {
+    // A terminal entered the material; a confirm naming any other verdict is malformed and is not
+    // buffered as one.
+    let Ok(verdict) = TerminalVerdict::try_from(confirm.verdict) else {
+        crate::shot_trace::record(
+            shot_trace,
+            "cf_rx",
+            now.0,
+            confirm.shot,
+            || json!({ "res": "not_terminal" }),
+        );
+        return;
+    };
     let fresh = sanctioned.insert_terminal(
         confirm.shot,
         SanctionedTerminal {
             position: confirm.position,
             normal: confirm.normal,
-            penetrated: confirm.penetrated,
+            verdict,
             impact_tick: confirm.impact_tick.0,
             after_bounces: confirm.after_bounces,
         },
@@ -1419,7 +1431,7 @@ fn consume_impact_confirm(
         "cf_rx",
         now.0,
         confirm.shot,
-        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.penetrated }),
+        || json!({ "dup": !fresh, "it": confirm.impact_tick.0, "pen": confirm.verdict.entered() }),
     );
 }
 
@@ -1601,6 +1613,7 @@ fn spawn_reconstructed_fire(
         speed: event.speed,
         caliber: event.caliber,
         mass: event.mass,
+        nose_factor: event.nose_factor,
         tracer: event.tracer,
         mechanism: event.mechanism,
         shooter: ShotSource {
@@ -2228,6 +2241,7 @@ mod tests {
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,
+            nose_factor: 0.3,
             fire_mode: FireMode::Single { reload_secs: 8.0 },
             recoil,
             barrel,
@@ -2582,6 +2596,7 @@ mod tests {
             speed: 800.0,
             caliber: 0.0079,
             mass: 0.0118,
+            nose_factor: 0.5,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shooter,

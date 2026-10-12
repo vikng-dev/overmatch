@@ -20,6 +20,7 @@ use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
+    VolumeMaterial,
 };
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
@@ -578,6 +579,7 @@ fn insert_weapons(
             speed: weapon.speed,
             caliber: weapon.caliber,
             mass: weapon.mass,
+            nose_factor: weapon.nose.factor(),
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),
             barrel,
@@ -698,12 +700,15 @@ fn insert_ballistic_volumes(
             }
             if !split {
                 let (substance, primitives) = groups.iter().next().expect("exactly one group");
+                let resolved = primitives[0]
+                    .substance
+                    .as_ref()
+                    .expect("grouped by substance");
                 entity.insert(BallisticVolume {
-                    material_factor: primitives[0]
-                        .substance
-                        .as_ref()
-                        .expect("grouped by substance")
-                        .factor,
+                    material: VolumeMaterial {
+                        substance: resolved.id,
+                        factor: resolved.factor,
+                    },
                     substance: (*substance).to_owned(),
                 });
             }
@@ -763,11 +768,14 @@ fn insert_ballistic_volumes(
                     // the walk reads and the ownership the impulse path resolves.
                     collider.insert((
                         BallisticVolume {
-                            material_factor: primitive
-                                .substance
-                                .as_ref()
-                                .expect("grouped by substance")
-                                .factor,
+                            material: {
+                                let resolved =
+                                    primitive.substance.as_ref().expect("grouped by substance");
+                                VolumeMaterial {
+                                    substance: resolved.id,
+                                    factor: resolved.factor,
+                                }
+                            },
                             substance: (*substance).to_owned(),
                         },
                         VolumeOf(root),

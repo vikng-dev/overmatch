@@ -10,6 +10,8 @@
 //! law and not about the decimal literal it was written with.
 
 use super::*;
+use crate::ballistics::mechanism::{Limits, SolidShot, SolidShotState};
+use crate::substances::REFERENCE_FACTOR;
 
 // ---------------------------------------------------------------------------------------------
 // Fixture helpers
@@ -68,6 +70,7 @@ fn oblique_plate(
             triangle: primitive * 100 + shell * 10,
             t: enter,
             true_normal: entry_normal.normalize(),
+            entering: AXIS.dot(entry_normal) < 0.0,
         },
         FaceHit {
             volume: volume(vol),
@@ -77,6 +80,7 @@ fn oblique_plate(
             triangle: primitive * 100 + shell * 10 + 1,
             t: exit,
             true_normal: exit_normal.normalize(),
+            entering: AXIS.dot(exit_normal) < 0.0,
         },
     ]
 }
@@ -92,8 +96,14 @@ fn corridor(length: f32, hits: Vec<FaceHit>) -> RayCorridor {
     }
 }
 
+/// Fixture volumes of one factor are one substance ([`VolumeMaterial::fixture`]).
 fn table(entries: &[(u32, f32)]) -> VolumeTable {
-    VolumeTable::new(entries.iter().map(|(v, f)| (volume(*v), *f))).expect("test factors are legal")
+    VolumeTable::new(
+        entries
+            .iter()
+            .map(|(v, f)| (volume(*v), VolumeMaterial::fixture(*f))),
+    )
+    .expect("test factors are legal")
 }
 
 fn walk(corridor: &RayCorridor, volumes: &VolumeTable) -> RayWalk {
@@ -182,9 +192,9 @@ impl Slab {
         } else {
             ((back, -n), (front, n))
         };
-        [(enter, 0u32), (exit, 1u32)]
+        [(enter, 0u32, true), (exit, 1u32, false)]
             .into_iter()
-            .filter_map(|((t, true_normal), face)| {
+            .filter_map(|((t, true_normal), face, entering)| {
                 let t = if t < 0.0 {
                     if seeded {
                         return None;
@@ -201,6 +211,7 @@ impl Slab {
                     triangle: self.primitive * 100 + face,
                     t: t as f64,
                     true_normal,
+                    entering,
                 })
             })
             .collect()
@@ -302,6 +313,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -311,6 +323,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 1,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -320,6 +333,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 2,
             t: 1.125,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     let result = walk(&corridor(4.0, hits), &volumes);
@@ -349,6 +363,7 @@ fn a_shared_vertex_fan_is_one_crossing() {
             triangle: index as u32,
             t: 1.0,
             true_normal: normal.normalize(),
+            entering: AXIS.dot(normal) < 0.0,
         });
     }
     hits.push(FaceHit {
@@ -359,6 +374,7 @@ fn a_shared_vertex_fan_is_one_crossing() {
         triangle: 9,
         t: 1.5,
         true_normal: AXIS,
+        entering: false,
     });
     let result = walk(&corridor(4.0, hits), &volumes);
     assert_eq!(result.runs.len(), 1);
@@ -380,6 +396,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -389,6 +406,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             triangle: 1,
             t: 1.0,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     let result = walk(&corridor(4.0, hits), &volumes);
@@ -427,6 +445,7 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
             triangle: 0,
             t: 0.25,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     corridor.initial_presence = vec![key];
@@ -434,6 +453,45 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
     assert_eq!(result.cost, 250.0);
     assert_eq!(result.runs.len(), 1);
     assert_eq!(result.runs[0].start, 0.0);
+}
+
+/// A declared presence is handed on at EVERY hand-off, the corridor origin included.
+///
+/// A resumed corridor that begins inside a shell reads that crossing's entrance plane at its own
+/// origin, so the transit seed is read at `t ≈ 0`. The shell's entry was the seed's, behind that
+/// origin; reading it as "on the plane" leaves the transit unseeded, its entry face already behind
+/// it, and the shell's exit with nothing open.
+#[test]
+fn declared_presence_is_seeded_at_the_corridor_origin() {
+    let volumes = table(&[(1, 1000.0)]);
+    let laws = WalkLaws::default();
+    let key = ShellKey {
+        volume: volume(1),
+        primitive: prim(0),
+        shell: 0,
+    };
+    let mut corridor = corridor(
+        4.0,
+        vec![FaceHit {
+            volume: volume(1),
+            primitive: prim(0),
+            shell: 0,
+            contact: Contact::Face(0),
+            triangle: 0,
+            t: 0.25,
+            true_normal: AXIS,
+            entering: false,
+        }],
+    );
+    corridor.initial_presence = vec![key];
+    let walked = walk(&corridor, &volumes);
+    for t in [-0.0, 0.0, 1.0e-9, 0.1, 0.25] {
+        assert_eq!(walked.inside_at(t, &laws), vec![key], "seeded at {t}");
+    }
+    assert!(
+        walked.inside_at(0.5, &laws).is_empty(),
+        "and closed past its exit"
+    );
 }
 
 /// The same hit list WITHOUT the declaration is an error, never inferred topology. "The first hit is
@@ -451,6 +509,7 @@ fn starting_inside_without_declared_presence_is_a_structured_error() {
             triangle: 7,
             t: 0.25,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     match walk_ray(3, &corridor, &volumes, &WalkLaws::default()) {
@@ -579,6 +638,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 0,
             t: 0.25,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -588,6 +648,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 1,
             t: 0.5,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -597,6 +658,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 2,
             t: 1.0,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     assert!(matches!(
@@ -621,6 +683,7 @@ fn an_exit_below_depth_zero_is_still_a_structured_error() {
         triangle: 9,
         t: 0.75,
         true_normal: AXIS,
+        entering: false,
     });
     assert!(matches!(
         walk_ray(2, &corridor(4.0, hits), &volumes, &WalkLaws::default()),
@@ -634,12 +697,36 @@ fn an_exit_below_depth_zero_is_still_a_structured_error() {
 fn non_finite_and_negative_factors_are_rejected_at_construction() {
     for bad in [f32::NAN, f32::INFINITY, -1.0] {
         assert!(matches!(
-            VolumeTable::new([(volume(1), bad)]),
+            VolumeTable::new([(volume(1), VolumeMaterial::fixture(bad))]),
             Err(WalkError::BadFactor { .. })
         ));
     }
-    let table = VolumeTable::new([(volume(1), -0.0)]).unwrap();
+    let table = VolumeTable::new([(volume(1), VolumeMaterial::fixture(-0.0))]).unwrap();
     assert_eq!(table.factor(volume(1)).unwrap().to_bits(), 0.0f32.to_bits());
+}
+
+/// One substance carries one factor, and one volume one entry: either violation is a named load
+/// error, never a silent choice between the two.
+#[test]
+fn a_substance_has_one_factor_and_a_volume_one_entry() {
+    let steel = VolumeMaterial::fixture(1000.0);
+    let conflicting = VolumeMaterial {
+        factor: 2000.0,
+        ..steel
+    };
+    assert_eq!(
+        VolumeTable::new([(volume(1), steel), (volume(2), conflicting)]).unwrap_err(),
+        WalkError::SubstanceFactorConflict {
+            substance: steel.substance,
+            first: 1000.0,
+            second: 2000.0,
+        }
+    );
+    assert_eq!(
+        VolumeTable::new([(volume(1), steel), (volume(1), steel)]).unwrap_err(),
+        WalkError::RepeatedVolume { volume: volume(1) }
+    );
+    assert!(VolumeTable::new([(volume(1), steel), (volume(2), steel)]).is_ok());
 }
 
 /// A hit naming a volume with no factor is a bind gap, and a bind gap must not resolve to a default.
@@ -732,6 +819,7 @@ fn a_corridor_starting_inside_a_volume_grants_no_free_crossing() {
             triangle: 0,
             t: 0.125,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     corridor.initial_presence = vec![ShellKey {
@@ -1018,10 +1106,7 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     hits.extend(plate(2, 0, 0.5305, 0.5605));
     let disc = point_disc(2.0, sample(Vec3::ZERO, hits));
     let walked = walk_disc(&disc, &volumes, &WalkLaws::default()).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
+    let shot = Shot { caliber: 0.088 };
     match begin(&walked, &shot, &WalkLaws::default()) {
         Begin::Transit(request) => {
             assert!(!request.entrance.overmatched);
@@ -1037,58 +1122,86 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     }
 }
 
-/// Downward, equal and upward factor joints inside one welded run, with the exact spall count and
-/// budget each produces.
-///
-/// FLAGGED (§13 spec conflict): §13.2 says spall fires at every downward step, §13.4 says "one exit,
-/// spall once per welded run". Implemented conservatively as the field law — welding deletes only
-/// the void's face pair, and the material step it exposes still obeys §13.2. An equal-factor joint
-/// therefore emits nothing at all, which is where the two readings agree.
-#[test]
-fn weld_joints_obey_the_field_law_for_spall() {
-    let laws = WalkLaws::default();
-
-    // Equal factors across the void: no step, so one entrance and one exit, budget = SUMMED cost.
-    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
-    let mut equal = plate(1, 0, 0.2, 0.3);
-    equal.extend(plate(2, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, equal), &volumes, &laws).unwrap();
-    let downward: Vec<_> = result
-        .events
+/// The body exits of one point-sample crossing, as `(substances, genuine, start, end)`.
+fn exits_of(volumes: &VolumeTable, hits: Vec<FaceHit>) -> Vec<(Vec<SubstanceId>, bool, f64, f64)> {
+    let walked = walk_disc(
+        &point_disc(2.0, sample(Vec3::ZERO, hits)),
+        volumes,
+        &WalkLaws::default(),
+    )
+    .unwrap();
+    assert_eq!(walked.events.len(), 1, "one welded crossing");
+    walked.events[0]
+        .exits
         .iter()
-        .filter(|e| e.factor_after < e.factor_before)
-        .collect();
-    assert_eq!(downward.len(), 1, "equal-factor weld emits one exit only");
-    assert!((downward[0].spall_budget - 199.5).abs() < 0.1);
+        .map(|exit| {
+            assert_eq!(
+                exit.members.len(),
+                1,
+                "a point disc has one member per exit"
+            );
+            let member = &exit.members[0];
+            assert_eq!(member.face.is_some(), exit.genuine);
+            (
+                exit.substances.clone(),
+                exit.genuine,
+                member.start,
+                member.end,
+            )
+        })
+        .collect()
+}
 
-    // Downward across the void (RHA → cast): the exposed step fires, and so does the exit.
-    let volumes = table(&[(1, 1000.0), (2, 900.0)]);
+/// A body exits where the next medium resists less. Across a welded joint: one substance on both
+/// sides is one body with one exit; a softer substance behind is an internal exit and then the
+/// genuine one; a harder one behind continues the body, which exits once at the far face; an
+/// equal-factor different substance behind continues it too.
+#[test]
+fn body_exits_follow_substance_identity_across_weld_joints() {
+    let rha = SubstanceId::fixture(1000.0);
+    let cast = SubstanceId::fixture(900.0);
+
+    let one = table(&[(1, 1000.0), (2, 1000.0)]);
+    let mut same = plate(1, 0, 0.2, 0.3);
+    same.extend(plate(2, 0, 0.3005, 0.4));
+    assert_eq!(exits_of(&one, same), vec![(vec![rha], true, 0.2, 0.4)]);
+
+    let two = table(&[(1, 1000.0), (2, 900.0)]);
     let mut downhill = plate(1, 0, 0.2, 0.3);
     downhill.extend(plate(2, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, downhill), &volumes, &laws).unwrap();
-    let downward: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.factor_after < e.factor_before)
-        .collect();
-    assert_eq!(downward.len(), 2);
-    assert!(
-        downward[0].welded,
-        "the interior step exists only because of the weld"
+    assert_eq!(
+        exits_of(&two, downhill),
+        vec![
+            (vec![rha], false, 0.2, 0.3),
+            (vec![cast], true, 0.3005, 0.4)
+        ]
     );
-    assert!((downward[0].spall_budget - 100.0).abs() < 0.1);
 
-    // Upward across the void (cast → RHA): the joint throws nothing; only the exit does.
     let mut uphill = plate(2, 0, 0.2, 0.3);
     uphill.extend(plate(1, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, uphill), &volumes, &laws).unwrap();
     assert_eq!(
-        result
-            .events
-            .iter()
-            .filter(|e| e.factor_after < e.factor_before)
-            .count(),
-        1
+        exits_of(&two, uphill),
+        vec![(vec![cast, rha], true, 0.2, 0.4)]
+    );
+
+    // Equal factor, different substance, in contact: one body, one exit at the far face.
+    let probe = SubstanceId::probe();
+    let equal = VolumeTable::new([
+        (volume(1), VolumeMaterial::fixture(1000.0)),
+        (
+            volume(2),
+            VolumeMaterial {
+                substance: probe,
+                factor: 1000.0,
+            },
+        ),
+    ])
+    .unwrap();
+    let mut contact = plate(1, 0, 0.2, 0.3);
+    contact.extend(plate(2, 0, 0.3, 0.4));
+    assert_eq!(
+        exits_of(&equal, contact),
+        vec![(vec![rha, probe], true, 0.2, 0.4)]
     );
 }
 
@@ -1469,7 +1582,7 @@ fn a_half_covered_disc_gives_half_coverage_and_half_cost() {
 }
 
 /// A FRAGMENT is a shell with r → 0 and k = 1 (§13.5), so it must reduce EXACTLY to the single-ray
-/// walk — bitwise, not approximately. `cast_spall_fragment` then needs no law of its own.
+/// walk — bitwise, not approximately.
 #[test]
 fn a_fragment_is_the_single_ray_walk_bitwise() {
     let volumes = table(&[(1, 1000.0), (2, 200.0)]);
@@ -1609,7 +1722,7 @@ fn axis_only_and_ring_only_coverage_are_reported_honestly() {
 }
 
 /// Two samples meeting DIFFERENT stacks: the shared outer plate makes them one event, and each
-/// downward step carries its own coverage — entrance η, internal-step η and exit η are different
+/// body exit carries its own members — entrance η, internal-step η and exit η are different
 /// subsets and must not be collapsed into one scalar.
 #[test]
 fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
@@ -1642,13 +1755,15 @@ fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
     assert_eq!(walked.events.len(), 1);
     let event = &walked.events[0];
     assert_eq!(event.coverage, 1.0);
-    // Two distinct downward steps: the 1000 → 200 the deep sample alone saw, and the exits.
+    // The plate's internal exit into the ammunition, which the deep sample alone saw, is its own
+    // body exit beside the plate's genuine one.
     let step = event
-        .spall
+        .exits
         .iter()
-        .find(|mark| mark.from_factor == 1000.0 && mark.to_factor == 200.0)
-        .expect("the interior step must be its own spall source");
-    assert_eq!(step.coverage, 0.5);
+        .find(|exit| exit.substances == [SubstanceId::fixture(1000.0)] && !exit.genuine)
+        .expect("the interior step must be its own body exit");
+    assert_eq!(step.members.len(), 1);
+    assert_eq!(step.members[0].sample, 1);
     let coverage = |vol: u32| {
         event
             .shares
@@ -1698,10 +1813,33 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
 // §13.3 / §13.5 / §3 — the staged resolution
 // ---------------------------------------------------------------------------------------------
 
-const AP_88: Shot = Shot {
-    caliber: 0.088,
-    capability: 250.0,
-};
+const AP_88: Shot = Shot { caliber: 0.088 };
+
+/// The capability (reference-mm) the staged-resolution fixtures fire with: fixture data.
+const AP_88_CAPABILITY: f32 = 250.0;
+
+/// A solid shot bound against the shipped registry, at the speed where its readout is `capability`
+/// reference-mm. Fixture data: an 88-class body.
+fn solid(capability: f32) -> (SolidShot, SolidShotState) {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    (round, round.at(super::super::speed_for(body, capability)))
+}
+
+/// [`finish`] for a solid shot whose readout is `capability` reference-mm.
+fn finish_at(
+    transit: &DiscWalk,
+    request: &TransitRequest,
+    capability: f32,
+    laws: &WalkLaws,
+) -> Result<ResolutionPlan<SolidShotState>, WalkError> {
+    let (round, state) = solid(capability);
+    finish(transit, request, &round, state, &Limits { rest: 0.0 }, laws)
+}
 
 fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
     match begin(walked, shot, laws) {
@@ -2035,11 +2173,11 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let honest = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    assert!(finish(&honest, &request, &AP_88, &laws).is_ok());
+    assert!(finish_at(&honest, &request, AP_88_CAPABILITY, &laws).is_ok());
 
     // The entrance walk itself: right geometry, wrong axis and origin.
     assert!(matches!(
-        finish(&walked, &request, &AP_88, &laws),
+        finish_at(&walked, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -2047,7 +2185,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let mut rolled = honest.clone();
     rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
     assert!(matches!(
-        finish(&rolled, &request, &AP_88, &laws),
+        finish_at(&rolled, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -2060,7 +2198,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     }
     let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
     assert!(matches!(
-        finish(&other, &request, &AP_88, &laws),
+        finish_at(&other, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -2085,7 +2223,7 @@ fn finish_rejects_a_corridor_whose_samples_moved() {
     assert_eq!(moved.origin, request.origin);
     assert_eq!(moved.samples(), request.samples);
     assert!(matches!(
-        finish(&moved, &request, &AP_88, &laws),
+        finish_at(&moved, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -2115,16 +2253,16 @@ fn finish_rejects_a_far_crossing_of_the_same_entity() {
         "the fixture must keep the entity identical — that is the point"
     );
     assert!(matches!(
-        finish(&far, &request, &AP_88, &laws),
+        finish_at(&far, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
 
-/// Capability exhausted partway through a factor CHANGE: the embed point is the inverse of the
-/// prefix integral, not `span × cap/cost`, and per-entity damage is CLIPPED at that progress — a
-/// round that dies in the plate deposits nothing in the crewman behind it.
+/// Capability exhausted partway through a factor CHANGE: the round comes to rest where its state
+/// does, not at `span × cap/cost`, and per-entity damage is CLIPPED at that progress — a round that
+/// dies in the plate deposits nothing in the crewman behind it.
 #[test]
-fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
+fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 10.0)]);
     // 100 mm of RHA head-on, then a crewman.
@@ -2133,13 +2271,9 @@ fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
         Slab::at(2, 0, 0.6, -AXIS, 0.3),
     ];
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 60.0,
-    };
-    let request = transit_request(&walked, &shot, &laws);
+    let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &shot, &laws).unwrap();
+    let plan = finish_at(&transit, &request, 60.0, &laws).unwrap();
 
     // Head-on, so the handoff is the plate's own face: 60 reference-mm dies 60 mm in.
     match plan.outcome {
@@ -2150,14 +2284,225 @@ fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
     let armour = plan
         .deposits
         .iter()
-        .find(|d| d.entity == volume(1))
+        .find(|d| d.address == volume(1))
         .expect("the plate it died in must be charged");
-    assert!((armour.chord - 0.06).abs() < 1.0e-3, "{}", armour.chord);
     assert!(
-        !plan.deposits.iter().any(|d| d.entity == volume(2)),
+        (armour.line_chord().unwrap() - 0.06).abs() < 1.0e-3,
+        "{armour:?}"
+    );
+    assert!(
+        !plan.deposits.iter().any(|d| d.address == volume(2)),
         "a round that stopped in the plate cannot wound the crewman behind it"
     );
-    assert!(plan.spall.is_empty(), "no exit, no spall (§5)");
+    assert!(
+        plan.spall.is_empty(),
+        "the body the round stops inside throws nothing"
+    );
+}
+
+/// An exit the round reaches throws even when the round stops in a later body of the same
+/// crossing; the body it stops inside throws nothing. The source's spend is the mechanism's
+/// readout drop across the body it left. Fixture: 20 mm of steel in contact with two metres of a
+/// 150-factor block, which the round cannot cross.
+#[test]
+fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 150.0)]);
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.02),
+        Slab::at(2, 0, 0.52, -AXIS, 2.0),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 4.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 4.0), &volumes, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+
+    assert!(matches!(plan.outcome, Outcome::Embedded { .. }));
+    assert_eq!(plan.spall.len(), 1, "{:?}", plan.spall);
+    let source = &plan.spall[0];
+    assert_eq!(source.substances, [SubstanceId::fixture(1000.0)]);
+    assert!(source.face.is_none(), "an internal step has no face");
+    // DERIVED: 20 mm head-on at 1000 per metre.
+    assert!((source.spend - 20.0).abs() < 0.05, "{}", source.spend);
+    let (round, state) = solid(AP_88_CAPABILITY);
+    assert_eq!(source.entry_speed, state.speed as f32);
+    assert!(source.exit_speed < source.entry_speed && source.exit_speed > 0.0);
+    let left = super::super::speed_for(round.body(), AP_88_CAPABILITY - source.spend);
+    assert!(
+        (source.exit_speed / left - 1.0).abs() < 1.0e-3,
+        "{}",
+        source.exit_speed
+    );
+}
+
+/// Each source carries the round's own speeds across its own body: the speed the round left one
+/// body with is the speed it entered the next with, and the last exit's is the residual.
+#[test]
+fn each_source_uses_the_speeds_across_its_own_body() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 10.0)]);
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.1),
+        Slab::at(2, 0, 0.6, -AXIS, 0.3),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+
+    assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
+    let [plate, crew] = plan.spall.as_slice() else {
+        panic!("two exits: {:?}", plan.spall);
+    };
+    let (_, state) = solid(AP_88_CAPABILITY);
+    assert_eq!(plate.entry_speed, state.speed as f32);
+    assert_eq!(plate.exit_speed, crew.entry_speed);
+    assert_eq!(crew.exit_speed, plan.state.speed as f32);
+    assert!(plate.face.is_none() && crew.face.is_some());
+    // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
+    assert!((plate.spend - 100.0).abs() < 0.1, "{}", plate.spend);
+    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+    let face = crew.face.unwrap();
+    assert!(
+        face.dot(crew.direction) > 0.0,
+        "a genuine exit's face normal points out of the body, along the round"
+    );
+}
+
+/// A volume table from `(volume, substance, factor)` triples.
+fn substance_table(entries: &[(u32, SubstanceId, f32)]) -> VolumeTable {
+    VolumeTable::new(entries.iter().map(|(v, substance, factor)| {
+        (
+            volume(*v),
+            VolumeMaterial {
+                substance: *substance,
+                factor: *factor,
+            },
+        )
+    }))
+    .expect("test factors are legal")
+}
+
+/// The spall sources of a head-on 88 at [`AP_88_CAPABILITY`] through `slabs`.
+fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
+    let laws = WalkLaws::default();
+    let walked = walk_disc(&entrance_disc(slabs, 3.0), volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, slabs, 3.0), volumes, &laws).unwrap();
+    finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+        .unwrap()
+        .spall
+}
+
+/// Plates of equal factor in contact are one plate, whatever their substances: 50 mm + 50 mm of two
+/// equal-factor substances throws exactly one spall cone, at the far face, as strong as the one
+/// 100 mm of either throws.
+#[test]
+fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
+    let rha = SubstanceId::fixture(1000.0);
+    let probe = SubstanceId::probe();
+    let pair = substance_table(&[(1, rha, 1000.0), (2, probe, 1000.0)]);
+    let split = spall_through(
+        &pair,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(2, 1, 0.55, -AXIS, 0.05),
+        ],
+    );
+    let [cone] = split.as_slice() else {
+        panic!("one cone: {split:?}");
+    };
+    assert_eq!(cone.substances, [rha, probe]);
+    assert!(cone.face.is_some(), "the far face is a genuine exit");
+
+    for (vol, substance) in [(1, rha), (2, probe)] {
+        let single = substance_table(&[(vol, substance, 1000.0)]);
+        let whole = spall_through(&single, &[Slab::at(vol, 0, 0.5, -AXIS, 0.1)]);
+        let [plate] = whole.as_slice() else {
+            panic!("one cone: {whole:?}");
+        };
+        assert_eq!(cone.strength(), plate.strength());
+        assert_eq!(cone.spend, plate.spend);
+        assert_eq!(cone.entry_speed, plate.entry_speed);
+        assert_eq!(cone.exit_speed, plate.exit_speed);
+    }
+}
+
+/// Only a step into softer material or air throws; a step into harder or equal material continues
+/// the body, so the cone at the next softer step carries the spend of everything since the last
+/// throw. Fixture stacks, 50 mm plates in contact, head-on.
+#[test]
+fn only_a_softer_step_throws() {
+    let rha = SubstanceId::fixture(1000.0);
+    let probe = SubstanceId::probe();
+    let cast = SubstanceId::fixture(900.0);
+    let flesh = SubstanceId::fixture(10.0);
+    let volumes = substance_table(&[
+        (1, rha, 1000.0),
+        (2, probe, 1000.0),
+        (3, cast, 900.0),
+        (4, flesh, 10.0),
+        (5, rha, 1000.0),
+    ]);
+    let (_, state) = solid(AP_88_CAPABILITY);
+    let entry = state.speed as f32;
+
+    // Hard, then equal, then softer: one internal throw summing both plates, then the far face.
+    let hard_equal = spall_through(
+        &volumes,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(2, 1, 0.55, -AXIS, 0.05),
+            Slab::at(4, 2, 0.6, -AXIS, 0.3),
+        ],
+    );
+    let [steel, crew] = hard_equal.as_slice() else {
+        panic!("two cones: {hard_equal:?}");
+    };
+    assert_eq!(steel.substances, [rha, probe]);
+    assert!(steel.face.is_none() && crew.face.is_some());
+    assert_eq!(steel.entry_speed, entry);
+    assert_eq!(steel.exit_speed, crew.entry_speed);
+    // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
+    assert!((steel.spend - 100.0).abs() < 0.1, "{}", steel.spend);
+    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+
+    // Soft, then hard: no throw at the step up; one cone at the far face summing both plates.
+    let soft_hard = spall_through(
+        &volumes,
+        &[
+            Slab::at(3, 0, 0.5, -AXIS, 0.05),
+            Slab::at(1, 1, 0.55, -AXIS, 0.05),
+        ],
+    );
+    let [cone] = soft_hard.as_slice() else {
+        panic!("one cone: {soft_hard:?}");
+    };
+    assert_eq!(cone.substances, [cast, rha]);
+    assert!(cone.face.is_some());
+    assert_eq!(cone.entry_speed, entry);
+    // DERIVED: 50 mm at 900 per metre plus 50 mm at 1000 per metre.
+    assert!((cone.spend - 95.0).abs() < 0.1, "{}", cone.spend);
+
+    // Hard, softer, hard: a throw at the step down, then one at the far face for what followed it.
+    let dip = spall_through(
+        &volumes,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(3, 1, 0.55, -AXIS, 0.05),
+            Slab::at(5, 2, 0.6, -AXIS, 0.05),
+        ],
+    );
+    let [first, last] = dip.as_slice() else {
+        panic!("two cones: {dip:?}");
+    };
+    assert_eq!(first.substances, [rha]);
+    assert_eq!(last.substances, [cast, rha]);
+    assert!(first.face.is_none() && last.face.is_some());
+    assert_eq!(first.exit_speed, last.entry_speed);
+    // DERIVED: 50 mm at 1000 per metre; then 50 mm at 900 plus 50 mm at 1000.
+    assert!((first.spend - 50.0).abs() < 0.1, "{}", first.spend);
+    assert!((last.spend - 95.0).abs() < 0.1, "{}", last.spend);
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
@@ -2173,18 +2518,18 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
 
     assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
     assert!((plan.cost_spent - 103.0).abs() < 0.5, "{}", plan.cost_spent);
     let crew = plan
         .deposits
         .iter()
-        .find(|d| d.entity == volume(2))
+        .find(|d| d.address == volume(2))
         .expect("the crewman transited must be charged");
-    assert!((crew.chord - 0.3).abs() < 1.0e-3);
+    assert!((crew.line_chord().unwrap() - 0.3).abs() < 1.0e-3);
     assert!(
-        (crew.cost - 3.0).abs() < 0.05,
+        (crew.amount - 3.0).abs() < 0.05,
         "flesh charges its own factor"
     );
     assert!(!plan.spall.is_empty());
@@ -2192,8 +2537,8 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
 
 /// Overmatch charges the PERPENDICULAR projection rather than the oblique chord (§4: it cannot
 /// present its slope to a round that dwarfs it) — and the projection reaches every CONSEQUENCE.
-/// §13.5 defines the spall budget as the event's cost and §6 defines transit damage from the cost
-/// paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
+/// A spall source's spend is the mechanism's readout drop and §6 defines transit damage from the
+/// cost paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
 /// depositing damage for 30.
 #[test]
 fn overmatch_charges_the_perpendicular_projection_everywhere() {
@@ -2207,7 +2552,7 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     assert!(request.entrance.overmatched);
 
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
 
     // Whatever the normalization bend did to the chord, the CHARGE is the 15 mm perpendicular
     // thickness — which is the point of the projection.
@@ -2215,23 +2560,22 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     let exit = plan
         .spall
         .iter()
-        .find(|mark| mark.to_factor == 0.0)
+        .find(|source| source.face.is_some())
         .expect("a perforation exits");
     assert!(
-        (exit.budget - 15.0).abs() < 0.2,
-        "spall budget {}",
-        exit.budget
+        (exit.spend - 15.0).abs() < 0.2,
+        "spall spend {}",
+        exit.spend
     );
     let deposit = &plan.deposits[0];
     assert!(
-        (deposit.cost - 15.0).abs() < 0.2,
+        (deposit.amount - 15.0).abs() < 0.2,
         "deposit {}",
-        deposit.cost
+        deposit.amount
     );
     assert!(
-        (deposit.chord - 0.015).abs() < 5.0e-4,
-        "the charged chord is the perpendicular one: {}",
-        deposit.chord
+        (deposit.line_chord().unwrap() - 0.015).abs() < 5.0e-4,
+        "the charged chord is the perpendicular one: {deposit:?}"
     );
     // The GEOMETRY is untouched — the round really did travel its slope chord.
     match plan.outcome {
@@ -2924,17 +3268,22 @@ fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
     let mut hits = plate(1, 1, enter, exit);
     // A high-factor plate's entry landing between the thin plate's two faces …
     hits.extend(plate(2, 2, ulps(1.0, 4), 1.5));
-    // … and a chain of tangent faces reaching from the thin plate across the air beyond it.
+    // … and a chain of tangent brushes reaching from the thin plate across the air beyond it: each
+    // a fan of two claims on one contact that disagree about direction, as the collector reports a
+    // ray grazing a feature.
     for step in 0..40 {
-        hits.push(FaceHit {
-            volume: volume(3),
-            primitive: prim(3),
-            shell: 0,
-            contact: Contact::Face(step),
-            triangle: step,
-            t: ulps(exit as f32, (step as i32) * 8),
-            true_normal: Vec3::X,
-        });
+        for entering in [true, false] {
+            hits.push(FaceHit {
+                volume: volume(3),
+                primitive: prim(3),
+                shell: 0,
+                contact: Contact::Edge(step, step + 1),
+                triangle: 2 * step + u32::from(entering),
+                t: ulps(exit as f32, (step as i32) * 8),
+                true_normal: Vec3::X,
+                entering,
+            });
+        }
     }
     let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both solids resolve");
 
@@ -2975,6 +3324,7 @@ fn a_fan_of_claims_on_one_feature_is_one_crossing() {
         triangle: 77,
         t: 1.0,
         true_normal: AXIS,
+        entering: false,
     });
     let walked = walk(&corridor(2.0, hits), &volumes);
 
@@ -3105,6 +3455,7 @@ fn duplicate_claims_of_one_contact_are_one_entry() {
         triangle: 77,
         t: 1.0,
         true_normal: -AXIS,
+        entering: true,
     });
     let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws)
         .expect("a duplicated entry claim is one entry");
@@ -3123,6 +3474,7 @@ fn duplicate_claims_of_one_contact_are_one_entry() {
         triangle: 77,
         t: ulps(1.0, 2),
         true_normal: -AXIS,
+        entering: true,
     });
     assert!(matches!(
         walk_ray(0, &corridor(2.0, hits), &volumes, &laws),
@@ -3152,6 +3504,7 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
                 triangle: a,
                 t: 1.0,
                 true_normal: AXIS,
+                entering: false,
             },
             FaceHit {
                 volume: volume(1),
@@ -3161,6 +3514,7 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
                 triangle: b,
                 t: 1.0,
                 true_normal: -AXIS,
+                entering: true,
             },
         ]
     };
@@ -3422,4 +3776,529 @@ fn surface_identity_never_charges_less_than_the_exact_union_field() {
             walked.cost,
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ordered encounters
+// ---------------------------------------------------------------------------------------------
+
+/// Each sample reports its materials IN ORDER, with identity, gaps and overlaps intact: an overlap
+/// of two substances lists both, and nothing is reduced to one factor.
+#[test]
+fn layers_report_every_volume_in_order_with_gaps_and_overlaps() {
+    let volumes = table(&[(1, 1000.0), (2, 900.0), (3, 10.0), (4, 1000.0)]);
+    let mut hits = plate(1, 0, 0.25, 0.5);
+    hits.extend(plate(2, 0, 0.5, 0.75));
+    hits.extend(plate(3, 0, 1.0, 1.25));
+    hits.extend(plate(4, 0, 1.125, 1.5));
+    let walked = walk(&corridor(2.0, hits), &volumes);
+    let layers: Vec<(f64, f64, Vec<u32>)> = walked
+        .layers
+        .iter()
+        .map(|layer| {
+            let mut present: Vec<u32> = layer
+                .present
+                .iter()
+                .map(|presence| {
+                    (1..=4)
+                        .find(|index| volume(*index) == presence.volume)
+                        .expect("a fixture volume")
+                })
+                .collect();
+            present.sort();
+            (layer.start, layer.end, present)
+        })
+        .collect();
+    assert_eq!(
+        layers,
+        vec![
+            (0.0, 0.25, vec![]),
+            (0.25, 0.5, vec![1]),
+            (0.5, 0.75, vec![2]),
+            (0.75, 1.0, vec![]),
+            (1.0, 1.125, vec![3]),
+            (1.125, 1.25, vec![3, 4]),
+            (1.25, 1.5, vec![4]),
+            (1.5, 2.0, vec![]),
+        ]
+    );
+    let mut both = vec![SubstanceId::fixture(1000.0), SubstanceId::fixture(10.0)];
+    both.sort();
+    assert_eq!(
+        walked.layers[5].substances(),
+        both,
+        "an overlap keeps both substances"
+    );
+}
+
+/// Plates of one substance in contact are ONE plate: the boundary between them is not an
+/// interface. Two substances of equal factor in contact are two plates, and the boundary between
+/// them is one.
+#[test]
+fn an_interface_is_a_change_of_substance_never_of_volume_alone() {
+    // Fixture data: a second substance id at the first one's factor.
+    let other = VolumeMaterial {
+        substance: SubstanceId::fixture(999.0),
+        factor: 1000.0,
+    };
+    let interfaces = |second: VolumeMaterial| {
+        let volumes = VolumeTable::new([
+            (volume(1), VolumeMaterial::fixture(1000.0)),
+            (volume(2), second),
+        ])
+        .unwrap();
+        let mut hits = plate(1, 0, 0.25, 0.5);
+        hits.extend(plate(2, 0, 0.5, 0.75));
+        let walked = walk_disc(
+            &point_disc(2.0, sample(Vec3::ZERO, hits)),
+            &volumes,
+            &WalkLaws::default(),
+        )
+        .unwrap();
+        assert_eq!(walked.events.len(), 1);
+        walked.events[0]
+            .encounters
+            .iter()
+            .map(|encounter| (encounter.start, encounter.end, encounter.interface))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        interfaces(VolumeMaterial::fixture(1000.0)),
+        vec![(0.25, 0.5, true), (0.5, 0.75, false)]
+    );
+    assert_eq!(
+        interfaces(other),
+        vec![(0.25, 0.5, true), (0.5, 0.75, true)]
+    );
+}
+
+/// What the scalar path decided for one transit: the round's residual or rest point, and the
+/// per-entity `(chord, cost)` deposits.
+struct ScalarOutcome {
+    /// The whole crossing's charged cost (reference-mm).
+    total: f64,
+    embed: Option<f64>,
+    cost_spent: f32,
+    residual: f32,
+    deposits: BTreeMap<Entity, (f64, f64)>,
+}
+
+/// THE SCALAR ORACLE: the disc-mean cumulative cost profile, its inverse at the capability, the
+/// residual speed by the capability law's inverse, and the per-entity deposits clipped at the
+/// stop — the arithmetic the mechanism replaced, restated here as the equivalence reference.
+/// Reads only the walk's spans, runs and presence, never the encounters. Valid for a transit with
+/// one crossing.
+fn scalar_outcome(
+    transit: &DiscWalk,
+    request: &TransitRequest,
+    body: super::super::RoundBody,
+    capability: f32,
+) -> ScalarOutcome {
+    assert_eq!(transit.events.len(), 1, "the oracle reads one crossing");
+    let event = &transit.events[0];
+    let k = transit.samples() as f64;
+    let (start, end) = (event.start, event.end);
+    let mut breaks: Vec<f64> = vec![start, end];
+    for walk in &transit.walks {
+        for run in &walk.runs {
+            for span in &walk.spans {
+                if span.end > run.start && span.start < run.end {
+                    breaks.push(span.start);
+                    breaks.push(span.end);
+                }
+            }
+        }
+    }
+    breaks.sort_by(f64::total_cmp);
+    breaks.dedup();
+    breaks.retain(|t| *t >= start && *t <= end);
+    let charge = if request.entrance.overmatched {
+        transit.axis.dot(request.entrance.normal).abs() as f64
+    } else {
+        1.0
+    };
+    let mut cumulative = vec![0.0f64];
+    for window in breaks.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mid = 0.5 * (a + b);
+        let mut slope = 0.0f64;
+        for walk in &transit.walks {
+            if !walk
+                .runs
+                .iter()
+                .any(|run| run.start <= mid && mid < run.end)
+            {
+                continue;
+            }
+            if let Some(span) = walk.spans.iter().find(|s| s.start <= mid && mid < s.end) {
+                slope += span.factor as f64;
+            }
+        }
+        let last = *cumulative.last().unwrap();
+        cumulative.push(last + (b - a) * slope / k);
+    }
+    let cumulative: Vec<f64> = cumulative.iter().map(|c| c * charge).collect();
+    let total = *cumulative.last().unwrap();
+    let budget = capability as f64;
+    let embed = (budget < total).then(|| {
+        let index = (1..breaks.len())
+            .find(|&index| cumulative[index] > budget)
+            .expect("the budget falls short of the total");
+        let slice = cumulative[index] - cumulative[index - 1];
+        if slice <= 0.0 {
+            return breaks[index - 1];
+        }
+        let share = (budget - cumulative[index - 1]) / slice;
+        breaks[index - 1] + (breaks[index] - breaks[index - 1]) * share
+    });
+    let (cost_spent, cut) = match embed {
+        Some(t) => (capability.min(total as f32), t),
+        None => (total as f32, end),
+    };
+    let residual = match embed {
+        Some(_) => 0.0,
+        None => super::super::speed_for(body, (capability - cost_spent).max(0.0)),
+    };
+    let mut deposits: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    for walk in &transit.walks {
+        let (Some(first), Some(last)) = (walk.runs.first(), walk.runs.last()) else {
+            continue;
+        };
+        for presence in &walk.presence {
+            for (a, b) in &presence.spans {
+                let (a, b) = (a.max(first.start), b.min(last.end));
+                if b <= a {
+                    continue;
+                }
+                let chord = (b.min(cut) - a).max(0.0) / k * charge;
+                let slot = deposits.entry(presence.entity).or_insert((0.0, 0.0));
+                slot.0 += chord;
+                slot.1 += chord * presence.factor as f64;
+            }
+        }
+    }
+    deposits.retain(|_, (chord, _)| *chord > 0.0);
+    ScalarOutcome {
+        total,
+        embed,
+        cost_spent,
+        residual,
+        deposits,
+    }
+}
+
+/// REFERENCE STEEL ALONE, THE MECHANISM IS THE SCALAR LAW. On randomized stacks of reference-steel
+/// plates — abutting, overlapping, at random obliquity, overmatched or not — and random
+/// capabilities, the solid-shot mechanism advancing through the ordered encounters matches the
+/// scalar path ([`scalar_outcome`]) to float precision: the same verdict, the rest point, the
+/// residual speed, the reference-mm spent and every deposit. Every number is fixture data.
+///
+/// Every case is accounted for. A case is not compared in exactly two classes: the entrance
+/// decides no transit (a ricochet: neither path advances anything), or the crossing's cost lies
+/// within the scalar path's own readout rounding of the round's capability, where that rounding
+/// alone decides the verdict.
+#[test]
+fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
+    let laws = WalkLaws::default();
+    let (round, _) = solid(1.0);
+    let body = round.body();
+    let mut state = 0x2026_1012_u64;
+    let mut unit = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let (mut compared, mut ricochets, mut knife_edges) = (0, 0, 0);
+    let (mut embeds, mut overmatches, mut overmatched_rests) = (0, 0, 0);
+    let (scale, inertia) = body.terms();
+    // The capability law's inverse in f64: the speed carrying `readout` reference-mm.
+    let speed_at = |readout: f64| ((readout / (1000.0 * scale)).exp_m1() / inertia).sqrt();
+    for case in 0..400 {
+        let tilt = (unit() * 60.0).to_radians() as f32;
+        let normal = Vec3::new(0.0, tilt.sin(), -tilt.cos());
+        let plates = 1 + (unit() * 4.0) as u32;
+        let mut slabs = Vec::new();
+        let mut volumes = Vec::new();
+        let mut front = 0.5f32;
+        for plate in 0..plates {
+            let chord = (0.005 + unit() * 0.145) as f32;
+            slabs.push(Slab::at(plate + 1, plate, front, normal, chord));
+            volumes.push((plate + 1, 1000.0));
+            // Abutting, or overlapping the next plate by up to half this one.
+            front += chord * (1.0 - (unit() * 0.5) as f32 * (unit() < 0.5) as u32 as f32);
+        }
+        let volumes = table(&volumes);
+        let entrance = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+        let Begin::Transit(request) = begin(&entrance, &AP_88, &laws) else {
+            ricochets += 1;
+            continue;
+        };
+        let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+        // Abutting or overlapping plates are one crossing by construction of the fixture.
+        assert_eq!(transit.events.len(), 1, "case {case}: one crossing");
+        // Half the cases near the crossing's own cost, so rests inside every kind of crossing
+        // (overmatched ones included) are drawn, not just perforations.
+        let total = scalar_outcome(&transit, &request, body, 0.0).total;
+        let requested = if case % 2 == 0 {
+            (1.0 + unit() * 400.0) as f32
+        } else {
+            (total * (0.05 + unit() * 1.2)).max(0.1) as f32
+        };
+        let (round, state) = solid(requested);
+        let capability = super::super::capability(body, state.speed as f32);
+        let old = scalar_outcome(&transit, &request, body, capability);
+        // THE KNIFE EDGE. The scalar path budgets the f32 readout `capability`; the mechanism
+        // advances the f64 state whose exact readout is `exact`. They differ by the readout's own
+        // rounding, at most half an f32 ULP (2⁻²⁴ relative, DERIVED). A crossing whose cost lies
+        // within that difference of the readout is decided by the rounding alone. The f64 term
+        // bounds the two paths' f64 arithmetic (each well under 100 roundings of 2⁻⁵³ relative,
+        // DERIVED ~1e-14), so a case outside the band has one verdict on both paths.
+        let exact = round.reference_mm(state);
+        let band = (capability as f64 - exact).abs() + 1.0e-12 * exact;
+        if (capability as f64 - total).abs() <= band {
+            knife_edges += 1;
+            continue;
+        }
+        let new = finish(
+            &transit,
+            &request,
+            &round,
+            state,
+            &Limits { rest: 0.0 },
+            &laws,
+        )
+        .unwrap();
+        compared += 1;
+        embeds += old.embed.is_some() as u32;
+        overmatches += request.entrance.overmatched as u32;
+        overmatched_rests += (request.entrance.overmatched && old.embed.is_some()) as u32;
+        let tolerance = |value: f64| 1.0e-5 * (1.0 + value.abs());
+        match (new.outcome, old.embed) {
+            (Outcome::Embedded { t, .. }, Some(at)) => {
+                assert!(
+                    (t as f64 - at).abs() < 1.0e-6,
+                    "case {case}: rest at {t} against {at}"
+                );
+                assert_eq!(new.state.speed, 0.0, "case {case}: at rest");
+            }
+            (Outcome::Perforated { .. }, None) => {
+                // The scalar residual is the readout left, `capability − cost_spent`, in f32: each
+                // of the two and their difference rounds by at most half an f32 ULP of the
+                // capability. The residual SPEED must lie in the speed interval that readout bound
+                // spans (DERIVED, three half-ULPs), however steep the inverse is near exhaustion.
+                let left = capability as f64 - old.cost_spent as f64;
+                let slack = 1.5 * f32::EPSILON as f64 * capability as f64;
+                let (low, high) = (speed_at((left - slack).max(0.0)), speed_at(left + slack));
+                assert!(
+                    (low..=high).contains(&new.state.speed),
+                    "case {case}: residual speed {} outside [{low}, {high}] (scalar {})",
+                    new.state.speed,
+                    old.residual
+                );
+                // The scalar residual is the same interval's speed, cast once to f32.
+                let cast = 0.5 * f32::EPSILON as f64;
+                assert!(
+                    (low * (1.0 - cast)..=high * (1.0 + cast)).contains(&(old.residual as f64)),
+                    "case {case}: scalar residual {} outside [{low}, {high}]",
+                    old.residual
+                );
+            }
+            (outcome, embed) => {
+                panic!("case {case}: {outcome:?} against a scalar rest at {embed:?}")
+            }
+        }
+        assert!(
+            ((new.cost_spent - old.cost_spent) as f64).abs() < tolerance(capability as f64),
+            "case {case}: spent {} against {}",
+            new.cost_spent,
+            old.cost_spent
+        );
+        let deposits: BTreeMap<Entity, (f64, f64)> = new
+            .deposits
+            .iter()
+            .map(|deposit| {
+                let chord = deposit.line_chord().expect("a line dose");
+                (deposit.address, (chord as f64, deposit.amount as f64))
+            })
+            .collect();
+        assert_eq!(
+            deposits.keys().collect::<Vec<_>>(),
+            old.deposits.keys().collect::<Vec<_>>(),
+            "case {case}: the same volumes are dosed"
+        );
+        for (entity, (chord, cost)) in &deposits {
+            let (old_chord, old_cost) = old.deposits[entity];
+            assert!(
+                (chord - old_chord).abs() < 1.0e-6 && (cost - old_cost).abs() < tolerance(old_cost),
+                "case {case}: {entity:?} dosed ({chord}, {cost}) against ({old_chord}, {old_cost})"
+            );
+        }
+    }
+    assert_eq!(
+        compared + ricochets + knife_edges,
+        400,
+        "every case is compared or in a named class"
+    );
+    assert!(
+        knife_edges <= 2,
+        "{knife_edges} knife edges: the band is a rounding bound, never a population"
+    );
+    assert!(compared > 200, "only {compared} cases were compared");
+    assert!(
+        embeds > 20 && compared - embeds > 20,
+        "both verdicts must be exercised: {embeds} rests of {compared}"
+    );
+    assert!(
+        overmatches > 20 && overmatched_rests > 5,
+        "the overmatch adapter was exercised {overmatches} times, {overmatched_rests} to a rest"
+    );
+}
+
+/// One encounter over `[start, end)` on a one-sample disc, every listed volume present over all
+/// of it.
+fn stretch(start: f64, end: f64, interface: bool, present: &[(u32, f32)]) -> Encounter {
+    Encounter {
+        start,
+        end,
+        interface,
+        samples: vec![SampleLayer {
+            sample: 0,
+            present: present
+                .iter()
+                .map(|(index, factor)| VolumeContact {
+                    volume: volume(*index),
+                    material: VolumeMaterial::fixture(*factor),
+                    start,
+                    end,
+                })
+                .collect(),
+        }],
+        disc: 1,
+    }
+}
+
+/// A SEAM INSIDE ONE SUBSTANCE IS NOT A BOUNDARY. A crossing whose cost is the round's whole
+/// potential to the bit gives the same control and speed whether its steel is one volume, two
+/// abutting halves of one substance, or one volume duplicated in the same substance. Fixture data:
+/// an 88-class body at 450 m/s against reference steel; the length is the one whose drop equals
+/// that potential exactly (DERIVED by scalar emulation of the force law's arithmetic).
+#[test]
+fn a_same_substance_seam_does_not_change_the_outcome() {
+    let length = 0.041457119507477665;
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let state = round.at(450.0);
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let steel = REFERENCE_FACTOR;
+    let outcome = |encounters: &[Encounter]| {
+        let advanced =
+            advance_through(&round, state, encounters, &Limits { rest: 0.0 }, &geometry).unwrap();
+        let chords: Vec<f64> = advanced.doses.values().map(|(chord, _)| *chord).collect();
+        (advanced.stop, advanced.state.speed, chords)
+    };
+    let unsplit = outcome(&[stretch(0.0, length, true, &[(1, steel)])]);
+    assert_eq!(
+        unsplit,
+        (None, 0.0, vec![length]),
+        "the witness spends the potential exactly"
+    );
+    let half = 0.5 * length;
+    let split = outcome(&[
+        stretch(0.0, half, true, &[(1, steel)]),
+        stretch(half, length, false, &[(2, steel)]),
+    ]);
+    let duplicated = outcome(&[stretch(0.0, length, true, &[(1, steel), (2, steel)])]);
+    assert_eq!(
+        split,
+        (None, 0.0, vec![half, length - half]),
+        "split in equal halves: each half doses its own volume"
+    );
+    assert_eq!(
+        duplicated,
+        (None, 0.0, vec![length, length]),
+        "duplicated in the same substance: both copies are dosed, neither owns the chord"
+    );
+}
+
+/// SEQUENTIAL LAYERS ARE ORDERED, NEVER REDUCED. Two plates of different substances in sequence
+/// cost the round both of them, never the more resistant one alone. The rigid force law's
+/// potential drop is additive over encounters, so a round that perforates both leaves at the same
+/// speed in either order (to the rounding of the per-encounter speed round trip); a round that
+/// stops inside them stops at a different depth, in a different volume, by order. Fixture data:
+/// an 88-class body, 0.05 m of reference steel and 0.05 m of a substance at a tenth of it.
+#[test]
+fn sequential_layers_advance_in_order_and_cost_both() {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let (hard, soft) = (REFERENCE_FACTOR, 0.1 * REFERENCE_FACTOR);
+    let through = |speed: f32, layers: [(u32, f32); 2]| {
+        let encounters: Vec<Encounter> = layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| {
+                let start = 0.05 * index as f64;
+                stretch(start, start + 0.05, true, &[*layer])
+            })
+            .collect();
+        advance_through(
+            &round,
+            round.at(speed),
+            &encounters,
+            &Limits { rest: 0.0 },
+            &geometry,
+        )
+        .unwrap()
+    };
+    let hard_alone = advance_through(
+        &round,
+        round.at(1000.0),
+        &[stretch(0.0, 0.05, true, &[(1, hard)])],
+        &Limits { rest: 0.0 },
+        &geometry,
+    )
+    .unwrap();
+
+    let hard_first = through(1000.0, [(1, hard), (2, soft)]);
+    let soft_first = through(1000.0, [(2, soft), (1, hard)]);
+    assert_eq!((hard_first.stop, soft_first.stop), (None, None));
+    assert!(
+        hard_first.state.speed < hard_alone.state.speed,
+        "the soft plate behind the hard one costs the round: {} against {}",
+        hard_first.state.speed,
+        hard_alone.state.speed
+    );
+    assert!(
+        (hard_first.state.speed / soft_first.state.speed - 1.0).abs() < 1.0e-12,
+        "{} against {}",
+        hard_first.state.speed,
+        soft_first.state.speed
+    );
+
+    let hard_first = through(200.0, [(1, hard), (2, soft)]);
+    let soft_first = through(200.0, [(2, soft), (1, hard)]);
+    let (Some(a), Some(b)) = (hard_first.stop, soft_first.stop) else {
+        panic!("both orders stop the round inside the stack");
+    };
+    assert!(
+        a < 0.05 && b > 0.05,
+        "hard first rests at {a}, soft first at {b}"
+    );
+    assert!(!hard_first.doses.contains_key(&volume(2)));
+    assert!(soft_first.doses.contains_key(&volume(1)));
 }

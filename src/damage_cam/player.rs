@@ -19,7 +19,7 @@ use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{ConsequenceState, PenetrationReport, Role, SpallBurst, Verdict};
+use super::{ConsequenceState, PenCamVerdict, PenetrationReport, Role, SpallCone};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -386,12 +386,12 @@ struct BurstTiming {
     nose: f32,
     /// The envelope's end circle, along a generator at the cone's half-angle.
     rim: f32,
-    /// One per [`SpallBurst::fragments`] entry, in order.
+    /// One per [`SpallCone::fragments`] entry, in order.
     fragments: Vec<f32>,
 }
 
 impl BurstTiming {
-    fn new(report: &PenetrationReport, burst: &SpallBurst) -> Self {
+    fn new(report: &PenetrationReport, burst: &SpallCone) -> Self {
         let origin = Vec3::from(burst.origin);
         let axis = Vec3::from(burst.axis).normalize_or(Vec3::Z);
         let v_exit = path_speed_at(report, burst.t);
@@ -511,7 +511,7 @@ fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
 /// sample's time when no segment does. `None` when the path ends in material.
 fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
     let (anchor, from) = match report.impact.verdict {
-        Verdict::Ricochet => (report.impact.point, 0.0),
+        PenCamVerdict::Ricochet => (report.impact.point, 0.0),
         _ => {
             let plate = report.plates.last()?;
             (plate.exit?, plate.t)
@@ -642,7 +642,7 @@ fn crossing(report: &PenetrationReport, index: usize) -> (Vec3, Vec3) {
     let entry = Vec3::from(plate.entry);
     let far = match plate.exit {
         Some(exit) => Vec3::from(exit),
-        None if report.impact.verdict == Verdict::Ricochet => entry,
+        None if !report.impact.verdict.entered() => entry,
         None => report.path.last().map_or(entry, |p| Vec3::from(p.point)),
     };
     (entry, far)
@@ -1451,7 +1451,7 @@ fn draw_section_plate(
             let exit = Vec3::from(exit);
             Some((exit, (exit - entry).normalize_or(incoming)))
         }
-        None if report.impact.verdict == Verdict::Ricochet => None,
+        None if !report.impact.verdict.entered() => None,
         None => {
             let along = (head - entry).normalize_or(incoming);
             let depth = (head - entry)
@@ -1491,7 +1491,7 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
     let incoming = Vec3::from(report.impact.incoming);
     let normal = Vec3::from(report.impact.normal);
     let color = match report.impact.verdict {
-        Verdict::Ricochet => RICOCHET,
+        PenCamVerdict::Ricochet => RICOCHET,
         _ if report.plates.first().is_some_and(|p| p.overmatched) => OVERMATCH,
         _ => ENTRY,
     };
@@ -1506,7 +1506,7 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
 /// fragment's alpha by where it ends.
 fn draw_burst(
     gizmos: &mut Gizmos,
-    burst: &SpallBurst,
+    burst: &SpallCone,
     timing: &BurstTiming,
     progress: impl Fn(f32) -> f32,
     fade: impl Fn(Vec3) -> f32,
@@ -1614,11 +1614,11 @@ fn update_hud(
     );
 }
 
-fn verdict_word(verdict: Verdict) -> (&'static str, Color) {
+fn verdict_word(verdict: PenCamVerdict) -> (&'static str, Color) {
     match verdict {
-        Verdict::Through => ("THROUGH", SPAN),
-        Verdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
-        Verdict::Ricochet => ("RICOCHET", RICOCHET),
+        PenCamVerdict::Through => ("THROUGH", SPAN),
+        PenCamVerdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
+        PenCamVerdict::Ricochet => ("RICOCHET", RICOCHET),
     }
 }
 
@@ -1843,7 +1843,7 @@ mod tests {
                 normal: [0.0, 0.0, -1.0],
                 incoming: [0.0, 0.0, 1.0],
                 incidence_deg: 0.0,
-                verdict: Verdict::Through,
+                verdict: PenCamVerdict::Through,
             },
             plates: vec![],
             path: vec![
@@ -1856,7 +1856,7 @@ mod tests {
                     point: [0.0, 0.0, 0.6],
                 },
             ],
-            spall: vec![SpallBurst {
+            spall: vec![SpallCone {
                 t: 0.0005,
                 origin: [0.0, 0.0, 0.3],
                 axis: [0.0, 0.0, 1.0],

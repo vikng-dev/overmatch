@@ -1078,6 +1078,7 @@ mod tests {
             speed: 773.0,
             caliber,
             mass: 10.2,
+            nose_factor: 0.3,
             mechanism: if caliber <= MG_CALIBER {
                 crate::spec::FireMechanism::Automatic
             } else {

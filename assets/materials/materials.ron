@@ -5,8 +5,24 @@
 // datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
 // the model, §13.7: substance is authored per-plate, paint is a runtime livery).
 //
-// `factor` = shell-resistance in reference-mm per metre of chord (the §13.2 field value).
-// Baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
+// `resistance` = how the substance resists a round's force law. Exactly one entry is `Reference`:
+// the reference steel, whose `facts` are the force law's reference constants and one metre of which
+// is 1000 reference-mm by definition. Every other entry declares `Effective(factor)`: reference-mm
+// per metre of chord (the §13.2 field value), i.e. it resists as `factor / 1000` of the reference
+// force at every speed. Declared, never inferred from facts or from a fill fraction.
+//
+// `facts` = the material facts of a structural metal (density kg/m³, flow strength Pa at large
+// strain, Young's modulus Pa, Poisson's ratio), each row from the research table in
+// `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` (Q2). `None` where no
+// row is sourced; non-metals (crew, ammunition, rubber, engine block) never carry facts. Facts on
+// an `Effective` entry are recorded for the mechanisms that will read them; the force law does not
+// read them yet, and the strength ratio they give (DERIVED, at the strength-limited end) differs
+// from the declared factor:
+//   - GunSteel, 4340-class quenched-and-tempered analogue: a / a_ref ≈ 1.129 (≈ 1129), ρ / ρ_ref ≈ 0.994.
+//   - MildSteel, 1020 analogue: a / a_ref ≈ 0.460 (≈ 460), ρ / ρ_ref ≈ 1.006.
+//   Cast armour has no sourced row.
+//
+// Effective factors: baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
 // material research pass 2026-08-07 (Tiger metallurgy, sources in the session record):
 // DOCTRINE (Yan ruling 2026-08-07): factors are PHYSICS-HONEST, never bent for gameplay.
 // If flesh is 0.01 and a 7.92 penetrates, it penetrates, period. Feel belongs to the laws
@@ -57,13 +73,19 @@
 // those counts, because a second vehicle is a different model and not a broken one.
 (
     substances: {
-        "RHA":         (factor: 1000.0, paintable: true),
-        "GunSteel":    (factor: 1000.0, paintable: true),
-        "Cast":        (factor:  900.0, paintable: true),
-        "MildSteel":   (factor:  800.0, paintable: true),
-        "EngineBlock": (factor:  150.0, paintable: false),
-        "Ammunition":  (factor:  200.0, paintable: false),
-        "Rubber":      (factor:   50.0, paintable: false),
-        "Flesh":       (factor:   10.0, paintable: false),
+        "RHA":         (resistance: Reference, paintable: true,
+                        facts: Some((density: 7850.0, flow_strength: 1.0e9,
+                                     youngs_modulus: 205.0e9, poisson_ratio: 0.29))),
+        "GunSteel":    (resistance: Effective(1000.0), paintable: true,
+                        facts: Some((density: 7800.0, flow_strength: 1.18e9,
+                                     youngs_modulus: 190.0e9, poisson_ratio: 0.29))),
+        "Cast":        (resistance: Effective( 900.0), paintable: true,  facts: None),
+        "MildSteel":   (resistance: Effective( 800.0), paintable: true,
+                        facts: Some((density: 7900.0, flow_strength: 0.40e9,
+                                     youngs_modulus: 190.0e9, poisson_ratio: 0.29))),
+        "EngineBlock": (resistance: Effective( 150.0), paintable: false, facts: None),
+        "Ammunition":  (resistance: Effective( 200.0), paintable: false, facts: None),
+        "Rubber":      (resistance: Effective(  50.0), paintable: false, facts: None),
+        "Flesh":       (resistance: Effective(  10.0), paintable: false, facts: None),
     },
 )

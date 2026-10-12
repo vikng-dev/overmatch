@@ -176,6 +176,8 @@ pub(crate) struct ShellCertificate {
 pub(crate) struct PrimitiveSubstance {
     /// The material datablock name — the join key to `materials.ron` (§12: identity, never parsed).
     pub name: String,
+    /// The substance's identity in the registry it was resolved against.
+    pub id: crate::substances::SubstanceId,
     /// The §13.2 field value: reference-mm of armour per metre of chord.
     pub factor: f32,
 }
@@ -299,7 +301,8 @@ fn classify(
     let substance = registry.get(material).ok()?;
     Some(PrimitiveSubstance {
         name: material.to_owned(),
-        factor: substance.factor,
+        id: registry.id(material).ok()?,
+        factor: substance.factor(),
     })
 }
 
@@ -1444,6 +1447,7 @@ mod tests {
             indices,
             substance: Some(PrimitiveSubstance {
                 name: SUBSTANCE.into(),
+                id: crate::substances::SubstanceId::fixture(1000.0),
                 factor: 1000.0,
             }),
             certificate: None,
@@ -1522,7 +1526,7 @@ mod tests {
         // which is the whole reason the file has to come from the right revision.
         std::fs::write(
             &elsewhere,
-            "SubstanceRegistry(substances: {\"Cheese\": (factor: 1.0, paintable: false)})",
+            "SubstanceRegistry(substances: {\"Cheese\": (resistance: Reference, paintable: false, facts: Some((density: 1000.0, flow_strength: 1.0e6, youngs_modulus: 1.0e9, poisson_ratio: 0.4)))})",
         )
         .expect("the fixture registry is writable");
         let findings = verify_asset(&asset.glb, Some(&elsewhere));
@@ -1872,7 +1876,7 @@ mod tests {
         trigger: Primary,
         muzzle: "Muzzle",
         barrel: "Recoil",
-        speed: 1.0, caliber: 0.1, mass: 1.0,
+        speed: 1.0, caliber: 0.1, mass: 1.0, nose: Flat,
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
         report_clips: [],

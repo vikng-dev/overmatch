@@ -51,7 +51,7 @@ use crate::exact::Int;
 /// The Tiger's densest ballistic primitive is a few thousand triangles TOTAL, and a ray crosses a
 /// vanishing fraction of them, so this is orders above anything real — it exists to turn a runaway
 /// (a degenerate mesh, a corridor extended past all reason) into a loud stop.
-const MAX_FACES: usize = 4096;
+pub(crate) const MAX_FACES: usize = 4096;
 
 /// Bound on the f64 evaluation of the crossing determinant `−axis · ((b − a) × (c − a))`, as a
 /// multiple of its permanent `Σ (|e1ᵤ·e2ᵥ| + |e1ᵥ·e2ᵤ|)·|axisₖ|`.
@@ -86,18 +86,31 @@ pub(crate) struct Corridor<'a> {
     /// Unit travel direction.
     pub axis: Vec3,
     pub length: f32,
+    /// Metres of the same line BEHIND [`origin`](Self::origin) the corridor also covers: it spans
+    /// `[−behind, length − behind)` of the line through `origin` along `axis`, and every reported
+    /// `t` is measured from `origin − axis · behind`. The line is still formed at `origin`, in the
+    /// arithmetic a corridor starting there runs, so every crossing is decided on the very line such
+    /// a corridor casts. Zero for a sweep; the containment probe (`resolve::certified`) reaches back
+    /// from the start it certifies this way, never from an origin re-formed metres behind it, whose
+    /// rounding would move the line off the start.
+    pub behind: f32,
     /// Shells this ray was declared to START inside.
     ///
-    /// Honors the core's `(open, close]` seed contract from the driving side: a face BEHIND the
-    /// origin belongs to the seed and is dropped, and a face a rounding-hair behind it on a ray that
-    /// was NOT seeded is the face the ray is sitting on and is clamped to `t = 0`, where the walk
-    /// processes it. The two rules are complements, so an entry is counted exactly once however the
-    /// f32 falls.
+    /// Honors the core's `(open, close]` seed contract from the driving side ([`admit_shell`]):
+    /// within [`sitting_reach`] of the origin, either side, the one boundary the seed accounts for
+    /// (the entry of a seeded shell, the exit of an unseeded one) is dropped, and every other one is
+    /// the corridor's, clamped to `t = 0` when it lies behind. The rules are complements — so every
+    /// boundary is counted exactly once — only because that reach covers everything the seed
+    /// declined to own and every re-measurement error; see there.
     pub seeded: &'a [ShellKey],
+    /// Progress along the ray the seed was READ on ([`super::walk::SampleSeed::t`]), or `None` for a
+    /// corridor no seed hands off to. It is the scale [`super::walk::RayWalk::inside_at`] judged
+    /// "on the hand-off plane" at, which [`sitting_reach`] has to match.
+    pub handoff: Option<f64>,
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
-    /// face — a second opinion about that is how an entry gets counted twice or not at all. The
-    /// trimesh prune reads it through [`prune_margin`], to decide when a corridor origin is ON a
-    /// face rather than past it.
+    /// face — a second opinion about that is how an entry gets counted twice or not at all. Read
+    /// through [`sitting_reach`], which decides when a corridor origin is ON a face rather than past
+    /// it.
     pub laws: &'a WalkLaws,
 }
 
@@ -133,6 +146,12 @@ pub(crate) fn collect(
         // was computed from.
         let local_origin = inverse * ((corridor.anchor - position.0) + corridor.origin);
         let local_axis = inverse * corridor.axis;
+        let reach = sitting_reach(
+            corridor.handoff,
+            corridor.origin,
+            local_origin,
+            corridor.laws,
+        );
         let seeded = |shell: u32| {
             corridor.seeded.contains(&ShellKey {
                 volume: node,
@@ -175,13 +194,13 @@ pub(crate) fn collect(
                     local_origin,
                     local_axis,
                     corridor.length,
+                    corridor.behind,
                     node,
                     primitive,
                     surfaces,
                     &seeded,
                     *rotation,
-                    prune_margin(local_origin, corridor.laws),
-                    corridor.laws,
+                    reach,
                     out,
                 )?
             }
@@ -195,6 +214,7 @@ pub(crate) fn collect(
                 node,
                 primitive,
                 seeded(0),
+                reach,
                 out,
             )?,
         }
@@ -213,45 +233,51 @@ pub(crate) fn collect(
     Ok(())
 }
 
-/// How far outside the corridor's own extent the trimesh prune reaches, so that the prune cannot be
-/// the thing that decides whether a face EXISTS — [`admit`] owns that decision.
+/// How far behind the corridor origin an UNSEEDED face may sit and still be the face the ray is
+/// sitting on — the reach of [`admit`]'s clamp, and the margin the trimesh prune grows its box by so
+/// that the prune never decides whether a face EXISTS.
 ///
-/// A transit corridor's origin IS an entry face's position, recomputed through a walk, a handoff and
-/// a world-to-local subtraction, so it lands a few ULP on one side of that plane or the other. When
-/// it lands PAST, the face's own AABB — degenerate in the axis it is perpendicular to — falls
-/// outside the corridor's box by that same hair and the leaf is never tested. `admit` is written for
-/// exactly this ("behind the origin and unseeded → the ray is sitting on the face") and never gets
-/// the chance.
+/// # The partition it completes
 ///
-/// Same tolerance family, and the same scale-awareness, as [`super::walk::coincident`]: this is "the
-/// origin is ON that boundary", stated as a box.
+/// A transit sample's seed and this clamp are the two halves of one decision about the entry face
+/// at the hand-off. [`super::walk::RayWalk::inside_at`] owns an entry only when it lies more than
+/// `topology_band(handoff)` behind the plane it read the seed on; nearer than that it is "on the
+/// plane" and left to the corridor. So the reach is the SUM of two bands:
 ///
-/// RE-DERIVED after the corridor became anchor-relative, because that changed which rounding is left
-/// to absorb. It is scaled on the LOCAL ray origin — the corridor's position in the collider's own
-/// frame — since that is now the only quantity the crossing arithmetic rounds at. A ray probing a
-/// tank part sits metres from its centre at most, so the floor lands near `topology_abs`: a few
-/// micrometres, wherever on the map the shot happens.
+/// - `topology_band(handoff)` — everything the seed declined. An entry it declined and this clamp
+///   then dropped as already traversed is counted by nobody: the shell's exit arrives with nothing
+///   open, `UnexpectedExit`, and the round fails closed on a plate it bit into. MEASURED: a ring
+///   sample whose entrance ray entered 1.72e-6 behind a hand-off plane 10.585 m from its anchor
+///   (band 5.23e-6) re-measures that face 1.42e-6 behind the transit origin — beyond
+///   `topology_abs`, so a reach without this term drops it (`resolve::tests`).
+/// - `topology_band(scale)` — the corridor re-measures that face from an origin rounded at its own
+///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing
+///   arithmetic runs in. The anchor is where the march segment started, not first contact, and a
+///   continuation keeps its anchor within a step (it is re-anchored at the start of each,
+///   `resolve::Interior::rebased`), so a hand-off sits up to one step's travel budget plus
+///   `resolve::MAX_OVERRUN` from it.
 ///
-/// Before anchoring it had to scale on the WORLD position instead, and that is what made this a
-/// squeeze rather than a tolerance: `topology_rel · 2500 m` reaches [`super::MARCH_EPS`] exactly, so
-/// the floor the geometry demanded and the ceiling safety demanded crossed INSIDE the map — a live
-/// handoff at 2.5 km lands 0.3848 mm off its own plane, past the 0.25 mm ceiling. The anchor
-/// removes the conflict; the ceiling stays as defence in depth.
+/// A corridor with no hand-off carries only the second band.
 ///
-/// The CEILING is not decoration. The march resumes one `MARCH_EPS` past every face it leaves, so a
-/// margin that reached a whole nudge would re-collect the EXIT face of the plate just perforated —
-/// an exit for a primitive the walk is not inside, `UnexpectedExit`, and a round stopped dead in
-/// mid-air one millimetre past the plate it punched through. A quarter of the nudge is now orders
-/// above anything the floor asks for, which is exactly the state a clamp should be in: never
-/// reached, and still there.
-fn prune_margin(local_origin: Vec3, laws: &WalkLaws) -> f32 {
-    (laws.topology_abs + laws.topology_rel * local_origin.abs().max_element())
-        .min(super::MARCH_EPS * PRUNE_MARGIN_SHARE)
+/// # The ceiling
+///
+/// The march resumes one [`super::MARCH_EPS`] past every face it leaves, so a reach that grew to a
+/// whole nudge would re-collect the EXIT face of the plate just perforated — an exit for a primitive
+/// the walk is not inside, `UnexpectedExit`, and a round stopped dead in mid-air one millimetre past
+/// the plate it punched through. DERIVED: the two bands reach a quarter of the nudge only past
+/// ~310 m of scale, and a corridor origin sits at most one step's budget plus
+/// `resolve::MAX_OVERRUN` from its anchor: about 63 m for a round at 800 m/s over a 16 ms tick. The
+/// ceiling is defence in depth, never reached.
+fn sitting_reach(handoff: Option<f64>, origin: Vec3, local_origin: Vec3, laws: &WalkLaws) -> f32 {
+    let declined = handoff.map_or(0.0, |t| super::walk::topology_band(t.abs(), laws));
+    let scale = origin.length().max(local_origin.length()) as f64;
+    let reach = declined + super::walk::topology_band(scale, laws);
+    (reach as f32).min(super::MARCH_EPS * SITTING_REACH_SHARE)
 }
 
-/// Ceiling on [`prune_margin`], as a share of the march's own boundary nudge — see there for why a
+/// Ceiling on [`sitting_reach`], as a share of the march's own boundary nudge — see there for why a
 /// share of THAT constant is the honest way to state it.
-const PRUNE_MARGIN_SHARE: f32 = 0.25;
+const SITTING_REACH_SHARE: f32 = 0.25;
 
 /// Every triangle the ray crosses, with the winding normal.
 #[expect(
@@ -263,13 +289,15 @@ fn collect_trimesh(
     origin: Vec3,
     axis: Vec3,
     length: f32,
+    // [`Corridor::behind`]: the line is formed at `origin`, and `t` is reported from `behind`
+    // metres back along it.
+    behind: f32,
     node: Entity,
     primitive: Entity,
     surfaces: &BallisticSurfaces,
     seeded: &dyn Fn(u32) -> bool,
     rotation: Rotation,
-    margin: f32,
-    laws: &WalkLaws,
+    reach: f32,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     // Prune by BOX OVERLAP against the corridor's own extent, not by a ray cast against each node.
@@ -280,12 +308,15 @@ fn collect_trimesh(
     // it entirely. The entry then vanishes and the walk reports an exit it never entered. Overlap
     // prunes nearly as well, and every surviving leaf still gets an exact intersection test, so the
     // prune cannot change WHICH crossings exist either way — PROVIDED it is grown by
-    // [`prune_margin`], because a box tested with a bare inequality has its own exact boundary, and
+    // [`sitting_reach`], because a box tested with a bare inequality has its own exact boundary, and
     // an origin one ULP past the face lands on the wrong side of it.
-    let far = origin + axis * length;
-    let lo = origin.min(far) - Vec3::splat(margin);
-    let hi = origin.max(far) + Vec3::splat(margin);
+    let near = origin - axis * behind;
+    let far = origin + axis * (length - behind);
+    let lo = near.min(far) - Vec3::splat(reach);
+    let hi = near.max(far) + Vec3::splat(reach);
     let shear = RayShear::new(origin, axis);
+    // Every claim at its RAW `t`; the seed contract is applied per shell once all are in.
+    let mut claims: Vec<(FaceHit, bool)> = Vec::new();
     for index in mesh.bvh().leaves(|node| {
         let aabb = node.aabb();
         aabb.maxs.x >= lo.x
@@ -312,25 +343,80 @@ fn collect_trimesh(
             &surfaces.corners[index as usize],
             &claim,
         );
-        if let Some(hit) = admit(t, length, seeded(shell), laws) {
-            out.push(FaceHit {
+        // A sweep's parameters pass through bit for bit, signed zero included.
+        let t = if behind == 0.0 {
+            t
+        } else {
+            t + f64::from(behind)
+        };
+        if !t.is_finite() || t >= length as f64 {
+            continue;
+        }
+        let entry = claim.entering;
+        claims.push((
+            FaceHit {
                 volume: node,
                 primitive,
                 shell,
                 contact,
                 triangle: index,
-                t: hit,
+                t,
                 // Back to world space. The winding normal is the mesh's own orientation — never
                 // parry's, which is flipped to oppose the ray and so cannot tell entry from exit.
                 true_normal: rotation * claim.normal,
-            });
-        }
-        if out.len() > MAX_FACES {
+                entering: entry,
+            },
+            entry,
+        ));
+        if out.len() + claims.len() > MAX_FACES {
             return Err(WalkError::CorridorOverflow {
                 volume: node,
-                collected: out.len(),
+                collected: out.len() + claims.len(),
                 limit: MAX_FACES,
             });
+        }
+    }
+
+    // One boundary per fan (one contact of one shell), in order along the ray within each shell.
+    // A fan whose faces disagree about direction is a tangent (`walk::canonical_crossings`), and it
+    // is admitted or dropped WHOLE, so admission never turns a tangent into a crossing by keeping
+    // half of it.
+    claims.sort_by(|(a, _), (b, _)| {
+        a.shell
+            .cmp(&b.shell)
+            .then(a.t.total_cmp(&b.t))
+            .then(a.contact.cmp(&b.contact))
+            .then(a.triangle.cmp(&b.triangle))
+    });
+    for shell_claims in claims.chunk_by(|(a, _), (b, _)| a.shell == b.shell) {
+        let mut fans: Vec<(Boundary, Vec<&FaceHit>)> = Vec::new();
+        for (claim, entry) in shell_claims {
+            let entry = *entry;
+            match fans
+                .iter_mut()
+                .find(|(_, members)| members[0].contact == claim.contact)
+            {
+                Some((boundary, members)) => {
+                    if boundary.entry != Some(entry) {
+                        boundary.entry = None;
+                    }
+                    members.push(claim);
+                }
+                None => fans.push((
+                    Boundary {
+                        t: claim.t,
+                        entry: Some(entry),
+                    },
+                    vec![claim],
+                )),
+            }
+        }
+        let boundaries: Vec<Boundary> = fans.iter().map(|(boundary, _)| *boundary).collect();
+        let admitted = admit_shell(&boundaries, length, seeded(shell_claims[0].0.shell), reach);
+        for ((_, members), admitted) in fans.iter().zip(admitted) {
+            if let Some(t) = admitted {
+                out.extend(members.iter().map(|claim| FaceHit { t, ..**claim }));
+            }
         }
     }
     Ok(())
@@ -345,6 +431,10 @@ fn collect_trimesh(
 ///
 /// Normals are re-signed from the geometry (`entry opposes the ray, exit agrees`), which for a
 /// convex solid is exact and owes parry's normal convention nothing.
+///
+/// A probe ([`Corridor::behind`]) passes THROUGH its origin rather than starting there, so it casts
+/// from the origin both ways: whether the origin is inside is the same `solid: true` reading a
+/// corridor starting there makes, and an origin inside must find both boundaries within the probe.
 ///
 /// # Inside, undeclared, and unbounded is an ERROR
 ///
@@ -377,6 +467,7 @@ fn collect_convex(
     node: Entity,
     primitive: Entity,
     seeded: bool,
+    reach: f32,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
     let Ok(axis) = Dir3::new(corridor.axis) else {
@@ -387,32 +478,9 @@ fn collect_convex(
     // sandbox slabs, no production armour takes this path, and its own boundary probe already looks
     // a millimetre behind the origin — four orders more slack than the rounding could ever be.
     let world_origin = corridor.anchor + corridor.origin;
-    // Both ends are probed with `solid: true`, and that is the whole trick.
-    //
-    // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot distinguish
-    // "began inside" from "grazed an edge" (entry and exit coincide out at distance), and it answers
-    // for the wrong face whenever a cast origin lands exactly ON a surface, which the corridor's own
-    // endpoints do constantly because they ARE face positions a previous walk computed. `solid: true`
-    // answers one unambiguous question instead: zero if the origin is within, otherwise the distance
-    // to the nearest surface.
-    let entry = collider.cast_ray(
-        position,
-        rotation,
-        world_origin,
-        Vec3::from(axis),
-        corridor.length,
-        true,
-    );
-    let far = world_origin + corridor.axis * corridor.length;
-    let exit = collider.cast_ray(
-        position,
-        rotation,
-        far,
-        -Vec3::from(axis),
-        corridor.length,
-        true,
-    );
 
+    // Each boundary at its RAW `t`; the seed contract is applied once all are in.
+    let mut found: Vec<(Boundary, FaceHit)> = Vec::new();
     let mut push = |t: f64, normal: Vec3, entry: bool, face: u32| {
         // Re-sign from the role, not from what the query returned.
         let oriented = if (normal.dot(corridor.axis) < 0.0) == entry {
@@ -420,8 +488,12 @@ fn collect_convex(
         } else {
             -normal
         };
-        if let Some(t) = admit(t, corridor.length, seeded, corridor.laws) {
-            out.push(FaceHit {
+        found.push((
+            Boundary {
+                t,
+                entry: Some(entry),
+            },
+            FaceHit {
                 volume: node,
                 primitive,
                 shell: 0,
@@ -429,96 +501,213 @@ fn collect_convex(
                 triangle: face,
                 t,
                 true_normal: oriented,
-            });
-        }
+                entering: entry,
+            },
+        ));
+    };
+    let cast = |from: Vec3, direction: Vec3, reach: f32, solid: bool| {
+        collider.cast_ray(position, rotation, from, direction, reach, solid)
     };
 
-    match entry {
-        // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
-        // origin lands on a face constantly, and that face is the one the ray is sitting on. Anything
-        // deeper than this probe is not: that sample should have been seeded, and if it was not, the
-        // walk says so rather than this papering over it.
-        //
-        // The trimesh path needs none of this — its own kernel reports faces at negative `t`, and
-        // `admit` places them.
-        Some((distance, _)) if distance <= 0.0 => {
-            if !seeded {
-                match collider.cast_ray(
-                    position,
-                    rotation,
-                    world_origin,
-                    -Vec3::from(axis),
-                    BOUNDARY_PROBE,
+    if corridor.behind > 0.0 {
+        // A probe through `world_origin`. Whether that point is inside is read by casts LEAVING it,
+        // the test a corridor starting there makes first; the interval's far boundaries come from
+        // casts re-formed at the probe's ends, outside the solid, where rounding moves no
+        // membership.
+        let behind = corridor.behind;
+        let ahead = corridor.length - behind;
+        let started_inside = |cast: Option<(f32, Vec3)>| cast.is_some_and(|(at, _)| at <= 0.0);
+        let forward = cast(world_origin, Vec3::from(axis), ahead, true);
+        let backward = cast(world_origin, -Vec3::from(axis), behind, true);
+        if started_inside(forward) || started_inside(backward) {
+            let (Some((entry, entry_normal)), Some((exit, exit_normal))) = (
+                cast(world_origin, -Vec3::from(axis), behind, false),
+                cast(world_origin, Vec3::from(axis), ahead, false),
+            ) else {
+                return Err(WalkError::CollectorFailed {
+                    volume: node,
+                    reason: "a probe through a convex volume does not reach its boundary",
+                });
+            };
+            push(f64::from(behind) - f64::from(entry), entry_normal, true, 0);
+            push(f64::from(behind) + f64::from(exit), exit_normal, false, 1);
+        } else if let Some((entry, entry_normal)) = forward {
+            push(f64::from(behind) + f64::from(entry), entry_normal, true, 0);
+            let far = world_origin + corridor.axis * ahead;
+            if let Some((exit, exit_normal)) = cast(far, -Vec3::from(axis), ahead, true) {
+                push(
+                    f64::from(corridor.length) - f64::from(exit),
+                    exit_normal,
                     false,
-                ) {
-                    // At `t = 0` deliberately, NOT at `-behind`. This phase has already made the
-                    // "sitting on the face" judgement itself, and BOUNDED it: the probe reaches one
-                    // `BOUNDARY_PROBE` and no further, so nothing farther behind can arrive here at
-                    // all. `admit`'s clamp is the trimesh phase's bound, where no such probe limits
-                    // how far back a sloped face may be found.
-                    Some((_, normal)) => push(0.0, normal, true, 0),
-                    // Inside, undeclared, and the entry face is nowhere near — see the note above.
-                    // Silence here is free penetration, so this is where it stops.
-                    None => {
-                        return Err(WalkError::CollectorFailed {
-                            volume: node,
-                            reason: "a sample begins inside a convex volume it was not seeded for, \
-                                     with no entry face within the boundary probe",
-                        });
+                    1,
+                );
+            }
+        } else if let Some((exit, exit_normal)) = backward {
+            let near = world_origin - corridor.axis * behind;
+            if let Some((entry, entry_normal)) = cast(near, Vec3::from(axis), behind, true) {
+                push(f64::from(entry), entry_normal, true, 0);
+            }
+            push(f64::from(behind) - f64::from(exit), exit_normal, false, 1);
+        }
+    } else {
+        // Both ends are probed with `solid: true`, and that is the whole trick.
+        //
+        // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot
+        // distinguish "began inside" from "grazed an edge" (entry and exit coincide out at
+        // distance), and it answers for the wrong face whenever a cast origin lands exactly ON a
+        // surface, which the corridor's own endpoints do constantly because they ARE face positions
+        // a previous walk computed. `solid: true` answers one unambiguous question instead: zero if
+        // the origin is within, otherwise the distance to the nearest surface.
+        let entry = cast(world_origin, Vec3::from(axis), corridor.length, true);
+        let far = world_origin + corridor.axis * corridor.length;
+        let exit = cast(far, -Vec3::from(axis), corridor.length, true);
+
+        match entry {
+            // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
+            // origin lands on a face constantly, and that face is the one the ray is sitting on.
+            // Anything deeper than this probe is not: that sample should have been seeded, and if it
+            // was not, the walk says so rather than this papering over it.
+            //
+            // The trimesh path needs none of this — its own kernel reports faces at negative `t`,
+            // and `admit` places them.
+            Some((distance, _)) if distance <= 0.0 => {
+                if !seeded {
+                    match cast(world_origin, -Vec3::from(axis), BOUNDARY_PROBE, false) {
+                        // At `t = 0` deliberately, NOT at `-behind`. This phase has already made
+                        // the "sitting on the face" judgement itself, and BOUNDED it: the probe
+                        // reaches one `BOUNDARY_PROBE` and no further, so nothing farther behind can
+                        // arrive here at all. `admit`'s clamp is the trimesh phase's bound, where no
+                        // such probe limits how far back a sloped face may be found.
+                        Some((_, normal)) => push(0.0, normal, true, 0),
+                        // Inside, undeclared, and the entry face is nowhere near — see the note
+                        // above. Silence here is free penetration, so this is where it stops.
+                        None => {
+                            return Err(WalkError::CollectorFailed {
+                                volume: node,
+                                reason: "a sample begins inside a convex volume it was not seeded \
+                                         for, with no entry face within the boundary probe",
+                            });
+                        }
                     }
                 }
             }
+            Some((distance, normal)) => push(distance as f64, normal, true, 0),
+            None => {}
         }
-        Some((distance, normal)) => push(distance as f64, normal, true, 0),
-        None => {}
-    }
 
-    match exit {
-        // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
-        // defect class: the walk reports `IncompleteCorridor` and the driver extends.
-        Some((distance, _)) if distance <= 0.0 => {}
-        Some((distance, normal)) => {
-            push(corridor.length as f64 - distance as f64, normal, false, 1)
+        match exit {
+            // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
+            // defect class: the walk reports `IncompleteCorridor` and the driver extends.
+            Some((distance, _)) if distance <= 0.0 => {}
+            Some((distance, normal)) => {
+                push(corridor.length as f64 - distance as f64, normal, false, 1)
+            }
+            None => {}
         }
-        None => {}
+    }
+    found.sort_by(|a, b| a.0.t.total_cmp(&b.0.t));
+    let boundaries: Vec<Boundary> = found.iter().map(|(boundary, _)| *boundary).collect();
+    let admitted = admit_shell(&boundaries, corridor.length, seeded, reach);
+    for ((_, hit), admitted) in found.iter().zip(admitted) {
+        if let Some(t) = admitted {
+            out.push(FaceHit { t, ..*hit });
+        }
     }
     Ok(())
 }
 
-/// Whether a crossing at `t` belongs to this corridor, and where.
+/// One boundary of one shell as a narrow phase found it, at its RAW `t`.
+#[derive(Clone, Copy, Debug)]
+struct Boundary {
+    t: f64,
+    /// `Some(true)` inward along the ray, `Some(false)` outward, `None` a tangent (a fan whose faces
+    /// disagree about direction).
+    entry: Option<bool>,
+}
+
+/// Admit one shell's boundaries, in order along the ray, against its seed: where each lands in this
+/// corridor, or `None` when it is not this corridor's.
 ///
-/// The seed contract, from the driving side: behind the origin and seeded → the seed already
-/// accounts for it; behind the origin and NOT seeded → the ray is SITTING ON the face, so it lands
-/// at `t = 0`; at or past the far end → it belongs to the next corridor (the interval is half-open).
+/// The seed accounts for exactly ONE boundary: the one the previous walk crossed at the hand-off
+/// (the entry of a seeded shell, the exit of an unseeded one). Before the first admitted transition
+/// the sample is in the seed's state, and the first boundary that restates it within
+/// [`sitting_reach`] of the origin is that one, and is dropped ([`admit`]). Nothing else is ever
+/// dropped for restating a state: from the first admitted transition, or once the seed's boundary is
+/// consumed, every forward boundary is the corridor's and goes to the core, whose parity check names
+/// a repeated entry (`UnexpectedEntry`) or a repeated exit (`UnexpectedExit`). Suppressing those by
+/// the evolving state instead would turn an unrepresentable sequence into a shorter valid chord and
+/// charge it as such. A finite interval lying wholly inside the band keeps both ends, and so does an
+/// exit followed by a re-entry: both follow the seed's state, never restate it.
+///
+/// A tangent bounds no material; it is placed by position alone and moves nothing.
+fn admit_shell(boundaries: &[Boundary], length: f32, seeded: bool, reach: f32) -> Vec<Option<f64>> {
+    // The seed's own boundary may still be met: no transition admitted, and none dropped as the
+    // seed's.
+    let mut owed = true;
+    boundaries
+        .iter()
+        .map(|boundary| match boundary.entry {
+            Some(entry) => {
+                let inside = if owed { seeded } else { !entry };
+                let admitted = admit(boundary.t, length, entry, inside, reach);
+                let seed_owned = entry == seeded && boundary.t.abs() <= reach as f64;
+                if owed && (admitted.is_some() || seed_owned) {
+                    owed = false;
+                }
+                admitted
+            }
+            None => admit(boundary.t, length, true, false, reach),
+        })
+        .collect()
+}
+
+/// Whether one crossing at `t` belongs to this corridor, and where. `entry` is the face's
+/// orientation (inward along the ray); `inside` whether the sample is inside the face's shell just
+/// before it — the seed while [`admit_shell`] still owes the seed's boundary, otherwise the state
+/// this boundary changes.
+///
+/// Within `reach` of the origin, IN EITHER DIRECTION, that state decides which boundary the
+/// corridor still owes:
+///
+/// - inside: the seed owns the ENTRY, so an entry there is dropped however its re-measurement
+///   rounded; the shell's EXIT is the corridor's, and one a hair behind the origin lands at `t = 0`.
+/// - outside: the ENTRY is the corridor's — the ray is SITTING ON the face, so one behind the
+///   origin lands at `t = 0`; the EXIT the seed already passed is dropped.
+///
+/// Past `reach` ahead, every face is the corridor's: a later re-entry or exit is real geometry.
+/// Past `reach` behind, every face is already traversed. At or past the far end a face belongs to
+/// the next corridor (the interval is half-open).
 ///
 /// # The clamp is bounded, and the bound is the whole rule
 ///
-/// "Sitting on the face" is what the unseeded clamp exists for, and it is a statement about a
-/// rounding hair — the corridor origin IS that face's position, recomputed. Applied to any distance
-/// behind the origin it says something else entirely: that a face the ray traversed long ago is
-/// still ahead of it.
+/// "Sitting on the face" is what the clamp exists for, and it is a statement about a rounding hair
+/// — the corridor origin IS that face's position, recomputed. Applied to any distance behind the
+/// origin it says something else entirely: that a face the ray traversed long ago is still ahead of
+/// it.
 ///
-/// That is not hypothetical. A transit corridor restarts at the plate's own exit, and on a SLOPED
-/// plate the exit triangles have extent along the ray, so the collector finds them well behind the
-/// origin and the clamp dragged them back to `t = 0` — an exit with nothing open, `UnexpectedExit`,
-/// fail-closed. The §13.6 fuzzer measured 40 of 40 head-on lines across the UFP stopping at the
-/// plate's own exit face, losing the exit, the spall and everything behind it. Square plates hide
-/// it: their exit triangles are perpendicular to the ray and have no extent along it, which is why
-/// every axis-aligned fixture passed.
+/// A transit corridor restarts at the plate's own exit, and on a SLOPED plate the exit triangles
+/// have extent along the ray, so the collector finds them well behind the origin; dragging them to
+/// `t = 0` is an exit with nothing open, `UnexpectedExit`, and the round fails closed on a plate it
+/// perforated. Square plates hide it: their exit triangles are perpendicular to the ray and have no
+/// extent along it.
 ///
-/// So the clamp reaches exactly as far as "on the face" means — [`super::walk::coincident`], the
-/// module's own answer to whether two `t` name one boundary. Anything farther behind is already
-/// traversed and is dropped. The seeded-drop / unseeded-clamp dichotomy is untouched; only the
-/// unbounded reach dies.
-fn admit(t: f64, length: f32, seeded: bool, laws: &WalkLaws) -> Option<f64> {
+/// So the clamp reaches exactly as far as "on the face" means — [`sitting_reach`], which is also
+/// as far as the seed declined to own. Anything farther behind is already traversed and is dropped.
+///
+/// The band is SYMMETRIC because the re-measurement error is: a face the seed judged is re-measured
+/// here up to `topology_band(scale)` either side of where the seed saw it, so a seed-owned entry can
+/// land a hair AHEAD of the origin as easily as behind it.
+fn admit(t: f64, length: f32, entry: bool, inside: bool, reach: f32) -> Option<f64> {
     if !t.is_finite() || t >= length as f64 {
         return None;
     }
+    let reach = reach as f64;
+    // The boundary the seed already accounts for: an entry while inside, an exit while outside.
+    if entry == inside {
+        return (t > reach).then_some(t);
+    }
     if t < 0.0 {
-        // Seeded: the seed owns it. Unseeded and ON the origin: the ray is sitting on this face.
-        // Unseeded and genuinely behind: the ray has already crossed it, and this corridor starts
-        // after it.
-        return (!seeded && super::walk::coincident(0.0, t, laws)).then_some(0.0);
+        return (-t <= reach).then_some(0.0);
     }
     Some(t)
 }
@@ -749,6 +938,11 @@ struct TriangleClaim {
     /// and MEASURES on; see [`contact_of`].
     t: f64,
     normal: Vec3,
+    /// Whether the ray crosses against the winding normal: the sign of the exact crossing
+    /// determinant `−axis · ((b − a) × (c − a))`, the predicate that admitted the claim. Never read
+    /// from `normal`, whose f32 dot with the axis can cancel to zero on a crossing whose determinant
+    /// does not. Frame-free: a rotation preserves it.
+    entering: bool,
     /// Bit `k` set means the edge OPPOSITE corner `k` produced an exactly-zero area, so the ray
     /// lies on it. Zero bits is an interior claim; one is an edge; two is the vertex they share.
     zeros: u8,
@@ -840,8 +1034,8 @@ fn cross_triangle(
             (d1[u].abs() * d2[v].abs() + d1[v].abs() * d2[u].abs()) * direction[k].abs()
         })
         .sum();
-    let t = if det.abs() > DETERMINANT_SLACK * permanent + f64::MIN_POSITIVE {
-        (shear.origin_exact - a64).dot(exact) / det
+    let (t, entering) = if det.abs() > DETERMINANT_SLACK * permanent + f64::MIN_POSITIVE {
+        ((shear.origin_exact - a64).dot(exact) / det, det > 0.0)
     } else {
         // Inside the band the float determinant cannot say whether the ray is parallel, so the
         // exact one does — and the same escalation hands back a parameter the cancelled quotient
@@ -850,7 +1044,10 @@ fn cross_triangle(
         if denominator.is_zero() {
             return None;
         }
-        numerator.to_f64() / denominator.to_f64()
+        (
+            numerator.to_f64() / denominator.to_f64(),
+            denominator.signum() > 0,
+        )
     };
     // A NEEDLE'S PLANE IS NOT ITS OWN f32 CROSS PRODUCT. Two edges within `PROJECTION_SLACK` of
     // parallel cancel that product down to its last bits, and what survives is noise with a
@@ -865,7 +1062,12 @@ fn cross_triangle(
     } else {
         coarse.normalize_or_zero()
     };
-    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim { t, normal, zeros })
+    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim {
+        t,
+        normal,
+        entering,
+        zeros,
+    })
 }
 
 /// The crossing's plane parameter as an exact ratio: `((origin − a) · N, −axis · N)` with
@@ -1077,8 +1279,20 @@ mod tests {
     /// fixture that had to name a world position to state a law about rounding is exactly what
     /// anchoring retired.
     fn trimesh_hits(collider: &Collider, origin: Vec3, axis: Vec3, length: f32) -> Vec<FaceHit> {
+        let reach = sitting_reach(None, origin, origin, &WalkLaws::default());
+        trimesh_hits_within(collider, origin, axis, length, false, reach)
+    }
+
+    /// [`trimesh_hits`] at an explicit seed and reach, for corridors that hand off.
+    fn trimesh_hits_within(
+        collider: &Collider,
+        origin: Vec3,
+        axis: Vec3,
+        length: f32,
+        seeded: bool,
+        reach: f32,
+    ) -> Vec<FaceHit> {
         let node = Entity::from_raw_u32(1).expect("a test entity index");
-        let laws = WalkLaws::default();
         let mut out = Vec::new();
         let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() else {
             panic!("`Collider::trimesh` builds a trimesh");
@@ -1097,13 +1311,13 @@ mod tests {
             origin,
             axis,
             length,
+            0.0,
             node,
             node,
             &surfaces,
-            &|_| false,
+            &|_| seeded,
             Rotation::default(),
-            prune_margin(origin, &laws),
-            &laws,
+            reach,
             &mut out,
         )
         .expect("the fixture collects cleanly");
@@ -1154,7 +1368,7 @@ mod tests {
 
     /// THE MARGIN MUST NOT REACH A FACE THE MARCH DELIBERATELY STEPPED PAST.
     ///
-    /// The other side of the same squeeze. Every corridor after the first resumes one
+    /// The other side of the same squeeze. A corridor after a perforation resumes one
     /// [`super::MARCH_EPS`] beyond the face it is leaving, so a margin that grew to a whole nudge
     /// would re-collect the EXIT face of the plate just perforated — [`admit`] would clamp it to
     /// `t = 0`, and the walk would see an exit for a primitive it is not inside: `UnexpectedExit`,
@@ -1181,25 +1395,312 @@ mod tests {
     #[test]
     fn admission_honours_the_seed_contract() {
         let laws = WalkLaws::default();
+        let reach = sitting_reach(None, Vec3::ZERO, Vec3::ZERO, &laws);
         // Inside the corridor: kept as-is.
-        assert_eq!(admit(0.5, 1.0, false, &laws), Some(0.5));
+        assert_eq!(admit(0.5, 1.0, true, false, reach), Some(0.5));
         // Half-open at the far end: this one is the next corridor's.
-        assert_eq!(admit(1.0, 1.0, false, &laws), None);
+        assert_eq!(admit(1.0, 1.0, true, false, reach), None);
         // Behind the origin, seeded: the seed already accounts for the entry.
-        assert_eq!(admit(-1.0e-7, 1.0, true, &laws), None);
+        assert_eq!(admit(-1.0e-7, 1.0, true, true, reach), None);
         // Behind the origin, NOT seeded: the ray is sitting on the face.
-        assert_eq!(admit(-1.0e-7, 1.0, false, &laws), Some(0.0));
-        assert_eq!(admit(f64::NAN, 1.0, false, &laws), None);
+        assert_eq!(admit(-1.0e-7, 1.0, true, false, reach), Some(0.0));
+        assert_eq!(admit(f64::NAN, 1.0, true, false, reach), None);
         // BEHIND THE ORIGIN AND MEANING IT: already traversed, and not this corridor's to report.
         // A sloped plate's exit triangles have extent along the ray, so a transit corridor that
         // restarts at that exit finds them here — and dragging them to `t = 0` is an exit with
         // nothing open, which the driver fails closed on.
-        for behind in [-1.0e-3, -0.05, -1.0] {
+        for (behind, entry) in [-1.0e-3, -0.05, -1.0]
+            .into_iter()
+            .flat_map(|behind| [(behind, true), (behind, false)])
+        {
             assert_eq!(
-                admit(behind, 1.0, false, &laws),
+                admit(behind, 1.0, entry, false, reach),
                 None,
                 "{behind} m behind the origin is traversed, not underfoot",
             );
+        }
+    }
+
+    /// THE SEED AND THE CORRIDOR OWN EVERY BOUNDARY AT A HAND-OFF EXACTLY ONCE.
+    ///
+    /// A transit sample's face at progress `handoff + δ` on the ray its seed was read on is
+    /// re-measured by this corridor at `δ + e`, `|e|` up to the band of the corridor's own scale (the
+    /// larger of the anchor-relative and the collider-local origin, as [`sitting_reach`] reads it),
+    /// in EITHER direction. Between them the seed ([`super::super::walk::RayWalk::inside_at`]) and
+    /// [`admit`] must count an entry exactly once wherever it lies, and an exit exactly when the
+    /// seed says the sample is still inside at the hand-off. Nobody counting an entry is
+    /// `UnexpectedExit`; both counting it is `UnexpectedEntry`; an exit counted against a closed
+    /// seed is `UnexpectedExit`, and one dropped against an open seed never closes.
+    #[test]
+    fn the_seed_and_the_corridor_own_every_boundary_at_a_hand_off_once() {
+        use super::super::walk::{RayWalk, ShellPresence, topology_band};
+
+        let laws = WalkLaws::default();
+        let entity = Entity::from_raw_u32(1).expect("a test entity index");
+        let key = ShellKey {
+            volume: entity,
+            primitive: entity,
+            shell: 0,
+        };
+        let seeded_by = |span: (f64, f64), handoff: f64| {
+            RayWalk {
+                spans: Vec::new(),
+                runs: Vec::new(),
+                cost: 0.0,
+                presence: Vec::new(),
+                shells: vec![ShellPresence {
+                    key,
+                    spans: vec![span],
+                }],
+                events: Vec::new(),
+                layers: Vec::new(),
+            }
+            .inside_at(handoff, &laws)
+            .contains(&key)
+        };
+        for handoff in [0.0f64, 0.5, 10.585, 50.0] {
+            // The transit origin sits at the hand-off's own scale from the anchor.
+            let origin = Vec3::new(0.0, 0.0, -(handoff as f32));
+            for local in [Vec3::ZERO, Vec3::ONE, Vec3::splat(3.0)] {
+                let reach = sitting_reach(Some(handoff), origin, local, &laws);
+                let seed_band = topology_band(handoff, &laws);
+                let remeasure = topology_band(origin.length().max(local.length()) as f64, &laws);
+                for share in [0.01, 0.5, 0.99, 1.01, 2.0, 10.0, 1.0e3] {
+                    for side in [-1.0, 1.0] {
+                        let delta = side * seed_band * share;
+                        for error in [-0.99 * remeasure, 0.0, 0.99 * remeasure] {
+                            let t = delta + error;
+                            let seeded = seeded_by((handoff + delta, handoff + 1.0), handoff);
+                            let counted = admit(t, 1.0, true, seeded, reach).is_some();
+                            assert!(
+                                seeded != counted,
+                                "an entry {delta:e} m past a hand-off at {handoff} m (local \
+                                 {local}), re-measured at {t:e}, is owned by the seed: {seeded}, \
+                                 by the corridor: {counted}",
+                            );
+                            let inside = seeded_by((handoff - 1.0, handoff + delta), handoff);
+                            let counted = admit(t, 1.0, false, inside, reach).is_some();
+                            assert_eq!(
+                                inside, counted,
+                                "an exit {delta:e} m past a hand-off at {handoff} m (local \
+                                 {local}), re-measured at {t:e}: seed open {inside}, counted \
+                                 {counted}",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A WHOLE INTERVAL INSIDE THE HAND-OFF BAND IS STILL AN INTERVAL.
+    ///
+    /// The seed owns at most the one boundary the previous walk crossed at the hand-off. An
+    /// unseeded sample whose shell both begins and ends within [`sitting_reach`] ahead of the
+    /// origin owns neither: the entry is the corridor's, and so is the exit that follows it. Pairing
+    /// has no minimum thickness, so a chord of a few microns is valid geometry; dropping its exit
+    /// leaves the shell open and the walk reports `IncompleteCorridor`. The mirror case is a seeded
+    /// shell that exits and re-enters inside the band. Generic geometry: a thin slab struck square,
+    /// and an ordinary plate clipped a few microns inside one of its edges.
+    #[test]
+    fn a_finite_interval_inside_the_hand_off_band_keeps_both_boundaries() {
+        use super::super::walk::{RayCorridor, VolumeTable, walk_ray};
+
+        let laws = WalkLaws::default();
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        // A corridor ten metres from its anchor, as a transit after one tick of flight is.
+        let reach = sitting_reach(Some(10.0), Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO, &laws);
+        let micron = 1.0e-6_f32;
+        assert!(
+            reach > 9.0 * micron,
+            "the fixture sits inside the band: {reach:e}"
+        );
+
+        let thin = trimesh_box(Vec3::new(0.3, 0.3, 2.0 * micron));
+        let plate = trimesh_box(Vec3::new(0.3, 0.3, 0.05));
+        let clip = Vec3::new(-1.0, 0.0, 1.0).normalize();
+        // Enters the plate's +X side 3 µm below its top edge and leaves through the top.
+        let clipped = Vec3::new(0.15, 0.1, 0.025 - 3.0 * micron) - clip * 3.0 * micron;
+        // Off every face diagonal, so each boundary is one triangle's interior.
+        let square = Vec3::new(0.01, -0.003, 7.0 * micron);
+        for (name, collider, origin, axis) in [
+            ("thin slab", &thin, square, Vec3::NEG_Z),
+            ("clipped edge", &plate, clipped, clip),
+        ] {
+            let hits = trimesh_hits_within(collider, origin, axis, 0.5, false, reach);
+            let mut order: Vec<(f64, bool)> = hits
+                .iter()
+                .map(|hit| (hit.t, hit.true_normal.dot(axis) < 0.0))
+                .collect();
+            order.sort_by(|a, b| a.0.total_cmp(&b.0));
+            assert!(
+                order.len() == 2 && order[0].1 && !order[1].1 && order[1].0 <= reach as f64,
+                "{name}: one entry then one exit, both inside the band: {order:?}",
+            );
+            walk_ray(
+                0,
+                &RayCorridor {
+                    anchor: Vec3::ZERO,
+                    origin,
+                    axis,
+                    length: 0.5,
+                    initial_presence: Vec::new(),
+                    hits,
+                },
+                &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
+                    .expect("a usable factor"),
+                &laws,
+            )
+            .unwrap_or_else(|error| panic!("{name}: the interval pairs: {error:?}"));
+        }
+
+        // The mirror: a seeded sample leaves its shell and re-enters it inside the band. Both
+        // boundaries follow the one the seed owns, so both are the corridor's.
+        let boundaries = [
+            Boundary {
+                t: 2.0e-6,
+                entry: Some(false),
+            },
+            Boundary {
+                t: 5.0e-6,
+                entry: Some(true),
+            },
+        ];
+        assert_eq!(
+            admit_shell(&boundaries, 0.5, true, reach),
+            vec![Some(2.0e-6), Some(5.0e-6)],
+            "the exit and the re-entry that follows it are both counted",
+        );
+    }
+
+    /// A REPEATED ENTRY OR EXIT INSIDE THE BAND FAILS LOUDLY; ADMISSION NEVER REPAIRS IT.
+    ///
+    /// The seed owns one boundary. Four distinct contacts of one shell ordered entry, entry, exit,
+    /// exit wholly inside the hand-off band are not a closed shell crossed transversely, and neither
+    /// is exit, exit after a seeded start: whatever admission drops, the core must still see the
+    /// repeat. Dropping each boundary that restates the evolving state leaves one entry and one exit
+    /// — a shorter valid chord charged in place of a topology error.
+    #[test]
+    fn a_repeated_boundary_inside_the_hand_off_band_fails_loudly() {
+        use super::super::walk::{RayCorridor, VolumeTable, walk_ray};
+
+        let laws = WalkLaws::default();
+        let node = Entity::from_raw_u32(1).expect("a test entity index");
+        let reach = sitting_reach(Some(10.0), Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO, &laws);
+        let micron = 1.0e-6;
+        assert!(
+            reach as f64 > 5.0 * micron,
+            "the fixture sits inside the band: {reach:e}"
+        );
+        let walked = |pattern: &[bool], seeded: bool| {
+            let boundaries: Vec<Boundary> = pattern
+                .iter()
+                .enumerate()
+                .map(|(index, &entry)| Boundary {
+                    t: (index + 1) as f64 * micron,
+                    entry: Some(entry),
+                })
+                .collect();
+            let admitted = admit_shell(&boundaries, 0.5, seeded, reach);
+            let hits: Vec<FaceHit> = boundaries
+                .iter()
+                .zip(&admitted)
+                .enumerate()
+                .filter_map(|(index, (boundary, admitted))| {
+                    admitted.map(|t| FaceHit {
+                        volume: node,
+                        primitive: node,
+                        shell: 0,
+                        contact: Contact::Face(index as u32),
+                        triangle: index as u32,
+                        t,
+                        true_normal: if boundary.entry == Some(true) {
+                            Vec3::Z
+                        } else {
+                            Vec3::NEG_Z
+                        },
+                        entering: boundary.entry == Some(true),
+                    })
+                })
+                .collect();
+            let key = ShellKey {
+                volume: node,
+                primitive: node,
+                shell: 0,
+            };
+            (
+                admitted,
+                walk_ray(
+                    0,
+                    &RayCorridor {
+                        anchor: Vec3::ZERO,
+                        origin: Vec3::ZERO,
+                        axis: Vec3::NEG_Z,
+                        length: 0.5,
+                        initial_presence: if seeded { vec![key] } else { Vec::new() },
+                        hits,
+                    },
+                    &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
+                        .expect("a usable factor"),
+                    &laws,
+                ),
+            )
+        };
+
+        let (admitted, walk) = walked(&[true, true, false, false], false);
+        assert_eq!(
+            admitted.iter().filter(|t| t.is_some()).count(),
+            4,
+            "every boundary of an unseeded repeated entry reaches the core: {admitted:?}",
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedEntry { .. })),
+            "the repeated entry is named: {walk:?}",
+        );
+
+        let (admitted, walk) = walked(&[false, false], true);
+        assert_eq!(
+            admitted.iter().filter(|t| t.is_some()).count(),
+            2,
+            "both exits of a seeded sample reach the core: {admitted:?}",
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedExit { .. })),
+            "the repeated exit is named: {walk:?}",
+        );
+
+        // Unseeded, the seed owns the first exit and nothing after it.
+        let (admitted, walk) = walked(&[false, false], false);
+        assert_eq!(
+            admitted,
+            vec![None, Some(2.0 * micron)],
+            "the seed owns one exit, not two"
+        );
+        assert!(
+            matches!(walk, Err(WalkError::UnexpectedExit { .. })),
+            "the second exit is named: {walk:?}",
+        );
+    }
+
+    /// Past the hand-off band the seed has no say: a later entry and a later exit of a shell the
+    /// sample is seeded inside or not are both this corridor's to count.
+    #[test]
+    fn boundaries_past_the_hand_off_band_are_the_corridor_s() {
+        let laws = WalkLaws::default();
+        let reach = sitting_reach(Some(10.0), Vec3::splat(5.0), Vec3::ONE, &laws);
+        for t in [reach as f64 * 1.01 + 1.0e-9, 1.0e-3, 0.5] {
+            for seeded in [false, true] {
+                assert_eq!(
+                    admit(t, 1.0, true, seeded, reach),
+                    Some(t),
+                    "entry at {t:e}"
+                );
+                assert_eq!(
+                    admit(t, 1.0, false, seeded, reach),
+                    Some(t),
+                    "exit at {t:e}"
+                );
+            }
         }
     }
 
@@ -1366,7 +1867,11 @@ mod tests {
                 initial_presence: Vec::new(),
                 hits,
             },
-            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &super::super::walk::VolumeTable::new([(
+                node,
+                super::super::walk::VolumeMaterial::fixture(1.0),
+            )])
+            .expect("a usable factor"),
             &WalkLaws::default(),
         )?;
         Ok(walk
@@ -1934,6 +2439,7 @@ mod tests {
                 indices: faces.iter().flatten().copied().collect(),
                 substance: Some(crate::bake::PrimitiveSubstance {
                     name: "RHA".into(),
+                    id: crate::substances::SubstanceId::fixture(1000.0),
                     factor: 1000.0,
                 }),
                 certificate: None,
@@ -1960,7 +2466,11 @@ mod tests {
                 initial_presence: Vec::new(),
                 hits,
             },
-            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &super::super::walk::VolumeTable::new([(
+                node,
+                super::super::walk::VolumeMaterial::fixture(1.0),
+            )])
+            .expect("a usable factor"),
             &WalkLaws::default(),
         )
         .expect("a closed needle resolves");

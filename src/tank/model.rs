@@ -63,6 +63,7 @@ pub struct Weapon {
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
+    pub nose_factor: f32,
     /// Reload/cyclic mechanism and its edge-versus-level input semantics.
     pub fire_mode: FireMode,
     pub recoil: Option<RecoilSpec>,

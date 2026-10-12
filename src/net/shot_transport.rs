@@ -455,6 +455,7 @@ fn queue_fire(
         speed: fire.speed,
         caliber: fire.caliber,
         mass: fire.mass,
+        nose_factor: fire.nose_factor,
         mechanism: fire.mechanism,
         tracer: fire.tracer,
         shooter: source.tank,
@@ -533,13 +534,13 @@ fn queue_terminal(
         "cf",
         timeline.tick().0,
         terminal.shot,
-        || json!({ "pen": terminal.penetrated, "ab": terminal.after_bounces }),
+        || json!({ "pen": terminal.verdict.entered(), "ab": terminal.after_bounces }),
     );
     let confirm = ImpactConfirm {
         shot: terminal.shot,
         position: terminal.position,
         normal: terminal.normal,
-        penetrated: terminal.penetrated,
+        verdict: terminal.verdict.into(),
         impact_tick: timeline.tick(),
         after_bounces: terminal.after_bounces,
     };
@@ -904,6 +905,7 @@ mod tests {
             speed: 800.0,
             caliber: 0.0079,
             mass: 0.0118,
+            nose_factor: 0.5,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shooter: Entity::from_raw_u32(combatant as u32).unwrap(),
@@ -1358,7 +1360,7 @@ mod tests {
             shot,
             position: Vec3::X,
             normal: Vec3::NEG_X,
-            penetrated: false,
+            verdict: crate::ballistics::Verdict::Stopped,
             impact_tick: Tick(108),
             after_bounces: 1,
         });

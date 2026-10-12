@@ -1,8 +1,8 @@
 //! The §13 union field walk — the pure core.
 //!
-//! The live march runs it through `super::resolve::resolve_crossing`. Everything here is a pure
-//! function over pre-collected data: no ECS, no spatial queries, no commands, no wall clock, no
-//! RNG. Those live in the Avian adapter (`super::resolve`, `super::collect`), which is what makes
+//! The live march and the §13.6 gate run it through `super::resolve::decide`. Everything here is a
+//! pure function over pre-collected data: no ECS, no spatial queries, no commands, no wall clock,
+//! no RNG. Those live in the Avian adapter (`super::resolve`, `super::collect`), which is what makes
 //! the laws testable to the bit.
 //!
 //! # What it replaces
@@ -46,8 +46,9 @@
 //! pre-collected hit list therefore cannot describe both. So the core is a two-stage continuation:
 //! [`begin`] consumes the entrance disc and returns either a ricochet plan or a
 //! [`TransitRequest`] naming the axis and frame the caller must collect the transit corridor along;
-//! [`finish`] consumes that corridor and returns the [`ResolutionPlan`]. Slice-1 tests answer the
-//! request from fixtures; slice 2 answers it with real casts.
+//! [`finish`] consumes that corridor, advancing the round's mechanism (`super::mechanism`) through
+//! the crossing's ordered [`Encounter`]s, and returns the [`ResolutionPlan`]. Fixture tests answer
+//! the request from fixtures; the runtime answers it with real casts.
 //!
 //! # Fail loud, never repair
 //!
@@ -68,7 +69,14 @@
 //! since the old marcher's 1 mm nudge alone would eat half the weld budget.
 
 use bevy::prelude::*;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+
+use super::mechanism::{
+    Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
+    overlap_factor,
+};
+use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
 #[cfg(test)]
 mod tests;
@@ -159,8 +167,8 @@ pub enum Contact {
 /// `true_normal` is the face's OUTWARD normal recovered from triangle winding — NOT parry's
 /// reported normal, which is flipped to oppose the ray, so a backface read from inside is
 /// indistinguishable from a head-on entry (§13.1). Recovering the true orientation is the adapter's
-/// contract; this module classifies entry/exit from it and would silently invert the whole walk if
-/// handed the flipped one.
+/// contract, and [`entering`](Self::entering) is that orientation decided; this module classifies
+/// entry/exit from it and would silently invert the whole walk if handed the flipped one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceHit {
     pub volume: Entity,
@@ -186,6 +194,12 @@ pub struct FaceHit {
     /// parameter itself stays wide from the collector's exact projection through to the cost integral.
     pub t: f64,
     pub true_normal: Vec3,
+    /// Whether the ray crosses this face INTO its shell (against the outward normal). Decided by
+    /// the collector with the predicate that admitted the face — the sign of the exact crossing
+    /// determinant — so every admitted face has a direction. `true_normal` is the face's geometry
+    /// and never re-decides it: its f32 dot with the axis can cancel to zero, or flip, on a crossing
+    /// whose exact determinant does not.
+    pub entering: bool,
 }
 
 impl FaceHit {
@@ -198,14 +212,42 @@ impl FaceHit {
     }
 }
 
-/// The factor of every volume the corridor can meet, supplied ONCE per volume.
+/// What a volume is made of, as the walk and the mechanisms read it: the substance's identity and
+/// its declared resistance, reference-mm per metre of chord (`crate::substances::Substance::factor`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct VolumeMaterial {
+    pub substance: SubstanceId,
+    pub factor: f32,
+}
+
+impl VolumeMaterial {
+    /// The substance named `name` in `registry`. Hard error on an unknown name.
+    pub fn of(registry: &SubstanceRegistry, name: &str) -> Result<Self, SubstanceError> {
+        Ok(Self {
+            substance: registry.id(name)?,
+            factor: registry.get(name)?.factor(),
+        })
+    }
+
+    /// A fixture material of `factor` reference-mm per metre, its substance one per factor
+    /// ([`SubstanceId::fixture`]).
+    #[cfg(test)]
+    pub(crate) fn fixture(factor: f32) -> Self {
+        Self {
+            substance: SubstanceId::fixture(factor),
+            factor,
+        }
+    }
+}
+
+/// The material of every volume the corridor can meet, supplied ONCE per volume.
 ///
-/// Not per hit: a volume has one substance (§13.7), and repeating the scalar on every face invites
-/// two faces of one plate disagreeing — an unrepresentable state that the union `max` would then
-/// have to arbitrate.
+/// Not per hit: a volume has one substance (§13.7), and repeating it on every face invites two
+/// faces of one plate disagreeing — an unrepresentable state that the union would then have to
+/// arbitrate.
 #[derive(Clone, Debug, Default)]
 pub struct VolumeTable {
-    factors: BTreeMap<Entity, f32>,
+    materials: BTreeMap<Entity, VolumeMaterial>,
 }
 
 impl VolumeTable {
@@ -213,34 +255,61 @@ impl VolumeTable {
     /// sum. A `NaN` poisons both the field maximum and the sort; a negative factor breaks
     /// monotonicity (§13.6). Zero is canonicalized so `-0.0` cannot produce a second bit pattern
     /// for "no material" and defeat the bit-equality coalescing in [`walk_ray`].
-    pub fn new(entries: impl IntoIterator<Item = (Entity, f32)>) -> Result<Self, WalkError> {
-        let mut factors = BTreeMap::new();
-        for (volume, factor) in entries {
+    ///
+    /// One volume, one entry; one substance, one factor. Interfaces compare substance identity
+    /// while mechanisms read factors, so a substance carrying two factors would change resistance
+    /// where no interface is reported ([`WalkError::SubstanceFactorConflict`]), and a repeated
+    /// volume would have one of its materials silently dropped ([`WalkError::RepeatedVolume`]).
+    pub fn new(
+        entries: impl IntoIterator<Item = (Entity, VolumeMaterial)>,
+    ) -> Result<Self, WalkError> {
+        let mut materials = BTreeMap::new();
+        let mut factors: BTreeMap<SubstanceId, f32> = BTreeMap::new();
+        for (volume, material) in entries {
+            let factor = material.factor;
             if !factor.is_finite() || factor < 0.0 {
                 return Err(WalkError::BadFactor { volume, factor });
             }
-            factors.insert(volume, if factor == 0.0 { 0.0 } else { factor });
+            let factor = if factor == 0.0 { 0.0 } else { factor };
+            let declared = *factors.entry(material.substance).or_insert(factor);
+            if declared.to_bits() != factor.to_bits() {
+                return Err(WalkError::SubstanceFactorConflict {
+                    substance: material.substance,
+                    first: declared,
+                    second: factor,
+                });
+            }
+            if materials
+                .insert(volume, VolumeMaterial { factor, ..material })
+                .is_some()
+            {
+                return Err(WalkError::RepeatedVolume { volume });
+            }
         }
-        Ok(Self { factors })
+        Ok(Self { materials })
     }
 
-    /// Every `(volume, factor)` the table carries, in entity order.
+    /// Every `(volume, material)` the table carries, in entity order.
     ///
     /// Exists for the §13.6 idempotence/monotonicity gate ([`super::fuzz`]), which re-walks a real
     /// corridor with one volume DUPLICATED and therefore has to state the same table plus one row.
     /// Reconstructing it from the world instead would prove the property about a table the walk was
     /// never handed.
-    pub fn entries(&self) -> impl Iterator<Item = (Entity, f32)> + '_ {
-        self.factors
+    pub fn entries(&self) -> impl Iterator<Item = (Entity, VolumeMaterial)> + '_ {
+        self.materials
             .iter()
-            .map(|(volume, factor)| (*volume, *factor))
+            .map(|(volume, material)| (*volume, *material))
     }
 
-    fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
-        self.factors
+    fn material(&self, volume: Entity) -> Result<VolumeMaterial, WalkError> {
+        self.materials
             .get(&volume)
             .copied()
             .ok_or(WalkError::UnknownVolume { volume })
+    }
+
+    fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
+        Ok(self.material(volume)?.factor)
     }
 }
 
@@ -320,7 +389,7 @@ pub struct WalkLaws {
     /// RULED 2026-08-07 (§13.4): chaining is transitive but budgeted, and the cap IS the tolerance —
     /// the same 2 mm knob, deliberately, because one constant bounds both extremes at once. A single
     /// two-plate sandwich welds across up to 2 mm of air; an arbitrarily long picket fence can never
-    /// collapse into one run with one terminal spall budget by chaining.
+    /// collapse into one run with one terminal exit by chaining.
     pub weld_run_gap_budget: f32,
     /// LATERAL domain — two samples' entrance patches lie on one surface when their normals agree
     /// to this cosine …
@@ -383,8 +452,10 @@ impl Default for WalkLaws {
         Self {
             // 1 µm: three orders below the weld tolerance and below any authored feature.
             topology_abs: 1.0e-6,
-            // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (slice 2 anchors it at
-            // first contact), so `t` stays in metres and this term only has to cover intersection
+            // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (the driver anchors it
+            // where the march segment started, and a continuation keeps that anchor within a step and
+            // is re-anchored between steps, so it sits at most one step's travel budget plus `resolve::MAX_OVERRUN` behind any corridor), so
+            // `t` stays within tens of metres of the anchor and this term only has to cover intersection
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
             topology_rel: 4.0e-7,
@@ -418,6 +489,14 @@ impl Default for WalkLaws {
 pub enum WalkError {
     /// A factor that cannot participate in `max` or in a deterministic sum.
     BadFactor { volume: Entity, factor: f32 },
+    /// One substance declared at two factors in one volume table.
+    SubstanceFactorConflict {
+        substance: SubstanceId,
+        first: f32,
+        second: f32,
+    },
+    /// One volume supplied twice to a volume table.
+    RepeatedVolume { volume: Entity },
     /// A hit named a volume the table does not carry — a bind gap, never a defaultable factor.
     UnknownVolume { volume: Entity },
     /// The corridor itself is malformed (non-unit axis, non-finite length, a hit behind the origin).
@@ -490,6 +569,23 @@ pub enum WalkError {
     /// against the axis and their sum cannot vanish — `n̄` is well-defined by construction, which is
     /// precisely §13.5's repair of the point model's degenerate normal.
     DegenerateEntryNormal { coverage: f32 },
+    /// A fresh start's membership could not be established against a candidate volume: its shape is
+    /// neither a certified trimesh nor convex, so no containment probe can be trusted on it, or the
+    /// probe through the candidates' bounds would exceed the corridor ceiling. The start is never
+    /// declared outside instead.
+    UncertifiedStart {
+        volume: Entity,
+        reason: &'static str,
+    },
+    /// A mechanism asked the crossing driver for a control it does not carry out (a redirect or a
+    /// schedule). Never approximated by stopping or continuing.
+    UnsupportedControl,
+    /// The driver's step ran out of a limit: more crossings than `resolve::MAX_STEP_CROSSINGS`, or
+    /// travel more than `resolve::MAX_OVERRUN` past the step's budget. Each crossing was bounded;
+    /// their succession was not, and a step that never yields applies consequences ever further
+    /// downrange. `crossings` counts the refused one; `overrun` is metres past the budget it would
+    /// have reached.
+    DrainExhausted { crossings: usize, overrun: f32 },
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -570,7 +666,8 @@ pub enum BoundaryKind {
     Exit,
 }
 
-/// One field transition. Spall fires wherever the step is DOWNWARD, including the exit (§13.2).
+/// One field transition along a sample ray. Spall sources are not read from these: they are body
+/// exits ([`BodyExit`]), found from the sample's substance layers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoundaryEvent {
     pub kind: BoundaryKind,
@@ -579,11 +676,6 @@ pub struct BoundaryEvent {
     pub normal: Vec3,
     pub factor_before: f32,
     pub factor_after: f32,
-    /// §5's body term: the cost of the constant-factor stretch just exited. Zero unless the step is
-    /// downward. For a plain single-material plate this is the whole plate — identical to what the
-    /// serial resolver hands the spall cone today; for an equal-factor welded sandwich it is the
-    /// SUMMED cost, matching §13.4's "budget = the run's summed cost".
-    pub spall_budget: f32,
     /// True when this step only exists because a micro-gap was welded away.
     pub welded: bool,
     pub run: usize,
@@ -602,6 +694,40 @@ pub struct EntityPresence {
     pub spans: Vec<(f64, f64)>,
 }
 
+/// One volume present over a [`Layer`]: its identity (the layer a dose is addressed to) and its
+/// material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presence {
+    pub volume: Entity,
+    pub material: VolumeMaterial,
+}
+
+/// One stretch of a sample ray over which the set of present volumes is constant — an ORDERED
+/// ENCOUNTER, cut wherever any volume's presence opens or closes, with nothing reduced: an overlap
+/// of two substances lists both. A gap (air between plates, a welded void) is a layer with nothing
+/// present. A sample's layers tile its corridor `[0, length)` in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    pub start: f64,
+    pub end: f64,
+    /// In volume order.
+    pub present: Vec<Presence>,
+}
+
+impl Layer {
+    /// The substances present, in id order, each once.
+    pub fn substances(&self) -> Vec<SubstanceId> {
+        let mut out: Vec<SubstanceId> = self
+            .present
+            .iter()
+            .map(|presence| presence.material.substance)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 /// One shell's presence intervals along a sample ray.
 ///
 /// Kept alongside the per-ENTITY union because the staged handoff needs surface identity: after
@@ -611,7 +737,10 @@ pub struct EntityPresence {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShellPresence {
     pub key: ShellKey,
-    /// Disjoint, ordered, half-open `[open, close)`.
+    /// Disjoint, ordered, half-open `[open, close)`. A span the ray BEGAN inside (declared
+    /// [`RayCorridor::initial_presence`]) opens at `−∞`: its entry was owned by the seed that
+    /// declared it, behind every hand-off this walk can make, so [`RayWalk::inside_at`] hands it on
+    /// even at `t = 0`.
     pub spans: Vec<(f64, f64)>,
 }
 
@@ -627,6 +756,8 @@ pub struct RayWalk {
     /// Per-shell presence — the seed state the staged handoff exports.
     pub shells: Vec<ShellPresence>,
     pub events: Vec<BoundaryEvent>,
+    /// The ordered encounters along this sample ([`Layer`]).
+    pub layers: Vec<Layer>,
 }
 
 impl RayWalk {
@@ -652,7 +783,10 @@ impl RayWalk {
             .iter()
             .filter(|presence| {
                 presence.spans.iter().any(|(open, close)| {
-                    let entered = *open < t && !coincident(*open, t, laws);
+                    // A declared span (`open = −∞`) was entered before any `t`; `coincident`
+                    // would read `∞ ≤ ∞` as the same boundary.
+                    let entered =
+                        *open == f64::NEG_INFINITY || (*open < t && !coincident(*open, t, laws));
                     let still_inside = t <= *close || coincident(*close, t, laws);
                     entered && still_inside
                 })
@@ -669,8 +803,14 @@ impl RayWalk {
 /// Whether two `t` values name the same topological boundary. Scale-aware, because f32 spacing
 /// coarsens with distance and a face diagonal at 400 m must still reduce to one crossing.
 pub(crate) fn coincident(anchor: f64, t: f64, laws: &WalkLaws) -> bool {
-    (t - anchor).abs()
-        <= laws.topology_abs as f64 + laws.topology_rel as f64 * anchor.abs().max(t.abs())
+    (t - anchor).abs() <= topology_band(anchor.abs().max(t.abs()), laws)
+}
+
+/// The width of "the same boundary" for parameters of magnitude `scale` (m) — [`coincident`]'s
+/// tolerance, exposed so the collector's hand-off clamp (`collect::sitting_reach`) is stated in the
+/// same band [`RayWalk::inside_at`] judges the seed with.
+pub(crate) fn topology_band(scale: f64, laws: &WalkLaws) -> f64 {
+    laws.topology_abs as f64 + laws.topology_rel as f64 * scale
 }
 
 /// One certified crossing of one shell: where the ray goes in or out, and which faces said so.
@@ -699,7 +839,7 @@ struct Crossing {
 /// that agrees is transverse and emits exactly one oriented crossing. That is the whole rule, and it
 /// needs neither a normal tolerance nor a minimum thickness — a shell thinner than any window is two
 /// DIFFERENT contacts and stays two crossings.
-fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
+fn canonical_crossings(order: &[&FaceHit]) -> Vec<Crossing> {
     struct Fan {
         t: f64,
         sign: i32,
@@ -710,16 +850,11 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
     let mut fans: BTreeMap<(ShellKey, Contact), Fan> = BTreeMap::new();
     for hit in order {
         // EXACT ZERO IS THE ONLY TANGENT, and the collector has already refused it: a face whose
-        // plane contains the ray projects to a degenerate outline and claims nothing. So the sign of
-        // `axis · n` is the direction, with no angular threshold deciding what counts as a face.
-        let d = axis.dot(hit.true_normal);
-        let sign = if d < 0.0 {
-            1
-        } else if d > 0.0 {
-            -1
-        } else {
-            continue;
-        };
+        // plane contains the ray projects to a degenerate outline and claims nothing. So every hit
+        // has a direction, read from the collector's exact predicate rather than re-derived from
+        // `true_normal`, with no angular threshold deciding what counts as a face. A fan whose
+        // claims disagree is a tangent brush, dropped below.
+        let sign = if hit.entering { 1 } else { -1 };
         match fans.entry((hit.key(), hit.contact)) {
             std::collections::btree_map::Entry::Occupied(mut slot) => {
                 let fan = slot.get_mut();
@@ -767,6 +902,8 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
 struct Field {
     /// Per open shell: where its presence opened.
     open: BTreeMap<ShellKey, f64>,
+    /// Per entity with a shell open: how many. An entity whose count reaches zero is removed, so
+    /// the field's maximum reads only what is open.
     per_entity: BTreeMap<Entity, u32>,
 }
 
@@ -835,7 +972,7 @@ pub fn walk_ray(
     // reversed pair is an exit before its own entry: a structured error over geometry that is
     // perfectly ordinary. An exit that STILL precedes its entry after this sort is a genuine
     // alternation violation, and stays one.
-    let mut crossings = canonical_crossings(&order, corridor.axis);
+    let mut crossings = canonical_crossings(&order);
     crossings.sort_by(|a, b| {
         a.t.total_cmp(&b.t)
             .then(a.key.cmp(&b.key))
@@ -932,6 +1069,9 @@ pub fn walk_ray(
                 };
                 if let Some(count) = field.per_entity.get_mut(&key.volume) {
                     *count -= 1;
+                    if *count == 0 {
+                        field.per_entity.remove(&key.volume);
+                    }
                 }
                 intervals.push((key, open_at, t));
                 exit_normal += crossing.normal;
@@ -1034,6 +1174,7 @@ pub fn walk_ray(
     )?;
     let events = boundary_events(corridor, &runs);
     let presence = entity_presence(&intervals, volumes)?;
+    let layers = layers(corridor.length as f64, &presence, volumes)?;
 
     let mut by_shell: BTreeMap<ShellKey, Vec<(f64, f64)>> = BTreeMap::new();
     for (key, open, close) in &intervals {
@@ -1043,6 +1184,13 @@ pub fn walk_ray(
         .into_iter()
         .map(|(key, mut spans)| {
             spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            // The field opened a declared shell at the corridor origin, which is where its CHORD
+            // starts; its ENTRY is the seed's, and lies behind the origin.
+            if corridor.initial_presence.contains(&key)
+                && let Some(first) = spans.first_mut()
+            {
+                first.0 = f64::NEG_INFINITY;
+            }
             ShellPresence { key, spans }
         })
         .collect();
@@ -1054,7 +1202,76 @@ pub fn walk_ray(
         presence,
         shells,
         events,
+        layers,
     })
+}
+
+/// The ordered encounters over `[0, length)`: cut at every presence boundary, each listing the
+/// volumes whose (unioned) presence covers it.
+fn layers(
+    length: f64,
+    presence: &[EntityPresence],
+    volumes: &VolumeTable,
+) -> Result<Vec<Layer>, WalkError> {
+    let mut cuts: Vec<f64> = vec![0.0, length];
+    for entity in presence {
+        for (open, close) in &entity.spans {
+            cuts.push(*open);
+            cuts.push(*close);
+        }
+    }
+    cuts.retain(|t| (0.0..=length).contains(t));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let materials = presence
+        .iter()
+        .map(|entity| volumes.material(entity.entity))
+        .collect::<Result<Vec<_>, _>>()?;
+    // A sweep over the span ends in order. Every span end inside the corridor is a cut, so a span
+    // covers the window opening at `start` exactly when `open <= start < close`.
+    let mut opens: Vec<(f64, usize)> = Vec::new();
+    let mut closes: Vec<(f64, usize)> = Vec::new();
+    for (index, entity) in presence.iter().enumerate() {
+        for (open, close) in &entity.spans {
+            opens.push((*open, index));
+            closes.push((*close, index));
+        }
+    }
+    opens.sort_by(|a, b| a.0.total_cmp(&b.0));
+    closes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut next_open, mut next_close) = (0, 0);
+    // Per presence index (volume order), how many of its spans cover the window.
+    let mut active: BTreeMap<usize, u32> = BTreeMap::new();
+    let mut out = Vec::with_capacity(cuts.len());
+    for window in cuts.windows(2) {
+        let (start, end) = (window[0], window[1]);
+        while next_open < opens.len() && opens[next_open].0 <= start {
+            *active.entry(opens[next_open].1).or_insert(0) += 1;
+            next_open += 1;
+        }
+        while next_close < closes.len() && closes[next_close].0 <= start {
+            let index = closes[next_close].1;
+            if let Some(count) = active.get_mut(&index) {
+                *count -= 1;
+                if *count == 0 {
+                    active.remove(&index);
+                }
+            }
+            next_close += 1;
+        }
+        out.push(Layer {
+            start,
+            end,
+            present: active
+                .keys()
+                .map(|&index| Presence {
+                    volume: presence[index].entity,
+                    material: materials[index],
+                })
+                .collect(),
+        });
+    }
+    Ok(out)
 }
 
 /// The union factor at `t = 0`, from declared initial presence alone.
@@ -1095,8 +1312,7 @@ fn weld_runs(
                 cost_acc += span.cost();
                 match segments.last_mut() {
                     // Coalesce across a welded void so an equal-factor sandwich reads as ONE
-                    // stretch — that is what makes the welded exit's spall budget the SUMMED cost
-                    // (§13.4) without any special case.
+                    // stretch of the field.
                     Some(last) if last.factor.to_bits() == span.factor.to_bits() => {
                         last.end = span.end;
                         last.material += span.end - span.start;
@@ -1182,15 +1398,9 @@ fn weld_runs(
     Ok(welded)
 }
 
-/// Turn each welded run's material segments into the ordered field transitions the consequence step
-/// consumes. Spall fires at every DOWNWARD step (§13.2's field law), including the exit.
-///
-/// RULED 2026-08-07 (§13.4, superseding its own original "spall once per welded run", which
-/// contradicted §13.2): welding deletes only the void's exit/entry face pair, and the direct
-/// material step it exposes still obeys the field law. A welded `RHA | 0.4 mm air | Cast` joint
-/// therefore spalls with its own budget; an equal-factor joint emits nothing at all, which is where
-/// the common case still reads as "one exit". A 0.4 mm void never "develops" spall of its own —
-/// voids have no events, material steps do.
+/// Turn each welded run's material segments into its ordered field transitions: one entrance, every
+/// factor step inside, one exit. Welding deletes only a void's exit/entry face pair; the material
+/// step it exposes is still a step, and a void has no event of its own.
 fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEvent> {
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
@@ -1205,13 +1415,11 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
             normal: run.entry_normal,
             factor_before: 0.0,
             factor_after: first.factor,
-            spall_budget: 0.0,
             welded: false,
             run: index,
         });
         for pair in run.segments.windows(2) {
             let (before, after) = (pair[0], pair[1]);
-            let downward = after.factor < before.factor;
             events.push(BoundaryEvent {
                 kind: BoundaryKind::Step,
                 t: before.end,
@@ -1219,7 +1427,6 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
                 normal: corridor.axis,
                 factor_before: before.factor,
                 factor_after: after.factor,
-                spall_budget: if downward { before.cost } else { 0.0 },
                 welded: after.start != before.end,
                 run: index,
             });
@@ -1232,7 +1439,6 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
             normal: run.exit_normal,
             factor_before: last.factor,
             factor_after: 0.0,
-            spall_budget: last.cost,
             welded: false,
             run: index,
         });
@@ -1354,13 +1560,14 @@ impl DiscFrame {
 /// The disc's sample offsets: the axis, then a ring of `ring` samples at `radius`.
 ///
 /// This is a deterministic sample MEAN, not an equal-area quadrature — so `η` below is sampled
-/// coverage, not exact geometric area (§13.5's own note: k is the resolution dial).
+/// coverage, not exact geometric area (§13.5's own note: k is the resolution dial). The ring's
+/// `cos`/`sin` are `libm`'s, so the samples are the same bits on every shipped target.
 pub fn disc_offsets(frame: &DiscFrame, radius: f32, ring: usize) -> Vec<Vec3> {
     let mut out = Vec::with_capacity(ring + 1);
     out.push(Vec3::ZERO);
     for index in 0..ring {
         let angle = std::f32::consts::TAU * (index as f32) / (ring as f32);
-        out.push((frame.u * angle.cos() + frame.v * angle.sin()) * radius);
+        out.push((frame.u * libm::cosf(angle) + frame.v * libm::sinf(angle)) * radius);
     }
     out
 }
@@ -1391,70 +1598,175 @@ pub struct DiscCorridor {
     pub samples: Vec<SampleCorridor>,
 }
 
-/// A downward field step aggregated over the disc — one spall source.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DiscSpall {
-    pub t: f64,
+/// One sample's part in a [`BodyExit`]: the body's extent along that sample's ray.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExitMember {
+    pub sample: usize,
+    /// Where the sample entered the body.
+    pub start: f64,
+    /// Where it left it: the body's rear boundary on this ray.
+    pub end: f64,
+    /// Corridor-relative position of `end` on this sample's ray.
     pub position: Vec3,
-    pub normal: Vec3,
-    pub from_factor: f32,
-    pub to_factor: f32,
-    /// §5's body term, already η-weighted: the contributing samples' budgets divided by k.
-    pub budget: f32,
-    /// The fraction of the disc that saw THIS step — entrance, internal-step and exit coverage are
-    /// different subsets and are not interchangeable (they describe different faces).
+    /// The rear face's outward normal at a genuine exit (material to air); `None` at an internal
+    /// step (material to softer material), which has no face of its own.
+    pub face: Option<Vec3>,
+    /// The volumes this sample's exit leaves, in entity order: present in the body's last layer on
+    /// this ray and absent from the next (every one of them at a genuine exit).
+    pub exited: Vec<Entity>,
+}
+
+/// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
+/// decides whether the round reaches it.
+///
+/// A BODY is a maximal stretch of material along a sample, welded voids inside it included, over
+/// which no layer resists less than the one before it. It EXITS where the next medium resists less
+/// — the next layer has a lower factor, or the run ends in air — and the next body starts there. A
+/// step to an equal or higher factor continues the body, whatever the substances: plates of equal
+/// factor in contact are one body, and a body's spend is everything crossed since the run began or
+/// the last exit. Members are grouped by the substances of the body (every substance crossed in
+/// it), by whether the exit is genuine, and by their ordinal among such exits on their own ray;
+/// longitudinal position cannot be the key, since on an oblique slab the ring's exits are spread by
+/// `r·tan(incidence)` yet are one face.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyExit {
+    /// The substances of the body exited, in id order.
+    pub substances: Vec<SubstanceId>,
+    /// Whether the exit is genuine (into air through a rear face) rather than an internal step.
+    pub genuine: bool,
+    /// The contributing samples, in sample order.
+    pub members: Vec<ExitMember>,
+}
+
+/// A body exit the round reached: where it throws its spall cone from, and the round's state across
+/// the body it left (design doc §5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpallSource {
+    /// Mean progress of the reached members' exits.
+    pub t: f64,
+    /// Mean position of the reached members' exits (corridor-relative from [`finish`]).
+    pub position: Vec3,
+    /// Mean outward rear-face normal at a genuine exit; `None` at an internal step.
+    pub face: Option<Vec3>,
+    /// The round's unit direction of travel through the crossing.
+    pub direction: Vec3,
+    /// The substances of the body exited, in id order.
+    pub substances: Vec<SubstanceId>,
+    /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order. The
+    /// surface the cone is thrown from is theirs, so a direction that starts inside one of them has
+    /// not entered it, and does not dose it there. A volume only an unreached member leaves is not
+    /// among them: the round never left it, and a direction starting inside it enters it there.
+    pub exited: Vec<Entity>,
+    /// Reference-mm the mechanism spent across this body: its readout drop over the body's
+    /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
+    /// summed over the reached members.
+    pub spend: f32,
+    /// The round's speed (m/s) where the earliest member entered the body.
+    pub entry_speed: f32,
+    /// The round's speed (m/s) where the latest reached member left it.
+    pub exit_speed: f32,
+    /// Fraction of the disc whose ray reached this exit.
     pub coverage: f32,
 }
 
-/// The disc-mean cumulative cost as a function of longitudinal progress.
-///
-/// Kept because embedding cannot use the serial resolver's uniform `span × cap/cost`: with several
-/// factors along the corridor the cost is not linear in progress, so the embed point is the
-/// INVERSE of this prefix integral, and per-entity transit damage is clipped at the same progress
-/// rather than scaled proportionally.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CostProfile {
-    pub ts: Vec<f64>,
-    pub cumulative: Vec<f64>,
+impl SpallSource {
+    /// The cone's on-axis strength `S = spend × (v_exit / v_entry)²` (reference-mm): the spend at the
+    /// exit, scaled by the fraction of the round's kinetic energy left across the body. Zero for a
+    /// round that entered at rest.
+    pub fn strength(&self) -> f32 {
+        if self.entry_speed > 0.0 {
+            let ratio = self.exit_speed / self.entry_speed;
+            self.spend * ratio * ratio
+        } else {
+            0.0
+        }
+    }
 }
 
-impl CostProfile {
-    pub fn total(&self) -> f64 {
-        self.cumulative.last().copied().unwrap_or(0.0)
-    }
+/// One volume met by one sample over part of an [`Encounter`]: its identity (the address a dose
+/// goes to), its material, and the stretch `[start, end)` of the encounter it covers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeContact {
+    pub volume: Entity,
+    pub material: VolumeMaterial,
+    pub start: f64,
+    pub end: f64,
+}
 
-    /// The progress `t` at which the accumulated cost first reaches `budget`, or `None` when the
-    /// whole profile costs less than that (i.e. the round perforates).
-    pub fn invert(&self, budget: f64) -> Option<f64> {
-        if budget >= self.total() {
-            return None;
-        }
-        for index in 1..self.ts.len() {
-            if self.cumulative[index] > budget {
-                let slice = self.cumulative[index] - self.cumulative[index - 1];
-                if slice <= 0.0 {
-                    return Some(self.ts[index - 1]);
+/// What one sample of the disc meets over an [`Encounter`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SampleLayer {
+    pub sample: usize,
+    /// The volumes the sample meets, ordered by where they open and then by volume; empty where
+    /// the sample is in a gap of this crossing (a welded void). The substances among them are the
+    /// same at every point of the encounter; which volume carries them may change.
+    pub present: Vec<VolumeContact>,
+}
+
+/// One stretch of a disc crossing over which every sample's SUBSTANCE SET is constant: the ordered
+/// encounter a mechanism advances through. A [`DiscEvent`]'s encounters tile the crossing
+/// `[start, end]` in order, cut at every sample's [`Layer`] boundary, so there each one's present
+/// volumes are constant too. The driver hands a mechanism each run of them joined across no
+/// interface as one encounter ([`Encounter::absorb`]); such a merged encounter's `present` may list
+/// volumes of one substance that never overlap, each over its own `[start, end)`, and its endpoints
+/// are not every volume boundary inside it. Whatever needs volume boundaries reads the contact
+/// intervals, never `present` membership. Samples outside the crossing over a stretch are absent
+/// from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Encounter {
+    pub start: f64,
+    pub end: f64,
+    /// Some sample's substance set differs here from the previous encounter's (the first
+    /// encounter is always one). A boundary where only volume identity changes — two plates of one
+    /// substance in contact — is not an interface: they are one plate, and the driver hands a
+    /// mechanism the run they make as one encounter ([`Encounter::absorb`]).
+    pub interface: bool,
+    /// The samples inside the crossing over this stretch, in sample order.
+    pub samples: Vec<SampleLayer>,
+    /// k — the disc's sample count, the denominator of every disc mean.
+    pub disc: usize,
+}
+
+impl Encounter {
+    /// Extend this encounter over `next`, which follows it across no interface: every sample's
+    /// substance set is the same over both, so to a mechanism they are one stretch of one
+    /// material. A volume met on both sides of the seam is one contact.
+    pub(crate) fn absorb(&mut self, next: &Encounter) {
+        debug_assert!(!next.interface && next.start == self.end);
+        self.end = next.end;
+        for layer in &next.samples {
+            let index = match self
+                .samples
+                .binary_search_by_key(&layer.sample, |own| own.sample)
+            {
+                Ok(index) => index,
+                Err(index) => {
+                    self.samples.insert(
+                        index,
+                        SampleLayer {
+                            sample: layer.sample,
+                            present: Vec::new(),
+                        },
+                    );
+                    index
                 }
-                let share = (budget - self.cumulative[index - 1]) / slice;
-                let (a, b) = (self.ts[index - 1], self.ts[index]);
-                return Some(a + (b - a) * share);
+            };
+            let present = &mut self.samples[index].present;
+            for contact in &layer.present {
+                match present
+                    .iter_mut()
+                    .find(|own| own.volume == contact.volume && own.end == contact.start)
+                {
+                    Some(own) => own.end = contact.end,
+                    None => present.push(*contact),
+                }
             }
         }
-        self.ts.last().copied()
-    }
-
-    /// Scale the whole profile — how overmatch charges the perpendicular projection instead of the
-    /// oblique chord without breaking the inversion (§4: overmatch cancels the slope cost).
-    fn scaled(&self, factor: f64) -> Self {
-        Self {
-            ts: self.ts.clone(),
-            cumulative: self.cumulative.iter().map(|c| c * factor).collect(),
-        }
     }
 }
 
-/// One entity's share of a disc crossing — the damage deposit AND the material slice-2 needs to
-/// decide impulse ownership.
+/// One entity's share of a whole disc crossing: what the crossing presents of it, before any
+/// mechanism has decided how far the round gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityShare {
     pub entity: Entity,
@@ -1465,8 +1777,6 @@ pub struct EntityShare {
     pub cost: f32,
     /// Fraction of the disc that met this entity at all.
     pub coverage: f32,
-    /// Per-sample presence spans, kept only to clip at an embed. Private detail of the plan.
-    spans: Vec<(f64, f64)>,
 }
 
 /// One crossing of the world by the disc: the cluster of sample runs that belong to the same
@@ -1490,10 +1800,13 @@ pub struct DiscEvent {
     pub entrance_volume: Entity,
     /// Every primitive this crossing touched, sorted — the identity half of the transit check.
     pub primitives: Vec<PrimitiveKey>,
-    /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
+    /// `(1/k) Σᵢ costᵢ` (reference-mm) — automatically `η × mean covered chord cost`. A readout:
+    /// the entrance rules read it, no mechanism advances on it.
     pub cost: f32,
-    pub profile: CostProfile,
-    pub spall: Vec<DiscSpall>,
+    /// The crossing's ordered encounters ([`Encounter`]).
+    pub encounters: Vec<Encounter>,
+    /// Every body exit along the crossing ([`BodyExit`]), ordered by mean exit progress.
+    pub exits: Vec<BodyExit>,
     pub shares: Vec<EntityShare>,
 }
 
@@ -1810,18 +2123,22 @@ fn build_event(
     let entry_position = entry_position / covered as f32;
     let exit_position = exit_position / covered as f32;
 
-    // Disc-mean cumulative cost. Breakpoints are the union of every contributing sample's canonical
+    // Disc-mean cost readout, accumulated over the union of every contributing sample's canonical
     // span boundaries; between two of them every sample's factor is constant, so the mean slope is
-    // exact and the profile is piecewise linear.
+    // exact.
     let mut breaks: Vec<f64> = vec![start, end];
     for (&sample, runs) in &by_sample {
         for &run in runs {
             let extent = &walks[sample].runs[run];
-            for span in &walks[sample].spans {
-                if span.end > extent.start && span.start < extent.end {
-                    breaks.push(span.start);
-                    breaks.push(span.end);
-                }
+            let spans = &walks[sample].spans;
+            // Spans tile the corridor in order: those overlapping the run, by bisection.
+            let from = spans.partition_point(|span| span.end <= extent.start);
+            let to = spans
+                .partition_point(|span| span.start < extent.end)
+                .max(from);
+            for span in &spans[from..to] {
+                breaks.push(span.start);
+                breaks.push(span.end);
             }
         }
     }
@@ -1829,8 +2146,7 @@ fn build_event(
     breaks.dedup();
     breaks.retain(|t| *t >= start && *t <= end);
 
-    let mut cumulative: Vec<f64> = Vec::with_capacity(breaks.len());
-    cumulative.push(0.0);
+    let mut total = 0.0f64;
     for window in breaks.windows(2) {
         let (a, b) = (window[0], window[1]);
         let mid = 0.5 * (a + b);
@@ -1846,22 +2162,18 @@ fn build_event(
             if !inside {
                 continue;
             }
-            if let Some(span) = walks[sample]
-                .spans
-                .iter()
-                .find(|span| span.start <= mid && mid < span.end)
+            let spans = &walks[sample].spans;
+            if let Some(span) = spans
+                .get(spans.partition_point(|span| span.end <= mid))
+                .filter(|span| span.start <= mid && mid < span.end)
             {
                 slope += span.factor as f64;
             }
         }
-        let last = *cumulative.last().unwrap();
-        cumulative.push(last + (b - a) * slope / kf);
+        total += (b - a) * slope / kf;
     }
-    let profile = CostProfile {
-        ts: breaks,
-        cumulative,
-    };
-    let cost = profile.total() as f32;
+    let cost = total as f32;
+    let encounters = encounters(walks, &by_sample, start, end, k);
 
     // Per-entity shares, unioned per sample then averaged over the disc.
     let mut shares: BTreeMap<Entity, (f32, Vec<(f64, f64)>, BTreeSet<usize>)> = BTreeMap::new();
@@ -1895,69 +2207,105 @@ fn build_event(
                 chord: chord as f32,
                 cost: (chord * factor as f64) as f32,
                 coverage: (samples.len() as f64 / kf) as f32,
-                spans,
             }
         })
         .collect();
 
-    // Spall: cluster each sample's downward steps by their factor pair and their ordinal among
-    // same-pair steps in that sample. Longitudinal position cannot be the key — on an oblique slab
-    // the ring's exits are spread by `r·tan(incidence)` yet they are all one exit face.
-    let mut spall_groups: BTreeMap<(u32, u32, usize), (Vec<f64>, Vec3, Vec3, f64, usize)> =
+    // Body exits, per sample, then grouped over the disc ([`BodyExit`]).
+    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), Vec<ExitMember>> =
         BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in &by_sample {
-        let mut ordinals: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        let base = corridor.origin + corridor.samples[sample].offset;
+        let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
+        let mut member = |substances: Vec<SubstanceId>,
+                          start: f64,
+                          end: f64,
+                          face: Option<Vec3>,
+                          mut exited: Vec<Entity>| {
+            let genuine = face.is_some();
+            let ordinal = ordinals.entry((substances.clone(), genuine)).or_insert(0);
+            exited.sort();
+            exited.dedup();
+            exit_groups
+                .entry((substances, genuine, *ordinal))
+                .or_default()
+                .push(ExitMember {
+                    sample,
+                    start,
+                    end,
+                    position: base + corridor.axis * end as f32,
+                    face,
+                    exited,
+                });
+            *ordinal += 1;
+        };
         let mut saw_exit = false;
         for &run in runs {
-            for event in walks[sample].events.iter().filter(|e| e.run == run) {
-                if event.factor_after >= event.factor_before {
+            let extent = &walks[sample].runs[run];
+            if walks[sample]
+                .events
+                .iter()
+                .any(|e| e.run == run && e.kind == BoundaryKind::Exit && e.factor_before > 0.0)
+            {
+                saw_exit = true;
+            }
+            // (substances so far, factor of its latest layer, start, end, volumes of its latest
+            // layer) of the body the sample is in. A layer resisting at least as much as the one
+            // before it continues the body.
+            type Body = (Vec<SubstanceId>, f32, f64, f64, Vec<Entity>);
+            let mut body: Option<Body> = None;
+            for layer in layers_over(&walks[sample].layers, extent.start, extent.end) {
+                let (from, to) = (layer.start.max(extent.start), layer.end.min(extent.end));
+                if layer.present.is_empty() || to <= from {
                     continue;
                 }
-                if event.kind == BoundaryKind::Exit {
-                    saw_exit = true;
-                }
-                let pair = (event.factor_before.to_bits(), event.factor_after.to_bits());
-                let ordinal = ordinals.entry(pair).or_insert(0);
-                let slot = spall_groups.entry((pair.0, pair.1, *ordinal)).or_insert((
-                    Vec::new(),
-                    Vec3::ZERO,
-                    Vec3::ZERO,
-                    0.0,
-                    0,
-                ));
-                slot.0.push(event.t);
-                slot.1 += event.position;
-                slot.2 += event.normal;
-                slot.3 += event.spall_budget as f64;
-                slot.4 += 1;
-                *ordinal += 1;
+                let substances = layer.substances();
+                let factor = layer
+                    .present
+                    .iter()
+                    .fold(0.0f32, |most, presence| most.max(presence.material.factor));
+                let volumes: Vec<Entity> = layer.present.iter().map(|p| p.volume).collect();
+                body = Some(match body.take() {
+                    Some((held, before, start, end, last)) if factor < before => {
+                        let left = last
+                            .into_iter()
+                            .filter(|volume| !volumes.contains(volume))
+                            .collect();
+                        member(held, start, end, None, left);
+                        (substances, factor, from, to, volumes)
+                    }
+                    Some((mut held, _, start, _, _)) => {
+                        held.extend(substances);
+                        held.sort();
+                        held.dedup();
+                        (held, factor, start, to, volumes)
+                    }
+                    None => (substances, factor, from, to, volumes),
+                });
+            }
+            if let Some((held, factor, start, end, last)) = body
+                && factor > 0.0
+            {
+                member(held, start, end, Some(extent.exit_normal), last);
             }
         }
         if saw_exit {
             exit_covered += 1;
         }
     }
-    let mut spall: Vec<DiscSpall> = spall_groups
+    let mut exits: Vec<BodyExit> = exit_groups
         .into_iter()
-        .map(|((from, to, _), (ts, position, normal, budget, count))| {
-            let n = count as f32;
-            DiscSpall {
-                t: ts.iter().sum::<f64>() / count as f64,
-                position: position / n,
-                normal: if count == 1 {
-                    normal
-                } else {
-                    unit_or_zero(normal)
-                },
-                from_factor: f32::from_bits(from),
-                to_factor: f32::from_bits(to),
-                budget: (budget / kf) as f32,
-                coverage: (count as f64 / kf) as f32,
-            }
+        .map(|((substances, genuine, _), members)| BodyExit {
+            substances,
+            genuine,
+            members,
         })
         .collect();
-    spall.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let mean_end = |exit: &BodyExit| {
+        exit.members.iter().map(|m| m.end).sum::<f64>() / exit.members.len() as f64
+    };
+    exits.sort_by(|a, b| mean_end(a).total_cmp(&mean_end(b)));
 
     let mut primitives: Vec<PrimitiveKey> = by_sample
         .iter()
@@ -1990,24 +2338,105 @@ fn build_event(
         coverage,
         exit_coverage: (exit_covered as f64 / kf) as f32,
         cost,
-        profile,
-        spall,
+        encounters,
+        exits,
         shares,
     })
+}
+
+/// The layers of `layers` (one sample's, which tile its corridor in order) that touch
+/// `[start, end]`, found by bisection: a corridor of many crossings is not rescanned per crossing.
+fn layers_over(layers: &[Layer], start: f64, end: f64) -> &[Layer] {
+    let from = layers.partition_point(|layer| layer.end < start);
+    let to = layers.partition_point(|layer| layer.start <= end).max(from);
+    &layers[from..to]
+}
+
+/// The ordered encounters of one disc crossing: `[start, end]` cut at every boundary of every
+/// contributing sample's layers, each stretch listing what each sample inside the crossing meets.
+fn encounters(
+    walks: &[RayWalk],
+    by_sample: &BTreeMap<usize, Vec<usize>>,
+    start: f64,
+    end: f64,
+    k: usize,
+) -> Vec<Encounter> {
+    let mut cuts: Vec<f64> = vec![start, end];
+    for &sample in by_sample.keys() {
+        for layer in layers_over(&walks[sample].layers, start, end) {
+            cuts.push(layer.start);
+            cuts.push(layer.end);
+        }
+    }
+    cuts.retain(|t| *t >= start && *t <= end);
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+
+    let mut out: Vec<Encounter> = Vec::with_capacity(cuts.len());
+    let mut before: BTreeMap<usize, Vec<SubstanceId>> = BTreeMap::new();
+    for window in cuts.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mid = 0.5 * (a + b);
+        let mut samples = Vec::new();
+        let mut now: BTreeMap<usize, Vec<SubstanceId>> = BTreeMap::new();
+        for (&sample, runs) in by_sample {
+            let inside = runs.iter().any(|&run| {
+                let extent = &walks[sample].runs[run];
+                extent.start <= mid && mid < extent.end
+            });
+            if !inside {
+                continue;
+            }
+            let Some(layer) = layers_over(&walks[sample].layers, a, b)
+                .iter()
+                .find(|layer| layer.start <= mid && mid < layer.end)
+            else {
+                continue;
+            };
+            now.insert(sample, layer.substances());
+            samples.push(SampleLayer {
+                sample,
+                present: layer
+                    .present
+                    .iter()
+                    .map(|presence| VolumeContact {
+                        volume: presence.volume,
+                        material: presence.material,
+                        start: a,
+                        end: b,
+                    })
+                    .collect(),
+            });
+        }
+        let interface = out.is_empty() || {
+            let substances = |map: &BTreeMap<usize, Vec<SubstanceId>>, sample: &usize| {
+                map.get(sample).cloned().unwrap_or_default()
+            };
+            before
+                .keys()
+                .chain(now.keys())
+                .any(|sample| substances(&before, sample) != substances(&now, sample))
+        };
+        out.push(Encounter {
+            start: a,
+            end: b,
+            interface,
+            samples,
+            disc: k,
+        });
+        before = now;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------
 // Stage 3 — the staged resolution (§13.3 surface laws, §5 spall, §3 capability)
 // ---------------------------------------------------------------------------------------------
 
-/// The striking round, reduced to what the laws read.
+/// The striking round, reduced to what the entrance rules read.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
     pub caliber: f32,
-    /// Reference-mm this round can defeat right now (`super::capability`). The core spends it and
-    /// reports what it spent; inverting back to a residual speed stays with the caller, which owns
-    /// the DeMarre constants.
-    pub capability: f32,
 }
 
 /// What the entrance disc decided, and what the surface laws read to decide it.
@@ -2232,7 +2661,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
 /// How the crossing ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Outcome {
-    /// Defeated: buried where the prefix integral of the disc-mean cost reaches the capability.
+    /// Defeated: buried where the mechanism came to rest.
     Embedded { at: Vec3, t: f32 },
     /// Punched through: the march resumes at the aggregate exit face.
     Perforated {
@@ -2243,36 +2672,30 @@ pub enum Outcome {
     },
 }
 
-/// One entity's deposit from this crossing.
-///
-/// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no priority, no
-/// argmax). The IMPULSE does, when a crossing's presence set spans several rigid bodies — which can
-/// only happen when distinct bodies overlap in space, since within one tank every volume shares the
-/// body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to the body owning the ENTRANCE
-/// surface, the first one physically touched; anything behind it is shoved through contact by the
-/// physics engine. So the caller routes the shove by [`ResolutionPlan::entrance`], not by these
-/// shares — they are the damage, and the diagnostic if that default is ever revisited.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EntityDeposit {
-    pub entity: Entity,
-    pub factor: f32,
-    pub chord: f32,
-    /// Reference-mm of ITS OWN material the round chewed — §6's transit damage, before the caller's
-    /// `TRANSIT_K`.
-    pub cost: f32,
-    pub coverage: f32,
-}
-
 /// Everything the crossing decided, as declarative facts for the caller to apply in order.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResolutionPlan {
+pub struct ResolutionPlan<S> {
     pub entrance: EntranceRead,
     pub outcome: Outcome,
-    /// Reference-mm actually spent (the whole crossing when it perforates, the capability when it
-    /// embeds).
+    /// The mechanism's state where the crossing left it: at rest on an embed, past the exit on a
+    /// perforation.
+    pub state: S,
+    /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
-    pub deposits: Vec<EntityDeposit>,
-    pub spall: Vec<DiscSpall>,
+    /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
+    /// volume order ([`DoseSource::Line`]).
+    ///
+    /// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no
+    /// priority, no argmax). The IMPULSE does, when a crossing's presence set spans several rigid
+    /// bodies — which can only happen when distinct bodies overlap in space, since within one tank
+    /// every volume shares the body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to
+    /// the body owning the ENTRANCE surface, the first one physically touched; anything behind it
+    /// is shoved through contact by the physics engine. So the caller routes the shove by
+    /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.
+    pub deposits: Vec<Dose>,
+    /// One per body exit the round reached, in order: every exit before a stop throws, and the body
+    /// the round stops inside throws nothing.
+    pub spall: Vec<SpallSource>,
 }
 
 /// The corridor [`finish`] was handed must be the corridor [`begin`] asked for.
@@ -2353,13 +2776,18 @@ const HANDOFF_PROXIMITY: f32 = 1.0e-3;
 /// magnitude of the event-plane rule for the same reason: two reads of one surface patch.
 const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
-/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits).
-pub fn finish(
+/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits):
+/// `mechanism` advances `state` through the crossing's ordered encounters until it stops or the
+/// crossing ends. This is the one driver of a crossing's outcome, for the runtime and the §13.6 gate
+/// alike.
+pub(crate) fn finish<M: Mechanism>(
     transit: &DiscWalk,
     request: &TransitRequest,
-    shot: &Shot,
+    mechanism: &M,
+    state: M::State,
+    limits: &Limits,
     _laws: &WalkLaws,
-) -> Result<ResolutionPlan, WalkError> {
+) -> Result<ResolutionPlan<M::State>, WalkError> {
     validate_transit(transit, request)?;
     let Some(event) = transit.events.first() else {
         return Err(WalkError::BadCorridor {
@@ -2367,94 +2795,268 @@ pub fn finish(
             reason: "the transit corridor met no material after the entrance decided to enter",
         });
     };
-
-    // Overmatch cannot be made to present its oblique line of sight to a round that dwarfs it, so
-    // the CHARGED chord is the perpendicular projection, not the full slope chord (§4).
-    //
-    // It applies to every consequence, not just to the capability spend. §13.5 defines the spall
-    // budget AS the event's cost and §6 defines transit damage from the cost paid — so a projection
-    // that scaled only `cost_spent` would leave a 60° overmatched crossing spending 15 reference-mm
-    // while throwing spall and depositing damage for 30. One `charge` factor, applied to the prefix
-    // profile, the spall budgets and the deposits alike. The GEOMETRIC quantities (`t`, the embed
-    // position, the presence spans) are untouched: the round still travels the distance it travels.
-    let charge = if request.entrance.overmatched {
-        transit.axis.dot(request.entrance.normal).abs() as f64
+    let geometry = Geometry {
+        axis: transit.axis,
+        entrance_normal: request.entrance.normal,
+    };
+    let advanced = if request.entrance.overmatched {
+        advance_through(
+            &OvermatchProjection { inner: mechanism },
+            state,
+            &event.encounters,
+            limits,
+            &geometry,
+        )?
     } else {
-        1.0
+        advance_through(mechanism, state, &event.encounters, limits, &geometry)?
     };
-    let profile = event.profile.scaled(charge);
-    let total = profile.total();
+    let cost_spent =
+        (mechanism.reference_mm(state) - mechanism.reference_mm(advanced.state)) as f32;
 
-    let embed_t = profile.invert(shot.capability as f64);
-    let (outcome, cost_spent, cut) = match embed_t {
-        Some(t) => {
-            let at = transit.origin + transit.axis * t as f32;
-            (
-                Outcome::Embedded { at, t: t as f32 },
-                shot.capability.min(total as f32),
-                t,
-            )
-        }
-        None => (
-            Outcome::Perforated {
-                exit: event.exit_position,
-                exit_normal: event.exit_normal,
-                direction: transit.axis,
-                t: event.end as f32,
+    let outcome = match advanced.stop {
+        Some(t) => Outcome::Embedded {
+            at: transit.origin + transit.axis * t as f32,
+            t: t as f32,
+        },
+        None => Outcome::Perforated {
+            exit: event.exit_position,
+            exit_normal: event.exit_normal,
+            direction: transit.axis,
+            t: event.end as f32,
+        },
+    };
+
+    let deposits = advanced
+        .doses
+        .into_iter()
+        .filter(|(_, (chord, _))| *chord as f32 > 0.0)
+        .map(|(address, (chord, amount))| Dose {
+            address,
+            amount: amount as f32,
+            source: DoseSource::Line {
+                chord: chord as f32,
             },
-            total as f32,
-            event.end,
-        ),
-    };
-
-    // Per-entity damage is clipped at the embed progress, never scaled: a round that stops in the
-    // first plate must deposit nothing in the crew behind it.
-    let deposits = event
-        .shares
-        .iter()
-        .map(|share| {
-            let chord: f64 = share
-                .spans
-                .iter()
-                .map(|(a, b)| (b.min(cut) - *a).max(0.0))
-                .sum::<f64>()
-                / transit.samples() as f64;
-            let covered = share
-                .spans
-                .iter()
-                .filter(|(a, _)| *a < cut)
-                .count()
-                .min(transit.samples());
-            let charged = chord * charge;
-            EntityDeposit {
-                entity: share.entity,
-                factor: share.factor,
-                chord: charged as f32,
-                cost: (charged * share.factor as f64) as f32,
-                coverage: if covered == 0 { 0.0 } else { share.coverage },
-            }
-        })
-        .filter(|deposit| deposit.chord > 0.0)
-        .collect();
-
-    // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward
-    // steps it actually reached, and every budget is charged on the same projection as the cost it
-    // is defined to equal.
-    let spall = event
-        .spall
-        .iter()
-        .filter(|mark| mark.t <= cut)
-        .map(|mark| DiscSpall {
-            budget: (mark.budget as f64 * charge) as f32,
-            ..*mark
         })
         .collect();
+
+    let spall = spall_sources(
+        mechanism,
+        &event.exits,
+        &advanced.stretches,
+        advanced.stop,
+        transit.axis,
+        transit.samples(),
+    );
 
     Ok(ResolutionPlan {
         entrance: request.entrance,
         outcome,
+        state: advanced.state,
         cost_spent,
         deposits,
         spall,
     })
+}
+
+/// Where a mechanism's run through a crossing ended.
+struct Advanced<S> {
+    state: S,
+    /// Progress at which it came to rest; `None` when it crossed every encounter.
+    stop: Option<f64>,
+    /// Per addressed volume, the summed line `(chord, amount)`.
+    doses: BTreeMap<Entity, (f64, f64)>,
+    /// Every encounter the mechanism advanced through, in order.
+    stretches: Vec<Stretch<S>>,
+}
+
+/// One encounter as the mechanism advanced through it: the progress it covered, the states either
+/// side, and the factor each present sample was resisted by there.
+struct Stretch<S> {
+    start: f64,
+    /// Where the advance left the round: the encounter's end, or the rest point.
+    end: f64,
+    before: S,
+    after: S,
+    /// `(sample, factor)` for every sample in the encounter ([`overlap_factor`]).
+    resisted: Vec<(usize, f32)>,
+}
+
+/// The encounters a mechanism advances through: each run of encounters joined across no interface
+/// is one ([`Encounter::absorb`]), so a seam inside one substance cannot change an outcome.
+fn one_substance_runs(encounters: &[Encounter]) -> Vec<Cow<'_, Encounter>> {
+    let mut out: Vec<Cow<'_, Encounter>> = Vec::with_capacity(encounters.len());
+    for encounter in encounters {
+        match out.last_mut() {
+            Some(run) if !encounter.interface => run.to_mut().absorb(encounter),
+            _ => out.push(Cow::Borrowed(encounter)),
+        }
+    }
+    out
+}
+
+/// Advance `state` through `encounters` in order until the mechanism stops.
+fn advance_through<M: Mechanism>(
+    mechanism: &M,
+    mut state: M::State,
+    encounters: &[Encounter],
+    limits: &Limits,
+    geometry: &Geometry,
+) -> Result<Advanced<M::State>, WalkError> {
+    let mut doses: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    let mut stretches: Vec<Stretch<M::State>> = Vec::new();
+    for encounter in one_substance_runs(encounters) {
+        let encounter = &*encounter;
+        let before = state;
+        let advance = mechanism.advance(state, encounter, limits, geometry);
+        state = advance.state;
+        for effect in advance.effects {
+            match effect {
+                Effect::Line {
+                    address,
+                    chord,
+                    amount,
+                } => {
+                    let slot = doses.entry(address).or_insert((0.0, 0.0));
+                    slot.0 += chord;
+                    slot.1 += amount;
+                }
+            }
+        }
+        let stop = advance.control == Control::Stop;
+        stretches.push(Stretch {
+            start: encounter.start,
+            end: if stop {
+                encounter.start + advance.consumed
+            } else {
+                encounter.end
+            },
+            before,
+            after: state,
+            resisted: encounter
+                .samples
+                .iter()
+                .map(|sample| (sample.sample, overlap_factor(&sample.present)))
+                .collect(),
+        });
+        match advance.control {
+            Control::Continue => {}
+            Control::Stop => {
+                return Ok(Advanced {
+                    state,
+                    stop: Some(encounter.start + advance.consumed),
+                    doses,
+                    stretches,
+                });
+            }
+            Control::Redirect { .. } | Control::Schedule => {
+                return Err(WalkError::UnsupportedControl);
+            }
+        }
+    }
+    Ok(Advanced {
+        state,
+        stop: None,
+        doses,
+        stretches,
+    })
+}
+
+/// The spall sources of the body exits the round reached ([`SpallSource`]).
+///
+/// A member is reached when its exit lies at or before the rest point; a body the round stops inside
+/// throws nothing. Body boundaries are run ends or factor drops on their sample, each a change of
+/// substance set, so they are interfaces and every stretch lies wholly inside or wholly outside a
+/// member's body: a stretch belongs to it
+/// when its midpoint does. A stretch's readout drop is shared among its samples by the factor each
+/// was resisted by — the share the rigid force law gives each sample of the disc-mean force.
+fn spall_sources<M: Mechanism>(
+    mechanism: &M,
+    exits: &[BodyExit],
+    stretches: &[Stretch<M::State>],
+    stop: Option<f64>,
+    direction: Vec3,
+    // k: the disc's sample count.
+    disc: usize,
+) -> Vec<SpallSource> {
+    let disc_spend: Vec<f64> = stretches
+        .iter()
+        .map(|stretch| {
+            mechanism.reference_mm(stretch.before) - mechanism.reference_mm(stretch.after)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for exit in exits {
+        let reached: Vec<&ExitMember> = exit
+            .members
+            .iter()
+            .filter(|member| stop.is_none_or(|rest| member.end <= rest))
+            .collect();
+        if reached.is_empty() {
+            continue;
+        }
+        let mut spend = 0.0f64;
+        for member in &reached {
+            for (stretch, drop) in stretches.iter().zip(&disc_spend) {
+                let mid = 0.5 * (stretch.start + stretch.end);
+                if !(member.start <= mid && mid < member.end) {
+                    continue;
+                }
+                let total: f64 = stretch.resisted.iter().map(|(_, f)| *f as f64).sum();
+                let own = stretch
+                    .resisted
+                    .iter()
+                    .find(|(sample, _)| *sample == member.sample)
+                    .map_or(0.0, |(_, f)| *f as f64);
+                if total > 0.0 {
+                    spend += drop * own / total;
+                }
+            }
+        }
+        let first = reached
+            .iter()
+            .map(|m| m.start)
+            .fold(f64::INFINITY, f64::min);
+        let last = reached
+            .iter()
+            .map(|m| m.end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let entry = stretches
+            .iter()
+            .find(|stretch| 0.5 * (stretch.start + stretch.end) >= first)
+            .map(|stretch| stretch.before);
+        let exit_state = stretches
+            .iter()
+            .rev()
+            .find(|stretch| 0.5 * (stretch.start + stretch.end) < last)
+            .map(|stretch| stretch.after);
+        let (Some(entry), Some(exit_state)) = (entry, exit_state) else {
+            continue;
+        };
+        let count = reached.len();
+        let faces: Vec<Vec3> = reached.iter().filter_map(|m| m.face).collect();
+        let face = match faces.as_slice() {
+            [] => None,
+            // One face IS the mean; normalising a unit vector would perturb its low bits.
+            [one] => Some(*one),
+            several => Some(unit_or_zero(several.iter().copied().sum())),
+        };
+        let exited: BTreeSet<Entity> = reached
+            .iter()
+            .flat_map(|m| m.exited.iter().copied())
+            .collect();
+        out.push(SpallSource {
+            t: reached.iter().map(|m| m.end).sum::<f64>() / count as f64,
+            position: reached.iter().map(|m| m.position).sum::<Vec3>() / count as f32,
+            face,
+            direction,
+            substances: exit.substances.clone(),
+            exited: exited.into_iter().collect(),
+            spend: spend as f32,
+            entry_speed: mechanism.speed(entry) as f32,
+            exit_speed: mechanism.speed(exit_state) as f32,
+            coverage: (count as f64 / disc as f64) as f32,
+        });
+    }
+    out.sort_by(|a, b| a.t.total_cmp(&b.t));
+    out
 }

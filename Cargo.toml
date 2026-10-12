@@ -23,7 +23,11 @@ chrono = "0.4.45"
 # wire carries. Already in the tree through lightyear (same locked version).
 postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 ron = "0.12"
-glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
+# Already in the tree through bevy_math (same locked version — this adds no compiled crate); named
+# directly only by `ballistics::spall_cone`, whose direction generator must give the same bits on
+# every shipped target, which the platform's own `sin`/`cos` do not (CI measured Linux differing).
+libm = "0.2.16"
+glam ={ version = "0.32.1", features = ["serde", "scalar-math"] }
 winit = "0.30"
 # Already in the tree through bevy (same locked version); named directly only by the present-mode
 # capability probe (`settings::probe`), which needs `SurfaceTargetUnsafe` and the wgpu-side

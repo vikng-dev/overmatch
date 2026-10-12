@@ -230,7 +230,7 @@ fn layers_section(ui: &mut egui::Ui, layers: &mut LayerView) {
     volume_state_row(ui, "component", &mut layers.components);
 }
 
-/// The live shot parameters — muzzle speed, calibre, mass — as sliders over the panel's LOCAL
+/// The live shot parameters — muzzle speed, calibre, mass, nose factor — as sliders over the panel's LOCAL
 /// [`ShotParams`], plus a restore-the-88 button. Calibre is edited in mm (stored in m).
 fn shot_section(ui: &mut egui::Ui, shot: &mut ShotParams, reset_shot: &mut bool) {
     ui.add(egui::Slider::new(&mut shot.muzzle_speed, 100.0..=1200.0).text("muzzle (m/s)"));
@@ -242,6 +242,7 @@ fn shot_section(ui: &mut egui::Ui, shot: &mut ShotParams, reset_shot: &mut bool)
         shot.caliber = cal_mm / 1e3;
     }
     ui.add(egui::Slider::new(&mut shot.mass, 1.0..=25.0).text("mass (kg)"));
+    ui.add(egui::Slider::new(&mut shot.nose_factor, 0.05..=1.0).text("nose factor"));
     if ui.button("Reset to 88 mm").clicked() {
         *reset_shot = true;
     }

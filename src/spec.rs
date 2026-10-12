@@ -70,10 +70,69 @@ pub enum Trigger {
     Secondary,
 }
 
+/// A projectile's nose geometry, parameters in calibres. [`Self::factor`] derives `N`, the
+/// frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1, in
+/// `(0, 1]`. `validate()` rejects a parameter outside its variant's range.
+#[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
+#[serde(deny_unknown_fields)]
+pub enum NoseShape {
+    /// Tangent ogive of `crh` calibre-radius-head, `crh ≥ 0.5` (0.5 is a hemisphere).
+    Ogive { crh: f32 },
+    /// Cone of `length_calibres` length, `> 0`.
+    Cone { length_calibres: f32 },
+    /// Spherical cap of `radius_calibres` radius, `≥ 0.5` (0.5 is a hemisphere).
+    Cap { radius_calibres: f32 },
+    /// Flat face.
+    Flat,
+}
+
+impl NoseShape {
+    /// The nose factor `N`: ogive `(8ψ − 1) / (24ψ²)`, cone `1 / (1 + 4φ²)`, cap `1 − 1 / (8φ²)`,
+    /// flat `1`. Evaluated in f64 and cast once: the squares leave f32's range for a parameter
+    /// past ~1e19, where the factor itself is still representable. `validate()` rejects a factor
+    /// the cast leaves subnormal or zero.
+    pub fn factor(self) -> f32 {
+        let factor = match self {
+            Self::Ogive { crh } => {
+                let crh = crh as f64;
+                (8.0 * crh - 1.0) / (24.0 * crh * crh)
+            }
+            Self::Cone { length_calibres } => {
+                let length = length_calibres as f64;
+                1.0 / (1.0 + 4.0 * length * length)
+            }
+            Self::Cap { radius_calibres } => {
+                let radius = radius_calibres as f64;
+                1.0 - 1.0 / (8.0 * radius * radius)
+            }
+            Self::Flat => 1.0,
+        };
+        factor as f32
+    }
+
+    /// The variant's parameter and whether it lies in the variant's range, or `None` for `Flat`.
+    fn parameter(self) -> Option<(&'static str, f32, bool)> {
+        match self {
+            Self::Ogive { crh } => Some(("Ogive.crh (≥ 0.5)", crh, crh.is_finite() && crh >= 0.5)),
+            Self::Cone { length_calibres } => Some((
+                "Cone.length_calibres (> 0)",
+                length_calibres,
+                length_calibres.is_finite() && length_calibres > 0.0,
+            )),
+            Self::Cap { radius_calibres } => Some((
+                "Cap.radius_calibres (≥ 0.5)",
+                radius_calibres,
+                radius_calibres.is_finite() && radius_calibres >= 0.5,
+            )),
+            Self::Flat => None,
+        }
+    }
+}
+
 /// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
 /// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
 /// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
-/// by design — a future overheat model adds fields to `Automatic` (deferred, owner call 2026-07-12).
+/// by design — a future overheat model adds fields to `Automatic` (deferred).
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum FireMode {
@@ -136,6 +195,8 @@ pub struct WeaponSpec {
     pub caliber: f32,
     /// Projectile mass (kg) — primary driver of penetration capability.
     pub mass: f32,
+    /// Projectile nose geometry; the capability law reads the nose factor it derives.
+    pub nose: NoseShape,
     /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
     /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
     pub fire_mode: FireMode,
@@ -933,6 +994,25 @@ impl TankSpec {
             }
         }
         for (name, weapon) in &self.weapons {
+            if let Some((parameter, value, false)) = weapon.nose.parameter() {
+                return Err(format!(
+                    "weapon `{name}`: nose {parameter} is out of range (got {value})"
+                )
+                .into());
+            }
+            let round = crate::ballistics::RoundBody {
+                mass: weapon.mass,
+                caliber: weapon.caliber,
+                nose_factor: weapon.nose.factor(),
+            };
+            if let Err(reason) = crate::ballistics::round_in_domain(round, weapon.speed) {
+                return Err(format!(
+                    "weapon `{name}`: the round (nose {:?}) is outside the capability law's \
+                     domain: {reason}",
+                    weapon.nose
+                )
+                .into());
+            }
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
                     if reload_secs < 0.0 {
@@ -1228,12 +1308,18 @@ mod tests {
                 ("speed", weapon.speed),
                 ("caliber", weapon.caliber),
                 ("mass", weapon.mass),
+                ("nose factor", weapon.nose.factor()),
             ] {
                 assert!(
                     value.is_finite() && value > 0.0,
                     "weapon `{name}`: {field} must be finite and > 0 (got {value})"
                 );
             }
+            assert!(
+                weapon.nose.factor() <= 1.0,
+                "weapon `{name}`: nose factor must be ≤ 1 (got {})",
+                weapon.nose.factor()
+            );
             for clip in &weapon.report_clips {
                 assert!(
                     clip.ends_with(".ogg"),
@@ -1403,7 +1489,7 @@ TankSpec(
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
             barrel: "Cannon_Recoil",
-            speed: 700.0, caliber: 0.05, mass: 5.0,
+            speed: 700.0, caliber: 0.05, mass: 5.0, nose: Ogive(crh: 1.0),
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech],
@@ -1413,7 +1499,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            speed: 700.0, caliber: 0.008, mass: 0.012,
+            speed: 700.0, caliber: 0.008, mass: 0.012, nose: Cap(radius_calibres: 0.5),
             fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
             report_clips: [],
         ),
@@ -1522,6 +1608,114 @@ TankSpec(
             with_optics(optics)
                 .validate()
                 .unwrap_or_else(|err| panic!("{optics:?} must be accepted: {err}"));
+        }
+    }
+
+    /// Each nose family derives its factor by its own formula (a hemisphere and a half-calibre
+    /// cone are `½`, DERIVED; a flat face `1`), and a parameter outside the family's range is a
+    /// load error naming the weapon.
+    #[test]
+    fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
+        for (shape, expected) in [
+            (NoseShape::Ogive { crh: 0.5 }, 0.5),
+            (
+                NoseShape::Cap {
+                    radius_calibres: 0.5,
+                },
+                0.5,
+            ),
+            (NoseShape::Flat, 1.0),
+            (
+                NoseShape::Cone {
+                    length_calibres: 0.5,
+                },
+                0.5,
+            ),
+        ] {
+            let got = shape.factor();
+            assert!((got - expected).abs() < 1.0e-6, "{shape:?}: {got}");
+        }
+        for shape in [
+            NoseShape::Ogive { crh: 0.49 },
+            NoseShape::Cone {
+                length_calibres: 0.0,
+            },
+            NoseShape::Cap {
+                radius_calibres: 0.4,
+            },
+            NoseShape::Ogive { crh: f32::NAN },
+        ] {
+            let mut spec = fixture();
+            let mut weapon = spec.weapons["MG"].clone();
+            weapon.nose = shape;
+            spec.weapons.insert("Blunt".to_string(), weapon);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("Blunt") && err.contains("nose"),
+                "{shape:?}: {err}"
+            );
+        }
+    }
+
+    /// Extreme FINITE nose parameters: a spec is accepted exactly when its derived factor and the
+    /// capability law's results stay in their finite valid domain, and an accepted factor is the
+    /// family's own formula, not an overflowed intermediate.
+    #[test]
+    fn extreme_nose_parameters_are_accepted_only_inside_the_law_s_domain() {
+        let accepted = |shape: NoseShape| {
+            let mut spec = fixture();
+            let mut weapon = spec.weapons["Cannon"].clone();
+            weapon.nose = shape;
+            spec.weapons.insert("Extreme".to_string(), weapon);
+            match spec.validate() {
+                Ok(()) => true,
+                Err(err) => {
+                    let err = err.to_string();
+                    assert!(
+                        err.contains("Extreme") && err.contains("nose"),
+                        "{shape:?}: {err}"
+                    );
+                    false
+                }
+            }
+        };
+        // DERIVED limits: ogive N → 1/(3ψ), cone N → 1/(4φ²), cap N → 1.
+        for (shape, limit) in [
+            (NoseShape::Ogive { crh: 1.0e20 }, 1.0 / 3.0e20),
+            (
+                NoseShape::Cone {
+                    length_calibres: 1.0e18,
+                },
+                0.25e-36,
+            ),
+            (
+                NoseShape::Cap {
+                    radius_calibres: f32::MAX,
+                },
+                1.0,
+            ),
+        ] {
+            assert!(accepted(shape), "{shape:?} is inside the law's domain");
+            let got = shape.factor() as f64;
+            assert!(
+                (got / limit - 1.0).abs() < 1.0e-6,
+                "{shape:?}: factor {got} vs {limit}"
+            );
+        }
+        for shape in [
+            NoseShape::Cone {
+                length_calibres: 1.0e20,
+            },
+            NoseShape::Ogive { crh: f32::MAX },
+            NoseShape::Cone {
+                length_calibres: f32::MAX,
+            },
+        ] {
+            assert!(
+                !accepted(shape),
+                "{shape:?} derives a factor f32 cannot carry (got {})",
+                shape.factor()
+            );
         }
     }
 

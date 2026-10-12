@@ -16,7 +16,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
-use crate::ballistics::ComponentHealth;
+use crate::ballistics::{ComponentHealth, Verdict};
 use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
@@ -131,7 +131,16 @@ use crate::{CombatantId, ShotId};
 /// framing under all of it does — messages serialize with postcard instead of bincode, the packet
 /// header is 13 bytes, message ids are wrapping `u16`s, and replicon 0.43+ folds marker components
 /// into its own protocol hash. REV 28 shipped (v0.5.2 onward), so this is a real bump.
-pub const PROTOCOL_REV: u32 = 29;
+///
+/// REV 30 (force-law capability): `FireEvent` carries the round's `nose_factor`, which the
+/// capability law reads beside mass and calibre. Own-type graph and REV move; capability itself
+/// never rides the wire.
+///
+/// REV 31 (a public impact outcome): [`ImpactConfirm`]'s `penetrated` bool becomes a [`Verdict`]
+/// (`Through` / `Stopped` / `Ricochet` / `Struck`), so a peer can tell a round that stopped in the
+/// plate from one that went through, and a deflection from a stop that resolved no crossing. New
+/// embedded enum: own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 31;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -303,6 +312,7 @@ pub struct FireEvent {
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
+    pub nose_factor: f32,
     pub mechanism: crate::spec::FireMechanism,
     /// Authoritative tracer selection.
     pub tracer: bool,
@@ -427,8 +437,9 @@ pub struct ImpactConfirm {
     /// The struck face's outward normal, from the server's raycast. No `Dir3` guard on receipt:
     /// `Impact` consumers normalize with a fallback by contract (see `ballistics::Impact::normal`).
     pub normal: Vec3,
-    /// The server's penetration verdict — gates the flame lick exactly as the local read does.
-    pub penetrated: bool,
+    /// The server's verdict at the struck face: whether the round stopped in the material or went
+    /// through. Its `entered()` gates the flame lick exactly as the local read does.
+    pub verdict: Verdict,
     /// The server `Tick` the impact resolved on. Audit / future RTT-adaptive use, like
     /// [`RicochetKeyframe::bounce_tick`] — the client resolves on receipt, not by re-aging.
     pub impact_tick: Tick,
@@ -883,7 +894,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x7926_3814_03fc_ca61;
+const WIRE_TYPES_HASH: u64 = 0xf0bf_c3ef_9a90_e904;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1335,9 +1346,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 29 and the lightyear 0.30.1 wire dependency (the framing changed under an
-        // unchanged own-type graph).
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x3f3d_9417_ec19_f150;
+        // Pins REV 31: `ImpactConfirm` carries a four-way `Verdict`, on the lightyear 0.30.1 wire
+        // dependency.
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x4d85_af40_b6af_0c81;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1586,6 +1597,7 @@ mod tests {
         ("src/spec.rs", "FireMechanism"),
         ("src/net/protocol.rs", "RicochetKeyframe"),
         ("src/net/protocol.rs", "ImpactConfirm"),
+        ("src/ballistics.rs", "Verdict"),
         ("src/net/protocol.rs", "DamageReceipt"),
         ("src/net/protocol.rs", "DamageConfirm"),
         ("src/net/protocol.rs", "SetSpawnPoint"),

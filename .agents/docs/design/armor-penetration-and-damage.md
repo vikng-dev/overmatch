@@ -93,15 +93,45 @@ well-defined.
 > overlapping volumes behave as their boolean union, and cost/damage/spall become field + boundary
 > laws over the material-factor field. Implement crossings from §13, magnitudes from here.
 
-For a fixed projectile (mass, caliber, hardness constant), penetration is a monotonic, invertible
-function of velocity (DeMarre, `pen ∝ vⁿ`). So **velocity is the stored state; penetration
-*capability* is its derivative.** The march, per volume crossed:
+For a fixed round (mass, calibre, nose factor), penetration is a monotonic, invertible function of
+velocity. So **velocity is the stored state; penetration *capability* is its derivative.** The
+march, per volume crossed:
 
-1. `capability = f(mass, velocity)` — reference-mm this shell can defeat right now. **Mass is the
-   primary driver** (sectional density / KE, `pen ∝ massᴹ·vⁿ`, M≈0.5); velocity secondary; both held
-   in the shell, mass constant so velocity stays the stored state. Caliber is *not* here — it drives
-   overmatch and spall hole-size, not raw penetration. (This is what separates a tank shell from a
-   bullet at equal speed, and is the seed of the per-shell data struct.)
+1. `capability = f(round, velocity)` — reference-mm this shell can defeat right now, by the
+   force-law (Poncelet) form:
+
+   ```
+   A        = π c² / 4                              presented area (m²), c = calibre
+   k        = B · N · RHO_REF                       inertia coefficient (kg/m³)
+   depth(v) = m / (2 A k) · ln(1 + k v² / a)        metres of reference steel still to go
+   C        = 1000 · depth(v)                       capability, reference-mm
+   v(C)     = sqrt((a / k) · (exp(C/1000 · 2 A k / m) − 1))
+   ```
+
+   No fitted constant. The reference steel is armour-class rolled homogeneous steel, given by its
+   material facts: flow stress `Y = 1.0e9 Pa` (mean of proof stress and tensile strength), Young's
+   modulus `E = 205e9 Pa`, Poisson's ratio `ν = 0.29`, density `RHO_REF = 7850 kg/m³`
+   (`.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md` Q2). The strength
+   term `a` (Pa) is the compressible elastic–perfectly-plastic cavity-expansion term
+   `a = (2/3) · (1 + ln(E / (3 (1 − ν) Y))) · Y ≈ 3.711e9 Pa` (DERIVED): a prior from material
+   facts, not validated against thick-steel depth data, and the compressible form was read in
+   restatement, not in its primary. `B = 1` is the target inertia factor, a named approximation
+   weakly constrained by the available plate data. The fixture rounds at muzzle carry about
+   115 reference-mm (main gun, 773 m/s) and 14.5 reference-mm (machine gun, 755 m/s), DERIVED.
+   The nose factor `N` is the frictionless nose factor of the cavity-expansion form, in `(0, 1]`. It is **shell data authored as geometry**: each weapon in the tank RON carries a
+   required `nose` (parameters in calibres), and `spec.rs` derives `N` once at load — `Ogive(crh:
+   ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`; `Cone(length_calibres: φ)`, `φ > 0`:
+   `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`, `φ ≥ 0.5`: `N = 1 − 1 / (8φ²)`; `Flat`:
+   `N = 1`. A parameter outside its range fails to load. The derived scalar travels with mass and
+   calibre through `FireShell`, `Projectile` and the `FireEvent` wire; the shape never leaves the
+   spec layer. Fixture noses are labelled: `Ogive(crh: 1.0)` for the main gun,
+   `Cap(radius_calibres: 0.5)` (a hemisphere, `N = 0.5`) for the machine-gun rounds. Calibre enters raw penetration through `A`: at equal mass a wider round
+   presents more area and goes less deep. The law's invariants: strictly increasing in speed;
+   replica scaling (mass ×s³, calibre
+   ×s gives capability ×s); the local speed exponent is 2 at low speed (the inertia term is
+   negligible) and falls below 2 as it grows; and spending composes, because a crossing spends
+   reference-mm and the inverse is exact. A crossing whose limit speed is `v_l` leaves
+   `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
 2. `cost = LOS_distance × material_factor` (× angle effects), also reference-mm.
 3. If `capability > cost` → **perforate**: spend `cost`, invert `f` back to a reduced **residual
    velocity** (the Lambert–Jonas shape — barely-penetrate exits slow, big overmatch barely slows),
@@ -138,63 +168,98 @@ When the path reaches a volume's face:
    LOS cost; perforate→exit (spall) or embed.
 
 The *structure* is the design; the magnitudes (k, ricochet angle, normalization degrees, material
-factors, the DeMarre exponent) are **live knobs the sandbox exists to tune** — built as adjustable
+factors) are **live knobs the sandbox exists to tune** — built as adjustable
 constants, not baked.
 
-## 5. Spall — the exit cone (the primary crew-killer)
+## 5. Spall — the spall cone (the primary crew-killer)
 
-On every **perforation exit**, the volume emits a **consistent, fixed-shape cone** — *not* a
-per-shell dynamically-derived spray (that read as confusing/inconsistent). Dense on-axis at the
-source (point-blank behind the plate is a guaranteed hit), thinning with angle and distance, so
-survival odds rise the further off-axis and the deeper a component sits.
+Spall is a **field**: strength over directions from an origin, spent by the material it crosses,
+dosing the boxes it reaches (glossary: *Field*, *Spall cone*). Adopted by the owner 2026-10-12;
+decision record `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`
+("The dose model"), evidence in `research/cloud-falloff.md`, `research/cloud-angle-deep.md` and
+`research/codex-cloud-angle/verdict.md` beside it.
 
-- **Cone density = expected fragment-units per direction.**
-- A **fragment is an energy packet** (superseded the original 1-HP/no-pen token — energy-packet cut
-  2026-06-28). It carries a penetration value (RHA-mm) that bleeds with distance (drag); it deposits
-  damage scaled by that energy, then **punches through thin volumes** (losing the cost it spends) or
-  **stops in thick ones**. So **geometric shadowing** still holds for the engine block, but a thin
-  bulkhead no longer fully protects what's behind it, and a strong on-axis fragment can exit the tank
-  to reach another a few metres back (arriving weak). On-axis fragments are stronger (narrower, more
-  penetrating) — the continuous form of WT's "more power ↔ narrower cone" groups.
-- AP spalls at the exit of **every** plate it perforates → multiple spall events per shot, each
-  rolling independently against nearby components.
+**Which steps throw.** A cone is thrown at every **body exit** the round reaches, sized by that
+exit's own spend and speeds, whatever the round does afterwards. A body is a maximal stretch of
+material along the path (welded voids inside it included) over which no layer resists less than
+the one before it. It exits where the next medium resists less — a lower factor, or air — and the
+next body starts there. A step to an equal or higher factor continues the body without a throw,
+whatever the substances: plates of equal factor in contact are one plate and throw once at the far
+face with their summed spend (owner, 2026-10-12), and a step up into harder material adds what is
+crossed behind it to the same body, since no softer step intervened. Exits reached before the round
+stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
-**Locked v1 model (2026-06-28).** The cone's *shape* is fixed (symmetric, half-angle constant,
-axis = the penetrator's **exit direction** — which already carries the normalization bend; obliquity
-adds no skew); only its *fragment budget* (density) scales with the shot. The budget is the
-**product of a body term and a shell term** — both must be present or there is no spall:
+**Strength.** `S = spend × (v_exit / v_entry)²` (reference-mm, on the axis), where `spend` is what
+the round's mechanism spent crossing that body (its readout drop, η-weighted by the disc) and
+`v_entry`, `v_exit` are the round's speeds entering and leaving it. A thin or soft body has a small
+positive spend (positive chord × factor) and throws a small cone; a barely-through round has a
+small energy ratio. Calibre has no role.
 
-> `spall_budget ∝ cost_paid × v_res² × caliber`
+**Profile.** Inside a cone of half-angle `α` about its axis,
 
-- **Body term = `cost_paid` = LOS_distance × material_factor** — the material the round chewed, i.e.
-  the *supply* of fragments. Thin/soft body → ~0; crew (≈0 factor) don't scab. (Resolves the §9 open
-  tab: budget scales with residual energy *and* material, not either alone.)
-- **Shell term = `v_res²`** (residual energy) — the *power* to throw them forward. Barely-through →
-  v_res≈0 → ~0; overmatch with energy to spare → violent.
-- This is why both extremes are weak: barely-through starves the shell term; thin/soft body starves
-  the body term. Optimal = a well-sized plate perforated with energy to spare.
-- `material_factor` doubles as the spall-supply proxy for v1. A dedicated **`spall_factor`**
-  (brittleness, the physically-correct scabbing driver — ductile RHA resists, brittle armor/cast iron
-  throws) is **noted as a later refinement**, not built yet.
+> `s(θ) = S · (cos θ − cos α) / (1 − cos α)`, and `0` outside.
 
-**Energy-packet refinement (2026-06-28).** The total-energy budget above is *factored* into a
-**count × per-fragment energy**, which is cleaner and is where shell-type variation will live:
-- **count ∝ cost × caliber** (material supply + hole size — how *many* fragments).
-- **per-fragment energy ∝ v_res² × (on-axis weight)** (the shot's push, concentrated on-axis — how
-  *hard* each one is). Energy → both damage *and* penetration (RHA-mm), and bleeds with distance
-  (fragment drag). Product still ≈ `cost × v_res² × caliber`, so the §5 budget is preserved.
-This single change subsumes three threads: cone shape (on-axis weighting), fragment penetration
-(energy-gated), and fragment drag (distance term). Shell types then vary the energy total + its
-on-axis concentration + a fragment-penetration ceiling (see the shell-as-data direction in the
-handoff). Other shell types (APHE/APDS/APFSDS/HE/…) stay deferred — AP is the populated point.
-- **HE is a separate, penetration-independent mechanic** (later): a fuse triggers on minimum
-  steel-equivalent thickness, then after a delay detonates into a much denser, wider cone — the
-  penetrator is gone. Not modelled in this slice.
+Smooth on the axis, zero at the rim, strongest on-axis (War Thunder's "narrower is stronger" made
+continuous). Calibration observable: the cone holding 95 % of the emitted strength has half-angle
+`arccos(cos α + √0.05 · (1 − cos α))` ≈ 0.88 α (DERIVED).
+
+**Axis.** At a genuine exit (material to air through a rear face), `normalize(n_rear + d_exit)`,
+`n_rear` the face's outward normal and `d_exit` the round's direction; at an internal step (no face
+of its own), `d_exit`. ENGINEERING ASSUMPTION with MEASURED support (Verolme 1997; Recht & Howell
+1967: 25° measured against 22.5° predicted at 45° obliquity).
+
+**Sampling.** `N` directions in equal-solid-angle strata, `μ_k = cos θ_k = 1 − (1 − cos α)(k + ½)/N`,
+golden-angle azimuth, each standing for `1/N` of the cone. The midpoint rule is exact on a profile
+linear in `cos θ`, so the emitted total `(1/N) Σ s_k` is `S/2` at every `N`: `N` is resolution,
+never balance. The strata are generated with `libm` so their bits match on every shipped target.
+
+**Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and spent
+only by `chord × factor` through material; it stops where that exhausts it, or where it leaves the
+struck tank (it doses only that tank's boxes; hitting another tank is a preserved alternative). The
+`1/r²` fall-off is not a parameter: a box farther away covers fewer directions. Shadowing is graded:
+a plate nearly always stops a direction, an engine block mostly, a crew station barely.
+
+**Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
+the whole ray through the struck tank, from outside every candidate's bounds through the throw
+point, with nothing declared. So what it starts inside is established, never assumed — thrown from
+an internal step it starts inside the softer material and pays for it — and every volume along it is
+present in order, nested and overlapping ones included; an overlap resists by the union-field
+overlap rule. No nudge displaces the ray: the volumes the exit leaves are recognised by identity, so
+a direction starting inside one of them pays for that material but does not dose it there.
+
+**Dose.** A box's dose is `D_b = (1/N) Σ s_i(at entry)` over the directions entering it, each
+direction dosing a box once, in the count unit (reference-mm), never scaled by the box's own factor;
+armour (no count) shadows and takes nothing. A box the direction starts inside is entered at the
+throw point, unless the exit leaves it. Doses go through the addressed `Dose` effect, like the line's. Dose summed over boxes is not
+conserved (two thin boxes in line both take nearly full strength); the emitted budget is.
+
+**Data.** `α`, the axis rule and `N` live in `assets/ballistics/spall_cone.ron`, parsed and
+validated while the app is built (ADR-0014: built from data, synchronously); a half-angle whose
+`cos α` rounds to 1, or a shape not emitting `S/2` within the rounding of its weights, is refused. `α` = 25° is TUNED/provisional (owner 2026-10-12;
+MEASURED normal-impact outer extents ~26°, Qi et al. 2026). The half-angle and the axis are a
+playtest fork (`.agents/scratch/playtest-forks/README.md`).
+
+**Class invariants** (tests hold them for any tank and any cone; fixture numbers are fixture data):
+exact emission `S/2` at N ∈ {1, 7, 24, 97}; resolution stability; homogeneity in `S`; inverse
+square for an unshadowed thin box; profile shape (maximal on the axis, zero at and past the rim);
+factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose,
+over a cone and along one direction through randomized stacks); a direction pays for the material it
+starts inside, a nested shield shadows, a box inside a traversed volume is dosed, a plate thinner
+than any nudge is charged. The shipped cone's walks, and six whole main-gun shots at the bound tank
+(exit detection, spends and speeds, strength, axis, walks, HP), are digested on every target by
+`src/ballistics/field_casts.rs`; the force law's transcendentals are `libm`'s, so a shot's spall
+sources are the same bits everywhere.
+
+**Not built.** The fragment cone (a bursting round's own fragments, carrying its velocity) and the
+blast sphere; plate failure mode (coherent plug vs distributed debris) selected by material and
+impact conditions. **HE** stays a separate, penetration-independent mechanic: a fuse triggers on
+minimum steel-equivalent thickness, then detonates after a delay.
 
 ## 6. Component damage — HP per component, never per tank
 
-Every component has its own **HP pool** (e.g. crewman 3, engine 10). A fragment deposits 1 unit; the
-**main penetrator transiting** a module deposits many (scaled by the energy it spent crossing it).
+Every component has its own **HP pool** (e.g. crewman 3, engine 10). A spall cone doses it by the
+strength reaching it (§5); the **main penetrator transiting** a module deposits what it spent
+crossing it.
 This is *local function state*, not a global health bar — the kill condition is still crew < 2.
 
 - **Crew are soft** (low HP) — the kill currency; a graze chips, a faceful of cone or a clean
@@ -413,13 +478,13 @@ remaining work is deferred refinements (§9) and the eventual game-side (non-san
 
 ## 9. Open tabs (deferred, named so they aren't lost)
 
-- Spall budget *driver* is settled (§5: `cost_paid × v_res² × caliber`); remaining tuning = caliber
-  exponent (1 vs 2 = hole-area), an overall fragment cap, continuous vs coarse-tiered count, and
-  whether to split out a dedicated `spall_factor` (brittleness) from `material_factor`.
+- Spall strength is settled (§5: `spend × (v_exit / v_entry)²`); remaining tuning = the box counts
+  (the owner's feel pass), the half-angle and axis fork, and whether a dedicated brittleness
+  (plug vs debris) selects the failure mode.
 - Ricochet threshold dependencies: pure angle now; later velocity/caliber-scaled.
 - HE: fuse minimum-thickness trigger + delay + dense wide cone (penetration-independent).
-- Numeric magnitudes (k overmatch ratio, ricochet angle, normalization degrees, material factors,
-  DeMarre exponent) — tuned live in the sandbox.
+- Numeric magnitudes (k overmatch ratio, ricochet angle, normalization degrees, material factors)
+  — tuned live in the sandbox.
 - Data homes: ballistic-volume geometry on the model (watertight); material factor + shell specs in
   RON (ADR-0010 spirit — ADR-0010 already flags per-plate armor as a genuinely node-attached case);
   crew/module/station definitions TBD.
@@ -618,15 +683,15 @@ material *of yours* it chewed." The error a component clipped into armor introdu
 penetrated that deep — at which point it was hitting the component anyway. Two crew overlapping
 each other: both deposit, cost charged once, nothing needs to win.
 
-**Spall law:** at every **downward factor step**, emit spall scaled by the §5 budget of the
-contiguous run just exited, into the next region — then the fragments march under these same field
-laws. Everything on the wishlist emerges with no class rules:
+**Spall law:** at every **body exit** — a step to a lower factor, or to air — a spall cone is thrown
+with that body's own spend and speeds (§5), and its directions march under these same field laws.
+Everything on the wishlist emerges with no class rules:
 
-- Crew never spall — flesh can't accumulate cost (§5's body term, unchanged).
-- Crew pressed against an inner wall (steel→flesh contact, no air gap): spall throws off the steel
-  backface **directly into the body** — the overlap *created* that transition, correctly.
-- Buried steel faces (overlapped plates) stop being downward steps — no seam spall, no seam VFX.
-- A small drop into other steel (cast→RHA) emits fragments that the fragment march absorbs in
+- Crew barely spall — flesh spends almost nothing (§5's strength, unchanged in shape).
+- Crew pressed against an inner wall (steel→flesh contact, no air gap): the cone throws off the
+  steel backface **directly into the body** — the overlap *created* that transition, correctly.
+- Buried steel faces (overlapped plates) are no exits — no seam spall, no seam VFX.
+- A small drop into other steel (RHA→cast) throws a cone the material behind absorbs in
   millimetres — self-correcting, no suppression rule needed.
 
 ### 13.3 Surface-law amendment — factor-weighted thickness (required for classlessness)
@@ -678,12 +743,10 @@ today independent of unions.
    - **It merges event topology, not material.** One entry face (ricochet/normalization/incidence
      once, at the outer face), one exit at the true inner face, overmatch against the run's summed
      factor-weighted thickness. No second ricochet check mid-sandwich.
-   - **Spall follows the field law, not the run** (RULED 2026-08-07, superseding this section's
-     original "spall once per welded run", which contradicted §13.2): welding deletes only the
-     void's exit/entry face pair; the direct material step it exposes still obeys §13.2 — a
-     downward factor step at a welded joint spalls with its own budget, an equal-factor joint
-     emits nothing. A 0.4mm void still never "develops" spall of its own — voids have no events,
-     material steps do.
+   - **Spall follows the body, not the run:** welding deletes only the void's exit/entry face
+     pair; the material step it exposes is judged under §5 — a lower-factor substance behind a
+     welded joint makes the joint a body exit with its own spend, an equal or higher factor behind
+     it continues the body. A 0.4mm void never "develops" spall of its own.
    - **It never charges the gap.** Cost integrates material chords only — welding deletes phantom
      *faces*; it cannot create phantom *steel*.
    - **Measure the gap perpendicular, not along the ray** — else grazing incidence un-welds exactly
@@ -703,7 +766,7 @@ today independent of unions.
    free flight — **spaced armor is emergent**.
 
 Entry-face semantics (incidence, normalization, ricochet test, the terminal/`Impact` reads) evaluate
-at the outermost *significant* factor step; spall at downward steps. **A boundary buried under
+at the outermost *significant* factor step; spall at body exits (§5). **A boundary buried under
 equal-or-higher factor is deliberately eventless** — it is not a field step, so there is no ricochet,
 no spall, no impact and no normal to attribute, and the exposed outer boundary is read from the face
 that actually moves the field. That is the qualifier on "a thin shell has real events": it has
@@ -736,8 +799,9 @@ samples. Per event:
   **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.
   Damage stays per-presence, now per-sample: each HP entity deposits for the samples crossing *it*
   — a shell clipping the corner of a crew volume wounds fractionally. Emergent.
-- **Exit:** area-mean exit point/normal; spall budget = the event's cost (already η-weighted);
-  spall axis = exit direction as before.
+- **Exit:** area-mean exit point/normal. Each body exit is grouped over the samples that reach
+  it; its spend is the mechanism's readout drop across that body, shared among the samples by the
+  factor each was resisted by, so it is η-weighted by construction (§5).
 
 **What the uniform law dissolves** (each was a provisional rule during 2026-08-03/04 design;
 none survive — recorded so they aren't re-invented):
@@ -758,9 +822,8 @@ none survive — recorded so they aren't re-invented):
 **Emergent results:** the MG port in the cast mantlet is a *graded* weakspot (η ≈ 0.9 of the cast
 chord — most, not all, of the resistance; zero authored weakspot data); an 88 cannot thread the
 turret-ring slit while an MG round centered in it flies free (η = 0) — **caliber-gated weakspots
-from geometry**; sub-caliber accidental cracks self-heal (η ≈ 1, near-full charge); **fragments
-are shells with r→0, k=1** — the same primitive degenerates to the pure ray, so
-`cast_spall_fragment` needs no law of its own.
+from geometry**; sub-caliber accidental cracks self-heal (η ≈ 1, near-full charge); a shell with
+r→0, k=1 degenerates to the pure ray.
 
 **Deliberate costs, accepted 2026-08-04:**
 
@@ -860,9 +923,8 @@ Enforced mechanically, not by eyeball:
   expected. Assigning a substance to *faces* of a shared shell is forbidden — the walk pairs
   entry/exit per closed surface, and a painted-on boundary has no exit face to pair.
 
-**Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; equal-factor run
-merging for spall accounting (an ownership switch mid-steel is one run, keyed by factor value);
-whether ricochet-shock on exposed components adopts the same factor-step gate; the
+**Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; whether ricochet-shock
+on exposed components adopts the same factor-step gate; the
 lateral-asymmetry kick (§13.5, deliberately omitted). Material near-ties need nothing: `max`
 needs no tie-break for cost, and damage has no ownership at all.
 **Track belt ballistics (RULED IN, 2026-08-07, design pending):** Yan — links, sprockets and

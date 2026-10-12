@@ -303,6 +303,7 @@ fn fire_script(
         speed: 800.0,
         caliber: 0.088,
         mass: 10.2,
+        nose_factor: 0.3,
         mechanism,
         tracer: true,
         shot_origin: FireShellOrigin::Local,
@@ -450,6 +451,7 @@ fn fire_volley_script(
                 speed: 800.0,
                 caliber: 0.0079,
                 mass: 0.0118,
+                nose_factor: 0.5,
                 mechanism: crate::spec::FireMechanism::Automatic,
                 tracer: true,
                 shot_origin: FireShellOrigin::Local,
@@ -497,6 +499,7 @@ fn fire_sustained_stream(
             speed: 800.0,
             caliber: 0.0079,
             mass: 0.0118,
+            nose_factor: 0.5,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shot_origin: FireShellOrigin::Local,
@@ -534,6 +537,7 @@ fn fire_sustained_stream(
         speed: 800.0,
         caliber: 0.088,
         mass: 10.2,
+        nose_factor: 0.3,
         mechanism: crate::spec::FireMechanism::Single,
         tracer: true,
         shot_origin: FireShellOrigin::Local,
@@ -619,7 +623,7 @@ fn collect_catch_up_armor_holds(
 struct ClientBounces(u32);
 
 fn collect_client_bounces(impact: On<Impact>, mut bounces: ResMut<ClientBounces>) {
-    if impact.deflection.is_some() {
+    if impact.outcome.deflection().is_some() {
         bounces.0 += 1;
     }
 }
@@ -701,7 +705,7 @@ fn spawn_plate(app: &mut App) {
         Collider::cuboid(20.0, 20.0, 0.1),
         CollisionLayers::new([Layer::Armor], LayerMask::ALL),
         BallisticVolume {
-            material_factor: STEEL,
+            material: crate::ballistics::VolumeMaterial::fixture(STEEL),
             substance: "RHA".to_string(),
         },
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every

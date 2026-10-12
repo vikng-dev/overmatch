@@ -6241,6 +6241,7 @@ dependencies = [
  "glam 0.32.1",
  "gltf",
  "image",
+ "libm",
  "lightyear",
  "lightyear_core",
  "lightyear_inputs",
