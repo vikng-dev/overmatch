@@ -11,6 +11,9 @@
 //   before they are acted on, and transitions are guarded by `WHERE state = …`.
 // - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
 //   with no rows left it is cleared and the object goes idle.
+// - A deployment is forgotten only once Edgegap confirms it stopped. Ending a server moves its row to
+//   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
+//   gone), and only then is the row `ended` and its history closed.
 // - Secrets: the netcode key leaves this object only in a ticket answer for that server; the report
 //   secret is stored only as its SHA-256 and never leaves.
 
@@ -23,7 +26,7 @@ import { groupLocations, locationId } from "./locations";
 import { diag, REASONS, serverReason } from "./reasons";
 import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
 
-type ServerState = "starting" | "ready" | "ended";
+type ServerState = "starting" | "ready" | "stopping" | "ended";
 
 type ServerRow = {
 	id: string;
@@ -45,6 +48,8 @@ type ServerRow = {
 	next_poll_at: number | null;
 	ended_at: number | null;
 	peak_players: number;
+	deploy_pending: number;
+	stop_at: number | null;
 }
 
 type TicketRow = {
@@ -110,7 +115,9 @@ CREATE TABLE IF NOT EXISTS servers (
 	last_seen INTEGER,
 	next_poll_at INTEGER,
 	ended_at INTEGER,
-	peak_players INTEGER NOT NULL DEFAULT 0
+	peak_players INTEGER NOT NULL DEFAULT 0,
+	deploy_pending INTEGER NOT NULL DEFAULT 0,
+	stop_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS tickets (
 	id TEXT PRIMARY KEY,
@@ -157,7 +164,7 @@ export class Registry extends DurableObject<Env> {
 		}
 		const matches = new Map<string, number>();
 		for (const r of this.sql
-			.exec<{ location: string; n: number }>("SELECT location, COUNT(*) AS n FROM servers WHERE state != 'ended' GROUP BY location")
+			.exec<{ location: string; n: number }>("SELECT location, COUNT(*) AS n FROM servers WHERE state IN ('starting', 'ready') GROUP BY location")
 			.toArray()) {
 			matches.set(r.location, r.n);
 		}
@@ -202,7 +209,7 @@ export class Registry extends DurableObject<Env> {
 		const s = t.server_id ? this.server(t.server_id) : null;
 		if (!s) return { state: "starting" };
 		if (s.state === "ready") return { state: "ready", address: s.address!, port: s.port!, key: s.netcode_key };
-		if (s.state === "ended") return { state: "failed", reason: publicReason(s.reason) };
+		if (s.state === "stopping" || s.state === "ended") return { state: "failed", reason: publicReason(s.reason) };
 		return { state: "starting" };
 	}
 
@@ -210,12 +217,12 @@ export class Registry extends DurableObject<Env> {
 
 	async heartbeat(serverId: string, secret: string, hb: HeartbeatRequest): Promise<ServerCallResult> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended") return { status: 410 };
+		if (!s || !live(s)) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		const now = Date.now();
 		const written = this.sql.exec(
 			`UPDATE servers SET players = ?, capacity = ?, server_state = ?, last_seen = ?, peak_players = MAX(peak_players, ?)
-			 WHERE id = ? AND state != 'ended'`,
+			 WHERE id = ? AND state IN ('starting', 'ready')`,
 			hb.players,
 			hb.capacity,
 			hb.state,
@@ -234,7 +241,7 @@ export class Registry extends DurableObject<Env> {
 
 	async end(serverId: string, secret: string, reason: string): Promise<ServerCallResult> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended") return { status: 410 };
+		if (!s || !live(s)) return { status: 410 };
 		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
 		await this.finish(serverId, "ended", serverReason(reason));
 		return { status: 204 };
@@ -244,7 +251,7 @@ export class Registry extends DurableObject<Env> {
 	 *  that. */
 	async webhook(serverId: string): Promise<void> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended" || !s.deployment_id) return;
+		if (!s || !live(s) || !s.deployment_id) return;
 		await this.refreshStatus(serverId);
 	}
 
@@ -284,6 +291,11 @@ export class Registry extends DurableObject<Env> {
 			const s = this.server(id);
 			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", REASONS.serverLost, "ready");
 		}
+
+		const stopping = this.sql
+			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'stopping' AND COALESCE(stop_at, 0) <= ?", now)
+			.toArray();
+		for (const { id } of stopping) await this.tryStop(id);
 
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
 		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
@@ -389,8 +401,8 @@ export class Registry extends DurableObject<Env> {
 		const serverId = newId(version);
 		const netcodeKey = randomHex(32);
 		this.sql.exec(
-			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at)
-			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?)`,
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy_pending)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 1)`,
 			serverId,
 			where,
 			this.cfg.capacity,
@@ -424,21 +436,22 @@ export class Registry extends DurableObject<Env> {
 			});
 		} catch (err) {
 			console.warn("deploy failed", serverId, diag(err));
-			await this.finish(serverId, "failed", deployFailure(err));
+			this.sql.exec("UPDATE servers SET deploy_pending = 0 WHERE id = ?", serverId);
+			await this.finish(serverId, "failed", deployFailure(err), "starting");
+			await this.tryStop(serverId); // ended while the call was in flight: nothing to stop now
 			return;
 		}
 
-		const still = this.sql.exec("UPDATE servers SET deployment_id = ? WHERE id = ? AND state = 'starting'", deploymentId, serverId).rowsWritten;
-		if (!still) {
-			// Ended while the deploy call was in flight: the deployment has no row to report to.
-			await this.provider.stop(deploymentId).catch((err) => console.error("stop of orphan failed", deploymentId, diag(err)));
-		}
+		// Recorded whatever the row's state: a claim that ended while the call was in flight is
+		// `stopping`, and its stop needs this id.
+		this.sql.exec("UPDATE servers SET deployment_id = ?, deploy_pending = 0 WHERE id = ?", deploymentId, serverId);
 		await recordEvent(this.env.DB, { kind: "deployed", serverId, deploymentId });
+		if (this.server(serverId)?.state === "stopping") await this.tryStop(serverId);
 	}
 
 	private async refreshStatus(serverId: string): Promise<void> {
 		const before = this.server(serverId);
-		if (!before?.deployment_id || before.state === "ended") return;
+		if (!before?.deployment_id || !live(before)) return;
 		let st: DeploymentStatus;
 		try {
 			st = await this.provider.status(before.deployment_id);
@@ -447,7 +460,7 @@ export class Registry extends DurableObject<Env> {
 			return;
 		}
 		const s = this.server(serverId);
-		if (!s || s.state === "ended") return;
+		if (!s || !live(s)) return;
 		switch (st.phase) {
 			case "ready":
 				this.sql.exec("UPDATE servers SET address = ?, port = ? WHERE id = ? AND state != 'ended'", st.address, st.port, serverId);
@@ -477,13 +490,22 @@ export class Registry extends DurableObject<Env> {
 		return n > 0;
 	}
 
-	/** Terminal transition: stop the deployment if one may be live, record history, and give the
-	 *  tickets of a server that never became ready another placement (bounded by JOIN_ATTEMPTS). */
+	/** End a live server: move it to `stopping`, give the tickets of a server that never became ready
+	 *  another placement (bounded by JOIN_ATTEMPTS), and try the stop. The row stays until the stop
+	 *  is confirmed (`tryStop`). */
 	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): Promise<void> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended" || (from && s.state !== from)) return;
+		if (!s || !live(s) || (from && s.state !== from)) return;
 		const now = Date.now();
-		this.sql.exec("UPDATE servers SET state = 'ended', outcome = ?, reason = ?, ended_at = ? WHERE id = ? AND state = ?", outcome, reason, now, serverId, s.state);
+		const moved = this.sql.exec(
+			"UPDATE servers SET state = 'stopping', outcome = ?, reason = ?, stop_at = ? WHERE id = ? AND state = ?",
+			outcome,
+			reason,
+			now,
+			serverId,
+			s.state,
+		).rowsWritten;
+		if (!moved) return;
 		const orphans =
 			s.state === "starting"
 				? this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", serverId).toArray()
@@ -507,14 +529,47 @@ export class Registry extends DurableObject<Env> {
 			}
 		}
 
-		if (s.deployment_id) {
-			await this.provider.stop(s.deployment_id).catch((err) => console.error("stop failed", s.deployment_id, diag(err)));
-		}
-		await recordEvent(this.env.DB, { kind: "ended", serverId, at: now, outcome, reason, peakPlayers: s.peak_players });
-
+		await this.tryStop(serverId);
 		const version = versionOf(serverId);
 		for (const id of retry) if (version) await this.place(version, id);
 		await this.reschedule();
+	}
+
+	/** One stop attempt for a `stopping` row. Success (or Edgegap no longer knowing the deployment)
+	 *  ends the row and closes its history; failure leaves it `stopping` with the next attempt time.
+	 *  A row whose deploy call is still in flight waits for the id. */
+	private async tryStop(serverId: string): Promise<void> {
+		const s = this.server(serverId);
+		if (s?.state !== "stopping") return;
+		const now = Date.now();
+		if (!s.deployment_id) {
+			if (s.deploy_pending) this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
+			else await this.markEnded(serverId);
+			return;
+		}
+		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
+		try {
+			await this.provider.stop(s.deployment_id);
+		} catch (err) {
+			console.error("stop failed, will retry", serverId, diag(err));
+			return;
+		}
+		await this.markEnded(serverId);
+	}
+
+	private async markEnded(serverId: string): Promise<void> {
+		const s = this.server(serverId);
+		if (s?.state !== "stopping") return;
+		const now = Date.now();
+		if (!this.sql.exec("UPDATE servers SET state = 'ended', ended_at = ? WHERE id = ? AND state = 'stopping'", now, serverId).rowsWritten) return;
+		await recordEvent(this.env.DB, {
+			kind: "ended",
+			serverId,
+			at: now,
+			outcome: s.outcome ?? "ended",
+			reason: s.reason ?? REASONS.serverEnded,
+			peakPlayers: s.peak_players,
+		});
 	}
 
 	private async ensureAlarm(at: number): Promise<void> {
@@ -530,6 +585,7 @@ export class Registry extends DurableObject<Env> {
 					SELECT MIN(created_at + ?, CASE WHEN deployment_id IS NULL THEN created_at + ? ELSE COALESCE(next_poll_at, 0) END) AS t
 						FROM servers WHERE state = 'starting'
 					UNION ALL SELECT last_seen + ? FROM servers WHERE state = 'ready'
+					UNION ALL SELECT COALESCE(stop_at, 0) FROM servers WHERE state = 'stopping'
 					UNION ALL SELECT ended_at + ? FROM servers WHERE state = 'ended'
 					UNION ALL SELECT created_at + ? FROM tickets
 				)`,
@@ -563,4 +619,8 @@ function deployFailure(err: unknown): string {
 	if (err instanceof ProviderError && err.status === 422) return REASONS.noCapacity;
 	if (err instanceof ProviderError && err.status >= 400 && err.status < 500) return REASONS.startRefused;
 	return REASONS.providerUnavailable;
+}
+
+function live(s: ServerRow): boolean {
+	return s.state === "starting" || s.state === "ready";
 }

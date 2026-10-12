@@ -212,6 +212,56 @@ describe("the alarm", () => {
 	});
 });
 
+describe("cleanup is durable", () => {
+	it("a failed stop is retried by the alarm until Edgegap confirms, and only then is history ended", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0, 1);
+		await age(V, 16 * S); // silent past HEARTBEAT_DEADLINE_S
+		edgegap.failStops = 2;
+		await runDurableObjectAlarm(registry(V));
+		expect(edgegap.deployment(0).status).toBe("Status.READY"); // still running, still billed
+		expect((await session(s.id))?.ended_at).toBeNull();
+
+		await age(V, 601 * S); // well past ENDED_RETENTION_S: the row must not be forgotten
+		await runDurableObjectAlarm(registry(V));
+		expect((await registry(V).snapshot()).map((r) => r.id)).toContain(s.id);
+		expect(edgegap.deployment(0).status).toBe("Status.READY");
+
+		await age(V, 6 * S);
+		await runDurableObjectAlarm(registry(V)); // third attempt succeeds
+		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
+		expect(await session(s.id)).toMatchObject({ outcome: "lost" });
+		expect((await session(s.id))?.ended_at).not.toBeNull();
+		expect(edgegap.count("DELETE", `/v1/stop/${s.deploymentId}`)).toBe(3);
+	});
+
+	it("a failed stop on end is retried too", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0);
+		edgegap.failStops = 1;
+		expect((await call("POST", `/v1/servers/${s.id}/end`, {}, { authorization: `Bearer ${s.secret}` })).status).toBe(204);
+		expect(edgegap.deployment(0).status).toBe("Status.READY");
+		await age(V, 6 * S);
+		await runDurableObjectAlarm(registry(V));
+		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
+	});
+
+	it("a deployment that answers after its claim timed out is stopped, retried if need be", async () => {
+		const release = edgegap.holdDeploys();
+		const pending = join({ version: V, locations: ["Paris"], pings: {} });
+		await new Promise((r) => setTimeout(r, 50));
+		await age(V, 61 * S);
+		await runDurableObjectAlarm(registry(V)); // the claim times out while its deploy is in flight
+		edgegap.failStops = 1;
+		release();
+		await pending;
+		expect(edgegap.deployment(0).status).toBe("Status.DEPLOYING"); // the first stop failed
+		await age(V, 6 * S);
+		await runDurableObjectAlarm(registry(V));
+		expect(edgegap.deployment(0).status).toBe("Status.TERMINATED");
+	});
+});
+
 describe("end", () => {
 	it("stops the deployment and records the session", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });

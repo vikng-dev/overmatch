@@ -49,7 +49,7 @@ export async function age(version: string, ms: number): Promise<void> {
 	await runInDurableObject(registry(version), (_: Registry, state) => {
 		state.storage.sql.exec(
 			`UPDATE servers SET created_at = created_at - ?1, last_seen = last_seen - ?1, next_poll_at = next_poll_at - ?1,
-			   ready_at = ready_at - ?1, ended_at = ended_at - ?1`,
+			   ready_at = ready_at - ?1, ended_at = ended_at - ?1, stop_at = stop_at - ?1`,
 			ms,
 		);
 		state.storage.sql.exec("UPDATE tickets SET created_at = created_at - ?1, attached_at = attached_at - ?1", ms);
