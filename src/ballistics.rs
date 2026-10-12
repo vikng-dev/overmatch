@@ -31,6 +31,9 @@ pub(crate) use walk::VolumeMaterial;
 /// Solid shot is the only one built.
 mod mechanism;
 
+/// The spall cone's shape data: half-angle, axis rule and the directions it is sampled by.
+mod spall_cone;
+
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
@@ -56,10 +59,10 @@ pub mod fuzz;
 #[cfg(test)]
 mod goldens;
 
-/// The spall-cloud casts digested to the bit and compared with a pinned digest, run on every
-/// shipped target by CI: the instrument for whether a client may re-cast a cloud itself.
+/// The spall-cone casts digested to the bit and compared with a pinned digest, run on every
+/// shipped target by CI: the instrument for whether a client may re-cast a field itself.
 #[cfg(test)]
-mod cloud_casts;
+mod field_casts;
 
 /// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
 /// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
@@ -271,32 +274,6 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
     Ok(())
 }
 
-/// Deterministic spall-cone directions with normalized polar position `t` in `[0, 1]`.
-fn spall_directions(axis: Dir3, half_angle: f32, n: usize) -> Vec<(Dir3, f32)> {
-    let z = Vec3::from(axis);
-    let up = if z.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
-    let x = z.cross(up).normalize();
-    let y = z.cross(x);
-    const GOLDEN: f32 = 2.399_963_2;
-    (0..n)
-        .filter_map(|k| {
-            let t = (k as f32 + 0.5) / n as f32;
-            let polar = half_angle * t;
-            let az = k as f32 * GOLDEN;
-            let local = z * polar.cos() + (x * az.cos() + y * az.sin()) * polar.sin();
-            Dir3::new(local).ok().map(|d| (d, t))
-        })
-        .collect()
-}
-
-/// DERIVED max RHA-mm for an on-axis fragment: the upper endpoint of the 3–30 mm reference range
-/// recorded in `.agents/docs/design/armor-penetration-and-damage.md`.
-const FRAG_PEN_MAX: f32 = 30.0;
-/// Fragment air drag (1/m).
-const FRAG_DRAG: f32 = 0.6;
-/// HP a fragment deposits per RHA-mm of its current penetration at the moment of impact.
-const FRAG_DMG_PER_MM: f32 = 0.12;
-
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
 const TRANSIT_K: f32 = 1.0;
 
@@ -322,50 +299,62 @@ fn apply_doses(
 }
 
 /// An HP pool at `current` after `dose`, floored at zero. In f32: a dose below the pool's
-/// resolution leaves it unchanged.
+/// resolution leaves it unchanged. A field dose is already in the count unit and is never scaled.
 fn dosed(current: f32, dose: &mechanism::Dose) -> f32 {
-    let per_mm = match dose.source {
-        mechanism::DoseSource::Line { .. } => TRANSIT_K,
-        mechanism::DoseSource::Fragment => FRAG_DMG_PER_MM,
+    let amount = match dose.source {
+        mechanism::DoseSource::Line { .. } => dose.amount * TRANSIT_K,
+        mechanism::DoseSource::Field => dose.amount,
     };
-    (current - dose.amount * per_mm).max(0.0)
+    (current - amount).max(0.0)
 }
 
-/// March one spall fragment through ballistic volumes: its visual trace, and the doses it addresses
-/// to the HP-bearing boxes it strikes, in strike order.
-fn cast_spall_fragment(
+/// March one direction of a spall cone through the struck tank's volumes: its trace, and the doses
+/// it addresses to the HP-bearing boxes it enters, in entry order (design doc §5).
+///
+/// `strength` (reference-mm) is constant in air and spent only by `chord × factor` through
+/// material. On entering a box the direction doses it `strength × weight` — its strength at entry
+/// times its share `1/N` of the cone — never scaled by the box's factor; armour (no HP) shadows and
+/// takes nothing. The direction stops where its strength is exhausted, or where no volume `within`
+/// the struck tank lies further along it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field march's kernel, shared with the cross-platform cast digest; every argument \
+              is world state or the direction's own"
+)]
+fn cast_field_ray(
     origin: Vec3,
     dir: Dir3,
-    mut pen: f32,
-    mut range: f32,
+    mut strength: f32,
+    weight: f32,
     spatial: &SpatialQuery,
     volumes: &Query<&BallisticVolume>,
     parents: &Query<&ChildOf>,
     health: &Query<&mut ComponentHealth>,
     filter: &SpatialQueryFilter,
-) -> (SpallFragment, Vec<mechanism::Dose>) {
+    within: &dyn Fn(Entity) -> bool,
+) -> (SpallRay, Vec<mechanism::Dose>) {
     const EPS: f32 = 1.0e-3;
-    const PROBE: f32 = 50.0;
+    // Query bounds, not a range law: no tank is near this size, and the march spends strength by
+    // material alone.
+    const PROBE: f32 = resolve::MAX_CORRIDOR;
+    let mut range = resolve::MAX_CORRIDOR;
     let mut pos = origin;
     let mut deposited = false;
     let mut doses = Vec::new();
-    while range > EPS {
-        let Some(hit) = spatial.cast_ray(pos, dir, range, true, filter) else {
-            pos += Vec3::from(dir) * range; // flew the rest, hit nothing
-            break;
+    while strength > 0.0 && range > EPS {
+        let Some(hit) = spatial.cast_ray_predicate(pos, dir, range, true, filter, within) else {
+            break; // left the struck tank
         };
         let at = pos + Vec3::from(dir) * hit.distance;
-        pen = (pen / (1.0 + FRAG_DRAG * hit.distance)).max(0.0); // drag over the gap
-        let node = hit_ancestor(hit.entity, volumes, parents).map(|(e, v)| (e, v.material.factor));
-        let Some((node_entity, factor)) = node else {
+        let Some((node, volume)) = hit_ancestor(hit.entity, volumes, parents) else {
             pos = at;
             break;
         };
-        if health.contains(node_entity) {
+        if health.contains(node) {
             doses.push(mechanism::Dose {
-                address: node_entity,
-                amount: pen,
-                source: mechanism::DoseSource::Fragment,
+                address: node,
+                amount: strength * weight,
+                source: mechanism::DoseSource::Field,
             });
             deposited = true;
         }
@@ -380,18 +369,18 @@ fn cast_spall_fragment(
             )
             .map(|exit| EPS + exit.distance)
             .unwrap_or(0.0);
-        let cost = span * factor;
-        if pen > cost {
-            pen -= cost;
+        let cost = span * volume.material.factor;
+        if strength > cost {
+            strength -= cost;
             pos = at + Vec3::from(dir) * (span + EPS);
             range -= hit.distance + span + EPS;
         } else {
-            pos = at + Vec3::from(dir) * span * (pen / cost.max(EPS));
+            pos = at + Vec3::from(dir) * span * (strength / cost);
             break;
         }
     }
     (
-        SpallFragment {
+        SpallRay {
             end: pos,
             deposited,
         },
@@ -911,29 +900,27 @@ pub struct PenetrationMarks {
     pub ricochets: Vec<Vec3>,
 }
 
-/// A single spall fragment's trace: where it stopped, and whether it deposited HP (hit a component)
-/// or merely shadowed / flew on (hit armor or air). A fragment is an energy packet (§5): it carries
-/// a penetration value that bleeds with distance (`FRAG_DRAG`), deposits `pen × FRAG_DMG_PER_MM`
-/// into each component it crosses, punches through thin volumes and stops in thick ones.
-pub struct SpallFragment {
+/// One direction of a spall cone, as marched: where it stopped (its strength exhausted, or where it
+/// left the struck tank), and whether it dosed a box on the way.
+pub struct SpallRay {
     pub end: Vec3,
     pub deposited: bool,
 }
 
-/// One spall event — the cone thrown from a perforation exit. Origin + axis + half-angle describe
-/// the fixed-shape cone; `fragments` are the resolved rays the sandbox draws.
-pub struct SpallBurst {
+/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and half-angle
+/// describe its shape; `rays` are its directions as marched, in stratum order.
+pub struct SpallCone {
     pub origin: Vec3,
     pub axis: Dir3,
     pub half_angle: f32,
-    pub fragments: Vec<SpallFragment>,
+    pub rays: Vec<SpallRay>,
 }
 
-/// The spall a shell has thrown this flight — one burst per perforation exit. Public like
+/// The spall a shell has thrown this flight — one cone per body exit it reached. Public like
 /// `PenetrationMarks`; freed when the shell despawns.
 #[derive(Component, Default)]
 pub struct SpallMarks {
-    pub bursts: Vec<SpallBurst>,
+    pub cones: Vec<SpallCone>,
 }
 
 /// Live per-shell readout for the sandbox's info layer — current speed (m/s) and remaining
@@ -2714,73 +2701,61 @@ fn resolve_replica_armor_contact(
     ReplicaArmorContact::Stopped
 }
 
-/// Throw the spall cone a perforation's exit face makes, appending one burst to the shell's record.
+/// Throw the spall cone of one body exit, appending it to the shell's record (design doc §5).
 ///
-/// The *count* comes from the material chewed (`cost`) and the hole size (`caliber`) — the fragment
-/// supply; each fragment's *energy* comes from the shot's residual (v_res²) and its position in the
-/// cone (on-axis strongest). So a thin/soft body throws few fragments and a barely-through round
-/// throws weak ones — both extremes low (design §5). Each fragment then penetrates per its energy.
+/// Strength `S = spend × (v_exit / v_entry)²` ([`walk::SpallSource::strength`]); direction `k` of the
+/// shipped shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the cone. Each
+/// direction is marched through the volumes of `tank`, the struck tank, alone
+/// ([`cast_field_ray`]).
 ///
 /// Returns the HP the authority actually removed; a replica resolves the identical geometry and the
-/// identical visual trace, and deposits nothing.
-fn throw_spall_burst(
+/// identical trace, and deposits nothing.
+fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
-    exit: Vec3,
-    dir: Dir3,
-    cost: f32,
-    caliber: f32,
-    speed: f32,
+    source: &walk::SpallSource,
+    tank: Option<Entity>,
     world: &ProjectileMarchWorld,
     health: &mut Query<&mut ComponentHealth>,
     armor: &SpatialQueryFilter,
-    // Only authority writes HP; replicas retain the visual trace.
+    // Only authority writes HP; replicas retain the trace.
     deposit: bool,
 ) -> f32 {
-    // Nudge past the exit face so a fragment's first cast doesn't re-touch it — the same 1 mm
+    // Nudge past the exit face so a direction's first cast doesn't re-touch it — the same 1 mm
     // boundary nudge the march itself uses.
     const EPS: f32 = 1.0e-3;
-    // Spall (design §5). The fragment COUNT is supply only: (material chewed / ref) × (caliber /
-    // ref), capped. Residual energy is deliberately NOT a factor here — it is applied per fragment
-    // below as `shot_energy`, so a barely-through round throws its full complement of fragments and
-    // throws them weakly, rather than throwing fewer. The cone's shape is fixed; only density scales.
-    const SPALL_MAX_FRAGMENTS: usize = 24;
-    const SPALL_COST_REF: f32 = 100.0; // ref-mm (≈ a 100 mm steel plate)
-    const SPALL_VRES_REF: f32 = 500.0; // m/s
-    const SPALL_CALIBER_REF: f32 = 0.088; // m (the 88)
-    const SPALL_HALF_ANGLE: f32 = 0.35; // rad (~20°)
-    const SPALL_RANGE: f32 = 6.0; // m — fragments are short-range
+    let shape = spall_cone::ConeShape::shipped();
+    let strength = source.strength();
+    let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
+    let axis = shape.axis(source.face, direction);
+    let weight = 1.0 / shape.directions_count() as f32;
+    let within = |collider: Entity| {
+        hit_ancestor(collider, &world.volumes, &world.parents)
+            .is_some_and(|(node, _)| world.owners.get(node).ok().map(VolumeOf::tank) == tank)
+    };
     let mut damage_dealt = 0.0;
-    let count_f =
-        SPALL_MAX_FRAGMENTS as f32 * (cost / SPALL_COST_REF) * (caliber / SPALL_CALIBER_REF);
-    let count = (count_f.round() as i32).clamp(0, SPALL_MAX_FRAGMENTS as i32) as usize;
-    if count > 0 {
-        // Residual energy sets how hard each fragment is thrown (full at the reference exit
-        // speed); the on-axis fragments (`t→0`) keep the most of it.
-        let shot_energy = (speed / SPALL_VRES_REF).powi(2).clamp(0.0, 1.0);
-        let mut burst = SpallBurst {
-            origin: exit,
-            axis: dir,
-            half_angle: SPALL_HALF_ANGLE,
-            fragments: Vec::with_capacity(count),
-        };
-        for (fdir, t) in spall_directions(dir, SPALL_HALF_ANGLE, count) {
-            let birth_pen = FRAG_PEN_MAX * shot_energy * (1.0 - t);
-            let (fragment, doses) = cast_spall_fragment(
-                exit + Vec3::from(fdir) * EPS,
-                fdir,
-                birth_pen,
-                SPALL_RANGE,
-                &world.spatial,
-                &world.volumes,
-                &world.parents,
-                health,
-                armor,
-            );
-            damage_dealt += apply_doses(&doses, health, deposit);
-            burst.fragments.push(fragment);
-        }
-        spall.bursts.push(burst);
+    let mut cone = SpallCone {
+        origin: source.position,
+        axis,
+        half_angle: shape.half_angle(),
+        rays: Vec::with_capacity(shape.directions_count()),
+    };
+    for (ray_dir, profile) in shape.directions(axis) {
+        let (ray, doses) = cast_field_ray(
+            source.position + Vec3::from(ray_dir) * EPS,
+            ray_dir,
+            strength * profile,
+            weight,
+            &world.spatial,
+            &world.volumes,
+            &world.parents,
+            health,
+            armor,
+            &within,
+        );
+        damage_dealt += apply_doses(&doses, health, deposit);
+        cone.rays.push(ray);
     }
+    spall.cones.push(cone);
     damage_dealt
 }
 

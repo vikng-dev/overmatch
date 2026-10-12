@@ -232,10 +232,9 @@ const DT: f32 = 0.016;
 /// drag change the speed but never the direction, and the gate's straight flight is the runtime's.
 const DROP_FROM: Vec3 = Vec3::new(0.1, 3.0, -0.2);
 
-/// The top of a target out of reach of every spall fragment thrown from a plate at `y = 1`: 6.5 m
-/// below it, past the 6 m a fragment flies (`throw_spall_burst`'s range). Fixture data; each
-/// arrangement also asserts that no fragment deposited ([`Agreement::transit_only`]).
-const PAST_SPALL: f32 = -5.5;
+/// The top of a wide target 6.5 m below a plate at `y = 1`, where a partly covered or overmatched
+/// round lands whatever its bend. Fixture data.
+const FAR_BELOW: f32 = -5.5;
 
 /// Every impact the runtime fired, as `(verdict, position)`.
 #[derive(Resource, Default)]
@@ -305,19 +304,19 @@ fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz:
         .expect("the driver system runs")
 }
 
-/// The runtime's side: one tick of the real march, read back as impacts, and whether any spall
-/// fragment the round threw deposited HP.
+/// The runtime's side: one tick of the real march, read back as impacts, and whether any direction
+/// of a spall cone the round threw dosed a box.
 fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>, bool) {
     let shell = spawn_round(app, body, DROP_FROM, Vec3::NEG_Y * speed);
     app.update();
-    let fragments = app.world().get::<SpallMarks>(shell).is_some_and(|marks| {
+    let field = app.world().get::<SpallMarks>(shell).is_some_and(|marks| {
         marks
-            .bursts
+            .cones
             .iter()
-            .flat_map(|burst| &burst.fragments)
-            .any(|fragment| fragment.deposited)
+            .flat_map(|cone| &cone.rays)
+            .any(|ray| ray.deposited)
     });
-    (app.world().resource::<Read>().0.clone(), fragments)
+    (app.world().resource::<Read>().0.clone(), field)
 }
 
 /// What the runtime turns each decision into: one impact per bounce or bite, none for a clear.
@@ -348,8 +347,8 @@ struct Agreement {
     admitted: bool,
     /// The runtime removed HP from the target, by any route.
     damaged: bool,
-    /// A spall fragment the runtime threw deposited HP — a route the admission does not observe.
-    fragments: bool,
+    /// A spall cone the runtime threw dosed a box — a route the admission does not observe.
+    field: bool,
     /// The round bounced off an HP-bearing volume and jarred it — a route the admission does not
     /// observe either.
     shock: bool,
@@ -358,7 +357,7 @@ struct Agreement {
 impl Agreement {
     /// The runtime's only HP route was transit, the one the admission observes.
     fn transit_only(&self) -> bool {
-        !self.fragments && !self.shock
+        !self.field && !self.shock
     }
 }
 
@@ -376,7 +375,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         runtime.update();
     }
     runtime.world_mut().resource_mut::<Read>().0.clear();
-    let (read, fragments) = marched(&mut runtime, body, speed);
+    let (read, field) = marched(&mut runtime, body, speed);
     let hp = runtime
         .world()
         .get::<ComponentHealth>(target)
@@ -430,7 +429,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         reached,
         admitted,
         damaged,
-        fragments,
+        field,
         shock,
     };
     assert!(
@@ -449,14 +448,23 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
 
 /// A soft HP-bearing box `width` across, centred under the drop line with its top at `top`: the
 /// target every arrangement aims at. Fixture data.
+///
+/// It belongs to a tank of its own, so no spall cone thrown from the plates above it — volumes of no
+/// tank — reaches it: a cone doses only the struck tank's boxes. Each arrangement also asserts that
+/// no field dose landed ([`Agreement::transit_only`]).
 fn target_below(app: &mut App, top: f32, width: f32) -> Entity {
-    volume(
+    let target = volume(
         app,
         Vec3::new(width, 0.4, width),
         Transform::from_translation(Vec3::new(DROP_FROM.x, top - 0.2, DROP_FROM.z)),
         STEEL * 0.1,
         Some(100.0),
-    )
+    );
+    let tank = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(target)
+        .insert(crate::damage::VolumeOf(tank));
+    target
 }
 
 /// A plate of `thickness` whose normal is tilted `tilt` from `+Y` about `+Z`, its top face through
@@ -483,9 +491,9 @@ fn tilted_plate(app: &mut App, thickness: f32, tilt: f32, at: f32, factor: f32) 
 /// runtime's own first-tick speed and budget.
 ///
 /// THE PARITY IS TRANSIT PARITY. The admission observes transit deposits; the runtime also removes
-/// HP by a bounce's shock and by spall fragments. Every arrangement here is transit-only, asserted,
-/// with targets placed past spall reach where a perforation could throw any;
-/// [`shock_and_fragments_lie_outside_the_transit_parity`] shows the two routes outside it.
+/// HP by a bounce's shock and by spall cones. Every arrangement here is transit-only, asserted, with
+/// every target in a tank of its own, outside the plates' cones ([`target_below`]);
+/// [`shock_and_field_doses_lie_outside_the_transit_parity`] shows the two routes outside it.
 #[test]
 fn the_runtime_and_the_gate_decide_the_same_crossings() {
     // Stop: a plate thicker than the round can defeat.
@@ -530,7 +538,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
             STEEL,
             None,
         );
-        target_below(app, PAST_SPALL, 6.0)
+        target_below(app, FAR_BELOW, 6.0)
     });
     assert!(partial.transit_only());
     assert!(
@@ -615,7 +623,7 @@ fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
     );
     let overmatched = agree("overmatch", FIXTURE_88, 800.0, |app| {
         tilted_plate(app, thickness, tilt, 1.0, STEEL);
-        target_below(app, PAST_SPALL, 6.0)
+        target_below(app, FAR_BELOW, 6.0)
     });
     assert!(overmatched.transit_only());
     assert!(
@@ -731,10 +739,11 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
 ///
 /// Two routes by which the runtime removes HP that the admission does not observe, each with the
 /// round's own path kept clear of the HP-bearing box: a round that bounces off the box itself
-/// jars it ([`Bounce::shock`]), and a perforation's spall reaches a box beside the round's path.
+/// jars it ([`Bounce::shock`]), and a perforation's spall cone reaches a box beside the round's
+/// path.
 /// Both sides still agree on every impact; the box is damaged and not admitted. Fixture data.
 #[test]
-fn shock_and_fragments_lie_outside_the_transit_parity() {
+fn shock_and_field_doses_lie_outside_the_transit_parity() {
     // Shock: a machine-gun round grazes an HP-bearing soft slab at 75°, too thick for it to
     // overmatch.
     let shocked = agree("shock", FIXTURE_MG, 755.0, |app| {
@@ -759,9 +768,9 @@ fn shock_and_fragments_lie_outside_the_transit_parity() {
         "the bounce jars the box it bounced off, and that is not a transit route",
     );
 
-    // Fragments: an 88 perforates 60 mm of steel square on; an HP-bearing box sits 0.3 m below the
-    // plate, beside the disc's path but inside the spall cone.
-    let thrown = agree("fragments", FIXTURE_88, 800.0, |app| {
+    // Field: an 88 perforates 60 mm of steel square on; an HP-bearing box of the same (absent) tank
+    // sits 0.3 m below the plate, beside the disc's path but inside the spall cone.
+    let thrown = agree("field", FIXTURE_88, 800.0, |app| {
         volume(
             app,
             Vec3::new(2.0, 0.06, 2.0),
@@ -784,10 +793,10 @@ fn shock_and_fragments_lie_outside_the_transit_parity() {
         thrown.impacts,
     );
     assert!(
-        thrown.fragments && thrown.damaged && !thrown.admitted,
-        "a fragment reaches the box beside the path, and that is not a transit route: fragments \
+        thrown.field && thrown.damaged && !thrown.admitted,
+        "the cone reaches the box beside the path, and that is not a transit route: field \
          {}, damaged {}, admitted {}",
-        thrown.fragments,
+        thrown.field,
         thrown.damaged,
         thrown.admitted,
     );
@@ -1711,5 +1720,311 @@ fn a_probe_past_its_face_ceiling_fails_closed() {
     assert!(
         matches!(error, WalkError::UncertifiedStart { reason, .. } if reason.contains("faces")),
         "the refusal names the face ceiling: {error:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The spall cone's field law (design doc §5): class invariants on fixture worlds
+// ---------------------------------------------------------------------------------------------
+
+use crate::ballistics::spall_cone::{AxisRule, ConeShape};
+use crate::ballistics::{ProjectileMarchWorld, cast_field_ray};
+
+/// Fixture half-angle (rad) of the cones below: fixture data, not the shipped value.
+const FIELD_ALPHA: f64 = 0.436;
+/// Fixture direction count where the resolution is not the point.
+const FIELD_N: usize = 96;
+/// HP of every fixture box: above any dose below, so no dose is clamped away.
+const FIELD_HP: f32 = 1.0e6;
+
+/// A fixture world built by `build`, stepped so its colliders are queryable; returns the boxes
+/// `build` names, in order.
+fn field_world(build: impl FnOnce(&mut App) -> Vec<Entity>) -> (App, Vec<Entity>) {
+    let mut app = world_with_trimesh_plates(&[]);
+    let boxes = build(&mut app);
+    for _ in 0..8 {
+        app.update();
+    }
+    (app, boxes)
+}
+
+/// A box `size` centred `depth` metres down the cone's axis (`-Y` from the origin) and `lateral`
+/// metres along `+X`; `hp` makes it a box, `None` armour.
+fn below(app: &mut App, size: Vec3, depth: f32, lateral: f32, factor: f32, hp: bool) -> Entity {
+    volume(
+        app,
+        size,
+        Transform::from_translation(Vec3::new(lateral, -depth, 0.0)),
+        factor,
+        hp.then_some(FIELD_HP),
+    )
+}
+
+/// Each of `boxes`' dose from one cone of `directions` strata, half-angle [`FIELD_ALPHA`] and
+/// on-axis strength `strength`, thrown from the origin down `-Y` through every volume of the world
+/// (volumes of no tank: one tank).
+fn field_doses(app: &mut App, boxes: &[Entity], strength: f32, directions: usize) -> Vec<f64> {
+    let shape = ConeShape::new(FIELD_ALPHA, AxisRule::ExitDirection, directions).unwrap();
+    let boxes = boxes.to_vec();
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld, health: Query<&mut ComponentHealth>| {
+                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
+                let within = |collider: Entity| {
+                    hit_ancestor(collider, &world.volumes, &world.parents).is_some()
+                };
+                let weight = 1.0 / directions as f32;
+                let mut dose = vec![0.0f64; boxes.len()];
+                for (dir, profile) in shape.directions(Dir3::NEG_Y) {
+                    let (_, doses) = cast_field_ray(
+                        Vec3::ZERO,
+                        dir,
+                        strength * profile,
+                        weight,
+                        &world.spatial,
+                        &world.volumes,
+                        &world.parents,
+                        &health,
+                        &armor,
+                        &within,
+                    );
+                    for applied in doses {
+                        if let Some(index) = boxes.iter().position(|b| *b == applied.address) {
+                            dose[index] += applied.amount as f64;
+                        }
+                    }
+                }
+                dose
+            },
+        )
+        .expect("the field system runs")
+}
+
+/// CLASS INVARIANT 2, RESOLUTION STABILITY: a box's dose converges as the direction count grows —
+/// in the convergence regime the change from N to 4N shrinks with every step — and at the shipped
+/// count it lies within a stated tolerance of the converged value. Fixture: a soft box off the
+/// axis, a metre down.
+///
+/// The steps are taken from 96 directions up. Below that a box edge sits between a handful of
+/// strata and successive changes are noise of one stratum's weight, not a trend: MEASURED on this
+/// fixture, 24 → 96 → 384 changed the dose by 0.091 then 0.101 (of ~2.0), then 0.029 and 0.009.
+#[test]
+fn a_box_dose_is_stable_under_resolution() {
+    let (mut app, boxes) =
+        field_world(|app| vec![below(app, Vec3::new(0.4, 0.05, 0.4), 1.0, 0.15, 0.0, true)]);
+    let counts = [96, 384, 1536, 6144, 24576];
+    let doses: Vec<f64> = counts
+        .iter()
+        .map(|&n| field_doses(&mut app, &boxes, 10.0, n)[0])
+        .collect();
+    let changes: Vec<f64> = doses.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    assert!(
+        changes.windows(2).all(|w| w[1] <= w[0]),
+        "the change shrinks as N quadruples: doses {doses:?}, changes {changes:?}"
+    );
+    let converged = doses[doses.len() - 1];
+    let shipped = ConeShape::shipped().directions_count();
+    let at_shipped = field_doses(&mut app, &boxes, 10.0, shipped)[0];
+    // Fixture tolerance: a tenth of the converged dose at the shipped resolution.
+    assert!(
+        (at_shipped - converged).abs() <= 0.1 * converged,
+        "N = {shipped}: {at_shipped} against {converged}"
+    );
+}
+
+/// CLASS INVARIANT 3, HOMOGENEITY: where no direction is exhausted, scaling the on-axis strength
+/// scales every dose by the same factor; with exhaustion, a dose never falls as the strength rises.
+#[test]
+fn doses_are_homogeneous_in_strength() {
+    let (mut app, boxes) = field_world(|app| {
+        vec![
+            below(app, Vec3::new(0.3, 0.05, 0.3), 1.0, 0.1, 0.0, true),
+            below(app, Vec3::new(0.2, 0.05, 0.2), 1.5, -0.2, 0.0, true),
+        ]
+    });
+    let one = field_doses(&mut app, &boxes, 10.0, FIELD_N);
+    let scaled = field_doses(&mut app, &boxes, 37.0, FIELD_N);
+    for (a, b) in one.iter().zip(&scaled) {
+        assert!(*a > 0.0, "the fixture boxes lie in the cone");
+        assert!((b / a - 3.7).abs() < 1.0e-5, "{b} against 3.7 × {a}");
+    }
+
+    let (mut app, boxes) = field_world(|app| {
+        below(app, Vec3::new(2.0, 0.01, 2.0), 0.5, 0.0, STEEL, false);
+        vec![below(app, Vec3::new(0.4, 0.05, 0.4), 1.0, 0.1, 10.0, true)]
+    });
+    let mut last = 0.0;
+    for strength in [1.0, 5.0, 9.0, 11.0, 20.0, 50.0, 200.0] {
+        let dose = field_doses(&mut app, &boxes, strength, FIELD_N)[0];
+        assert!(dose >= last, "S = {strength}: {dose} below {last}");
+        last = dose;
+    }
+    assert!(last > 0.0, "a strong enough cone gets through the plate");
+}
+
+/// CLASS INVARIANT 4, INVERSE SQUARE: strength is not spent in air, so a thin unresisting box on
+/// the axis takes a quarter of the dose at twice the distance — the share of the cone it covers.
+/// Fixture: a 0.1 m square; the profile across it varies by under 1 % (DERIVED), inside the
+/// tolerance.
+#[test]
+fn an_unshadowed_dose_falls_as_the_inverse_square() {
+    let dose_at = |depth: f32| {
+        let (mut app, boxes) = field_world(|app| {
+            vec![below(
+                app,
+                Vec3::new(0.1, 0.002, 0.1),
+                depth,
+                0.0,
+                0.0,
+                true,
+            )]
+        });
+        field_doses(&mut app, &boxes, 10.0, 16384)[0]
+    };
+    let ratio = dose_at(2.0) / dose_at(1.0);
+    assert!((ratio - 0.25).abs() < 0.01, "D(2r)/D(r) = {ratio}");
+}
+
+/// CLASS INVARIANT 6, FACTOR INDEPENDENCE: a box's dose is the strength arriving at it, never
+/// scaled by its own factor.
+#[test]
+fn a_box_dose_does_not_depend_on_its_own_factor() {
+    let dose_with = |factor: f32| {
+        let (mut app, boxes) =
+            field_world(|app| vec![below(app, Vec3::new(0.3, 0.2, 0.3), 1.0, 0.1, factor, true)]);
+        field_doses(&mut app, &boxes, 10.0, FIELD_N)[0]
+    };
+    let soft = dose_with(10.0);
+    assert!(soft > 0.0);
+    assert_eq!(soft.to_bits(), dose_with(900.0).to_bits());
+}
+
+/// CLASS INVARIANT 7, SHADOWING IS MONOTONE: adding any volume between the origin and a box —
+/// armour or another box, thin or thick — never raises the box's dose.
+#[test]
+fn adding_a_volume_never_raises_a_dose() {
+    let target = |app: &mut App| below(app, Vec3::new(0.4, 0.05, 0.4), 1.2, 0.1, 10.0, true);
+    let (mut app, boxes) = field_world(|app| vec![target(app)]);
+    let bare = field_doses(&mut app, &boxes, 10.0, FIELD_N)[0];
+    assert!(bare > 0.0);
+    let between: [(Vec3, f32, f32, bool); 4] = [
+        (Vec3::new(0.2, 0.01, 0.2), 0.0, STEEL, false),
+        (Vec3::new(2.0, 0.004, 2.0), 0.0, STEEL, false),
+        (Vec3::new(0.3, 0.2, 0.3), 0.15, 10.0, true),
+        (Vec3::new(2.0, 0.05, 2.0), 0.0, STEEL, false),
+    ];
+    for (size, lateral, factor, hp) in between {
+        let (mut app, boxes) = field_world(|app| {
+            below(app, size, 0.6, lateral, factor, hp);
+            vec![target(app)]
+        });
+        let shadowed = field_doses(&mut app, &boxes, 10.0, FIELD_N)[0];
+        assert!(
+            shadowed <= bare,
+            "{size:?} at factor {factor}: {shadowed} above {bare}"
+        );
+    }
+}
+
+/// A cone doses the struck tank's boxes alone: a box of another tank inside the cone takes
+/// nothing, a box of the struck tank beside it does. And square on, the cone's axis is the plate's
+/// rear normal, which is the round's direction. Fixture: an 88 perforates 60 mm of steel square on;
+/// two soft boxes sit below the plate either side of the path.
+#[test]
+fn a_cone_doses_the_struck_tank_alone() {
+    let mut app = world_with_trimesh_plates(&[]);
+    volume(
+        &mut app,
+        Vec3::new(2.0, 0.06, 2.0),
+        Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
+        STEEL,
+        None,
+    );
+    let own = volume(
+        &mut app,
+        Vec3::new(0.5, 0.2, 0.6),
+        Transform::from_translation(Vec3::new(DROP_FROM.x + 0.31, 0.54, DROP_FROM.z)),
+        STEEL * 0.1,
+        Some(100.0),
+    );
+    let foreign = volume(
+        &mut app,
+        Vec3::new(0.5, 0.2, 0.6),
+        Transform::from_translation(Vec3::new(DROP_FROM.x - 0.31, 0.54, DROP_FROM.z)),
+        STEEL * 0.1,
+        Some(100.0),
+    );
+    let other = app.world_mut().spawn_empty().id();
+    app.world_mut()
+        .entity_mut(foreign)
+        .insert(crate::damage::VolumeOf(other));
+    app.insert_resource(RetainSpentShells(true));
+    for _ in 0..8 {
+        app.update();
+    }
+    let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
+    app.update();
+
+    let hp = |entity: Entity| app.world().get::<ComponentHealth>(entity).unwrap().current;
+    assert!(hp(own) < 100.0, "the struck tank's box is dosed");
+    assert_eq!(hp(foreign), 100.0, "another tank's box is not");
+    let marks = app
+        .world()
+        .get::<SpallMarks>(shell)
+        .expect("the shell keeps its marks");
+    let first = marks.cones.first().expect("the plate's exit throws");
+    assert!(
+        Vec3::from(first.axis).distance(Vec3::NEG_Y) < 1.0e-4,
+        "square on, the axis is the rear normal and the direction: {:?}",
+        first.axis
+    );
+}
+
+/// An exit the round reaches throws even when the round then stops in the body behind it. Fixture:
+/// an 88 through 20 mm of steel into two metres of a 150-factor block in contact with it.
+#[test]
+fn an_exit_before_a_stop_throws_at_runtime() {
+    let mut app = world_with_trimesh_plates(&[]);
+    volume(
+        &mut app,
+        Vec3::new(2.0, 0.02, 2.0),
+        Transform::from_translation(Vec3::new(DROP_FROM.x, 0.99, DROP_FROM.z)),
+        STEEL,
+        None,
+    );
+    volume(
+        &mut app,
+        Vec3::new(2.0, 2.0, 2.0),
+        Transform::from_translation(Vec3::new(DROP_FROM.x, -0.02, DROP_FROM.z)),
+        150.0,
+        None,
+    );
+    app.insert_resource(RetainSpentShells(true))
+        .init_resource::<Read>()
+        .add_observer(read_impact);
+    for _ in 0..8 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<Read>().0.clear();
+    let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
+    app.update();
+    let verdicts: Vec<Verdict> = app
+        .world()
+        .resource::<Read>()
+        .0
+        .iter()
+        .map(|i| i.0)
+        .collect();
+    assert_eq!(verdicts, [Verdict::Stopped], "the round stops in the block");
+    let cones = &app.world().get::<SpallMarks>(shell).unwrap().cones;
+    assert_eq!(
+        cones.len(),
+        1,
+        "the steel's exit throws; the block it stops in does not"
+    );
+    assert!(
+        (cones[0].origin.y - 0.98).abs() < 2.0e-3,
+        "the cone comes off the steel's rear face: {:?}",
+        cones[0].origin
     );
 }

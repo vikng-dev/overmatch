@@ -108,16 +108,16 @@ pub(crate) enum DoseSource {
     /// The round's own line, which put `chord` metres (disc mean, as charged) of the volume behind
     /// it.
     Line { chord: f32 },
-    /// A spall fragment, at its penetration on striking the box.
-    Fragment,
+    /// A field (a spall cone): one direction's strength at entry times its share of the cone.
+    Field,
 }
 
 impl Dose {
-    /// The chord the round's own line put into the box; `None` for a fragment, which has none.
+    /// The chord the round's own line put into the box; `None` for a field dose, which has none.
     pub(crate) fn line_chord(&self) -> Option<f32> {
         match self.source {
             DoseSource::Line { chord } => Some(chord),
-            DoseSource::Fragment => None,
+            DoseSource::Field => None,
         }
     }
 }

@@ -111,7 +111,7 @@ struct Outcome {
     ricochets: usize,
     /// Volume crossings (entry→exit) the shell recorded along its whole flight, in march order.
     crossings: Vec<(Vec3, Vec3)>,
-    /// Where each spall cone was thrown from — one per perforation exit.
+    /// Where each spall cone was thrown from — one per body exit the round reached.
     spall_origins: Vec<Vec3>,
 }
 
@@ -184,8 +184,8 @@ fn fire(
             }
         }
         for marks in app.world_mut().query::<&SpallMarks>().iter(app.world()) {
-            if marks.bursts.len() > spall_origins.len() {
-                spall_origins = marks.bursts.iter().map(|burst| burst.origin).collect();
+            if marks.cones.len() > spall_origins.len() {
+                spall_origins = marks.cones.iter().map(|cone| cone.origin).collect();
             }
         }
     }
@@ -556,8 +556,10 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
 /// clamp was bounded. That golden pins the whole outcome tuple; this one pins the two facts the
 /// defect destroyed, so a regression names itself.
 ///
-/// FIXTURE CHARACTERISATION: one spall cone and no survivor are this asset's geometry against the
-/// 88's law capability, not an invariant; the exit face and its cone are.
+/// FIXTURE CHARACTERISATION: three spall cones and no survivor are this asset's geometry against
+/// the 88's law capability, not an invariant; the exit face and its cone are. Every body exit the
+/// round reaches throws (design doc §5): on this line the front plate's and two inside the hull, in
+/// path order, before the round stops in the rear plate, which throws nothing.
 ///
 /// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
 /// whether the exit face came back or the spall model moved, not which number to re-bake.
@@ -612,10 +614,18 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     );
     assert_eq!(
         out.spall_origins.len(),
-        1,
-        "PHYSICS CHANGED — diff consciously. Fixture characterisation: one of this line's \
-         crossings perforates into a space worth spalling into — the front plate; the round stops \
-         in the rear one: {:?}",
+        3,
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: the round reaches three \
+         body exits on this line — the front plate's and two inside the hull — and stops in the \
+         rear plate: {:?}",
+        out.spall_origins
+    );
+    assert!(
+        out.spall_origins
+            .windows(2)
+            .all(|pair| pair[1].z > pair[0].z),
+        "PHYSICS CHANGED — diff consciously. The cones come off exits in path order, downrange \
+         along `+Z`: {:?}",
         out.spall_origins
     );
     assert_eq!(

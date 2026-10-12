@@ -23,8 +23,8 @@
 //! [`apply`] carries the runtime's consequences out of it (HP, impulses, marks, spall, events), and
 //! [`Flight::follow`] advances the flight to where the next crossing starts. The runtime march and
 //! the §13.6 gate (`fuzz`) both drive successive crossings through exactly this state machine; the
-//! gate observes the decisions and applies nothing. The seam is not yet complete: spall fragments
-//! are resolved in [`apply`], not decided (see there).
+//! gate observes the decisions and applies nothing. The seam is not yet complete: a spall cone's
+//! directions are marched in [`apply`], not decided (see there).
 //!
 //! # Fail closed, never free
 //!
@@ -47,7 +47,7 @@ use super::walk::{
 use super::{
     BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
     MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
-    TerminalVerdict, apply_doses, apply_hit_impulse, hit_ancestor, throw_spall_burst,
+    TerminalVerdict, apply_doses, apply_hit_impulse, hit_ancestor, throw_spall_cone,
 };
 
 #[cfg(test)]
@@ -1193,11 +1193,11 @@ pub(super) fn volume_table(
 /// and the impact and authority events. Returns the HP actually removed.
 ///
 /// Transit doses, a bounce's shock, the impulses and the events all come out of the
-/// [`Decision`]. Spall does NOT: the decision carries each spall source and its budget, but the
-/// fragment count, their directions and what each fragment hits are resolved here, against the
-/// live world ([`throw_spall_burst`]), into addressed doses applied through the same
-/// [`apply_doses`] as the line's. So the §13.6 gate, which observes the decisions and applies none
-/// of this, reads every transit dose and every bounce the runtime acts on, and no fragment's.
+/// [`Decision`]. Spall does NOT: the decision carries each spall source, but the cone's directions
+/// and what each one enters are resolved here, against the live world ([`throw_spall_cone`]), into
+/// addressed doses applied through the same [`apply_doses`] as the line's. So the §13.6 gate, which
+/// observes the decisions and applies none of this, reads every transit dose and every bounce the
+/// runtime acts on, and no field dose.
 pub(crate) fn apply(
     decision: &Decision,
     shell: &mut MarchingShell,
@@ -1319,13 +1319,10 @@ fn apply_bite(
     };
     // Every exit the round reached throws, whether it then stopped or went on.
     for source in &bite.spall {
-        damage += throw_spall_burst(
+        damage += throw_spall_cone(
             shell.spall,
-            source.position,
-            Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z),
-            source.spend,
-            shell.projectile.caliber(),
-            source.exit_speed,
+            source,
+            bite.owner,
             context.world,
             health,
             context.armor,

@@ -1562,7 +1562,7 @@ fn a_half_covered_disc_gives_half_coverage_and_half_cost() {
 }
 
 /// A FRAGMENT is a shell with r → 0 and k = 1 (§13.5), so it must reduce EXACTLY to the single-ray
-/// walk — bitwise, not approximately. `cast_spall_fragment` then needs no law of its own.
+/// walk — bitwise, not approximately.
 #[test]
 fn a_fragment_is_the_single_ray_walk_bitwise() {
     let volumes = table(&[(1, 1000.0), (2, 200.0)]);

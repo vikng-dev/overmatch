@@ -1657,6 +1657,20 @@ pub struct SpallSource {
     pub coverage: f32,
 }
 
+impl SpallSource {
+    /// The cone's on-axis strength `S = spend × (v_exit / v_entry)²` (reference-mm): the spend at the
+    /// exit, scaled by the fraction of the round's kinetic energy left across the body. Zero for a
+    /// round that entered at rest.
+    pub fn strength(&self) -> f32 {
+        if self.entry_speed > 0.0 {
+            let ratio = self.exit_speed / self.entry_speed;
+            self.spend * ratio * ratio
+        } else {
+            0.0
+        }
+    }
+}
+
 /// One volume met by one sample over part of an [`Encounter`]: its identity (the address a dose
 /// goes to), its material, and the stretch `[start, end)` of the encounter it covers.
 #[derive(Clone, Copy, Debug, PartialEq)]

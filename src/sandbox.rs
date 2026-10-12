@@ -1060,36 +1060,36 @@ fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks>) {
     }
 }
 
-/// Spall draw: each fragment ray from a perforation exit — hot orange where it deposited HP into a
-/// component, dim grey where it merely shadowed (armor) or flew into air. The spray *is* the cone;
-/// its density reads the material × residual-energy budget (design §5).
+/// Spall draw: each direction of a body exit's spall cone, from the exit to where it stopped — hot
+/// orange where it dosed a box, dim grey where it only shadowed (armour) or left the tank. Each
+/// direction runs until material exhausts its strength (design doc §5).
 fn draw_spall(mut gizmos: Gizmos, marks: Query<&SpallMarks>) {
-    // A short representative length for the cone outline (fragments stop where they hit).
+    // A short representative length for the cone outline (directions stop where they are spent).
     const OUTLINE: f32 = 1.2;
     for mark in &marks {
-        for burst in &mark.bursts {
+        for cone in &mark.cones {
             // Faint cone outline: the axis and a rim circle, so the cone's aim + spread read even
-            // when only a few fragments are thrown.
-            let axis = Vec3::from(burst.axis);
-            let tip = burst.origin + axis * OUTLINE;
-            let rim = OUTLINE * burst.half_angle.tan();
+            // where its directions stop short.
+            let axis = Vec3::from(cone.axis);
+            let tip = cone.origin + axis * OUTLINE;
+            let rim = OUTLINE * cone.half_angle.tan();
             let facing = Quat::from_rotation_arc(Vec3::Z, axis);
-            gizmos.line(burst.origin, tip, Color::srgb(0.35, 0.37, 0.42));
+            gizmos.line(cone.origin, tip, Color::srgb(0.35, 0.37, 0.42));
             gizmos.circle(
                 Isometry3d::new(tip, facing),
                 rim,
                 Color::srgb(0.35, 0.37, 0.42),
             );
-            for frag in &burst.fragments {
-                let color = if frag.deposited {
+            for ray in &cone.rays {
+                let color = if ray.deposited {
                     Color::srgb(1.0, 0.4, 0.1)
                 } else {
                     Color::srgb(0.45, 0.47, 0.52)
                 };
-                gizmos.line(burst.origin, frag.end, color);
-                if frag.deposited {
+                gizmos.line(cone.origin, ray.end, color);
+                if ray.deposited {
                     gizmos.sphere(
-                        Isometry3d::from_translation(frag.end),
+                        Isometry3d::from_translation(ray.end),
                         0.05,
                         Color::srgb(1.0, 0.2, 0.1),
                     );
