@@ -67,7 +67,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x2908_f01a_7088_10d5;
+const PINNED_TOTAL: u64 = 0x4b88_579f_171f_bc70;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 

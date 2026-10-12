@@ -137,12 +137,18 @@ pub const SWAP_SECONDS: f32 = 4.0;
 
 /// A repairable module function served by this volume. Function loss is derived from its HP.
 /// Identity/label only — gating keys off [`Capability`] requirements (via [`Part`]), not the function.
+///
+/// A requirement names a function, and [`part_qualities`] max-combines every volume serving one, so
+/// a weapon gated on its own barrel needs a barrel function no other weapon's barrel serves: the
+/// main gun's ([`Self::GunBarrel`]), the coaxial machine gun's and the bow machine gun's.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum FunctionRole {
     Engine,
     Transmission,
     Breech,
     GunBarrel,
+    CoaxMgBarrel,
+    BowMgBarrel,
 }
 
 impl FunctionRole {
@@ -152,6 +158,8 @@ impl FunctionRole {
             FunctionRole::Transmission => "Transmission",
             FunctionRole::Breech => "Breech",
             FunctionRole::GunBarrel => "Gun barrel",
+            FunctionRole::CoaxMgBarrel => "Coax MG barrel",
+            FunctionRole::BowMgBarrel => "Bow MG barrel",
         }
     }
 }
@@ -187,6 +195,8 @@ pub enum Part {
     Transmission,
     Breech,
     GunBarrel,
+    CoaxMgBarrel,
+    BowMgBarrel,
 }
 
 impl From<CrewStation> for Part {
@@ -208,6 +218,8 @@ impl From<FunctionRole> for Part {
             FunctionRole::Transmission => Part::Transmission,
             FunctionRole::Breech => Part::Breech,
             FunctionRole::GunBarrel => Part::GunBarrel,
+            FunctionRole::CoaxMgBarrel => Part::CoaxMgBarrel,
+            FunctionRole::BowMgBarrel => Part::BowMgBarrel,
         }
     }
 }

@@ -234,7 +234,8 @@ TankSpec(
     //
     // So this map holds ONLY the nodes that are more than armour: an hp pool, and the consequence
     // facets layered on it (crew / ammo / function). Every pure armour plate — the whole hull and
-    // turret, the mantlet, the MG bodies, the road wheels — is absent BY DESIGN. Both directions
+    // turret, the mantlet, the MG bodies and ball mount — is absent BY DESIGN; the running gear is
+    // listed only to tag it external. Both directions
     // fail loud at bind: a key here that is not a ballistic volume is an error, and the
     // material-implied lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo
     // facet, EngineBlock with no entry).
@@ -244,6 +245,10 @@ TankSpec(
         "Transmission":     (hp: 10.0, function: Transmission),
         "Breech":           (hp:  8.0, function: Breech),
         "Main_Gun_Barrel":  (hp:  8.0, function: GunBarrel),
+        // Each MG barrel serves its own weapon's barrel function, which that weapon's fire gate
+        // names, as the main gun's does. 2.0 hp is TUNED: a thin barrel, the smoke launchers' value.
+        "Coax_MG_Barrel":   (hp:  2.0, function: CoaxMgBarrel),
+        "Hull_MG_Barrel":   (hp:  2.0, function: BowMgBarrel),
         // --- Crew ---
         "Commander":        (hp: 3.0, crew: Commander),
         "Gunner":           (hp: 3.0, crew: Gunner),
@@ -349,7 +354,7 @@ TankSpec(
             round: "7.9mm_AP",
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
-            fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
+            fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])]), CoaxMgBarrel],
             load: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
             // No MG recording in the library yet — silent until one is cut and listed here.
             report_clips: [],
@@ -361,7 +366,7 @@ TankSpec(
             round: "7.9mm_AP",
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
-            fire: [BowGunner],
+            fire: [BowGunner, BowMgBarrel],
             // Same rule as the coax: the swap needs the gun's crew.
             load: [BowGunner],
             report_clips: [],

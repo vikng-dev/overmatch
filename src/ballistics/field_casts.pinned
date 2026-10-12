@@ -1,4 +1,4 @@
-frame a9fce9635fced710 cbf29ce484222325
+frame 102bfad7d52c7c55 cbf29ce484222325
 A/cone/000/00 96e036b266dc166a b754bfcdb112102c
 A/cone/000/01 551b4969b5750c74 7fad6d5e0ea765e9
 A/cone/000/02 c46b60c319215e4e 5e9017196f6b64cb
@@ -489,6 +489,8 @@ A/box/BowGunner/0 975ff410b6e98fd5 3cd4dd8f5ce56cbd
 A/box/BowGunner/1 e60c2dca0b406701 2aee85580737666b
 A/box/Breech/0 87b36717005c9b24 49cf54acb8d77a0a
 A/box/Breech/1 d87de3e8101ce3e1 d6041cdf68f635b6
+A/box/Coax_MG_Barrel/0 ca5ed0c8049a6659 e808e5bdb967ef9e
+A/box/Coax_MG_Barrel/1 60114298e6d671e0 d12ad035c707dc1f
 A/box/Commander/0 82f529bcf2a8ff9a 62dd7f6896d91793
 A/box/Commander/1 4e836ed1b04b47f3 5b493ebf607f4e27
 A/box/Driver/0 c0b0ec2112e9fbc1 952b095244c1211c
@@ -497,6 +499,8 @@ A/box/Engine/0 bd90213dd038c248 40a5d987d6a6c860
 A/box/Engine/1 f26cf7995a5f234a 0f4523117f1f80ed
 A/box/Gunner/0 fbf3456c109bfb9a 70c2ed4be29519d0
 A/box/Gunner/1 24dac9fe8179a8e0 ae24500f1665e8d1
+A/box/Hull_MG_Barrel/0 b953e20b33e04ea0 c2f686a35dabe170
+A/box/Hull_MG_Barrel/1 cf86551d1fe8bec2 1d869373e181a7fe
 A/box/Loader/0 6a899dd602acd732 743dab8846c993c3
 A/box/Loader/1 f78ffb9dbb570cd4 132be39339a25b75
 A/box/Main_Gun_Barrel/0 212a2a8fc9deaee5 93feb453aff9b4b8
@@ -515,7 +519,7 @@ A/box/Smoke_Launcher_5/0 0762e91c50154761 65bc7afdf1b17528
 A/box/Smoke_Launcher_5/1 8fcbe888bb329691 252acb57a253fd9e
 A/box/Transmission/0 842f7814b8d4084d a5ad3944f00a2b59
 A/box/Transmission/1 eed40775d173fc8f d11ba4f7ebd60654
-A/dose cbf29ce484222325 7a05f966eb203076
+A/dose cbf29ce484222325 be2bcfeae2353282
 B/cone/000/00 74628e74a6564774 278d0c3e1f956d25
 B/cone/000/01 54f27a34ceff9008 f0e69f49dc39684b
 B/cone/000/02 7b6b3749fa583b42 5e52f3879dcbd11a
@@ -1006,6 +1010,8 @@ B/box/BowGunner/0 1de00ec9a65db912 947f1b0f48f87ef0
 B/box/BowGunner/1 40b146e2b789fd59 db494c97ecfe18b5
 B/box/Breech/0 e810c5e868b14115 35222c299782e293
 B/box/Breech/1 f4737c33e135acf3 6a23532c12870b8e
+B/box/Coax_MG_Barrel/0 e559f650f0f29312 d5d874b8603f39c7
+B/box/Coax_MG_Barrel/1 1a4b6d2db545d21d 55611975289bc7ff
 B/box/Commander/0 e103fa99f6897182 f00143ebfe944a1a
 B/box/Commander/1 bf2f41c46969d17d 17190f90939bfc45
 B/box/Driver/0 169c3392aa97e6c3 e04a014f5b7cc1fd
@@ -1014,6 +1020,8 @@ B/box/Engine/0 4a4b1bc9846cd3d7 73fbec82967f3376
 B/box/Engine/1 c23e0bd13c684dfd e1fc718f8839a96c
 B/box/Gunner/0 6f032279c1054ceb d7128c1c10e493ac
 B/box/Gunner/1 78643474ff75ce65 15dd107065f7df75
+B/box/Hull_MG_Barrel/0 4e11ea2014bea72f 428e3aa0231d5c62
+B/box/Hull_MG_Barrel/1 191a8f15653c70c6 8cf37214f135f5f3
 B/box/Loader/0 5be964eb404554d6 b60f1092c65e9596
 B/box/Loader/1 0bc9b7f9ce019744 74ecb258d188baf8
 B/box/Main_Gun_Barrel/0 0eb8eceba2ad424f c431c2686c5dbbeb
@@ -1032,10 +1040,10 @@ B/box/Smoke_Launcher_5/0 6db716373d94d565 fbf4a7ae1d67f7a6
 B/box/Smoke_Launcher_5/1 8b8505c0d01fa240 fc4fca9d18605cd1
 B/box/Transmission/0 f0786c07fdedf93e 25569702b47d1a21
 B/box/Transmission/1 58497736e53a0c8e a93e2aadd9f397df
-B/dose cbf29ce484222325 11ed7b5a7e8568eb
-shot/driver 6766a66df0ee8ca8 509d8b049dae21d7
-shot/rear 0018ff59a4dd398c ebaa28b218100b52
-shot/left-front 6484eaecdd75f69c 6a69b812f800553e
-shot/left-mid e00f4f6b596bc7b9 fcaa42d426463e56
-shot/turret-left 21ce31afb11a6ba5 9f65bdc635263d7c
-shot/right-rear 4155a7fcd5759b2e f5990f7f8d8f95b7
+B/dose cbf29ce484222325 046f7dec5675ab3f
+shot/driver 6766a66df0ee8ca8 60526e0143fa7c73
+shot/rear 0018ff59a4dd398c b1f5864ccc7ad482
+shot/left-front 6484eaecdd75f69c 9abeb9e60b9b9dba
+shot/left-mid e00f4f6b596bc7b9 739059f54180128a
+shot/turret-left 21ce31afb11a6ba5 b839dda52da02e4c
+shot/right-rear 4155a7fcd5759b2e 1c24398264a5346f

@@ -96,6 +96,14 @@
             count: 8.0,
         ),
         (
+            name: "Coax_MG_Barrel",
+            role: Module,
+            center: (0.54653263, 2.307579, -1.229661),
+            half_extents: (0.015886685, 0.015886705, 0.28245467),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
+        ),
+        (
             name: "Commander",
             role: Crew,
             center: (-0.5006714, 1.9958768, 0.3892746),
@@ -126,6 +134,14 @@
             half_extents: (0.22123024, 0.55355203, 0.34178013),
             rotation: (0.0, 0.0, 0.0, 1.0),
             count: 3.0,
+        ),
+        (
+            name: "Hull_MG_Barrel",
+            role: Module,
+            center: (0.5790119, 1.5910573, -2.1262245),
+            half_extents: (0.015886685, 0.015886705, 0.28245467),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
         ),
         (
             name: "Loader",
