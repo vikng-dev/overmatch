@@ -1,0 +1,41 @@
+// The round registry: every round a weapon can fire, keyed by the name a weapon's `round` names.
+// Read by `src/rounds.rs`, embedded and parsed once, validated at parse; a round is bound to its
+// mechanism at spawn from this data alone.
+//
+// A round states its core material (a substance in `assets/materials/materials.ron` that carries
+// material facts), its nose as geometry in calibres (the nose factor is DERIVED from it at load),
+// its mass (kg), its calibre (m) and its muzzle speed (m/s).
+//
+// PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
+// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
+// "Q7" is the fixture-materials recommendation in
+// `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md`, which collected no
+// munition data: the rounds are labelled fixtures.
+(
+    rounds: {
+        "88mm_AP": (
+            core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered 4340-class alloy-steel
+                body, the class Q7 recommends for the large round; GunSteel carries that class's
+                facts. The rigid regime reads no core fact")),
+            nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: a blunt ogive of 1 crh")),
+            mass: (10.2, Unknown("no source recorded in the repo; settled by a cited munition
+                table")),
+            caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
+            muzzle_speed: (773.0, Unknown("no source recorded in the repo; settled by a cited
+                firing table")),
+        ),
+        "7.9mm_AP": (
+            core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered alloy-steel core,
+                Q7's 'hardened' belt; GunSteel carries that class's facts. The rigid regime reads
+                no core fact")),
+            nose: (Cap(radius_calibres: 0.5), Tuned("labelled fixture value: round-nosed, a
+                hemispherical cap")),
+            mass: (0.0118, Unknown("no source recorded in the repo; settled by a cited munition
+                table")),
+            caliber: (0.0079, Unknown("rounded from the 7.92 mm nominal designation; whether the
+                bore or the bullet diameter is meant is not recorded")),
+            muzzle_speed: (755.0, Unknown("no source recorded in the repo; settled by a cited
+                firing table")),
+        ),
+    },
+)

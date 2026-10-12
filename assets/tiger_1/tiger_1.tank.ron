@@ -324,10 +324,9 @@ TankSpec(
             trigger: Primary,
             muzzle: "Main_Gun_Muzzle",
             barrel: "Main_Gun_Recoil",
-            speed: 773.0, caliber: 0.088, mass: 10.2,
-            // Nose geometry in calibres; the capability law reads the nose factor derived from it.
-            // Labelled fixture value: a blunt ogive of 1 crh.
-            nose: Ogive(crh: 1.0),
+            // The round fired: a key in assets/ballistics/rounds.ron, which states its core, nose,
+            // mass, calibre and muzzle speed with their provenance.
+            round: "88mm_AP",
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],
@@ -347,9 +346,7 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Coax_MG_Muzzle",
             barrel: "Coax_MG_Recoil",
-            speed: 755.0, caliber: 0.0079, mass: 0.0118,
-            // Labelled fixture value: round-nosed, a hemispherical cap.
-            nose: Cap(radius_calibres: 0.5),
+            round: "7.9mm_AP",
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
@@ -361,9 +358,7 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Hull_MG_Muzzle",
             barrel: "Hull_MG_Recoil",
-            speed: 755.0, caliber: 0.0079, mass: 0.0118,
-            // Labelled fixture value: round-nosed, a hemispherical cap.
-            nose: Cap(radius_calibres: 0.5),
+            round: "7.9mm_AP",
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [BowGunner],

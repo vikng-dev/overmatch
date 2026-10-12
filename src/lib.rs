@@ -138,6 +138,9 @@ mod render_policy;
 /// itself (the one writer of its resource mounts the resource's owner), so it reaches every windowed
 /// root and no other.
 mod render_scale;
+/// The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, with its
+/// core material, nose geometry, mass, calibre and muzzle speed, resolved and validated at parse.
+mod rounds;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;

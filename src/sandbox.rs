@@ -62,11 +62,14 @@ impl Default for ShotParams {
             .values()
             .find(|weapon| weapon.trigger == spec::Trigger::Primary)
             .expect("the seed tank authors a primary weapon");
+        let round = weapon
+            .resolved_round()
+            .unwrap_or_else(|err| panic!("the seed tank's primary weapon: {err}"));
         Self {
-            muzzle_speed: weapon.speed,
-            caliber: weapon.caliber,
-            mass: weapon.mass,
-            nose_factor: weapon.nose.factor(),
+            muzzle_speed: round.muzzle_speed,
+            caliber: round.body.caliber,
+            mass: round.body.mass,
+            nose_factor: round.body.nose_factor,
         }
     }
 }

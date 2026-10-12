@@ -120,12 +120,11 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
         .weapons
         .get(&scenario.weapon)
         .unwrap_or_else(|| panic!("{}: no weapon `{}`", scenario.name, scenario.weapon));
-    let body = RoundBody {
-        mass: weapon.mass,
-        caliber: weapon.caliber,
-        nose_factor: weapon.nose.factor(),
-    };
-    let speed = scenario.speed.unwrap_or(weapon.speed);
+    let round = weapon
+        .resolved_round()
+        .unwrap_or_else(|err| panic!("{}: {err}", scenario.name));
+    let body = round.body;
+    let speed = scenario.speed.unwrap_or(round.muzzle_speed);
     let origin = PROBE_TANK_AT + scenario.from;
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
@@ -152,8 +151,8 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
     let facts = ShotFacts {
         launch: origin,
         projectile: scenario.weapon.clone(),
-        caliber_mm: weapon.caliber * 1000.0,
-        mass_kg: weapon.mass,
+        caliber_mm: body.caliber * 1000.0,
+        mass_kg: body.mass,
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
         turret_yaw_deg: turret_yaw(app.world(), tank),
     };

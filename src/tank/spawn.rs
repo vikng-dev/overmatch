@@ -575,12 +575,15 @@ fn insert_weapons(
     {
         let muzzle = entity_at(muzzle_index);
         let barrel = barrel_index.map(&entity_at);
+        let round = weapon.resolved_round().unwrap_or_else(|err| {
+            panic!("weapon `{weapon_name}`: {err} — the spec's validate() resolves every round")
+        });
         let weapon_component = Weapon {
             name: (*weapon_name).clone(),
-            speed: weapon.speed,
-            caliber: weapon.caliber,
-            mass: weapon.mass,
-            nose_factor: weapon.nose.factor(),
+            speed: round.muzzle_speed,
+            caliber: round.body.caliber,
+            mass: round.body.mass,
+            nose_factor: round.body.nose_factor,
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),
             barrel,

@@ -137,7 +137,7 @@ pub enum Trigger {
 
 /// A projectile's nose geometry, parameters in calibres. [`Self::factor`] derives `N`, the
 /// frictionless nose factor of the cavity-expansion form with the inertia constant taken as 1, in
-/// `(0, 1]`. `validate()` rejects a parameter outside its variant's range.
+/// `(0, 1]`. The round registry ([`crate::rounds`]) rejects a parameter outside its variant's range.
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum NoseShape {
@@ -154,7 +154,7 @@ pub enum NoseShape {
 impl NoseShape {
     /// The nose factor `N`: ogive `(8ψ − 1) / (24ψ²)`, cone `1 / (1 + 4φ²)`, cap `1 − 1 / (8φ²)`,
     /// flat `1`. Evaluated in f64 and cast once: the squares leave f32's range for a parameter
-    /// past ~1e19, where the factor itself is still representable. `validate()` rejects a factor
+    /// past ~1e19, where the factor itself is still representable. The round registry rejects a factor
     /// the cast leaves subnormal or zero.
     pub fn factor(self) -> f32 {
         let factor = match self {
@@ -176,7 +176,7 @@ impl NoseShape {
     }
 
     /// The variant's parameter and whether it lies in the variant's range, or `None` for `Flat`.
-    fn parameter(self) -> Option<(&'static str, f32, bool)> {
+    pub(crate) fn parameter(self) -> Option<(&'static str, f32, bool)> {
         match self {
             Self::Ogive { crh } => Some(("Ogive.crh (≥ 0.5)", crh, crh.is_finite() && crh >= 0.5)),
             Self::Cone { length_calibres } => Some((
@@ -254,14 +254,9 @@ pub struct WeaponSpec {
     /// Recoiling barrel node, if the weapon reciprocates; omitted → no recoil (e.g. a coax).
     #[serde(default)]
     pub barrel: Option<String>,
-    /// Muzzle velocity (m/s).
-    pub speed: f32,
-    /// Shell calibre (m) — drives overmatch in the penetration march.
-    pub caliber: f32,
-    /// Projectile mass (kg) — primary driver of penetration capability.
-    pub mass: f32,
-    /// Projectile nose geometry; the capability law reads the nose factor it derives.
-    pub nose: NoseShape,
+    /// The round this weapon fires: a key in the round registry (`assets/ballistics/rounds.ron`),
+    /// which states its core, nose, mass, calibre and muzzle speed ([`Self::resolved_round`]).
+    pub round: String,
     /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
     /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
     pub fire_mode: FireMode,
@@ -281,6 +276,15 @@ pub struct WeaponSpec {
     /// no name derivation — and required authoring: `[]` is a silent weapon, which is a decision,
     /// not an omission.
     pub report_clips: Vec<String>,
+}
+
+impl WeaponSpec {
+    /// The round this weapon names, resolved in the shipped round registry; an unknown name is an
+    /// error naming it. `validate()` resolves every weapon's round, so on a validated spec this is
+    /// `Ok`.
+    pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::rounds::RoundError> {
+        crate::rounds::RoundRegistry::shipped().get(&self.round)
+    }
 }
 
 /// A weapon's procedural barrel-recoil spring (a 1-DOF damped spring along the bore).
@@ -1063,24 +1067,8 @@ impl TankSpec {
             }
         }
         for (name, weapon) in &self.weapons {
-            if let Some((parameter, value, false)) = weapon.nose.parameter() {
-                return Err(format!(
-                    "weapon `{name}`: nose {parameter} is out of range (got {value})"
-                )
-                .into());
-            }
-            let round = crate::ballistics::RoundBody {
-                mass: weapon.mass,
-                caliber: weapon.caliber,
-                nose_factor: weapon.nose.factor(),
-            };
-            if let Err(reason) = crate::ballistics::round_in_domain(round, weapon.speed) {
-                return Err(format!(
-                    "weapon `{name}`: the round (nose {:?}) is outside the capability law's \
-                     domain: {reason}",
-                    weapon.nose
-                )
-                .into());
+            if let Err(err) = weapon.resolved_round() {
+                return Err(format!("weapon `{name}`: {err}").into());
             }
             match weapon.fire_mode {
                 FireMode::Single { reload_secs } => {
@@ -1373,22 +1361,6 @@ mod tests {
                 weapon.barrel.is_some(),
                 "weapon `{name}`: the recoil spring is authored iff the recoiling barrel is"
             );
-            for (field, value) in [
-                ("speed", weapon.speed),
-                ("caliber", weapon.caliber),
-                ("mass", weapon.mass),
-                ("nose factor", weapon.nose.factor()),
-            ] {
-                assert!(
-                    value.is_finite() && value > 0.0,
-                    "weapon `{name}`: {field} must be finite and > 0 (got {value})"
-                );
-            }
-            assert!(
-                weapon.nose.factor() <= 1.0,
-                "weapon `{name}`: nose factor must be ≤ 1 (got {})",
-                weapon.nose.factor()
-            );
             for clip in &weapon.report_clips {
                 assert!(
                     clip.ends_with(".ogg"),
@@ -1559,7 +1531,7 @@ TankSpec(
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
             barrel: "Cannon_Recoil",
-            speed: 700.0, caliber: 0.05, mass: 5.0, nose: Ogive(crh: 1.0),
+            round: "88mm_AP",
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech],
@@ -1569,7 +1541,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            speed: 700.0, caliber: 0.008, mass: 0.012, nose: Cap(radius_calibres: 0.5),
+            round: "7.9mm_AP",
             fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
             report_clips: [],
         ),
@@ -1711,112 +1683,19 @@ TankSpec(
         }
     }
 
-    /// Each nose family derives its factor by its own formula (a hemisphere and a half-calibre
-    /// cone are `½`, DERIVED; a flat face `1`), and a parameter outside the family's range is a
-    /// load error naming the weapon.
+    /// A weapon naming a round the registry does not carry is a load error naming the weapon and
+    /// the round. A round's own validity is the registry's ([`crate::rounds`]).
     #[test]
-    fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
-        for (shape, expected) in [
-            (NoseShape::Ogive { crh: 0.5 }, 0.5),
-            (
-                NoseShape::Cap {
-                    radius_calibres: 0.5,
-                },
-                0.5,
-            ),
-            (NoseShape::Flat, 1.0),
-            (
-                NoseShape::Cone {
-                    length_calibres: 0.5,
-                },
-                0.5,
-            ),
-        ] {
-            let got = shape.factor();
-            assert!((got - expected).abs() < 1.0e-6, "{shape:?}: {got}");
-        }
-        for shape in [
-            NoseShape::Ogive { crh: 0.49 },
-            NoseShape::Cone {
-                length_calibres: 0.0,
-            },
-            NoseShape::Cap {
-                radius_calibres: 0.4,
-            },
-            NoseShape::Ogive { crh: f32::NAN },
-        ] {
-            let mut spec = fixture();
-            let mut weapon = spec.weapons["MG"].clone();
-            weapon.nose = shape;
-            spec.weapons.insert("Blunt".to_string(), weapon);
-            let err = spec.validate().unwrap_err().to_string();
-            assert!(
-                err.contains("Blunt") && err.contains("nose"),
-                "{shape:?}: {err}"
-            );
-        }
-    }
-
-    /// Extreme FINITE nose parameters: a spec is accepted exactly when its derived factor and the
-    /// capability law's results stay in their finite valid domain, and an accepted factor is the
-    /// family's own formula, not an overflowed intermediate.
-    #[test]
-    fn extreme_nose_parameters_are_accepted_only_inside_the_law_s_domain() {
-        let accepted = |shape: NoseShape| {
-            let mut spec = fixture();
-            let mut weapon = spec.weapons["Cannon"].clone();
-            weapon.nose = shape;
-            spec.weapons.insert("Extreme".to_string(), weapon);
-            match spec.validate() {
-                Ok(()) => true,
-                Err(err) => {
-                    let err = err.to_string();
-                    assert!(
-                        err.contains("Extreme") && err.contains("nose"),
-                        "{shape:?}: {err}"
-                    );
-                    false
-                }
-            }
-        };
-        // DERIVED limits: ogive N → 1/(3ψ), cone N → 1/(4φ²), cap N → 1.
-        for (shape, limit) in [
-            (NoseShape::Ogive { crh: 1.0e20 }, 1.0 / 3.0e20),
-            (
-                NoseShape::Cone {
-                    length_calibres: 1.0e18,
-                },
-                0.25e-36,
-            ),
-            (
-                NoseShape::Cap {
-                    radius_calibres: f32::MAX,
-                },
-                1.0,
-            ),
-        ] {
-            assert!(accepted(shape), "{shape:?} is inside the law's domain");
-            let got = shape.factor() as f64;
-            assert!(
-                (got / limit - 1.0).abs() < 1.0e-6,
-                "{shape:?}: factor {got} vs {limit}"
-            );
-        }
-        for shape in [
-            NoseShape::Cone {
-                length_calibres: 1.0e20,
-            },
-            NoseShape::Ogive { crh: f32::MAX },
-            NoseShape::Cone {
-                length_calibres: f32::MAX,
-            },
-        ] {
-            assert!(
-                !accepted(shape),
-                "{shape:?} derives a factor f32 cannot carry (got {})",
-                shape.factor()
-            );
-        }
+    fn a_weapon_naming_an_unknown_round_is_refused() {
+        let mut spec = fixture();
+        let mut weapon = spec.weapons["MG"].clone();
+        weapon.round = "Unobtainium".to_string();
+        spec.weapons.insert("Phantom".to_string(), weapon);
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Phantom") && err.contains("Unobtainium"),
+            "{err}"
+        );
     }
 
     /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.

@@ -235,18 +235,20 @@ impl Outcome {
     }
 }
 
-/// `(caliber, mass, nose_factor, speed)` of one of the bound tank's own weapons, read from its
-/// authored spec sheet, so a golden fires the round the asset declares.
+/// `(caliber, mass, nose_factor, speed)` of the round one of the bound tank's own weapons names in
+/// its authored spec sheet, so a golden fires the round the asset declares.
 fn authored_round(weapon: &str) -> (f32, f32, f32, f32) {
     let spec: crate::spec::TankSpec =
         ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
             .expect("the shipped sheet parses");
-    let weapon = &spec.weapons[weapon];
+    let round = spec.weapons[weapon]
+        .resolved_round()
+        .unwrap_or_else(|err| panic!("weapon `{weapon}`: {err}"));
     (
-        weapon.caliber,
-        weapon.mass,
-        weapon.nose.factor(),
-        weapon.speed,
+        round.body.caliber,
+        round.body.mass,
+        round.body.nose_factor,
+        round.muzzle_speed,
     )
 }
 
