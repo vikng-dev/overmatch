@@ -147,13 +147,20 @@ pub fn spawn(
 pub fn place_camera(
     run: Res<Run>,
     library: Res<Library>,
-    mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
+    mut commands: Commands,
+    mut camera: Query<(Entity, &mut Transform, &mut Projection, &CameraProfile), With<MainCamera>>,
 ) {
-    let (Some(first), Ok((mut transform, mut projection))) =
+    let (Some(first), Ok((entity, mut transform, mut projection, profile))) =
         (run.shots.first(), camera.single_mut())
     else {
         return;
     };
+    // The battlefield view, whatever profile a kill cam left installed.
+    if *profile != CameraProfile::BattlefieldThirdPerson {
+        commands
+            .entity(entity)
+            .insert(CameraProfile::BattlefieldThirdPerson);
+    }
     let report = &library.records[first.record].report;
     let (want, fov) = if PLAYLIST[run.entry].victim {
         (
@@ -450,7 +457,9 @@ mod tests {
         }
         let mut out = Vec::new();
         let entry = path[1];
-        let first_leg = path[1] - path[0];
+        // The round flies from the shooter's muzzle where the record names one; the march's own
+        // start otherwise.
+        let first_leg = path[1] - report.muzzle.map_or(path[0], Vec3::from);
         if entry.distance(Vec3::from(report.impact.point)) > POSITION_TOL_M {
             out.push(format!(
                 "impact {:?} is not the path's entry {entry}",

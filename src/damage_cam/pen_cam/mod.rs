@@ -350,16 +350,14 @@ impl Run {
                 let report = &library.records[record].report;
                 let fire = LEAD_IN_S + offset;
                 let speed = report.projectile.speed_mps.max(1.0);
-                let impact = fire + world::SHOOTER_DISTANCE_M / speed;
-                // The approach flies the record's own first leg, origin to impact, extended back.
-                let incoming = (Vec3::from(report.impact.point) - Vec3::from(report.origin))
-                    .normalize_or(Vec3::NEG_Z);
+                let muzzle = staged_muzzle(report);
+                let impact = fire + muzzle.distance(Vec3::from(report.impact.point)) / speed;
                 ShotRun {
                     record,
                     fire,
                     impact,
                     arrival: impact + timeline::OPEN_LATENCY_S,
-                    muzzle: Vec3::from(report.impact.point) - incoming * world::SHOOTER_DISTANCE_M,
+                    muzzle,
                 }
             })
             .collect();
@@ -423,6 +421,17 @@ impl Run {
         self.dismissed = None;
         self.finished_at = None;
     }
+}
+
+/// Where the round is fired from on the battlefield: the record's muzzle where the record has one,
+/// else staged [`world::SHOOTER_DISTANCE_M`] back along the record's own first leg (origin to
+/// impact).
+pub fn staged_muzzle(report: &PenetrationReport) -> Vec3 {
+    let impact = Vec3::from(report.impact.point);
+    report.muzzle.map(Vec3::from).unwrap_or_else(|| {
+        let incoming = (impact - Vec3::from(report.origin)).normalize_or(Vec3::NEG_Z);
+        impact - incoming * world::SHOOTER_DISTANCE_M
+    })
 }
 
 /// The corner as it stands this frame.
@@ -498,35 +507,43 @@ pub fn demo_plugin(app: &mut App) {
     .insert_resource(library)
     .insert_resource(settings)
     .insert_resource(run)
-    .init_resource::<Corner>()
-    .init_resource::<Ready>()
     .add_systems(Startup, (hold_clock, view::spawn, world::spawn))
     .add_systems(
         Startup,
         (stage::spawn, hud::spawn, killcam::spawn).after(view::spawn),
-    )
-    .add_systems(
-        Update,
-        (
-            view::prepare,
-            release_clock,
-            controls,
-            killcam::input,
-            advance,
-            corner_now,
-            view::pose,
-            killcam::stage,
-            camera_writers(),
-            stage::rebuild,
-            stage::animate,
-            world::animate,
-            hud::layout,
-            hud::animate,
-            killcam::hud,
-        )
-            .chain(),
     );
+    sequence(app);
     stage::plugin(app);
+}
+
+/// The demo's frame: its resources and the one ordered chain every frame runs, from the views'
+/// preparation through input, the clock, the camera's writers and the drawing. Tests drive this
+/// same wiring.
+pub(super) fn sequence(app: &mut App) {
+    app.init_resource::<Corner>()
+        .init_resource::<Ready>()
+        .init_resource::<killcam::KillCam>()
+        .add_systems(
+            Update,
+            (
+                view::prepare,
+                release_clock,
+                controls,
+                killcam::input,
+                advance,
+                corner_now,
+                view::pose,
+                killcam::stage,
+                camera_writers(),
+                stage::rebuild,
+                stage::animate,
+                world::animate,
+                hud::layout,
+                hud::animate,
+                killcam::hud,
+            )
+                .chain(),
+        );
 }
 
 /// The main camera's writers, one per run: the shooter's sight or the victim's chase view, or the
@@ -662,6 +679,7 @@ fn advance(
     settings: Res<Settings>,
     mut run: ResMut<Run>,
     corner: Res<Corner>,
+    cam: Res<killcam::KillCam>,
 ) {
     if let Some(at) = run.respawned_at {
         // The demo's respawn: a fresh life of the same scenario, paused on the living tank.
@@ -674,7 +692,7 @@ fn advance(
         }
         return;
     }
-    if run.paused {
+    if run.paused || killcam::holding(&run, &cam) {
         return;
     }
     let dt = time.delta_secs() * SPEEDS[run.speed];

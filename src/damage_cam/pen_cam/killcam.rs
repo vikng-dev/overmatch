@@ -424,7 +424,6 @@ pub const RESPAWNING: &str = "RESPAWNING";
 pub const RESPAWN_S: f32 = 0.8;
 
 pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
-    commands.insert_resource(KillCam::default());
     let text = |font: &Handle<Font>, px: f32, color: Color| {
         (
             TextFont {
@@ -537,14 +536,21 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// Whether the run plays the kill cam: the run condition of its camera writer.
-pub fn active(run: Res<Run>) -> bool {
-    run.kill.is_some()
+/// Whether the kill cam owns the main camera: a kill run whose rig is staged. Until the shooter's
+/// scene and tank file load there is no rig, the world keeps the camera, and the run's clock holds
+/// ([`holding`]).
+pub fn active(run: Res<Run>, cam: Res<KillCam>) -> bool {
+    run.kill.is_some() && cam.rig.is_some()
 }
 
-/// Whether no kill cam owns the main camera.
-pub fn inactive(run: Res<Run>) -> bool {
-    run.kill.is_none()
+/// Whether the world owns the main camera.
+pub fn inactive(run: Res<Run>, cam: Res<KillCam>) -> bool {
+    !active(run, cam)
+}
+
+/// Whether a kill run's clock waits for its stage.
+pub fn holding(run: &Run, cam: &KillCam) -> bool {
+    run.kill.is_some() && cam.rig.is_none()
 }
 
 /// The player's free look: a left-drag turns the orbit by the game's look law in beats 1 and 4,
@@ -866,7 +872,6 @@ pub fn hud(
 
 #[cfg(test)]
 mod tests {
-    use super::super::Corner;
     use super::*;
 
     fn library() -> Library {
@@ -1157,27 +1162,37 @@ mod tests {
         assert!(round.contains("88mm_AP") && round.contains("700 m"));
     }
 
-    /// The camera writers and the input gate in the demo's own order, on a headless app with the
-    /// K1 run and a fixture rig.
-    fn camera_app(entry: usize) -> App {
+    /// The demo's own frame ([`super::super::sequence`]) on a headless app: the run of `entry`, the
+    /// left button held with a drag, a fixture rig staged unless `staged` is false, and the main
+    /// camera. Systems whose scene resources a headless app lacks (the views, the stage, the
+    /// corner's images) are skipped by the ignoring error handler; everything that decides the
+    /// camera, its input, the clock and the panels runs as in the demo.
+    fn demo_app(entry: usize, staged: bool) -> App {
         let library = library();
         let settings = Settings::default();
-        let run = Run::new(entry, &library, &settings, true);
+        let run = Run::new(entry, &library, &settings, false);
         let mut app = App::new();
+        app.set_error_handler(bevy::ecs::error::ignore);
         let mut mouse = ButtonInput::<MouseButton>::default();
         mouse.press(MouseButton::Left);
         app.insert_resource(library)
             .insert_resource(settings)
             .insert_resource(run)
             .insert_resource(mouse)
+            .insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(AccumulatedMouseMotion {
                 delta: Vec2::new(40.0, 0.0),
             })
-            .insert_resource(KillCam {
-                rig: Some(rig()),
-                ..KillCam::default()
+            .insert_resource(UiFonts {
+                hud: Handle::default(),
+                body: Handle::default(),
             })
-            .add_systems(Update, (input, super::super::camera_writers()).chain());
+            .init_resource::<Time>()
+            .add_systems(Startup, spawn);
+        super::super::sequence(&mut app);
+        if staged {
+            app.world_mut().resource_mut::<KillCam>().rig = Some(rig());
+        }
         app.world_mut().spawn((
             Transform::IDENTITY,
             Projection::Perspective(PerspectiveProjection::default()),
@@ -1185,6 +1200,26 @@ mod tests {
             MainCamera,
         ));
         app
+    }
+
+    fn camera(app: &mut App) -> (Transform, CameraProfile) {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<(&Transform, &CameraProfile), With<MainCamera>>();
+        let (transform, profile) = query.single(app.world()).unwrap();
+        (*transform, *profile)
+    }
+
+    fn press(app: &mut App, key: KeyCode) {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.clear();
+        keys.press(key);
+    }
+
+    fn release(app: &mut App) {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release_all();
+        keys.clear();
     }
 
     fn kill_entry() -> usize {
@@ -1198,12 +1233,12 @@ mod tests {
             .expect("a kill entry")
     }
 
-    /// Across the real handoffs the player's drag turns the camera only while it is free (the hit
-    /// and the death screen), the kill cam is the camera's writer in every beat, and the lesson's
-    /// profile swaps the ridden tank for its glass.
+    /// Through the demo's wiring, across every handoff: the player's drag turns the camera only
+    /// while it is free (the hit and the death screen), the kill cam is the camera's writer in
+    /// every beat, and only the lesson's profile swaps the ridden tank for its glass.
     #[test]
     fn the_drag_moves_the_camera_only_while_it_is_free() {
-        let mut app = camera_app(kill_entry());
+        let mut app = demo_app(kill_entry(), true);
         let beats = app.world().resource::<Run>().kill.unwrap().1;
         for (t, beat) in [
             (beats.impact + 0.1, Beat::Hit),
@@ -1233,64 +1268,72 @@ mod tests {
                 cam.death.unwrap_or_else(|| rig.frame_look()),
                 false,
             );
-            let mut camera = app
-                .world_mut()
-                .query_filtered::<(&Transform, &CameraProfile), With<MainCamera>>();
-            let (transform, profile) = camera.single(app.world()).unwrap();
+            let (transform, profile) = camera(&mut app);
             assert!(
                 transform.translation.distance(want.translation) < 1e-3,
                 "{beat:?}: the camera is not the kill cam's"
             );
             assert_eq!(
-                *profile == CameraProfile::KillCamLesson,
+                profile == CameraProfile::KillCamLesson,
                 beat == Beat::Lesson,
                 "{beat:?}"
             );
         }
     }
 
-    /// On a run without a kill the world places the camera and the kill cam's input is inert.
+    /// Switching to another scenario during the lesson hands the camera back to the world with the
+    /// battlefield profile: the ridden tank is drawn again and the stage is not.
     #[test]
-    fn without_a_kill_the_world_places_the_camera() {
-        let mut app = camera_app(0);
+    fn a_scenario_switch_leaves_no_lesson_profile() {
+        let mut app = demo_app(kill_entry(), true);
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
+        app.update();
+        assert_eq!(camera(&mut app).1, CameraProfile::KillCamLesson);
+        press(&mut app, super::super::ENTRY_KEYS[0]);
+        app.update();
+        release(&mut app);
         app.update();
         let run = app.world().resource::<Run>();
+        assert!(run.kill.is_none());
         let muzzle = run.shots[0].muzzle;
-        let mut camera = app
-            .world_mut()
-            .query_filtered::<&Transform, With<MainCamera>>();
-        let transform = camera.single(app.world()).unwrap();
+        let (transform, profile) = camera(&mut app);
+        assert_eq!(profile, CameraProfile::BattlefieldThirdPerson);
         assert!(transform.translation.distance(muzzle) < 1e-3);
-        assert_eq!(app.world().resource::<KillCam>().hit, Rig::player_look());
+    }
+
+    /// While the shooter is still loading there is no rig: the world keeps the camera and the run's
+    /// clock holds, so nothing plays to a camera no one places.
+    #[test]
+    fn the_clock_holds_while_the_shooter_loads() {
+        let mut app = demo_app(kill_entry(), false);
+        app.update();
+        let start = app.world().resource::<Run>().t;
+        let placed = camera(&mut app).0;
+        assert_ne!(
+            placed.translation,
+            Vec3::ZERO,
+            "no writer placed the camera"
+        );
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(500));
+        app.update();
+        assert_eq!(app.world().resource::<Run>().t, start);
+        app.world_mut().resource_mut::<KillCam>().rig = Some(rig());
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(500));
+        app.update();
+        assert!(app.world().resource::<Run>().t > start);
     }
 
     /// `R` on the death screen shows the respawn, then starts a fresh life on the living tank: the
     /// death panel does not stay up.
     #[test]
     fn respawn_completes_visibly() {
-        let library = library();
-        let settings = Settings::default();
-        let entry = kill_entry();
-        let run = Run::new(entry, &library, &settings, false);
-        let beats = run.kill.unwrap().1;
-        let mut app = App::new();
-        app.insert_resource(library)
-            .insert_resource(settings)
-            .insert_resource(run)
-            .insert_resource(ButtonInput::<KeyCode>::default())
-            .insert_resource(ButtonInput::<MouseButton>::default())
-            .insert_resource(AccumulatedMouseMotion::default())
-            .insert_resource(UiFonts {
-                hud: Handle::default(),
-                body: Handle::default(),
-            })
-            .init_resource::<Corner>()
-            .init_resource::<Time>()
-            .add_systems(Startup, spawn)
-            .add_systems(
-                Update,
-                (super::super::controls, super::super::advance, hud).chain(),
-            );
+        let mut app = demo_app(kill_entry(), true);
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
         app.update();
         let panel = |app: &mut App| {
             let mut query = app
@@ -1308,24 +1351,46 @@ mod tests {
             rows
         };
         app.world_mut().resource_mut::<Run>().t = beats.death() + 0.5;
-        app.world_mut()
-            .resource_mut::<ButtonInput<KeyCode>>()
-            .press(KeyCode::KeyR);
+        press(&mut app, KeyCode::KeyR);
         app.update();
         assert!(app.world().resource::<Run>().respawned_at.is_some());
         assert_eq!(panel(&mut app), Visibility::Inherited);
         assert_eq!(texts(&mut app)[0].1, RESPAWNING);
-        {
-            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-            keys.release(KeyCode::KeyR);
-            keys.clear();
-        }
+        release(&mut app);
         app.world_mut().resource_mut::<Run>().t = beats.death() + 0.5 + RESPAWN_S;
         app.update();
         let run = app.world().resource::<Run>();
         assert!(run.respawned_at.is_none() && run.t < beats.impact);
         assert_eq!(beats.beat(run.t), Beat::Hit);
         assert_eq!(panel(&mut app), Visibility::Hidden);
+    }
+
+    /// The shooter stands at the muzzle the record names and the card's range is its distance to
+    /// the impact; a record without a muzzle is staged the demo's distance back along its own line.
+    /// The kill fixture's muzzle sits off that staging distance, so the two cannot be confused.
+    #[test]
+    fn the_shooter_stands_at_the_records_muzzle() {
+        let library = library();
+        let run = Run::new(kill_entry(), &library, &Settings::default(), true);
+        let shot = &run.shots[run.kill.unwrap().0];
+        let record = &library.records[shot.record];
+        let report = &record.report;
+        let impact = Vec3::from(report.impact.point);
+        let muzzle = Vec3::from(report.muzzle.expect("the kill fixture records a muzzle"));
+        assert!(shot.muzzle.distance(muzzle) < 1e-4);
+        let range = muzzle.distance(impact);
+        let staging = super::super::world::SHOOTER_DISTANCE_M;
+        assert!(
+            (range - staging).abs() > 10.0,
+            "fixture: a muzzle off the staging"
+        );
+        let killer = record.killer.as_ref().expect("a killer");
+        let [_, _, line] = card_lines(killer, shot.muzzle.distance(impact));
+        assert!(line.starts_with(&format!("{range:.0} m")), "{line}");
+        let mut unstaged = report.clone();
+        unstaged.muzzle = None;
+        let staged = super::super::staged_muzzle(&unstaged);
+        assert!((staged.distance(impact) - staging).abs() < 1e-2);
     }
 
     /// The legend names `=` and what `R` does on the run.
