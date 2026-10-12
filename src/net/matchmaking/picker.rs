@@ -363,6 +363,16 @@ mod tests {
         assert_eq!(group_ping_label(europe), "228 ms");
     }
 
+    /// A continent whose measured locations round to the same ping shows one value, not a range.
+    #[test]
+    fn equal_measured_locations_show_one_value() {
+        let pings = table(&[("Paris", measured(210.0)), ("Frankfurt", measured(210.3))]);
+        let groups = groups(&fixture(), &pings);
+        let europe = groups.iter().find(|g| g.continent == "Europe").unwrap();
+        assert_eq!(europe.range_ms(), Some((210.0, 210.3)));
+        assert_eq!(group_ping_label(europe), "210 ms");
+    }
+
     #[test]
     fn unprobed_locations_read_as_measuring_and_block_settling() {
         let pings = table(&[("Singapore", measured(45.0))]);

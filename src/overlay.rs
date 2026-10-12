@@ -13,11 +13,11 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 use crate::flow::{Flow, InMatchSystems};
 
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
-/// declared LOW→HIGH, so the greatest is the top layer: `Lobby` is the maximum (the pre-connect
-/// Join menu, up only while no client link exists), then `ConnectStatus` (a connect / reconnect
-/// takes over everything in play), then `Menu` (an open menu is the top INTERACTIVE layer — Esc
-/// closes it, R can't respawn under it), then `SpawnMap`, then `Death`, then `ViewDead` at the
-/// bottom.
+/// declared LOW→HIGH, so the greatest is the top layer: `ConnectStatus` is the maximum (a dropped
+/// link takes over everything in play), then `Menu` (an open menu is the top INTERACTIVE layer —
+/// Esc closes it, R can't respawn under it), then `SpawnMap`, then `Death`, then `ViewDead` at the
+/// bottom. Every overlay lives inside a match: the lobby and the first connect are screens
+/// (`flow::Flow`), not overlays.
 ///
 /// Priority is deliberately DISTINCT from [`Overlay::zindex`] (the physical draw order): `Menu`
 /// outranks `Death` in priority (so the menu, not the death screen, owns the scrim while both are
@@ -37,12 +37,9 @@ pub(crate) enum Overlay {
     /// The Esc cursor-release menu (the net stand-in for SP pause; the sim never stops). Esc is the
     /// only thing that opens it — losing focus releases the cursor without declaring an overlay.
     Menu,
-    /// Not connected yet, or the in-game link dropped: "CONNECTING…" / "RECONNECTING…". Declared
-    /// only while a client link entity exists.
+    /// The match's link dropped: "RECONNECTING…". Declared only in a match, while its link is down.
+    /// Highest.
     ConnectStatus,
-    /// Matchmaking mode's Join menu (`net::matchmaking`), declared exactly while no client link
-    /// entity exists — so never together with `ConnectStatus`. Highest.
-    Lobby,
 }
 
 impl Overlay {
@@ -52,7 +49,6 @@ impl Overlay {
     /// outranks it in priority, precisely so the death status line shows THROUGH the menu.
     pub(crate) const fn zindex(self) -> i32 {
         match self {
-            Overlay::Lobby => 400,
             Overlay::ConnectStatus => 300,
             Overlay::Death => 200,
             Overlay::SpawnMap => 150,
@@ -70,6 +66,12 @@ impl Overlay {
     /// It carries no `OverlayNode`: it is not part of the active set, declares no presence, and owns
     /// no backdrop. The menu owns all of that; this is only where the menu's content draws.
     pub(crate) const MENU_CONTENT_Z: i32 = Overlay::Menu.zindex() + 10;
+
+    /// The z-layer for the menu's ACTIONS — today, matchmaking's LEAVE MATCH button: one rung above
+    /// the settings page, so a button beside the page's full-screen wrapper takes its own clicks,
+    /// and below everything that covers the menu, exactly as [`Overlay::MENU_CONTENT_Z`] is. Like
+    /// the page it carries no `OverlayNode`; it is shown while the menu owns the scrim.
+    pub(crate) const MENU_ACTIONS_Z: i32 = Overlay::MENU_CONTENT_Z + 1;
 
     /// The z-layer for the gunner sight's own FURNITURE — today the optic mask, the blackout with
     /// the glass cut out of it (`sight::reticle`). Negative, so it draws below every rung above
@@ -91,18 +93,17 @@ impl Overlay {
     pub(crate) const PEN_CAM_CORNER_Z: i32 = 20;
 
     /// Whether this overlay CAPTURES input while active — play stops and the cursor frees. The menu is
-    /// the obvious one; connect status too (there is no tank to drive until the link is up, and a
-    /// visible cursor over "CONNECTING…" is the honest state). Death and view-death do NOT block: the
+    /// the obvious one; the reconnect screen too (there is no tank to drive until the link is back,
+    /// and a visible cursor over "RECONNECTING…" is the honest state). Death and view-death do NOT block: the
     /// respawn key and the Lshift view switch both ride `PlayerInputSet`, which needs the cursor
     /// captured — the player is still "in" the tank, just with a dead station.
     /// The spawn map blocks too, and must: picking a point needs a visible, free cursor, which is
     /// exactly what a blocking overlay buys (the cursor owner releases, `feed_action_state` zeroes
     /// the wire command, so the tank coasts to a stop instead of driving blind under the map).
-    /// The lobby is a menu with buttons and no tank behind it.
     const fn blocks_input(self) -> bool {
         matches!(
             self,
-            Overlay::Menu | Overlay::ConnectStatus | Overlay::SpawnMap | Overlay::Lobby
+            Overlay::Menu | Overlay::ConnectStatus | Overlay::SpawnMap
         )
     }
 
@@ -121,6 +122,10 @@ impl Overlay {
 #[derive(Resource, Default)]
 pub(crate) struct Overlays {
     active: BTreeSet<Overlay>,
+    /// The client is on the match screen, declared from `Flow` every frame ([`declare_screen`]).
+    /// False by default: off the match screen input is blocked. A flag, not the screen itself, so
+    /// the fixed-clock reader of this set (`feed_action_state`) never reads `Flow`.
+    in_match: bool,
 }
 
 impl Overlays {
@@ -133,6 +138,11 @@ impl Overlays {
         } else {
             self.active.remove(&overlay);
         }
+    }
+
+    /// Declare whether the client is on the match screen this frame; absolute, like [`Self::declare`].
+    pub(crate) fn declare_in_match(&mut self, in_match: bool) {
+        self.in_match = in_match;
     }
 
     /// Whether `overlay` is currently latched.
@@ -149,14 +159,15 @@ impl Overlays {
 
 /// THE single input-license authority — the one derivation that replaces the four scattered inferences
 /// (the `cursor_locked` gate, `feed_action_state`'s zeroing, the menu open/close cursor calls, and the
-/// focus watcher). Input is blocked when the window is unfocused (the OS took the cursor) OR any latched
-/// overlay captures input ([`Overlay::blocks_input`] — the menu or the connect screen). When this is
+/// focus watcher). Input is blocked when the window is unfocused (the OS took the cursor), OR the
+/// client is not on the match screen (the lobby, the connect screen), OR any latched overlay captures
+/// input ([`Overlay::blocks_input`] — the menu, the spawn map or the reconnect screen). When this is
 /// true the cursor owner releases the cursor (which idles `PlayerInputSet` via `state::cursor_locked`)
 /// and `feed_action_state` sends a default command, so the tank coasts to a stop instead of holding the
 /// last input. `window_focused` is passed in (not read from the set) so it can reflect the LIVE window
 /// even in the fixed-schedule consumer, exactly as the old zeroing read `window.focused` directly.
 pub(crate) fn input_blocked(overlays: &Overlays, window_focused: bool) -> bool {
-    !window_focused || overlays.active.iter().any(|o| o.blocks_input())
+    !window_focused || !overlays.in_match || overlays.active.iter().any(|o| o.blocks_input())
 }
 
 /// Esc routing: the top overlay IF Esc may dismiss it (only ever the menu). Esc toggles the menu — it
@@ -284,6 +295,7 @@ pub(crate) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
+                declare_screen.in_set(OverlaySet::Declare),
                 // Esc's routing READS the set, so it runs in the toggle stage. The menu is a match's.
                 esc_toggle.in_set(OverlaySet::Toggle).in_set(InMatchSystems),
                 cursor_owner.in_set(OverlaySet::Cursor),
@@ -299,6 +311,14 @@ pub(crate) fn plugin(app: &mut App) {
 
 fn clear_overlays(mut overlays: ResMut<Overlays>) {
     *overlays = Overlays::default();
+}
+
+/// Fold the screen into the set: input is licensed only on the match screen.
+fn declare_screen(flow: Res<State<Flow>>, mut overlays: ResMut<Overlays>) {
+    let in_match = *flow.get() == Flow::InMatch;
+    if overlays.in_match != in_match {
+        overlays.declare_in_match(in_match);
+    }
 }
 
 /// Spawn the Esc menu backdrop once, hidden. [`apply_overlay_visibility`] reveals it whenever the
@@ -447,6 +467,7 @@ mod tests {
     fn overlays(active: &[Overlay]) -> Overlays {
         Overlays {
             active: active.iter().copied().collect(),
+            in_match: true,
         }
     }
 
@@ -485,7 +506,6 @@ mod tests {
     /// the death status line (which rides Death's z) shows through the menu.
     #[test]
     fn zindex_contract_is_pinned() {
-        assert_eq!(Overlay::Lobby.zindex(), 400);
         assert_eq!(Overlay::ConnectStatus.zindex(), 300);
         assert_eq!(Overlay::Death.zindex(), 200);
         assert_eq!(Overlay::Menu.zindex(), 100);
@@ -504,6 +524,11 @@ mod tests {
             Overlay::MENU_CONTENT_Z < Overlay::SpawnMap.zindex()
                 && Overlay::MENU_CONTENT_Z < Overlay::Death.zindex(),
             "the map and the death screen must still cover the menu's content",
+        );
+        assert!(
+            Overlay::MENU_ACTIONS_Z > Overlay::MENU_CONTENT_Z
+                && Overlay::MENU_ACTIONS_Z < Overlay::SpawnMap.zindex(),
+            "the menu's actions draw over its page and under whatever covers the menu",
         );
     }
 
@@ -708,20 +733,17 @@ mod tests {
         overlays.declare(Overlay::ConnectStatus, true);
     }
 
-    /// The lobby owns the screen: it is the top layer over anything else latched, blocks input, and
-    /// neither Esc nor `M` can latch a layer beneath it.
+    /// Off the match screen input is blocked whatever is latched, and the default set — the state
+    /// before any screen is declared — is off it.
     #[test]
-    fn lobby_is_the_top_blocking_undismissable_layer() {
-        let set = overlays(&[Overlay::Lobby, Overlay::Death]);
-        assert_eq!(set.top(), Some(Overlay::Lobby));
-        assert!(draws_scrim(&set, Overlay::Lobby));
-        assert!(input_blocked(&overlays(&[Overlay::Lobby]), true));
-        assert_eq!(top_dismissable(&overlays(&[Overlay::Lobby])), None);
-        assert!(
-            !esc_menu_target(&overlays(&[Overlay::Lobby])),
-            "Esc over the lobby latches no menu",
-        );
-        assert!(!may_open(&overlays(&[Overlay::Lobby]), Overlay::SpawnMap));
+    fn off_the_match_screen_input_is_blocked() {
+        assert!(input_blocked(&Overlays::default(), true));
+        let off_screen = Overlays {
+            in_match: false,
+            ..overlays(&[Overlay::Death])
+        };
+        assert!(input_blocked(&off_screen, true));
+        assert!(!input_blocked(&overlays(&[Overlay::Death]), true));
     }
 
     /// The status line is menu-over-death ONLY: it does not show when Death owns the scrim (full screen

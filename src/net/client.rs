@@ -594,7 +594,7 @@ pub fn run() {
     }
     app.insert_resource(template);
     app.add_systems(Startup, load_tank_assets);
-    // The connect-status overlay ("CONNECTING…" / "RECONNECTING…") is windowed presentation only —
+    // The connect screens (joining, and "RECONNECTING…" in a match) are windowed presentation only —
     // headless automation has no window to draw it, and verifies the state machine via the log
     // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
     if !simulate || sim_windowed {
@@ -720,8 +720,8 @@ struct ConnectRetry {
     /// driver stays idle: the client entity carries `Disconnected` from spawn (netcode's `#[require]`
     /// default), which is the pre-connect resting state — NOT a failure to retry.
     initiated: bool,
-    /// We reached `Connected` at least once this session. Distinguishes "never connected yet"
-    /// (`CONNECTING…`) from "was in game, lost the link" (`RECONNECTING…`) for the status overlay.
+    /// We reached `Connected` at least once on this link. Distinguishes "never connected yet" (the
+    /// joining screen) from "was in game, lost the link" (the match with `RECONNECTING…` over it).
     connected_once: bool,
     /// Connect attempts that have already failed and been retried — drives the `(retry N)` suffix
     /// and the backoff schedule. Reset to 0 on a successful `Connected`.
@@ -924,109 +924,91 @@ fn abandon_unreachable_match(
     ));
 }
 
-/// The connect screen's systems. `update_connect_status` declares `Overlay::ConnectStatus` into the
-/// overlay authority, so it runs in the `Declare` phase, before the cursor owner derives the input
-/// license from the set.
+/// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
+/// spawned on entering it and labelled from [`ConnectRetry`]; a match's dropped link is
+/// `Overlay::ConnectStatus` ("RECONNECTING…"), declared only in a match, in the `Declare` phase,
+/// before the cursor owner derives the input license from the set.
 pub(super) fn connect_screen_plugin(app: &mut App) {
+    use crate::flow::{Flow, InMatchSystems};
     app.init_resource::<ConnectRetry>()
         .add_systems(Startup, spawn_connect_status)
+        .add_systems(OnEnter(Flow::Joining), spawn_joining_screen)
         .add_systems(
             Update,
-            update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
+            (
+                update_connect_status
+                    .in_set(crate::overlay::OverlaySet::Declare)
+                    .in_set(InMatchSystems),
+                update_joining_screen.run_if(in_state(Flow::Joining)),
+            ),
         );
 }
 
-/// The connect-status message node inside the connect overlay — its text is rewritten from
-/// [`ConnectRetry`] by [`update_connect_status`]. The backdrop node itself carries no bespoke marker:
-/// it is an `overlay::OverlayNode(ConnectStatus)`, so its z and scrim visibility are the shared
-/// authority's job; only this text child needs its own handle for the in-place label rewrite.
+/// The joining screen's label.
 #[derive(Component)]
-struct ConnectStatusText;
+struct JoiningText;
 
-/// Spawn the persistent connect overlay; [`update_connect_status`] declares presence and updates its
-/// label, while `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps
-/// its z; the text child carries [`ConnectStatusText`] for the in-place label rewrite.
+/// Spawn the persistent reconnect overlay; [`update_connect_status`] declares its presence, while
+/// `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps its z.
 fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
     crate::ui_font::spawn_overlay(
         &mut commands,
         &fonts.hud,
-        crate::overlay::OverlayNode(crate::overlay::Overlay::ConnectStatus),
-        "CONNECTING…",
-        ConnectStatusText,
+        (
+            crate::overlay::OverlayNode(crate::overlay::Overlay::ConnectStatus),
+            Visibility::Hidden,
+        ),
+        "RECONNECTING…",
+        (),
         Some(Color::srgba(0.0, 0.0, 0.0, 0.6)),
     );
 }
 
-/// Declare the connect-status overlay's presence from the live connection state and drive its LABEL
-/// from [`ConnectRetry`]: `CONNECTING…` / `CONNECTING… (retry N)` before a first connect, the
-/// build-mismatch hint after enough first-connect failures, and `RECONNECTING…` after an in-game drop.
-/// Presence declaration runs in [`crate::overlay::OverlaySet::Declare`]; the backdrop's z and scrim
-/// visibility are the shared `OverlayNode` authority's, so this system no longer touches `Visibility`.
-///
-/// The label write is guarded on ACTUAL change — rebuilt only when the `(connected_once, attempts)`
-/// pair it renders changes. That pair is the label's sole input, so memoizing it in a `Local` skips
-/// both the `format!` allocation and the `Text` change-detection churn on the steady-state frames
-/// (which are almost all of them — the overlay sits on one message for seconds at a time).
-///
-/// The mismatch hint is gated on `!connected_once`: only a session that has NEVER connected can be a
-/// build mismatch (the fingerprints are transport-indistinguishable from a down server); once we have
-/// connected, a later drop is a transient link loss and stays `RECONNECTING…` for as long as the
-/// retries run, never accusing a mid-game player's client of being out of date.
-fn update_connect_status(
-    retry: Res<ConnectRetry>,
-    links: Query<(), With<NetcodeClient>>,
-    connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
-    mut overlays: ResMut<crate::overlay::Overlays>,
-    mut text: Query<&mut Text, With<ConnectStatusText>>,
-    mut shown: Local<Option<(bool, u32)>>,
-) {
-    use crate::overlay::Overlay;
-    let is_connected = !connected.is_empty();
-    // Declare presence into the overlay authority: the connect screen is latched whenever a link
-    // exists and is not up. Direct mode has a link from startup; matchmaking mode has none until a
-    // match is ready, and the Join menu owns the screen until then. Above every in-play overlay,
-    // so it owns the scrim whenever present — and the shared `overlay::apply_overlay_visibility`
-    // reconciler swaps the backdrop's visibility from that.
-    overlays.declare(Overlay::ConnectStatus, !links.is_empty() && !is_connected);
-    if is_connected || links.is_empty() {
-        return;
-    }
-
-    // The label is a pure function of `(connected_once, attempts)` — rebuild it (and rewrite the
-    // `Text`) only when that pair changes, not every frame. `attempts` is clamped into the memo key at
-    // the hint threshold, so once the persistent-failure hint is showing the key stops changing and
-    // the `format!`/`Text`-write churn stops too (the label is constant past that point). The clamp
-    // is safe for BOTH paths: a never-connected session climbs to the hint and pins there, while a
-    // reconnecting session (`connected_once`) never reaches the mismatch branch below, so its key just
-    // pins at the clamp with the label constant on "RECONNECTING…".
-    let key = (
-        retry.connected_once,
-        retry.attempts.min(MISMATCH_HINT_AFTER_ATTEMPTS),
+/// Spawn the joining screen: the match world is not yet anyone's view, so its scrim is near opaque.
+fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>) {
+    crate::ui_font::spawn_overlay(
+        &mut commands,
+        &fonts.hud,
+        crate::flow::FlowScoped(crate::flow::Flow::Joining),
+        joining_label(0),
+        JoiningText,
+        Some(Color::srgba(0.01, 0.02, 0.03, 0.94)),
     );
-    if *shown != Some(key) {
-        let label = if retry.connected_once {
-            // We connected earlier this session, so the fingerprints PROVABLY matched — a mid-game
-            // drop is a transient link loss, never a build mismatch. Keep "RECONNECTING…" indefinitely
-            // (retries are uncapped) rather than ever accusing a connected player's client of being
-            // out of date.
-            "RECONNECTING…".to_string()
-        } else if retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
-            // Never connected this session AND enough attempts have failed to rule out a server still
-            // starting up. The refusal a fingerprint mismatch produces is indistinguishable from an
-            // unreachable server (see `MISMATCH_HINT_AFTER_ATTEMPTS`), so name both causes.
-            "CAN'T CONNECT — server down or client/server build mismatch\n\
-             (update the client or redeploy the server)"
-                .to_string()
-        } else if retry.attempts == 0 {
-            "CONNECTING…".to_string()
-        } else {
-            format!("CONNECTING… (retry {})", retry.attempts)
-        };
-        if let Ok(mut text) = text.single_mut() {
-            *text = Text::new(label);
-        }
-        *shown = Some(key);
+}
+
+/// The joining screen's label after `attempts` failed connects. Past
+/// [`MISMATCH_HINT_AFTER_ATTEMPTS`] it names both causes a refusal can have (see that constant):
+/// only a session that has never connected can be a build mismatch, and this screen is only ever
+/// shown to one.
+fn joining_label(attempts: u32) -> String {
+    if attempts >= MISMATCH_HINT_AFTER_ATTEMPTS {
+        "CAN'T CONNECT — server down or client/server build mismatch\n\
+         (update the client or redeploy the server)"
+            .to_string()
+    } else if attempts == 0 {
+        "CONNECTING…".to_string()
+    } else {
+        format!("CONNECTING… (retry {attempts})")
     }
+}
+
+/// Rewrite the joining label when the attempt count it renders changes.
+fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
+    let label = joining_label(retry.attempts);
+    for mut text in &mut text {
+        if text.0 != label {
+            text.0.clone_from(&label);
+        }
+    }
+}
+
+/// Declare the reconnect overlay while the match's link is down.
+fn update_connect_status(
+    links: Query<Has<Connected>, With<NetcodeClient>>,
+    mut overlays: ResMut<crate::overlay::Overlays>,
+) {
+    let down = links.iter().any(|connected| !connected);
+    overlays.declare(crate::overlay::Overlay::ConnectStatus, down);
 }
 
 /// Parse without touching DNS so address shape and source precedence remain unit-testable offline.

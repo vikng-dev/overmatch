@@ -589,6 +589,9 @@ mod tests {
     fn m_cannot_latch_a_map_under_an_overlay_declared_the_same_frame() {
         let mut app = App::new();
         app.init_resource::<Overlays>();
+        app.world_mut()
+            .resource_mut::<Overlays>()
+            .declare_in_match(true);
         app.init_resource::<SpawnMap>();
         app.init_resource::<ButtonInput<KeyCode>>();
         app.insert_resource(LinkDown(true));

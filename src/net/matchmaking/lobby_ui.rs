@@ -1,8 +1,8 @@
 //! The Join menu's view: a modal card on the lobby scrim — title and version, the region picker,
-//! a status line, and the Join / Cancel buttons.
+//! a status line, and the Join / Cancel buttons. The card is the `Flow::Lobby` screen's.
 //!
 //! The picker list is rebuilt only when what it shows changes ([`ListView`] compared against the
-//! last one drawn); the footer is reconciled every frame with change-guarded writes. Clicks are
+//! last one drawn into the same list node, so a respawned card draws at once); the footer is reconciled every frame with change-guarded writes. Clicks are
 //! one `Pointer<Click>` observer over [`Target`]; hover is picking's own [`Hovered`].
 //!
 //! Strings from the network (city names, failure reasons) pass through [`printable`] before they
@@ -17,7 +17,7 @@ use super::picker::{self, GroupView, Tick};
 use super::ticket::{self, Phase};
 use super::worker::WorkerLink;
 use super::{Lobby, Locations};
-use crate::overlay::{Overlay, OverlayNode};
+use crate::flow::{Flow, FlowScoped};
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
 const CARD_WIDTH_PX: f32 = 620.0;
@@ -103,7 +103,7 @@ fn font(handle: &Handle<Font>, px: f32) -> TextFont {
 pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
-            OverlayNode(Overlay::Lobby),
+            FlowScoped(Flow::Lobby),
             Node {
                 width: Val::Percent(100.0),
                 height: Val::Percent(100.0),
@@ -112,7 +112,6 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                 ..default()
             },
             BackgroundColor(SCRIM),
-            Visibility::Hidden,
         ))
         .with_children(|scrim| {
             scrim
@@ -148,14 +147,6 @@ pub(super) fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                             TextColor(TEXT_DIM),
                         ));
                     });
-                    card.spawn((
-                        Text::new(
-                            "Tick the regions you will play in. Join finds an open match there, \
-                             or starts a server in the one with the lowest ping.",
-                        ),
-                        font(&fonts.body, SMALL_PX),
-                        TextColor(TEXT_DIM),
-                    ));
                     card.spawn((
                         LobbyList,
                         Node {
@@ -389,13 +380,17 @@ pub(super) fn refresh_list(
     fonts: Res<UiFonts>,
     lobby: Res<Lobby>,
     list: Single<Entity, With<LobbyList>>,
-    mut shown: Local<Option<ListView>>,
+    mut shown: Local<Option<(Entity, ListView)>>,
 ) {
     let view = list_view(&lobby);
-    if shown.as_ref() == Some(&view) {
+    if shown
+        .as_ref()
+        .is_some_and(|(drawn, last)| *drawn == *list && *last == view)
+    {
         return;
     }
-    let mut list = commands.entity(*list);
+    let list_entity = *list;
+    let mut list = commands.entity(list_entity);
     list.despawn_children();
     list.with_children(|list| match &view {
         ListView::Loading => {
@@ -442,7 +437,7 @@ pub(super) fn refresh_list(
             }
         }
     });
-    *shown = Some(view);
+    *shown = Some((list_entity, view));
 }
 
 /// The status line's text and colour for the current lobby state.

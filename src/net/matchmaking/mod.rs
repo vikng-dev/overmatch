@@ -9,8 +9,9 @@
 //!   until `ready` or `failed`. A ready ticket is sent as [`MatchReady`]; `net::client` spawns the
 //!   link to that address with that key. If that link never connects, `net::client` despawns it
 //!   and sends [`MatchUnreachable`], which returns the lobby to idle with the reason.
-//! - **Presence.** The lobby is [`Overlay::Lobby`], declared exactly while no client link entity
-//!   exists, so it and the connect screen (declared only while one does) never overlap.
+//! - **Presence.** The lobby is the `Flow::Lobby` screen (no client link): its card is spawned on
+//!   entering it and leaves with it, and its view systems run only there. [`Lobby`] persists, so a
+//!   return to the lobby keeps the selection and the pings.
 //! - **Threads.** Every HTTP call, DNS lookup and probe runs on its own thread ([`worker`]); the
 //!   frame loop only drains finished replies.
 //! - **Contract.** `backend/README.md` and `backend/contract/*.json`, held by [`contract`]'s tests.
@@ -18,9 +19,8 @@
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
-use lightyear::prelude::client::NetcodeClient;
 
-use crate::overlay::{Overlay, OverlaySet, Overlays};
+use crate::flow::Flow;
 
 mod contract;
 mod lobby_ui;
@@ -123,30 +123,21 @@ pub(super) fn install(app: &mut App, api: &str) {
         .add_message::<MatchReady>()
         .add_message::<MatchUnreachable>()
         .add_observer(lobby_ui::clicked)
-        .add_systems(Startup, (lobby_ui::spawn, request_locations))
+        .add_systems(Startup, request_locations)
+        .add_systems(OnEnter(Flow::Lobby), lobby_ui::spawn)
         .add_systems(
             Update,
             (
-                declare_lobby.in_set(OverlaySet::Declare),
-                (
-                    receive_replies,
-                    take_unreachable,
-                    poll_ticket,
-                    lobby_ui::refresh_list,
-                    lobby_ui::refresh_footer,
-                )
-                    .chain(),
+                (receive_replies, take_unreachable, poll_ticket).chain(),
+                (lobby_ui::refresh_list, lobby_ui::refresh_footer)
+                    .after(poll_ticket)
+                    .run_if(in_state(Flow::Lobby)),
             ),
         );
 }
 
 fn request_locations(link: Res<WorkerLink>) {
     link.fetch_locations(super::CLIENT_VERSION);
-}
-
-/// The lobby is up exactly while there is no client link to show a connect screen for.
-fn declare_lobby(links: Query<(), With<NetcodeClient>>, mut overlays: ResMut<Overlays>) {
-    overlays.declare(Overlay::Lobby, links.is_empty());
 }
 
 fn receive_replies(

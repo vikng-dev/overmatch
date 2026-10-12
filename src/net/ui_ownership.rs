@@ -96,6 +96,23 @@ fn root_names(world: &mut World) -> Vec<Vec<String>> {
         .collect()
 }
 
+/// Every entity carrying a component whose short type name is `marker`.
+fn entities_named(world: &mut World, marker: &str) -> Vec<Entity> {
+    let mut query = world.query::<EntityRef>();
+    query
+        .iter(world)
+        .filter(|entity| {
+            entity.archetype().components().iter().any(|id| {
+                world
+                    .components()
+                    .get_name(*id)
+                    .is_some_and(|name| name.shortname().to_string() == marker)
+            })
+        })
+        .map(|entity| entity.id())
+        .collect()
+}
+
 /// Every root marker in `expected` is on some root.
 fn assert_roots(world: &mut World, flow: Flow, expected: &[&str]) {
     let names = root_names(world);
@@ -165,6 +182,8 @@ fn client_ui_app() -> App {
         .add_plugins(crate::settings::plugin(
             crate::settings::PageEntry::OverlayMenu,
         ));
+    // A closed local port: the location fetch fails at once, and the lobby draws that failure.
+    super::matchmaking::install(&mut app, "http://127.0.0.1:9");
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -215,12 +234,35 @@ fn every_root_is_owned_and_each_screen_draws_only_its_own_ui() {
             stale.is_empty(),
             "{flow:?}: another screen's trees remain: {stale:?}"
         );
-        for owners in visible_owners(world) {
+        let drawn = visible_owners(world);
+        for owners in &drawn {
             assert_eq!(
-                owners,
+                *owners,
                 vec![Owner::Screen(flow)],
                 "{flow:?}: a drawn root must be this screen's; overlays and the settings page are \
                  hidden until declared"
+            );
+        }
+        if matches!(flow, Flow::Lobby | Flow::Joining) {
+            assert!(!drawn.is_empty(), "{flow:?}: the screen draws its own root");
+        }
+        if flow == Flow::Lobby {
+            let lists = entities_named(world, "LobbyList");
+            assert_eq!(lists.len(), 1, "one lobby card");
+            assert!(
+                world
+                    .get::<Children>(lists[0])
+                    .is_some_and(|children| !children.is_empty()),
+                "the lobby's list is drawn on every entry, a return included"
+            );
+            let texts: Vec<String> = world
+                .query::<&Text>()
+                .iter(world)
+                .map(|text| text.0.clone())
+                .collect();
+            assert!(
+                !texts.iter().any(|text| text.contains("Tick the regions")),
+                "the lobby carries no instruction text: {texts:?}"
             );
         }
         let debug_cards = world
@@ -284,11 +326,12 @@ fn the_match_builds_its_hud_and_leaving_takes_it_away() {
 
     enter(&mut app, Flow::Lobby);
     let world = app.world_mut();
-    assert_eq!(
-        world.query::<&FlowScoped>().iter(world).count(),
-        0,
-        "leaving the match takes every one of its trees"
-    );
+    let left = world
+        .query::<&FlowScoped>()
+        .iter(world)
+        .filter(|scope| scope.0 == Flow::InMatch)
+        .count();
+    assert_eq!(left, 0, "leaving the match takes every one of its trees");
     let deaths = root_names(world)
         .iter()
         .filter(|root| root.iter().any(|name| name == "DeathScreenNode"))
