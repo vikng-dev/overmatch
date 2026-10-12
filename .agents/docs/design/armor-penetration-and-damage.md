@@ -191,8 +191,9 @@ stops still throw; the body the round stops inside throws nothing. A bounce thro
 
 **Strength.** `S = spend × (v_exit / v_entry)²` (reference-mm, on the axis), where `spend` is what
 the round's mechanism spent crossing that body (its readout drop, η-weighted by the disc) and
-`v_entry`, `v_exit` are the round's speeds entering and leaving it. Both terms or nothing: a thin
-or soft body has no spend, a barely-through round no energy ratio. Calibre has no role.
+`v_entry`, `v_exit` are the round's speeds entering and leaving it. A thin or soft body has a small
+positive spend (positive chord × factor) and throws a small cone; a barely-through round has a
+small energy ratio. Calibre has no role.
 
 **Profile.** Inside a cone of half-angle `α` about its axis,
 
@@ -218,21 +219,36 @@ struck tank (it doses only that tank's boxes; hitting another tank is a preserve
 `1/r²` fall-off is not a parameter: a box farther away covers fewer directions. Shadowing is graded:
 a plate nearly always stops a direction, an engine block mostly, a crew station barely.
 
-**Dose.** A box's dose is `D_b = (1/N) Σ s_i(at entry)` over the directions entering it, in the
-count unit (reference-mm), never scaled by the box's own factor; armour (no count) shadows and takes
-nothing. Doses go through the addressed `Dose` effect, like the line's. Dose summed over boxes is not
+**Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
+the whole ray through the struck tank, from outside every candidate's bounds through the throw
+point, with nothing declared. So what it starts inside is established, never assumed — thrown from
+an internal step it starts inside the softer material and pays for it — and every volume along it is
+present in order, nested and overlapping ones included; an overlap resists by the union-field
+overlap rule. No nudge displaces the ray: the volumes the exit leaves are recognised by identity, so
+a direction starting inside one of them pays for that material but does not dose it there.
+
+**Dose.** A box's dose is `D_b = (1/N) Σ s_i(at entry)` over the directions entering it, each
+direction dosing a box once, in the count unit (reference-mm), never scaled by the box's own factor;
+armour (no count) shadows and takes nothing. A box the direction starts inside is entered at the
+throw point, unless the exit leaves it. Doses go through the addressed `Dose` effect, like the line's. Dose summed over boxes is not
 conserved (two thin boxes in line both take nearly full strength); the emitted budget is.
 
-**Data.** `α`, the axis rule and `N` live in `assets/ballistics/spall_cone.ron`, validated at parse
-(ADR-0014: built from data, synchronously). `α` = 25° is TUNED/provisional (owner 2026-10-12;
+**Data.** `α`, the axis rule and `N` live in `assets/ballistics/spall_cone.ron`, parsed and
+validated while the app is built (ADR-0014: built from data, synchronously); a half-angle whose
+`cos α` rounds to 1, or a shape not emitting `S/2` within the rounding of its weights, is refused. `α` = 25° is TUNED/provisional (owner 2026-10-12;
 MEASURED normal-impact outer extents ~26°, Qi et al. 2026). The half-angle and the axis are a
 playtest fork (`.agents/scratch/playtest-forks/README.md`).
 
 **Class invariants** (tests hold them for any tank and any cone; fixture numbers are fixture data):
 exact emission `S/2` at N ∈ {1, 7, 24, 97}; resolution stability; homogeneity in `S`; inverse
 square for an unshadowed thin box; profile shape (maximal on the axis, zero at and past the rim);
-factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose).
-The shipped cone's casts are digested on every target by `src/ballistics/field_casts.rs`.
+factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose,
+over a cone and along one direction through randomized stacks); a direction pays for the material it
+starts inside, a nested shield shadows, a box inside a traversed volume is dosed, a plate thinner
+than any nudge is charged. The shipped cone's walks, and six whole main-gun shots at the bound tank
+(exit detection, spends and speeds, strength, axis, walks, HP), are digested on every target by
+`src/ballistics/field_casts.rs`; the force law's transcendentals are `libm`'s, so a shot's spall
+sources are the same bits everywhere.
 
 **Not built.** The fragment cone (a bursting round's own fragments, carrying its velocity) and the
 blast sphere; plate failure mode (coherent plug vs distributed debris) selected by material and

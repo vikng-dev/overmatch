@@ -796,9 +796,10 @@ pub struct ArmorVolume;
 #[derive(Component)]
 pub struct ComponentVolume;
 
-/// A component's HP pool (crew/module/ammo). A spall fragment deposits 1; the main penetrator
-/// transiting deposits many (scaled by the cost it paid crossing — design §6). `current` clamps at
-/// 0; the *consequences* of reaching 0 (cookoff, crew death, knock-out) are later increments (§§7–8).
+/// A component's HP pool (crew/module/ammo), in reference-mm. The main penetrator transiting
+/// deposits what it spent crossing it, and each spall cone direction entering it its strength at
+/// entry / N (design §§5–6). `current` clamps at 0; the *consequences* of reaching 0 (cookoff, crew
+/// death, knock-out) are later increments (§§7–8).
 #[derive(Component)]
 pub struct ComponentHealth {
     pub current: f32,

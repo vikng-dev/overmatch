@@ -26,6 +26,13 @@
 //! gate observes the decisions and applies nothing. The seam is not yet complete: a spall cone's
 //! directions are marched in [`apply`], not decided (see there).
 //!
+//! # Fields
+//!
+//! A spall cone's directions are walked by the same collector and pairing walk as the line's
+//! corridors ([`field_presence`]), and spent and dosed over the ordered presence it returns
+//! ([`field_direction`]). The field law they serve — strength, profile, shadowing, dose — is the
+//! design doc's §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+//!
 //! # Fail closed, never free
 //!
 //! On any structured [`WalkError`] the round STOPS at the contact it was resolving: no perforation,
