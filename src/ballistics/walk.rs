@@ -74,6 +74,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::mechanism::{
     Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
+    overlap_factor,
 };
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
@@ -382,7 +383,7 @@ pub struct WalkLaws {
     /// RULED 2026-08-07 (§13.4): chaining is transitive but budgeted, and the cap IS the tolerance —
     /// the same 2 mm knob, deliberately, because one constant bounds both extremes at once. A single
     /// two-plate sandwich welds across up to 2 mm of air; an arbitrarily long picket fence can never
-    /// collapse into one run with one terminal spall budget by chaining.
+    /// collapse into one run with one terminal exit by chaining.
     pub weld_run_gap_budget: f32,
     /// LATERAL domain — two samples' entrance patches lie on one surface when their normals agree
     /// to this cosine …
@@ -659,7 +660,8 @@ pub enum BoundaryKind {
     Exit,
 }
 
-/// One field transition. Spall fires wherever the step is DOWNWARD, including the exit (§13.2).
+/// One field transition along a sample ray. Spall sources are not read from these: they are body
+/// exits ([`BodyExit`]), found from the sample's substance layers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BoundaryEvent {
     pub kind: BoundaryKind,
@@ -668,11 +670,6 @@ pub struct BoundaryEvent {
     pub normal: Vec3,
     pub factor_before: f32,
     pub factor_after: f32,
-    /// §5's body term: the cost of the constant-factor stretch just exited. Zero unless the step is
-    /// downward. For a plain single-material plate this is the whole plate — identical to what the
-    /// serial resolver hands the spall cone today; for an equal-factor welded sandwich it is the
-    /// SUMMED cost, matching §13.4's "budget = the run's summed cost".
-    pub spall_budget: f32,
     /// True when this step only exists because a micro-gap was welded away.
     pub welded: bool,
     pub run: usize,
@@ -1314,8 +1311,7 @@ fn weld_runs(
                 cost_acc += span.cost();
                 match segments.last_mut() {
                     // Coalesce across a welded void so an equal-factor sandwich reads as ONE
-                    // stretch — that is what makes the welded exit's spall budget the SUMMED cost
-                    // (§13.4) without any special case.
+                    // stretch of the field.
                     Some(last) if last.factor.to_bits() == span.factor.to_bits() => {
                         last.end = span.end;
                         last.material += span.end - span.start;
@@ -1401,15 +1397,9 @@ fn weld_runs(
     Ok(welded)
 }
 
-/// Turn each welded run's material segments into the ordered field transitions the consequence step
-/// consumes. Spall fires at every DOWNWARD step (§13.2's field law), including the exit.
-///
-/// RULED 2026-08-07 (§13.4, superseding its own original "spall once per welded run", which
-/// contradicted §13.2): welding deletes only the void's exit/entry face pair, and the direct
-/// material step it exposes still obeys the field law. A welded `RHA | 0.4 mm air | Cast` joint
-/// therefore spalls with its own budget; an equal-factor joint emits nothing at all, which is where
-/// the common case still reads as "one exit". A 0.4 mm void never "develops" spall of its own —
-/// voids have no events, material steps do.
+/// Turn each welded run's material segments into its ordered field transitions: one entrance, every
+/// factor step inside, one exit. Welding deletes only a void's exit/entry face pair; the material
+/// step it exposes is still a step, and a void has no event of its own.
 fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEvent> {
     let mut events = Vec::new();
     for (index, run) in runs.iter().enumerate() {
@@ -1424,13 +1414,11 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
             normal: run.entry_normal,
             factor_before: 0.0,
             factor_after: first.factor,
-            spall_budget: 0.0,
             welded: false,
             run: index,
         });
         for pair in run.segments.windows(2) {
             let (before, after) = (pair[0], pair[1]);
-            let downward = after.factor < before.factor;
             events.push(BoundaryEvent {
                 kind: BoundaryKind::Step,
                 t: before.end,
@@ -1438,7 +1426,6 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
                 normal: corridor.axis,
                 factor_before: before.factor,
                 factor_after: after.factor,
-                spall_budget: if downward { before.cost } else { 0.0 },
                 welded: after.start != before.end,
                 run: index,
             });
@@ -1451,7 +1438,6 @@ fn boundary_events(corridor: &RayCorridor, runs: &[WeldedRun]) -> Vec<BoundaryEv
             normal: run.exit_normal,
             factor_before: last.factor,
             factor_after: 0.0,
-            spall_budget: last.cost,
             welded: false,
             run: index,
         });
@@ -1610,18 +1596,64 @@ pub struct DiscCorridor {
     pub samples: Vec<SampleCorridor>,
 }
 
-/// A downward field step aggregated over the disc — one spall source.
+/// One sample's part in a [`BodyExit`]: the body's extent along that sample's ray.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct DiscSpall {
-    pub t: f64,
+pub struct ExitMember {
+    pub sample: usize,
+    /// Where the sample entered the body.
+    pub start: f64,
+    /// Where it left it: the body's rear boundary on this ray.
+    pub end: f64,
+    /// Corridor-relative position of `end` on this sample's ray.
     pub position: Vec3,
-    pub normal: Vec3,
-    pub from_factor: f32,
-    pub to_factor: f32,
-    /// §5's body term, already η-weighted: the contributing samples' budgets divided by k.
-    pub budget: f32,
-    /// The fraction of the disc that saw THIS step — entrance, internal-step and exit coverage are
-    /// different subsets and are not interchangeable (they describe different faces).
+    /// The rear face's outward normal at a genuine exit (material to air); `None` at an internal
+    /// step (material to softer material), which has no face of its own.
+    pub face: Option<Vec3>,
+}
+
+/// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
+/// decides whether the round reaches it.
+///
+/// A BODY is a maximal stretch of one substance set along a sample, welded voids inside it
+/// included: two plates of one substance in contact are one body. A body EXITS where the next
+/// medium resists less — the next body has a lower factor, or the run ends in air. A step to an
+/// equal or higher factor ends the body without an exit. Members are grouped by the substances
+/// exited, by whether the exit is genuine, and by their ordinal among such exits on their own ray;
+/// longitudinal position cannot be the key, since on an oblique slab the ring's exits are spread by
+/// `r·tan(incidence)` yet are one face.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyExit {
+    /// The substances of the body exited, in id order.
+    pub substances: Vec<SubstanceId>,
+    /// Whether the exit is genuine (into air through a rear face) rather than an internal step.
+    pub genuine: bool,
+    /// The contributing samples, in sample order.
+    pub members: Vec<ExitMember>,
+}
+
+/// A body exit the round reached: where it throws its spall cone from, and the round's state across
+/// the body it left (design doc §5).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpallSource {
+    /// Mean progress of the reached members' exits.
+    pub t: f64,
+    /// Mean position of the reached members' exits (corridor-relative from [`finish`]).
+    pub position: Vec3,
+    /// Mean outward rear-face normal at a genuine exit; `None` at an internal step.
+    pub face: Option<Vec3>,
+    /// The round's unit direction of travel through the crossing.
+    pub direction: Vec3,
+    /// The substances of the body exited, in id order.
+    pub substances: Vec<SubstanceId>,
+    /// Reference-mm the mechanism spent across this body: its readout drop over the body's
+    /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
+    /// summed over the reached members.
+    pub spend: f32,
+    /// The round's speed (m/s) where the earliest member entered the body.
+    pub entry_speed: f32,
+    /// The round's speed (m/s) where the latest reached member left it.
+    pub exit_speed: f32,
+    /// Fraction of the disc whose ray reached this exit.
     pub coverage: f32,
 }
 
@@ -1645,10 +1677,15 @@ pub struct SampleLayer {
     pub present: Vec<VolumeContact>,
 }
 
-/// One stretch of a disc crossing over which every sample's present volumes are constant: the
-/// ordered encounter a mechanism advances through. Encounters tile the crossing `[start, end]` in
-/// order, cut at every sample's [`Layer`] boundary; samples outside the crossing over a stretch
-/// are absent from it.
+/// One stretch of a disc crossing over which every sample's SUBSTANCE SET is constant: the ordered
+/// encounter a mechanism advances through. A [`DiscEvent`]'s encounters tile the crossing
+/// `[start, end]` in order, cut at every sample's [`Layer`] boundary, so there each one's present
+/// volumes are constant too. The driver hands a mechanism each run of them joined across no
+/// interface as one encounter ([`Encounter::absorb`]); such a merged encounter's `present` may list
+/// volumes of one substance that never overlap, each over its own `[start, end)`, and its endpoints
+/// are not every volume boundary inside it. Whatever needs volume boundaries reads the contact
+/// intervals, never `present` membership. Samples outside the crossing over a stretch are absent
+/// from it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Encounter {
     pub start: f64,
@@ -1742,7 +1779,8 @@ pub struct DiscEvent {
     pub cost: f32,
     /// The crossing's ordered encounters ([`Encounter`]).
     pub encounters: Vec<Encounter>,
-    pub spall: Vec<DiscSpall>,
+    /// Every body exit along the crossing ([`BodyExit`]), ordered by mean exit progress.
+    pub exits: Vec<BodyExit>,
     pub shares: Vec<EntityShare>,
 }
 
@@ -2147,64 +2185,85 @@ fn build_event(
         })
         .collect();
 
-    // Spall: cluster each sample's downward steps by their factor pair and their ordinal among
-    // same-pair steps in that sample. Longitudinal position cannot be the key — on an oblique slab
-    // the ring's exits are spread by `r·tan(incidence)` yet they are all one exit face.
-    let mut spall_groups: BTreeMap<(u32, u32, usize), (Vec<f64>, Vec3, Vec3, f64, usize)> =
+    // Body exits, per sample, then grouped over the disc ([`BodyExit`]).
+    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), Vec<ExitMember>> =
         BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in &by_sample {
-        let mut ordinals: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        let base = corridor.origin + corridor.samples[sample].offset;
+        let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
+        let mut member =
+            |substances: Vec<SubstanceId>, start: f64, end: f64, face: Option<Vec3>| {
+                let genuine = face.is_some();
+                let ordinal = ordinals.entry((substances.clone(), genuine)).or_insert(0);
+                exit_groups
+                    .entry((substances, genuine, *ordinal))
+                    .or_default()
+                    .push(ExitMember {
+                        sample,
+                        start,
+                        end,
+                        position: base + corridor.axis * end as f32,
+                        face,
+                    });
+                *ordinal += 1;
+            };
         let mut saw_exit = false;
         for &run in runs {
-            for event in walks[sample].events.iter().filter(|e| e.run == run) {
-                if event.factor_after >= event.factor_before {
+            let extent = &walks[sample].runs[run];
+            if walks[sample]
+                .events
+                .iter()
+                .any(|e| e.run == run && e.kind == BoundaryKind::Exit && e.factor_before > 0.0)
+            {
+                saw_exit = true;
+            }
+            // (substances, factor, start, end) of the body the sample is in.
+            let mut body: Option<(Vec<SubstanceId>, f32, f64, f64)> = None;
+            for layer in layers_over(&walks[sample].layers, extent.start, extent.end) {
+                let (from, to) = (layer.start.max(extent.start), layer.end.min(extent.end));
+                if layer.present.is_empty() || to <= from {
                     continue;
                 }
-                if event.kind == BoundaryKind::Exit {
-                    saw_exit = true;
+                let substances = layer.substances();
+                let factor = layer
+                    .present
+                    .iter()
+                    .fold(0.0f32, |most, presence| most.max(presence.material.factor));
+                match &mut body {
+                    Some((current, _, _, end)) if *current == substances => *end = to,
+                    _ => {
+                        if let Some((exited, before, start, end)) = body.take()
+                            && factor < before
+                        {
+                            member(exited, start, end, None);
+                        }
+                        body = Some((substances, factor, from, to));
+                    }
                 }
-                let pair = (event.factor_before.to_bits(), event.factor_after.to_bits());
-                let ordinal = ordinals.entry(pair).or_insert(0);
-                let slot = spall_groups.entry((pair.0, pair.1, *ordinal)).or_insert((
-                    Vec::new(),
-                    Vec3::ZERO,
-                    Vec3::ZERO,
-                    0.0,
-                    0,
-                ));
-                slot.0.push(event.t);
-                slot.1 += event.position;
-                slot.2 += event.normal;
-                slot.3 += event.spall_budget as f64;
-                slot.4 += 1;
-                *ordinal += 1;
+            }
+            if let Some((exited, factor, start, end)) = body
+                && factor > 0.0
+            {
+                member(exited, start, end, Some(extent.exit_normal));
             }
         }
         if saw_exit {
             exit_covered += 1;
         }
     }
-    let mut spall: Vec<DiscSpall> = spall_groups
+    let mut exits: Vec<BodyExit> = exit_groups
         .into_iter()
-        .map(|((from, to, _), (ts, position, normal, budget, count))| {
-            let n = count as f32;
-            DiscSpall {
-                t: ts.iter().sum::<f64>() / count as f64,
-                position: position / n,
-                normal: if count == 1 {
-                    normal
-                } else {
-                    unit_or_zero(normal)
-                },
-                from_factor: f32::from_bits(from),
-                to_factor: f32::from_bits(to),
-                budget: (budget / kf) as f32,
-                coverage: (count as f64 / kf) as f32,
-            }
+        .map(|((substances, genuine, _), members)| BodyExit {
+            substances,
+            genuine,
+            members,
         })
         .collect();
-    spall.sort_by(|a, b| a.t.total_cmp(&b.t));
+    let mean_end = |exit: &BodyExit| {
+        exit.members.iter().map(|m| m.end).sum::<f64>() / exit.members.len() as f64
+    };
+    exits.sort_by(|a, b| mean_end(a).total_cmp(&mean_end(b)));
 
     let mut primitives: Vec<PrimitiveKey> = by_sample
         .iter()
@@ -2238,7 +2297,7 @@ fn build_event(
         exit_coverage: (exit_covered as f64 / kf) as f32,
         cost,
         encounters,
-        spall,
+        exits,
         shares,
     })
 }
@@ -2592,7 +2651,9 @@ pub struct ResolutionPlan<S> {
     /// is shoved through contact by the physics engine. So the caller routes the shove by
     /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.
     pub deposits: Vec<Dose>,
-    pub spall: Vec<DiscSpall>,
+    /// One per body exit the round reached, in order: every exit before a stop throws, and the body
+    /// the round stops inside throws nothing.
+    pub spall: Vec<SpallSource>,
 }
 
 /// The corridor [`finish`] was handed must be the corridor [`begin`] asked for.
@@ -2710,20 +2771,17 @@ pub(crate) fn finish<M: Mechanism>(
     let cost_spent =
         (mechanism.reference_mm(state) - mechanism.reference_mm(advanced.state)) as f32;
 
-    let (outcome, cut) = match advanced.stop {
-        Some(t) => {
-            let at = transit.origin + transit.axis * t as f32;
-            (Outcome::Embedded { at, t: t as f32 }, t)
-        }
-        None => (
-            Outcome::Perforated {
-                exit: event.exit_position,
-                exit_normal: event.exit_normal,
-                direction: transit.axis,
-                t: event.end as f32,
-            },
-            event.end,
-        ),
+    let outcome = match advanced.stop {
+        Some(t) => Outcome::Embedded {
+            at: transit.origin + transit.axis * t as f32,
+            t: t as f32,
+        },
+        None => Outcome::Perforated {
+            exit: event.exit_position,
+            exit_normal: event.exit_normal,
+            direction: transit.axis,
+            t: event.end as f32,
+        },
     };
 
     let deposits = advanced
@@ -2739,23 +2797,14 @@ pub(crate) fn finish<M: Mechanism>(
         })
         .collect();
 
-    // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward
-    // steps it actually reached. Spall budgets are the event's cost readout, so the overmatch
-    // compatibility adapter's projection applies to them too.
-    let charge = if request.entrance.overmatched {
-        transit.axis.dot(request.entrance.normal).abs() as f64
-    } else {
-        1.0
-    };
-    let spall = event
-        .spall
-        .iter()
-        .filter(|mark| mark.t <= cut)
-        .map(|mark| DiscSpall {
-            budget: (mark.budget as f64 * charge) as f32,
-            ..*mark
-        })
-        .collect();
+    let spall = spall_sources(
+        mechanism,
+        &event.exits,
+        &advanced.stretches,
+        advanced.stop,
+        transit.axis,
+        transit.samples(),
+    );
 
     Ok(ResolutionPlan {
         entrance: request.entrance,
@@ -2774,6 +2823,20 @@ struct Advanced<S> {
     stop: Option<f64>,
     /// Per addressed volume, the summed line `(chord, amount)`.
     doses: BTreeMap<Entity, (f64, f64)>,
+    /// Every encounter the mechanism advanced through, in order.
+    stretches: Vec<Stretch<S>>,
+}
+
+/// One encounter as the mechanism advanced through it: the progress it covered, the states either
+/// side, and the factor each present sample was resisted by there.
+struct Stretch<S> {
+    start: f64,
+    /// Where the advance left the round: the encounter's end, or the rest point.
+    end: f64,
+    before: S,
+    after: S,
+    /// `(sample, factor)` for every sample in the encounter ([`overlap_factor`]).
+    resisted: Vec<(usize, f32)>,
 }
 
 /// The encounters a mechanism advances through: each run of encounters joined across no interface
@@ -2798,8 +2861,10 @@ fn advance_through<M: Mechanism>(
     geometry: &Geometry,
 ) -> Result<Advanced<M::State>, WalkError> {
     let mut doses: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    let mut stretches: Vec<Stretch<M::State>> = Vec::new();
     for encounter in one_substance_runs(encounters) {
         let encounter = &*encounter;
+        let before = state;
         let advance = mechanism.advance(state, encounter, limits, geometry);
         state = advance.state;
         for effect in advance.effects {
@@ -2815,6 +2880,22 @@ fn advance_through<M: Mechanism>(
                 }
             }
         }
+        let stop = advance.control == Control::Stop;
+        stretches.push(Stretch {
+            start: encounter.start,
+            end: if stop {
+                encounter.start + advance.consumed
+            } else {
+                encounter.end
+            },
+            before,
+            after: state,
+            resisted: encounter
+                .samples
+                .iter()
+                .map(|sample| (sample.sample, overlap_factor(&sample.present)))
+                .collect(),
+        });
         match advance.control {
             Control::Continue => {}
             Control::Stop => {
@@ -2822,6 +2903,7 @@ fn advance_through<M: Mechanism>(
                     state,
                     stop: Some(encounter.start + advance.consumed),
                     doses,
+                    stretches,
                 });
             }
             Control::Redirect { .. } | Control::Schedule => {
@@ -2833,5 +2915,100 @@ fn advance_through<M: Mechanism>(
         state,
         stop: None,
         doses,
+        stretches,
     })
+}
+
+/// The spall sources of the body exits the round reached ([`SpallSource`]).
+///
+/// A member is reached when its exit lies at or before the rest point; a body the round stops inside
+/// throws nothing. Body boundaries are substance-set changes on their sample, so they are interfaces
+/// and every stretch lies wholly inside or wholly outside a member's body: a stretch belongs to it
+/// when its midpoint does. A stretch's readout drop is shared among its samples by the factor each
+/// was resisted by — the share the rigid force law gives each sample of the disc-mean force.
+fn spall_sources<M: Mechanism>(
+    mechanism: &M,
+    exits: &[BodyExit],
+    stretches: &[Stretch<M::State>],
+    stop: Option<f64>,
+    direction: Vec3,
+    // k: the disc's sample count.
+    disc: usize,
+) -> Vec<SpallSource> {
+    let disc_spend: Vec<f64> = stretches
+        .iter()
+        .map(|stretch| {
+            mechanism.reference_mm(stretch.before) - mechanism.reference_mm(stretch.after)
+        })
+        .collect();
+    let mut out = Vec::new();
+    for exit in exits {
+        let reached: Vec<&ExitMember> = exit
+            .members
+            .iter()
+            .filter(|member| stop.is_none_or(|rest| member.end <= rest))
+            .collect();
+        if reached.is_empty() {
+            continue;
+        }
+        let mut spend = 0.0f64;
+        for member in &reached {
+            for (stretch, drop) in stretches.iter().zip(&disc_spend) {
+                let mid = 0.5 * (stretch.start + stretch.end);
+                if !(member.start <= mid && mid < member.end) {
+                    continue;
+                }
+                let total: f64 = stretch.resisted.iter().map(|(_, f)| *f as f64).sum();
+                let own = stretch
+                    .resisted
+                    .iter()
+                    .find(|(sample, _)| *sample == member.sample)
+                    .map_or(0.0, |(_, f)| *f as f64);
+                if total > 0.0 {
+                    spend += drop * own / total;
+                }
+            }
+        }
+        let first = reached
+            .iter()
+            .map(|m| m.start)
+            .fold(f64::INFINITY, f64::min);
+        let last = reached
+            .iter()
+            .map(|m| m.end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let entry = stretches
+            .iter()
+            .find(|stretch| 0.5 * (stretch.start + stretch.end) >= first)
+            .map(|stretch| stretch.before);
+        let exit_state = stretches
+            .iter()
+            .rev()
+            .find(|stretch| 0.5 * (stretch.start + stretch.end) < last)
+            .map(|stretch| stretch.after);
+        let (Some(entry), Some(exit_state)) = (entry, exit_state) else {
+            continue;
+        };
+        let count = reached.len();
+        let faces: Vec<Vec3> = reached.iter().filter_map(|m| m.face).collect();
+        let face = match faces.as_slice() {
+            [] => None,
+            // One face IS the mean; normalising a unit vector would perturb its low bits.
+            [one] => Some(*one),
+            several => Some(unit_or_zero(several.iter().copied().sum())),
+        };
+        out.push(SpallSource {
+            t: reached.iter().map(|m| m.end).sum::<f64>() / count as f64,
+            position: reached.iter().map(|m| m.position).sum::<Vec3>() / count as f32,
+            face,
+            direction,
+            substances: exit.substances.clone(),
+            spend: spend as f32,
+            entry_speed: mechanism.speed(entry) as f32,
+            exit_speed: mechanism.speed(exit_state) as f32,
+            coverage: (count as f64 / disc as f64) as f32,
+        });
+    }
+    out.sort_by(|a, b| a.t.total_cmp(&b.t));
+    out
 }

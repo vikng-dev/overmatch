@@ -35,6 +35,9 @@ pub(crate) trait Mechanism {
 
     /// Reference-mm `state` can still defeat: the readout, never the currency.
     fn reference_mm(&self, state: Self::State) -> f64;
+
+    /// The round's speed (m/s) in `state`.
+    fn speed(&self, state: Self::State) -> f64;
 }
 
 /// The limits an advance must respect.
@@ -90,7 +93,7 @@ pub(crate) enum Effect {
 }
 
 /// A dose addressed to one volume: the box a consequence lands in, and how much of it, in
-/// reference-mm. The round's own line and the spall cloud both deposit through it.
+/// reference-mm. The round's own line and the spall cone both deposit through it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dose {
     pub address: Entity,
@@ -249,6 +252,10 @@ impl Mechanism for SolidShot {
     fn reference_mm(&self, state: SolidShotState) -> f64 {
         capability_of((self.scale, self.inertia), state.speed)
     }
+
+    fn speed(&self, state: SolidShotState) -> f64 {
+        state.speed
+    }
 }
 
 /// THE UNION-FIELD OVERLAP RULE: what one sample is resisted by where several volumes are present
@@ -311,6 +318,10 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
 
     fn reference_mm(&self, state: M::State) -> f64 {
         self.inner.reference_mm(state)
+    }
+
+    fn speed(&self, state: M::State) -> f64 {
+        self.inner.speed(state)
     }
 }
 

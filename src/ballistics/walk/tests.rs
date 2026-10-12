@@ -1104,58 +1104,84 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     }
 }
 
-/// Downward, equal and upward factor joints inside one welded run, with the exact spall count and
-/// budget each produces.
-///
-/// FLAGGED (§13 spec conflict): §13.2 says spall fires at every downward step, §13.4 says "one exit,
-/// spall once per welded run". Implemented conservatively as the field law — welding deletes only
-/// the void's face pair, and the material step it exposes still obeys §13.2. An equal-factor joint
-/// therefore emits nothing at all, which is where the two readings agree.
-#[test]
-fn weld_joints_obey_the_field_law_for_spall() {
-    let laws = WalkLaws::default();
-
-    // Equal factors across the void: no step, so one entrance and one exit, budget = SUMMED cost.
-    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
-    let mut equal = plate(1, 0, 0.2, 0.3);
-    equal.extend(plate(2, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, equal), &volumes, &laws).unwrap();
-    let downward: Vec<_> = result
-        .events
+/// The body exits of one point-sample crossing, as `(substances, genuine, start, end)`.
+fn exits_of(volumes: &VolumeTable, hits: Vec<FaceHit>) -> Vec<(Vec<SubstanceId>, bool, f64, f64)> {
+    let walked = walk_disc(
+        &point_disc(2.0, sample(Vec3::ZERO, hits)),
+        volumes,
+        &WalkLaws::default(),
+    )
+    .unwrap();
+    assert_eq!(walked.events.len(), 1, "one welded crossing");
+    walked.events[0]
+        .exits
         .iter()
-        .filter(|e| e.factor_after < e.factor_before)
-        .collect();
-    assert_eq!(downward.len(), 1, "equal-factor weld emits one exit only");
-    assert!((downward[0].spall_budget - 199.5).abs() < 0.1);
+        .map(|exit| {
+            assert_eq!(
+                exit.members.len(),
+                1,
+                "a point disc has one member per exit"
+            );
+            let member = exit.members[0];
+            assert_eq!(member.face.is_some(), exit.genuine);
+            (
+                exit.substances.clone(),
+                exit.genuine,
+                member.start,
+                member.end,
+            )
+        })
+        .collect()
+}
 
-    // Downward across the void (RHA → cast): the exposed step fires, and so does the exit.
-    let volumes = table(&[(1, 1000.0), (2, 900.0)]);
+/// A body is a stretch of one substance set; it exits where the next medium resists less. Across a
+/// welded joint: one substance on both sides is one body with one exit; a softer substance behind
+/// is an internal exit and then the genuine one; a harder one behind ends the first body without an
+/// exit; an equal-factor different substance behind ends it without an exit too.
+#[test]
+fn body_exits_follow_substance_identity_across_weld_joints() {
+    let rha = SubstanceId::fixture(1000.0);
+    let cast = SubstanceId::fixture(900.0);
+
+    let one = table(&[(1, 1000.0), (2, 1000.0)]);
+    let mut same = plate(1, 0, 0.2, 0.3);
+    same.extend(plate(2, 0, 0.3005, 0.4));
+    assert_eq!(exits_of(&one, same), vec![(vec![rha], true, 0.2, 0.4)]);
+
+    let two = table(&[(1, 1000.0), (2, 900.0)]);
     let mut downhill = plate(1, 0, 0.2, 0.3);
     downhill.extend(plate(2, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, downhill), &volumes, &laws).unwrap();
-    let downward: Vec<_> = result
-        .events
-        .iter()
-        .filter(|e| e.factor_after < e.factor_before)
-        .collect();
-    assert_eq!(downward.len(), 2);
-    assert!(
-        downward[0].welded,
-        "the interior step exists only because of the weld"
+    assert_eq!(
+        exits_of(&two, downhill),
+        vec![
+            (vec![rha], false, 0.2, 0.3),
+            (vec![cast], true, 0.3005, 0.4)
+        ]
     );
-    assert!((downward[0].spall_budget - 100.0).abs() < 0.1);
 
-    // Upward across the void (cast → RHA): the joint throws nothing; only the exit does.
     let mut uphill = plate(2, 0, 0.2, 0.3);
     uphill.extend(plate(1, 0, 0.3005, 0.4));
-    let result = walk_ray(0, &corridor(2.0, uphill), &volumes, &laws).unwrap();
+    assert_eq!(exits_of(&two, uphill), vec![(vec![rha], true, 0.3005, 0.4)]);
+
+    // Equal factor, different substance, in contact: the first body ends at the joint and throws
+    // nothing; the spend behind the joint is the second body's alone.
+    let probe = SubstanceId::probe();
+    let equal = VolumeTable::new([
+        (volume(1), VolumeMaterial::fixture(1000.0)),
+        (
+            volume(2),
+            VolumeMaterial {
+                substance: probe,
+                factor: 1000.0,
+            },
+        ),
+    ])
+    .unwrap();
+    let mut contact = plate(1, 0, 0.2, 0.3);
+    contact.extend(plate(2, 0, 0.3, 0.4));
     assert_eq!(
-        result
-            .events
-            .iter()
-            .filter(|e| e.factor_after < e.factor_before)
-            .count(),
-        1
+        exits_of(&equal, contact),
+        vec![(vec![probe], true, 0.3, 0.4)]
     );
 }
 
@@ -1676,7 +1702,7 @@ fn axis_only_and_ring_only_coverage_are_reported_honestly() {
 }
 
 /// Two samples meeting DIFFERENT stacks: the shared outer plate makes them one event, and each
-/// downward step carries its own coverage — entrance η, internal-step η and exit η are different
+/// body exit carries its own members — entrance η, internal-step η and exit η are different
 /// subsets and must not be collapsed into one scalar.
 #[test]
 fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
@@ -1709,13 +1735,15 @@ fn different_stacks_on_different_samples_carry_per_boundary_coverage() {
     assert_eq!(walked.events.len(), 1);
     let event = &walked.events[0];
     assert_eq!(event.coverage, 1.0);
-    // Two distinct downward steps: the 1000 → 200 the deep sample alone saw, and the exits.
+    // The plate's internal exit into the ammunition, which the deep sample alone saw, is its own
+    // body exit beside the plate's genuine one.
     let step = event
-        .spall
+        .exits
         .iter()
-        .find(|mark| mark.from_factor == 1000.0 && mark.to_factor == 200.0)
-        .expect("the interior step must be its own spall source");
-    assert_eq!(step.coverage, 0.5);
+        .find(|exit| exit.substances == [SubstanceId::fixture(1000.0)] && !exit.genuine)
+        .expect("the interior step must be its own body exit");
+    assert_eq!(step.members.len(), 1);
+    assert_eq!(step.members[0].sample, 1);
     let coverage = |vol: u32| {
         event
             .shares
@@ -2246,7 +2274,79 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
         !plan.deposits.iter().any(|d| d.address == volume(2)),
         "a round that stopped in the plate cannot wound the crewman behind it"
     );
-    assert!(plan.spall.is_empty(), "no exit, no spall (§5)");
+    assert!(
+        plan.spall.is_empty(),
+        "the body the round stops inside throws nothing"
+    );
+}
+
+/// An exit the round reaches throws even when the round stops in a later body of the same
+/// crossing; the body it stops inside throws nothing. The source's spend is the mechanism's
+/// readout drop across the body it left. Fixture: 20 mm of steel in contact with two metres of a
+/// 150-factor block, which the round cannot cross.
+#[test]
+fn exits_before_a_stop_throw_and_the_stopped_body_throws_nothing() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 150.0)]);
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.02),
+        Slab::at(2, 0, 0.52, -AXIS, 2.0),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 4.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 4.0), &volumes, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+
+    assert!(matches!(plan.outcome, Outcome::Embedded { .. }));
+    assert_eq!(plan.spall.len(), 1, "{:?}", plan.spall);
+    let source = &plan.spall[0];
+    assert_eq!(source.substances, [SubstanceId::fixture(1000.0)]);
+    assert!(source.face.is_none(), "an internal step has no face");
+    // DERIVED: 20 mm head-on at 1000 per metre.
+    assert!((source.spend - 20.0).abs() < 0.05, "{}", source.spend);
+    let (round, state) = solid(AP_88_CAPABILITY);
+    assert_eq!(source.entry_speed, state.speed as f32);
+    assert!(source.exit_speed < source.entry_speed && source.exit_speed > 0.0);
+    let left = super::super::speed_for(round.body(), AP_88_CAPABILITY - source.spend);
+    assert!(
+        (source.exit_speed / left - 1.0).abs() < 1.0e-3,
+        "{}",
+        source.exit_speed
+    );
+}
+
+/// Each source carries the round's own speeds across its own body: the speed the round left one
+/// body with is the speed it entered the next with, and the last exit's is the residual.
+#[test]
+fn each_source_uses_the_speeds_across_its_own_body() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 10.0)]);
+    let slabs = [
+        Slab::at(1, 0, 0.5, -AXIS, 0.1),
+        Slab::at(2, 0, 0.6, -AXIS, 0.3),
+    ];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+
+    assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
+    let [plate, crew] = plan.spall.as_slice() else {
+        panic!("two exits: {:?}", plan.spall);
+    };
+    let (_, state) = solid(AP_88_CAPABILITY);
+    assert_eq!(plate.entry_speed, state.speed as f32);
+    assert_eq!(plate.exit_speed, crew.entry_speed);
+    assert_eq!(crew.exit_speed, plan.state.speed as f32);
+    assert!(plate.face.is_none() && crew.face.is_some());
+    // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
+    assert!((plate.spend - 100.0).abs() < 0.1, "{}", plate.spend);
+    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+    let face = crew.face.unwrap();
+    assert!(
+        face.dot(crew.direction) > 0.0,
+        "a genuine exit's face normal points out of the body, along the round"
+    );
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
@@ -2281,8 +2381,8 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
 
 /// Overmatch charges the PERPENDICULAR projection rather than the oblique chord (§4: it cannot
 /// present its slope to a round that dwarfs it) — and the projection reaches every CONSEQUENCE.
-/// §13.5 defines the spall budget as the event's cost and §6 defines transit damage from the cost
-/// paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
+/// A spall source's spend is the mechanism's readout drop and §6 defines transit damage from the
+/// cost paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
 /// depositing damage for 30.
 #[test]
 fn overmatch_charges_the_perpendicular_projection_everywhere() {
@@ -2304,12 +2404,12 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     let exit = plan
         .spall
         .iter()
-        .find(|mark| mark.to_factor == 0.0)
+        .find(|source| source.face.is_some())
         .expect("a perforation exits");
     assert!(
-        (exit.budget - 15.0).abs() < 0.2,
-        "spall budget {}",
-        exit.budget
+        (exit.spend - 15.0).abs() < 0.2,
+        "spall spend {}",
+        exit.spend
     );
     let deposit = &plan.deposits[0];
     assert!(

@@ -42,7 +42,7 @@ use super::collect::{self, Corridor};
 use super::mechanism::{Dose, Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
-    SampleSeed, ShellKey, Shot, VolumeTable, WalkError, WalkLaws,
+    SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
     BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
@@ -742,6 +742,9 @@ pub(crate) struct Bite {
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
     /// first plate deposits nothing behind it.
     pub deposits: Vec<Dose>,
+    /// One spall source per body exit the round reached, embedded or through, positions in WORLD
+    /// ([`walk::SpallSource`]).
+    pub spall: Vec<SpallSource>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
     /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
     /// and for a perforation the nudge on to the resume point.
@@ -773,9 +776,6 @@ pub(crate) enum BiteEnd {
         speed: f32,
         /// The momentum the shell lost crossing, to the entrance body at the entrance.
         impulse: Vec3,
-        /// One spall source per downward field step the round reached, including the exit (§13.2's
-        /// field law): `(position, η-weighted budget)`.
-        spall: Vec<(Vec3, f32)>,
         /// Which primitives each sample is still inside where the flight resumes. A shell that
         /// punches an outer plate while one ring sample is already inside the crewman behind it
         /// must resume knowing that, or the next corridor reports an exit it never entered.
@@ -982,11 +982,6 @@ fn bite(
                     direction: bent,
                     speed: residual,
                     impulse: mass * (v_in - Vec3::from(bent) * residual),
-                    spall: plan
-                        .spall
-                        .iter()
-                        .map(|mark| (world(mark.position), mark.budget))
-                        .collect(),
                     continuation: Interior {
                         anchor: transit.anchor,
                         origin: transit.origin + transit.axis * resume,
@@ -1004,6 +999,14 @@ fn bite(
         overmatched: plan.entrance.overmatched,
         owner: owner(struck),
         deposits: plan.deposits,
+        spall: plan
+            .spall
+            .into_iter()
+            .map(|source| SpallSource {
+                position: world(source.position),
+                ..source
+            })
+            .collect(),
         travel: approach + flown,
         end,
     }
@@ -1300,14 +1303,7 @@ fn apply_bite(
             // inside the steel.
             (TerminalVerdict::Stopped, *at, *at)
         }
-        BiteEnd::Perforated {
-            exit,
-            direction,
-            speed,
-            impulse,
-            spall,
-            ..
-        } => {
+        BiteEnd::Perforated { exit, impulse, .. } => {
             // The body keeps the momentum the shell lost crossing it; the shell carries the rest on.
             if let Some(owner) = bite.owner {
                 apply_hit_impulse(bodies, owner, *impulse, bite.entrance);
@@ -1318,24 +1314,24 @@ fn apply_bite(
                 overmatched: bite.overmatched,
             });
             shell.path.points.push(*exit);
-            // Each source carries its own already-η-weighted budget.
-            for (source, budget) in spall {
-                damage += throw_spall_burst(
-                    shell.spall,
-                    *source,
-                    *direction,
-                    *budget,
-                    shell.projectile.caliber(),
-                    *speed,
-                    context.world,
-                    health,
-                    context.armor,
-                    context.deposit,
-                );
-            }
             (TerminalVerdict::Through, bite.entrance, bite.entrance)
         }
     };
+    // Every exit the round reached throws, whether it then stopped or went on.
+    for source in &bite.spall {
+        damage += throw_spall_burst(
+            shell.spall,
+            source.position,
+            Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z),
+            source.spend,
+            shell.projectile.caliber(),
+            source.exit_speed,
+            context.world,
+            health,
+            context.armor,
+            context.deposit,
+        );
+    }
 
     commands.trigger(Impact {
         position,
