@@ -35,16 +35,28 @@ use crate::{CombatantId, SimPlugin};
 
 const PORT: u16 = 5888;
 
+const TICK: Duration = Duration::from_nanos(15_625_000);
+
+/// Headless runner frame period. Packets are read in `PreUpdate` and written in `PostUpdate`, so a
+/// tick runs up to one period after its boundary and an inbound packet waits up to one period in
+/// the socket; clients pay both in their ping RTT and in the arrival spread that sizes their sync
+/// margins and interpolation delay. Every frame costs CPU, connected client or not.
+const FRAME: Duration = Duration::from_millis(4);
+
+// Each tick gets its own frame: lightyear replicates once per frame in which the fixed loop ran, so
+// a frame running two ticks sends one checkpoint for both.
+const _: () = assert!(FRAME.as_nanos() < TICK.as_nanos());
+
 pub fn run() {
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(None))
         // Headless composition needs its own application runner.
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
+        .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
     // No `CompressedImageFormatSupport` here, unlike `headless_test.rs`: every texture on the
     // server's asset allowlist (`.github/actions/build-server/action.yml`) is png, and the UASTC
     // KTX2 sits behind plugins this root does not mount — `load_tank_sim_assets` opens no scene.
     app.add_plugins(ServerPlugins {
-        tick_duration: Duration::from_secs_f64(1.0 / 64.0),
+        tick_duration: TICK,
     });
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
