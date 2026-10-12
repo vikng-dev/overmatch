@@ -27,6 +27,10 @@ mod sanctioned;
 mod walk;
 pub(crate) use walk::VolumeMaterial;
 
+/// Round mechanisms: how a round's state advances through the ordered encounters of a crossing.
+/// Solid shot is the only one built.
+mod mechanism;
+
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
@@ -167,12 +171,6 @@ fn reference_steel() -> &'static crate::substances::MaterialFacts {
 /// theory 1.5).
 const B_INERTIA: f32 = 1.0;
 
-/// The reference steel's strength term (Pa): the cavity-expansion term of its facts
-/// ([`crate::substances::MaterialFacts::cavity_strength`], ≈ 3.711e9 Pa, DERIVED).
-fn strength_ref() -> f64 {
-    reference_steel().cavity_strength()
-}
-
 /// What the capability law reads off a round: mass (kg), calibre (m) and nose factor `N`
 /// (dimensionless): the frictionless nose factor of the cavity-expansion form, in `(0, 1]`, derived
 /// from the spec's nose geometry ([`crate::spec::NoseShape`]).
@@ -184,36 +182,52 @@ pub(crate) struct RoundBody {
 }
 
 impl RoundBody {
-    /// The law's inertia coefficient `k = B_INERTIA · N · ρ_ref` (kg/m³), `ρ_ref` the reference
-    /// steel's density.
-    fn inertia_coefficient(self) -> f64 {
-        B_INERTIA as f64 * self.nose_factor as f64 * reference_steel().density
-    }
-
-    /// The law's two round terms: `m / (2 A k)` (m) and `k / a` (s²/m²), `a` the reference
-    /// steel's strength term.
+    /// The law's two round terms against the reference steel `reference`: `m / (2 A k)` (m) and
+    /// `k / a` (s²/m²), `k = B_INERTIA · N · ρ_ref` the inertia coefficient (kg/m³) and `a` the
+    /// reference's cavity strength term.
     ///
     /// In f64: `m / (2 A k)` grows as `1 / N` and leaves f32's range for a nose factor near f32's
     /// smallest normal, while the capability it multiplies stays finite.
-    fn terms(self) -> (f64, f64) {
+    fn terms_against(self, reference: &crate::substances::MaterialFacts) -> (f64, f64) {
         let caliber = self.caliber as f64;
         let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
-        let k = self.inertia_coefficient();
-        (self.mass as f64 / (2.0 * area * k), k / strength_ref())
+        let k = B_INERTIA as f64 * self.nose_factor as f64 * reference.density;
+        (
+            self.mass as f64 / (2.0 * area * k),
+            k / reference.cavity_strength(),
+        )
     }
+
+    /// [`terms_against`](Self::terms_against) the shipped reference steel.
+    fn terms(self) -> (f64, f64) {
+        self.terms_against(reference_steel())
+    }
+}
+
+/// The force law's readout in reference-mm for a round of `terms` ([`RoundBody::terms_against`]) at
+/// `speed` m/s: `1000 · m / (2 A k) · ln(1 + k v² / a)`.
+fn capability_of((scale, inertia): (f64, f64), speed: f64) -> f64 {
+    1000.0 * scale * (inertia * speed * speed).ln_1p()
+}
+
+/// `round`'s mechanism, bound against the shipped substance registry.
+fn bound(round: RoundBody) -> mechanism::SolidShot {
+    mechanism::SolidShot::bind(
+        round,
+        crate::substances::SubstanceRegistry::shipped_static(),
+    )
 }
 
 /// Reference-mm `round` can still defeat at `speed` m/s — the force law
 /// `C = 1000 · m / (2 A k) · ln(1 + k v² / a)`, `A = π c² / 4`, `k = B_INERTIA · N · ρ_ref`, `a`
-/// the reference steel's strength term ([`strength_ref`]).
+/// the reference steel's cavity strength term
+/// ([`crate::substances::MaterialFacts::cavity_strength`], ≈ 3.711e9 Pa, DERIVED).
 ///
 /// Invariants: replica scaling (mass ×s³, calibre ×s gives capability ×s); strictly decreasing in
 /// calibre at fixed mass; local speed exponent 2 at low speed, below 2 above it. Evaluated in f64
 /// and cast once: finite for every round [`round_in_domain`] admits.
 fn capability(round: RoundBody, speed: f32) -> f32 {
-    let (scale, inertia) = round.terms();
-    let speed = speed as f64;
-    (1000.0 * scale * (inertia * speed * speed).ln_1p()) as f32
+    capability_of(round.terms(), speed as f64) as f32
 }
 
 /// Inverse of [`capability`] for a fixed round: the speed carrying `capability` reference-mm.
@@ -690,9 +704,9 @@ pub struct FireShell {
 #[derive(Component)]
 pub(crate) struct Projectile {
     velocity: Vec3,
-    caliber: f32,
-    mass: f32,
-    nose_factor: f32,
+    /// The round's mechanism, bound at spawn from its fire data and the substance registry
+    /// ([`mechanism::SolidShot::bind`]) — data, never an asset.
+    round: mechanism::SolidShot,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
     drag_k: f32,
     /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
@@ -722,16 +736,12 @@ impl Projectile {
     /// The round's caliber (m) — the same value [`Impact::caliber`] carries, read by view code that
     /// sizes an effect off a shell in flight rather than off a landed impact.
     pub(crate) fn caliber(&self) -> f32 {
-        self.caliber
+        self.round.body().caliber
     }
 
     /// What the capability law reads off this round.
     fn body(&self) -> RoundBody {
-        RoundBody {
-            mass: self.mass,
-            caliber: self.caliber,
-            nose_factor: self.nose_factor,
-        }
+        self.round.body()
     }
 
     /// The round's current speed (m/s) — read by view code that scales an effect off a shell in
@@ -746,9 +756,11 @@ impl Projectile {
     pub(crate) fn view_test_round(caliber: f32) -> Self {
         Self {
             velocity: Vec3::ZERO,
-            caliber,
-            mass: 1.0,
-            nose_factor: 0.3,
+            round: bound(RoundBody {
+                mass: 1.0,
+                caliber,
+                nose_factor: 0.3,
+            }),
             drag_k: 0.0,
             disc: walk::DiscFrame {
                 u: Vec3::X,
@@ -1258,9 +1270,11 @@ fn on_fire_shell(
     let shell_base = (
         Projectile {
             velocity,
-            caliber: fire.caliber,
-            mass: fire.mass,
-            nose_factor: fire.nose_factor,
+            round: bound(RoundBody {
+                mass: fire.mass,
+                caliber: fire.caliber,
+                nose_factor: fire.nose_factor,
+            }),
             drag_k: drag,
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
@@ -1715,7 +1729,7 @@ fn resolve_held_shell(
                     .normal
                     .filter(|_| index == 0)
                     .unwrap_or(segment.bounce.direction),
-                caliber: shell.projectile.caliber,
+                caliber: shell.projectile.caliber(),
                 surface: ImpactSurface::Armor,
                 outcome: ImpactOutcome::Ricochet {
                     direction: segment.bounce.direction,
@@ -1912,7 +1926,7 @@ fn consume_overdue_sanctioned_outcome(
                     // The keyframe does not carry the surface normal; preserve the existing
                     // overdue-path approximation from its sanctioned outgoing direction.
                     normal: segment.bounce.direction,
-                    caliber: shell.projectile.caliber,
+                    caliber: shell.projectile.caliber(),
                     surface: ImpactSurface::Armor,
                     outcome: ImpactOutcome::Ricochet {
                         direction: segment.bounce.direction,
@@ -1994,7 +2008,7 @@ fn finish_at_sanctioned_terminal(
     terminal: &SanctionedTerminal,
     commands: &mut Commands,
 ) {
-    let caliber = shell.projectile.caliber;
+    let caliber = shell.projectile.caliber();
     shell.path.begin_segment();
     shell.path.points.push(terminal.position);
     commands.trigger(Impact {
@@ -2029,7 +2043,7 @@ fn resume_from_catch_up(
     if let Ok(direction) = Dir3::new(caught_up.velocity) {
         if let Some(normal) = lift {
             shell.transform.translation += normal.normalize_or_zero()
-                * resolve::disc_radius(shell.projectile.caliber)
+                * resolve::disc_radius(shell.projectile.caliber())
                 + direction * MARCH_EPS;
         }
         shell.transform.look_to(direction, Vec3::Y);
@@ -2130,8 +2144,8 @@ fn march_shell_step(
     // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
     // state that must not read a view detail.
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
-    let body = shell.projectile.body();
-    let radius = resolve::disc_radius(shell.projectile.caliber);
+    let round = shell.projectile.round;
+    let radius = resolve::disc_radius(shell.projectile.caliber());
     let context = resolve::ResolveContext {
         world,
         colliders,
@@ -2214,11 +2228,11 @@ fn march_shell_step(
             Ahead::Terrain { distance, normal } => {
                 let entry = origin + dir * distance;
                 let shorted =
-                    shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX;
+                    shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX;
                 commands.trigger(Impact {
                     position: entry,
                     normal,
-                    caliber: shell.projectile.caliber,
+                    caliber: shell.projectile.caliber(),
                     surface: ImpactSurface::Terrain,
                     outcome: ImpactOutcome::Struck,
                 });
@@ -2257,7 +2271,7 @@ fn march_shell_step(
             // (thickness/span probes, ricochet, spall, HP). Population-preserving — same
             // despawn-on-contact as the live path — so the A−B tick-cost delta isolates the
             // resolution machinery. Default off (see the type).
-            if shortcircuit && shell.projectile.caliber < MG_SHORTCIRCUIT_CALIBER_MAX {
+            if shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX {
                 // Classify the first surface from the hit's volume ancestry (the same
                 // `hit_ancestor` rule the full march uses just below) so the read is honest even in
                 // the B-arm. The short-circuit stops dead without resolving penetration, so
@@ -2271,7 +2285,7 @@ fn march_shell_step(
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
-                    caliber: shell.projectile.caliber,
+                    caliber: shell.projectile.caliber(),
                     surface,
                     outcome: ImpactOutcome::Struck,
                 });
@@ -2289,7 +2303,7 @@ fn march_shell_step(
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
-                    caliber: shell.projectile.caliber,
+                    caliber: shell.projectile.caliber(),
                     surface: ImpactSurface::Terrain,
                     outcome: ImpactOutcome::Struck,
                 });
@@ -2389,7 +2403,7 @@ fn march_shell_step(
         // spall, no transit damage. Free penetration is the one outcome worse than a stopped shell,
         // because it is indistinguishable from armour that was never modelled. The budget is charged
         // BEFORE the crossing is applied, so a refused crossing lands none of its consequences.
-        let decided = resolve::decide(&context, &not_own, body, &flight, contact)
+        let decided = resolve::decide(&context, &not_own, &round, &flight, contact)
             .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
         let decision = match decided {
             Ok(decision) => decision,
@@ -2400,7 +2414,7 @@ fn march_shell_step(
                 commands.trigger(Impact {
                     position: entry,
                     normal: contact_normal,
-                    caliber: shell.projectile.caliber,
+                    caliber: shell.projectile.caliber(),
                     surface: ImpactSurface::Armor,
                     outcome: ImpactOutcome::Struck,
                 });
@@ -2480,7 +2494,7 @@ fn uncertified_start(
         commands.trigger(Impact {
             position,
             normal: -Vec3::from(direction),
-            caliber: shell.projectile.caliber,
+            caliber: shell.projectile.caliber(),
             surface: ImpactSurface::Armor,
             outcome: ImpactOutcome::Struck,
         });
@@ -2579,7 +2593,7 @@ fn resolve_replica_armor_contact(
 ) -> ReplicaArmorContact {
     let entity = shell.entity;
     let shot = shell.shot;
-    let caliber = shell.projectile.caliber;
+    let caliber = shell.projectile.caliber();
     let consumed = shell.marks.ricochets.len();
     let next_bounce = shot
         .zip(sanctioned)
@@ -2936,7 +2950,7 @@ mod tests {
                     let caliber = round.caliber as f64;
                     let area = std::f64::consts::FRAC_PI_4 * caliber * caliber;
                     let limit = 1000.0 * round.mass as f64 * (speed as f64).powi(2)
-                        / (2.0 * area * strength_ref());
+                        / (2.0 * area * reference_steel().cavity_strength());
                     assert!(
                         got.is_finite() && (got as f64 / limit - 1.0).abs() < 1.0e-4,
                         "{round:?} at {speed} m/s: {got} vs the limit {limit}"
@@ -2970,7 +2984,7 @@ mod tests {
     #[test]
     fn capability_law_residual_matches_the_limit_speed_identity() {
         for round in LAW_ROUNDS {
-            let inertia = (round.inertia_coefficient() / strength_ref()) as f32;
+            let inertia = round.terms().1 as f32;
             for speed in [400.0f32, 773.0, 1500.0] {
                 for fraction in [0.1f32, 0.5, 0.9] {
                     let limit = fraction * speed;
@@ -3147,9 +3161,7 @@ mod march_tests {
         (
             Projectile {
                 velocity,
-                caliber: body.caliber,
-                mass: body.mass,
-                nose_factor: body.nose_factor,
+                round: bound(body),
                 drag_k: drag_k(body.caliber, body.mass),
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),

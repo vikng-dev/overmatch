@@ -129,9 +129,11 @@ fn fire(
     app.world_mut().spawn((
         Projectile {
             velocity: direction * speed,
-            caliber,
-            mass,
-            nose_factor,
+            round: bound(RoundBody {
+                mass,
+                caliber,
+                nose_factor,
+            }),
             drag_k: drag_k(caliber, mass),
             disc: walk::DiscFrame::anchored(direction).expect("a golden fires along a real axis"),
             continuation: None,

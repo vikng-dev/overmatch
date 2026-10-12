@@ -331,6 +331,7 @@ fn blamed_volume(error: &WalkError) -> Option<Entity> {
         | WalkError::CorridorMismatch { .. }
         | WalkError::UnattributedRun { .. }
         | WalkError::DegenerateEntryNormal { .. }
+        | WalkError::UnsupportedControl
         | WalkError::DrainExhausted { .. } => None,
     }
 }
@@ -706,6 +707,8 @@ pub(super) fn drive(
         frame,
         continuation: None,
     };
+    // The probe round's mechanism, bound as a fired shell's is at spawn.
+    let round = super::bound(body);
     let radius = resolve::disc_radius(body.caliber);
     let mut budget = resolve::Budget::new(length);
     let mut out = Drive::default();
@@ -731,7 +734,7 @@ pub(super) fn drive(
                     hit.distance
                 }
             };
-        let decision = resolve::decide(context, &|_| true, body, &flight, contact)
+        let decision = resolve::decide(context, &|_| true, &round, &flight, contact)
             .map_err(|error| fail(error, &flight))?;
         budget
             .charge(decision.charged())

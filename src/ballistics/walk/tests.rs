@@ -10,6 +10,7 @@
 //! law and not about the decimal literal it was written with.
 
 use super::*;
+use crate::ballistics::mechanism::{Limits, SolidShot, SolidShotState};
 
 // ---------------------------------------------------------------------------------------------
 // Fixture helpers
@@ -1062,10 +1063,7 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     hits.extend(plate(2, 0, 0.5305, 0.5605));
     let disc = point_disc(2.0, sample(Vec3::ZERO, hits));
     let walked = walk_disc(&disc, &volumes, &WalkLaws::default()).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 250.0,
-    };
+    let shot = Shot { caliber: 0.088 };
     match begin(&walked, &shot, &WalkLaws::default()) {
         Begin::Transit(request) => {
             assert!(!request.entrance.overmatched);
@@ -1742,10 +1740,33 @@ fn the_aggregate_entry_normal_cannot_degenerate() {
 // §13.3 / §13.5 / §3 — the staged resolution
 // ---------------------------------------------------------------------------------------------
 
-const AP_88: Shot = Shot {
-    caliber: 0.088,
-    capability: 250.0,
-};
+const AP_88: Shot = Shot { caliber: 0.088 };
+
+/// The capability (reference-mm) the staged-resolution fixtures fire with: fixture data.
+const AP_88_CAPABILITY: f32 = 250.0;
+
+/// A solid shot bound against the shipped registry, at the speed where its readout is `capability`
+/// reference-mm. Fixture data: an 88-class body.
+fn solid(capability: f32) -> (SolidShot, SolidShotState) {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    (round, round.at(super::super::speed_for(body, capability)))
+}
+
+/// [`finish`] for a solid shot whose readout is `capability` reference-mm.
+fn finish_at(
+    transit: &DiscWalk,
+    request: &TransitRequest,
+    capability: f32,
+    laws: &WalkLaws,
+) -> Result<ResolutionPlan<SolidShotState>, WalkError> {
+    let (round, state) = solid(capability);
+    finish(transit, request, &round, state, &Limits { rest: 0.0 }, laws)
+}
 
 fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
     match begin(walked, shot, laws) {
@@ -2079,11 +2100,11 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let honest = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    assert!(finish(&honest, &request, &AP_88, &laws).is_ok());
+    assert!(finish_at(&honest, &request, AP_88_CAPABILITY, &laws).is_ok());
 
     // The entrance walk itself: right geometry, wrong axis and origin.
     assert!(matches!(
-        finish(&walked, &request, &AP_88, &laws),
+        finish_at(&walked, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -2091,7 +2112,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     let mut rolled = honest.clone();
     rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
     assert!(matches!(
-        finish(&rolled, &request, &AP_88, &laws),
+        finish_at(&rolled, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 
@@ -2104,7 +2125,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     }
     let other = walk_disc(&unrelated, &table(&[(9, 1000.0)]), &laws).unwrap();
     assert!(matches!(
-        finish(&other, &request, &AP_88, &laws),
+        finish_at(&other, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -2129,7 +2150,7 @@ fn finish_rejects_a_corridor_whose_samples_moved() {
     assert_eq!(moved.origin, request.origin);
     assert_eq!(moved.samples(), request.samples);
     assert!(matches!(
-        finish(&moved, &request, &AP_88, &laws),
+        finish_at(&moved, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
@@ -2159,16 +2180,16 @@ fn finish_rejects_a_far_crossing_of_the_same_entity() {
         "the fixture must keep the entity identical — that is the point"
     );
     assert!(matches!(
-        finish(&far, &request, &AP_88, &laws),
+        finish_at(&far, &request, AP_88_CAPABILITY, &laws),
         Err(WalkError::CorridorMismatch { .. })
     ));
 }
 
-/// Capability exhausted partway through a factor CHANGE: the embed point is the inverse of the
-/// prefix integral, not `span × cap/cost`, and per-entity damage is CLIPPED at that progress — a
-/// round that dies in the plate deposits nothing in the crewman behind it.
+/// Capability exhausted partway through a factor CHANGE: the round comes to rest where its state
+/// does, not at `span × cap/cost`, and per-entity damage is CLIPPED at that progress — a round that
+/// dies in the plate deposits nothing in the crewman behind it.
 #[test]
-fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
+fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 10.0)]);
     // 100 mm of RHA head-on, then a crewman.
@@ -2177,13 +2198,9 @@ fn capability_exhausted_midway_inverts_the_prefix_integral_and_clips_damage() {
         Slab::at(2, 0, 0.6, -AXIS, 0.3),
     ];
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
-    let shot = Shot {
-        caliber: 0.088,
-        capability: 60.0,
-    };
-    let request = transit_request(&walked, &shot, &laws);
+    let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &shot, &laws).unwrap();
+    let plan = finish_at(&transit, &request, 60.0, &laws).unwrap();
 
     // Head-on, so the handoff is the plate's own face: 60 reference-mm dies 60 mm in.
     match plan.outcome {
@@ -2217,7 +2234,7 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let walked = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
     let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
 
     assert!(matches!(plan.outcome, Outcome::Perforated { .. }));
     assert!((plan.cost_spent - 103.0).abs() < 0.5, "{}", plan.cost_spent);
@@ -2251,7 +2268,7 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     assert!(request.entrance.overmatched);
 
     let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-    let plan = finish(&transit, &request, &AP_88, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
 
     // Whatever the normalization bend did to the chord, the CHARGE is the 15 mm perpendicular
     // thickness — which is the point of the projection.
@@ -3559,5 +3576,247 @@ fn an_interface_is_a_change_of_substance_never_of_volume_alone() {
     assert_eq!(
         interfaces(other),
         vec![(0.25, 0.5, true), (0.5, 0.75, true)]
+    );
+}
+
+/// What the scalar path decided for one transit: the round's residual or rest point, and the
+/// per-entity `(chord, cost)` deposits.
+struct ScalarOutcome {
+    /// The whole crossing's charged cost (reference-mm).
+    total: f64,
+    embed: Option<f64>,
+    cost_spent: f32,
+    residual: f32,
+    deposits: BTreeMap<Entity, (f64, f64)>,
+}
+
+/// THE SCALAR ORACLE: the disc-mean cumulative cost profile, its inverse at the capability, the
+/// residual speed by the capability law's inverse, and the per-entity deposits clipped at the
+/// stop — the arithmetic the mechanism replaced, restated here as the equivalence reference.
+/// Reads only the walk's spans, runs and presence, never the encounters. Valid for a transit with
+/// one crossing.
+fn scalar_outcome(
+    transit: &DiscWalk,
+    request: &TransitRequest,
+    body: super::super::RoundBody,
+    capability: f32,
+) -> ScalarOutcome {
+    assert_eq!(transit.events.len(), 1, "the oracle reads one crossing");
+    let event = &transit.events[0];
+    let k = transit.samples() as f64;
+    let (start, end) = (event.start, event.end);
+    let mut breaks: Vec<f64> = vec![start, end];
+    for walk in &transit.walks {
+        for run in &walk.runs {
+            for span in &walk.spans {
+                if span.end > run.start && span.start < run.end {
+                    breaks.push(span.start);
+                    breaks.push(span.end);
+                }
+            }
+        }
+    }
+    breaks.sort_by(f64::total_cmp);
+    breaks.dedup();
+    breaks.retain(|t| *t >= start && *t <= end);
+    let charge = if request.entrance.overmatched {
+        transit.axis.dot(request.entrance.normal).abs() as f64
+    } else {
+        1.0
+    };
+    let mut cumulative = vec![0.0f64];
+    for window in breaks.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mid = 0.5 * (a + b);
+        let mut slope = 0.0f64;
+        for walk in &transit.walks {
+            if !walk
+                .runs
+                .iter()
+                .any(|run| run.start <= mid && mid < run.end)
+            {
+                continue;
+            }
+            if let Some(span) = walk.spans.iter().find(|s| s.start <= mid && mid < s.end) {
+                slope += span.factor as f64;
+            }
+        }
+        let last = *cumulative.last().unwrap();
+        cumulative.push(last + (b - a) * slope / k);
+    }
+    let cumulative: Vec<f64> = cumulative.iter().map(|c| c * charge).collect();
+    let total = *cumulative.last().unwrap();
+    let budget = capability as f64;
+    let embed = (budget < total).then(|| {
+        let index = (1..breaks.len())
+            .find(|&index| cumulative[index] > budget)
+            .expect("the budget falls short of the total");
+        let slice = cumulative[index] - cumulative[index - 1];
+        if slice <= 0.0 {
+            return breaks[index - 1];
+        }
+        let share = (budget - cumulative[index - 1]) / slice;
+        breaks[index - 1] + (breaks[index] - breaks[index - 1]) * share
+    });
+    let (cost_spent, cut) = match embed {
+        Some(t) => (capability.min(total as f32), t),
+        None => (total as f32, end),
+    };
+    let residual = match embed {
+        Some(_) => 0.0,
+        None => super::super::speed_for(body, (capability - cost_spent).max(0.0)),
+    };
+    let mut deposits: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    for walk in &transit.walks {
+        let (Some(first), Some(last)) = (walk.runs.first(), walk.runs.last()) else {
+            continue;
+        };
+        for presence in &walk.presence {
+            for (a, b) in &presence.spans {
+                let (a, b) = (a.max(first.start), b.min(last.end));
+                if b <= a {
+                    continue;
+                }
+                let chord = (b.min(cut) - a).max(0.0) / k * charge;
+                let slot = deposits.entry(presence.entity).or_insert((0.0, 0.0));
+                slot.0 += chord;
+                slot.1 += chord * presence.factor as f64;
+            }
+        }
+    }
+    deposits.retain(|_, (chord, _)| *chord > 0.0);
+    ScalarOutcome {
+        total,
+        embed,
+        cost_spent,
+        residual,
+        deposits,
+    }
+}
+
+/// REFERENCE STEEL ALONE, THE MECHANISM IS THE SCALAR LAW. On randomized stacks of reference-steel
+/// plates — abutting, overlapping, at random obliquity, overmatched or not — and random
+/// capabilities, the solid-shot mechanism advancing through the ordered encounters matches the
+/// scalar path ([`scalar_outcome`]) to float precision: the same verdict, the rest point, the
+/// residual speed, the reference-mm spent and every deposit. Every number is fixture data.
+#[test]
+fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
+    let laws = WalkLaws::default();
+    let (round, _) = solid(1.0);
+    let body = round.body();
+    let mut state = 0x2026_1012_u64;
+    let mut unit = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut compared = 0;
+    let (mut embeds, mut overmatches, mut overmatched_rests) = (0, 0, 0);
+    for case in 0..400 {
+        let tilt = (unit() * 60.0).to_radians() as f32;
+        let normal = Vec3::new(0.0, tilt.sin(), -tilt.cos());
+        let plates = 1 + (unit() * 4.0) as u32;
+        let mut slabs = Vec::new();
+        let mut volumes = Vec::new();
+        let mut front = 0.5f32;
+        for plate in 0..plates {
+            let chord = (0.005 + unit() * 0.145) as f32;
+            slabs.push(Slab::at(plate + 1, plate, front, normal, chord));
+            volumes.push((plate + 1, 1000.0));
+            // Abutting, or overlapping the next plate by up to half this one.
+            front += chord * (1.0 - (unit() * 0.5) as f32 * (unit() < 0.5) as u32 as f32);
+        }
+        let volumes = table(&volumes);
+        let entrance = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
+        let Begin::Transit(request) = begin(&entrance, &AP_88, &laws) else {
+            continue;
+        };
+        let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
+        if transit.events.len() != 1 {
+            continue;
+        }
+        // Half the cases near the crossing's own cost, so rests inside every kind of crossing
+        // (overmatched ones included) are drawn, not just perforations.
+        let total = scalar_outcome(&transit, &request, body, 0.0).total;
+        let requested = if case % 2 == 0 {
+            (1.0 + unit() * 400.0) as f32
+        } else {
+            (total * (0.05 + unit() * 1.2)).max(0.1) as f32
+        };
+        let (round, state) = solid(requested);
+        let capability = super::super::capability(body, state.speed as f32);
+        let old = scalar_outcome(&transit, &request, body, capability);
+        // The knife edge where the budget meets the whole crossing to within the two paths'
+        // rounding decides the verdict by rounding alone; it is left out (DERIVED bound: f32
+        // readout ULP, ~1e-7 relative).
+        if ((capability as f64) - total).abs() < 1.0e-5 * capability as f64 {
+            continue;
+        }
+        let new = finish(
+            &transit,
+            &request,
+            &round,
+            state,
+            &Limits { rest: 0.0 },
+            &laws,
+        )
+        .unwrap();
+        compared += 1;
+        embeds += old.embed.is_some() as u32;
+        overmatches += request.entrance.overmatched as u32;
+        overmatched_rests += (request.entrance.overmatched && old.embed.is_some()) as u32;
+        let tolerance = |value: f64| 1.0e-5 * (1.0 + value.abs());
+        match (new.outcome, old.embed) {
+            (Outcome::Embedded { t, .. }, Some(at)) => assert!(
+                (t as f64 - at).abs() < 1.0e-6,
+                "case {case}: rest at {t} against {at}"
+            ),
+            (Outcome::Perforated { .. }, None) => {
+                let (new, old) = (
+                    super::super::capability(body, new.state.speed as f32),
+                    super::super::capability(body, old.residual),
+                );
+                assert!(
+                    ((new - old) as f64).abs() < tolerance(capability as f64),
+                    "case {case}: residual readout {new} against {old}"
+                );
+            }
+            (outcome, embed) => {
+                panic!("case {case}: {outcome:?} against a scalar rest at {embed:?}")
+            }
+        }
+        assert!(
+            ((new.cost_spent - old.cost_spent) as f64).abs() < tolerance(capability as f64),
+            "case {case}: spent {} against {}",
+            new.cost_spent,
+            old.cost_spent
+        );
+        let deposits: BTreeMap<Entity, (f64, f64)> = new
+            .deposits
+            .iter()
+            .map(|deposit| (deposit.entity, (deposit.chord as f64, deposit.cost as f64)))
+            .collect();
+        assert_eq!(
+            deposits.keys().collect::<Vec<_>>(),
+            old.deposits.keys().collect::<Vec<_>>(),
+            "case {case}: the same volumes are dosed"
+        );
+        for (entity, (chord, cost)) in &deposits {
+            let (old_chord, old_cost) = old.deposits[entity];
+            assert!(
+                (chord - old_chord).abs() < 1.0e-6 && (cost - old_cost).abs() < tolerance(old_cost),
+                "case {case}: {entity:?} dosed ({chord}, {cost}) against ({old_chord}, {old_cost})"
+            );
+        }
+    }
+    assert!(compared > 200, "only {compared} cases were comparable");
+    assert!(
+        embeds > 20 && compared - embeds > 20,
+        "both verdicts must be exercised: {embeds} rests of {compared}"
+    );
+    assert!(
+        overmatches > 20 && overmatched_rests > 5,
+        "the overmatch adapter was exercised {overmatches} times, {overmatched_rests} to a rest"
     );
 }

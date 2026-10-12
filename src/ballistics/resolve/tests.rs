@@ -8,7 +8,7 @@ use bevy::ecs::system::RunSystemOnce;
 use super::*;
 use crate::ballistics::march_tests::{box_trimesh, world_with_trimesh_plates};
 use crate::ballistics::walk::FaceHit;
-use crate::ballistics::{BallisticVolume, RoundBody};
+use crate::ballistics::{BallisticVolume, RoundBody, bound, capability};
 
 /// Fixture round and plate: an 88-class disc against 50 mm of steel. Fixture data; nothing below
 /// depends on whether it perforates.
@@ -158,7 +158,6 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                             )?;
                             let shot = Shot {
                                 caliber: ROUND.caliber,
-                                capability: capability(ROUND, SPEED),
                             };
                             let Begin::Transit(request) =
                                 walk::begin(&entrance, &shot, &context.laws)
@@ -187,7 +186,15 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 &request.seeds,
                                 ENTRANCE_SPAN,
                             )?;
-                            walk::finish(&transit, &request, &shot, &context.laws)?;
+                            let round = bound(ROUND);
+                            walk::finish(
+                                &transit,
+                                &request,
+                                &round,
+                                round.at(SPEED),
+                                &LIMITS,
+                                &context.laws,
+                            )?;
                             Ok::<_, WalkError>(Some(corridor))
                         },
                     )
@@ -602,15 +609,17 @@ fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
     );
 }
 
-/// A ROUND THAT SPENDS EXACTLY ITS CAPABILITY REACHES NOTHING BEHIND.
+/// A ROUND WHOSE BUDGET FALLS SHORT OF A CROSSING REACHES NOTHING BEHIND.
 ///
-/// The crossing's cost equals the capability to the bit: the plate is perforated with no residual
-/// (`walk::CostProfile::invert` stops only short of the whole profile), and the next crossing embeds
-/// at its face with no chord into the target. The gate must agree, and a gate that admits by
-/// `cost ≤ capability` does not. Fixture: a one-sample round, a metre of material whose factor is
-/// the round's capability per metre, faces at exactly representable heights.
+/// The crossing asks one readout step more than the round carries: the round comes to rest inside
+/// it, short of the far face, with no chord into the target. The gate must agree. Fixture: a
+/// one-sample round, a metre of material whose factor is one f32 step above the round's
+/// readout per metre, faces at exactly representable heights. The far-face edge itself — a
+/// stretch asking exactly the round's whole potential — is the mechanism's
+/// (`mechanism::tests::spending_exactly_the_potential_leaves_the_round_at_rest_at_the_far_face`):
+/// the round's state is its speed, and no f32 factor states that potential to the bit.
 #[test]
-fn an_exact_budget_crossing_terminates_before_the_target() {
+fn a_budget_short_of_the_crossing_terminates_before_the_target() {
     let stepped = freeflight_step(
         Vec3::NEG_Y * 755.0,
         drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
@@ -622,8 +631,10 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
         "the fall is exactly vertical, so the chord is exactly the metre"
     );
     let (speed, _) = first_tick(FIXTURE_MG, 755.0);
-    let factor = capability(FIXTURE_MG, speed);
-    let exact = agree("exact budget", FIXTURE_MG, 755.0, |app| {
+    // One f32 step above the round's readout: the metre asks for more than the round carries,
+    // however the f64 state rounds.
+    let factor = capability(FIXTURE_MG, speed).next_up();
+    let short = agree("one step short", FIXTURE_MG, 755.0, |app| {
         volume(
             app,
             Vec3::new(1.0, 1.0, 1.0),
@@ -634,12 +645,12 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
         target_below(app, 0.0, 2.0)
     });
     assert_eq!(
-        exact.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
-        [Verdict::Through, Verdict::Stopped],
-        "through the metre with nothing left, then stopped at the target's face",
+        short.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
+        [Verdict::Stopped],
+        "stopped inside the metre, short of its far face",
     );
-    assert!(!exact.admitted, "no chord into the target");
-    assert!(exact.transit_only());
+    assert!(!short.admitted, "no chord into the target");
+    assert!(short.transit_only());
 }
 
 /// SHOCK AND FRAGMENTS LIE OUTSIDE THE TRANSIT PARITY.
@@ -1124,7 +1135,7 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                 flight.settle(&context, &|_| true, radius)?;
                 // Short of the nearest sample's first contact; it only sizes the first corridor.
                 let contact = 0.8;
-                let decision = decide(&context, &|_| true, ROUND, &flight, contact)?;
+                let decision = decide(&context, &|_| true, &bound(ROUND), &flight, contact)?;
                 assert!(
                     matches!(decision, Decision::Bounce(_)),
                     "the graze bounces: {decision:?}"

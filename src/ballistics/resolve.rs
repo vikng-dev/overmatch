@@ -39,14 +39,15 @@ use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider, Spa
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
+use super::mechanism::{Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
     BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
-    MarchingShell, PenetrationEvent, ProjectileMarchWorld, RoundBody, ShellRicochet, ShellTerminal,
-    TerminalVerdict, apply_hit_impulse, capability, hit_ancestor, speed_for, throw_spall_burst,
+    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
+    TerminalVerdict, apply_hit_impulse, hit_ancestor, throw_spall_burst,
 };
 
 #[cfg(test)]
@@ -144,6 +145,10 @@ pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
 
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
 const TRANSIT_K: f32 = 1.0;
+
+/// The limits every crossing's mechanism advances under: a round is at rest once its readout would
+/// fall below zero reference-mm — exhausted, and nothing more.
+const LIMITS: Limits = Limits { rest: 0.0 };
 
 /// Shock a glancing bounce jars into an exposed component: impact energy × squareness. Armour has no
 /// HP and shrugs it off.
@@ -803,17 +808,19 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 
 /// Decide one crossing of the union field from first contact, with no consequence applied:
 /// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the bend,
-/// [`walk::finish`], the residual speed, the travel and the continuation.
+/// [`walk::finish`] advancing the round's bound mechanism, the residual speed, the travel and the
+/// continuation.
 ///
 /// `contact` is the distance from [`Flight::sweep_origin`] to the nearest sample's first armour
 /// contact; it sizes the first corridor and nothing else.
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
-    body: RoundBody,
+    round: &SolidShot,
     flight: &Flight,
     contact: f32,
 ) -> Result<Decision, WalkError> {
+    let body = round.body();
     let radius = disc_radius(body.caliber);
     let dir = flight.direction;
     let speed = flight.speed;
@@ -846,10 +853,10 @@ pub(crate) fn decide(
         seeds,
         contact + ENTRANCE_SPAN,
     )?;
-    let capability_in = capability(body, speed);
+    let state_in = round.at(speed);
+    let capability_in = round.reference_mm(state_in) as f32;
     let shot = Shot {
         caliber: body.caliber,
-        capability: capability_in,
     };
     let owner = |struck: Entity| {
         context
@@ -912,12 +919,11 @@ pub(crate) fn decide(
                 &request.seeds,
                 ENTRANCE_SPAN,
             )?;
-            let plan = walk::finish(&transit, &request, &shot, &context.laws)?;
+            let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
             Ok(Decision::Bite(bite(
                 &transit,
                 plan,
-                body,
-                capability_in,
+                body.mass,
                 from,
                 dir,
                 bent,
@@ -936,9 +942,9 @@ pub(crate) fn decide(
 )]
 fn bite(
     transit: &DiscWalk,
-    plan: walk::ResolutionPlan,
-    body: RoundBody,
-    capability_in: f32,
+    plan: walk::ResolutionPlan<super::mechanism::SolidShotState>,
+    // kg.
+    mass: f32,
     // Where the flight's position is, RELATIVE to the transit's anchor.
     from: Vec3,
     incoming: Dir3,
@@ -962,12 +968,12 @@ fn bite(
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
                 at: world(at),
-                impulse: body.mass * v_in,
+                impulse: mass * v_in,
             },
             t,
         ),
         Outcome::Perforated { exit, t, .. } => {
-            let residual = speed_for(body, (capability_in - plan.cost_spent).max(0.0));
+            let residual = plan.state.speed as f32;
             // Read at the point the NEXT corridor will actually start from — the flight resumes one
             // nudge past the exit it is leaving, and a seed taken one nudge earlier describes a plate
             // the round has already cleared.
@@ -978,7 +984,7 @@ fn bite(
                     resume: world(transit.origin + transit.axis * resume),
                     direction: bent,
                     speed: residual,
-                    impulse: body.mass * (v_in - Vec3::from(bent) * residual),
+                    impulse: mass * (v_in - Vec3::from(bent) * residual),
                     spall: plan
                         .spall
                         .iter()
@@ -1247,7 +1253,7 @@ fn apply_bounce(
     commands.trigger(Impact {
         position: bounce.position,
         normal: bounce.normal,
-        caliber: shell.projectile.caliber,
+        caliber: shell.projectile.caliber(),
         surface: ImpactSurface::Armor,
         outcome: ImpactOutcome::Ricochet {
             direction: Vec3::from(bounce.direction),
@@ -1331,7 +1337,7 @@ fn apply_bite(
                     *source,
                     *direction,
                     *budget,
-                    shell.projectile.caliber,
+                    shell.projectile.caliber(),
                     *speed,
                     context.world,
                     health,
@@ -1346,7 +1352,7 @@ fn apply_bite(
     commands.trigger(Impact {
         position,
         normal: bite.normal,
-        caliber: shell.projectile.caliber,
+        caliber: shell.projectile.caliber(),
         surface: ImpactSurface::Armor,
         outcome: verdict.into(),
     });

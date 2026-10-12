@@ -46,8 +46,9 @@
 //! pre-collected hit list therefore cannot describe both. So the core is a two-stage continuation:
 //! [`begin`] consumes the entrance disc and returns either a ricochet plan or a
 //! [`TransitRequest`] naming the axis and frame the caller must collect the transit corridor along;
-//! [`finish`] consumes that corridor and returns the [`ResolutionPlan`]. Slice-1 tests answer the
-//! request from fixtures; slice 2 answers it with real casts.
+//! [`finish`] consumes that corridor, advancing the round's mechanism (`super::mechanism`) through
+//! the crossing's ordered [`Encounter`]s, and returns the [`ResolutionPlan`]. Fixture tests answer
+//! the request from fixtures; the runtime answers it with real casts.
 //!
 //! # Fail loud, never repair
 //!
@@ -70,6 +71,7 @@
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::mechanism::{Control, Effect, Geometry, Limits, Mechanism, OvermatchProjection};
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
 #[cfg(test)]
@@ -543,6 +545,9 @@ pub enum WalkError {
         volume: Entity,
         reason: &'static str,
     },
+    /// A mechanism asked the crossing driver for a control it does not carry out (a redirect or a
+    /// schedule). Never approximated by stopping or continuing.
+    UnsupportedControl,
     /// The driver's step ran out of a limit: more crossings than `resolve::MAX_STEP_CROSSINGS`, or
     /// travel more than `resolve::MAX_OVERRUN` past the step's budget. Each crossing was bounded;
     /// their succession was not, and a step that never yields applies consequences ever further
@@ -1564,53 +1569,6 @@ pub struct DiscSpall {
     pub coverage: f32,
 }
 
-/// The disc-mean cumulative cost as a function of longitudinal progress.
-///
-/// Kept because embedding cannot use the serial resolver's uniform `span × cap/cost`: with several
-/// factors along the corridor the cost is not linear in progress, so the embed point is the
-/// INVERSE of this prefix integral, and per-entity transit damage is clipped at the same progress
-/// rather than scaled proportionally.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CostProfile {
-    pub ts: Vec<f64>,
-    pub cumulative: Vec<f64>,
-}
-
-impl CostProfile {
-    pub fn total(&self) -> f64 {
-        self.cumulative.last().copied().unwrap_or(0.0)
-    }
-
-    /// The progress `t` at which the accumulated cost first reaches `budget`, or `None` when the
-    /// whole profile costs less than that (i.e. the round perforates).
-    pub fn invert(&self, budget: f64) -> Option<f64> {
-        if budget >= self.total() {
-            return None;
-        }
-        for index in 1..self.ts.len() {
-            if self.cumulative[index] > budget {
-                let slice = self.cumulative[index] - self.cumulative[index - 1];
-                if slice <= 0.0 {
-                    return Some(self.ts[index - 1]);
-                }
-                let share = (budget - self.cumulative[index - 1]) / slice;
-                let (a, b) = (self.ts[index - 1], self.ts[index]);
-                return Some(a + (b - a) * share);
-            }
-        }
-        self.ts.last().copied()
-    }
-
-    /// Scale the whole profile — how overmatch charges the perpendicular projection instead of the
-    /// oblique chord without breaking the inversion (§4: overmatch cancels the slope cost).
-    fn scaled(&self, factor: f64) -> Self {
-        Self {
-            ts: self.ts.clone(),
-            cumulative: self.cumulative.iter().map(|c| c * factor).collect(),
-        }
-    }
-}
-
 /// What one sample of the disc meets over an [`Encounter`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleLayer {
@@ -1638,8 +1596,8 @@ pub struct Encounter {
     pub disc: usize,
 }
 
-/// One entity's share of a disc crossing — the damage deposit AND the material slice-2 needs to
-/// decide impulse ownership.
+/// One entity's share of a whole disc crossing: what the crossing presents of it, before any
+/// mechanism has decided how far the round gets.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityShare {
     pub entity: Entity,
@@ -1650,8 +1608,6 @@ pub struct EntityShare {
     pub cost: f32,
     /// Fraction of the disc that met this entity at all.
     pub coverage: f32,
-    /// Per-sample presence spans, kept only to clip at an embed. Private detail of the plan.
-    spans: Vec<(f64, f64)>,
 }
 
 /// One crossing of the world by the disc: the cluster of sample runs that belong to the same
@@ -1675,9 +1631,9 @@ pub struct DiscEvent {
     pub entrance_volume: Entity,
     /// Every primitive this crossing touched, sorted — the identity half of the transit check.
     pub primitives: Vec<PrimitiveKey>,
-    /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
+    /// `(1/k) Σᵢ costᵢ` (reference-mm) — automatically `η × mean covered chord cost`. A readout:
+    /// the entrance rules read it, no mechanism advances on it.
     pub cost: f32,
-    pub profile: CostProfile,
     /// The crossing's ordered encounters ([`Encounter`]).
     pub encounters: Vec<Encounter>,
     pub spall: Vec<DiscSpall>,
@@ -1997,9 +1953,9 @@ fn build_event(
     let entry_position = entry_position / covered as f32;
     let exit_position = exit_position / covered as f32;
 
-    // Disc-mean cumulative cost. Breakpoints are the union of every contributing sample's canonical
+    // Disc-mean cost readout, accumulated over the union of every contributing sample's canonical
     // span boundaries; between two of them every sample's factor is constant, so the mean slope is
-    // exact and the profile is piecewise linear.
+    // exact.
     let mut breaks: Vec<f64> = vec![start, end];
     for (&sample, runs) in &by_sample {
         for &run in runs {
@@ -2016,8 +1972,7 @@ fn build_event(
     breaks.dedup();
     breaks.retain(|t| *t >= start && *t <= end);
 
-    let mut cumulative: Vec<f64> = Vec::with_capacity(breaks.len());
-    cumulative.push(0.0);
+    let mut total = 0.0f64;
     for window in breaks.windows(2) {
         let (a, b) = (window[0], window[1]);
         let mid = 0.5 * (a + b);
@@ -2041,14 +1996,9 @@ fn build_event(
                 slope += span.factor as f64;
             }
         }
-        let last = *cumulative.last().unwrap();
-        cumulative.push(last + (b - a) * slope / kf);
+        total += (b - a) * slope / kf;
     }
-    let profile = CostProfile {
-        ts: breaks,
-        cumulative,
-    };
-    let cost = profile.total() as f32;
+    let cost = total as f32;
     let encounters = encounters(walks, &by_sample, start, end, k);
 
     // Per-entity shares, unioned per sample then averaged over the disc.
@@ -2083,7 +2033,6 @@ fn build_event(
                 chord: chord as f32,
                 cost: (chord * factor as f64) as f32,
                 coverage: (samples.len() as f64 / kf) as f32,
-                spans,
             }
         })
         .collect();
@@ -2178,7 +2127,6 @@ fn build_event(
         coverage,
         exit_coverage: (exit_covered as f64 / kf) as f32,
         cost,
-        profile,
         encounters,
         spall,
         shares,
@@ -2258,14 +2206,10 @@ fn encounters(
 // Stage 3 — the staged resolution (§13.3 surface laws, §5 spall, §3 capability)
 // ---------------------------------------------------------------------------------------------
 
-/// The striking round, reduced to what the laws read.
+/// The striking round, reduced to what the entrance rules read.
 #[derive(Clone, Copy, Debug)]
 pub struct Shot {
     pub caliber: f32,
-    /// Reference-mm this round can defeat right now (`super::capability`). The core spends it and
-    /// reports what it spent; inverting back to a residual speed stays with the caller, which owns
-    /// the capability law.
-    pub capability: f32,
 }
 
 /// What the entrance disc decided, and what the surface laws read to decide it.
@@ -2490,7 +2434,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
 /// How the crossing ended.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Outcome {
-    /// Defeated: buried where the prefix integral of the disc-mean cost reaches the capability.
+    /// Defeated: buried where the mechanism came to rest.
     Embedded { at: Vec3, t: f32 },
     /// Punched through: the march resumes at the aggregate exit face.
     Perforated {
@@ -2501,7 +2445,7 @@ pub enum Outcome {
     },
 }
 
-/// One entity's deposit from this crossing.
+/// One entity's deposit from this crossing: the line doses the mechanism addressed to it, summed.
 ///
 /// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no priority, no
 /// argmax). The IMPULSE does, when a crossing's presence set spans several rigid bodies — which can
@@ -2509,25 +2453,26 @@ pub enum Outcome {
 /// body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to the body owning the ENTRANCE
 /// surface, the first one physically touched; anything behind it is shoved through contact by the
 /// physics engine. So the caller routes the shove by [`ResolutionPlan::entrance`], not by these
-/// shares — they are the damage, and the diagnostic if that default is ever revisited.
+/// deposits — they are the damage.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntityDeposit {
     pub entity: Entity,
-    pub factor: f32,
+    /// Disc-mean chord (m) of the entity behind the round, as charged.
     pub chord: f32,
     /// Reference-mm of ITS OWN material the round chewed — §6's transit damage, before the caller's
     /// `TRANSIT_K`.
     pub cost: f32,
-    pub coverage: f32,
 }
 
 /// Everything the crossing decided, as declarative facts for the caller to apply in order.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ResolutionPlan {
+pub struct ResolutionPlan<S> {
     pub entrance: EntranceRead,
     pub outcome: Outcome,
-    /// Reference-mm actually spent (the whole crossing when it perforates, the capability when it
-    /// embeds).
+    /// The mechanism's state where the crossing left it: at rest on an embed, past the exit on a
+    /// perforation.
+    pub state: S,
+    /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
     pub deposits: Vec<EntityDeposit>,
     pub spall: Vec<DiscSpall>,
@@ -2611,13 +2556,18 @@ const HANDOFF_PROXIMITY: f32 = 1.0e-3;
 /// magnitude of the event-plane rule for the same reason: two reads of one surface patch.
 const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
-/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits).
-pub fn finish(
+/// Resolve the transit corridor into the plan (§3's perforate/embed, §5's spall, §6's deposits):
+/// `mechanism` advances `state` through the crossing's ordered encounters until it stops or the
+/// crossing ends. This is the one driver of a crossing's outcome, for the runtime and the §13.6 gate
+/// alike.
+pub(crate) fn finish<M: Mechanism>(
     transit: &DiscWalk,
     request: &TransitRequest,
-    shot: &Shot,
+    mechanism: &M,
+    state: M::State,
+    limits: &Limits,
     _laws: &WalkLaws,
-) -> Result<ResolutionPlan, WalkError> {
+) -> Result<ResolutionPlan<M::State>, WalkError> {
     validate_transit(transit, request)?;
     let Some(event) = transit.events.first() else {
         return Err(WalkError::BadCorridor {
@@ -2625,33 +2575,28 @@ pub fn finish(
             reason: "the transit corridor met no material after the entrance decided to enter",
         });
     };
-
-    // Overmatch cannot be made to present its oblique line of sight to a round that dwarfs it, so
-    // the CHARGED chord is the perpendicular projection, not the full slope chord (§4).
-    //
-    // It applies to every consequence, not just to the capability spend. §13.5 defines the spall
-    // budget AS the event's cost and §6 defines transit damage from the cost paid — so a projection
-    // that scaled only `cost_spent` would leave a 60° overmatched crossing spending 15 reference-mm
-    // while throwing spall and depositing damage for 30. One `charge` factor, applied to the prefix
-    // profile, the spall budgets and the deposits alike. The GEOMETRIC quantities (`t`, the embed
-    // position, the presence spans) are untouched: the round still travels the distance it travels.
-    let charge = if request.entrance.overmatched {
-        transit.axis.dot(request.entrance.normal).abs() as f64
-    } else {
-        1.0
+    let geometry = Geometry {
+        axis: transit.axis,
+        entrance_normal: request.entrance.normal,
     };
-    let profile = event.profile.scaled(charge);
-    let total = profile.total();
+    let advanced = if request.entrance.overmatched {
+        advance_through(
+            &OvermatchProjection { inner: mechanism },
+            state,
+            &event.encounters,
+            limits,
+            &geometry,
+        )?
+    } else {
+        advance_through(mechanism, state, &event.encounters, limits, &geometry)?
+    };
+    let cost_spent =
+        (mechanism.reference_mm(state) - mechanism.reference_mm(advanced.state)) as f32;
 
-    let embed_t = profile.invert(shot.capability as f64);
-    let (outcome, cost_spent, cut) = match embed_t {
+    let (outcome, cut) = match advanced.stop {
         Some(t) => {
             let at = transit.origin + transit.axis * t as f32;
-            (
-                Outcome::Embedded { at, t: t as f32 },
-                shot.capability.min(total as f32),
-                t,
-            )
+            (Outcome::Embedded { at, t: t as f32 }, t)
         }
         None => (
             Outcome::Perforated {
@@ -2660,44 +2605,29 @@ pub fn finish(
                 direction: transit.axis,
                 t: event.end as f32,
             },
-            total as f32,
             event.end,
         ),
     };
 
-    // Per-entity damage is clipped at the embed progress, never scaled: a round that stops in the
-    // first plate must deposit nothing in the crew behind it.
-    let deposits = event
-        .shares
-        .iter()
-        .map(|share| {
-            let chord: f64 = share
-                .spans
-                .iter()
-                .map(|(a, b)| (b.min(cut) - *a).max(0.0))
-                .sum::<f64>()
-                / transit.samples() as f64;
-            let covered = share
-                .spans
-                .iter()
-                .filter(|(a, _)| *a < cut)
-                .count()
-                .min(transit.samples());
-            let charged = chord * charge;
-            EntityDeposit {
-                entity: share.entity,
-                factor: share.factor,
-                chord: charged as f32,
-                cost: (charged * share.factor as f64) as f32,
-                coverage: if covered == 0 { 0.0 } else { share.coverage },
-            }
+    let deposits = advanced
+        .doses
+        .into_iter()
+        .map(|(entity, (chord, amount))| EntityDeposit {
+            entity,
+            chord: chord as f32,
+            cost: amount as f32,
         })
         .filter(|deposit| deposit.chord > 0.0)
         .collect();
 
     // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward
-    // steps it actually reached, and every budget is charged on the same projection as the cost it
-    // is defined to equal.
+    // steps it actually reached. Spall budgets are the event's cost readout, so the overmatch
+    // compatibility adapter's projection applies to them too.
+    let charge = if request.entrance.overmatched {
+        transit.axis.dot(request.entrance.normal).abs() as f64
+    } else {
+        1.0
+    };
     let spall = event
         .spall
         .iter()
@@ -2711,8 +2641,64 @@ pub fn finish(
     Ok(ResolutionPlan {
         entrance: request.entrance,
         outcome,
+        state: advanced.state,
         cost_spent,
         deposits,
         spall,
+    })
+}
+
+/// Where a mechanism's run through a crossing ended.
+struct Advanced<S> {
+    state: S,
+    /// Progress at which it came to rest; `None` when it crossed every encounter.
+    stop: Option<f64>,
+    /// Per addressed volume, the summed line `(chord, amount)`.
+    doses: BTreeMap<Entity, (f64, f64)>,
+}
+
+/// Advance `state` through `encounters` in order until the mechanism stops.
+fn advance_through<M: Mechanism>(
+    mechanism: &M,
+    mut state: M::State,
+    encounters: &[Encounter],
+    limits: &Limits,
+    geometry: &Geometry,
+) -> Result<Advanced<M::State>, WalkError> {
+    let mut doses: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    for encounter in encounters {
+        let advance = mechanism.advance(state, encounter, limits, geometry);
+        state = advance.state;
+        for effect in advance.effects {
+            match effect {
+                Effect::Line {
+                    address,
+                    chord,
+                    amount,
+                } => {
+                    let slot = doses.entry(address).or_insert((0.0, 0.0));
+                    slot.0 += chord;
+                    slot.1 += amount;
+                }
+            }
+        }
+        match advance.control {
+            Control::Continue => {}
+            Control::Stop => {
+                return Ok(Advanced {
+                    state,
+                    stop: Some(encounter.start + advance.consumed),
+                    doses,
+                });
+            }
+            Control::Redirect { .. } | Control::Schedule => {
+                return Err(WalkError::UnsupportedControl);
+            }
+        }
+    }
+    Ok(Advanced {
+        state,
+        stop: None,
+        doses,
     })
 }
