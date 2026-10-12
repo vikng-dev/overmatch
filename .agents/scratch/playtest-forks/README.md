@@ -179,3 +179,39 @@ state because that widens the wire contract and join-in-progress model.
 
 **Lives in.** `src/net/shot_transport.rs`, `src/net/client.rs`, `src/net/shot_loss.rs`, and
 ADR-0021.
+
+---
+
+## F5 — Spall cone half-angle and axis
+
+**Status:** open · default chosen 2026-10-12 (owner) · settle in the damage feel pass
+
+**The question.** How wide is the spall cone thrown from a body exit, and where does it point
+behind an oblique plate? Together they decide which boxes behind a perforation take a dose, and how
+far off the shot line a crewman is safe.
+
+**Default — `α` = 25° (0.436 rad), axis = the bisector.** The axis is
+`normalize(rear-face outward normal + exit direction)` at a genuine exit and the exit direction at
+an internal step. The half-angle is TUNED/provisional: the comparable MEASURED normal-impact outer
+extents are ~26° (Qi et al. 2026). The bisector is an ENGINEERING ASSUMPTION with MEASURED support
+(Verolme 1997; Recht & Howell 1967). Evidence:
+`.agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md` and
+`research/codex-cloud-angle/verdict.md`.
+
+**Alternatives kept alive:**
+- **0.35 rad (~20°) with the exit-direction axis** — the cone as it stood before 2026-10-12: narrower,
+  and straight along the round's path behind an oblique plate.
+- **0.5 rad (~29°)** — wider; the earlier research recommendation, a judgement rather than a fit.
+- **~0.6 rad (35°)** — the median MEASURED maximum extent for steel plates at ordnance speed, if the
+  rim is read as the outermost fragment rather than the low-threshold witness extent.
+
+**Why it's a playtest call.** The measurements fix neither the observable the rim corresponds to nor
+the axis at obliquity in the game's regime. Watch whether crew a little off the shot line die too
+often or too rarely, and whether a sloped plate's spall goes where a player expects.
+
+**Revert cost.** Low — one data edit: `half_angle_deg` and `axis` (`RearNormalBisector` /
+`ExitDirection`) in `assets/ballistics/spall_cone.ron`. Box counts may then want the feel pass again.
+
+**Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
+`src/ballistics/spall_cone.rs` (shape, axis rule, directions) and `throw_spall_cone` in
+`src/ballistics.rs`.
