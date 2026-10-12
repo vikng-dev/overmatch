@@ -97,6 +97,11 @@ pub fn ease_exit(x: f32) -> f32 {
     curve((0.3, 0.0), (0.8, 0.15), x)
 }
 
+/// A move from rest to rest: standard, both ends flat.
+pub fn ease_standard(x: f32) -> f32 {
+    curve((0.2, 0.0), (0.0, 1.0), x)
+}
+
 fn curve(p1: (f32, f32), p2: (f32, f32), x: f32) -> f32 {
     CubicSegment::new_bezier_easing(Vec2::from(p1), Vec2::from(p2)).ease(x.clamp(0.0, 1.0))
 }
@@ -221,7 +226,7 @@ mod tests {
 
     #[test]
     fn easings_run_from_zero_to_one() {
-        for ease in [ease_enter, ease_exit] {
+        for ease in [ease_enter, ease_exit, ease_standard] {
             assert!(ease(0.0).abs() < 1e-4);
             assert!((ease(1.0) - 1.0).abs() < 1e-4);
             assert!(ease(0.5) > 0.0 && ease(0.5) < 1.0);

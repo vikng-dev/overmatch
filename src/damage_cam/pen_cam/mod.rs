@@ -24,6 +24,7 @@
 
 mod field;
 mod hud;
+mod killcam;
 mod material;
 mod plan;
 mod stage;
@@ -111,9 +112,14 @@ pub const PLAYLIST: &[Entry] = &[
         shots: &[("s11_mg_barrel_struck", 0.0)],
         victim: false,
     },
+    Entry {
+        label: "K1 own tank knocked out, ammo cooks off (kill cam)",
+        shots: &[("s5_oblique_through", 0.0)],
+        victim: true,
+    },
 ];
 
-const ENTRY_KEYS: [KeyCode; 11] = [
+const ENTRY_KEYS: [KeyCode; 12] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
@@ -125,6 +131,7 @@ const ENTRY_KEYS: [KeyCode; 11] = [
     KeyCode::Digit9,
     KeyCode::Digit0,
     KeyCode::Minus,
+    KeyCode::Equal,
 ];
 
 /// Seconds of quiet sight picture before the first shot.
@@ -151,6 +158,10 @@ pub struct Record {
     pub stem: &'static str,
     pub report: PenetrationReport,
     pub plan: Plan,
+    /// Whether the record knocks the struck tank out, by the game's rule ([`killcam::knockout`]).
+    pub knockout: Option<crate::damage::KnockoutReason>,
+    /// Who fired it, as the victim's copy names them.
+    pub killer: Option<killcam::Killer>,
 }
 
 impl Library {
@@ -180,7 +191,18 @@ impl Library {
                     "{stem}: the demo stages one vehicle, {vehicle}"
                 );
                 let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
-                Record { stem, report, plan }
+                let knockout = killcam::knockout(&report);
+                let killer = report.shooter.as_ref().map(|shooter| {
+                    killcam::Killer::of(shooter, &report.projectile.name)
+                        .unwrap_or_else(|err| panic!("{stem}: the shooter: {err}"))
+                });
+                Record {
+                    stem,
+                    report,
+                    plan,
+                    knockout,
+                    killer,
+                }
             })
             .collect();
         Self { records, vehicle }
@@ -273,6 +295,9 @@ pub struct Run {
     pub own_glass_since: Option<f32>,
     /// Mouse orbit applied to the corner camera while paused (yaw, pitch; rad).
     pub orbit: Vec2,
+    /// The shot that knocks the player's own tank out, and the kill cam's beats; the corner stays
+    /// shut on such a run.
+    pub kill: Option<(usize, killcam::Beats)>,
 }
 
 impl Run {
@@ -293,6 +318,7 @@ impl Run {
             finished_at: None,
             own_glass_since: None,
             orbit: Vec2::ZERO,
+            kill: None,
         };
         run.schedule(library, settings);
         run
@@ -322,7 +348,23 @@ impl Run {
                 }
             })
             .collect();
+        self.kill = entry
+            .victim
+            .then(|| {
+                self.shots.iter().enumerate().find_map(|(index, shot)| {
+                    library.records[shot.record].knockout.map(|_| {
+                        (
+                            index,
+                            killcam::Beats {
+                                impact: shot.impact,
+                            },
+                        )
+                    })
+                })
+            })
+            .flatten();
         let shown: Vec<usize> = (0..self.shots.len())
+            .filter(|_| self.kill.is_none())
             .filter(|&i| {
                 let verdict = library.records[self.shots[i].record].report.impact.verdict;
                 match settings.corner {
@@ -347,6 +389,9 @@ impl Run {
             .map(|turn| turn.start + self.kind_of(turn.record, library).duration())
             .unwrap_or(0.0);
         self.end = (last_impact + 1.0).max(corner_end) + TAIL_S;
+        if let Some((_, beats)) = self.kill {
+            self.end = beats.end();
+        }
     }
 
     pub fn kind_of(&self, shot: usize, library: &Library) -> CornerKind {
@@ -387,6 +432,17 @@ pub struct Showing {
     pub scale: f32,
     /// Fraction of the run still to play, for the progress hairline.
     pub remaining: f32,
+    /// Where the record is drawn.
+    pub surface: Surface,
+}
+
+/// Where a [`Showing`] is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Surface {
+    /// The corner inset.
+    Corner,
+    /// On the battlefield, over the struck tank itself: the kill cam's lesson.
+    World,
 }
 
 /// Set once both tank views have spawned and been dressed.
@@ -419,6 +475,7 @@ pub fn demo_plugin(app: &mut App) {
         crate::quit::plugin,
         crate::spec::plugin,
         crate::render_policy::plugin,
+        crate::ui_font::plugin,
         MaterialPlugin::<material::GlowMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
     ))
@@ -429,21 +486,27 @@ pub fn demo_plugin(app: &mut App) {
     .init_resource::<Corner>()
     .init_resource::<Ready>()
     .add_systems(Startup, (hold_clock, view::spawn, world::spawn))
-    .add_systems(Startup, (stage::spawn, hud::spawn).after(view::spawn))
+    .add_systems(
+        Startup,
+        (stage::spawn, hud::spawn, killcam::spawn).after(view::spawn),
+    )
     .add_systems(
         Update,
         (
             view::prepare,
             release_clock,
             controls,
+            killcam::input,
             advance,
             corner_now,
             view::pose,
             stage::rebuild,
             stage::animate,
             world::animate,
+            killcam::camera,
             hud::layout,
             hud::animate,
+            killcam::hud,
         )
             .chain(),
     );
@@ -478,7 +541,14 @@ fn controls(
             run.auto = false;
         }
     }
-    if keys.just_pressed(KeyCode::KeyR) {
+    if let Some((_, beats)) = run.kill
+        && keys.just_pressed(KeyCode::KeyR)
+    {
+        // Respawn, the game's binding: the demo's stand-in ends the run.
+        if beats.respawn_live(run.t) {
+            run.t = run.end;
+        }
+    } else if keys.just_pressed(KeyCode::KeyR) {
         run.t = 0.0;
         run.reset_interaction();
     }
@@ -601,7 +671,10 @@ fn advance(
 /// Which turn the corner shows at the run's clock, and how far into it.
 fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) {
     let mut now = Corner::default();
-    if let Some(since) = run.own_glass_since
+    if let Some((shot, beats)) = run.kill {
+        // The kill cam's lesson drives the stage's clock; the corner stays shut.
+        now.showing = killcam::lesson_showing(beats, run.t, run.shots[shot].record);
+    } else if let Some(since) = run.own_glass_since
         && let Some(record) = own_glass_record(&library)
     {
         // The own-tank glass on demand: open while the key is down.
@@ -615,6 +688,7 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
             opacity,
             scale,
             remaining: 1.0,
+            surface: Surface::Corner,
         });
     } else {
         let held = |turn: usize| {
@@ -657,6 +731,7 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
                 opacity,
                 scale,
                 remaining: 1.0 - (c / duration).clamp(0.0, 1.0),
+                surface: Surface::Corner,
             });
         }
     }
@@ -689,6 +764,10 @@ mod tests {
         let settings = Settings::default();
         for (index, entry) in PLAYLIST.iter().enumerate() {
             let run = Run::new(index, &library, &settings, true);
+            if run.kill.is_some() {
+                assert!(run.turns.is_empty(), "{}", entry.label);
+                continue;
+            }
             assert!(!run.turns.is_empty(), "{}", entry.label);
             for turn in &run.turns {
                 let shot = &run.shots[turn.record];

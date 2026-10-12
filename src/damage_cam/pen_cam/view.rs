@@ -14,12 +14,14 @@ use crate::spec::{TankSpec, ViewKind};
 use crate::tank::ServoRole;
 
 /// The hull node every tank view names; the record's frame is its frame.
-const HULL_NODE: &str = "Hull";
+pub(super) const HULL_NODE: &str = "Hull";
 
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ViewRoot {
     World,
     Stage,
+    /// The shooter's tank on the battlefield, placed by the kill cam.
+    Shooter,
 }
 
 /// A mesh of a tank view, classified once: the names of its node and its ancestors up to the
@@ -49,8 +51,8 @@ pub struct Views {
     spec: Handle<TankSpec>,
     pub world: Entity,
     pub stage: Entity,
-    /// The turret node and its rest rotation, per root.
-    turret: [Option<(Entity, Quat)>; 2],
+    /// The turret node and its rest rotation, per root (world, stage).
+    pub(super) turret: [Option<(Entity, Quat)>; 2],
     /// The hull node, per root (world, stage): its frame is the record's.
     pub hull: [Option<Entity>; 2],
     placed: [bool; 2],
@@ -90,16 +92,35 @@ pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Re
 }
 
 /// The view glb beside a tank file: `<dir>/<id>.tank.ron` → `<dir>/<id>.glb`.
-fn view_glb(vehicle: &str) -> String {
+pub(super) fn view_glb(vehicle: &str) -> String {
     let stem = vehicle.strip_suffix(".tank.ron").unwrap_or(vehicle);
     format!("{stem}.glb")
 }
 
-fn slot(root: ViewRoot) -> usize {
-    match root {
-        ViewRoot::World => 0,
-        ViewRoot::Stage => 1,
+impl Views {
+    /// The staged vehicle's tank file.
+    pub(super) fn spec(&self) -> &Handle<TankSpec> {
+        &self.spec
     }
+}
+
+/// The pose of `node` under its ancestor `root`, from local transforms (globals lag a frame).
+pub(super) fn pose_under(
+    node: Entity,
+    root: Entity,
+    parents: &Query<&ChildOf>,
+    local: impl Fn(Entity) -> Option<Transform>,
+) -> Mat4 {
+    let mut pose = Mat4::IDENTITY;
+    for ancestor in std::iter::once(node).chain(parents.iter_ancestors(node)) {
+        if ancestor == root {
+            break;
+        }
+        if let Some(transform) = local(ancestor) {
+            pose = transform.to_matrix() * pose;
+        }
+    }
+    pose
 }
 
 /// Classify new meshes, place each view once its hull node exists, measure the ground, and
@@ -146,11 +167,7 @@ pub fn prepare(
             entity_commands.insert((Proxy, Visibility::Hidden));
         }
     }
-    for (root, entity) in [
-        (ViewRoot::World, views.world),
-        (ViewRoot::Stage, views.stage),
-    ] {
-        let index = slot(root);
+    for (index, entity) in [(0, views.world), (1, views.stage)] {
         if views.placed[index] {
             continue;
         }
@@ -162,16 +179,9 @@ pub fn prepare(
         let Some(hull) = named(HULL_NODE) else {
             continue;
         };
-        // The hull's pose under the root, from local transforms (globals lag a frame).
-        let mut hull_pose = Mat4::IDENTITY;
-        for node in std::iter::once(hull).chain(parents.iter_ancestors(hull)) {
-            if node == entity {
-                break;
-            }
-            if let Ok(local) = transforms.get(node) {
-                hull_pose = local.to_matrix() * hull_pose;
-            }
-        }
+        let hull_pose = pose_under(hull, entity, &parents, |node| {
+            transforms.get(node).ok().map(|transform| *transform)
+        });
         if let Ok(mut root_transform) = transforms.get_mut(entity) {
             *root_transform = Transform::from_matrix(hull_pose.inverse());
         }
@@ -214,7 +224,7 @@ pub fn prepare(
 }
 
 /// The yaw servo above the gunner view's node.
-fn turret_node(
+pub(super) fn turret_node(
     spec: &TankSpec,
     named: &impl Fn(&str) -> Option<Entity>,
     parents: &Query<&ChildOf>,

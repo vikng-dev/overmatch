@@ -367,7 +367,11 @@ pub fn animate(
     let Ok((mut visibility, mut transform)) = root.single_mut() else {
         return;
     };
-    let Some(showing) = corner.showing else {
+    // The kill cam draws on the world, not in the corner.
+    let Some(showing) = corner
+        .showing
+        .filter(|showing| showing.surface == super::Surface::Corner)
+    else {
         visibility.set_if_neq(Visibility::Hidden);
         return;
     };
