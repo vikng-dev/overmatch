@@ -105,6 +105,8 @@ pub mod dev_capture;
 /// here keeps `sight` from naming `crate::net` (the `tests/net_boundary.rs` guard). Mounted only by
 /// [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
 mod overlay;
+/// OS-level process and window helpers that belong to no game layer.
+mod platform;
 /// Shutting down: the macOS `Cmd+Q` route into [`AppExit`](bevy::app::AppExit), and the recall of
 /// bevy's render `SubApp` that keeps its exit teardown from deadlocking against its own render
 /// thread. Both are pure exit-path plumbing with no per-frame cost; mounted once per windowed root
@@ -885,7 +887,7 @@ pub fn run_offline() {
         // Post-launch activation revocation — winit's didFinishLaunching has already made even an
         // invisible unbundled binary the active app; see the doc on the shared function.
         #[cfg(target_os = "macos")]
-        app.add_systems(Startup, net::revoke_macos_activation);
+        app.add_systems(Startup, platform::revoke_macos_activation);
     }
     app.add_plugins(GamePlugin);
     // Documentation frames; inert without `OVERMATCH_CAPTURE`.

@@ -38,9 +38,6 @@ mod sync_margin;
 #[cfg(test)]
 mod test_harness;
 
-/// The hidden-capture focus revocation — shared with `run_offline`'s hidden-capture mode.
-#[cfg(target_os = "macos")]
-pub(crate) use client::revoke_macos_activation;
 /// Run the network client.
 pub use client::run as run_client;
 /// Run the authoritative dedicated server.

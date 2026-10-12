@@ -339,9 +339,19 @@ Deflection off a too-steep face without entering — spawns a new path segment a
 **Overmatch**:
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
-**Spall** (exit cone):
-The fixed-shape cone of fragments thrown from a volume's exit face on perforation — dense on-axis, thinning with angle and distance — and the primary crew-killer. Each fragment is an energy packet: a penetration value that bleeds with distance, deposits damage in proportion to it, punches through thin volumes and stops in thick ones.
-_Avoid_: spalling, fragmentation, frag (the noun is spall; the emitter is the exit cone)
+**Field**:
+The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, spent by the material it crosses, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+_Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
+
+**Spall cone** (spall):
+The field of plate fragments thrown from a body exit when a round perforates — dense on its axis, falling to zero at its rim — and the primary crew-killer. Its strength comes from the spend at that exit; its axis and half-angle are defined in the owner-direction record (`.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`, "The dose model").
+_Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
+
+**Fragment cone**:
+The field of a bursting round's own fragments, which carry its velocity forward. Not built.
+
+**Blast sphere**:
+The field of a blast or shockwave, even in every direction. Not built.
 
 **Station**:
 The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by a living crewman, a corpse, or briefly no one. Role lives on the station, not the occupant.
