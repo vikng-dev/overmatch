@@ -1800,7 +1800,10 @@ mod tests {
             }
             for &index in &geometry.ballistic_volumes {
                 let node = &geometry.nodes[index];
-                let facets = spec.volumes.get(&node.name);
+                let facets = spec
+                    .volumes
+                    .get(&node.name)
+                    .and_then(crate::spec::VolumeSpec::component);
                 let worn = node.substance_groups();
                 if worn.contains_key("Flesh") {
                     assert!(

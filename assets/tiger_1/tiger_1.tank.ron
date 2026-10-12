@@ -265,6 +265,29 @@ TankSpec(
         "Smoke_Launcher_3": (hp: 2.0),
         "Smoke_Launcher_4": (hp: 2.0),
         "Smoke_Launcher_5": (hp: 2.0),
+        // --- External armour: the running gear outside the hull sides. It resists like any armour;
+        // perforating it is not a penetration of the tank (the pen cam's shot verdict). The track
+        // links wear no substance and are not volumes; the Tiger carries no skirts.
+        "Sprocket_L":       (external: true),
+        "Sprocket_R":       (external: true),
+        "Idler_L":          (external: true),
+        "Idler_R":          (external: true),
+        "Wheel_L_0":        (external: true),
+        "Wheel_L_1":        (external: true),
+        "Wheel_L_2":        (external: true),
+        "Wheel_L_3":        (external: true),
+        "Wheel_L_4":        (external: true),
+        "Wheel_L_5":        (external: true),
+        "Wheel_L_6":        (external: true),
+        "Wheel_L_7":        (external: true),
+        "Wheel_R_0":        (external: true),
+        "Wheel_R_1":        (external: true),
+        "Wheel_R_2":        (external: true),
+        "Wheel_R_3":        (external: true),
+        "Wheel_R_4":        (external: true),
+        "Wheel_R_5":        (external: true),
+        "Wheel_R_6":        (external: true),
+        "Wheel_R_7":        (external: true),
     },
     // Collision proxies (convex hull, Vehicle layer) — DECLARED, replacing the `*_Collider` suffix
     // scan. The suffix survives as a name because it reads well in Blender; nothing parses it.

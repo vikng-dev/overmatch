@@ -793,6 +793,12 @@ pub struct BallisticSurfaces {
 #[derive(Component)]
 pub struct ArmorVolume;
 
+/// Armour outside the main armour ([`crate::spec::VolumeSpec::External`]), on every entity that
+/// carries the volume's [`BallisticVolume`]. The walk never reads it; the pen cam's shot verdict
+/// does not count perforating it.
+#[derive(Component)]
+pub struct ExternalArmour;
+
 #[derive(Component)]
 pub struct ComponentVolume;
 

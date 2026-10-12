@@ -17,34 +17,99 @@ use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
 use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
-/// One COMPONENT's facets, keyed by model node name in [`TankSpec::volumes`].
+/// One volume entry, keyed by model node name in [`TankSpec::volumes`]: a component's facets, or the
+/// external tag on a pure armour volume.
 ///
 /// **Behavior is RON facets; membership is the material** (design `armor-penetration-and-damage.md`
 /// §12, classifier precedent 2026-08-07). Which nodes march is decided entirely by the substance
 /// material each primitive wears — this map no longer says. What it says is what a volume *is*
-/// beyond armour: `hp` is the pool that makes it damageable at all, and `crew`/`ammo`/`function`
-/// layer consequences on top. **Composition over a `kind` enum**: "is it crew?" means "does it have
+/// beyond armour. A volume with no entry is main armour.
+///
+/// Authored as one record: `(hp: …, crew: …, ammo: …, function: …)` is a component, and
+/// `(external: true)` is external armour. An entry that is both, or neither, fails to parse
+/// ([`VolumeEntry`]).
+#[derive(Deserialize, Clone)]
+#[serde(try_from = "VolumeEntry")]
+pub enum VolumeSpec {
+    /// A component: the HP pool that makes the volume damageable, and its consequence facets.
+    Component(ComponentSpec),
+    /// Armour outside the main armour — skirts, screens, stand-off plates, appliqué, road wheels,
+    /// tracks. It resists like any armour; the pen cam's shot verdict does not count perforating
+    /// it. Spawned as `ballistics::ExternalArmour`.
+    External,
+}
+
+impl VolumeSpec {
+    /// The component facets, or `None` for external armour.
+    pub fn component(&self) -> Option<&ComponentSpec> {
+        match self {
+            Self::Component(component) => Some(component),
+            Self::External => None,
+        }
+    }
+}
+
+/// The record a [`VolumeSpec`] is authored as.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VolumeEntry {
+    #[serde(default)]
+    external: bool,
+    #[serde(default, deserialize_with = "present")]
+    hp: Option<f32>,
+    #[serde(default)]
+    crew: Option<CrewStation>,
+    #[serde(default)]
+    ammo: bool,
+    #[serde(default)]
+    function: Option<FunctionRole>,
+}
+
+/// A field authored as a bare value, absent when not authored.
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
+    f32::deserialize(deserializer).map(Some)
+}
+
+const EXTERNAL_WITH_FACETS: &str = "an external armour volume carries no component facet (hp, \
+     crew, ammo, function): a volume is armour or a component, never both";
+const COMPONENT_WITHOUT_HP: &str = "a component volume needs an hp pool; a main armour volume has \
+     no entry, and external armour is `(external: true)`";
+
+impl TryFrom<VolumeEntry> for VolumeSpec {
+    type Error = String;
+
+    fn try_from(entry: VolumeEntry) -> Result<Self, String> {
+        let facets = entry.crew.is_some() || entry.ammo || entry.function.is_some();
+        match (entry.external, entry.hp) {
+            (true, None) if !facets => Ok(Self::External),
+            (true, _) => Err(EXTERNAL_WITH_FACETS.into()),
+            (false, Some(hp)) => Ok(Self::Component(ComponentSpec {
+                hp,
+                crew: entry.crew,
+                ammo: entry.ammo,
+                function: entry.function,
+            })),
+            (false, None) => Err(COMPONENT_WITHOUT_HP.into()),
+        }
+    }
+}
+
+/// One COMPONENT's facets. **Composition over a `kind` enum**: "is it crew?" means "does it have
 /// the crew facet?", and a future consequence adds another optional field, never a central enum.
 ///
 /// `material_factor` is GONE (slice 3): the numbers moved from per-node RON to the one substance
 /// registry, keyed by the material datablock name the model already carries. "No numbers in the
 /// model" survives — a plate's resistance is now a property of what it is made of, stated once.
-///
-/// Every entry is a component, so `hp` is REQUIRED. A pure armour plate has no entry at all.
-#[derive(Deserialize, Clone)]
-#[serde(deny_unknown_fields)]
-pub struct VolumeSpec {
+#[derive(Clone)]
+pub struct ComponentSpec {
     /// HP pool. Depleting it is what "damaged" means for this component; the consequences of
     /// reaching zero come from the facets below.
     pub hp: f32,
     /// Crew station served by this volume.
-    #[serde(default)]
     pub crew: Option<CrewStation>,
     /// Ammunition volume: HP depletion cooks off and kills all crew.
-    #[serde(default)]
     pub ammo: bool,
     /// Repairable capability served by this module. Function loss is derived from HP.
-    #[serde(default)]
     pub function: Option<FunctionRole>,
 }
 
@@ -709,11 +774,12 @@ pub struct TankSpec {
     /// Pitch→X) and slew tuning; tank construction resolves each name and binds the servo.
     /// Replaces the old fixed `turret`/`gun` fields, so a variant can declare any number of mounts.
     pub servos: HashMap<String, ServoSpec>,
-    /// **Components** keyed by model node name — the facets that make a ballistic volume more than
-    /// armour (design §12, classifier precedent 2026-08-07). Not a membership list: which nodes are
-    /// volumes comes from the material each primitive wears, and a pure armour plate appears here
-    /// not at all. Every key must name a node that IS a ballistic volume — a facet on a node the
-    /// march never meets is an authoring error, caught at bind.
+    /// **Volume entries** keyed by model node name — the facets that make a ballistic volume a
+    /// component, or the tag that makes it external armour (design §12, classifier precedent
+    /// 2026-08-07). Not a membership list: which nodes are volumes comes from the material each
+    /// primitive wears, and a main armour plate appears here not at all. Every key must name a node
+    /// that IS a ballistic volume — an entry on a node the march never meets is an authoring error,
+    /// caught at bind.
     pub volumes: HashMap<String, VolumeSpec>,
     /// Collision-proxy nodes (convex hull, Vehicle layer), by node name. Explicit, replacing the
     /// `*_Collider` suffix scan. A proxy must NOT wear a substance material — it is a physics
@@ -861,6 +927,9 @@ impl TankSpec {
         // Components: an HP pool that is not a positive number is a component that is dead on
         // arrival (0) or can never be depleted (NaN compares false against every threshold).
         for (node, volume) in &self.volumes {
+            let Some(volume) = volume.component() else {
+                continue;
+            };
             if !volume.hp.is_finite() || volume.hp <= 0.0 {
                 return Err(format!(
                     "component `{node}`: hp must be finite and > 0 (got {})",
@@ -1193,11 +1262,11 @@ mod tests {
         }
 
         // A collision proxy is a physics stand-in, never armour and never an actuator mount, so
-        // its node cannot also carry a component facet or a servo.
+        // its node cannot also carry a volume entry or a servo.
         for collider in &spec.colliders {
             assert!(
                 !spec.volumes.contains_key(collider),
-                "collider `{collider}` is also a component volume"
+                "collider `{collider}` is also a ballistic volume"
             );
             assert!(
                 !spec.servos.contains_key(collider),
@@ -1342,7 +1411,7 @@ mod tests {
         // and stay legal — `damage::part_qualities` max-combines every provider of a role.
         let mut seats: HashSet<CrewStation> = HashSet::new();
         for (node, volume) in &spec.volumes {
-            if let Some(seat) = volume.crew {
+            if let Some(seat) = volume.component().and_then(|component| component.crew) {
                 assert!(
                     seats.insert(seat),
                     "`{node}`: crew station {seat:?} is served by two volumes"
@@ -1355,6 +1424,7 @@ mod tests {
         let provided: HashSet<Part> = spec
             .volumes
             .values()
+            .filter_map(VolumeSpec::component)
             .flat_map(|volume| {
                 volume
                     .crew
@@ -1522,6 +1592,36 @@ TankSpec(
             .transmission
             .as_mut()
             .expect("the fixture authors a transmission block")
+    }
+
+    /// A volume entry is a component or external armour, never both and never neither: the
+    /// external tag carries no component facet, and a component carries an hp pool.
+    #[test]
+    fn a_volume_entry_is_a_component_or_external_armour() {
+        // The extension the shipped sheets declare.
+        let parse = |text: &str| {
+            ron::de::from_str::<VolumeSpec>(&format!("#![enable(implicit_some)]\n{text}"))
+        };
+        assert!(matches!(
+            parse("(external: true)"),
+            Ok(VolumeSpec::External)
+        ));
+        let component = parse("(hp: 3.0, crew: Driver)").expect("a component parses");
+        let component = component.component().expect("it is a component");
+        assert_eq!(component.hp, 3.0);
+        assert_eq!(component.crew, Some(CrewStation::Driver));
+        assert!(parse("(hp: 2.0, external: false)").is_ok());
+        for refused in [
+            "(external: true, hp: 2.0)",
+            "(external: true, ammo: true)",
+            "(external: true, crew: Driver)",
+            "(external: true, function: Engine)",
+            "()",
+            "(external: false)",
+            "(crew: Driver)",
+        ] {
+            assert!(parse(refused).is_err(), "`{refused}` must not parse");
+        }
     }
 
     /// The mutation battery's one baseline: unmutated, the fixture passes. Without this, a

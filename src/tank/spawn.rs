@@ -20,7 +20,7 @@ use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
-    VolumeMaterial,
+    ExternalArmour, VolumeMaterial,
 };
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
@@ -310,8 +310,8 @@ struct RigNodes<'a> {
     servo_nodes: Vec<usize>,
     weapon_entries: Vec<(&'a String, &'a WeaponSpec)>,
     weapon_nodes: Vec<(usize, Option<usize>)>,
-    /// Every ballistic volume the MATERIAL rule found, name-sorted, paired with its component
-    /// facets where the spec declares any (`None` = pure armour, which is most of the tank).
+    /// Every ballistic volume the MATERIAL rule found, name-sorted, paired with its spec entry
+    /// where the spec declares one (`None` = main armour, which is most of the tank).
     volume_nodes: Vec<(&'a str, Option<&'a VolumeSpec>, usize)>,
     /// The gunner view's node — the main mount's Pitch servo, anchor of the gun chain.
     gunner_pitch: usize,
@@ -376,8 +376,9 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
     inert.sort_unstable();
     assert!(
         inert.is_empty(),
-        "spec declares components on nodes that are not ballistic volumes (no primitive of theirs \
-         wears a registry substance material, so the march can never reach them): {inert:?}"
+        "spec declares volume entries on nodes that are not ballistic volumes (no primitive of \
+         theirs wears a registry substance material, so the march can never reach them): \
+         {inert:?}"
     );
     // The gunner view's node is the main mount's Pitch servo — the anchor of the gun chain.
     let gunner_pitch = spec
@@ -663,8 +664,10 @@ fn insert_ballistic_volumes(
             "ballistic volume `{name}` captured no substance primitive"
         );
         let split = groups.len() > 1;
+        let component = facets.and_then(VolumeSpec::component);
+        let external = matches!(facets, Some(VolumeSpec::External));
         assert!(
-            !(split && facets.is_some()),
+            !(split && component.is_some()),
             "volume `{name}` is authored from {} substances AND declares component facets — the \
              facets sit on the node while each substance is its own volume, so its HP would never \
              be deposited to. Author it as one substance, or split the object",
@@ -674,7 +677,7 @@ fn insert_ballistic_volumes(
         {
             let mut entity = commands.entity(entity);
             entity.insert(VolumeOf(root));
-            if let Some(volume) = facets {
+            if let Some(volume) = component {
                 if let Some(crew) = volume.crew {
                     // Seat role + its native occupant (topology B): `home == seat` at spawn, so
                     // competence is 1.0 until a backfill swap moves an occupant to a foreign seat.
@@ -697,6 +700,10 @@ fn insert_ballistic_volumes(
             } else {
                 // Pure armour: resists + shadows spall, nothing to lose.
                 entity.insert(ArmorVolume);
+                // On the entity that carries the volume: the node, or each substance's shard.
+                if external && !split {
+                    entity.insert(ExternalArmour);
+                }
             }
             if !split {
                 let (substance, primitives) = groups.iter().next().expect("exactly one group");
@@ -780,6 +787,9 @@ fn insert_ballistic_volumes(
                         },
                         VolumeOf(root),
                     ));
+                    if external {
+                        collider.insert(ExternalArmour);
+                    }
                 }
             }
         }
