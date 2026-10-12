@@ -1614,11 +1614,13 @@ pub struct ExitMember {
 /// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
 /// decides whether the round reaches it.
 ///
-/// A BODY is a maximal stretch of one substance set along a sample, welded voids inside it
-/// included: two plates of one substance in contact are one body. A body EXITS where the next
-/// medium resists less — the next body has a lower factor, or the run ends in air. A step to an
-/// equal or higher factor ends the body without an exit. Members are grouped by the substances
-/// exited, by whether the exit is genuine, and by their ordinal among such exits on their own ray;
+/// A BODY is a maximal stretch of material along a sample, welded voids inside it included, over
+/// which no layer resists less than the one before it. It EXITS where the next medium resists less
+/// — the next layer has a lower factor, or the run ends in air — and the next body starts there. A
+/// step to an equal or higher factor continues the body, whatever the substances: plates of equal
+/// factor in contact are one body, and a body's spend is everything crossed since the run began or
+/// the last exit. Members are grouped by the substances of the body (every substance crossed in
+/// it), by whether the exit is genuine, and by their ordinal among such exits on their own ray;
 /// longitudinal position cannot be the key, since on an oblique slab the ring's exits are spread by
 /// `r·tan(incidence)` yet are one face.
 #[derive(Clone, Debug, PartialEq)]
@@ -2232,7 +2234,8 @@ fn build_event(
             {
                 saw_exit = true;
             }
-            // (substances, factor, start, end) of the body the sample is in.
+            // (substances so far, factor of its latest layer, start, end) of the body the sample
+            // is in. A layer resisting at least as much as the one before it continues the body.
             let mut body: Option<(Vec<SubstanceId>, f32, f64, f64)> = None;
             for layer in layers_over(&walks[sample].layers, extent.start, extent.end) {
                 let (from, to) = (layer.start.max(extent.start), layer.end.min(extent.end));
@@ -2244,17 +2247,19 @@ fn build_event(
                     .present
                     .iter()
                     .fold(0.0f32, |most, presence| most.max(presence.material.factor));
-                match &mut body {
-                    Some((current, _, _, end)) if *current == substances => *end = to,
-                    _ => {
-                        if let Some((exited, before, start, end)) = body.take()
-                            && factor < before
-                        {
-                            member(exited, start, end, None);
-                        }
-                        body = Some((substances, factor, from, to));
+                body = Some(match body.take() {
+                    Some((exited, before, start, end)) if factor < before => {
+                        member(exited, start, end, None);
+                        (substances, factor, from, to)
                     }
-                }
+                    Some((mut held, _, start, _)) => {
+                        held.extend(substances);
+                        held.sort();
+                        held.dedup();
+                        (held, factor, start, to)
+                    }
+                    None => (substances, factor, from, to),
+                });
             }
             if let Some((exited, factor, start, end)) = body
                 && factor > 0.0
@@ -2936,8 +2941,9 @@ fn advance_through<M: Mechanism>(
 /// The spall sources of the body exits the round reached ([`SpallSource`]).
 ///
 /// A member is reached when its exit lies at or before the rest point; a body the round stops inside
-/// throws nothing. Body boundaries are substance-set changes on their sample, so they are interfaces
-/// and every stretch lies wholly inside or wholly outside a member's body: a stretch belongs to it
+/// throws nothing. Body boundaries are run ends or factor drops on their sample, each a change of
+/// substance set, so they are interfaces and every stretch lies wholly inside or wholly outside a
+/// member's body: a stretch belongs to it
 /// when its midpoint does. A stretch's readout drop is shared among its samples by the factor each
 /// was resisted by — the share the rigid force law gives each sample of the disc-mean force.
 fn spall_sources<M: Mechanism>(

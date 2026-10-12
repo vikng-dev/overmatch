@@ -181,9 +181,12 @@ decision record `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-d
 
 **Which steps throw.** A cone is thrown at every **body exit** the round reaches, sized by that
 exit's own spend and speeds, whatever the round does afterwards. A body is a maximal stretch of
-one substance set along the path (welded voids inside it included: two plates of one substance in
-contact are one body). It exits where the next medium resists less — a lower factor, or air. A
-step to an equal or higher factor ends the body without a throw. Exits reached before the round
+material along the path (welded voids inside it included) over which no layer resists less than
+the one before it. It exits where the next medium resists less — a lower factor, or air — and the
+next body starts there. A step to an equal or higher factor continues the body without a throw,
+whatever the substances: plates of equal factor in contact are one plate and throw once at the far
+face with their summed spend (owner, 2026-10-12), and a step up into harder material adds what is
+crossed behind it to the same body, since no softer step intervened. Exits reached before the round
 stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
 **Strength.** `S = spend × (v_exit / v_entry)²` (reference-mm, on the axis), where `spend` is what
@@ -725,9 +728,9 @@ today independent of unions.
      once, at the outer face), one exit at the true inner face, overmatch against the run's summed
      factor-weighted thickness. No second ricochet check mid-sandwich.
    - **Spall follows the body, not the run:** welding deletes only the void's exit/entry face
-     pair; the material step it exposes is still a body boundary under §5 — a lower-factor
-     substance behind a welded joint makes the joint a body exit with its own spend, one substance
-     on both sides is one body. A 0.4mm void never "develops" spall of its own.
+     pair; the material step it exposes is judged under §5 — a lower-factor substance behind a
+     welded joint makes the joint a body exit with its own spend, an equal or higher factor behind
+     it continues the body. A 0.4mm void never "develops" spall of its own.
    - **It never charges the gap.** Cost integrates material chords only — welding deletes phantom
      *faces*; it cannot create phantom *steel*.
    - **Measure the gap perpendicular, not along the ray** — else grazing incidence un-welds exactly
@@ -904,9 +907,8 @@ Enforced mechanically, not by eyeball:
   expected. Assigning a substance to *faces* of a shared shell is forbidden — the walk pairs
   entry/exit per closed surface, and a painted-on boundary has no exit face to pair.
 
-**Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; whether an equal-factor
-contact of two different substances should sum into one body for spall (§5 ends the body there
-without a throw); whether ricochet-shock on exposed components adopts the same factor-step gate; the
+**Open tabs (§13):** k (sample count) and the ring layout; the weld-ε value; whether ricochet-shock
+on exposed components adopts the same factor-step gate; the
 lateral-asymmetry kick (§13.5, deliberately omitted). Material near-ties need nothing: `max`
 needs no tie-break for cost, and damage has no ownership at all.
 **Track belt ballistics (RULED IN, 2026-08-07, design pending):** Yan — links, sprockets and

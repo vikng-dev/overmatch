@@ -1134,10 +1134,10 @@ fn exits_of(volumes: &VolumeTable, hits: Vec<FaceHit>) -> Vec<(Vec<SubstanceId>,
         .collect()
 }
 
-/// A body is a stretch of one substance set; it exits where the next medium resists less. Across a
-/// welded joint: one substance on both sides is one body with one exit; a softer substance behind
-/// is an internal exit and then the genuine one; a harder one behind ends the first body without an
-/// exit; an equal-factor different substance behind ends it without an exit too.
+/// A body exits where the next medium resists less. Across a welded joint: one substance on both
+/// sides is one body with one exit; a softer substance behind is an internal exit and then the
+/// genuine one; a harder one behind continues the body, which exits once at the far face; an
+/// equal-factor different substance behind continues it too.
 #[test]
 fn body_exits_follow_substance_identity_across_weld_joints() {
     let rha = SubstanceId::fixture(1000.0);
@@ -1161,10 +1161,12 @@ fn body_exits_follow_substance_identity_across_weld_joints() {
 
     let mut uphill = plate(2, 0, 0.2, 0.3);
     uphill.extend(plate(1, 0, 0.3005, 0.4));
-    assert_eq!(exits_of(&two, uphill), vec![(vec![rha], true, 0.3005, 0.4)]);
+    assert_eq!(
+        exits_of(&two, uphill),
+        vec![(vec![cast, rha], true, 0.2, 0.4)]
+    );
 
-    // Equal factor, different substance, in contact: the first body ends at the joint and throws
-    // nothing; the spend behind the joint is the second body's alone.
+    // Equal factor, different substance, in contact: one body, one exit at the far face.
     let probe = SubstanceId::probe();
     let equal = VolumeTable::new([
         (volume(1), VolumeMaterial::fixture(1000.0)),
@@ -1181,7 +1183,7 @@ fn body_exits_follow_substance_identity_across_weld_joints() {
     contact.extend(plate(2, 0, 0.3, 0.4));
     assert_eq!(
         exits_of(&equal, contact),
-        vec![(vec![probe], true, 0.3, 0.4)]
+        vec![(vec![rha, probe], true, 0.2, 0.4)]
     );
 }
 
@@ -2347,6 +2349,142 @@ fn each_source_uses_the_speeds_across_its_own_body() {
         face.dot(crew.direction) > 0.0,
         "a genuine exit's face normal points out of the body, along the round"
     );
+}
+
+/// A volume table from `(volume, substance, factor)` triples.
+fn substance_table(entries: &[(u32, SubstanceId, f32)]) -> VolumeTable {
+    VolumeTable::new(entries.iter().map(|(v, substance, factor)| {
+        (
+            volume(*v),
+            VolumeMaterial {
+                substance: *substance,
+                factor: *factor,
+            },
+        )
+    }))
+    .expect("test factors are legal")
+}
+
+/// The spall sources of a head-on 88 at [`AP_88_CAPABILITY`] through `slabs`.
+fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
+    let laws = WalkLaws::default();
+    let walked = walk_disc(&entrance_disc(slabs, 3.0), volumes, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, slabs, 3.0), volumes, &laws).unwrap();
+    finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+        .unwrap()
+        .spall
+}
+
+/// Plates of equal factor in contact are one plate, whatever their substances: 50 mm + 50 mm of two
+/// equal-factor substances throws exactly one spall cone, at the far face, as strong as the one
+/// 100 mm of either throws.
+#[test]
+fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
+    let rha = SubstanceId::fixture(1000.0);
+    let probe = SubstanceId::probe();
+    let pair = substance_table(&[(1, rha, 1000.0), (2, probe, 1000.0)]);
+    let split = spall_through(
+        &pair,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(2, 1, 0.55, -AXIS, 0.05),
+        ],
+    );
+    let [cone] = split.as_slice() else {
+        panic!("one cone: {split:?}");
+    };
+    assert_eq!(cone.substances, [rha, probe]);
+    assert!(cone.face.is_some(), "the far face is a genuine exit");
+
+    for (vol, substance) in [(1, rha), (2, probe)] {
+        let single = substance_table(&[(vol, substance, 1000.0)]);
+        let whole = spall_through(&single, &[Slab::at(vol, 0, 0.5, -AXIS, 0.1)]);
+        let [plate] = whole.as_slice() else {
+            panic!("one cone: {whole:?}");
+        };
+        assert_eq!(cone.strength(), plate.strength());
+        assert_eq!(cone.spend, plate.spend);
+        assert_eq!(cone.entry_speed, plate.entry_speed);
+        assert_eq!(cone.exit_speed, plate.exit_speed);
+    }
+}
+
+/// Only a step into softer material or air throws; a step into harder or equal material continues
+/// the body, so the cone at the next softer step carries the spend of everything since the last
+/// throw. Fixture stacks, 50 mm plates in contact, head-on.
+#[test]
+fn only_a_softer_step_throws() {
+    let rha = SubstanceId::fixture(1000.0);
+    let probe = SubstanceId::probe();
+    let cast = SubstanceId::fixture(900.0);
+    let flesh = SubstanceId::fixture(10.0);
+    let volumes = substance_table(&[
+        (1, rha, 1000.0),
+        (2, probe, 1000.0),
+        (3, cast, 900.0),
+        (4, flesh, 10.0),
+        (5, rha, 1000.0),
+    ]);
+    let (_, state) = solid(AP_88_CAPABILITY);
+    let entry = state.speed as f32;
+
+    // Hard, then equal, then softer: one internal throw summing both plates, then the far face.
+    let hard_equal = spall_through(
+        &volumes,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(2, 1, 0.55, -AXIS, 0.05),
+            Slab::at(4, 2, 0.6, -AXIS, 0.3),
+        ],
+    );
+    let [steel, crew] = hard_equal.as_slice() else {
+        panic!("two cones: {hard_equal:?}");
+    };
+    assert_eq!(steel.substances, [rha, probe]);
+    assert!(steel.face.is_none() && crew.face.is_some());
+    assert_eq!(steel.entry_speed, entry);
+    assert_eq!(steel.exit_speed, crew.entry_speed);
+    // DERIVED: 100 mm at 1000 per metre, then 300 mm at 10 per metre.
+    assert!((steel.spend - 100.0).abs() < 0.1, "{}", steel.spend);
+    assert!((crew.spend - 3.0).abs() < 0.01, "{}", crew.spend);
+
+    // Soft, then hard: no throw at the step up; one cone at the far face summing both plates.
+    let soft_hard = spall_through(
+        &volumes,
+        &[
+            Slab::at(3, 0, 0.5, -AXIS, 0.05),
+            Slab::at(1, 1, 0.55, -AXIS, 0.05),
+        ],
+    );
+    let [cone] = soft_hard.as_slice() else {
+        panic!("one cone: {soft_hard:?}");
+    };
+    assert_eq!(cone.substances, [cast, rha]);
+    assert!(cone.face.is_some());
+    assert_eq!(cone.entry_speed, entry);
+    // DERIVED: 50 mm at 900 per metre plus 50 mm at 1000 per metre.
+    assert!((cone.spend - 95.0).abs() < 0.1, "{}", cone.spend);
+
+    // Hard, softer, hard: a throw at the step down, then one at the far face for what followed it.
+    let dip = spall_through(
+        &volumes,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(3, 1, 0.55, -AXIS, 0.05),
+            Slab::at(5, 2, 0.6, -AXIS, 0.05),
+        ],
+    );
+    let [first, last] = dip.as_slice() else {
+        panic!("two cones: {dip:?}");
+    };
+    assert_eq!(first.substances, [rha]);
+    assert_eq!(last.substances, [cast, rha]);
+    assert!(first.face.is_none() && last.face.is_some());
+    assert_eq!(first.exit_speed, last.entry_speed);
+    // DERIVED: 50 mm at 1000 per metre; then 50 mm at 900 plus 50 mm at 1000.
+    assert!((first.spend - 50.0).abs() < 0.1, "{}", first.spend);
+    assert!((last.spend - 95.0).abs() < 0.1, "{}", last.spend);
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
