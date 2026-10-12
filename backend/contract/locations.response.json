@@ -1,0 +1,47 @@
+{
+  "version": "0.5.0",
+  "continents": [
+    {
+      "continent": "Asia",
+      "matches": 1,
+      "locations": [
+        {
+          "id": "Mumbai",
+          "city": "Mumbai",
+          "country": "India",
+          "continent": "Asia",
+          "latitude": 19.07,
+          "longitude": 72.88,
+          "beacon": null,
+          "matches": 0
+        },
+        {
+          "id": "Singapore",
+          "city": "Singapore",
+          "country": "Singapore",
+          "continent": "Asia",
+          "latitude": 1.35,
+          "longitude": 103.82,
+          "beacon": { "host": "203.0.113.10", "fqdn": "sg.beacon.test", "udp_port": 5000, "tcp_port": 5001 },
+          "matches": 1
+        }
+      ]
+    },
+    {
+      "continent": "Europe",
+      "matches": 0,
+      "locations": [
+        {
+          "id": "Paris",
+          "city": "Paris",
+          "country": "France",
+          "continent": "Europe",
+          "latitude": 48.86,
+          "longitude": 2.35,
+          "beacon": { "host": "203.0.113.13", "fqdn": null, "udp_port": 5000, "tcp_port": null },
+          "matches": 0
+        }
+      ]
+    }
+  ]
+}

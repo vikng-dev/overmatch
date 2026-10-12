@@ -1,0 +1,60 @@
+name: Backend
+
+# Typecheck and test the matchmaking Worker (backend/). Triggered like CI, and gated INSIDE the job
+# (backend/ci-scope.sh) rather than by workflow `paths:` filters: a path-skipped workflow leaves a
+# required check pending forever. When the range does not touch backend/, the job still runs and
+# succeeds as a no-op that says why. Nothing here deploys.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 0
+
+      - name: Does this range touch the backend
+        id: scope
+        run: sh ci-scope.sh "$EVENT" "$BASE" "$HEAD"
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+
+      - uses: actions/setup-node@v7
+        if: steps.scope.outputs.affected == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install
+        if: steps.scope.outputs.affected == 'true'
+        run: npm ci
+
+      - name: Typecheck
+        if: steps.scope.outputs.affected == 'true'
+        run: npm run typecheck
+
+      - name: Test
+        if: steps.scope.outputs.affected == 'true'
+        run: npm test
