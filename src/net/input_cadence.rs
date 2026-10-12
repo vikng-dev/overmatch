@@ -1,26 +1,32 @@
 //! Real-UDP probe of the client's input-message cadence: a client rendering several frames per
-//! fixed tick sends at most one input message per tick, and still sends one for every tick.
+//! fixed tick sends exactly one input message per buffered tick, and that message carries the
+//! command authored for its tick.
 //!
-//! The same loopback pair runs twice, with and without `install_input_send_cadence`, so the probe
-//! proves it can see the per-frame cadence the gate removes.
+//! The client owns a local input slot whose writer authors a distinct value every tick (a sequence
+//! number in `range`), stamped by the production `stamp_input_tick`. The server records, in arrival
+//! order, the command each message carries at its own `end_tick` — the one fresh state; the other
+//! four are redundancy — and drops the message so no target resolution runs. The same pair runs
+//! twice, with and without `install_input_send_cadence`, so the probe proves it can see the
+//! per-frame cadence the gate removes.
 
 use core::time::Duration;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
-use lightyear::input::input_message::InputMessage;
+use lightyear::input::input_message::{ActionStateSequence, Compressed, InputMessage};
 use lightyear::prelude::client::{
     Client, ClientPlugins, Connect, Connected, NetcodeClient, NetcodeConfig,
 };
-use lightyear::prelude::input::native::NativeStateSequence;
+use lightyear::prelude::input::client::InputSystems as ClientInputSystems;
+use lightyear::prelude::input::native::{ActionState, InputMarker, NativeStateSequence};
 use lightyear::prelude::input::server::InputSystems as ServerInputSystems;
 use lightyear::prelude::server::{
     NetcodeConfig as ServerNetcodeConfig, NetcodeServer, ServerPlugins, ServerUdpIo, Start,
 };
 use lightyear::prelude::*;
 
-use super::client::{install_input_send_cadence, shipping_input_delay};
+use super::client::{install_input_send_cadence, shipping_input_delay, stamp_input_tick};
 use super::protocol::protocol_id;
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 use crate::command::TankCommand;
@@ -30,33 +36,85 @@ type TankInputMessage = InputMessage<NativeStateSequence<TankCommand>>;
 /// Client frames per fixed tick: a ~512 fps client against the 64 Hz sim.
 const FRAMES_PER_TICK: u32 = 8;
 const CONNECT_STEPS: u32 = 2_000;
-/// Steps after the first received input message before counting, so sync has settled.
+/// Steps after the first received input message before the window opens, so sync has settled.
 const WARMUP_STEPS: u32 = 64;
 const MEASURED_STEPS: u32 = 256;
-/// Messages still in flight or already queued when the window opens or closes.
-const EDGE_SLACK: usize = 2;
+/// Explicit timeline shifts applied inside the window, each between two frames: (step, delta).
+const SHIFTS: [(u32, i32); 2] = [(64, 3), (160, -3)];
+/// Steps after the window closes, so every message authored inside it has arrived.
+const DRAIN_STEPS: u32 = 16;
 
-/// End ticks of every input message the server received, in arrival order.
+/// One authored command: the input tick it was stamped for and its sequence number.
+type Authored = (u32, u32);
+
+/// Commands the client authored for a buffered tick, in authoring order.
 #[derive(Resource, Default)]
-struct ReceivedInputTicks(Vec<Tick>);
+struct AuthoredCommands(Vec<Authored>);
+
+/// The fresh state (`end_tick`'s command) of every input message the server received, in arrival
+/// order; `None` when that state is absent or carries another tick's stamp.
+#[derive(Resource, Default)]
+struct ReceivedFresh(Vec<Option<Authored>>);
 
 #[derive(Resource, Default)]
 struct ClientTicks(u32);
 
-fn record_received_inputs(
-    mut receivers: Query<&mut MessageReceiver<TankInputMessage>>,
-    mut received: ResMut<ReceivedInputTicks>,
+/// Author a distinct command per tick: the sequence number rides in `range`.
+fn author_command(
+    mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
+    authored: Res<AuthoredCommands>,
 ) {
-    for mut receiver in &mut receivers {
-        receiver.retain_messages(|message| {
-            received.0.push(message.end_tick);
-            true
-        });
+    for mut state in &mut slots {
+        state.0 = TankCommand {
+            range: authored.0.len() as f32,
+            ..default()
+        };
+    }
+}
+
+/// Record the stamped command `buffer_action_state` files next; unsynced, it buffers nothing.
+fn record_authored(
+    sync: Res<LocalTimelineSync>,
+    slots: Query<&ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
+    mut authored: ResMut<AuthoredCommands>,
+) {
+    if !sync.is_synced() {
+        return;
+    }
+    for state in &slots {
+        authored.0.push((state.0.for_tick, state.0.range as u32));
     }
 }
 
 fn count_client_tick(mut ticks: ResMut<ClientTicks>) {
     ticks.0 += 1;
+}
+
+fn record_received_inputs(
+    mut receivers: Query<&mut MessageReceiver<TankInputMessage>>,
+    mut received: ResMut<ReceivedFresh>,
+) {
+    for mut receiver in &mut receivers {
+        receiver.retain_messages(|message| {
+            let end_tick = message.end_tick.0;
+            for target in &message.inputs {
+                let mut fresh = None;
+                for state in target.states.clone().get_snapshots_from_message(TICK) {
+                    match state {
+                        Compressed::Input(ActionState(command)) => fresh = Some(command),
+                        Compressed::Absent => fresh = None,
+                        Compressed::SameAsPrecedent => {}
+                    }
+                }
+                received.0.push(
+                    fresh
+                        .filter(|command| command.for_tick == end_tick)
+                        .map(|command| (command.for_tick, command.range as u32)),
+                );
+            }
+            false
+        });
+    }
 }
 
 fn build_server(port: u16) -> App {
@@ -65,7 +123,7 @@ fn build_server(port: u16) -> App {
         tick_duration: TICK,
     });
     super::protocol::plugin(&mut app);
-    app.init_resource::<ReceivedInputTicks>().add_systems(
+    app.init_resource::<ReceivedFresh>().add_systems(
         PreUpdate,
         record_received_inputs.in_set(ServerInputSystems::ValidateInputs),
     );
@@ -96,10 +154,21 @@ fn build_client(port: u16, gated: bool) -> App {
         install_input_send_cadence(&mut app);
     }
     app.init_resource::<ClientTicks>()
-        .add_systems(FixedFirst, count_client_tick);
+        .init_resource::<AuthoredCommands>()
+        .add_systems(FixedFirst, count_client_tick)
+        .add_systems(
+            FixedPreUpdate,
+            (author_command, stamp_input_tick, record_authored)
+                .chain()
+                .in_set(ClientInputSystems::WriteClientInputs),
+        );
     app.insert_resource(InputTimelineConfig::new(
         SyncConfig::default(),
         shipping_input_delay(),
+    ));
+    app.world_mut().spawn((
+        InputMarker::<TankCommand>::default(),
+        ActionState::<TankCommand>::default(),
     ));
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
     let client = app
@@ -130,22 +199,31 @@ fn build_client(port: u16, gated: bool) -> App {
 }
 
 /// One server tick and the client's `FRAMES_PER_TICK` frames, which together advance one tick.
-fn step(server: &mut App, client: &mut App) {
+/// `shift_after_frame` triggers a `LocalTimelineShift` on the client between two of those frames.
+fn step(server: &mut App, client: &mut App, shift_after_frame: Option<(u32, i32)>) {
     server.update();
     std::thread::sleep(Duration::from_micros(300));
-    for _ in 0..FRAMES_PER_TICK {
+    for frame in 0..FRAMES_PER_TICK {
         client.update();
+        if let Some((at, delta)) = shift_after_frame
+            && at == frame
+        {
+            client.world_mut().trigger(LocalTimelineShift { delta });
+        }
     }
     std::thread::sleep(Duration::from_micros(300));
 }
 
-struct Window {
+struct Run {
+    /// Commands authored inside the window, in authoring order.
+    authored: Vec<Authored>,
+    /// Fresh states received from the first to the last window command, in arrival order.
+    received: Vec<Option<Authored>>,
     client_ticks: usize,
     messages: usize,
-    distinct_end_ticks: usize,
 }
 
-fn measure(gated: bool) -> Window {
+fn run(gated: bool) -> Run {
     let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
@@ -155,14 +233,14 @@ fn measure(gated: bool) -> Window {
 
     let mut connected = false;
     for _ in 0..CONNECT_STEPS {
-        step(&mut server, &mut client);
+        step(&mut server, &mut client, None);
         let link_up = client
             .world_mut()
             .query_filtered::<(), (With<Client>, With<Connected>)>()
             .iter(client.world())
             .next()
             .is_some();
-        if link_up && !server.world().resource::<ReceivedInputTicks>().0.is_empty() {
+        if link_up && !server.world().resource::<ReceivedFresh>().0.is_empty() {
             connected = true;
             break;
         }
@@ -172,63 +250,95 @@ fn measure(gated: bool) -> Window {
         "the client never delivered an input message within {CONNECT_STEPS} steps"
     );
     for _ in 0..WARMUP_STEPS {
-        step(&mut server, &mut client);
+        step(&mut server, &mut client, None);
     }
 
-    server
-        .world_mut()
-        .resource_mut::<ReceivedInputTicks>()
-        .0
-        .clear();
+    let authored_before = client.world().resource::<AuthoredCommands>().0.len();
+    let received_before = server.world().resource::<ReceivedFresh>().0.len();
     let ticks_before = client.world().resource::<ClientTicks>().0;
-    for _ in 0..MEASURED_STEPS {
-        step(&mut server, &mut client);
+    for step_index in 0..MEASURED_STEPS {
+        // Mid-tick: the shift lands between the frame that buffered a tick and the next one.
+        let shift = SHIFTS
+            .iter()
+            .find(|(at, _)| *at == step_index)
+            .map(|(_, delta)| (FRAMES_PER_TICK / 2, *delta));
+        step(&mut server, &mut client, shift);
     }
+    let authored_after = client.world().resource::<AuthoredCommands>().0.len();
     let client_ticks = (client.world().resource::<ClientTicks>().0 - ticks_before) as usize;
-    let received = &server.world().resource::<ReceivedInputTicks>().0;
-    let mut distinct = received.clone();
-    distinct.sort_unstable_by_key(|tick| tick.0);
-    distinct.dedup();
-    Window {
+    for _ in 0..DRAIN_STEPS {
+        step(&mut server, &mut client, None);
+    }
+
+    let authored =
+        client.world().resource::<AuthoredCommands>().0[authored_before..authored_after].to_vec();
+    let all_received = &server.world().resource::<ReceivedFresh>().0[received_before..];
+    let first = authored.first().copied();
+    let last = authored.last().copied();
+    let start = all_received
+        .iter()
+        .position(|fresh| *fresh == first)
+        .expect("the window's first command never arrived as a fresh state");
+    let end = all_received
+        .iter()
+        .rposition(|fresh| *fresh == last)
+        .expect("the window's last command never arrived as a fresh state");
+    Run {
+        authored,
+        received: all_received[start..=end].to_vec(),
         client_ticks,
-        messages: received.len(),
-        distinct_end_ticks: distinct.len(),
+        messages: end + 1 - start,
     }
 }
 
-/// A client running `FRAMES_PER_TICK` frames per tick: gated, it sends one input message per
-/// tick, each ending on a distinct tick, with none skipped; ungated, the same harness sees the
-/// per-frame cadence.
+/// A client at `FRAMES_PER_TICK` frames per tick, across an explicit forward and backward timeline
+/// shift: gated, the server receives exactly one message per buffered tick, in authoring order,
+/// each carrying that tick's command as its fresh state — no gap, no repeat, no stale fresh state.
+/// Ungated, the same harness sees the per-frame cadence.
 #[test]
 fn a_fast_client_sends_one_input_message_per_tick() {
-    let gated = measure(true);
+    let gated = run(true);
     println!(
-        "gated: {} input messages ({} distinct end ticks) over {} client ticks at {FRAMES_PER_TICK} \
+        "gated: {} messages carried {} authored commands over {} client ticks at {FRAMES_PER_TICK} \
          frames/tick",
-        gated.messages, gated.distinct_end_ticks, gated.client_ticks
-    );
-    assert!(
-        gated.messages <= gated.client_ticks + EDGE_SLACK,
-        "a client at {FRAMES_PER_TICK} frames/tick sent {} input messages over {} ticks: more \
-         than one per tick",
         gated.messages,
-        gated.client_ticks,
+        gated.authored.len(),
+        gated.client_ticks
     );
     assert_eq!(
-        gated.distinct_end_ticks, gated.messages,
-        "two input messages ended on the same tick"
-    );
-    assert!(
-        gated.messages + EDGE_SLACK >= gated.client_ticks,
-        "the gate skipped ticks: {} input messages over {} ticks",
-        gated.messages,
+        gated.authored.len(),
         gated.client_ticks,
+        "every synced client tick authors exactly one command"
+    );
+    let tick_steps: Vec<i64> = gated
+        .authored
+        .windows(2)
+        .map(|pair| i64::from(pair[1].0) - i64::from(pair[0].0))
+        .collect();
+    for (_, delta) in SHIFTS {
+        assert!(
+            tick_steps.contains(&(1 + i64::from(delta))),
+            "the {delta:+} shift never moved the authored input ticks"
+        );
+    }
+    let received: Vec<Authored> = gated.received.iter().flatten().copied().collect();
+    assert_eq!(
+        received.len(),
+        gated.received.len(),
+        "a message's fresh state was absent or stamped for another tick"
+    );
+    assert_eq!(
+        received, gated.authored,
+        "the server must receive each authored command exactly once, in order, as its message's \
+         fresh state"
     );
 
-    let ungated = measure(false);
+    let ungated = run(false);
     println!(
-        "ungated: {} input messages ({} distinct end ticks) over {} client ticks",
-        ungated.messages, ungated.distinct_end_ticks, ungated.client_ticks
+        "ungated: {} messages carried {} authored commands over {} client ticks",
+        ungated.messages,
+        ungated.authored.len(),
+        ungated.client_ticks
     );
     assert!(
         ungated.messages > 2 * ungated.client_ticks,
