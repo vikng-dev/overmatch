@@ -1,0 +1,77 @@
+name: Edgegap version
+
+# Registers the DISPATCHED REF's server as Edgegap version `<CARGO_PKG_VERSION>` without cutting a
+# release: the same server build, image and registration `release.yml` runs on a tag, and nothing
+# else — no client, no smoke, no droplet, no GitHub Release.
+#
+#     gh workflow run edgegap-version.yml --ref main
+#
+# The ref is the "Use workflow from" ref: GitHub runs that ref's copy of this file, so the ref must
+# contain it. It builds `GITHUB_SHA`, which is that ref's tip.
+#
+# The version NAME is all a joining client reports, so the last registration of a name wins: a
+# re-run, or a later commit still at that version, re-points it at its own immutable image tag
+# (`<version>-<sha7>`). Dispatched on a commit past a release at that release's version, it serves
+# that release's Worker-joining clients a server they cannot handshake with — so do that only while
+# no published client of the version joins through the Worker.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The canonical server build, in a job with no write token — as in release.yml.
+  build-server:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - uses: ./.github/actions/build-server
+        with:
+          deployed-sha: 'true'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: overmatch-server.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  # The image push and the Edgegap registration. No compilation.
+  register-edgegap:
+    needs: build-server
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: edgegap-version
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: overmatch-server-x86_64-linux
+          path: .
+      - id: image
+        uses: ./.github/actions/server-image
+      - name: Register the Edgegap version
+        env:
+          EDGEGAP_TOKEN: ${{ secrets.EDGEGAP_TOKEN }}
+          VERSION: ${{ steps.image.outputs.version }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          TAG: ${{ steps.image.outputs.tag }}
+        run: scripts/ci/edgegap-version.sh "${VERSION}" "${IMAGE}" "${TAG}"

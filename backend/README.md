@@ -118,7 +118,7 @@ npm run typecheck        # generates src/worker-configuration.d.ts (gitignored),
 `npm run dev` (`wrangler dev`) needs a `.dev.vars` (gitignored) with `EDGEGAP_TOKEN`, plus `npx wrangler d1 migrations apply overmatch-sessions --local`. It
 calls the real Edgegap API, so a join there starts a billed deployment.
 
-## Deploy (by hand; CI only tests)
+## Deploy (the Worker by hand, CI only tests it; game versions by CI)
 
 1. `npx wrangler login`.
 2. `npx wrangler d1 create overmatch-sessions`; paste the printed `database_id` into
@@ -132,9 +132,17 @@ calls the real Edgegap API, so a join there starts a billed deployment.
    `ACCESS_TEAM_DOMAIN` in `wrangler.jsonc`, then deploy again. The Worker verifies the
    `Cf-Access-Jwt-Assertion` header against `<team>/cdn-cgi/access/certs`, so a request that
    bypasses Access is refused anyway.
-7. **Edgegap per game version:** app `Overmatch` (`EDGEGAP_APP`), version named exactly as the
-   client's version string, UDP port named `game` (`EDGEGAP_PORT_NAME`), `restart_policy: never`,
-   `max_duration` as the backstop. Registering it belongs to the release workflow.
+7. **Edgegap per game version — CI owns it; nothing to do by hand.** Every release tag
+   (`.github/workflows/release.yml`, job `register-edgegap`) pushes the server image to
+   `ghcr.io/vikng-dev/overmatch-server` (public; tags `<version>` and `<version>-<sha7>`) and
+   creates or updates version `<version>` of app `Overmatch` (`EDGEGAP_APP`): the version named
+   exactly as the client's `CARGO_PKG_VERSION`, image tag `<version>-<sha7>`, UDP 5888 named `game`
+   (`EDGEGAP_PORT_NAME`), `restart_policy: never`, `max_duration` 360 min, 1 vCPU / 1 GB, no env vars
+   (the Worker passes the game-server contract above per deployment). The Release is published
+   only after that registration. To register a commit without a release, dispatch
+   `gh workflow run edgegap-version.yml --ref <branch>`. Both run
+   `scripts/ci/edgegap-version.sh`, which holds the request bodies and the reasons for each value;
+   it needs the `EDGEGAP_TOKEN` repository secret.
 
 ## Built now, deferred behind a seam
 

@@ -1,0 +1,88 @@
+name: Publish the overmatch-server image
+description: >-
+  Wraps the `overmatch-server.tar.gz` that `build-server` produced (with deployed-sha) in a
+  container image and pushes it publicly to ghcr.io/<owner>/overmatch-server under two tags:
+  `<version>` and the immutable `<version>-<sha7>`. Compiles nothing.
+
+# CONTRACT:
+#   * The CALLER checks out the commit the tarball was built from (for Cargo.toml and this
+#     action), downloads the tarball to `tarball`, and grants `packages: write`.
+#   * Outputs name what the Edgegap version must run. Edgegap is pointed at the IMMUTABLE tag: a
+#     re-registration of the same version from a later commit must not be answered by an image a
+#     host cached under the reused `<version>` tag.
+
+inputs:
+  tarball:
+    description: Path to overmatch-server.tar.gz, built with deployed-sha 'true'.
+    required: false
+    default: overmatch-server.tar.gz
+
+outputs:
+  version:
+    description: CARGO_PKG_VERSION of the checkout, no `v`.
+    value: ${{ steps.build.outputs.version }}
+  image:
+    description: Registry and repository, e.g. ghcr.io/vikng-dev/overmatch-server.
+    value: ${{ steps.build.outputs.image }}
+  tag:
+    description: The immutable tag, `<version>-<sha7>`.
+    value: ${{ steps.build.outputs.tag }}
+
+runs:
+  using: composite
+  steps:
+    # BASE is the runner's own Ubuntu release, which is what `build-server` linked against: the
+    # image's glibc is then the binary's. The ldd pass fails the job on any unresolved library or
+    # missing symbol version, which is how a base drift would show.
+    - name: Build the image
+      id: build
+      shell: bash
+      env:
+        TARBALL: ${{ inputs.tarball }}
+        CONTEXT: ${{ runner.temp }}/server-image
+      run: |
+        set -euo pipefail
+        version="$(awk -F '"' '/^version[[:space:]]*=/ { print $2; exit }' Cargo.toml)"
+        test -n "${version}"
+        mkdir -p "${CONTEXT}"
+        tar -xzf "${TARBALL}" -C "${CONTEXT}"
+        built="$(cat "${CONTEXT}/overmatch-server/DEPLOYED_SHA")"
+        if [[ "${built}" != "$(git rev-parse HEAD)" ]]; then
+          echo "::error::the tarball was built from ${built}, the checkout is $(git rev-parse HEAD)"
+          exit 1
+        fi
+        cp "${GITHUB_ACTION_PATH}/Dockerfile" "${CONTEXT}/Dockerfile"
+        image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/overmatch-server"
+        tag="${version}-${built::7}"
+        base="ubuntu:$(. /etc/os-release && echo "${VERSION_ID}")"
+        docker build --build-arg "BASE=${base}" \
+          --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+          --label "org.opencontainers.image.revision=${built}" \
+          --label "org.opencontainers.image.version=${version}" \
+          -t "${image}:${tag}" -t "${image}:${version}" "${CONTEXT}"
+        libs="$(docker run --rm --entrypoint ldd "${image}:${tag}" /opt/overmatch-server/overmatch-server)"
+        printf '%s\n' "${libs}"
+        if grep -q 'not found' <<<"${libs}"; then
+          echo "::error::unresolved shared library in the image"
+          exit 1
+        fi
+        {
+          echo "version=${version}"
+          echo "image=${image}"
+          echo "tag=${tag}"
+        } >> "${GITHUB_OUTPUT}"
+
+    - name: Push the image
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        IMAGE: ${{ steps.build.outputs.image }}
+        TAG: ${{ steps.build.outputs.tag }}
+        VERSION: ${{ steps.build.outputs.version }}
+      run: |
+        set -euo pipefail
+        printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+        docker push "${IMAGE}:${TAG}"
+        docker push "${IMAGE}:${VERSION}"
+        docker logout ghcr.io
+        echo "pushed ${IMAGE}:${TAG} and ${IMAGE}:${VERSION}"
