@@ -19,7 +19,7 @@ use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{ConsequenceState, PenetrationReport, Role, SpallCone, Verdict};
+use super::{ConsequenceState, PenCamVerdict, PenetrationReport, Role, SpallCone};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -511,7 +511,7 @@ fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
 /// sample's time when no segment does. `None` when the path ends in material.
 fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
     let (anchor, from) = match report.impact.verdict {
-        Verdict::Ricochet => (report.impact.point, 0.0),
+        PenCamVerdict::Ricochet => (report.impact.point, 0.0),
         _ => {
             let plate = report.plates.last()?;
             (plate.exit?, plate.t)
@@ -1491,7 +1491,7 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
     let incoming = Vec3::from(report.impact.incoming);
     let normal = Vec3::from(report.impact.normal);
     let color = match report.impact.verdict {
-        Verdict::Ricochet => RICOCHET,
+        PenCamVerdict::Ricochet => RICOCHET,
         _ if report.plates.first().is_some_and(|p| p.overmatched) => OVERMATCH,
         _ => ENTRY,
     };
@@ -1614,12 +1614,11 @@ fn update_hud(
     );
 }
 
-fn verdict_word(verdict: Verdict) -> (&'static str, Color) {
+fn verdict_word(verdict: PenCamVerdict) -> (&'static str, Color) {
     match verdict {
-        Verdict::Through => ("THROUGH", SPAN),
-        Verdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
-        Verdict::Ricochet => ("RICOCHET", RICOCHET),
-        Verdict::Struck => ("STRUCK", Color::srgb(0.6, 0.6, 0.6)),
+        PenCamVerdict::Through => ("THROUGH", SPAN),
+        PenCamVerdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
+        PenCamVerdict::Ricochet => ("RICOCHET", RICOCHET),
     }
 }
 
@@ -1844,7 +1843,7 @@ mod tests {
                 normal: [0.0, 0.0, -1.0],
                 incoming: [0.0, 0.0, 1.0],
                 incidence_deg: 0.0,
-                verdict: Verdict::Through,
+                verdict: PenCamVerdict::Through,
             },
             plates: vec![],
             path: vec![

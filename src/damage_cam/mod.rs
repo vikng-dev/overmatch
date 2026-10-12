@@ -17,8 +17,36 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// The sim's impact outcome: one vocabulary for the sim, the wire and the record.
-pub use crate::ballistics::Verdict;
+pub use crate::ballistics::{ImpactSurface, Verdict};
+
+/// What a pen cam shows the round did. A pen cam exists only for a hit on a player's tank, and
+/// only these three verdicts open one: [`Verdict::Struck`] has no counterpart, so a record cannot
+/// hold it.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PenCamVerdict {
+    Through,
+    Stopped,
+    Ricochet,
+}
+
+impl PenCamVerdict {
+    /// The round entered the material: it stopped inside it or went through.
+    pub fn entered(self) -> bool {
+        matches!(self, Self::Stopped | Self::Through)
+    }
+
+    /// The pen cam an impact opens, if any. A ground hit opens none; nor does an armour contact
+    /// that resolved no crossing (`Struck` on armour: a fail-closed walk, which the march logs as
+    /// an error where the walk fails).
+    pub fn of_impact(surface: ImpactSurface, verdict: Verdict) -> Option<Self> {
+        match (surface, verdict) {
+            (ImpactSurface::Terrain, _) | (ImpactSurface::Armor, Verdict::Struck) => None,
+            (ImpactSurface::Armor, Verdict::Through) => Some(Self::Through),
+            (ImpactSurface::Armor, Verdict::Stopped) => Some(Self::Stopped),
+            (ImpactSurface::Armor, Verdict::Ricochet) => Some(Self::Ricochet),
+        }
+    }
+}
 
 /// A finished shot against one tank, in causal order.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -54,7 +82,7 @@ pub struct Impact {
     pub incoming: [f32; 3],
     /// Angle between `-incoming` and `normal`.
     pub incidence_deg: f32,
-    pub verdict: Verdict,
+    pub verdict: PenCamVerdict,
 }
 
 /// One plate crossing. Thickness is three numbers: the geometric chord along the path, its normal
@@ -157,6 +185,37 @@ impl PenetrationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every armour verdict but `Struck` opens the pen cam of the same name; terrain opens none.
+    #[test]
+    fn only_a_resolved_armour_verdict_opens_a_pen_cam() {
+        let all = [
+            Verdict::Through,
+            Verdict::Stopped,
+            Verdict::Ricochet,
+            Verdict::Struck,
+        ];
+        for verdict in all {
+            assert_eq!(
+                PenCamVerdict::of_impact(ImpactSurface::Terrain, verdict),
+                None
+            );
+        }
+        assert_eq!(
+            all.map(|verdict| PenCamVerdict::of_impact(ImpactSurface::Armor, verdict)),
+            [
+                Some(PenCamVerdict::Through),
+                Some(PenCamVerdict::Stopped),
+                Some(PenCamVerdict::Ricochet),
+                None,
+            ]
+        );
+        for verdict in all {
+            if let Some(opened) = PenCamVerdict::of_impact(ImpactSurface::Armor, verdict) {
+                assert_eq!(opened.entered(), verdict.entered());
+            }
+        }
+    }
 
     fn scenario_dir() -> std::path::PathBuf {
         crate::assets::asset_root().join(player::SCENARIO_DIR)

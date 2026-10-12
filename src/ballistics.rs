@@ -946,7 +946,7 @@ pub(crate) struct TracerRound;
 
 /// The impact surface class, resolved from ballistic-volume ancestry.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum ImpactSurface {
+pub enum ImpactSurface {
     Terrain,
     Armor,
 }
@@ -958,7 +958,7 @@ pub(crate) enum ImpactSurface {
 /// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
 /// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark, the
 /// short-circuit probe). `Stopped` entered the material and ended inside it; `Through` came out the
-/// far side.
+/// far side. `Struck` opens no pen cam ([`crate::damage_cam::PenCamVerdict`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Through,
@@ -2428,8 +2428,13 @@ fn march_shell_step(
         let decision = match decided {
             Ok(decision) => decision,
             Err(error) => {
-                warn_once!(
-                    "ballistics: union walk failed, stopping the round at contact: {error:?}"
+                error!(
+                    shot = ?shell.shot.map(|shot| shot.0),
+                    shell = ?shell.entity,
+                    struck = ?hit.map(|hit| hit.entity),
+                    ?error,
+                    "ballistics: union walk failed, stopping the round at contact; it opens no \
+                     pen cam"
                 );
                 commands.trigger(Impact {
                     position: entry,
@@ -2508,8 +2513,13 @@ fn uncertified_start(
     commands: &mut Commands,
 ) -> bool {
     if deposit {
-        warn_once!(
-            "ballistics: a fresh start could not be certified, stopping the round: {error:?}"
+        error!(
+            shot = ?shell.shot.map(|shot| shot.0),
+            shell = ?shell.entity,
+            ?position,
+            ?error,
+            "ballistics: a fresh start could not be certified, stopping the round; it opens no \
+             pen cam"
         );
         commands.trigger(Impact {
             position,
@@ -4531,6 +4541,75 @@ mod march_tests {
             app.world().get_entity(shell).is_err(),
             "the sanctioned terminal ends the shell",
         );
+    }
+
+    /// A pen cam opens only for a hit on armour that resolved one of its three verdicts: the
+    /// ricochet, the stop and the perforation each open one; a ground hit and a fail-closed armour
+    /// contact open none. Plate thicknesses and the 75° graze are fixture data.
+    #[test]
+    fn a_pen_cam_opens_only_for_a_resolved_armour_hit() {
+        use crate::damage_cam::PenCamVerdict;
+        let opened = |hits: &[Captured]| -> Vec<Option<PenCamVerdict>> {
+            hits.iter()
+                .map(|hit| PenCamVerdict::of_impact(hit.surface, hit.verdict))
+                .collect()
+        };
+        let graze = Vec3::new(
+            75.0_f32.to_radians().sin(),
+            0.0,
+            -75.0_f32.to_radians().cos(),
+        )
+        .normalize();
+        let plate =
+            |thickness: f32| world_with_plate(Vec3::new(3.0, 3.0, thickness), Vec3::Y * 2.0);
+        let head_on = Vec3::new(0.0, 2.0, 2.0);
+        assert_eq!(
+            opened(&fire_and_capture(
+                &mut plate(0.10),
+                Vec3::new(-1.0, 2.0, 0.6),
+                graze,
+                800.0
+            )),
+            [Some(PenCamVerdict::Ricochet)],
+        );
+        assert_eq!(
+            opened(&fire_and_capture(
+                &mut plate(0.5),
+                head_on,
+                Vec3::NEG_Z,
+                800.0
+            )),
+            [Some(PenCamVerdict::Stopped)],
+        );
+        assert_eq!(
+            opened(&fire_and_capture(
+                &mut plate(0.05),
+                head_on,
+                Vec3::NEG_Z,
+                800.0
+            )),
+            [Some(PenCamVerdict::Through)],
+        );
+
+        let mut ground = world_with_plate(Vec3::splat(0.5), Vec3::splat(900.0));
+        ground.insert_resource(flat_grid(30.0));
+        let ground = fire_and_capture(
+            &mut ground,
+            Vec3::new(10.0, 80.0, -20.0),
+            Vec3::NEG_Y,
+            800.0,
+        );
+        assert_eq!(ground.len(), 1, "one ground read");
+        assert_eq!(opened(&ground), [None]);
+
+        let mut failed = plate(0.10);
+        spawn_uncertifiable(&mut failed);
+        spawn_free_shell(&mut failed, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
+        failed.update();
+        let failed = failed.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(failed.len(), 1, "one fail-closed read");
+        assert_eq!(failed[0].surface, ImpactSurface::Armor);
+        assert_eq!(opened(&failed), [None]);
     }
 
     /// The authority fails an uncertified fresh start closed, where it stands.
