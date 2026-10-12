@@ -397,6 +397,9 @@ export class Registry extends DurableObject<Env> {
 			now + this.cfg.statusPollMs,
 		);
 		this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", serverId, now, ticketId);
+		// The claim's deadline is durable before any outbound await (D1, Edgegap): a stalled call or an
+		// eviction from here on still leaves an alarm that reaps the row.
+		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
 
 		await recordEvent(this.env.DB, { kind: "requested", serverId, version, location: where, at: now });
 		let deploymentId: string;
@@ -428,7 +431,6 @@ export class Registry extends DurableObject<Env> {
 			await this.provider.stop(deploymentId).catch((err) => console.error("stop of orphan failed", deploymentId, diag(err)));
 		}
 		await recordEvent(this.env.DB, { kind: "deployed", serverId, deploymentId });
-		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
 	}
 
 	private async refreshStatus(serverId: string): Promise<void> {

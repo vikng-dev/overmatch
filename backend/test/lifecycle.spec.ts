@@ -1,4 +1,5 @@
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import type { Registry } from "../src/registry";
 import { describe, expect, it } from "vitest";
 import { age, bringUp, env, call, heartbeat, join, launched, registry, ticket, webhook } from "./helpers";
 
@@ -129,6 +130,20 @@ describe("readiness", () => {
 });
 
 describe("the alarm", () => {
+	it("is set to the start deadline before the deploy call goes out", async () => {
+		const release = edgegap.holdDeploys();
+		const pending = join({ version: V, locations: ["Paris"], pings: {} });
+		await new Promise((r) => setTimeout(r, 50)); // the deploy call is now in flight, held
+		const seen = await runInDurableObject(registry(V), async (_: Registry, state) => ({
+			alarm: await state.storage.getAlarm(),
+			created: state.storage.sql.exec<{ created_at: number }>("SELECT created_at FROM servers").one().created_at,
+		}));
+		release();
+		await pending;
+		expect(seen.alarm).not.toBeNull();
+		expect(seen.alarm!).toBeLessThanOrEqual(seen.created + 60 * S);
+	});
+
 	it("drops a server that never becomes ready and stops its deployment", async () => {
 		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 20, London: 25 } });
 		const s = launched();
