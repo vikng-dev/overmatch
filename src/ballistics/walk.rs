@@ -70,6 +70,8 @@
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
+
 #[cfg(test)]
 mod tests;
 
@@ -198,14 +200,42 @@ impl FaceHit {
     }
 }
 
-/// The factor of every volume the corridor can meet, supplied ONCE per volume.
+/// What a volume is made of, as the walk and the mechanisms read it: the substance's identity and
+/// its declared resistance, reference-mm per metre of chord (`crate::substances::Substance::factor`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct VolumeMaterial {
+    pub substance: SubstanceId,
+    pub factor: f32,
+}
+
+impl VolumeMaterial {
+    /// The substance named `name` in `registry`. Hard error on an unknown name.
+    pub fn of(registry: &SubstanceRegistry, name: &str) -> Result<Self, SubstanceError> {
+        Ok(Self {
+            substance: registry.id(name)?,
+            factor: registry.get(name)?.factor(),
+        })
+    }
+
+    /// A fixture material of `factor` reference-mm per metre, its substance one per factor
+    /// ([`SubstanceId::fixture`]).
+    #[cfg(test)]
+    pub(crate) fn fixture(factor: f32) -> Self {
+        Self {
+            substance: SubstanceId::fixture(factor),
+            factor,
+        }
+    }
+}
+
+/// The material of every volume the corridor can meet, supplied ONCE per volume.
 ///
-/// Not per hit: a volume has one substance (§13.7), and repeating the scalar on every face invites
-/// two faces of one plate disagreeing — an unrepresentable state that the union `max` would then
-/// have to arbitrate.
+/// Not per hit: a volume has one substance (§13.7), and repeating it on every face invites two
+/// faces of one plate disagreeing — an unrepresentable state that the union would then have to
+/// arbitrate.
 #[derive(Clone, Debug, Default)]
 pub struct VolumeTable {
-    factors: BTreeMap<Entity, f32>,
+    materials: BTreeMap<Entity, VolumeMaterial>,
 }
 
 impl VolumeTable {
@@ -213,34 +243,47 @@ impl VolumeTable {
     /// sum. A `NaN` poisons both the field maximum and the sort; a negative factor breaks
     /// monotonicity (§13.6). Zero is canonicalized so `-0.0` cannot produce a second bit pattern
     /// for "no material" and defeat the bit-equality coalescing in [`walk_ray`].
-    pub fn new(entries: impl IntoIterator<Item = (Entity, f32)>) -> Result<Self, WalkError> {
-        let mut factors = BTreeMap::new();
-        for (volume, factor) in entries {
+    pub fn new(
+        entries: impl IntoIterator<Item = (Entity, VolumeMaterial)>,
+    ) -> Result<Self, WalkError> {
+        let mut materials = BTreeMap::new();
+        for (volume, material) in entries {
+            let factor = material.factor;
             if !factor.is_finite() || factor < 0.0 {
                 return Err(WalkError::BadFactor { volume, factor });
             }
-            factors.insert(volume, if factor == 0.0 { 0.0 } else { factor });
+            materials.insert(
+                volume,
+                VolumeMaterial {
+                    factor: if factor == 0.0 { 0.0 } else { factor },
+                    ..material
+                },
+            );
         }
-        Ok(Self { factors })
+        Ok(Self { materials })
     }
 
-    /// Every `(volume, factor)` the table carries, in entity order.
+    /// Every `(volume, material)` the table carries, in entity order.
     ///
     /// Exists for the §13.6 idempotence/monotonicity gate ([`super::fuzz`]), which re-walks a real
     /// corridor with one volume DUPLICATED and therefore has to state the same table plus one row.
     /// Reconstructing it from the world instead would prove the property about a table the walk was
     /// never handed.
-    pub fn entries(&self) -> impl Iterator<Item = (Entity, f32)> + '_ {
-        self.factors
+    pub fn entries(&self) -> impl Iterator<Item = (Entity, VolumeMaterial)> + '_ {
+        self.materials
             .iter()
-            .map(|(volume, factor)| (*volume, *factor))
+            .map(|(volume, material)| (*volume, *material))
     }
 
-    fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
-        self.factors
+    fn material(&self, volume: Entity) -> Result<VolumeMaterial, WalkError> {
+        self.materials
             .get(&volume)
             .copied()
             .ok_or(WalkError::UnknownVolume { volume })
+    }
+
+    fn factor(&self, volume: Entity) -> Result<f32, WalkError> {
+        Ok(self.material(volume)?.factor)
     }
 }
 
@@ -618,6 +661,40 @@ pub struct EntityPresence {
     pub spans: Vec<(f64, f64)>,
 }
 
+/// One volume present over a [`Layer`]: its identity (the layer a dose is addressed to) and its
+/// material.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presence {
+    pub volume: Entity,
+    pub material: VolumeMaterial,
+}
+
+/// One stretch of a sample ray over which the set of present volumes is constant — an ORDERED
+/// ENCOUNTER, cut wherever any volume's presence opens or closes, with nothing reduced: an overlap
+/// of two substances lists both. A gap (air between plates, a welded void) is a layer with nothing
+/// present. A sample's layers tile its corridor `[0, length)` in order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layer {
+    pub start: f64,
+    pub end: f64,
+    /// In volume order.
+    pub present: Vec<Presence>,
+}
+
+impl Layer {
+    /// The substances present, in id order, each once.
+    pub fn substances(&self) -> Vec<SubstanceId> {
+        let mut out: Vec<SubstanceId> = self
+            .present
+            .iter()
+            .map(|presence| presence.material.substance)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 /// One shell's presence intervals along a sample ray.
 ///
 /// Kept alongside the per-ENTITY union because the staged handoff needs surface identity: after
@@ -646,6 +723,8 @@ pub struct RayWalk {
     /// Per-shell presence — the seed state the staged handoff exports.
     pub shells: Vec<ShellPresence>,
     pub events: Vec<BoundaryEvent>,
+    /// The ordered encounters along this sample ([`Layer`]).
+    pub layers: Vec<Layer>,
 }
 
 impl RayWalk {
@@ -1062,6 +1141,7 @@ pub fn walk_ray(
     )?;
     let events = boundary_events(corridor, &runs);
     let presence = entity_presence(&intervals, volumes)?;
+    let layers = layers(corridor.length as f64, &presence, volumes)?;
 
     let mut by_shell: BTreeMap<ShellKey, Vec<(f64, f64)>> = BTreeMap::new();
     for (key, open, close) in &intervals {
@@ -1089,7 +1169,50 @@ pub fn walk_ray(
         presence,
         shells,
         events,
+        layers,
     })
+}
+
+/// The ordered encounters over `[0, length)`: cut at every presence boundary, each listing the
+/// volumes whose (unioned) presence covers it.
+fn layers(
+    length: f64,
+    presence: &[EntityPresence],
+    volumes: &VolumeTable,
+) -> Result<Vec<Layer>, WalkError> {
+    let mut cuts: Vec<f64> = vec![0.0, length];
+    for entity in presence {
+        for (open, close) in &entity.spans {
+            cuts.push(*open);
+            cuts.push(*close);
+        }
+    }
+    cuts.retain(|t| (0.0..=length).contains(t));
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    let mut out = Vec::with_capacity(cuts.len());
+    for window in cuts.windows(2) {
+        let (start, end) = (window[0], window[1]);
+        let mut present = Vec::new();
+        for entity in presence {
+            if entity
+                .spans
+                .iter()
+                .any(|(open, close)| *open <= start && end <= *close)
+            {
+                present.push(Presence {
+                    volume: entity.entity,
+                    material: volumes.material(entity.entity)?,
+                });
+            }
+        }
+        out.push(Layer {
+            start,
+            end,
+            present,
+        });
+    }
+    Ok(out)
 }
 
 /// The union factor at `t = 0`, from declared initial presence alone.
@@ -1488,6 +1611,33 @@ impl CostProfile {
     }
 }
 
+/// What one sample of the disc meets over an [`Encounter`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct SampleLayer {
+    pub sample: usize,
+    /// The volumes present on that sample, in volume order; empty where the sample is in a gap of
+    /// this crossing (a welded void).
+    pub present: Vec<Presence>,
+}
+
+/// One stretch of a disc crossing over which every sample's present volumes are constant: the
+/// ordered encounter a mechanism advances through. Encounters tile the crossing `[start, end]` in
+/// order, cut at every sample's [`Layer`] boundary; samples outside the crossing over a stretch
+/// are absent from it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Encounter {
+    pub start: f64,
+    pub end: f64,
+    /// Some sample's substance set differs here from the previous encounter's (the first
+    /// encounter is always one). A boundary where only volume identity changes — two plates of one
+    /// substance in contact — is not an interface: they are one plate.
+    pub interface: bool,
+    /// The samples inside the crossing over this stretch, in sample order.
+    pub samples: Vec<SampleLayer>,
+    /// k — the disc's sample count, the denominator of every disc mean.
+    pub disc: usize,
+}
+
 /// One entity's share of a disc crossing — the damage deposit AND the material slice-2 needs to
 /// decide impulse ownership.
 #[derive(Clone, Debug, PartialEq)]
@@ -1528,6 +1678,8 @@ pub struct DiscEvent {
     /// `(1/k) Σᵢ costᵢ` — automatically `η × mean covered chord cost`.
     pub cost: f32,
     pub profile: CostProfile,
+    /// The crossing's ordered encounters ([`Encounter`]).
+    pub encounters: Vec<Encounter>,
     pub spall: Vec<DiscSpall>,
     pub shares: Vec<EntityShare>,
 }
@@ -1897,6 +2049,7 @@ fn build_event(
         cumulative,
     };
     let cost = profile.total() as f32;
+    let encounters = encounters(walks, &by_sample, start, end, k);
 
     // Per-entity shares, unioned per sample then averaged over the disc.
     let mut shares: BTreeMap<Entity, (f32, Vec<(f64, f64)>, BTreeSet<usize>)> = BTreeMap::new();
@@ -2026,9 +2179,79 @@ fn build_event(
         exit_coverage: (exit_covered as f64 / kf) as f32,
         cost,
         profile,
+        encounters,
         spall,
         shares,
     })
+}
+
+/// The ordered encounters of one disc crossing: `[start, end]` cut at every boundary of every
+/// contributing sample's layers, each stretch listing what each sample inside the crossing meets.
+fn encounters(
+    walks: &[RayWalk],
+    by_sample: &BTreeMap<usize, Vec<usize>>,
+    start: f64,
+    end: f64,
+    k: usize,
+) -> Vec<Encounter> {
+    let mut cuts: Vec<f64> = vec![start, end];
+    for &sample in by_sample.keys() {
+        for layer in &walks[sample].layers {
+            cuts.push(layer.start);
+            cuts.push(layer.end);
+        }
+    }
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup();
+    cuts.retain(|t| *t >= start && *t <= end);
+
+    let mut out: Vec<Encounter> = Vec::with_capacity(cuts.len());
+    let mut before: BTreeMap<usize, Vec<SubstanceId>> = BTreeMap::new();
+    for window in cuts.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        let mid = 0.5 * (a + b);
+        let mut samples = Vec::new();
+        let mut now: BTreeMap<usize, Vec<SubstanceId>> = BTreeMap::new();
+        for (&sample, runs) in by_sample {
+            let inside = runs.iter().any(|&run| {
+                let extent = &walks[sample].runs[run];
+                extent.start <= mid && mid < extent.end
+            });
+            if !inside {
+                continue;
+            }
+            let Some(layer) = walks[sample]
+                .layers
+                .iter()
+                .find(|layer| layer.start <= mid && mid < layer.end)
+            else {
+                continue;
+            };
+            now.insert(sample, layer.substances());
+            samples.push(SampleLayer {
+                sample,
+                present: layer.present.clone(),
+            });
+        }
+        let interface = out.is_empty() || {
+            let substances = |map: &BTreeMap<usize, Vec<SubstanceId>>, sample: &usize| {
+                map.get(sample).cloned().unwrap_or_default()
+            };
+            before
+                .keys()
+                .chain(now.keys())
+                .any(|sample| substances(&before, sample) != substances(&now, sample))
+        };
+        out.push(Encounter {
+            start: a,
+            end: b,
+            interface,
+            samples,
+            disc: k,
+        });
+        before = now;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------------

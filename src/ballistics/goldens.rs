@@ -268,7 +268,7 @@ fn front_plate_cost(app: &mut App) -> f32 {
         .query::<(&Name, &BallisticVolume)>()
         .iter(app.world())
         .find(|(name, _)| name.as_str() == "Hull_UFP_Upper")
-        .map(|(_, volume)| volume.material_factor)
+        .map(|(_, volume)| volume.material.factor)
         .expect("the bound tank has its front plate");
     FRONT_PLATE_CHORD * factor
 }
@@ -436,7 +436,7 @@ fn a_rear_shot_soaks_in_the_engine_block() {
         .query::<(&Name, &BallisticVolume)>()
         .iter(app.world())
         .find(|(name, _)| name.as_str() == "Engine")
-        .map(|(_, volume)| (volume.material_factor, volume.substance.clone()))
+        .map(|(_, volume)| (volume.material.factor, volume.substance.clone()))
         .expect("the bound tank has an engine volume");
     assert_eq!(
         factor,

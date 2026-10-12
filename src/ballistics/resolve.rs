@@ -1161,28 +1161,22 @@ pub(super) fn volume_table(
     context: &ResolveContext<'_, '_, '_>,
     corridor: &DiscCorridor,
 ) -> Result<VolumeTable, WalkError> {
-    let mut entries: Vec<(Entity, f32)> = Vec::new();
+    let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
     for sample in &corridor.samples {
-        for hit in &sample.hits {
-            if !entries.iter().any(|(entity, _)| *entity == hit.volume) {
-                let factor = context
+        let volumes = sample
+            .hits
+            .iter()
+            .map(|hit| hit.volume)
+            .chain(sample.initial_presence.iter().map(|key| key.volume));
+        for volume in volumes {
+            if !entries.iter().any(|(entity, _)| *entity == volume) {
+                let material = context
                     .world
                     .volumes
-                    .get(hit.volume)
-                    .map(|volume| volume.material_factor)
-                    .map_err(|_| WalkError::UnknownVolume { volume: hit.volume })?;
-                entries.push((hit.volume, factor));
-            }
-        }
-        for key in &sample.initial_presence {
-            if !entries.iter().any(|(entity, _)| *entity == key.volume) {
-                let factor = context
-                    .world
-                    .volumes
-                    .get(key.volume)
-                    .map(|volume| volume.material_factor)
-                    .map_err(|_| WalkError::UnknownVolume { volume: key.volume })?;
-                entries.push((key.volume, factor));
+                    .get(volume)
+                    .map(|found| found.material)
+                    .map_err(|_| WalkError::UnknownVolume { volume })?;
+                entries.push((volume, material));
             }
         }
     }

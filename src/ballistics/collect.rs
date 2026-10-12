@@ -1439,6 +1439,7 @@ mod tests {
                     spans: vec![span],
                 }],
                 events: Vec::new(),
+                layers: Vec::new(),
             }
             .inside_at(handoff, &laws)
             .contains(&key)
@@ -1532,7 +1533,8 @@ mod tests {
                     initial_presence: Vec::new(),
                     hits,
                 },
-                &VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+                &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
+                    .expect("a usable factor"),
                 &laws,
             )
             .unwrap_or_else(|error| panic!("{name}: the interval pairs: {error:?}"));
@@ -1623,7 +1625,8 @@ mod tests {
                         initial_presence: if seeded { vec![key] } else { Vec::new() },
                         hits,
                     },
-                    &VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+                    &VolumeTable::new([(node, super::super::walk::VolumeMaterial::fixture(1.0))])
+                        .expect("a usable factor"),
                     &laws,
                 ),
             )
@@ -1849,7 +1852,11 @@ mod tests {
                 initial_presence: Vec::new(),
                 hits,
             },
-            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &super::super::walk::VolumeTable::new([(
+                node,
+                super::super::walk::VolumeMaterial::fixture(1.0),
+            )])
+            .expect("a usable factor"),
             &WalkLaws::default(),
         )?;
         Ok(walk
@@ -2417,6 +2424,7 @@ mod tests {
                 indices: faces.iter().flatten().copied().collect(),
                 substance: Some(crate::bake::PrimitiveSubstance {
                     name: "RHA".into(),
+                    id: crate::substances::SubstanceId::fixture(1000.0),
                     factor: 1000.0,
                 }),
                 certificate: None,
@@ -2443,7 +2451,11 @@ mod tests {
                 initial_presence: Vec::new(),
                 hits,
             },
-            &super::super::walk::VolumeTable::new([(node, 1.0)]).expect("a usable factor"),
+            &super::super::walk::VolumeTable::new([(
+                node,
+                super::super::walk::VolumeMaterial::fixture(1.0),
+            )])
+            .expect("a usable factor"),
             &WalkLaws::default(),
         )
         .expect("a closed needle resolves");

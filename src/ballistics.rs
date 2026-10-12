@@ -25,6 +25,7 @@ mod sanctioned;
 /// is a pure function over pre-collected hit lists, which is what makes the §13.6 invariants
 /// testable to the bit.
 mod walk;
+pub(crate) use walk::VolumeMaterial;
 
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
@@ -156,7 +157,7 @@ pub(crate) const MAX_COSMETIC_CATCH_UP_TICKS: u32 = 100;
 fn reference_steel() -> &'static crate::substances::MaterialFacts {
     static FACTS: std::sync::LazyLock<crate::substances::MaterialFacts> =
         std::sync::LazyLock::new(|| {
-            crate::substances::SubstanceRegistry::shipped().reference_facts()
+            crate::substances::SubstanceRegistry::shipped_static().reference_facts()
         });
     &FACTS
 }
@@ -308,7 +309,7 @@ fn cast_spall_fragment(
         };
         let at = pos + Vec3::from(dir) * hit.distance;
         pen = (pen / (1.0 + FRAG_DRAG * hit.distance)).max(0.0); // drag over the gap
-        let node = hit_ancestor(hit.entity, volumes, parents).map(|(e, v)| (e, v.material_factor));
+        let node = hit_ancestor(hit.entity, volumes, parents).map(|(e, v)| (e, v.material.factor));
         let Some((node_entity, factor)) = node else {
             pos = at;
             break;
@@ -799,8 +800,9 @@ impl ShellPath {
 /// authored anywhere.
 #[derive(Component)]
 pub struct BallisticVolume {
-    /// The §13.2 field value: reference-mm of armour per metre of chord.
-    pub material_factor: f32,
+    /// The substance's identity and its §13.2 field value (reference-mm of armour per metre of
+    /// chord).
+    pub material: walk::VolumeMaterial,
     /// The substance's registry name — identity, for diagnostics/inspection and the paint livery.
     /// Never parsed for behaviour.
     #[allow(
@@ -3221,7 +3223,7 @@ mod march_tests {
             Collider::cuboid(size.x, size.y, size.z),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: walk::VolumeMaterial::fixture(STEEL),
                 substance: "RHA".to_string(),
             },
         ));
@@ -3423,7 +3425,7 @@ mod march_tests {
                     Collider::cuboid(3.0, 3.0, 0.10),
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {
-                        material_factor: 1.0,
+                        material: walk::VolumeMaterial::fixture(1.0),
                         substance: "RHA".to_string(),
                     },
                     ComponentHealth {
@@ -4458,7 +4460,7 @@ mod march_tests {
             )]),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: walk::VolumeMaterial::fixture(STEEL),
                 substance: "fixture".to_string(),
             },
         ));
@@ -4901,7 +4903,7 @@ mod march_tests {
             Collider::cuboid(3.0, 3.0, 0.5),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: walk::VolumeMaterial::fixture(STEEL),
                 substance: "RHA".to_string(),
             },
         ));
@@ -5317,7 +5319,7 @@ mod march_tests {
                 box_trimesh(*size),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "RHA".to_string(),
                 },
             ));
@@ -5429,7 +5431,7 @@ mod march_tests {
                 box_trimesh(Vec3::new(3.0, 0.6, 0.1)),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "RHA".to_string(),
                 },
             ));
@@ -5632,7 +5634,7 @@ mod march_tests {
                     box_trimesh(Vec3::new(tilted.x, tilted.y, half * 2.0)),
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {
-                        material_factor: STEEL * 0.01,
+                        material: walk::VolumeMaterial::fixture(STEEL * 0.01),
                         substance: "soft".to_string(),
                     },
                 ));
@@ -5754,7 +5756,7 @@ mod march_tests {
             box_trimesh(Vec3::new(1.0, 1.0, half * 2.0)),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL * 0.01,
+                material: walk::VolumeMaterial::fixture(STEEL * 0.01),
                 substance: "soft".to_string(),
             },
         ));
@@ -5900,7 +5902,7 @@ mod march_tests {
             box_trimesh(Vec3::new(1.0, high - low, thickness)),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: walk::VolumeMaterial::fixture(STEEL),
                 substance: "RHA".to_string(),
             },
         ));
@@ -6423,7 +6425,7 @@ mod march_tests {
                 box_trimesh(Vec3::new(3.0, 3.0, 0.02)),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "RHA".to_string(),
                 },
             ));
@@ -6497,7 +6499,7 @@ mod march_tests {
             // substance name is empty to match: this fixture is deliberately un-declared, and
             // naming a registry substance here would assert the opposite of what it tests.
             BallisticVolume {
-                material_factor: 0.0,
+                material: walk::VolumeMaterial::fixture(0.0),
                 substance: String::new(),
             },
         ));
@@ -6566,7 +6568,7 @@ mod march_tests {
                 box_trimesh(Vec3::new(3.0, 3.0, 0.02)),
                 CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "RHA".to_string(),
                 },
             ));

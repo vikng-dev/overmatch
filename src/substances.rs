@@ -110,6 +110,20 @@ pub enum Resistance {
     Effective(f32),
 }
 
+/// A substance's identity: its position in the registry's name order. Stable for one registry;
+/// never a wire or save identity (the registry's own text is).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct SubstanceId(u64);
+
+impl SubstanceId {
+    /// A fixture substance for tests that build volumes without a registry: one id per factor, so
+    /// fixture plates of one factor are one substance. Disjoint from every registry id.
+    #[cfg(test)]
+    pub(crate) fn fixture(factor: f32) -> Self {
+        Self(1 << 32 | factor.to_bits() as u64)
+    }
+}
+
 /// One substance's entry.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -301,6 +315,13 @@ impl SubstanceRegistry {
         })
     }
 
+    /// The shipped registry, parsed once.
+    pub fn shipped_static() -> &'static Self {
+        static REGISTRY: std::sync::LazyLock<SubstanceRegistry> =
+            std::sync::LazyLock::new(SubstanceRegistry::shipped);
+        &REGISTRY
+    }
+
     /// The shipped registry. Panics on a malformed file, matching [`crate::bake`]'s treatment of the
     /// embedded tank spec: a broken authored contract is a build defect, not a runtime condition to
     /// degrade through.
@@ -326,6 +347,17 @@ impl SubstanceRegistry {
                 known: self.substances.keys().cloned().collect(),
             }
         })
+    }
+
+    /// The identity of the substance named `name` in this registry — hard error on an unknown name.
+    pub fn id(&self, name: &str) -> Result<SubstanceId, SubstanceError> {
+        self.get(name)?;
+        let index = self
+            .substances
+            .keys()
+            .position(|key| key == name)
+            .expect("present, checked above");
+        Ok(SubstanceId(index as u64))
     }
 
     /// The reference steel's material facts — the force law's reference constants.

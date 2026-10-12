@@ -92,8 +92,14 @@ fn corridor(length: f32, hits: Vec<FaceHit>) -> RayCorridor {
     }
 }
 
+/// Fixture volumes of one factor are one substance ([`VolumeMaterial::fixture`]).
 fn table(entries: &[(u32, f32)]) -> VolumeTable {
-    VolumeTable::new(entries.iter().map(|(v, f)| (volume(*v), *f))).expect("test factors are legal")
+    VolumeTable::new(
+        entries
+            .iter()
+            .map(|(v, f)| (volume(*v), VolumeMaterial::fixture(*f))),
+    )
+    .expect("test factors are legal")
 }
 
 fn walk(corridor: &RayCorridor, volumes: &VolumeTable) -> RayWalk {
@@ -672,11 +678,11 @@ fn an_exit_below_depth_zero_is_still_a_structured_error() {
 fn non_finite_and_negative_factors_are_rejected_at_construction() {
     for bad in [f32::NAN, f32::INFINITY, -1.0] {
         assert!(matches!(
-            VolumeTable::new([(volume(1), bad)]),
+            VolumeTable::new([(volume(1), VolumeMaterial::fixture(bad))]),
             Err(WalkError::BadFactor { .. })
         ));
     }
-    let table = VolumeTable::new([(volume(1), -0.0)]).unwrap();
+    let table = VolumeTable::new([(volume(1), VolumeMaterial::fixture(-0.0))]).unwrap();
     assert_eq!(table.factor(volume(1)).unwrap().to_bits(), 0.0f32.to_bits());
 }
 
@@ -3460,4 +3466,98 @@ fn surface_identity_never_charges_less_than_the_exact_union_field() {
             walked.cost,
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Ordered encounters
+// ---------------------------------------------------------------------------------------------
+
+/// Each sample reports its materials IN ORDER, with identity, gaps and overlaps intact: an overlap
+/// of two substances lists both, and nothing is reduced to one factor.
+#[test]
+fn layers_report_every_volume_in_order_with_gaps_and_overlaps() {
+    let volumes = table(&[(1, 1000.0), (2, 900.0), (3, 10.0), (4, 1000.0)]);
+    let mut hits = plate(1, 0, 0.25, 0.5);
+    hits.extend(plate(2, 0, 0.5, 0.75));
+    hits.extend(plate(3, 0, 1.0, 1.25));
+    hits.extend(plate(4, 0, 1.125, 1.5));
+    let walked = walk(&corridor(2.0, hits), &volumes);
+    let layers: Vec<(f64, f64, Vec<u32>)> = walked
+        .layers
+        .iter()
+        .map(|layer| {
+            let mut present: Vec<u32> = layer
+                .present
+                .iter()
+                .map(|presence| {
+                    (1..=4)
+                        .find(|index| volume(*index) == presence.volume)
+                        .expect("a fixture volume")
+                })
+                .collect();
+            present.sort();
+            (layer.start, layer.end, present)
+        })
+        .collect();
+    assert_eq!(
+        layers,
+        vec![
+            (0.0, 0.25, vec![]),
+            (0.25, 0.5, vec![1]),
+            (0.5, 0.75, vec![2]),
+            (0.75, 1.0, vec![]),
+            (1.0, 1.125, vec![3]),
+            (1.125, 1.25, vec![3, 4]),
+            (1.25, 1.5, vec![4]),
+            (1.5, 2.0, vec![]),
+        ]
+    );
+    let mut both = vec![SubstanceId::fixture(1000.0), SubstanceId::fixture(10.0)];
+    both.sort();
+    assert_eq!(
+        walked.layers[5].substances(),
+        both,
+        "an overlap keeps both substances"
+    );
+}
+
+/// Plates of one substance in contact are ONE plate: the boundary between them is not an
+/// interface. Two substances of equal factor in contact are two plates, and the boundary between
+/// them is one.
+#[test]
+fn an_interface_is_a_change_of_substance_never_of_volume_alone() {
+    // Fixture data: a second substance id at the first one's factor.
+    let other = VolumeMaterial {
+        substance: SubstanceId::fixture(999.0),
+        factor: 1000.0,
+    };
+    let interfaces = |second: VolumeMaterial| {
+        let volumes = VolumeTable::new([
+            (volume(1), VolumeMaterial::fixture(1000.0)),
+            (volume(2), second),
+        ])
+        .unwrap();
+        let mut hits = plate(1, 0, 0.25, 0.5);
+        hits.extend(plate(2, 0, 0.5, 0.75));
+        let walked = walk_disc(
+            &point_disc(2.0, sample(Vec3::ZERO, hits)),
+            &volumes,
+            &WalkLaws::default(),
+        )
+        .unwrap();
+        assert_eq!(walked.events.len(), 1);
+        walked.events[0]
+            .encounters
+            .iter()
+            .map(|encounter| (encounter.start, encounter.end, encounter.interface))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        interfaces(VolumeMaterial::fixture(1000.0)),
+        vec![(0.25, 0.5, true), (0.5, 0.75, false)]
+    );
+    assert_eq!(
+        interfaces(other),
+        vec![(0.25, 0.5, true), (0.5, 0.75, true)]
+    );
 }

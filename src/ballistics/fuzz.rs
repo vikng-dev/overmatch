@@ -862,10 +862,10 @@ impl Pass<'_, '_, '_> {
         let Ok(base) = walk::walk_ray(0, &corridor, &volumes, &self.context.laws) else {
             return;
         };
-        let Ok(factor) = volumes
+        let Ok(material) = volumes
             .entries()
             .find(|(volume, _)| *volume == seed.volume)
-            .map(|(_, factor)| factor)
+            .map(|(_, material)| material)
             .ok_or(())
         else {
             return;
@@ -889,8 +889,16 @@ impl Pass<'_, '_, '_> {
             (1.0_f32, ViolationKind::DuplicationChangedCost),
             (2.0, ViolationKind::DuplicationLoweredCost),
         ] {
-            let mut entries: Vec<(Entity, f32)> = volumes.entries().collect();
-            entries.push((self.spares.volume, factor * scale));
+            // The duplicate is the seed's substance; at 2× it is a stronger copy of it, the
+            // monotonicity probe.
+            let mut entries: Vec<(Entity, walk::VolumeMaterial)> = volumes.entries().collect();
+            entries.push((
+                self.spares.volume,
+                walk::VolumeMaterial {
+                    factor: material.factor * scale,
+                    ..material
+                },
+            ));
             let Ok(table) = VolumeTable::new(entries) else {
                 continue;
             };

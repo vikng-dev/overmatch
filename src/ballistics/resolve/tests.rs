@@ -103,7 +103,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                 box_trimesh(PLATE),
                 CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "RHA".to_string(),
                 },
             ));
@@ -246,7 +246,7 @@ fn volume(app: &mut App, size: Vec3, at: Transform, factor: f32, hp: Option<f32>
         box_trimesh(size),
         CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
         BallisticVolume {
-            material_factor: factor,
+            material: walk::VolumeMaterial::fixture(factor),
             substance: "fixture".to_string(),
         },
     ));
@@ -944,7 +944,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
                 ),
                 CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL * 1.0e-5,
+                    material: walk::VolumeMaterial::fixture(STEEL * 1.0e-5),
                     substance: "fixture".to_string(),
                 },
             ));
@@ -1234,7 +1234,7 @@ fn mesh_volume(app: &mut App, mesh: (Collider, BallisticSurfaces), at: Transform
             mesh,
             CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: walk::VolumeMaterial::fixture(STEEL),
                 substance: "fixture".to_string(),
             },
         ))
@@ -1466,7 +1466,7 @@ fn a_start_inside_nested_volumes_is_inside_each() {
                 Collider::cuboid(1.0, 1.0, 1.0),
                 CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
                 BallisticVolume {
-                    material_factor: STEEL,
+                    material: walk::VolumeMaterial::fixture(STEEL),
                     substance: "fixture".to_string(),
                 },
             ))

@@ -176,6 +176,8 @@ pub(crate) struct ShellCertificate {
 pub(crate) struct PrimitiveSubstance {
     /// The material datablock name — the join key to `materials.ron` (§12: identity, never parsed).
     pub name: String,
+    /// The substance's identity in the registry it was resolved against.
+    pub id: crate::substances::SubstanceId,
     /// The §13.2 field value: reference-mm of armour per metre of chord.
     pub factor: f32,
 }
@@ -299,6 +301,7 @@ fn classify(
     let substance = registry.get(material).ok()?;
     Some(PrimitiveSubstance {
         name: material.to_owned(),
+        id: registry.id(material).ok()?,
         factor: substance.factor(),
     })
 }
@@ -1444,6 +1447,7 @@ mod tests {
             indices,
             substance: Some(PrimitiveSubstance {
                 name: SUBSTANCE.into(),
+                id: crate::substances::SubstanceId::fixture(1000.0),
                 factor: 1000.0,
             }),
             certificate: None,

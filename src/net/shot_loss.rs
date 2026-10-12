@@ -705,7 +705,7 @@ fn spawn_plate(app: &mut App) {
         Collider::cuboid(20.0, 20.0, 0.1),
         CollisionLayers::new([Layer::Armor], LayerMask::ALL),
         BallisticVolume {
-            material_factor: STEEL,
+            material: crate::ballistics::VolumeMaterial::fixture(STEEL),
             substance: "RHA".to_string(),
         },
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every

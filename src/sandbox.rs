@@ -467,8 +467,7 @@ fn spawn_targets(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Steel: reference-mm of armor per metre of material, so a plate's cost ≈ its thickness in mm.
-    const STEEL: f32 = 1000.0;
+    // RHA, the reference steel: a plate's cost in reference-mm is its thickness in mm.
     // (x, thickness_m, tint) — 15 mm (overmatched), 50 mm, 100 mm, 300 mm (defeats it head-on).
     let plates = [
         (-6.0_f32, 0.015_f32, Color::srgba(0.72, 0.74, 0.82, 0.40)),
@@ -490,7 +489,11 @@ fn spawn_targets(
             Collider::cuboid(3.0, 3.0, thickness),
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
-                material_factor: STEEL,
+                material: crate::ballistics::VolumeMaterial::of(
+                    crate::substances::SubstanceRegistry::shipped_static(),
+                    "RHA",
+                )
+                .expect("the shipped registry names RHA"),
                 substance: "RHA".to_string(),
             },
         ));
