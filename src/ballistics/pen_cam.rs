@@ -366,6 +366,104 @@ fn scenarios() -> Vec<Scenario> {
     ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
+const RECORD_REL_TOLERANCE: f64 = 0.0;
+
+/// A record's text, split into float literals and the exact text between them. An integer, or
+/// digits inside a name (`s3_ricochet`, `88mm_AP`), stay text.
+#[derive(Debug, PartialEq)]
+enum Token<'a> {
+    Text(&'a str),
+    Float(f64),
+}
+
+fn tokens(text: &str) -> Vec<Token<'_>> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let (mut text_from, mut i) = (0, 0);
+    while i < bytes.len() {
+        let starts_number = (bytes[i].is_ascii_digit()
+            || (bytes[i] == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)))
+            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || b"_.".contains(&bytes[i - 1])));
+        if !starts_number {
+            i += 1;
+            continue;
+        }
+        let mut end = i + 1;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_digit()
+                || b".eE".contains(&bytes[end])
+                || (b"+-".contains(&bytes[end]) && b"eE".contains(&bytes[end - 1])))
+        {
+            end += 1;
+        }
+        let literal = &text[i..end];
+        match literal.parse::<f64>() {
+            Ok(value) if literal.contains(['.', 'e', 'E']) => {
+                if text_from < i {
+                    out.push(Token::Text(&text[text_from..i]));
+                }
+                out.push(Token::Float(value));
+                text_from = end;
+            }
+            _ => {}
+        }
+        i = end;
+    }
+    if text_from < bytes.len() {
+        out.push(Token::Text(&text[text_from..]));
+    }
+    out
+}
+
+/// The largest float difference between two records whose text matches exactly everywhere else.
+#[derive(Debug, Default)]
+struct Spread {
+    abs: f64,
+    rel: f64,
+    /// The line of the checked-in record holding the largest relative difference.
+    worst: String,
+}
+
+/// How far `today` departs from `recorded`: `Err` names the first difference in anything but a
+/// float literal (a verdict, a name, a plate or path point gained or lost).
+fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
+    let (a, b) = (tokens(recorded), tokens(today));
+    let mut spread = Spread::default();
+    let mut at = 0;
+    for (index, pair) in a.iter().zip(&b).enumerate() {
+        match pair {
+            (Token::Float(x), Token::Float(y)) => {
+                let abs = (x - y).abs();
+                let rel = if abs == 0.0 {
+                    0.0
+                } else {
+                    abs / x.abs().max(y.abs())
+                };
+                spread.abs = spread.abs.max(abs);
+                if rel > spread.rel {
+                    spread.rel = rel;
+                    at = index;
+                }
+            }
+            (x, y) if x == y => {}
+            (x, y) => return Err(format!("{x:?} became {y:?}")),
+        }
+    }
+    if a.len() != b.len() {
+        return Err(format!("{} tokens became {}", a.len(), b.len()));
+    }
+    let line_start = a[..at]
+        .iter()
+        .rev()
+        .find_map(|token| match token {
+            Token::Text(text) => text.rsplit('\n').next(),
+            Token::Float(_) => None,
+        })
+        .unwrap_or_default();
+    spread.worst = format!("{}{:?}", line_start.trim_start(), a.get(at));
+    Ok(spread)
+}
+
 /// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
 /// path, and the checked-in record is exactly what the march records today. No record is left
 /// without a scenario.
@@ -401,8 +499,13 @@ fn the_pen_cam_scenarios_are_current() {
         let path = dir.join(format!("{}.ron", scenario.name));
         if bless {
             std::fs::write(&path, &text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        } else if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-            stale.push(scenario.name.clone());
+        } else {
+            let recorded = std::fs::read_to_string(&path).unwrap_or_default();
+            match spread(&recorded, &text) {
+                Ok(spread) if spread.rel <= RECORD_REL_TOLERANCE => {}
+                Ok(spread) => stale.push(format!("{}: {spread:?}", scenario.name)),
+                Err(changed) => stale.push(format!("{}: {changed}", scenario.name)),
+            }
         }
     }
     let mut orphans: Vec<String> = std::fs::read_dir(&dir)
