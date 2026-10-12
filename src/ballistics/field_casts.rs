@@ -22,9 +22,10 @@
 //! and, at spawn pose in a fresh world each, `shot`: the tank's own main-gun round fired through the
 //! real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end to end — body-exit
 //! detection, the mechanism's spends and speeds, each cone's strength and axis, and its walks. A shot
-//! record digests every penetration event, every cone (origin, axis, half-angle, and each
-//! direction's end and whether it dosed; a direction's end and its doses carry its strength), and
-//! every named box's HP after the shot.
+//! record digests every penetration event, every cone (origin, axis, half-angle; its source's spend,
+//! entry and exit speeds and strength `S`, each as raw bits, so a source parameter that moves no
+//! direction's end and no HP still moves the record; and each direction's end and whether it
+//! dosed), and every named box's HP after the shot.
 //!
 //! Each ray goes through two paths:
 //!
@@ -66,7 +67,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x8838_06ef_4fc3_0087;
+const PINNED_TOTAL: u64 = 0x2908_f01a_7088_10d5;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -556,6 +557,10 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         bits3(&mut output, Vec3::from(cone.axis));
         output.push(' ');
         bits(&mut output, cone.half_angle);
+        for value in [cone.spend, cone.entry_speed, cone.exit_speed, cone.strength] {
+            output.push(' ');
+            bits(&mut output, value);
+        }
         for ray in &cone.rays {
             output.push(' ');
             bits3(&mut output, ray.end);
