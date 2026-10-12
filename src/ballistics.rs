@@ -297,7 +297,36 @@ const FRAG_DRAG: f32 = 0.6;
 /// HP a fragment deposits per RHA-mm of its current penetration at the moment of impact.
 const FRAG_DMG_PER_MM: f32 = 0.12;
 
-/// March one spall fragment through ballistic volumes and return its visual trace.
+/// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
+const TRANSIT_K: f32 = 1.0;
+
+/// Apply `doses` in order, each to its box's HP pool floored at zero, and return the HP removed. A
+/// box with no HP pool takes nothing. Only authority writes HP (`deposit`).
+fn apply_doses(
+    doses: &[mechanism::Dose],
+    health: &mut Query<&mut ComponentHealth>,
+    deposit: bool,
+) -> f32 {
+    let mut removed = 0.0;
+    if !deposit {
+        return removed;
+    }
+    for dose in doses {
+        if let Ok(mut hp) = health.get_mut(dose.address) {
+            let per_mm = match dose.source {
+                mechanism::DoseSource::Line { .. } => TRANSIT_K,
+                mechanism::DoseSource::Fragment => FRAG_DMG_PER_MM,
+            };
+            let before = hp.current;
+            hp.current = (before - dose.amount * per_mm).max(0.0);
+            removed += before - hp.current;
+        }
+    }
+    removed
+}
+
+/// March one spall fragment through ballistic volumes: its visual trace, and the doses it addresses
+/// to the HP-bearing boxes it strikes, in strike order.
 fn cast_spall_fragment(
     origin: Vec3,
     dir: Dir3,
@@ -306,16 +335,14 @@ fn cast_spall_fragment(
     spatial: &SpatialQuery,
     volumes: &Query<&BallisticVolume>,
     parents: &Query<&ChildOf>,
-    health: &mut Query<&mut ComponentHealth>,
+    health: &Query<&mut ComponentHealth>,
     filter: &SpatialQueryFilter,
-    // Only authority writes HP; replicas retain the visual trace.
-    deposit: bool,
-) -> (SpallFragment, f32) {
+) -> (SpallFragment, Vec<mechanism::Dose>) {
     const EPS: f32 = 1.0e-3;
     const PROBE: f32 = 50.0;
     let mut pos = origin;
     let mut deposited = false;
-    let mut damage_dealt = 0.0;
+    let mut doses = Vec::new();
     while range > EPS {
         let Some(hit) = spatial.cast_ray(pos, dir, range, true, filter) else {
             pos += Vec3::from(dir) * range; // flew the rest, hit nothing
@@ -328,12 +355,12 @@ fn cast_spall_fragment(
             pos = at;
             break;
         };
-        if let Ok(mut hp) = health.get_mut(node_entity) {
-            if deposit {
-                let before = hp.current;
-                hp.current = (before - pen * FRAG_DMG_PER_MM).max(0.0);
-                damage_dealt += before - hp.current;
-            }
+        if health.contains(node_entity) {
+            doses.push(mechanism::Dose {
+                address: node_entity,
+                amount: pen,
+                source: mechanism::DoseSource::Fragment,
+            });
             deposited = true;
         }
         let span = spatial
@@ -362,7 +389,7 @@ fn cast_spall_fragment(
             end: pos,
             deposited,
         },
-        damage_dealt,
+        doses,
     )
 }
 
@@ -2732,7 +2759,7 @@ fn throw_spall_burst(
         };
         for (fdir, t) in spall_directions(dir, SPALL_HALF_ANGLE, count) {
             let birth_pen = FRAG_PEN_MAX * shot_energy * (1.0 - t);
-            let (fragment, fragment_damage) = cast_spall_fragment(
+            let (fragment, doses) = cast_spall_fragment(
                 exit + Vec3::from(fdir) * EPS,
                 fdir,
                 birth_pen,
@@ -2742,9 +2769,8 @@ fn throw_spall_burst(
                 &world.parents,
                 health,
                 armor,
-                deposit,
             );
-            damage_dealt += fragment_damage;
+            damage_dealt += apply_doses(&doses, health, deposit);
             burst.fragments.push(fragment);
         }
         spall.bursts.push(burst);

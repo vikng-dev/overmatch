@@ -71,7 +71,9 @@
 use bevy::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::mechanism::{Control, Effect, Geometry, Limits, Mechanism, OvermatchProjection};
+use super::mechanism::{
+    Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
+};
 use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
 #[cfg(test)]
@@ -2445,25 +2447,6 @@ pub enum Outcome {
     },
 }
 
-/// One entity's deposit from this crossing: the line doses the mechanism addressed to it, summed.
-///
-/// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no priority, no
-/// argmax). The IMPULSE does, when a crossing's presence set spans several rigid bodies — which can
-/// only happen when distinct bodies overlap in space, since within one tank every volume shares the
-/// body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to the body owning the ENTRANCE
-/// surface, the first one physically touched; anything behind it is shoved through contact by the
-/// physics engine. So the caller routes the shove by [`ResolutionPlan::entrance`], not by these
-/// deposits — they are the damage.
-#[derive(Clone, Debug, PartialEq)]
-pub struct EntityDeposit {
-    pub entity: Entity,
-    /// Disc-mean chord (m) of the entity behind the round, as charged.
-    pub chord: f32,
-    /// Reference-mm of ITS OWN material the round chewed — §6's transit damage, before the caller's
-    /// `TRANSIT_K`.
-    pub cost: f32,
-}
-
 /// Everything the crossing decided, as declarative facts for the caller to apply in order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolutionPlan<S> {
@@ -2474,7 +2457,17 @@ pub struct ResolutionPlan<S> {
     pub state: S,
     /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
-    pub deposits: Vec<EntityDeposit>,
+    /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
+    /// volume order ([`DoseSource::Line`]).
+    ///
+    /// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no
+    /// priority, no argmax). The IMPULSE does, when a crossing's presence set spans several rigid
+    /// bodies — which can only happen when distinct bodies overlap in space, since within one tank
+    /// every volume shares the body. RULED 2026-08-07 (§13.5): the full momentum exchange goes to
+    /// the body owning the ENTRANCE surface, the first one physically touched; anything behind it
+    /// is shoved through contact by the physics engine. So the caller routes the shove by
+    /// [`ResolutionPlan::entrance`], not by these doses — they are the damage.
+    pub deposits: Vec<Dose>,
     pub spall: Vec<DiscSpall>,
 }
 
@@ -2612,12 +2605,14 @@ pub(crate) fn finish<M: Mechanism>(
     let deposits = advanced
         .doses
         .into_iter()
-        .map(|(entity, (chord, amount))| EntityDeposit {
-            entity,
-            chord: chord as f32,
-            cost: amount as f32,
+        .filter(|(_, (chord, _))| *chord as f32 > 0.0)
+        .map(|(address, (chord, amount))| Dose {
+            address,
+            amount: amount as f32,
+            source: DoseSource::Line {
+                chord: chord as f32,
+            },
         })
-        .filter(|deposit| deposit.chord > 0.0)
         .collect();
 
     // No exit, no spall (§5: spall is an exit/perforation event). An embed keeps only the downward

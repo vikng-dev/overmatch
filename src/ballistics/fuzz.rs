@@ -653,8 +653,8 @@ impl Drive {
             Decision::Bite(bite) => bite
                 .deposits
                 .iter()
-                .filter(|deposit| deposit.chord > 0.0)
-                .map(|deposit| deposit.entity)
+                .filter(|deposit| deposit.line_chord().is_some_and(|chord| chord > 0.0))
+                .map(|deposit| deposit.address)
                 .collect::<Vec<_>>(),
             _ => Vec::new(),
         })

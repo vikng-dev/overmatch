@@ -453,18 +453,11 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                             .expect("a laid-out box has health")
                             .current = BOX_RESET_HP;
                     }
-                    let (fragment, dealt) = cast_spall_fragment(
-                        ray.origin,
-                        ray.dir,
-                        ray.pen,
-                        ray.range,
-                        &spatial,
-                        &volumes,
-                        &parents,
-                        &mut health,
-                        &armor,
-                        true,
+                    let (fragment, doses) = cast_spall_fragment(
+                        ray.origin, ray.dir, ray.pen, ray.range, &spatial, &volumes, &parents,
+                        &health, &armor,
                     );
+                    let dealt = apply_doses(&doses, &mut health, true);
                     output.push_str(" end ");
                     bits3(&mut output, fragment.end);
                     let _ = write!(output, " deposited {} dealt ", fragment.deposited);

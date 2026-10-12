@@ -88,6 +88,36 @@ pub(crate) enum Effect {
     },
 }
 
+/// A dose addressed to one volume: the box a consequence lands in, and how much of it, in
+/// reference-mm. The round's own line and the spall cloud both deposit through it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Dose {
+    pub address: Entity,
+    /// Reference-mm.
+    pub amount: f32,
+    pub source: DoseSource,
+}
+
+/// What put a [`Dose`] into its box.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum DoseSource {
+    /// The round's own line, which put `chord` metres (disc mean, as charged) of the volume behind
+    /// it.
+    Line { chord: f32 },
+    /// A spall fragment, at its penetration on striking the box.
+    Fragment,
+}
+
+impl Dose {
+    /// The chord the round's own line put into the box; `None` for a fragment, which has none.
+    pub(crate) fn line_chord(&self) -> Option<f32> {
+        match self.source {
+            DoseSource::Line { chord } => Some(chord),
+            DoseSource::Fragment => None,
+        }
+    }
+}
+
 /// The result of one advance.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Advance<S> {

@@ -39,7 +39,7 @@ use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider, Spa
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::mechanism::{Limits, Mechanism, SolidShot};
+use super::mechanism::{Dose, Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, VolumeTable, WalkError, WalkLaws,
@@ -47,7 +47,7 @@ use super::walk::{
 use super::{
     BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
     MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
-    TerminalVerdict, apply_hit_impulse, hit_ancestor, throw_spall_burst,
+    TerminalVerdict, apply_doses, apply_hit_impulse, hit_ancestor, throw_spall_burst,
 };
 
 #[cfg(test)]
@@ -142,9 +142,6 @@ impl Budget {
 /// k-independent. Precondition: the degenerate-bake volumes on the fuzzer residue list — a ring
 /// samples 13× more surface, so fail-closed impacts scale ~4% → 14% with k on today's asset.
 pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
-
-/// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
-const TRANSIT_K: f32 = 1.0;
 
 /// The limits every crossing's mechanism advances under: a round is at rest once its readout would
 /// fall below zero reference-mm — exhausted, and nothing more.
@@ -744,7 +741,7 @@ pub(crate) struct Bite {
     pub owner: Option<Entity>,
     /// Per-entity transit charges, already clipped at the embed progress: a round that stops in the
     /// first plate deposits nothing behind it.
-    pub deposits: Vec<walk::EntityDeposit>,
+    pub deposits: Vec<Dose>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
     /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
     /// and for a perforation the nudge on to the resume point.
@@ -1192,12 +1189,12 @@ pub(super) fn volume_table(
 /// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
 /// and the impact and authority events. Returns the HP actually removed.
 ///
-/// Transit deposits, a bounce's shock, the impulses and the events all come out of the
+/// Transit doses, a bounce's shock, the impulses and the events all come out of the
 /// [`Decision`]. Spall does NOT: the decision carries each spall source and its budget, but the
-/// fragment count, their directions and what each fragment hits and deposits are resolved here,
-/// against the live world ([`throw_spall_burst`]). So the §13.6 gate, which observes the decisions
-/// and applies none of this, reads every transit deposit and every bounce the runtime acts on, and
-/// no fragment's HP. Resolving fragments into the decision is step C's work.
+/// fragment count, their directions and what each fragment hits are resolved here, against the
+/// live world ([`throw_spall_burst`]), into addressed doses applied through the same
+/// [`apply_doses`] as the line's. So the §13.6 gate, which observes the decisions and applies none
+/// of this, reads every transit dose and every bounce the runtime acts on, and no fragment's.
 pub(crate) fn apply(
     decision: &Decision,
     shell: &mut MarchingShell,
@@ -1284,18 +1281,9 @@ fn apply_bite(
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) -> f32 {
-    let mut damage = 0.0;
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
     // (§13.2's damage law — no ownership, no priority, no argmax).
-    if context.deposit {
-        for deposit in &bite.deposits {
-            if let Ok(mut hp) = health.get_mut(deposit.entity) {
-                let before = hp.current;
-                hp.current = (before - deposit.cost * TRANSIT_K).max(0.0);
-                damage += before - hp.current;
-            }
-        }
-    }
+    let mut damage = apply_doses(&bite.deposits, health, context.deposit);
 
     let (verdict, position, terminal_at) = match &bite.end {
         BiteEnd::Embedded { at, impulse } => {

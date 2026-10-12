@@ -2211,11 +2211,14 @@ fn capability_exhausted_midway_stops_the_round_and_clips_damage() {
     let armour = plan
         .deposits
         .iter()
-        .find(|d| d.entity == volume(1))
+        .find(|d| d.address == volume(1))
         .expect("the plate it died in must be charged");
-    assert!((armour.chord - 0.06).abs() < 1.0e-3, "{}", armour.chord);
     assert!(
-        !plan.deposits.iter().any(|d| d.entity == volume(2)),
+        (armour.line_chord().unwrap() - 0.06).abs() < 1.0e-3,
+        "{armour:?}"
+    );
+    assert!(
+        !plan.deposits.iter().any(|d| d.address == volume(2)),
         "a round that stopped in the plate cannot wound the crewman behind it"
     );
     assert!(plan.spall.is_empty(), "no exit, no spall (§5)");
@@ -2241,11 +2244,11 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
     let crew = plan
         .deposits
         .iter()
-        .find(|d| d.entity == volume(2))
+        .find(|d| d.address == volume(2))
         .expect("the crewman transited must be charged");
-    assert!((crew.chord - 0.3).abs() < 1.0e-3);
+    assert!((crew.line_chord().unwrap() - 0.3).abs() < 1.0e-3);
     assert!(
-        (crew.cost - 3.0).abs() < 0.05,
+        (crew.amount - 3.0).abs() < 0.05,
         "flesh charges its own factor"
     );
     assert!(!plan.spall.is_empty());
@@ -2285,14 +2288,13 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
     );
     let deposit = &plan.deposits[0];
     assert!(
-        (deposit.cost - 15.0).abs() < 0.2,
+        (deposit.amount - 15.0).abs() < 0.2,
         "deposit {}",
-        deposit.cost
+        deposit.amount
     );
     assert!(
-        (deposit.chord - 0.015).abs() < 5.0e-4,
-        "the charged chord is the perpendicular one: {}",
-        deposit.chord
+        (deposit.line_chord().unwrap() - 0.015).abs() < 5.0e-4,
+        "the charged chord is the perpendicular one: {deposit:?}"
     );
     // The GEOMETRY is untouched — the round really did travel its slope chord.
     match plan.outcome {
@@ -3795,7 +3797,10 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         let deposits: BTreeMap<Entity, (f64, f64)> = new
             .deposits
             .iter()
-            .map(|deposit| (deposit.entity, (deposit.chord as f64, deposit.cost as f64)))
+            .map(|deposit| {
+                let chord = deposit.line_chord().expect("a line dose");
+                (deposit.address, (chord as f64, deposit.amount as f64))
+            })
             .collect();
         assert_eq!(
             deposits.keys().collect::<Vec<_>>(),
