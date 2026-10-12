@@ -723,17 +723,25 @@ struct ConnectRetry {
     /// Connect attempts that have already failed and been retried — drives the `(retry N)` suffix
     /// and the backoff schedule. Reset to 0 on a successful `Connected`.
     attempts: u32,
-    /// Wall-clock deadline (`Time::elapsed_secs_f64`) for the next retry `Connect`. Armed the frame
-    /// we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
+    /// Real-time deadline (`Time<Real>::elapsed_secs_f64`) for the next retry `Connect`. Armed the
+    /// frame we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
+    /// Every time in this ledger is real time: virtual time pauses, scales and clamps a long
+    /// frame's delta, and the give-up below compares against these.
     next_retry_at: Option<f64>,
-    /// When (`Time<Real>::elapsed_secs_f64`) a once-connected link was first seen down; cleared on
-    /// `Connected`. Matchmaking mode gives the match up [`RECONNECT_GIVE_UP_S`] of wall clock after
-    /// it — real time, since virtual time pauses, scales and clamps a long frame's delta.
+    /// When a once-connected link was first seen down; cleared on `Connected`.
     down_since: Option<f64>,
+    /// When the last retry `Connect` fired.
+    last_attempt_at: Option<f64>,
+    /// A retry fired at least [`RECONNECT_GIVE_UP_S`] after `down_since` has failed: the match is
+    /// given up. Cleared on `Connected`.
+    exhausted: bool,
 }
 
-/// Seconds a once-connected matchmaking link may stay down before the client gives the match up
-/// and returns to the lobby. TUNED: twice the Worker's 15 s heartbeat deadline, after which the
+/// Seconds of real time a once-connected matchmaking link keeps reconnecting before the client
+/// gives the match up and returns to the lobby: the match ends when a retry fired at least this
+/// long after the link went down fails. Measured over attempts, not across a stall — a client
+/// whose frames stopped for longer (a suspend, a hitch) still tries once on resume, and a live
+/// server takes it back. TUNED: twice the Worker's 15 s heartbeat deadline, after which the
 /// Worker has dropped a silent server (`decisions.md`, "Reconnect give-up").
 const RECONNECT_GIVE_UP_S: f64 = 30.0;
 
@@ -785,7 +793,6 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     the server's lingering-slot `ClientEntityInUse` drop after a hard client kill (the client_id
 ///     stays the session-stable one; netcode does not key the collision on it).
 fn drive_connection(
-    time: Res<Time>,
     real: Res<Time<Real>>,
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
@@ -805,15 +812,18 @@ fn drive_connection(
         return;
     };
 
+    let now = real.elapsed_secs_f64();
     if connected {
         retry.connected_once = true;
         retry.attempts = 0;
         retry.next_retry_at = None;
         retry.down_since = None;
+        retry.last_attempt_at = None;
+        retry.exhausted = false;
         return;
     }
     if retry.connected_once && retry.down_since.is_none() {
-        retry.down_since = Some(real.elapsed_secs_f64());
+        retry.down_since = Some(now);
     }
 
     if !retry.initiated {
@@ -834,8 +844,13 @@ fn drive_connection(
     }
 
     // Initiated, not connected, not connecting => the attempt failed and netcode inserted
-    // `Disconnected`. Retry on a backoff.
-    let now = time.elapsed_secs_f64();
+    // `Disconnected`. A failed retry fired past the give-up exhausts the match; otherwise retry on
+    // a backoff.
+    if let (Some(down), Some(attempted)) = (retry.down_since, retry.last_attempt_at)
+        && attempted - down >= RECONNECT_GIVE_UP_S
+    {
+        retry.exhausted = true;
+    }
     match retry.next_retry_at {
         None => {
             let delay = reconnect_backoff_secs(retry.attempts);
@@ -844,6 +859,7 @@ fn drive_connection(
         Some(at) if now >= at => {
             retry.attempts += 1;
             retry.next_retry_at = None;
+            retry.last_attempt_at = Some(now);
             commands.trigger(Connect { entity });
             // Log netcode's terminal reason for the breadcrumb it gives (`ConnectionRequestTimedOut`
             // vs `ConnectionDenied` etc.). It does NOT distinguish a fingerprint mismatch from an
@@ -973,11 +989,10 @@ fn finish_leaving(
 
 /// Whether, and how, the match's link is closed this frame: the server reported gone (`gone`), a
 /// link that never connected after [`MISMATCH_HINT_AFTER_ATTEMPTS`] attempts, or a once-connected
-/// link down for [`RECONNECT_GIVE_UP_S`]. A link that connected once is the match's: its close is
-/// the match's end; one that never connected is a failed join.
+/// link whose reconnects are exhausted ([`RECONNECT_GIVE_UP_S`]). A link that connected once is the
+/// match's: its close is the match's end; one that never connected is a failed join.
 fn close_verdict(
     retry: &ConnectRetry,
-    now: f64,
     gone: Option<String>,
 ) -> Option<super::matchmaking::MatchClosed> {
     use super::matchmaking::MatchClosed;
@@ -992,15 +1007,14 @@ fn close_verdict(
         return (retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS)
             .then(|| MatchClosed::Unreachable("could not reach the match server".into()));
     }
-    let down_for = now - retry.down_since?;
-    (down_for >= RECONNECT_GIVE_UP_S)
+    retry
+        .exhausted
         .then(|| MatchClosed::Ended("the match server stopped answering".into()))
 }
 
 /// Close the match's link on a [`close_verdict`]: despawn it, start the connection ledger afresh
 /// and tell the lobby why.
 fn close_lost_match(
-    time: Res<Time<Real>>,
     mut retry: ResMut<ConnectRetry>,
     mut gone: MessageReader<super::matchmaking::ServerGone>,
     links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
@@ -1008,7 +1022,7 @@ fn close_lost_match(
     mut commands: Commands,
 ) {
     let gone = gone.read().last().map(|gone| gone.0.clone());
-    let Some(verdict) = close_verdict(&retry, time.elapsed_secs_f64(), gone) else {
+    let Some(verdict) = close_verdict(&retry, gone) else {
         return;
     };
     let Ok(link) = links.single() else { return };
@@ -1516,12 +1530,6 @@ impl SeenDamage {
     }
 }
 
-/// A new transport connection starts a new receipt/presentation identity scope.
-///
-/// INVARIANT: Lightyear does not carry message-channel backlog across connections. Clearing these
-/// client-only ledgers therefore cannot discard an in-flight fact from the new connection, and it
-/// prevents a later server connection that reuses match-local ids from colliding with the previous
-/// link. A connection spanning multiple Battles is forbidden until `ShotId` carries a Battle epoch.
 /// The link ended: every estimator and ledger keyed to that server's tick clock starts empty for
 /// the next connection. A new server's timeline starts behind the old one's, so a carried-over
 /// newest tick would reject the new server's arrivals ([`ArrivalDelay`](super::sync_margin::ArrivalDelay))
@@ -1540,6 +1548,12 @@ fn reset_link_state(
     *impulses = default();
 }
 
+/// A new transport connection starts a new receipt/presentation identity scope.
+///
+/// INVARIANT: Lightyear does not carry message-channel backlog across connections. Clearing these
+/// client-only ledgers therefore cannot discard an in-flight fact from the new connection, and it
+/// prevents a later server connection that reuses match-local ids from colliding with the previous
+/// link. A connection spanning multiple Battles is forbidden until `ShotId` carries a Battle epoch.
 fn reset_shot_receive_state(
     _connected: On<Add, Connected>,
     mut recoil: ResMut<PendingRecoilKicks>,
@@ -3637,9 +3651,9 @@ mod tests {
     }
 
     /// A matchmaking link closes on exactly its three exits — a server reported gone (at once), a
-    /// link that never connected after the hint threshold, a once-connected link down for the
-    /// give-up period — and a never-connected close is a failed join, a once-connected one the
-    /// match's end.
+    /// link that never connected after the hint threshold, a once-connected link whose reconnects
+    /// are exhausted — and a never-connected close is a failed join, a once-connected one the
+    /// match's end. Time alone closes nothing: only an exhausted ledger does.
     #[test]
     fn match_link_closes_on_each_exit_and_not_before() {
         use super::super::matchmaking::MatchClosed;
@@ -3648,14 +3662,13 @@ mod tests {
             attempts: MISMATCH_HINT_AFTER_ATTEMPTS - 1,
             ..default()
         };
-        assert_eq!(close_verdict(&joining, 100.0, None), None);
+        assert_eq!(close_verdict(&joining, None), None);
         assert_eq!(
             close_verdict(
                 &ConnectRetry {
                     attempts: MISMATCH_HINT_AFTER_ATTEMPTS,
                     ..joining
                 },
-                0.0,
                 None
             ),
             Some(MatchClosed::Unreachable(
@@ -3663,7 +3676,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            close_verdict(&joining, 0.0, Some("start failed".into())),
+            close_verdict(&joining, Some("start failed".into())),
             Some(MatchClosed::Unreachable("start failed".into())),
             "a server gone before the first connect is a failed join"
         );
@@ -3673,29 +3686,29 @@ mod tests {
             connected_once: true,
             attempts: 40,
             down_since: Some(10.0),
+            last_attempt_at: Some(10.0 + 10.0 * RECONNECT_GIVE_UP_S),
             ..default()
         };
         assert_eq!(
-            close_verdict(&down, 10.0 + RECONNECT_GIVE_UP_S - 0.1, None),
+            close_verdict(&down, None),
             None,
-            "a dropped match keeps reconnecting, whatever the attempt count"
+            "a dropped match keeps reconnecting until a retry past the give-up has failed"
         );
+        let exhausted = ConnectRetry {
+            exhausted: true,
+            ..down
+        };
         assert_eq!(
-            close_verdict(&down, 10.0 + RECONNECT_GIVE_UP_S, None),
+            close_verdict(&exhausted, None),
             Some(MatchClosed::Ended(
                 "the match server stopped answering".into()
             ))
         );
         assert_eq!(
-            close_verdict(&down, 11.0, Some("server stopped".into())),
+            close_verdict(&down, Some("server stopped".into())),
             Some(MatchClosed::Ended("server stopped".into())),
             "the Worker's verdict closes at once"
         );
-        let up = ConnectRetry {
-            down_since: None,
-            ..down
-        };
-        assert_eq!(close_verdict(&up, 1_000.0, None), None, "a live link stays");
     }
 
     /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
