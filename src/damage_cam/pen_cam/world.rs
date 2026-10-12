@@ -142,11 +142,53 @@ pub fn spawn(
 }
 
 /// Place the sight, the ground, and each shot's tracer, flash and mark at the run's clock.
+/// Place the main camera when no kill cam owns it: the shooter's sight, or the victim's chase
+/// view. The camera has one writer per run; [`animate`] reads the pose it is left with.
+pub fn place_camera(
+    run: Res<Run>,
+    library: Res<Library>,
+    mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
+) {
+    let (Some(first), Ok((mut transform, mut projection))) =
+        (run.shots.first(), camera.single_mut())
+    else {
+        return;
+    };
+    let report = &library.records[first.record].report;
+    let (want, fov) = if PLAYLIST[run.entry].victim {
+        (
+            Transform::from_translation(CHASE_EYE).looking_at(CHASE_LOOK, Vec3::Y),
+            CHASE_FOV_DEG,
+        )
+    } else {
+        let target = Vec3::from(report.impact.point);
+        let up = if (target - first.muzzle).normalize().y.abs() > 0.95 {
+            Vec3::NEG_Z
+        } else {
+            Vec3::Y
+        };
+        (
+            Transform::from_translation(first.muzzle).looking_at(target, up),
+            SIGHT_FOV_DEG,
+        )
+    };
+    if *transform != want {
+        *transform = want;
+    }
+    if let Projection::Perspective(p) = projection.as_mut()
+        && p.fov != fov.to_radians()
+    {
+        p.fov = fov.to_radians();
+    }
+}
+
+/// Place the ground, and each shot's tracer, flash and mark at the run's clock; the tracer is
+/// culled near the main camera's final eye, wherever its writer put it.
 pub fn animate(
     run: Res<Run>,
     library: Res<Library>,
     views: Res<Views>,
-    mut camera: Query<(&mut Transform, &mut Projection), With<MainCamera>>,
+    camera: Query<&Transform, With<MainCamera>>,
     mut ground: Query<&mut Transform, (With<Ground>, Without<MainCamera>)>,
     mut tracers: Query<
         (&Tracer, &mut Transform, &mut Visibility),
@@ -175,40 +217,10 @@ pub fn animate(
     if let (Some(y), Ok(mut transform)) = (views.ground_y, ground.single_mut()) {
         transform.translation.y = y;
     }
-    let victim = PLAYLIST[run.entry].victim;
-    let eye = if let (Some(first), Ok((mut transform, mut projection))) =
-        (run.shots.first(), camera.single_mut())
-    {
-        let report = &library.records[first.record].report;
-        let (want, fov) = if victim {
-            (
-                Transform::from_translation(CHASE_EYE).looking_at(CHASE_LOOK, Vec3::Y),
-                CHASE_FOV_DEG,
-            )
-        } else {
-            let target = Vec3::from(report.impact.point);
-            let up = if (target - first.muzzle).normalize().y.abs() > 0.95 {
-                Vec3::NEG_Z
-            } else {
-                Vec3::Y
-            };
-            (
-                Transform::from_translation(first.muzzle).looking_at(target, up),
-                SIGHT_FOV_DEG,
-            )
-        };
-        if *transform != want {
-            *transform = want;
-        }
-        if let Projection::Perspective(p) = projection.as_mut()
-            && p.fov != fov.to_radians()
-        {
-            p.fov = fov.to_radians();
-        }
-        want.translation
-    } else {
-        Vec3::ZERO
-    };
+    let eye = camera
+        .single()
+        .map(|transform| transform.translation)
+        .unwrap_or(Vec3::ZERO);
     let t = run.t;
     for (tracer, mut transform, mut visibility) in &mut tracers {
         let Some(shot) = run.shots.get(tracer.0) else {
@@ -336,6 +348,43 @@ mod tests {
     use super::super::{Settings, ShotRun};
     use super::*;
     use crate::damage_cam::RoundEnd;
+
+    /// The tracer is culled near the main camera's final eye, wherever its writer put it: on a
+    /// kill run a camera on the tracer's path hides it, one far from it shows it.
+    #[test]
+    fn the_tracer_is_culled_at_the_final_eye() {
+        let library = Library::load();
+        let settings = Settings::default();
+        let entry = (0..PLAYLIST.len())
+            .find(|&entry| Run::new(entry, &library, &settings, true).kill.is_some())
+            .expect("a kill entry");
+        let run = Run::new(entry, &library, &settings, true);
+        let shot = run.shots[0].clone();
+        let t = 0.5 * (shot.fire + shot.impact);
+        let (head, _) = tracer_head(&shot, &library.records[shot.record], t).unwrap();
+        for (eye, drawn) in [
+            (head + Vec3::Y * 5.0, false),
+            (head + Vec3::Y * 500.0, true),
+        ] {
+            let mut app = App::new();
+            let mut run = Run::new(entry, &library, &settings, true);
+            run.t = t;
+            app.insert_resource(Library::load())
+                .insert_resource(run)
+                .insert_resource(super::super::view::Views::fixture())
+                .insert_resource(Assets::<GlowMaterial>::default())
+                .add_systems(Update, animate);
+            app.world_mut()
+                .spawn((Transform::from_translation(eye), MainCamera));
+            let tracer = app
+                .world_mut()
+                .spawn((Tracer(0), Transform::IDENTITY, Visibility::Hidden))
+                .id();
+            app.update();
+            let visibility = *app.world().get::<Visibility>(tracer).unwrap();
+            assert_eq!(visibility == Visibility::Inherited, drawn, "eye {eye}");
+        }
+    }
 
     /// The tracer flies the record's own legs (the approach along origin → impact, the onward flight
     /// along the leg leaving the point the record has the round leave), so the only gap between the

@@ -8,8 +8,10 @@
 //!
 //! Run it: `cargo run --bin pen_cam_demo` (optionally a scenario label, `pen_cam_demo s4`, and
 //! `--once` to stop after it). Keys: `X` dismiss, hold `C` to hold, hold `V` for the own-tank
-//! glass, `P` cycles the corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`
-//! pick a scenario, `A` toggles auto-advance, `R` replays, `Space` pauses, `←`/`→` scrub, `[`/`]`
+//! glass, `P` cycles the corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`,
+//! `=` pick a scenario (`=` is K1, the victim kill cam, where `R` respawns from 0.5 s after the
+//! hit and a left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays,
+//! `Space` pauses, `←`/`→` scrub, `[`/`]`
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
 //! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
 //! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion.
@@ -36,6 +38,8 @@ mod world;
 
 use std::time::Duration;
 
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
@@ -305,6 +309,9 @@ pub struct Run {
     /// The shot that knocks the player's own tank out, and the kill cam's beats; the corner stays
     /// shut on such a run.
     pub kill: Option<(usize, killcam::Beats)>,
+    /// Run seconds at which the player pressed respawn on a kill run: the death panel reads
+    /// [`killcam::RESPAWNING`] for [`killcam::RESPAWN_S`], then the run starts a fresh life.
+    pub respawned_at: Option<f32>,
 }
 
 impl Run {
@@ -326,6 +333,7 @@ impl Run {
             own_glass_since: None,
             orbit: Vec2::ZERO,
             kill: None,
+            respawned_at: None,
         };
         run.schedule(library, settings);
         run
@@ -507,10 +515,11 @@ pub fn demo_plugin(app: &mut App) {
             advance,
             corner_now,
             view::pose,
+            killcam::stage,
+            camera_writers(),
             stage::rebuild,
             stage::animate,
             world::animate,
-            killcam::camera,
             hud::layout,
             hud::animate,
             killcam::hud,
@@ -518,6 +527,17 @@ pub fn demo_plugin(app: &mut App) {
             .chain(),
     );
     stage::plugin(app);
+}
+
+/// The main camera's writers, one per run: the shooter's sight or the victim's chase view, or the
+/// kill cam. Effects that read the camera (the tracer's near cull) run after them.
+pub(super) fn camera_writers() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        world::place_camera.run_if(killcam::inactive),
+        killcam::place.run_if(killcam::active),
+    )
+        .chain()
+        .into_configs()
 }
 
 /// Virtual time waits for the views; `release_clock` starts it.
@@ -551,9 +571,9 @@ fn controls(
     if let Some((_, beats)) = run.kill
         && keys.just_pressed(KeyCode::KeyR)
     {
-        // Respawn, the game's binding: the demo's stand-in ends the run.
-        if beats.respawn_live(run.t) {
-            run.t = run.end;
+        // Respawn, the game's binding; `advance` completes it.
+        if beats.respawn_live(run.t) && run.respawned_at.is_none() {
+            run.respawned_at = Some(run.t);
         }
     } else if keys.just_pressed(KeyCode::KeyR) {
         run.t = 0.0;
@@ -643,6 +663,17 @@ fn advance(
     mut run: ResMut<Run>,
     corner: Res<Corner>,
 ) {
+    if let Some(at) = run.respawned_at {
+        // The demo's respawn: a fresh life of the same scenario, paused on the living tank.
+        run.t += time.delta_secs();
+        if run.t - at >= killcam::RESPAWN_S {
+            let (entry, once) = (run.entry, run.once);
+            *run = Run::new(entry, &library, &settings, once);
+            run.auto = false;
+            run.paused = true;
+        }
+        return;
+    }
     if run.paused {
         return;
     }

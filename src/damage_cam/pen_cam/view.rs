@@ -66,6 +66,8 @@ pub struct Views {
     placed: [bool; 2],
     /// The ground's height under the battlefield view, once measured.
     pub ground_y: Option<f32>,
+    /// The shooter's tank file, once the kill cam stages a shooter: its view's proxies are its own.
+    pub(super) shooter_spec: Option<Handle<TankSpec>>,
 }
 
 pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Res<Library>) {
@@ -96,6 +98,7 @@ pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Re
         hull: [None, None],
         placed: [false, false],
         ground_y: None,
+        shooter_spec: None,
     });
 }
 
@@ -106,6 +109,21 @@ pub(super) fn view_glb(vehicle: &str) -> String {
 }
 
 impl Views {
+    /// Views of no scene, for tests of systems that read the resource.
+    #[cfg(test)]
+    pub(super) fn fixture() -> Self {
+        Self {
+            spec: Handle::default(),
+            world: Entity::PLACEHOLDER,
+            stage: Entity::PLACEHOLDER,
+            servos: [Vec::new(), Vec::new()],
+            hull: [None, None],
+            placed: [false, false],
+            ground_y: None,
+            shooter_spec: None,
+        }
+    }
+
     /// The staged vehicle's tank file.
     pub(super) fn spec(&self) -> &Handle<TankSpec> {
         &self.spec
@@ -164,7 +182,16 @@ pub fn prepare(
         let Some(root) = root else {
             continue;
         };
-        let proxy = chain.iter().any(|name| spec.colliders.contains(name));
+        // Each view's proxies are named by its own vehicle's tank file; a shooter's mesh waits
+        // for the shooter's.
+        let root_spec = match root {
+            ViewRoot::Shooter => views.shooter_spec.as_ref().and_then(|h| specs.get(h)),
+            ViewRoot::World | ViewRoot::Stage => Some(spec),
+        };
+        let Some(root_spec) = root_spec else {
+            continue;
+        };
+        let proxy = chain.iter().any(|name| root_spec.colliders.contains(name));
         let mut entity_commands = commands.entity(entity);
         entity_commands.insert(ViewMesh {
             root,

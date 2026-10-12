@@ -296,6 +296,16 @@ pub fn layout(
     }
 }
 
+/// What `R` does on this run, as the legend names it: on a kill run it respawns, the game's
+/// binding, and a drag looks while the camera is free.
+pub(super) fn legend_r(kill: bool) -> &'static str {
+    if kill {
+        "R respawn  drag look"
+    } else {
+        "R replay"
+    }
+}
+
 /// The corner's presence, accent, glyph and hairline; the reticle; the labels.
 pub fn animate(
     corner: Res<super::Corner>,
@@ -337,7 +347,7 @@ pub fn animate(
         };
         let line = format!(
             "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  slice {}{}\n\
-             1-9 0 - scenario  A auto  R replay  Space pause  Left/Right scrub  [ ] speed  \
+             1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
              X dismiss  C hold  V own tank  P setting  F expand  O ortho  G glass  D dose  \
              L axis  M reduce motion",
             entry.label,
@@ -359,6 +369,7 @@ pub fn animate(
             } else {
                 ""
             },
+            legend_r(run.kill.is_some()),
         );
         if text.0 != line {
             text.0 = line;

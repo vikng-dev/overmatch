@@ -690,6 +690,12 @@ fn trail_span(plan: &Plan, from: f32, to: f32, end: (f32, Vec3)) -> Option<(Vec3
     Some((plan.line.at(from), b))
 }
 
+/// Whether the inset camera draws `showing`: only a corner's; the kill cam's lesson draws the
+/// stage on the world.
+fn inset_active(showing: &super::Showing) -> bool {
+    showing.surface == super::Surface::Corner
+}
+
 /// Animate the stage from the corner's clock and frame the corner camera.
 pub fn animate(
     corner: Res<Corner>,
@@ -753,7 +759,7 @@ pub fn animate(
         shell_visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    camera.is_active = true;
+    camera.is_active = inset_active(&showing);
     let plan = &library.records[showing.record].plan;
     let kind = showing.kind;
     let c = showing.c;
@@ -1141,6 +1147,24 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 mod tests {
     use super::*;
     use crate::damage_cam::RoundEnd;
+
+    /// The inset draws a corner showing and stays off for the kill cam's lesson.
+    #[test]
+    fn the_inset_draws_only_the_corner() {
+        let mut showing = super::super::Showing {
+            record: 0,
+            turn: 0,
+            kind: CornerKind::Glass,
+            c: 0.5,
+            opacity: 1.0,
+            scale: 1.0,
+            remaining: 1.0,
+            surface: super::super::Surface::Corner,
+        };
+        assert!(inset_active(&showing));
+        showing.surface = super::super::Surface::World;
+        assert!(!inset_active(&showing));
+    }
 
     /// Tolerance on a drawn position (m): DERIVED, f32 rounding of a transform over a few metres
     /// is under 1e-5 m.
