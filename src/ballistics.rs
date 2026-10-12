@@ -64,7 +64,8 @@ mod goldens;
 #[cfg(test)]
 mod field_casts;
 
-/// The pen cam recorder: scripted shots at the bound tank read back as pen cam records.
+/// The pen cam recorder: scripted shots at the bound tank read back as pen cam records, and the
+/// scenario files the demo plays, checked current.
 #[cfg(test)]
 mod pen_cam;
 

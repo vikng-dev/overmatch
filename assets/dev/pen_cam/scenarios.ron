@@ -1,0 +1,88 @@
+#![enable(implicit_some)]
+// The pen cam demo's scripted shots (`demo/ux-spec.md` §5), recorded by the real march at the
+// bound tank (`ballistics::pen_cam`). Positions are metres in the target's spawn frame: the tank
+// root at the origin, -Z its front, +Y up; a pose turns the tank under the shot. `verdict` is what
+// the shot earns on the bound tank today, checked on every run. Every shot is fixture data.
+[
+    (
+        name: "s1_through_crew",
+        shows: "an 88 through the driver's front plate: one spall cone into the compartment lights the crew at different doses, and the round stops in the rear plate",
+        weapon: "MainGun",
+        from: (-0.57, 1.45, -6.5),
+        toward: (-0.57, 1.45, 0.0),
+        verdict: Penetration,
+    ),
+    (
+        name: "s2_stopped_mantlet",
+        shows: "an 88 stopped inside the gun mask, short of its inner face; the stopping crossing throws no cone",
+        weapon: "MainGun",
+        from: (0.55, 2.2, -8.0),
+        toward: (0.55, 2.2, 0.0),
+        verdict: NonPen,
+    ),
+    (
+        name: "s3_ricochet",
+        shows: "an 88 meeting the hull side at 75 degrees from its normal bounces away",
+        weapon: "MainGun",
+        from: (-3.0, 1.5, -6.0),
+        toward: (-1.44, 1.5, -0.204),
+        verdict: Ricochet,
+    ),
+    (
+        name: "s4_spaced_then_stopped",
+        shows: "an 88 through a road wheel (external armour) stopped in the lower hull side behind it; the wheel's cones fill the gap",
+        weapon: "MainGun",
+        from: (-5.0, 0.8, -0.8),
+        toward: (0.0, 0.8, -0.8),
+        verdict: NonPen,
+    ),
+    (
+        name: "s5_oblique_through",
+        shows: "an 88 through the hull side at 55 degrees: the cone's axis leans from the path toward the plate normal",
+        weapon: "MainGun",
+        from: (-4.0, 1.5, -3.7),
+        toward: (-1.0, 1.5, 0.584),
+        verdict: Penetration,
+    ),
+    (
+        name: "s6_overpen",
+        shows: "an 88 down through the deck and the floor of the sponson and out, crossing empty space: nothing is dosed",
+        weapon: "MainGun",
+        from: (1.2, 5.0, 2.4),
+        toward: (1.2, 1.5, 2.4),
+        verdict: Penetration,
+    ),
+    (
+        name: "s7_engine_shadow",
+        shows: "an 88 through the rear plate into the engine: the engine shadows the cone, and the boxes beyond it are lit weakly",
+        weapon: "MainGun",
+        from: (0.6, 1.4, 8.0),
+        toward: (0.2, 1.4, 0.0),
+        verdict: Penetration,
+    ),
+    (
+        name: "s8a_mg_ricochet",
+        shows: "the first of two records 0.8 s apart: a machine-gun round bounces off the hull side",
+        weapon: "Coax",
+        from: (-3.0, 1.5, -6.0),
+        toward: (-1.44, 1.5, -0.204),
+        verdict: Ricochet,
+    ),
+    (
+        name: "s8b_mg_stopped",
+        shows: "the second of two records 0.8 s apart: a machine-gun round stops in the turret side",
+        weapon: "Coax",
+        from: (-4.0, 2.2, -0.5),
+        toward: (0.0, 2.2, -0.5),
+        verdict: NonPen,
+    ),
+    (
+        name: "s9_one_box_lost",
+        shows: "the turret traversed 30 degrees: an 88 through its side loses one box, the breech",
+        weapon: "MainGun",
+        from: (-4.0, 2.0, -0.5),
+        toward: (0.0, 2.0, -0.5),
+        turret_yaw_deg: 30.0,
+        verdict: Penetration,
+    ),
+]

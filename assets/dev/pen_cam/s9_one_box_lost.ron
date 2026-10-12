@@ -1,0 +1,453 @@
+// s9_one_box_lost: the turret traversed 30 degrees: an 88 through its side loses one box, the breech
+// Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+(
+    synthetic: false,
+    vehicle: Some("tiger_1/tiger_1.tank.ron"),
+    turret_yaw_deg: 30.000002,
+    projectile: (
+        name: "MainGun",
+        caliber_mm: 88.0,
+        mass_kg: 10.2,
+        speed_mps: 771.09576,
+    ),
+    impact: (
+        point: (-1.3096657, 1.9994535, -0.5),
+        normal: (-0.9806162, -0.10815857, 0.16338202),
+        incoming: (1.0, -0.00020305306, 0.0),
+        incidence_deg: 11.305959,
+        verdict: Penetration,
+    ),
+    plates: [
+        (
+            name: "Turret_Side",
+            t: 0.0,
+            entry: (-1.3096657, 1.9994535, -0.5),
+            exit: Some((-1.2274876, 2.0012302, -0.50270414)),
+            chord_mm: 82.117294,
+            steel_equiv_mm: 82.117294,
+            cost_mm: 82.117294,
+            overmatched: false,
+            class: Main,
+            factor: 1000.0,
+        ),
+    ],
+    ricochets: [],
+    path: [
+        (
+            t: -0.0034889756,
+            point: (-4.0, 2.0, -0.5),
+        ),
+        (
+            t: 0.0,
+            point: (-1.3096657, 1.9994535, -0.5),
+        ),
+        (
+            t: 0.00014184555,
+            point: (-1.2276115, 2.0012279, -0.50269985),
+        ),
+        (
+            t: 0.0018541161,
+            point: (-0.5659027, 2.0155344, -0.5244746),
+        ),
+        (
+            t: 0.0020212801,
+            point: (-0.53385925, 2.016089, -0.52869844),
+        ),
+    ],
+    spall: [
+        (
+            t: 0.00014184555,
+            origin: (-1.2276115, 2.0012279, -0.50269985),
+            axis: (0.99298453, 0.06636088, -0.097866565),
+            half_angle_deg: 25.0,
+            strength: 20.657604,
+            fragments: [
+                (
+                    end: (-0.54668903, 2.0464544, -0.5269594),
+                    strength: 20.227238,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.8427912,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.5977564, 1.9968367, -0.6160188),
+                    strength: 19.366505,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.8069274,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.56693363, 2.1395817, -0.5595212),
+                    strength: 18.50577,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.7710634,
+                        ),
+                    ],
+                ),
+                (
+                    end: (1.063281, 1.8520093, -0.49725342),
+                    strength: 17.645037,
+                    hits: [
+                        (
+                            volume: "Loader",
+                            damage: 0.7351993,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.6344433, 2.0618434, -0.6758094),
+                    strength: 16.784304,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.69933563,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.5050144, 2.1303105, -0.44525337),
+                    strength: 15.92357,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.66347146,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.85587406, 1.9437308, -0.5615697),
+                    strength: 15.062837,
+                    hits: [],
+                ),
+                (
+                    end: (-0.61476994, 2.182097, -0.63571024),
+                    strength: 14.202103,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.5917438,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.4785242, 1.9835987, -0.39395857),
+                    strength: 13.341369,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.5558795,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.6576071, 1.9776497, -0.71108675),
+                    strength: 12.480637,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.52001595,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.5304222, 2.2365923, -0.48257208),
+                    strength: 11.619903,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.4841519,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9694357, 1.943368, -0.50457144),
+                    strength: 10.759169,
+                    hits: [],
+                ),
+                (
+                    end: (-0.6603327, 2.137094, -0.72619057),
+                    strength: 9.898436,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.41242427,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.44285774, 2.1079655, -0.3248458),
+                    strength: 9.037702,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.37655982,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9720545, 1.9444017, -0.58022213),
+                    strength: 8.176969,
+                    hits: [],
+                ),
+                (
+                    end: (-0.59906006, 2.279613, -0.59533453),
+                    strength: 7.3162346,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.30483234,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.8930445, 1.9443607, -0.44214916),
+                    strength: 6.4555016,
+                    hits: [],
+                ),
+                (
+                    end: (-0.6629391, 2.0309348, -0.78961563),
+                    strength: 5.594768,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.23310454,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.46658993, 2.2665591, -0.36018658),
+                    strength: 4.7340345,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.19724026,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-1.0609426, 1.9445205, -0.52227306),
+                    strength: 3.8733008,
+                    hits: [],
+                ),
+                (
+                    end: (-0.66697884, 2.2343478, -0.72076654),
+                    strength: 3.0125673,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.12551278,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.3979826, 2.0077047, -0.2364893),
+                    strength: 2.1518338,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.08964813,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.9448385, 1.9461465, -0.63818645),
+                    strength: 1.2911003,
+                    hits: [],
+                ),
+                (
+                    end: (-0.5499306, 2.359702, -0.49874496),
+                    strength: 0.43036675,
+                    hits: [
+                        (
+                            volume: "Breech",
+                            damage: 0.017920746,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    ],
+    doses: [
+        (
+            volume: "Breech",
+            line: 32.325714,
+            field: 7.692623,
+        ),
+        (
+            volume: "Loader",
+            line: 0.0,
+            field: 0.7351993,
+        ),
+    ],
+    consequences: [
+        (
+            t: 0.0018541161,
+            volume: "Breech",
+            state: Lost,
+            function: Some("Breech"),
+        ),
+    ],
+    internals: [
+        (
+            name: "Ammo_L_0",
+            role: Ammo,
+            center: (-1.2420349, 1.5354133, 0.66291046),
+            half_extents: (0.29649413, 0.22635001, 0.55827546),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
+        ),
+        (
+            name: "Ammo_L_1",
+            role: Ammo,
+            center: (-1.2420349, 1.5354137, -0.6221614),
+            half_extents: (0.29649413, 0.22635001, 0.55827546),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
+        ),
+        (
+            name: "Ammo_R_0",
+            role: Ammo,
+            center: (1.2778463, 1.5354142, -0.6221628),
+            half_extents: (0.29649436, 0.22635001, 0.5582756),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
+        ),
+        (
+            name: "Ammo_R_1",
+            role: Ammo,
+            center: (1.2778463, 1.5354137, 0.6629095),
+            half_extents: (0.29649433, 0.22635001, 0.5582756),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 2.0,
+        ),
+        (
+            name: "BowGunner",
+            role: Crew,
+            center: (0.64663696, 1.092977, -1.4193373),
+            half_extents: (0.22123022, 0.55355215, 0.34178013),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 3.0,
+        ),
+        (
+            name: "Breech",
+            role: Module,
+            center: (-0.20771599, 2.1847515, -0.36057472),
+            half_extents: (0.22833535, 0.2152046, 0.6872933),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 8.0,
+        ),
+        (
+            name: "Commander",
+            role: Crew,
+            center: (-0.23895645, 1.9958768, 0.5874567),
+            half_extents: (0.22123024, 0.55355215, 0.34178013),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 3.0,
+        ),
+        (
+            name: "Driver",
+            role: Crew,
+            center: (-0.57423687, 1.092977, -1.6147261),
+            half_extents: (0.22123025, 0.55355215, 0.34178013),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 3.0,
+        ),
+        (
+            name: "Engine",
+            role: Engine,
+            center: (0.0, 1.0875902, 1.9865446),
+            half_extents: (0.3522838, 0.62436783, 0.6340563),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 10.0,
+        ),
+        (
+            name: "Gunner",
+            role: Crew,
+            center: (-0.67743874, 1.935574, -0.17396879),
+            half_extents: (0.22123024, 0.55355203, 0.34178013),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 3.0,
+        ),
+        (
+            name: "Loader",
+            role: Crew,
+            center: (0.5647001, 1.9958768, -0.31518555),
+            half_extents: (0.22123021, 0.5535521, 0.34178013),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 3.0,
+        ),
+        (
+            name: "Main_Gun_Barrel",
+            role: Module,
+            center: (-1.5734701, 2.1958914, -2.7253284),
+            half_extents: (0.14761755, 0.14768517, 2.0460865),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 8.0,
+        ),
+        (
+            name: "Smoke_Launcher_0",
+            role: Module,
+            center: (-1.3667946, 2.346323, 0.024179459),
+            half_extents: (0.09635562, 0.078553796, 0.15074304),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_1",
+            role: Module,
+            center: (-1.3202686, 2.4344034, 0.011318207),
+            half_extents: (0.084914446, 0.08330932, 0.15240856),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_2",
+            role: Module,
+            center: (-1.2847786, 2.535162, 0.009964943),
+            half_extents: (0.051856697, 0.09063998, 0.15393873),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_3",
+            role: Module,
+            center: (0.65101814, 2.535162, -1.1076679),
+            half_extents: (0.051856697, 0.09063998, 0.15393867),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_4",
+            role: Module,
+            center: (0.6699362, 2.4344034, -1.1377277),
+            half_extents: (0.084914446, 0.08330932, 0.1524085),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_5",
+            role: Module,
+            center: (0.7043371, 2.346323, -1.1715889),
+            half_extents: (0.09635562, 0.078553796, 0.15074304),
+            rotation: (0.0, 0.25881904, 0.0, 0.9659259),
+            count: 2.0,
+        ),
+        (
+            name: "Transmission",
+            role: Module,
+            center: (0.0, 0.7130792, -1.619195),
+            half_extents: (0.9058387, 0.24985617, 0.8413828),
+            rotation: (0.0, 0.0, 0.0, 1.0),
+            count: 10.0,
+        ),
+    ],
+)

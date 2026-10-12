@@ -1,9 +1,12 @@
 //! The pen cam recorder: scripted shots through the real march, read back as pen cam records
-//! ([`crate::damage_cam::record`]).
+//! ([`crate::damage_cam::record`]), and the scenario files the demo plays.
 //!
 //! A scenario names a round from the bound tank's own weapons, where it is fired from and toward,
 //! and the target's pose; [`record_scenario`] fires it at the bound tank in the probe world
-//! (headless, no window, no input) and returns the record.
+//! (headless, no window, no input) and returns the record. The scenario list and the records it
+//! produces live in [`SCENARIO_DIR`]; [`the_pen_cam_scenarios_are_current`] re-records every one
+//! and fails when a checked-in file differs, so a physics change refreshes them deliberately:
+//! `PEN_CAM_BLESS=1 cargo test --lib pen_cam` rewrites them, and the diff is the review.
 //!
 //! The class-invariant tests at the end fire at generic fixture plates, not at the bound tank.
 
@@ -22,6 +25,10 @@ use crate::damage_cam::{PenetrationReport, PlateClass, ShotVerdict};
 use crate::spec::VolumeSpec;
 use crate::tank::Rig;
 
+/// The scenario list and its records, relative to the asset root.
+const SCENARIO_DIR: &str = "dev/pen_cam";
+const SCENARIO_LIST: &str = "scenarios.ron";
+
 /// Fixed-step length the march is driven at (s), as the goldens drive it.
 const STEP: Duration = Duration::from_millis(16);
 /// Steps a shot is marched for: 8 × 16 ms carries a main-gun round ~100 m (DERIVED), the whole
@@ -36,6 +43,8 @@ const STEPS: usize = 8;
 struct Scenario {
     /// The record's file stem.
     name: String,
+    /// What the scenario shows, carried into the record's header.
+    shows: String,
     /// One of the bound tank's weapons, by its name in the tank file.
     weapon: String,
     /// Striking speed (m/s); the weapon's muzzle speed when absent.
@@ -49,6 +58,9 @@ struct Scenario {
     /// The turret's traverse from its spawn pose about the hull's `+Y` (degrees).
     #[serde(default)]
     turret_yaw_deg: f32,
+    /// The verdict the shot earns on the bound tank today: a physics change that flips it fails by
+    /// name.
+    verdict: ShotVerdict,
 }
 
 /// The probe world posed for `scenario`, with the march driven on [`STEP`] and spent shells kept.
@@ -158,12 +170,14 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
         let turn = Quat::from_rotation_y(yaw_deg.to_radians());
         record_scenario(&Scenario {
             name: format!("hull yaw {yaw_deg}"),
+            shows: String::new(),
             weapon: "MainGun".to_owned(),
             speed: None,
             from: turn * Vec3::new(-0.57, 1.45, -6.5),
             toward: turn * Vec3::new(-0.57, 1.45, 0.0),
             hull_yaw_deg: yaw_deg,
             turret_yaw_deg: 0.0,
+            verdict: ShotVerdict::Penetration,
         })
     };
     let (still, turned) = (shot(0.0), shot(30.0));
@@ -189,6 +203,72 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
     for (a, b) in still.path.iter().zip(&turned.path) {
         assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
     }
+}
+
+/// A record as its file holds it.
+fn render(scenario: &Scenario, report: &PenetrationReport) -> String {
+    let body = ron::ser::to_string_pretty(report, ron::ser::PrettyConfig::default())
+        .expect("a record serializes");
+    format!(
+        "// {}: {}\n// Recorded by the real march from `{SCENARIO_LIST}` (`ballistics::pen_cam`); do \
+         not edit.\n// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.\n{body}\n",
+        scenario.name, scenario.shows
+    )
+}
+
+fn scenarios() -> Vec<Scenario> {
+    let path = crate::assets::asset_root()
+        .join(SCENARIO_DIR)
+        .join(SCENARIO_LIST);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
+/// path, and the checked-in record is exactly what the march records today. No record is left
+/// without a scenario.
+#[test]
+fn the_pen_cam_scenarios_are_current() {
+    let dir = crate::assets::asset_root().join(SCENARIO_DIR);
+    let bless = std::env::var_os("PEN_CAM_BLESS").is_some();
+    let list = scenarios();
+    let mut stale = Vec::new();
+    for scenario in &list {
+        let report = record_scenario(scenario);
+        assert_eq!(
+            report.impact.verdict, scenario.verdict,
+            "PHYSICS CHANGED — {} earns a different verdict; diff consciously before re-recording",
+            scenario.name
+        );
+        assert_eq!(
+            ShotVerdict::of_path(&report.steps()),
+            Some(report.impact.verdict),
+            "{}: the record's own path reads a different verdict",
+            scenario.name
+        );
+        crate::damage_cam::tests::assert_self_consistent(&scenario.name, &report);
+        let text = render(scenario, &report);
+        let path = dir.join(format!("{}.ron", scenario.name));
+        if bless {
+            std::fs::write(&path, &text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        } else if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
+            stale.push(scenario.name.clone());
+        }
+    }
+    let mut orphans: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the scenario directory exists")
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST)
+        .filter(|file| !list.iter().any(|s| format!("{}.ron", s.name) == *file))
+        .collect();
+    orphans.sort();
+    assert!(orphans.is_empty(), "records with no scenario: {orphans:?}");
+    assert!(
+        stale.is_empty(),
+        "stale pen cam records {stale:?}: the march records them differently today. Re-record with \
+         `PEN_CAM_BLESS=1 cargo test --lib pen_cam` and review the diff"
+    );
 }
 
 /// Every entity carrying a volume of a node the tank file tags external carries
