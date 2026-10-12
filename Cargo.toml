@@ -136,6 +136,10 @@ required-features = ["dev_tools"]
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"
+# Unpacked debuginfo on macOS keeps every codegen unit's object file in `target/*/deps`, and
+# rustc never removes superseded ones (rust-lang/rust#161824), so each rebuild leaks a full set.
+# Off keeps no objects; the cost is file:line in test-harness backtraces.
+split-debuginfo = "off"
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -144,6 +148,8 @@ debug = 0
 [profile.dev-full]
 inherits = "dev"
 debug = 2
+# A debugger needs the object files that `dev` stops keeping.
+split-debuginfo = "unpacked"
 
 [profile.release]
 strip = true
