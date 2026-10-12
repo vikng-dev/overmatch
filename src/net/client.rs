@@ -895,23 +895,35 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
     ));
 }
 
-/// The input tick (`local tick + input delay`) the newest staged input message ends on, and whether
-/// this frame stages another.
+/// Fixed ticks that have buffered local input, the count at the last staged input message, and
+/// whether this frame stages another.
 #[derive(Resource, Default)]
 struct InputSendCadence {
-    staged_for: Option<Tick>,
+    buffered_ticks: u64,
+    staged_at: Option<u64>,
     due: bool,
 }
 
-/// Stage at most one input message per input tick. Lightyear's `prepare_input_message` runs once
+/// Stage at most one input message per fixed tick. Lightyear's `prepare_input_message` runs once
 /// per `PostUpdate` frame and, on a frame that ran no fixed tick, re-stages the same `end_tick` with
-/// the same `packet_redundancy` window, so without this gate the upload scales with frame rate
-/// rather than tick rate. The first frame of each new input tick still stages its message, so the
-/// input lead is unchanged. The gate keys on the tick, and [`shift_staged_input_tick`] moves the
-/// key with every `LocalTimelineShift` exactly as lightyear re-tags the staged message, so a shifted
-/// timeline sends on its next new tick.
+/// the same window, so without this gate the upload scales with frame rate rather than tick rate.
+///
+/// The gate keys on a count of fixed ticks that ran `InputSystems::BufferClientInputs`, never on
+/// tick numbers: a `LocalTimelineShift` or an input-delay change cannot alias a freshly buffered
+/// tick onto the last staged one. The first frame after each buffering tick stages, so the input
+/// lead is unchanged.
+///
+/// Redundancy is lightyear's, untouched: each message carries the last `packet_redundancy` (5)
+/// ticks, so at a steady 64 Hz a tick's command rides the messages of its own tick and the next
+/// four — first-to-last copy span 62.5 ms (DERIVED: 4 × 15.625 ms), surviving four consecutive
+/// lost messages. A frame that runs several fixed ticks stages one message ending on the latest;
+/// past five ticks in one frame the earliest falls outside that window. Both predate this gate.
 pub(super) fn install_input_send_cadence(app: &mut App) {
     app.init_resource::<InputSendCadence>()
+        .add_systems(
+            FixedPreUpdate,
+            count_buffered_tick.after(InputSystems::BufferClientInputs),
+        )
         .add_systems(
             PostUpdate,
             decide_input_send.before(InputSystems::PrepareInputMessage),
@@ -919,32 +931,25 @@ pub(super) fn install_input_send_cadence(app: &mut App) {
         .configure_sets(
             PostUpdate,
             InputSystems::PrepareInputMessage.run_if(input_send_due),
-        )
-        .add_observer(shift_staged_input_tick);
+        );
+}
+
+fn count_buffered_tick(mut cadence: ResMut<InputSendCadence>) {
+    cadence.buffered_ticks += 1;
 }
 
 /// Unsynced, lightyear skips `prepare_input_message` itself (its `SyncedLocalTimeline` parameter),
 /// so nothing is recorded as staged.
-fn decide_input_send(
-    timeline: Res<LocalTimeline>,
-    sync: Res<LocalTimelineSync>,
-    mut cadence: ResMut<InputSendCadence>,
-) {
-    let input_tick = timeline.tick() + sync.input_delay() as i32;
-    cadence.due = sync.is_synced() && cadence.staged_for != Some(input_tick);
+fn decide_input_send(sync: Res<LocalTimelineSync>, mut cadence: ResMut<InputSendCadence>) {
+    let buffered = cadence.buffered_ticks;
+    cadence.due = sync.is_synced() && cadence.staged_at != Some(buffered);
     if cadence.due {
-        cadence.staged_for = Some(input_tick);
+        cadence.staged_at = Some(buffered);
     }
 }
 
 fn input_send_due(cadence: Res<InputSendCadence>) -> bool {
     cadence.due
-}
-
-fn shift_staged_input_tick(shift: On<LocalTimelineShift>, mut cadence: ResMut<InputSendCadence>) {
-    if let Some(tick) = cadence.staged_for.as_mut() {
-        *tick = *tick + shift.delta;
-    }
 }
 
 /// Observable count of buffers cleared before Lightyear's native input encoder.
@@ -1902,7 +1907,7 @@ fn feed_action_state(
 /// `buffer_action_state` files the command under — so the stamp and the buffer slot cannot name
 /// different ticks. Pre-sync the buffer is not written at all (lightyear gates it on
 /// `SyncedLocalTimeline`), so a pre-sync stamp never reaches the wire.
-fn stamp_input_tick(
+pub(super) fn stamp_input_tick(
     timeline: Res<LocalTimeline>,
     sync: Res<LocalTimelineSync>,
     mut slots: Query<&mut ActionState<TankCommand>, With<InputMarker<TankCommand>>>,
@@ -2240,6 +2245,65 @@ mod tests {
         assert!(buffer.is_empty());
         assert_eq!(buffer.last_remote_tick, None);
         assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
+    }
+
+    /// A resync that shifts the timeline AND shrinks the input delay must not suppress the next
+    /// freshly buffered tick. DERIVED counterexample: local tick 100 at delay 4 stages input tick
+    /// 104; a +20 shift recomputes the delay to 3; the next fixed tick (121) buffers input tick 124
+    /// — the same number a watermark shifted by +20 would hold.
+    #[test]
+    fn a_resync_that_shrinks_the_input_delay_still_stages_the_next_tick() {
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        super::super::protocol::plugin(&mut app);
+        install_input_send_cadence(&mut app);
+        let set_delay = |app: &mut App, ticks: u16| {
+            app.insert_resource(InputTimelineConfig::new(
+                SyncConfig::default(),
+                InputDelayConfig::fixed_input_delay(ticks),
+            ));
+        };
+        let fixed_tick = |app: &mut App| {
+            app.world_mut().run_schedule(FixedFirst);
+            app.world_mut().run_schedule(FixedPreUpdate);
+        };
+        let frame_stages = |app: &mut App| {
+            app.world_mut().run_system_once(decide_input_send).unwrap();
+            app.world().resource::<InputSendCadence>().due
+        };
+
+        set_delay(&mut app, 4);
+        app.world_mut()
+            .resource_mut::<LocalTimeline>()
+            .apply_delta(99);
+        app.world_mut()
+            .resource_mut::<LocalTimelineSync>()
+            .set_synced(true);
+        fixed_tick(&mut app);
+        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(100));
+        assert_eq!(app.world().resource::<LocalTimelineSync>().input_delay(), 4);
+        assert!(frame_stages(&mut app), "tick 100 stages input tick 104");
+        assert!(
+            !frame_stages(&mut app),
+            "a frame with no new tick stages nothing"
+        );
+
+        // The resync, as lightyear's sync applies it between this frame's staging and the next
+        // (lightyear's own observer moves `LocalTimeline` by the delta).
+        app.world_mut().trigger(LocalTimelineShift { delta: 20 });
+        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(120));
+        set_delay(&mut app, 3);
+        assert_eq!(app.world().resource::<LocalTimelineSync>().input_delay(), 3);
+
+        fixed_tick(&mut app);
+        assert_eq!(app.world().resource::<LocalTimeline>().tick(), Tick(121));
+        assert!(
+            frame_stages(&mut app),
+            "the first frame of fixed tick 121 (input tick 124) must stage its message"
+        );
+        assert!(!frame_stages(&mut app), "and only once");
     }
 
     /// The stamp must name the tick lightyear will FILE the command under (`local_tick +
