@@ -124,6 +124,24 @@ impl Views {
         }
     }
 
+    /// Views of the tank file `spec` at the roots `world` and `stage`, on ground at `ground_y`, for
+    /// tests that stand a scene in for the glb.
+    #[cfg(test)]
+    pub(super) fn standing_in(
+        spec: Handle<TankSpec>,
+        world: Entity,
+        stage: Entity,
+        ground_y: f32,
+    ) -> Self {
+        Self {
+            spec,
+            world,
+            stage,
+            ground_y: Some(ground_y),
+            ..Self::fixture()
+        }
+    }
+
     /// The staged vehicle's tank file.
     pub(super) fn spec(&self) -> &Handle<TankSpec> {
         &self.spec

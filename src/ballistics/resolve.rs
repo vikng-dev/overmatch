@@ -1679,3 +1679,78 @@ fn apply_bite(
     }
     damage
 }
+
+/// The outward normal of `volume`'s face where a round of `caliber` (m) travelling along `axis`
+/// enters it at its entry point `entry` (WORLD), from the volume's own colliders as they stand now:
+/// the march's collector casts a fresh disc of the round's radius from `behind` short of `entry`
+/// to `behind` past `end`, the line's end in the volume, and each sample's first entering face of
+/// the volume counts once in the mean, the area mean [`walk::DiscEvent::entry_normal`] takes. The
+/// ring is laid on a frame anchored on `axis`, not the round's transported one, so its phase may
+/// differ from the march's. `None` where no sample enters the volume, or the collector fails.
+///
+/// The poses are the march's only while the colliders have not moved since the crossing resolved.
+pub(crate) fn entry_face_normal(
+    world: &mut World,
+    volume: Entity,
+    entry: Vec3,
+    end: Vec3,
+    axis: Vec3,
+    caliber: f32,
+) -> Option<Vec3> {
+    let axis = axis.normalize_or_zero();
+    let frame = DiscFrame::anchored(axis)?;
+    let radius = disc_radius(caliber);
+    // A sample of a disc laid on another phase may meet the face short of the march's earliest
+    // sample, by at most the radius at 45° of obliquity (DERIVED).
+    let behind = radius.max(MARCH_EPS);
+    let length = (end - entry).dot(axis).max(0.0) + 2.0 * behind;
+    let mut state = bevy::ecs::system::SystemState::<(
+        Query<Entity, With<Collider>>,
+        Query<&super::BallisticVolume>,
+        Query<&ChildOf>,
+        Query<(&Position, &Rotation, &Collider, Option<&BallisticSurfaces>)>,
+    )>::new(world);
+    let (shapes, volumes, parents, colliders) = state.get(world).ok()?;
+    let candidates: Vec<(Entity, Entity)> = shapes
+        .iter()
+        .filter(|&collider| {
+            hit_ancestor(collider, &volumes, &parents).is_some_and(|(node, _)| node == volume)
+        })
+        .map(|collider| (volume, collider))
+        .collect();
+    let laws = WalkLaws::default();
+    let mut sum = Vec3::ZERO;
+    let mut covered = 0;
+    for offset in layout(&frame, radius) {
+        let mut hits = Vec::new();
+        collect::collect(
+            &Corridor {
+                anchor: entry,
+                origin: offset,
+                axis,
+                length,
+                behind,
+                seeded: &[],
+                handoff: None,
+                laws: &laws,
+            },
+            &candidates,
+            &colliders,
+            &mut hits,
+        )
+        .ok()?;
+        if let Some(face) = hits
+            .iter()
+            .filter(|hit| hit.entering)
+            .min_by(|a, b| a.t.total_cmp(&b.t))
+        {
+            sum += face.true_normal;
+            covered += 1;
+        }
+    }
+    match covered {
+        0 => None,
+        1 => Some(sum),
+        _ => Some(sum.normalize_or_zero()).filter(|normal| *normal != Vec3::ZERO),
+    }
+}

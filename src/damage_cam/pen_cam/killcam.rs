@@ -10,6 +10,11 @@
 //!    back to the shooter's pivot, and the killer card shows name, vehicle, range and round.
 //! 4. **Death** — free: the orbit about the shooter, the death panel and the respawn prompt.
 //!
+//! Beat 3 plays only for a shooter the kill cam stages: a record that names none, a shooter whose
+//! tank file or scene fails to load, or one not staged within [`SHOOTER_WAIT_S`] skips it, and the
+//! death screen, orbiting the victim, follows the lesson with the killer card showing what the
+//! record names.
+//!
 //! Respawn is live from [`HIT_S`] after the impact. Every pose is the game's own orbit
 //! ([`crate::camera::orbit_rotation`], [`crate::camera::orbit_body`],
 //! [`crate::camera::orbit_pivot`]) about one of three pivots: the victim's, a pivot travelling the
@@ -49,6 +54,8 @@ const FRAME_TURN_S: f32 = 0.4;
 const KILLER_HOLD_S: f32 = 2.0;
 /// The demo's run ends this long into the death screen.
 const DEATH_HOLD_S: f32 = 2.0;
+/// The longest a kill run's clock holds for its shooter to stage, before beat 3 is dropped.
+pub const SHOOTER_WAIT_S: f32 = 3.0;
 /// The lesson's bearing: yawed off the shot's side, the body above the pivot by this slope (the
 /// corner's three-quarter).
 const LESSON_YAW_DEG: f32 = 55.0;
@@ -65,12 +72,12 @@ const PROMPT_DIM: f32 = 0.6;
 /// The card's accent bar.
 const ACCENT_PX: f32 = 3.0;
 
-/// Who fired the killing round, as the victim's copy of the record names them.
+/// Who fired the killing round, as the victim's copy of the record names them: the player and
+/// their vehicle where the record names a shooter, and the round in every record.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Killer {
-    pub name: String,
-    /// The shooter's vehicle, as its tank file names it to players.
-    pub vehicle: String,
+    /// The shooter's name and vehicle, as its tank file names it to players.
+    pub shooter: Option<(String, String)>,
     /// The round, by its key in the round registry.
     pub round: String,
     /// The round's muzzle speed (m/s), from the registry.
@@ -80,18 +87,23 @@ pub struct Killer {
 impl Killer {
     /// The killer of a record fired by `shooter` with the round `round` (a round registry key):
     /// the vehicle read from the shooter's own tank file, the muzzle speed from the registry.
-    pub fn of(shooter: &Shooter, round: &str) -> Result<Self, String> {
-        let path = crate::assets::asset_root().join(&shooter.vehicle);
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let spec: TankSpec =
-            ron::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    pub fn of(shooter: Option<&Shooter>, round: &str) -> Result<Self, String> {
+        let shooter = match shooter {
+            Some(shooter) => {
+                let path = crate::assets::asset_root().join(&shooter.vehicle);
+                let text = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("{}: {e}", path.display()))?;
+                let spec: TankSpec =
+                    ron::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+                Some((shooter.name.clone(), spec.display_name.clone()))
+            }
+            None => None,
+        };
         let fired = crate::rounds::RoundRegistry::shipped()
             .get(round)
             .map_err(|e| e.to_string())?;
         Ok(Self {
-            name: shooter.name.clone(),
-            vehicle: spec.display_name.clone(),
+            shooter,
             round: round.to_owned(),
             muzzle_speed: fired.muzzle_speed,
         })
@@ -142,6 +154,9 @@ impl Beat {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Beats {
     pub impact: f32,
+    /// Whether beat 3 plays: only for a shooter the kill cam can stage. Without one the death
+    /// screen follows the lesson.
+    pub shooter: bool,
 }
 
 impl Beats {
@@ -154,11 +169,20 @@ impl Beats {
     fn ride(self) -> f32 {
         self.killer() + ALIGN_S
     }
+    /// Where the killer card enters: the ride's end, or the death screen's start without beat 3.
     pub fn arrive(self) -> f32 {
-        self.ride() + RIDE_S
+        if self.shooter {
+            self.ride() + RIDE_S
+        } else {
+            self.killer()
+        }
     }
     pub fn death(self) -> f32 {
-        self.arrive() + KILLER_HOLD_S
+        if self.shooter {
+            self.arrive() + KILLER_HOLD_S
+        } else {
+            self.killer()
+        }
     }
     /// Where the demo's run ends.
     pub fn end(self) -> f32 {
@@ -208,7 +232,8 @@ pub fn lesson_showing(beats: Beats, t: f32, record: usize) -> Option<Showing> {
 #[derive(Clone, Copy, Debug)]
 pub struct Rig {
     pub victim_pivot: Vec3,
-    pub shooter_pivot: Vec3,
+    /// `None` where no shooter is staged ([`Beats::shooter`]): the death screen orbits the victim.
+    pub shooter_pivot: Option<Vec3>,
     pub impact: Vec3,
     pub muzzle: Vec3,
     /// The orbit's radius: the game's at its spawn zoom.
@@ -266,7 +291,31 @@ impl Rig {
     /// blended.
     fn ride_pivot(&self, e: f32) -> Vec3 {
         let on_line = self.impact.lerp(self.muzzle, e);
-        on_line + (self.victim_pivot - self.impact).lerp(self.shooter_pivot - self.muzzle, e)
+        on_line + (self.victim_pivot - self.impact).lerp(self.death_pivot() - self.muzzle, e)
+    }
+
+    /// The death screen's pivot: the shooter's, else the victim's.
+    fn death_pivot(&self) -> Vec3 {
+        self.shooter_pivot.unwrap_or(self.victim_pivot)
+    }
+
+    /// The lesson's drift (rad) at run time `t`.
+    fn drift(beats: Beats, t: f32, reduce: bool) -> f32 {
+        if reduce {
+            0.0
+        } else {
+            timeline::ORBIT_DEG_S.to_radians() * (t - beats.lesson()).max(0.0)
+        }
+    }
+
+    /// The death screen's opening look: the shooter framed, or without one the lesson's look as
+    /// the lesson ends.
+    pub fn death_look(&self, beats: Beats, reduce: bool) -> Quat {
+        if self.shooter_pivot.is_some() {
+            self.frame_look()
+        } else {
+            self.lesson_look(Self::drift(beats, beats.killer(), reduce))
+        }
     }
 
     /// The game's orbit body for `pivot` and `look`, pulled in by the flat ground.
@@ -295,13 +344,7 @@ impl Rig {
         death: Quat,
         reduce: bool,
     ) -> (Vec3, Quat) {
-        let drift = |t: f32| {
-            if reduce {
-                0.0
-            } else {
-                timeline::ORBIT_DEG_S.to_radians() * (t - beats.lesson()).max(0.0)
-            }
-        };
+        let drift = |t: f32| Self::drift(beats, t, reduce);
         match beats.beat(t) {
             Beat::Hit => (self.victim_pivot, hit),
             Beat::Lesson => {
@@ -325,7 +368,7 @@ impl Rig {
                     self.line_look().slerp(self.frame_look(), turn),
                 )
             }
-            Beat::Death => (self.shooter_pivot, death),
+            Beat::Death => (self.death_pivot(), death),
         }
     }
 
@@ -351,6 +394,8 @@ pub struct KillCam {
     pub rig: Option<Rig>,
     /// The orbit's vertical field (rad): the victim's riding crewman's naked eye, as in play.
     pub fov: f32,
+    /// Seconds the run's clock has held for the stage on this entry.
+    waited: f32,
 }
 
 impl Default for KillCam {
@@ -362,17 +407,25 @@ impl Default for KillCam {
             shooter: None,
             rig: None,
             fov: std::f32::consts::FRAC_PI_4,
+            waited: 0.0,
         }
     }
 }
 
-/// The shooter's tank on the battlefield: its view root, the tank file it was loaded from, and
-/// the root under its hull node (`hull pose`⁻¹) once that node exists.
+/// The shooter's tank on the battlefield: its view root, the tank file it was loaded from, its
+/// scene, and the root under its hull node (`hull pose`⁻¹) once that node exists.
 struct ShooterView {
     root: Entity,
     vehicle: String,
     spec: Handle<TankSpec>,
+    scene: Handle<WorldAsset>,
     hull_inverse: Option<Mat4>,
+}
+
+impl ShooterView {
+    fn failed(&self, assets: &AssetServer) -> bool {
+        assets.load_state(&self.spec).is_failed() || assets.load_state(&self.scene).is_failed()
+    }
 }
 
 /// The shooter's tank file and its view glb, as the record names them.
@@ -382,17 +435,30 @@ pub fn shooter_scene(report: &PenetrationReport) -> Option<(String, String)> {
 }
 
 /// The killer card's three data lines, each reduced to what the font draws and named by what is
-/// missing where nothing legible is left.
-pub fn card_lines(killer: &Killer, range_m: f32) -> [String; 3] {
-    let shown = |text: &str, missing: &str| drawable(text).unwrap_or_else(|| missing.to_owned());
+/// missing where the record names nothing legible; the range only where the record has the
+/// shooter's muzzle (`range_m`).
+pub fn card_lines(killer: &Killer, range_m: Option<f32>) -> [String; 3] {
+    let shown = |text: Option<&str>, missing: &str| {
+        text.and_then(drawable)
+            .unwrap_or_else(|| missing.to_owned())
+    };
+    let (name, vehicle) = killer
+        .shooter
+        .as_ref()
+        .map(|(name, vehicle)| (name.as_str(), vehicle.as_str()))
+        .unzip();
+    let round = format!(
+        "{}    {:.0} m/s",
+        shown(Some(&killer.round), "UNKNOWN ROUND"),
+        killer.muzzle_speed
+    );
     [
-        shown(&killer.name, "UNKNOWN PLAYER"),
-        shown(&killer.vehicle, "UNKNOWN VEHICLE"),
-        format!(
-            "{range_m:.0} m    {}    {:.0} m/s",
-            shown(&killer.round, "UNKNOWN ROUND"),
-            killer.muzzle_speed
-        ),
+        shown(name, "UNKNOWN PLAYER"),
+        shown(vehicle, "UNKNOWN VEHICLE"),
+        match range_m {
+            Some(range_m) => format!("{range_m:.0} m    {round}"),
+            None => round,
+        },
     ]
 }
 
@@ -536,9 +602,10 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// Whether the kill cam owns the main camera: a kill run whose rig is staged. Until the shooter's
-/// scene and tank file load there is no rig, the world keeps the camera, and the run's clock holds
-/// ([`holding`]).
+/// Whether the kill cam owns the main camera: a kill run whose rig is staged. Until the victim's
+/// view is placed and, on a run with beat 3, the shooter's scene and tank file load, there is no
+/// rig, the world keeps the camera, and the run's clock holds ([`holding`]); [`stage`] drops beat
+/// 3 rather than hold past [`SHOOTER_WAIT_S`] or a failed load.
 pub fn active(run: Res<Run>, cam: Res<KillCam>) -> bool {
     run.kill.is_some() && cam.rig.is_some()
 }
@@ -580,14 +647,18 @@ pub fn input(
 
 /// Stage the battlefield: the victim's tank as the body the camera rides, the shooter's tank of
 /// the vehicle the record names on the ground at the staged muzzle facing the impact, and the rig
-/// the kill cam's orbit is placed from.
+/// the kill cam's orbit is placed from. A kill run whose shooter cannot be staged — the record
+/// names none, its tank file or scene failed to load, or it is still unstaged after
+/// [`SHOOTER_WAIT_S`] of held clock — loses beat 3 ([`Run::drop_killer_beat`]) and is staged
+/// about the victim alone.
 #[allow(clippy::too_many_arguments)]
 pub fn stage(
-    run: Res<Run>,
+    mut run: ResMut<Run>,
     library: Res<Library>,
     mut views: ResMut<Views>,
     specs: Res<Assets<TankSpec>>,
     asset_server: Res<AssetServer>,
+    time: Res<Time>,
     mut cam: ResMut<KillCam>,
     mut commands: Commands,
     parents: Query<&ChildOf>,
@@ -610,6 +681,10 @@ pub fn stage(
         cam.staged = Some(run.entry);
         cam.hit = Rig::player_look();
         cam.death = None;
+        cam.waited = 0.0;
+    }
+    if holding(&run, &cam) {
+        cam.waited += time.delta_secs();
     }
     cam.rig = None;
 
@@ -630,7 +705,7 @@ pub fn stage(
             asset_server.load(GltfAssetLabel::Scene(0).from_asset(glb.clone()));
         let root = commands
             .spawn((
-                WorldAssetRoot(handle),
+                WorldAssetRoot(handle.clone()),
                 Transform::IDENTITY,
                 Visibility::Hidden,
                 ViewRoot::Shooter,
@@ -642,62 +717,12 @@ pub fn stage(
             root,
             vehicle: vehicle.clone(),
             spec,
+            scene: handle,
             hull_inverse: None,
         });
         return;
     }
-    let Some(shooter) = cam.shooter.as_mut() else {
-        return;
-    };
-    if shooter.hull_inverse.is_none() {
-        let hull = children.iter_descendants(shooter.root).find(|node| {
-            names
-                .get(*node)
-                .is_ok_and(|n| n.as_str() == view::HULL_NODE)
-        });
-        if let Some(hull) = hull {
-            let pose = view::pose_under(hull, shooter.root, &parents, |node| {
-                transforms.get(node).ok().copied()
-            });
-            shooter.hull_inverse = Some(pose.inverse());
-        }
-    }
-    let shooter_root = match (shooter.hull_inverse, shot, scene.is_some()) {
-        (Some(hull_inverse), Some(shot), true) => {
-            let impact = Vec3::from(library.records[shot.record].report.impact.point);
-            let at = Vec3::new(shot.muzzle.x, 0.0, shot.muzzle.z);
-            let toward = Vec3::new(impact.x - at.x, 0.0, impact.z - at.z);
-            let pose = Transform::from_translation(at).looking_to(toward, Vec3::Y);
-            Some(Transform::from_matrix(pose.to_matrix() * hull_inverse))
-        }
-        _ => None,
-    };
-    if let Ok(mut v) = visibility.get_mut(shooter.root) {
-        v.set_if_neq(if shooter_root.is_some() {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
-    }
-    if let Some(root) = shooter_root
-        && let Ok(mut transform) = transforms.get_mut(shooter.root)
-        && *transform != root
-    {
-        *transform = root;
-    }
-
-    // The rig: both pivots by the game's own formula, the turret ring of each tank lifted.
-    let (Some((shot_index, _)), Some(shooter_root), Some(ground_y)) =
-        (run.kill, shooter_root, views.ground_y)
-    else {
-        return;
-    };
-    let (Some(victim_spec), Some(shooter_spec)) =
-        (specs.get(views.spec()), specs.get(&shooter.spec))
-    else {
-        return;
-    };
-    let turret = |root: Entity, spec: &TankSpec| {
+    let turret = |root: Entity, spec: &TankSpec, transforms: &Query<&mut Transform>| {
         let named = |wanted: &str| {
             children
                 .iter_descendants(root)
@@ -709,12 +734,89 @@ pub fn stage(
         });
         Some(pose.w_axis.truncate())
     };
-    let (Some(victim_turret), Some(shooter_turret)) = (
-        turret(views.world, victim_spec),
-        turret(shooter.root, shooter_spec),
-    ) else {
+
+    // The shooter, on the ground at the muzzle facing the impact, once its hull node exists.
+    let mut shooter_pivot = None;
+    if let Some(shooter) = cam.shooter.as_mut() {
+        if shooter.hull_inverse.is_none() {
+            let hull = children.iter_descendants(shooter.root).find(|node| {
+                names
+                    .get(*node)
+                    .is_ok_and(|n| n.as_str() == view::HULL_NODE)
+            });
+            if let Some(hull) = hull {
+                let pose = view::pose_under(hull, shooter.root, &parents, |node| {
+                    transforms.get(node).ok().copied()
+                });
+                shooter.hull_inverse = Some(pose.inverse());
+            }
+        }
+        let shooter_root = match (shooter.hull_inverse, shot, scene.is_some()) {
+            (Some(hull_inverse), Some(shot), true) => {
+                let impact = Vec3::from(library.records[shot.record].report.impact.point);
+                let at = Vec3::new(shot.muzzle.x, 0.0, shot.muzzle.z);
+                let toward = Vec3::new(impact.x - at.x, 0.0, impact.z - at.z);
+                let pose = Transform::from_translation(at).looking_to(toward, Vec3::Y);
+                Some(Transform::from_matrix(pose.to_matrix() * hull_inverse))
+            }
+            _ => None,
+        };
+        if let Ok(mut v) = visibility.get_mut(shooter.root) {
+            v.set_if_neq(if shooter_root.is_some() {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
+        }
+        if let Some(root) = shooter_root
+            && let Ok(mut transform) = transforms.get_mut(shooter.root)
+            && *transform != root
+        {
+            *transform = root;
+        }
+        shooter_pivot = shooter_root.and_then(|root_pose| {
+            let spec = specs.get(&shooter.spec)?;
+            Some(orbit_pivot(
+                &root_pose,
+                turret(shooter.root, spec, &transforms)?,
+            ))
+        });
+    }
+
+    let Some((shot_index, beats)) = run.kill else {
         return;
     };
+    if beats.shooter
+        && shooter_pivot.is_none()
+        && (cam.waited >= SHOOTER_WAIT_S
+            || cam
+                .shooter
+                .as_ref()
+                .is_none_or(|shooter| shooter.failed(&asset_server)))
+    {
+        warn!(
+            "kill cam: the shooter could not be staged after {:.1} s; beat 3 is skipped",
+            cam.waited
+        );
+        run.drop_killer_beat();
+    }
+    let Some((_, beats)) = run.kill else {
+        return;
+    };
+
+    // The rig: both pivots by the game's own formula, the turret ring of each tank lifted.
+    let Some(ground_y) = views.ground_y else {
+        return;
+    };
+    let Some(victim_spec) = specs.get(views.spec()) else {
+        return;
+    };
+    let Some(victim_turret) = turret(views.world, victim_spec, &transforms) else {
+        return;
+    };
+    if beats.shooter && shooter_pivot.is_none() {
+        return;
+    }
     let victim_root = transforms
         .get(views.world)
         .ok()
@@ -723,7 +825,7 @@ pub fn stage(
     let shot = &run.shots[shot_index];
     cam.rig = Some(Rig {
         victim_pivot: orbit_pivot(&victim_root, victim_turret),
-        shooter_pivot: orbit_pivot(&shooter_root, shooter_turret),
+        shooter_pivot: shooter_pivot.filter(|_| beats.shooter),
         impact: Vec3::from(library.records[shot.record].report.impact.point),
         muzzle: shot.muzzle,
         radius: ORBIT_FAR,
@@ -756,9 +858,11 @@ pub fn place(
     if beat != Beat::Death {
         cam.death = None;
     } else if cam.death.is_none() {
-        cam.death = Some(rig.frame_look());
+        cam.death = Some(rig.death_look(beats, settings.reduce_motion));
     }
-    let death = cam.death.unwrap_or_else(|| rig.frame_look());
+    let death = cam
+        .death
+        .unwrap_or_else(|| rig.death_look(beats, settings.reduce_motion));
     let want = rig.pose(beats, t, cam.hit, death, settings.reduce_motion);
     if *transform != want {
         *transform = want;
@@ -818,16 +922,16 @@ pub fn hud(
             let color = timeline::verdict_color(CornerKind::of(record.report.impact.verdict));
             background.0 = color.with_alpha(enter);
         }
-        let range = shot.muzzle.distance(Vec3::from(record.report.impact.point));
-        let lines = record
-            .killer
-            .as_ref()
-            .map(|killer| card_lines(killer, range));
+        let impact = Vec3::from(record.report.impact.point);
+        let range = record
+            .report
+            .muzzle
+            .map(|muzzle| Vec3::from(muzzle).distance(impact));
+        let lines = card_lines(&record.killer, range);
         for (index, mut text, mut color) in &mut card_text {
-            let line = match (index.0, &lines) {
-                (0, _) => "KNOCKED OUT BY".to_owned(),
-                (row, Some(lines)) => lines[row - 1].clone(),
-                _ => String::new(),
+            let line = match index.0 {
+                0 => "KNOCKED OUT BY".to_owned(),
+                row => lines[row - 1].clone(),
             };
             if text.0 != line {
                 text.0 = line;
@@ -886,7 +990,7 @@ mod tests {
         let muzzle = impact - incoming * super::super::world::SHOOTER_DISTANCE_M;
         Rig {
             victim_pivot: Vec3::new(0.0, 4.4, 0.1),
-            shooter_pivot: Vec3::new(muzzle.x, 4.4, muzzle.z),
+            shooter_pivot: Some(Vec3::new(muzzle.x, 4.4, muzzle.z)),
             impact,
             muzzle,
             radius: ORBIT_FAR,
@@ -942,8 +1046,9 @@ mod tests {
             };
             assert!(entry.victim, "{}", entry.label);
             let record = &library.records[run.shots[shot].record];
-            let killer = record.killer.as_ref().expect("a kill names its killer");
-            assert!(!killer.name.is_empty() && !killer.vehicle.is_empty());
+            let killer = &record.killer;
+            let (name, vehicle) = killer.shooter.as_ref().expect("a kill names its killer");
+            assert!(!name.is_empty() && !vehicle.is_empty());
             assert!(killer.muzzle_speed > 0.0);
             assert!(
                 run.turns.is_empty(),
@@ -958,7 +1063,10 @@ mod tests {
     /// past its last event (the travel window's end, a cone's growth, a component's fill).
     #[test]
     fn the_beats_run_in_order() {
-        let beats = Beats { impact: 2.0 };
+        let beats = Beats {
+            impact: 2.0,
+            shooter: true,
+        };
         assert!(beats.lesson() < beats.killer());
         assert!(beats.killer() < beats.arrive() && beats.arrive() < beats.death());
         assert!(beats.death() < beats.end());
@@ -984,7 +1092,10 @@ mod tests {
     #[test]
     fn the_camera_is_continuous_across_beats() {
         let rig = rig();
-        let beats = Beats { impact: 2.0 };
+        let beats = Beats {
+            impact: 2.0,
+            shooter: true,
+        };
         let hit = Rig::player_look();
         let death = rig.frame_look();
         for boundary in [
@@ -1017,7 +1128,10 @@ mod tests {
     #[test]
     fn the_camera_orbits_then_rides_the_line() {
         let rig = rig();
-        let beats = Beats { impact: 2.0 };
+        let beats = Beats {
+            impact: 2.0,
+            shooter: true,
+        };
         let hit = Rig::player_look();
         let death = rig.frame_look();
         let mut t = beats.lesson();
@@ -1034,7 +1148,7 @@ mod tests {
         };
         let perpendicular = |v: Vec3| (v - incoming * v.dot(incoming)).length();
         let bound = perpendicular(rig.victim_pivot - rig.impact)
-            .max(perpendicular(rig.shooter_pivot - rig.muzzle))
+            .max(perpendicular(rig.shooter_pivot.unwrap() - rig.muzzle))
             + 1e-2;
         let mut t = beats.ride();
         while t < beats.arrive() - FRAME_TURN_S {
@@ -1043,8 +1157,8 @@ mod tests {
             t += 1.0 / 30.0;
         }
         let end = rig.pose(beats, beats.arrive(), hit, death, false);
-        assert!((end.translation.distance(rig.shooter_pivot) - rig.radius).abs() < 1e-2);
-        let to_pivot = (rig.shooter_pivot - end.translation).normalize();
+        assert!((end.translation.distance(rig.shooter_pivot.unwrap()) - rig.radius).abs() < 1e-2);
+        let to_pivot = (rig.shooter_pivot.unwrap() - end.translation).normalize();
         assert!(end.forward().dot(to_pivot) > 0.9999);
     }
 
@@ -1147,37 +1261,160 @@ mod tests {
     }
 
     /// The card's data lines draw in the shipped font: an undrawable name falls back to saying it
-    /// is unknown, a partly drawable one keeps what draws.
+    /// is unknown, a partly drawable one keeps what draws; a record with no shooter names neither,
+    /// and one with no muzzle shows no range.
     #[test]
     fn the_card_draws_only_what_the_font_covers() {
-        let killer = Killer {
-            name: "\u{864E}\u{738B}".into(),
-            vehicle: "Tiger \u{864E} I".into(),
+        let mut killer = Killer {
+            shooter: Some(("\u{864E}\u{738B}".into(), "Tiger \u{864E} I".into())),
             round: "88mm_AP".into(),
             muzzle_speed: 773.0,
         };
-        let [name, vehicle, round] = card_lines(&killer, 700.0);
+        let [name, vehicle, round] = card_lines(&killer, Some(700.0));
         assert_eq!(name, "UNKNOWN PLAYER");
         assert_eq!(vehicle, "Tiger I");
         assert!(round.contains("88mm_AP") && round.contains("700 m"));
+        killer.shooter = None;
+        let [name, vehicle, round] = card_lines(&killer, None);
+        assert_eq!(
+            (name.as_str(), vehicle.as_str()),
+            ("UNKNOWN PLAYER", "UNKNOWN VEHICLE")
+        );
+        assert_eq!(round, "88mm_AP    773 m/s");
     }
 
-    /// The demo's own frame ([`super::super::sequence`]) on a headless app: the run of `entry`, the
-    /// left button held with a drag, a fixture rig staged unless `staged` is false, and the main
-    /// camera. Systems whose scene resources a headless app lacks (the views, the stage, the
-    /// corner's images) are skipped by the ignoring error handler; everything that decides the
-    /// camera, its input, the clock and the panels runs as in the demo.
-    fn demo_app(entry: usize, staged: bool) -> App {
-        let library = library();
+    /// Where a standing-in view's nodes sit under their parents (m). Fixture data.
+    const HULL_AT: Vec3 = Vec3::new(0.0, 0.9, 0.1);
+    const TURRET_AT: Vec3 = Vec3::new(0.0, 1.0, -0.2);
+    const SIGHT_AT: Vec3 = Vec3::new(0.3, 0.4, 0.5);
+    /// The flat ground under the standing-in battlefield (m). Fixture data.
+    const GROUND_Y: f32 = -0.6;
+
+    /// The tank file at `vehicle`, read as [`Killer::of`] reads it.
+    fn tank_spec(vehicle: &str) -> TankSpec {
+        let path = crate::assets::asset_root().join(vehicle);
+        ron::de::from_str(&std::fs::read_to_string(path).expect("the tank file"))
+            .expect("the tank file parses")
+    }
+
+    /// Stand a tank view in for its glb under `root`: the hull node, the yaw servo above the
+    /// gunner's view and the gunner's view node, named as `spec` names them, at fixture offsets.
+    fn stand_in(world: &mut World, root: Entity, spec: &TankSpec) {
+        let sight = spec.views[&ViewKind::Gunner].node.clone();
+        let yaw = spec
+            .servos
+            .iter()
+            .filter(|(_, servo)| servo.role() == crate::tank::ServoRole::Yaw)
+            .map(|(name, _)| name.clone())
+            .min()
+            .expect("a yaw servo");
+        let hull = world
+            .spawn((
+                Name::new(view::HULL_NODE),
+                Transform::from_translation(HULL_AT),
+                ChildOf(root),
+            ))
+            .id();
+        let turret = world
+            .spawn((
+                Name::new(yaw.clone()),
+                Transform::from_translation(TURRET_AT),
+                ChildOf(hull),
+            ))
+            .id();
+        if sight != yaw {
+            world.spawn((
+                Name::new(sight),
+                Transform::from_translation(SIGHT_AT),
+                ChildOf(turret),
+            ));
+        }
+    }
+
+    /// How the kill run's shooter reaches the stage.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Shooting {
+        /// Its scene has spawned: a view stands in for it.
+        Spawned,
+        /// Its view root exists and its scene has not spawned yet.
+        Loading,
+        /// The stage loads it through the asset server, which has no loader for it.
+        Unloadable,
+    }
+
+    /// The demo's own frame ([`super::super::sequence`]) on a headless app: the run of `entry` over
+    /// the library as `edit` leaves it, the left button held with a drag, and the main camera. The
+    /// battlefield is staged by the stage's own systems from views standing in for the glbs: the
+    /// victim's and the stage's, and the shooter's as `shooting` says. Systems whose scene
+    /// resources a headless app lacks (the corner's images, the tracers) are skipped by the
+    /// ignoring error handler; everything that stages the battlefield and decides the cameras,
+    /// their input, the clock and the panels runs as in the demo.
+    fn demo_app_with(entry: usize, shooting: Shooting, edit: impl FnOnce(&mut Library)) -> App {
+        let mut library = library();
+        edit(&mut library);
         let settings = Settings::default();
         let run = Run::new(entry, &library, &settings, false);
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::ignore);
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        app.init_asset::<TankSpec>()
+            .init_asset::<WorldAsset>()
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<Image>()
+            .init_asset::<super::super::material::GlowMaterial>()
+            .init_asset::<super::super::material::SliceMaterial>();
+
+        let victim = tank_spec(&library.vehicle);
+        let world = app.world_mut();
+        let battlefield = world
+            .spawn((Transform::IDENTITY, Visibility::Hidden, ViewRoot::World))
+            .id();
+        stand_in(world, battlefield, &victim);
+        let stage = world
+            .spawn((Transform::IDENTITY, Visibility::Hidden, ViewRoot::Stage))
+            .id();
+        stand_in(world, stage, &victim);
+        let spec = world.resource_mut::<Assets<TankSpec>>().add(victim);
+        world.insert_resource(Views::standing_in(spec, battlefield, stage, GROUND_Y));
+
+        let mut cam = KillCam::default();
+        let shooter = run.kill.and_then(|(shot, _)| {
+            library.records[run.shots[shot].record]
+                .report
+                .shooter
+                .clone()
+        });
+        if let Some(shooter) = shooter
+            && shooting != Shooting::Unloadable
+        {
+            let spec = tank_spec(&shooter.vehicle);
+            let root = world
+                .spawn((Transform::IDENTITY, Visibility::Hidden, ViewRoot::Shooter))
+                .id();
+            if shooting == Shooting::Spawned {
+                stand_in(world, root, &spec);
+            }
+            cam.shooter = Some(ShooterView {
+                root,
+                vehicle: shooter.vehicle,
+                spec: world.resource_mut::<Assets<TankSpec>>().add(spec),
+                scene: Handle::default(),
+                hull_inverse: None,
+            });
+        }
+
         let mut mouse = ButtonInput::<MouseButton>::default();
         mouse.press(MouseButton::Left);
         app.insert_resource(library)
             .insert_resource(settings)
             .insert_resource(run)
+            .insert_resource(cam)
             .insert_resource(mouse)
             .insert_resource(ButtonInput::<KeyCode>::default())
             .insert_resource(AccumulatedMouseMotion {
@@ -1188,11 +1425,9 @@ mod tests {
                 body: Handle::default(),
             })
             .init_resource::<Time>()
-            .add_systems(Startup, spawn);
+            .add_systems(Startup, (spawn, super::super::stage::spawn));
+        super::super::stage::plugin(&mut app);
         super::super::sequence(&mut app);
-        if staged {
-            app.world_mut().resource_mut::<KillCam>().rig = Some(rig());
-        }
         app.world_mut().spawn((
             Transform::IDENTITY,
             Projection::Perspective(PerspectiveProjection::default()),
@@ -1200,6 +1435,36 @@ mod tests {
             MainCamera,
         ));
         app
+    }
+
+    fn demo_app(entry: usize, shooting: Shooting) -> App {
+        demo_app_with(entry, shooting, |_| {})
+    }
+
+    /// The rig the stage placed.
+    fn staged(app: &App) -> Rig {
+        app.world()
+            .resource::<KillCam>()
+            .rig
+            .expect("the stage placed the rig")
+    }
+
+    /// The inset camera's switch, set to `on` where given; what it reads now.
+    fn inset(app: &mut App, on: Option<bool>) -> bool {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&mut Camera, With<super::super::stage::StageCamera>>();
+        let mut camera = query.single_mut(app.world_mut()).expect("the inset camera");
+        if let Some(on) = on {
+            camera.is_active = on;
+        }
+        camera.is_active
+    }
+
+    fn advance_time(app: &mut App, seconds: f32) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(seconds));
     }
 
     fn camera(app: &mut App) -> (Transform, CameraProfile) {
@@ -1238,7 +1503,7 @@ mod tests {
     /// every beat, and only the lesson's profile swaps the ridden tank for its glass.
     #[test]
     fn the_drag_moves_the_camera_only_while_it_is_free() {
-        let mut app = demo_app(kill_entry(), true);
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
         let beats = app.world().resource::<Run>().kill.unwrap().1;
         for (t, beat) in [
             (beats.impact + 0.1, Beat::Hit),
@@ -1260,7 +1525,7 @@ mod tests {
                 _ => cam.hit != before.0,
             };
             assert_eq!(moved, !beat.captive(), "{beat:?}");
-            let rig = rig();
+            let rig = staged(&app);
             let want = rig.pose(
                 beats,
                 t,
@@ -1281,11 +1546,73 @@ mod tests {
         }
     }
 
+    /// The stage stands the shooter's hull on the ground at the record's muzzle, facing the
+    /// impact, and rides the camera to the pivot above it: the shooter's view root is placed so
+    /// its hull node, wherever the scene puts it under the root, lands there.
+    #[test]
+    fn the_staged_shooter_stands_at_the_muzzle_facing_the_impact() {
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        app.update();
+        let rig = staged(&app);
+        let run = app.world().resource::<Run>();
+        let shot = &run.shots[run.kill.unwrap().0];
+        let library = app.world().resource::<Library>();
+        let impact = Vec3::from(library.records[shot.record].report.impact.point);
+        let muzzle = shot.muzzle;
+        let cam = app.world().resource::<KillCam>();
+        let root = cam.shooter.as_ref().expect("a shooter view").root;
+        let root_pose = *app.world().get::<Transform>(root).unwrap();
+        let hull = root_pose.to_matrix() * Mat4::from_translation(HULL_AT);
+        let at = hull.w_axis.truncate();
+        assert!(
+            at.distance(Vec3::new(muzzle.x, 0.0, muzzle.z)) < 1e-3,
+            "the hull stands at {at}, the muzzle is at {muzzle}"
+        );
+        let forward = (hull * Vec4::NEG_Z).truncate();
+        let toward = Vec3::new(impact.x - muzzle.x, 0.0, impact.z - muzzle.z).normalize();
+        assert!(forward.normalize().dot(toward) > 0.9999, "{forward}");
+        assert_eq!(
+            app.world().get::<Visibility>(root),
+            Some(&Visibility::Inherited)
+        );
+        let pivot = rig.shooter_pivot.expect("a staged shooter");
+        assert!(Vec2::new(pivot.x - at.x, pivot.z - at.z).length() < 1.0 + TURRET_AT.length());
+    }
+
+    /// The inset camera draws a corner's record and stays off for the kill cam's lesson, whatever
+    /// it read before the frame.
+    #[test]
+    fn the_inset_draws_the_corner_and_not_the_lesson() {
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        app.update();
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
+        inset(&mut app, Some(true));
+        app.update();
+        assert!(!inset(&mut app, None), "the lesson draws on the world");
+
+        let library = library();
+        let corner = (0..PLAYLIST.len())
+            .find(|&entry| {
+                !Run::new(entry, &library, &Settings::default(), false)
+                    .turns
+                    .is_empty()
+            })
+            .expect("an entry opens the corner");
+        let mut app = demo_app(corner, Shooting::Spawned);
+        app.update();
+        let start = app.world().resource::<Run>().turns[0].start;
+        app.world_mut().resource_mut::<Run>().t = start + 0.5;
+        inset(&mut app, Some(false));
+        app.update();
+        assert!(inset(&mut app, None), "the corner draws in the inset");
+    }
+
     /// Switching to another scenario during the lesson hands the camera back to the world with the
     /// battlefield profile: the ridden tank is drawn again and the stage is not.
     #[test]
     fn a_scenario_switch_leaves_no_lesson_profile() {
-        let mut app = demo_app(kill_entry(), true);
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
         let beats = app.world().resource::<Run>().kill.unwrap().1;
         app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
         app.update();
@@ -1302,11 +1629,12 @@ mod tests {
         assert!(transform.translation.distance(muzzle) < 1e-3);
     }
 
-    /// While the shooter is still loading there is no rig: the world keeps the camera and the run's
-    /// clock holds, so nothing plays to a camera no one places.
+    /// While the shooter's scene is still spawning there is no rig: the world keeps the camera and
+    /// the run's clock holds, so nothing plays to a camera no one places; once it spawns, the stage
+    /// places the rig and the clock runs.
     #[test]
     fn the_clock_holds_while_the_shooter_loads() {
-        let mut app = demo_app(kill_entry(), false);
+        let mut app = demo_app(kill_entry(), Shooting::Loading);
         app.update();
         let start = app.world().resource::<Run>().t;
         let placed = camera(&mut app).0;
@@ -1315,24 +1643,127 @@ mod tests {
             Vec3::ZERO,
             "no writer placed the camera"
         );
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(500));
+        advance_time(&mut app, 0.5);
         app.update();
         assert_eq!(app.world().resource::<Run>().t, start);
-        app.world_mut().resource_mut::<KillCam>().rig = Some(rig());
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(500));
+        assert!(app.world().resource::<KillCam>().rig.is_none());
+        let root = app
+            .world()
+            .resource::<KillCam>()
+            .shooter
+            .as_ref()
+            .unwrap()
+            .root;
+        let vehicle = app
+            .world()
+            .resource::<KillCam>()
+            .shooter
+            .as_ref()
+            .unwrap()
+            .vehicle
+            .clone();
+        stand_in(app.world_mut(), root, &tank_spec(&vehicle));
+        app.update();
+        assert!(staged(&app).shooter_pivot.is_some());
+        advance_time(&mut app, 0.5);
         app.update();
         assert!(app.world().resource::<Run>().t > start);
+        assert!(app.world().resource::<Run>().kill.unwrap().1.shooter);
+    }
+
+    /// The clock never holds longer than [`SHOOTER_WAIT_S`]: a shooter whose scene never spawns
+    /// loses beat 3, and the run plays on about the victim.
+    #[test]
+    fn the_clock_holds_no_longer_than_the_wait() {
+        let mut app = demo_app(kill_entry(), Shooting::Loading);
+        app.update();
+        let start = app.world().resource::<Run>().t;
+        let mut frames = 0;
+        while app.world().resource::<Run>().t == start {
+            frames += 1;
+            assert!(frames < 20, "the clock still holds");
+            advance_time(&mut app, 0.5);
+            app.update();
+        }
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        assert!(!beats.shooter);
+        assert!(staged(&app).shooter_pivot.is_none());
+        assert!(app.world().resource::<KillCam>().waited >= SHOOTER_WAIT_S);
+    }
+
+    /// A shooter the asset server cannot load loses beat 3 as soon as the load fails, without
+    /// waiting out [`SHOOTER_WAIT_S`].
+    #[test]
+    fn a_failed_shooter_load_skips_beat_three() {
+        let mut app = demo_app(kill_entry(), Shooting::Unloadable);
+        let mut frames = 0;
+        while app.world().resource::<Run>().kill.unwrap().1.shooter {
+            frames += 1;
+            assert!(frames < 2000, "the load never failed");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            app.update();
+        }
+        assert!(app.world().resource::<KillCam>().waited < SHOOTER_WAIT_S);
+        let start = app.world().resource::<Run>().t;
+        app.update();
+        advance_time(&mut app, 0.5);
+        app.update();
+        assert!(app.world().resource::<Run>().t > start, "the clock runs");
+    }
+
+    /// A kill record that names no shooter plays the hit, the lesson and the death screen with no
+    /// beat 3 and no hold: the death screen orbits the victim, continuing the lesson's look, and
+    /// the card shows what the record has.
+    #[test]
+    fn a_kill_without_a_shooter_skips_beat_three() {
+        let entry = kill_entry();
+        let mut app = demo_app_with(entry, Shooting::Spawned, |library| {
+            let settings = Settings::default();
+            let run = Run::new(entry, library, &settings, true);
+            let record = &mut library.records[run.shots[run.kill.unwrap().0].record];
+            record.report.shooter = None;
+            record.killer.shooter = None;
+        });
+        app.update();
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        assert!(!beats.shooter);
+        assert_eq!(beats.death(), beats.killer());
+        let rig = staged(&app);
+        assert!(rig.shooter_pivot.is_none());
+        let start = app.world().resource::<Run>().t;
+        advance_time(&mut app, 0.5);
+        app.update();
+        assert!(app.world().resource::<Run>().t > start, "the clock runs");
+        let lesson_end = rig.pose(
+            beats,
+            beats.killer() - 1e-4,
+            Quat::IDENTITY,
+            Quat::IDENTITY,
+            false,
+        );
+        app.world_mut().resource_mut::<Run>().t = beats.death() + 1e-4;
+        app.update();
+        let (transform, _) = camera(&mut app);
+        assert!(
+            transform.translation.distance(lesson_end.translation) < 0.05,
+            "the death screen continues the lesson about the victim"
+        );
+        let mut rows: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&CardText, &Index, &Text)>()
+            .iter(app.world())
+            .map(|(_, index, text)| (index.0, text.0.clone()))
+            .collect();
+        rows.sort();
+        assert_eq!(rows[1].1, "UNKNOWN PLAYER");
+        assert_eq!(rows[2].1, "UNKNOWN VEHICLE");
     }
 
     /// `R` on the death screen shows the respawn, then starts a fresh life on the living tank: the
     /// death panel does not stay up.
     #[test]
     fn respawn_completes_visibly() {
-        let mut app = demo_app(kill_entry(), true);
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
         let beats = app.world().resource::<Run>().kill.unwrap().1;
         app.update();
         let panel = |app: &mut App| {
@@ -1384,8 +1815,7 @@ mod tests {
             (range - staging).abs() > 10.0,
             "fixture: a muzzle off the staging"
         );
-        let killer = record.killer.as_ref().expect("a killer");
-        let [_, _, line] = card_lines(killer, shot.muzzle.distance(impact));
+        let [_, _, line] = card_lines(&record.killer, Some(shot.muzzle.distance(impact)));
         assert!(line.starts_with(&format!("{range:.0} m")), "{line}");
         let mut unstaged = report.clone();
         unstaged.muzzle = None;

@@ -167,7 +167,7 @@ pub struct Record {
     /// Whether the record knocks the struck tank out, by the game's rule ([`killcam::knockout`]).
     pub knockout: Option<crate::damage::KnockoutReason>,
     /// Who fired it, as the victim's copy names them.
-    pub killer: Option<killcam::Killer>,
+    pub killer: killcam::Killer,
 }
 
 impl Library {
@@ -203,10 +203,8 @@ impl Library {
                 );
                 let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
                 let knockout = killcam::knockout(&report);
-                let killer = report.shooter.as_ref().map(|shooter| {
-                    killcam::Killer::of(shooter, &report.round)
-                        .unwrap_or_else(|err| panic!("{stem}: the shooter: {err}"))
-                });
+                let killer = killcam::Killer::of(report.shooter.as_ref(), &report.round)
+                    .unwrap_or_else(|err| panic!("{stem}: the killer: {err}"));
                 Record {
                     stem,
                     report,
@@ -370,6 +368,7 @@ impl Run {
                             index,
                             killcam::Beats {
                                 impact: shot.impact,
+                                shooter: library.records[shot.record].report.shooter.is_some(),
                             },
                         )
                     })
@@ -412,6 +411,19 @@ impl Run {
             CornerKind::Victim
         } else {
             library.records[self.shots[shot].record].plan.kind
+        }
+    }
+
+    /// Drop beat 3 from the kill run, whose shooter cannot be staged: the death screen follows the
+    /// lesson.
+    pub fn drop_killer_beat(&mut self) {
+        if let Some((shot, beats)) = self.kill {
+            let beats = killcam::Beats {
+                shooter: false,
+                ..beats
+            };
+            self.kill = Some((shot, beats));
+            self.end = beats.end();
         }
     }
 
