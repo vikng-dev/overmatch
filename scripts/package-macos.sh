@@ -63,9 +63,9 @@ if [[ "$MODE" != "sign" ]]; then
 
 # ---------- 1. Build the Apple Silicon binary ----------
 # `overmatch` is the PVP client. Default features now include `net`, so a plain `--release` build
-# is the networked client; if OVERMATCH_DEFAULT_API is set in the environment (the Release
-# workflow exports the Worker URL), it is baked in as the client's matchmaking Worker via option_env!.
-echo ">> Building aarch64-apple-darwin binary..."
+# is the networked client, with the Worker URL from scripts/default-api.sh baked in via option_env!.
+source scripts/default-api.sh
+echo ">> Building aarch64-apple-darwin binary (Worker URL: $OVERMATCH_DEFAULT_API)..."
 rustup target add aarch64-apple-darwin >/dev/null
 cargo build --release --target aarch64-apple-darwin
 mkdir -p "$DIST"

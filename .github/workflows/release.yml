@@ -5,7 +5,7 @@ name: Release
 #
 # THE SERVER RUNS ON EDGEGAP: one server per match, started by the matchmaking Worker (`backend/`)
 # for the version a joining client reports. A release client finds it only through the Worker URL
-# baked in as `OVERMATCH_DEFAULT_API`; it carries no server address. `OVERMATCH_SERVER` / `--local`
+# baked in as `OVERMATCH_DEFAULT_API` (from `scripts/default-api.sh`); it carries no server address. `OVERMATCH_SERVER` / `--local`
 # stay as runtime overrides for dev and LAN play.
 #
 # WHAT IS GUARANTEED: no Release becomes visible unless Edgegap version `<CARGO_PKG_VERSION>` —
@@ -74,13 +74,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The matchmaking Worker (backend/), baked into the release client at compile time through
-  # `option_env!("OVERMATCH_DEFAULT_API")` (net::client::run), so a double-clicked build opens the
-  # Join menu against it with no env set; overridable at runtime with `OVERMATCH_API`. Every step's
-  # cargo build inherits this workflow-level env. Each client build refuses to start without it,
-  # and each smoke lane refuses a shipped client that does not carry it: a client built without it
-  # would fall back to `127.0.0.1:5888` and find nobody. Not a secret: the Worker's public hostname.
-  OVERMATCH_DEFAULT_API: https://overmatch-backend.vikng.workers.dev
 
 jobs:
   # The DRAFT GitHub Release shell — tag pushes only. A manual dispatch never publishes, even when
@@ -262,17 +255,19 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: The client is built with a Worker URL
+      # The matchmaking Worker URL (`scripts/default-api.sh`, its one source), exported to the
+      # steps below so the client build bakes it in through `option_env!`. The script refuses a
+      # blank value, so no client is built with nowhere to connect.
+      - name: The client is built with the Worker URL
         shell: bash
         run: |
-          if [[ -z "${OVERMATCH_DEFAULT_API// }" ]]; then
-            echo "::error::OVERMATCH_DEFAULT_API is empty — the client would ship with nowhere to connect"
-            exit 1
-          fi
+          set -euo pipefail
+          source scripts/default-api.sh
+          echo "OVERMATCH_DEFAULT_API=${OVERMATCH_DEFAULT_API}" >> "${GITHUB_ENV}"
 
       # Build, archive, and checksum without uploading. In dry-run mode the action deliberately
       # withholds github.token from its composite shell, including cargo/build.rs subprocesses.
-      # The workflow-level OVERMATCH_DEFAULT_API is baked in via option_env!. Off a non-tag ref
+      # OVERMATCH_DEFAULT_API from the step above is baked in via option_env!. Off a non-tag ref
       # (dispatch smoke mode) `$tag` resolves to `dry-run`, so the artifact path below reads the
       # action's `archive` output rather than assuming the tag name.
       - name: Build and package client
@@ -465,6 +460,7 @@ jobs:
           set -euo pipefail
           client="$(find smoke -maxdepth 2 -type f -name overmatch -perm -u+x | head -1)"
           test -n "${client}"
+          source scripts/default-api.sh
           SMOKE_EXPECT_API="${OVERMATCH_DEFAULT_API}" \
             bash scripts/ci/archive-smoke.sh smoke/overmatch-server/overmatch-server "${client}"
 
@@ -534,6 +530,7 @@ jobs:
           # `BEVY_ASSET_ROOT` is read by a native Windows process, so it must be a Windows path —
           # `pwd -W` is git-bash's translation of its own POSIX view.
           root="$(pwd -W 2>/dev/null || pwd)"
+          source scripts/default-api.sh
           # The server binary is this run's build; its asset root is the shipped tarball's tree.
           SMOKE_SERVER_ASSET_ROOT="${root}/smoke/overmatch-server" \
           SMOKE_EXPECT_API="${OVERMATCH_DEFAULT_API}" \
@@ -607,8 +604,8 @@ jobs:
   # graph, arbitrary build.rs / proc-macros) and holds NO Apple signing secrets — no cert import, no
   # notary key. That isolation is the whole point of the split: a compromised transitive crate here
   # cannot reach the Developer ID cert or notary key, because they are never materialized on this
-  # runner. It inherits the workflow-level OVERMATCH_DEFAULT_API, bakes it in, and refuses an
-  # .app that does not carry it (no smoke lane covers macOS).
+  # runner. It bakes in the Worker URL and refuses an .app that does not carry it (no smoke lane
+  # covers macOS).
   # If you ever add an Apple secret here, STOP — it belongs in sign-macos below.
   #
   # ON DEMAND ONLY. A tag no longer waits on this job: ~1h20m of arm64 build + notarization for the
@@ -645,17 +642,15 @@ jobs:
           key: macos-aarch64
 
       # With a `tag` input the bundle version is that tag; without one VERSION stays unset and the
-      # script falls back to the Cargo.toml version. The Worker URL is checked on both sides of the
-      # build: set before it, present in the bundled binary after.
+      # script falls back to the Cargo.toml version. The Worker URL (`scripts/default-api.sh`, which
+      # the packaging script also sources) is checked on both sides of the build: non-blank before
+      # it, present in the bundled binary after.
       - name: Build the unsigned .app (arm64)
         env:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          if [[ -z "${OVERMATCH_DEFAULT_API// }" ]]; then
-            echo "::error::OVERMATCH_DEFAULT_API is empty — the client would ship with nowhere to connect"
-            exit 1
-          fi
+          source scripts/default-api.sh
           if [[ -n "${TAG}" ]]; then
             export VERSION="${TAG#v}"
           fi

@@ -15,6 +15,10 @@ NAME="overmatch"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# The Worker URL the client bakes in; forwarded into the container below.
+source scripts/default-api.sh
+echo ">> Worker URL: $OVERMATCH_DEFAULT_API"
+
 echo ">> Building $NAME for $TARGET inside Docker (linux/amd64)..."
 # --platform linux/amd64 makes the build native-x86_64 (emulated on Apple
 # Silicon via QEMU), avoiding a cross C toolchain for the ALSA/udev deps.
@@ -24,6 +28,7 @@ docker run --rm \
   -v "$ROOT":/app \
   -v "${NAME}-cargo-registry":/usr/local/cargo/registry \
   -w /app \
+  -e OVERMATCH_DEFAULT_API \
   rust:latest bash -c "\
     set -e && \
     apt-get update && \
