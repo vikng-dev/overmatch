@@ -22,6 +22,11 @@ use crate::damage_cam::{
 pub const LEAD_M: f32 = 1.5;
 /// A path that leaves the tank is drawn this far (m) past the point it left.
 pub const RUN_OUT_M: f32 = 1.5;
+/// Two arc lengths this close (m) name the same point of the line: a node's arc against the arc
+/// [`Polyline::arc_of`] finds for that node. DERIVED: arc lengths are f32 sums of legs under 100 m,
+/// so their rounding is under 1e-5 m; nodes are at least 1e-6 m apart ([`polyline`] merges closer
+/// ones) and a leg shorter than this is never one a tracer flies.
+pub const LEG_EPS_M: f32 = 1.0e-4;
 /// Every length the corner draws or frames around the round, [`LEAD_M`] and [`RUN_OUT_M`]
 /// included, is at most this many calibres ([`Plan::reach`]), so a small round is framed as tightly
 /// as its size asks: 0.16 m for a 7.9 mm round, while an 88 mm round's 1.76 m leaves every metre
@@ -104,6 +109,22 @@ impl Polyline {
             }
         }
         Vec3::NEG_Z
+    }
+
+    /// The index of the leg the line runs on just past arc length `s`: the first point whose arc
+    /// lies beyond `s`, so a node's arc names the leg leaving it. The last leg past the line's end.
+    pub fn leg_after(&self, s: f32) -> usize {
+        (1..self.points.len())
+            .find(|&i| self.arc[i] > s + LEG_EPS_M)
+            .unwrap_or(self.points.len().saturating_sub(1))
+    }
+
+    /// The unit direction of leg `i` (from point `i − 1` to point `i`).
+    pub fn leg_direction(&self, i: usize) -> Vec3 {
+        match (self.points.get(i.wrapping_sub(1)), self.points.get(i)) {
+            (Some(a), Some(b)) => (*b - *a).try_normalize().unwrap_or(Vec3::NEG_Z),
+            _ => Vec3::NEG_Z,
+        }
     }
 
     /// The arc length of the point on the line nearest `p`.

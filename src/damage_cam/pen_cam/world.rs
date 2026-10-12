@@ -297,23 +297,16 @@ pub(super) fn tracer_head(shot: &ShotRun, record: &Record, t: f32) -> Option<(Ve
     }
 }
 
-/// Where and how fast the round flies on after the struck tank, if the record has it leave: off
-/// the face of its bounce, or out along its path's last leg, at the striking speed scaled by the
-/// last leg's `(v/v₀)²`.
+/// Where and how fast the round flies on after the struck tank, if the record has it leave: from
+/// the point the record has it leave (the far end of its last crossing, or the face of its last
+/// bounce), along the recorded leg that leaves that point, at the striking speed scaled by that
+/// leg's `(v/v₀)²`. A round the record has come to rest flies on nowhere, whatever it bounced off
+/// on the way.
 fn onward(plan: &super::plan::Plan, speed: f32) -> Option<(Vec3, Vec3, f32)> {
-    let speed = speed * plan.line.energy.last().copied().unwrap_or(1.0).sqrt();
-    if let Some(bounce) = &plan.bounce {
-        return Some((bounce.point, bounce.outgoing, speed));
-    }
-    if plan.stop.is_some() || plan.line.points.len() < 3 {
-        return None;
-    }
-    let end = plan.line.length();
-    Some((
-        plan.line.at(plan.end_arc),
-        plan.line.direction_at(end),
-        speed,
-    ))
+    let (at, arc) = plan.left_at?;
+    let leg = plan.line.leg_after(arc);
+    let energy = plan.line.energy.get(leg).copied().unwrap_or(1.0);
+    Some((at, plan.line.leg_direction(leg), speed * energy.sqrt()))
 }
 
 /// The flash: a soft ball, brightest where it faces the eye and fading to nothing at its limb.
@@ -339,16 +332,26 @@ pub fn face_mark(point: Vec3, normal: Vec3, travel: Vec3, calibre: f32) -> Trans
 
 #[cfg(test)]
 mod tests {
+    use super::super::plan::Plan;
     use super::super::{Settings, ShotRun};
     use super::*;
+    use crate::damage_cam::RoundEnd;
 
-    /// Tolerances: the angle (deg) between the tracer's travel and the record's leg, and the
-    /// distance (m) of its head off that leg's line. A bounce's recorded outgoing direction and the
-    /// marched leg after it differ by 0.34° on the recorded ricochet (MEASURED), under the angle.
-    const ANGLE_TOL_DEG: f32 = 0.5;
+    /// The tracer flies the record's own legs (the approach along origin → impact, the onward flight
+    /// along the leg leaving the point the record has the round leave), so the only gap between the
+    /// two is f32 rounding. The angle (deg) between the tracer's travel and its leg: DERIVED, a
+    /// direction normalised in f32 carries ~1e-7 rad of rounding, which 1e-3° (1.7e-5 rad) bounds
+    /// with margin.
+    const ANGLE_TOL_DEG: f32 = 1.0e-3;
+    /// How far (m) the head may sit off its leg's line, or short of where it should be: DERIVED, the
+    /// f32 spacing at the staging range ([`SHOOTER_DISTANCE_M`], 700 m) is 6.1e-5 m, and the
+    /// approach's lerp over that range carries a few such steps.
     const POSITION_TOL_M: f32 = 1.0e-3;
     /// The run clock is sampled at this step (s).
     const SAMPLE_S: f32 = 1.0e-3;
+
+    /// A tracer: its head and direction of travel at run time `t`, as [`tracer_head`] states them.
+    type Head = fn(&ShotRun, &Record, f32) -> Option<(Vec3, Vec3)>;
 
     fn angle_deg(a: Vec3, b: Vec3) -> f32 {
         a.normalize()
@@ -365,8 +368,29 @@ mod tests {
         (v - d * v.dot(d)).length()
     }
 
-    /// Why the tracer of `shot` departs from its record's path, if it does.
-    fn departures(shot: &ShotRun, record: &Record) -> Vec<String> {
+    /// Where the record has the round leave the tank and the recorded leg that leaves that point,
+    /// read off the record alone; `None` when it rests.
+    fn leaving(
+        report: &crate::damage_cam::PenetrationReport,
+        path: &[Vec3],
+    ) -> Option<(Vec3, Vec3)> {
+        let RoundEnd::Left { at } = report.end else {
+            return None;
+        };
+        let at = Vec3::from(at);
+        let k = path
+            .iter()
+            .position(|p| p.distance(at) < 1.0e-5)
+            .expect("where the round left is a point of its path");
+        let leg = match path.get(k + 1) {
+            Some(next) => *next - at,
+            None => at - path[k - 1],
+        };
+        Some((at, leg))
+    }
+
+    /// Why the tracer `head` of `shot` departs from its record's path, if it does.
+    fn departures(shot: &ShotRun, record: &Record, head: Head) -> Vec<String> {
         let report = &record.report;
         let mut path: Vec<Vec3> = Vec::new();
         for node in &report.path {
@@ -378,50 +402,69 @@ mod tests {
         let mut out = Vec::new();
         let entry = path[1];
         let first_leg = path[1] - path[0];
-        let last = path[path.len() - 1];
-        let leg_start = path[path.len() - 2];
-        let last_leg = last - leg_start;
         if entry.distance(Vec3::from(report.impact.point)) > POSITION_TOL_M {
             out.push(format!(
                 "impact {:?} is not the path's entry {entry}",
                 report.impact.point
             ));
         }
-        let leaves = !report.rested();
+        let leaving = leaving(report, &path);
+        if let Some((at, _)) = leaving {
+            match head(shot, record, shot.impact) {
+                Some((start, _)) if start.distance(at) <= POSITION_TOL_M => {}
+                other => out.push(format!(
+                    "at the impact the tracer is at {other:?}, not where the record has the round \
+                     leave, {at}"
+                )),
+            }
+        }
         let (mut approach, mut onward) = (0, 0);
+        let mut progress: Option<f32> = None;
         let mut t = shot.fire;
         while t < shot.impact + 1.0 {
-            if let Some((head, direction)) = tracer_head(shot, record, t) {
+            if let Some((h, direction)) = head(shot, record, t) {
                 if t < shot.impact {
                     approach += 1;
                     let angle = angle_deg(direction, first_leg);
-                    let off = off_line(head, entry, first_leg);
-                    let beyond = (head - entry).dot(first_leg.normalize());
+                    let off = off_line(h, entry, first_leg);
+                    let beyond = (h - entry).dot(first_leg.normalize());
                     if angle > ANGLE_TOL_DEG || off > POSITION_TOL_M || beyond > POSITION_TOL_M {
                         out.push(format!(
-                            "t {t:.3}: approach {angle:.2} deg and {off:.4} m off the first leg, \
-                             {beyond:.4} m past the entry"
+                            "t {t:.3}: approach {angle:.4} deg and {off:.5} m off the first leg, \
+                             {beyond:.5} m past the entry"
                         ));
                         break;
                     }
                 } else {
                     onward += 1;
-                    if !leaves {
+                    let Some((at, leg)) = leaving else {
                         out.push(format!(
-                            "t {t:.3}: flies on at {head} although the path ends at rest at {last}"
+                            "t {t:.3}: flies on at {h} although the record has the round rest"
                         ));
                         break;
-                    }
-                    let angle = angle_deg(direction, last_leg);
-                    let off = off_line(head, last, last_leg);
-                    let allowed = POSITION_TOL_M
-                        + head.distance(leg_start) * ANGLE_TOL_DEG.to_radians().sin();
+                    };
+                    let angle = angle_deg(direction, leg);
+                    let along = (h - at).dot(leg.normalize());
+                    let off = off_line(h, at, leg);
+                    let allowed = POSITION_TOL_M + along.abs() * ANGLE_TOL_DEG.to_radians().sin();
                     if angle > ANGLE_TOL_DEG || off > allowed {
                         out.push(format!(
-                            "t {t:.3}: onward {angle:.2} deg and {off:.4} m off the last leg"
+                            "t {t:.3}: onward {angle:.4} deg and {off:.5} m off the leg leaving \
+                             {at}"
                         ));
                         break;
                     }
+                    if along < -POSITION_TOL_M {
+                        out.push(format!(
+                            "t {t:.3}: onward {along:.4} m behind where the round left, {at}"
+                        ));
+                        break;
+                    }
+                    if progress.is_some_and(|before| along <= before) {
+                        out.push(format!("t {t:.3}: the onward tracer does not advance"));
+                        break;
+                    }
+                    progress = Some(along);
                 }
             }
             t += SAMPLE_S;
@@ -429,31 +472,132 @@ mod tests {
         if approach == 0 {
             out.push("no tracer before the impact".to_owned());
         }
-        if leaves && onward == 0 {
-            out.push("the path leaves the tank and no tracer flies on".to_owned());
+        if leaving.is_some() && onward < 2 {
+            out.push("the record has the round leave the tank and no tracer flies on".to_owned());
+        }
+        out
+    }
+
+    /// Every shot the playlist fires, with its record.
+    fn shots(library: &Library) -> Vec<(ShotRun, &Record)> {
+        let settings = Settings::default();
+        let mut out = Vec::new();
+        for entry in 0..PLAYLIST.len() {
+            let run = Run::new(entry, library, &settings, true);
+            for shot in run.shots {
+                let record = &library.records[shot.record];
+                out.push((shot, record));
+            }
         }
         out
     }
 
     /// The battlefield's tracer flies the record's path, in the record's hull frame (the
-    /// battlefield's, [`tracer_head`]), for every shot the playlist fires: before
-    /// the impact along the path's first leg (within [`ANGLE_TOL_DEG`]) into its entry, which is
-    /// the record's impact point (within [`POSITION_TOL_M`]); after it only when the record has the
-    /// round leave the tank, and then along the path's last leg.
+    /// battlefield's, [`tracer_head`]), for every shot the playlist fires: before the impact along
+    /// the path's first leg into its entry, which is the record's impact point; after it only when
+    /// the record has the round leave the tank, and then from the point it left (at the impact
+    /// itself), along the recorded leg leaving that point, never behind it, advancing every sample.
     #[test]
     fn the_world_tracer_flies_the_records_path() {
         let library = Library::load();
-        let settings = Settings::default();
         let mut failures = Vec::new();
-        for entry in 0..PLAYLIST.len() {
-            let run = Run::new(entry, &library, &settings, true);
-            for shot in &run.shots {
-                let record = &library.records[shot.record];
-                for why in departures(shot, record) {
-                    failures.push(format!("{}: {why}", record.stem));
-                }
+        for (shot, record) in shots(&library) {
+            for why in departures(&shot, record, tracer_head) {
+                failures.push(format!("{}: {why}", record.stem));
             }
         }
         assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The onward flight's direction at `t`, or `None` outside it.
+    fn onward_direction(shot: &ShotRun, record: &Record, t: f32) -> Option<Vec3> {
+        let (_, direction) = tracer_head(shot, record, t)?;
+        (t >= shot.impact).then_some(direction)
+    }
+
+    fn stationary(shot: &ShotRun, record: &Record, t: f32) -> Option<(Vec3, Vec3)> {
+        match onward_direction(shot, record, t) {
+            Some(direction) => Some((record.plan.left_at?.0, direction)),
+            None => tracer_head(shot, record, t),
+        }
+    }
+
+    fn backward(shot: &ShotRun, record: &Record, t: f32) -> Option<(Vec3, Vec3)> {
+        let (head, direction) = tracer_head(shot, record, t)?;
+        match onward_direction(shot, record, t) {
+            Some(_) => Some((2.0 * record.plan.left_at?.0 - head, direction)),
+            None => Some((head, direction)),
+        }
+    }
+
+    /// The onward flight shifted `calibres` calibres along its own line: 20 is the drawn span's
+    /// run-out for a small round ([`super::super::plan::REACH_CALIBRES`]).
+    fn shifted(shot: &ShotRun, record: &Record, t: f32, calibres: f32) -> Option<(Vec3, Vec3)> {
+        let (head, direction) = tracer_head(shot, record, t)?;
+        let by = calibres * record.plan.calibre;
+        match onward_direction(shot, record, t) {
+            Some(_) => Some((head + direction * by, direction)),
+            None => Some((head, direction)),
+        }
+    }
+
+    /// Starts past where the round left.
+    fn late(shot: &ShotRun, record: &Record, t: f32) -> Option<(Vec3, Vec3)> {
+        shifted(shot, record, t, super::super::plan::REACH_CALIBRES)
+    }
+
+    /// Flies the right line and speed from behind where the round left: the tank side of the exit.
+    fn behind(shot: &ShotRun, record: &Record, t: f32) -> Option<(Vec3, Vec3)> {
+        shifted(shot, record, t, -super::super::plan::REACH_CALIBRES)
+    }
+
+    /// The tracer check itself catches an onward tracer that stands still, one placed backward on
+    /// the same line, one that flies from the tank side of the point the round left, and one that
+    /// starts past it, on every shot that leaves.
+    #[test]
+    fn the_tracer_check_catches_a_still_backward_or_late_tracer() {
+        let library = Library::load();
+        let mut leaving = 0;
+        for (shot, record) in shots(&library) {
+            if record.plan.left_at.is_none() {
+                continue;
+            }
+            leaving += 1;
+            for (name, head) in [
+                ("still", stationary as Head),
+                ("backward", backward as Head),
+                ("behind", behind as Head),
+                ("late", late as Head),
+            ] {
+                assert!(
+                    !departures(&shot, record, head).is_empty(),
+                    "{}: a {name} tracer passes",
+                    record.stem
+                );
+            }
+        }
+        assert!(leaving > 0, "the playlist has a round that leaves");
+    }
+
+    /// A round the record has come to rest flies on nowhere, wherever its path ends: a stop a
+    /// fraction of a millimetre inside a component's face, or one after a bounce. Every recorded
+    /// path is restated as one that rests in the struck tank's first component.
+    #[test]
+    fn a_round_the_record_rests_flies_on_nowhere() {
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        let mut bounced = 0;
+        for record in &library.records {
+            let mut report = record.report.clone();
+            report.end = RoundEnd::Rest {
+                volume: report.components[0].name.clone(),
+            };
+            let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
+            let speed = report.projectile.speed_mps;
+            assert!(plan.stop.is_some(), "{}: rests", record.stem);
+            assert!(onward(&plan, speed).is_none(), "{}: flies on", record.stem);
+            bounced += usize::from(plan.bounce.is_some());
+        }
+        assert!(bounced > 0, "a record that bounced is restated");
     }
 }

@@ -310,7 +310,9 @@ impl Run {
                 let fire = LEAD_IN_S + offset;
                 let speed = report.projectile.speed_mps.max(1.0);
                 let impact = fire + world::SHOOTER_DISTANCE_M / speed;
-                let incoming = Vec3::from(report.impact.incoming).normalize_or(Vec3::NEG_Z);
+                // The approach flies the record's own first leg, origin to impact, extended back.
+                let incoming = (Vec3::from(report.impact.point) - Vec3::from(report.origin))
+                    .normalize_or(Vec3::NEG_Z);
                 ShotRun {
                     record,
                     fire,
