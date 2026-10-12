@@ -169,6 +169,11 @@ pub(super) struct ImpulseTicks {
 impl ImpulseTicks {
     const CAP: usize = 256;
 
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.ring.is_empty()
+    }
+
     pub(super) fn record(&mut self, tick: Tick, class: ImpulseClass) {
         if self.ring.iter().any(|entry| *entry == (tick, class)) {
             return;

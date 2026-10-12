@@ -35,7 +35,8 @@
 //! 2 s of samples AND the ring holds one window's worth (`ArrivalStats::warmed`, derivation in
 //! `net::sync_margin`). Before arming the installed default rides unchanged (the latch pattern of
 //! the uplink law), so startup estimator pollution — connect/load stalls read as hundreds of ms
-//! of arrival delay — never reaches the objective; arming then latches for the session.
+//! of arrival delay — never reaches the objective; arming then latches for the link
+//! (`ArrivalDelay::link`).
 //!
 //! Lightyear's `sync_timeline` re-reads `Res<InterpolationConfig>` every frame with no caching, so
 //! writing the resource is the whole mechanism. Lightyear converges the timeline by ±5% clock speed, and a
@@ -138,18 +139,19 @@ pub(super) fn derive_interpolation_delay(
     estimator: Res<ArrivalDelay>,
     config: Option<ResMut<InterpolationConfig>>,
     pings: Query<&PingManager, With<Client>>,
-    mut armed: Local<bool>,
+    // The link the law is armed for: the latch holds for one link and re-arms on the next.
+    mut armed: Local<Option<u64>>,
     mut logged: Local<Option<Duration>>,
 ) {
     if matches!(*mode, DelayMode::Fixed(_)) {
         return;
     }
-    if !*armed {
+    if *armed != Some(estimator.link()) {
         if !estimator.stats.warmed() {
             // Pre-arm the installed default rides unchanged (module doc: warmup arming).
             return;
         }
-        *armed = true;
+        *armed = Some(estimator.link());
         info!(
             "net: interpolation delay law ARMED — estimator distribution valid ({})",
             estimator.describe()
@@ -396,6 +398,16 @@ mod tests {
         assert!(
             read(&world) > after_arm,
             "arming latches — a regressing digest must not re-freeze the follower"
+        );
+        // A new link re-arms: its cold digest (the startup pollution again) moves nothing.
+        let latched = read(&world);
+        world.resource_mut::<ArrivalDelay>().reset_for_new_link();
+        world.resource_mut::<ArrivalDelay>().stats = ArrivalStats::test_cold_spread(0.243);
+        world.run_system(writer).expect("writer runs");
+        assert_eq!(
+            read(&world),
+            latched,
+            "the latch is the link's: a new link's cold digest must not reach the objective"
         );
     }
 }

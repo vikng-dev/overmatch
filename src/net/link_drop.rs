@@ -30,7 +30,7 @@ const LEAVE_STEPS: u32 = 8;
 /// token's `client_timeout_secs`, 3 s by lightyear's default) plus slack.
 const DROP_DEADLINE: Duration = Duration::from_secs(10);
 
-fn build_server(port: u16) -> App {
+pub(super) fn build_server(port: u16) -> App {
     let mut app = base_app();
     app.add_plugins(ServerPlugins {
         tick_duration: TICK,

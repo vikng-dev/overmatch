@@ -11,7 +11,7 @@
 use bevy::prelude::*;
 
 use crate::flow::{Flow, FlowScoped};
-use crate::overlay::OverlayNode;
+use crate::overlay::{Overlay, OverlayNode};
 use crate::settings::SettingsCard;
 use crate::state::AppState;
 
@@ -126,8 +126,49 @@ fn assert_roots(world: &mut World, flow: Flow, expected: &[&str]) {
     }
 }
 
-/// The persistent roots: the overlays and the settings page, on every screen.
-const PERSISTENT_ROOTS: &[&str] = &["SettingsCard", "ViewDeathOverlay", "OverlayNode"];
+/// The persistent roots by marker: the settings page and the view-death black, on every screen.
+const PERSISTENT_ROOTS: &[&str] = &["SettingsCard", "ViewDeathOverlay"];
+
+/// The overlays whose backdrop is a persistent root, each exactly once, on every screen. `Death`'s
+/// is spawned per death.
+const PERSISTENT_OVERLAYS: &[Overlay] = &[
+    Overlay::ViewDead,
+    Overlay::SpawnMap,
+    Overlay::Menu,
+    Overlay::ConnectStatus,
+];
+
+/// Each persistent overlay has exactly one root.
+fn assert_overlay_roots(world: &mut World, flow: Flow) {
+    let mut query = world.query_filtered::<&OverlayNode, Without<ChildOf>>();
+    let overlays: Vec<Overlay> = query.iter(world).map(|node| node.0).collect();
+    for overlay in PERSISTENT_OVERLAYS {
+        assert_eq!(
+            overlays.iter().filter(|o| *o == overlay).count(),
+            1,
+            "{flow:?}: the {overlay:?} overlay has one root: {overlays:?}"
+        );
+    }
+}
+
+/// The hit-confirm marker sits in a root of its own that the match owns.
+fn assert_hit_confirm_root(world: &mut World) {
+    let markers = entities_named(world, "HitConfirmNode");
+    assert_eq!(markers.len(), 1, "one hit-confirm marker");
+    let parent = world
+        .get::<ChildOf>(markers[0])
+        .expect("the hit-confirm marker is a root's child")
+        .parent();
+    assert!(
+        world.get::<ChildOf>(parent).is_none(),
+        "the hit-confirm tree is one level deep"
+    );
+    assert_eq!(
+        world.get::<FlowScoped>(parent).map(|scope| scope.0),
+        Some(Flow::InMatch),
+        "the match owns the hit-confirm root"
+    );
+}
 
 /// The match's HUD roots, one marker each (`TankNameplate` and `ComponentHpLabel` are pools).
 const MATCH_ROOTS: &[&str] = &[
@@ -218,6 +259,7 @@ fn every_root_is_owned_and_each_screen_draws_only_its_own_ui() {
     ] {
         enter(&mut app, flow);
         assert_roots(app.world_mut(), flow, PERSISTENT_ROOTS);
+        assert_overlay_roots(app.world_mut(), flow);
         let world = app.world_mut();
         let misowned = misowned(world);
         assert!(
@@ -286,6 +328,8 @@ fn the_match_builds_its_hud_and_leaving_takes_it_away() {
     let mut app = client_ui_app();
     enter(&mut app, Flow::InMatch);
     assert_roots(app.world_mut(), Flow::InMatch, PERSISTENT_ROOTS);
+    assert_hit_confirm_root(app.world_mut());
+    assert_overlay_roots(app.world_mut(), Flow::InMatch);
     assert_roots(app.world_mut(), Flow::InMatch, MATCH_ROOTS);
 
     app.world_mut().spawn((

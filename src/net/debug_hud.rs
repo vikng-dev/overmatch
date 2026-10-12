@@ -212,8 +212,8 @@ fn update_debug_hud(
     links: Query<&Link, With<Connected>>,
     mut values: Query<(&mut Text, &mut TextColor, &Metric)>,
     // Mirrors `interp_delay`'s arming latch: placeholder until the estimator distribution is
-    // valid, then live for the session even if the digest later regresses.
-    mut armed: Local<bool>,
+    // valid, then live for the link even if the digest later regresses.
+    mut armed: Local<Option<u64>>,
 ) {
     // Throttle to ~1 Hz so the numbers are legible instead of churning every frame (repo idiom:
     // `Local<f32>` accumulator vs. a threshold, cf. `net::diagnostics`).
@@ -236,10 +236,10 @@ fn update_debug_hud(
         );
     // The delay law's instability term, from the SAME estimator `interp_delay` reads; `None`
     // (placeholder) until the law would itself be armed.
-    if !*armed && estimator.stats.warmed() {
-        *armed = true;
+    if *armed != Some(estimator.link()) && estimator.stats.warmed() {
+        *armed = Some(estimator.link());
     }
-    let jitter = (*armed).then(|| {
+    let jitter = (*armed == Some(estimator.link())).then(|| {
         jitter_readout(
             estimator.stats.spread(),
             tick.0,

@@ -49,11 +49,10 @@ pub(super) enum Phase {
         in_flight: bool,
         errors: u32,
     },
-    /// Ready: the lobby has handed the match to the connection and stays closed while it lives. The
-    /// ticket is kept: while the match's link is down it is polled ([`JoinFlow::due_lost_poll`]),
-    /// `in_flight` while a poll is out.
+    /// Ready: the lobby has handed the match to the connection ([`StatusEvent::Ready`]) and stays
+    /// closed while it lives. The ticket is kept: while the match's link is down it is polled
+    /// ([`JoinFlow::due_lost_poll`]), `in_flight` while a poll is out.
     Connecting {
-        ready: ReadyMatch,
         ticket: String,
         next_poll: f64,
         in_flight: bool,
@@ -243,7 +242,6 @@ impl JoinFlow {
                     StatusOutcome::Ready(ready) => {
                         let ticket = std::mem::take(ticket);
                         self.phase = Phase::Connecting {
-                            ready,
                             ticket,
                             next_poll: now + POLL_INTERVAL_S,
                             in_flight: false,
@@ -371,7 +369,7 @@ mod tests {
             flow.status(generation, StatusOutcome::Ready(ready()), 1.6),
             StatusEvent::Ready(ready())
         );
-        assert!(matches!(flow.phase(), Phase::Connecting { ready: r, .. } if *r == ready()));
+        assert!(matches!(flow.phase(), Phase::Connecting { .. }));
         assert!(flow.busy());
         assert_eq!(flow.join(2.0), None, "no second join while connecting");
     }

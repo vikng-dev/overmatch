@@ -203,6 +203,9 @@ pub(super) struct ArrivalDelay {
     /// here" bound `net::fire_presentation`'s heal deadlines read.
     newest_remote: Option<Tick>,
     samples: u64,
+    /// Links this estimator has been reset for ([`Self::reset_for_new_link`]); an arming latch
+    /// that reads the estimator holds for one link and re-arms on the next.
+    link: u64,
     /// The per-frame digest, refreshed by [`refresh_arrival_stats`].
     pub(super) stats: ArrivalStats,
 }
@@ -285,6 +288,19 @@ impl ArrivalDelay {
             newest_remote: Some(tick),
             ..Self::default()
         }
+    }
+
+    /// Empty the estimator for the next link: the new server's ticks start over.
+    pub(super) fn reset_for_new_link(&mut self) {
+        *self = Self {
+            link: self.link + 1,
+            ..Self::default()
+        };
+    }
+
+    /// Which link the samples are from, counted by [`Self::reset_for_new_link`].
+    pub(super) fn link(&self) -> u64 {
+        self.link
     }
 
     /// One line for the FRONTIER summary: the anchored spreads in ms and the sample count.

@@ -166,8 +166,11 @@ fn after_keyword<'a>(code: &'a str, keyword: &'a str) -> impl Iterator<Item = us
 /// `Flow` and every identifier whose code reaches it, over all sources: each `struct`/`enum`/`type`
 /// whose definition names `Flow` or another such type (a `SystemParam` holding `Res<State<Flow>>`),
 /// to a fixed point; then each `fn` whose signature names one of those types (a system's or a run
-/// condition's parameters); then each set configured `.run_if(..)` on any of them. A `fn` taints
-/// nothing further: only its own registration can carry `Flow` onto a schedule.
+/// condition's parameters); then, to a fixed point, each `fn` taking a `World` (an exclusive
+/// system, or a helper one calls) whose BODY names a tainted identifier — the one kind of system
+/// whose world access is not in its signature; then each set configured `.run_if(..)` on any of
+/// them. Otherwise a `fn` taints nothing further: only its own registration can carry `Flow` onto
+/// a schedule.
 fn tainted(sources: &[String]) -> BTreeSet<String> {
     let mut types = BTreeSet::from(["Flow".to_owned()]);
     loop {
@@ -193,6 +196,26 @@ fn tainted(sources: &[String]) -> BTreeSet<String> {
             if !name.is_empty() && names_any(signature(code, at + name.len()), &types) {
                 tainted.insert(name.to_owned());
             }
+        }
+    }
+    loop {
+        let before = tainted.len();
+        for code in sources {
+            for at in after_keyword(code, "fn ") {
+                let name = ident_at(code, at);
+                if name.is_empty() || tainted.contains(name) {
+                    continue;
+                }
+                let rest = at + name.len();
+                if names(signature(code, rest), "World")
+                    && names_any(definition(code, rest), &tainted)
+                {
+                    tainted.insert(name.to_owned());
+                }
+            }
+        }
+        if tainted.len() == before {
+            break;
         }
     }
     for code in sources {
@@ -332,6 +355,28 @@ fn the_detector_flags_a_fixed_registration_naming_flow() {
         violations_in(gated_set).len(),
         1,
         "a set gated on Flow: {gated_set}"
+    );
+    let exclusive = "fn tick(world: &mut World) {\n\
+                     if *world.resource::<State<Flow>>().get() != Flow::InMatch { return; }\n}\n\
+                     fn p(app: &mut App) { app.add_systems(FixedUpdate, tick); }";
+    assert_eq!(
+        violations_in(exclusive).len(),
+        1,
+        "an exclusive system reading Flow in its body: {exclusive}"
+    );
+    let helper = "fn screen(world: &World) -> bool { world.contains_resource::<State<Flow>>() }\n\
+                  fn tick(world: &mut World) { if screen(world) { return; } }\n\
+                  fn p(app: &mut App) { app.add_systems(FixedUpdate, tick); }";
+    assert_eq!(
+        violations_in(helper).len(),
+        1,
+        "an exclusive system reading Flow through a helper: {helper}"
+    );
+    let unrelated = "fn tick(world: &mut World) { world.resource_mut::<Clock>().0 += 1; }\n\
+                     fn p(app: &mut App) { app.add_systems(FixedUpdate, tick); }";
+    assert!(
+        violations_in(unrelated).is_empty(),
+        "an exclusive system that never reads Flow: {unrelated}"
     );
     let method = "fn write(next: &mut NextState<Flow>) {}\n\
                   fn p(app: &mut App) { app.add_systems(FixedUpdate, tick.run_if(|w: Res<W>| w.write())); }";

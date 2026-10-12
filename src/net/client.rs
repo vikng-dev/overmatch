@@ -607,6 +607,7 @@ pub fn run() {
 
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
+        .add_observer(reset_link_state)
         .add_observer(claim_input_slot)
         .add_systems(
             Update,
@@ -725,8 +726,9 @@ struct ConnectRetry {
     /// Wall-clock deadline (`Time::elapsed_secs_f64`) for the next retry `Connect`. Armed the frame
     /// we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
     next_retry_at: Option<f64>,
-    /// When (`Time::elapsed_secs_f64`) a once-connected link was first seen down; cleared on
-    /// `Connected`. Matchmaking mode gives the match up [`RECONNECT_GIVE_UP_S`] after it.
+    /// When (`Time<Real>::elapsed_secs_f64`) a once-connected link was first seen down; cleared on
+    /// `Connected`. Matchmaking mode gives the match up [`RECONNECT_GIVE_UP_S`] of wall clock after
+    /// it — real time, since virtual time pauses, scales and clamps a long frame's delta.
     down_since: Option<f64>,
 }
 
@@ -784,6 +786,7 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     stays the session-stable one; netcode does not key the collision on it).
 fn drive_connection(
     time: Res<Time>,
+    real: Res<Time<Real>>,
     assets: Option<Res<PendingTankAssets>>,
     asset_server: Res<AssetServer>,
     client: Query<
@@ -810,7 +813,7 @@ fn drive_connection(
         return;
     }
     if retry.connected_once && retry.down_since.is_none() {
-        retry.down_since = Some(time.elapsed_secs_f64());
+        retry.down_since = Some(real.elapsed_secs_f64());
     }
 
     if !retry.initiated {
@@ -997,7 +1000,7 @@ fn close_verdict(
 /// Close the match's link on a [`close_verdict`]: despawn it, start the connection ledger afresh
 /// and tell the lobby why.
 fn close_lost_match(
-    time: Res<Time>,
+    time: Res<Time<Real>>,
     mut retry: ResMut<ConnectRetry>,
     mut gone: MessageReader<super::matchmaking::ServerGone>,
     links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
@@ -1519,6 +1522,24 @@ impl SeenDamage {
 /// client-only ledgers therefore cannot discard an in-flight fact from the new connection, and it
 /// prevents a later server connection that reuses match-local ids from colliding with the previous
 /// link. A connection spanning multiple Battles is forbidden until `ShotId` carries a Battle epoch.
+/// The link ended: every estimator and ledger keyed to that server's tick clock starts empty for
+/// the next connection. A new server's timeline starts behind the old one's, so a carried-over
+/// newest tick would reject the new server's arrivals ([`ArrivalDelay`](super::sync_margin::ArrivalDelay))
+/// and this client's newly authored inputs ([`AuthoredIntent`](super::fire_presentation::AuthoredIntent)),
+/// and a pending trigger edge would replay onto the next tank; the impulse ticks
+/// ([`ImpulseTicks`](super::extrapolate::ImpulseTicks)) would classify the new server's gaps by
+/// the old server's ticks.
+fn reset_link_state(
+    _ended: On<Remove, Connected>,
+    mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
+    mut intent: ResMut<super::fire_presentation::AuthoredIntent>,
+    mut impulses: ResMut<super::extrapolate::ImpulseTicks>,
+) {
+    arrival.reset_for_new_link();
+    *intent = default();
+    *impulses = default();
+}
+
 fn reset_shot_receive_state(
     _connected: On<Add, Connected>,
     mut recoil: ResMut<PendingRecoilKicks>,
@@ -2216,6 +2237,10 @@ pub(super) fn stamp_input_tick(
 /// Two headless matchmaking clients against the live Worker (`#[ignore]`d; needs `OVERMATCH_API`).
 #[cfg(test)]
 mod hosted_e2e;
+
+/// The matchmaking exits through the installed lifecycle, over real UDP.
+#[cfg(test)]
+mod match_exit;
 
 /// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
 /// exercise that derivation directly against a minimal rig. An external integration test can't reach
@@ -3002,6 +3027,39 @@ mod tests {
         assert!(app.world().resource::<SeenShots>().set.is_empty());
     }
 
+    /// A link ending — a drop, a leave, a despawn — empties the state keyed to that server's tick
+    /// clock, so the next server's earlier ticks are accepted.
+    #[test]
+    fn a_link_ending_resets_its_clock_keyed_state() {
+        use super::super::extrapolate::{ImpulseClass, ImpulseTicks};
+        use super::super::fire_presentation::AuthoredIntent;
+        use super::super::sync_margin::ArrivalDelay;
+        let mut app = App::new();
+        app.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(5_000)))
+            .insert_resource(AuthoredIntent::test_with_authored(5_000))
+            .init_resource::<ImpulseTicks>()
+            .add_observer(reset_link_state);
+        app.world_mut()
+            .resource_mut::<ImpulseTicks>()
+            .record(Tick(5_000), ImpulseClass::Fire);
+        let link = app
+            .world_mut()
+            .spawn((RemoteId(PeerId::Netcode(99)), Connected))
+            .id();
+        let world = app.world();
+        assert!(
+            world.resource::<ArrivalDelay>().newest_remote().is_some()
+                && !world.resource::<AuthoredIntent>().is_empty()
+                && !world.resource::<ImpulseTicks>().is_empty(),
+            "fixture: a connected link's state"
+        );
+        app.world_mut().entity_mut(link).remove::<Connected>();
+        let world = app.world();
+        assert_eq!(world.resource::<ArrivalDelay>().newest_remote(), None);
+        assert!(world.resource::<AuthoredIntent>().is_empty());
+        assert!(world.resource::<ImpulseTicks>().is_empty());
+    }
+
     #[test]
     fn duplicate_damage_receipts_trace_two_receives_and_one_marker_boundary() {
         let path = std::env::temp_dir().join(format!(
@@ -3578,9 +3636,10 @@ mod tests {
         );
     }
 
-    /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
-    /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
-    /// monotonic growth so a broken BASE/STEP schedule can't hide behind a still-correct cap.
+    /// A matchmaking link closes on exactly its three exits — a server reported gone (at once), a
+    /// link that never connected after the hint threshold, a once-connected link down for the
+    /// give-up period — and a never-connected close is a failed join, a once-connected one the
+    /// match's end.
     #[test]
     fn match_link_closes_on_each_exit_and_not_before() {
         use super::super::matchmaking::MatchClosed;
@@ -3639,6 +3698,9 @@ mod tests {
         assert_eq!(close_verdict(&up, 1_000.0, None), None, "a live link stays");
     }
 
+    /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
+    /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
+    /// monotonic growth so a broken BASE/STEP schedule can't hide behind a still-correct cap.
     #[test]
     fn reconnect_backoff_is_capped() {
         assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);

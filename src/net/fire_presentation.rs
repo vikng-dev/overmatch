@@ -720,6 +720,24 @@ pub(super) struct AuthoredIntent {
 }
 
 impl AuthoredIntent {
+    #[cfg(test)]
+    pub(super) fn test_with_authored(for_tick: u32) -> Self {
+        let mut intent = Self::default();
+        intent.record(
+            for_tick,
+            Consumables {
+                primary: true,
+                secondary: false,
+            },
+        );
+        intent
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.authored.is_empty() && self.presented_through.is_none()
+    }
+
     fn record(&mut self, for_tick: u32, consumables: Consumables) {
         if self
             .authored

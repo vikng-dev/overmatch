@@ -145,6 +145,7 @@ fn client_app(api: &str, log: bool) -> App {
     // `run`'s receive wiring, verbatim; no input writer, so the own tank's command stays idle.
     app.add_observer(diagnostics::log_connected)
         .add_observer(reset_shot_receive_state)
+        .add_observer(reset_link_state)
         .add_observer(claim_input_slot)
         .add_systems(
             Update,
