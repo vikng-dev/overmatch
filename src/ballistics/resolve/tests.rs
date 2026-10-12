@@ -340,7 +340,11 @@ fn impacts_of(drive: &Drive) -> Vec<(Verdict, Vec3)> {
 struct Agreement {
     /// The impacts both sides read, in order.
     impacts: Vec<(Verdict, Vec3)>,
-    /// The gate admitted the target: some crossing put a positive TRANSIT chord into it.
+    /// GEOMETRIC REACH: some crossing the gate decided put a positive TRANSIT chord into the target.
+    reached: bool,
+    /// OBSERVABLE ADMISSION: the transit doses the gate decided for the target, applied in order to
+    /// its HP pool by the runtime's own arithmetic, remove HP. A positive chord whose dose is below
+    /// the pool's f32 resolution is reach without admission.
     admitted: bool,
     /// The runtime removed HP from the target, by any route.
     damaged: bool,
@@ -360,7 +364,7 @@ impl Agreement {
 
 /// Build the arrangement twice, fly `body` through the runtime in one and through the gate's driver
 /// in the other, and require that they agree on every impact, and — where transit was the runtime's
-/// only HP route ([`Agreement::transit_only`]) — on whether the target was reached.
+/// only HP route ([`Agreement::transit_only`]) — on whether the target was admitted.
 fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> Entity) -> Agreement {
     let mut runtime = world_with_trimesh_plates(&[]);
     runtime
@@ -386,7 +390,25 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
     }
     let flown = driven(&mut gate, body, speed);
     let decided = impacts_of(&flown);
-    let admitted = flown.reaches(gate_target);
+    let reached = flown.reaches(gate_target);
+    let pool = gate
+        .world()
+        .get::<ComponentHealth>(gate_target)
+        .expect("the target carries HP")
+        .current;
+    let left = flown
+        .decisions
+        .iter()
+        .filter_map(|decision| match decision {
+            Decision::Bite(bite) => Some(&bite.deposits),
+            _ => None,
+        })
+        .flatten()
+        .filter(|dose| dose.address == gate_target)
+        .fold(pool, |current, dose| {
+            crate::ballistics::dosed(current, dose)
+        });
+    let admitted = left < pool;
     let shock = flown.decisions.iter().any(|decision| {
         matches!(decision, Decision::Bounce(bounce)
             if gate.world().get::<ComponentHealth>(bounce.struck).is_some())
@@ -405,6 +427,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
     }
     let agreement = Agreement {
         impacts: read,
+        reached,
         admitted,
         damaged,
         fragments,
@@ -614,8 +637,9 @@ fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
 /// The crossing asks one readout step more than the round carries: the round comes to rest inside
 /// it, short of the far face, with no chord into the target. The gate must agree. Fixture: a
 /// one-sample round, a metre of material whose factor is one f32 step above the round's
-/// readout per metre, faces at exactly representable heights. The far-face edge itself — a
-/// stretch asking exactly the round's whole potential — is the mechanism's
+/// readout per metre, faces at exactly representable heights. A crossing costing exactly the
+/// readout is [`an_exact_budget_crossing_terminates_before_the_target`]; one asking exactly the
+/// round's whole potential is the mechanism's
 /// (`mechanism::tests::spending_exactly_the_potential_leaves_the_round_at_rest_at_the_far_face`):
 /// the round's state is its speed, and no f32 factor states that potential to the bit.
 #[test]
@@ -651,6 +675,56 @@ fn a_budget_short_of_the_crossing_terminates_before_the_target() {
     );
     assert!(!short.admitted, "no chord into the target");
     assert!(short.transit_only());
+}
+
+/// A ROUND WHOSE READOUT EQUALS A CROSSING'S COST LEAVES IT WITH A SUB-RESOLUTION RESIDUAL.
+///
+/// The crossing's cost equals the round's f32 readout. Speed is the state and the readout its f32
+/// rounding (DOWN here: the unrounded readout is above it), so the round crosses the metre with a
+/// tiny positive residual speed rather than none. That residual geometrically reaches the target
+/// behind — a positive chord — but its dose is below the target's f32 HP resolution: reach without
+/// admission, and the runtime removes no HP. Fixture: a one-sample round, a metre of material whose
+/// factor is the round's readout per metre, faces at exactly representable heights.
+#[test]
+fn an_exact_budget_crossing_terminates_before_the_target() {
+    let stepped = freeflight_step(
+        Vec3::NEG_Y * 755.0,
+        drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
+        DT,
+    );
+    assert_eq!(
+        Dir3::new(stepped).map(Vec3::from),
+        Ok(Vec3::NEG_Y),
+        "the fall is exactly vertical, so the chord is exactly the metre"
+    );
+    let (speed, _) = first_tick(FIXTURE_MG, 755.0);
+    let factor = capability(FIXTURE_MG, speed);
+    let exact = agree("exact budget", FIXTURE_MG, 755.0, |app| {
+        volume(
+            app,
+            Vec3::new(1.0, 1.0, 1.0),
+            Transform::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+            factor,
+            None,
+        );
+        target_below(app, 0.0, 2.0)
+    });
+    assert_eq!(
+        exact.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
+        [Verdict::Through, Verdict::Stopped],
+        "through the metre with a sub-resolution residual, then stopped in the target",
+    );
+    assert!(
+        exact.reached,
+        "the residual puts a positive chord into the target"
+    );
+    assert!(
+        !exact.admitted && !exact.damaged,
+        "whose dose the target's HP pool cannot resolve: admitted {}, damaged {}",
+        exact.admitted,
+        exact.damaged,
+    );
+    assert!(exact.transit_only());
 }
 
 /// SHOCK AND FRAGMENTS LIE OUTSIDE THE TRANSIT PARITY.

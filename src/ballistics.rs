@@ -313,16 +313,22 @@ fn apply_doses(
     }
     for dose in doses {
         if let Ok(mut hp) = health.get_mut(dose.address) {
-            let per_mm = match dose.source {
-                mechanism::DoseSource::Line { .. } => TRANSIT_K,
-                mechanism::DoseSource::Fragment => FRAG_DMG_PER_MM,
-            };
             let before = hp.current;
-            hp.current = (before - dose.amount * per_mm).max(0.0);
+            hp.current = dosed(before, dose);
             removed += before - hp.current;
         }
     }
     removed
+}
+
+/// An HP pool at `current` after `dose`, floored at zero. In f32: a dose below the pool's
+/// resolution leaves it unchanged.
+fn dosed(current: f32, dose: &mechanism::Dose) -> f32 {
+    let per_mm = match dose.source {
+        mechanism::DoseSource::Line { .. } => TRANSIT_K,
+        mechanism::DoseSource::Fragment => FRAG_DMG_PER_MM,
+    };
+    (current - dose.amount * per_mm).max(0.0)
 }
 
 /// March one spall fragment through ballistic volumes: its visual trace, and the doses it addresses

@@ -3726,6 +3726,11 @@ fn scalar_outcome(
 /// capabilities, the solid-shot mechanism advancing through the ordered encounters matches the
 /// scalar path ([`scalar_outcome`]) to float precision: the same verdict, the rest point, the
 /// residual speed, the reference-mm spent and every deposit. Every number is fixture data.
+///
+/// Every case is accounted for. A case is not compared in exactly two classes: the entrance
+/// decides no transit (a ricochet: neither path advances anything), or the crossing's cost lies
+/// within the scalar path's own readout rounding of the round's capability, where that rounding
+/// alone decides the verdict.
 #[test]
 fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
     let laws = WalkLaws::default();
@@ -3738,8 +3743,11 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
             .wrapping_add(1_442_695_040_888_963_407);
         (state >> 11) as f64 / (1u64 << 53) as f64
     };
-    let mut compared = 0;
+    let (mut compared, mut ricochets, mut knife_edges) = (0, 0, 0);
     let (mut embeds, mut overmatches, mut overmatched_rests) = (0, 0, 0);
+    let (scale, inertia) = body.terms();
+    // The capability law's inverse in f64: the speed carrying `readout` reference-mm.
+    let speed_at = |readout: f64| ((readout / (1000.0 * scale)).exp_m1() / inertia).sqrt();
     for case in 0..400 {
         let tilt = (unit() * 60.0).to_radians() as f32;
         let normal = Vec3::new(0.0, tilt.sin(), -tilt.cos());
@@ -3757,12 +3765,12 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         let volumes = table(&volumes);
         let entrance = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
         let Begin::Transit(request) = begin(&entrance, &AP_88, &laws) else {
+            ricochets += 1;
             continue;
         };
         let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &volumes, &laws).unwrap();
-        if transit.events.len() != 1 {
-            continue;
-        }
+        // Abutting or overlapping plates are one crossing by construction of the fixture.
+        assert_eq!(transit.events.len(), 1, "case {case}: one crossing");
         // Half the cases near the crossing's own cost, so rests inside every kind of crossing
         // (overmatched ones included) are drawn, not just perforations.
         let total = scalar_outcome(&transit, &request, body, 0.0).total;
@@ -3774,10 +3782,16 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         let (round, state) = solid(requested);
         let capability = super::super::capability(body, state.speed as f32);
         let old = scalar_outcome(&transit, &request, body, capability);
-        // The knife edge where the budget meets the whole crossing to within the two paths'
-        // rounding decides the verdict by rounding alone; it is left out (DERIVED bound: f32
-        // readout ULP, ~1e-7 relative).
-        if ((capability as f64) - total).abs() < 1.0e-5 * capability as f64 {
+        // THE KNIFE EDGE. The scalar path budgets the f32 readout `capability`; the mechanism
+        // advances the f64 state whose exact readout is `exact`. They differ by the readout's own
+        // rounding, at most half an f32 ULP (2⁻²⁴ relative, DERIVED). A crossing whose cost lies
+        // within that difference of the readout is decided by the rounding alone. The f64 term
+        // bounds the two paths' f64 arithmetic (each well under 100 roundings of 2⁻⁵³ relative,
+        // DERIVED ~1e-14), so a case outside the band has one verdict on both paths.
+        let exact = round.reference_mm(state);
+        let band = (capability as f64 - exact).abs() + 1.0e-12 * exact;
+        if (capability as f64 - total).abs() <= band {
+            knife_edges += 1;
             continue;
         }
         let new = finish(
@@ -3795,18 +3809,33 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         overmatched_rests += (request.entrance.overmatched && old.embed.is_some()) as u32;
         let tolerance = |value: f64| 1.0e-5 * (1.0 + value.abs());
         match (new.outcome, old.embed) {
-            (Outcome::Embedded { t, .. }, Some(at)) => assert!(
-                (t as f64 - at).abs() < 1.0e-6,
-                "case {case}: rest at {t} against {at}"
-            ),
-            (Outcome::Perforated { .. }, None) => {
-                let (new, old) = (
-                    super::super::capability(body, new.state.speed as f32),
-                    super::super::capability(body, old.residual),
-                );
+            (Outcome::Embedded { t, .. }, Some(at)) => {
                 assert!(
-                    ((new - old) as f64).abs() < tolerance(capability as f64),
-                    "case {case}: residual readout {new} against {old}"
+                    (t as f64 - at).abs() < 1.0e-6,
+                    "case {case}: rest at {t} against {at}"
+                );
+                assert_eq!(new.state.speed, 0.0, "case {case}: at rest");
+            }
+            (Outcome::Perforated { .. }, None) => {
+                // The scalar residual is the readout left, `capability − cost_spent`, in f32: each
+                // of the two and their difference rounds by at most half an f32 ULP of the
+                // capability. The residual SPEED must lie in the speed interval that readout bound
+                // spans (DERIVED, three half-ULPs), however steep the inverse is near exhaustion.
+                let left = capability as f64 - old.cost_spent as f64;
+                let slack = 1.5 * f32::EPSILON as f64 * capability as f64;
+                let (low, high) = (speed_at((left - slack).max(0.0)), speed_at(left + slack));
+                assert!(
+                    (low..=high).contains(&new.state.speed),
+                    "case {case}: residual speed {} outside [{low}, {high}] (scalar {})",
+                    new.state.speed,
+                    old.residual
+                );
+                // The scalar residual is the same interval's speed, cast once to f32.
+                let cast = 0.5 * f32::EPSILON as f64;
+                assert!(
+                    (low * (1.0 - cast)..=high * (1.0 + cast)).contains(&(old.residual as f64)),
+                    "case {case}: scalar residual {} outside [{low}, {high}]",
+                    old.residual
                 );
             }
             (outcome, embed) => {
@@ -3840,7 +3869,16 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
             );
         }
     }
-    assert!(compared > 200, "only {compared} cases were comparable");
+    assert_eq!(
+        compared + ricochets + knife_edges,
+        400,
+        "every case is compared or in a named class"
+    );
+    assert!(
+        knife_edges <= 2,
+        "{knife_edges} knife edges: the band is a rounding bound, never a population"
+    );
+    assert!(compared > 200, "only {compared} cases were compared");
     assert!(
         embeds > 20 && compared - embeds > 20,
         "both verdicts must be exercised: {embeds} rests of {compared}"
