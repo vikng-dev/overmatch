@@ -1,12 +1,19 @@
-//! Pen cam records read off the real march ([`crate::damage_cam::record`]): the shot verdict's
-//! class invariants, fired at generic fixture plates, and the external tag on the bound tank.
+//! The pen cam recorder: scripted shots through the real march, read back as pen cam records
+//! ([`crate::damage_cam::record`]).
+//!
+//! A scenario names a round from the bound tank's own weapons, where it is fired from and toward,
+//! and the target's pose; [`record_scenario`] fires it at the bound tank in the probe world
+//! (headless, no window, no input) and returns the record.
+//!
+//! The class-invariant tests at the end fire at generic fixture plates, not at the bound tank.
 
 use std::time::Duration;
 
 use avian3d::prelude::{CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
 use bevy::time::TimeUpdateStrategy;
+use serde::Deserialize;
 
-use super::fuzz::probe_world;
+use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world, probe_world_posed};
 use super::march_tests::{FIXTURE_88, fixture_round};
 use super::*;
 use crate::damage::VolumeOf;
@@ -20,6 +27,169 @@ const STEP: Duration = Duration::from_millis(16);
 /// Steps a shot is marched for: 8 × 16 ms carries a main-gun round ~100 m (DERIVED), the whole
 /// tank and the run-out past it.
 const STEPS: usize = 8;
+
+/// One scripted shot. Positions are metres in the target's spawn frame: the probe tank's root at
+/// the origin, the world's axes (`-Z` its front, `+Y` up). The target's pose turns the tank under
+/// the shot; the shot itself does not move.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Scenario {
+    /// The record's file stem.
+    name: String,
+    /// One of the bound tank's weapons, by its name in the tank file.
+    weapon: String,
+    /// Striking speed (m/s); the weapon's muzzle speed when absent.
+    #[serde(default)]
+    speed: Option<f32>,
+    from: Vec3,
+    toward: Vec3,
+    /// The hull's yaw about `+Y` (degrees).
+    #[serde(default)]
+    hull_yaw_deg: f32,
+    /// The turret's traverse from its spawn pose about the hull's `+Y` (degrees).
+    #[serde(default)]
+    turret_yaw_deg: f32,
+}
+
+/// The probe world posed for `scenario`, with the march driven on [`STEP`] and spent shells kept.
+fn scenario_world(scenario: &Scenario) -> App {
+    let pose = Transform::from_translation(PROBE_TANK_AT)
+        .with_rotation(Quat::from_rotation_y(scenario.hull_yaw_deg.to_radians()));
+    let mut app = probe_world_posed(pose).expect("the bound tank builds");
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
+        .insert_resource(RetainSpentShells(true))
+        .insert_resource(MgShortCircuit(false))
+        .add_systems(Update, integrate_projectiles);
+    if scenario.turret_yaw_deg != 0.0 {
+        let tank = app.world().resource::<ProbeTank>().0;
+        let turret = app
+            .world()
+            .get::<Rig>(tank)
+            .expect("the tank has a rig")
+            .turret;
+        let mut transform = app
+            .world_mut()
+            .get_mut::<Transform>(turret)
+            .expect("the turret is posed");
+        transform.rotation =
+            Quat::from_rotation_y(scenario.turret_yaw_deg.to_radians()) * transform.rotation;
+        // The turret's colliders follow its new pose before anything is cast.
+        for _ in 0..4 {
+            app.update();
+        }
+    }
+    app
+}
+
+/// The turret's yaw relative to the hull (degrees).
+fn turret_yaw(world: &World, tank: Entity) -> f32 {
+    let rig = world.get::<Rig>(tank).expect("the tank has a rig");
+    let rotation = |entity: Entity| {
+        world
+            .get::<GlobalTransform>(entity)
+            .expect("a posed node")
+            .to_scale_rotation_translation()
+            .1
+    };
+    let relative = rotation(rig.hull).inverse() * rotation(rig.turret);
+    relative.to_euler(EulerRot::YXZ).0.to_degrees()
+}
+
+/// Fire `scenario` at the bound tank and read back its record.
+fn record_scenario(scenario: &Scenario) -> PenetrationReport {
+    let mut app = scenario_world(scenario);
+    let tank = app.world().resource::<ProbeTank>().0;
+    let spec = app
+        .world()
+        .resource::<crate::bake::TankBlueprint>()
+        .spec
+        .clone();
+    let weapon = spec
+        .weapons
+        .get(&scenario.weapon)
+        .unwrap_or_else(|| panic!("{}: no weapon `{}`", scenario.name, scenario.weapon));
+    let body = RoundBody {
+        mass: weapon.mass,
+        caliber: weapon.caliber,
+        nose_factor: weapon.nose.factor(),
+    };
+    let speed = scenario.speed.unwrap_or(weapon.speed);
+    let origin = PROBE_TANK_AT + scenario.from;
+    let direction = (scenario.toward - scenario.from).normalize();
+    let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
+    let (projectile, readout) = fixture_round(body, direction * speed);
+    let shell = app
+        .world_mut()
+        .spawn((
+            projectile,
+            readout,
+            DamageReport::default(),
+            TerminalReport::default(),
+            ShellPath {
+                points: vec![origin],
+                segment_starts: Vec::new(),
+            },
+            PenetrationMarks::default(),
+            SpallMarks::default(),
+            Transform::from_translation(origin).looking_to(direction, Vec3::Y),
+        ))
+        .id();
+    for _ in 0..STEPS {
+        app.update();
+    }
+    let facts = ShotFacts {
+        launch: origin,
+        projectile: scenario.weapon.clone(),
+        caliber_mm: weapon.caliber * 1000.0,
+        mass_kg: weapon.mass,
+        vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
+        turret_yaw_deg: turret_yaw(app.world(), tank),
+    };
+    record::report(app.world_mut(), &struck, shell, &facts)
+        .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name))
+}
+
+/// A record is stated in the struck hull's frame: one shot fired at the bound tank at two hull
+/// poses, turned with the tank, records the same verdict, plates, boxes and path. The shot down a
+/// front plate and the 30° pose are fixture data; 1 mm is the tolerance on a position.
+#[test]
+fn a_record_is_stated_in_the_struck_hull_frame() {
+    let shot = |yaw_deg: f32| {
+        let turn = Quat::from_rotation_y(yaw_deg.to_radians());
+        record_scenario(&Scenario {
+            name: format!("hull yaw {yaw_deg}"),
+            weapon: "MainGun".to_owned(),
+            speed: None,
+            from: turn * Vec3::new(-0.57, 1.45, -6.5),
+            toward: turn * Vec3::new(-0.57, 1.45, 0.0),
+            hull_yaw_deg: yaw_deg,
+            turret_yaw_deg: 0.0,
+        })
+    };
+    let (still, turned) = (shot(0.0), shot(30.0));
+    let near = |a: [f32; 3], b: [f32; 3]| Vec3::from(a).distance(Vec3::from(b)) < 1.0e-3;
+    assert_eq!(still.impact.verdict, turned.impact.verdict);
+    assert!(near(still.impact.point, turned.impact.point));
+    let names = |report: &PenetrationReport| -> Vec<String> {
+        report
+            .plates
+            .iter()
+            .map(|plate| plate.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&still), names(&turned));
+    for (a, b) in still.plates.iter().zip(&turned.plates) {
+        assert!(near(a.entry, b.entry), "{}", a.name);
+    }
+    for (a, b) in still.internals.iter().zip(&turned.internals) {
+        assert_eq!(a.name, b.name);
+        assert!(near(a.center, b.center), "{}", a.name);
+    }
+    assert_eq!(still.path.len(), turned.path.len());
+    for (a, b) in still.path.iter().zip(&turned.path) {
+        assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
+    }
+}
 
 /// Every entity carrying a volume of a node the tank file tags external carries
 /// [`ExternalArmour`], a mixed node's per-substance volumes included, and no other does.

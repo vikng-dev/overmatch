@@ -484,6 +484,10 @@ pub(super) const PROBE_TANK_AT: Vec3 = Vec3::new(12.0, 3.0, -7.0);
 #[derive(Resource, Clone, Copy)]
 pub(super) struct ProbeTank(pub Entity);
 
+/// The pose the probe tank is spawned at.
+#[derive(Resource, Clone, Copy)]
+struct ProbePose(Transform);
+
 /// Two bare entities the duplication gate uses as the identity of the DUPLICATED volume. Real
 /// entities rather than synthesized ids: `PrimitiveKey` is entity-keyed, and a fabricated id is
 /// exactly the sort of thing that would make the gate pass for the wrong reason.
@@ -496,6 +500,7 @@ struct Spares {
 fn spawn_probe_tank(
     mut commands: Commands,
     source: TankSimSource,
+    pose: Res<ProbePose>,
     existing: Option<Res<ProbeTank>>,
 ) {
     if existing.is_some() {
@@ -508,7 +513,7 @@ fn spawn_probe_tank(
         &mut commands,
         content,
         (
-            Transform::from_translation(PROBE_TANK_AT),
+            pose.0,
             Name::new("ballistic fuzzer Tiger I"),
             RigidBody::Static,
         ),
@@ -527,6 +532,11 @@ fn spawn_probe_tank(
 /// use for. `RigidBody::Static` pins the pose; `bake::plugin` supplies the same blueprint the game
 /// binds from.
 pub(super) fn probe_world() -> Result<App, String> {
+    probe_world_posed(Transform::from_translation(PROBE_TANK_AT))
+}
+
+/// [`probe_world`] with the tank spawned at `pose`.
+pub(super) fn probe_world_posed(pose: Transform) -> Result<App, String> {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -540,6 +550,7 @@ pub(super) fn probe_world() -> Result<App, String> {
     ))
     .init_asset::<Mesh>()
     .add_plugins(crate::bake::plugin)
+    .insert_resource(ProbePose(pose))
     .add_systems(Update, spawn_probe_tank);
 
     // Avian registers diagnostics resources in `Plugin::finish`, and its spatial-query systems

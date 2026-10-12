@@ -64,7 +64,7 @@ mod goldens;
 #[cfg(test)]
 mod field_casts;
 
-/// Pen cam records read off the march: the shot verdict's class invariants on fixture plates.
+/// The pen cam recorder: scripted shots at the bound tank read back as pen cam records.
 #[cfg(test)]
 mod pen_cam;
 

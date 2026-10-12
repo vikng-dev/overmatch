@@ -31,6 +31,8 @@ pub(crate) use servo::RemoteServos;
 pub use servo::{ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, shortest_angle};
 #[cfg(test)]
 pub(crate) use servo::{ServoRest, drive_servos};
+#[cfg(test)]
+pub(crate) use spawn::TIGER_SPEC_PATH;
 #[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{

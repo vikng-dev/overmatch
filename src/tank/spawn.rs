@@ -114,7 +114,7 @@ pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
 pub(crate) const TIGER_SIM_GLB_PATH: &str = "tiger_1/tiger_1.sim.glb";
 
 /// The spec sheet beside them.
-const TIGER_SPEC_PATH: &str = "tiger_1/tiger_1.tank.ron";
+pub(crate) const TIGER_SPEC_PATH: &str = "tiger_1/tiger_1.tank.ron";
 
 /// Synchronous construction data. This source never reads Bevy asset readiness.
 #[derive(SystemParam)]
