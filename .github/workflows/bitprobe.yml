@@ -1,4 +1,11 @@
-name: Cross-target bitprobe
+# THROWAWAY BRANCH ONLY (hosting/risk-test): GitHub dispatches only workflows whose path exists on
+# the default branch and runs the ref's copy of that file, so the risk-test job borrows this path.
+# Never merge this file to main.
+#
+# Dispatch-only throwaway for the Edgegap risk test (.agents/scratch/hosting-2026-10/): builds the
+# Linux server with the canonical composite and pushes it as a container image to GHCR. Never runs
+# on push.
+name: hosting-risk-test
 
 on:
   workflow_dispatch:
@@ -10,50 +17,62 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-x86_64:
+  server-image:
+    permissions:
+      contents: read
+      packages: write
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 40
     steps:
-      # Same checkout/LFS transport as the deployed-server workflow, narrowed to the LFS objects the
-      # synchronous production bake consumes: each vehicle's certified sim artifact `<id>.sim.glb`
-      # (ADR-0035) — never the view glb, which no headless composition opens. The tank RON and the
-      # `<id>.lod.json` certificate the sim glb is sha256-checked against are ordinary Git content.
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
           lfs: false
-      - name: Pull bitprobe simulation geometry from R2
-        run: |
-          git lfs install --local
-          git lfs pull --include='assets/*/*.sim.glb'
 
-      # Keep toolchain, host libraries, cache family, release profile, and --locked behavior aligned
-      # with .github/actions/build-server/action.yml. `--features bitprobe` is the observation-only
-      # delta required to make the additional bin target available.
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux build dependencies
-        run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
-          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev
-      - name: Prune non-runtime assets
-        run: |
-          find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/build-server
         with:
-          key: server-net
-      - name: Build bitprobe with deployed-server codegen settings
-        run: cargo build --release --locked --features bitprobe --bin bitprobe
+          deployed-sha: 'true'
 
-      - name: Run deterministic fixture
+      # ubuntu:24.04 matches the runner's glibc. libasound2t64 and libudev1 are the DT_NEEDED
+      # libraries a Bevy binary links on Linux; the ldd step fails the job on any unresolved one.
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p image
+          tar -xzf overmatch-server.tar.gz -C image
+          cat > image/Dockerfile <<'EOF'
+          FROM ubuntu:24.04
+          RUN apt-get update \
+           && apt-get install -y --no-install-recommends libasound2t64 libudev1 ca-certificates \
+           && rm -rf /var/lib/apt/lists/*
+          COPY overmatch-server /opt/overmatch-server
+          WORKDIR /opt/overmatch-server
+          ENV BEVY_ASSET_ROOT=/opt/overmatch-server
+          EXPOSE 5888/udp
+          ENTRYPOINT ["/opt/overmatch-server/overmatch-server"]
+          EOF
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/overmatch-server"
+          short="${GITHUB_SHA::7}"
+          docker build \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            -t "${image}:${short}" -t "${image}:risk-test" image
+          if docker run --rm --entrypoint ldd "${image}:${short}" /opt/overmatch-server/overmatch-server | tee /dev/stderr | grep -q 'not found'; then
+            echo "::error::unresolved shared library in the image"
+            exit 1
+          fi
+          docker image ls "${image}"
+          echo "IMAGE=${image}" >> "${GITHUB_ENV}"
+          echo "SHORT=${short}" >> "${GITHUB_ENV}"
+
+      - name: Push image
+        shell: bash
         env:
-          BEVY_ASSET_ROOT: ${{ github.workspace }}
-        run: ./target/release/bitprobe bitprobe-linux-x86_64.obp.gz
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bitprobe-linux-x86_64
-          path: bitprobe-linux-x86_64.obp.gz
-          retention-days: 14
-          if-no-files-found: error
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GH_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE}:${SHORT}"
+          docker push "${IMAGE}:risk-test"
+          echo "pushed ${IMAGE}:${SHORT}"
