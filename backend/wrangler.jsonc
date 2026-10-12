@@ -55,7 +55,7 @@
 		// Edgegap Edge Cloud list price, edgegap.com/pricing.md reviewed 2026-09-04. Dashboard cost is DERIVED.
 		"USD_PER_VCPU_MINUTE": "0.00115",
 		"LOCATION_HINT": "apac",
-		"ACCESS_TEAM_DOMAIN": "",
-		"ACCESS_AUD": ""
+		"ACCESS_TEAM_DOMAIN": "https://vikng-dev-pages.cloudflareaccess.com",
+		"ACCESS_AUD": "f01302e8085ce591ac9c8f0c8c38e400921ff34e7e8202c61d357f82f552b4fa"
 	}
 }
