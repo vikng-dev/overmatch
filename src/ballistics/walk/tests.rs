@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::ballistics::mechanism::{Limits, SolidShot, SolidShotState};
+use crate::substances::REFERENCE_FACTOR;
 
 // ---------------------------------------------------------------------------------------------
 // Fixture helpers
@@ -3847,5 +3848,78 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
     assert!(
         overmatches > 20 && overmatched_rests > 5,
         "the overmatch adapter was exercised {overmatches} times, {overmatched_rests} to a rest"
+    );
+}
+
+/// One encounter over `[start, end)` on a one-sample disc, every listed volume present over all
+/// of it.
+fn stretch(start: f64, end: f64, interface: bool, present: &[(u32, f32)]) -> Encounter {
+    Encounter {
+        start,
+        end,
+        interface,
+        samples: vec![SampleLayer {
+            sample: 0,
+            present: present
+                .iter()
+                .map(|(index, factor)| VolumeContact {
+                    volume: volume(*index),
+                    material: VolumeMaterial::fixture(*factor),
+                    start,
+                    end,
+                })
+                .collect(),
+        }],
+        disc: 1,
+    }
+}
+
+/// A SEAM INSIDE ONE SUBSTANCE IS NOT A BOUNDARY. A crossing whose cost is the round's whole
+/// potential to the bit gives the same control and speed whether its steel is one volume, two
+/// abutting halves of one substance, or one volume duplicated in the same substance. Fixture data:
+/// an 88-class body at 450 m/s against reference steel; the length is the one whose drop equals
+/// that potential exactly (DERIVED by scalar emulation of the force law's arithmetic).
+#[test]
+fn a_same_substance_seam_does_not_change_the_outcome() {
+    let length = 0.041457119507477665;
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let state = round.at(450.0);
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let steel = REFERENCE_FACTOR;
+    let outcome = |encounters: &[Encounter]| {
+        let advanced =
+            advance_through(&round, state, encounters, &Limits { rest: 0.0 }, &geometry).unwrap();
+        let chords: Vec<f64> = advanced.doses.values().map(|(chord, _)| *chord).collect();
+        (advanced.stop, advanced.state.speed, chords)
+    };
+    let unsplit = outcome(&[stretch(0.0, length, true, &[(1, steel)])]);
+    assert_eq!(
+        unsplit,
+        (None, 0.0, vec![length]),
+        "the witness spends the potential exactly"
+    );
+    let half = 0.5 * length;
+    let split = outcome(&[
+        stretch(0.0, half, true, &[(1, steel)]),
+        stretch(half, length, false, &[(2, steel)]),
+    ]);
+    let duplicated = outcome(&[stretch(0.0, length, true, &[(1, steel), (2, steel)])]);
+    assert_eq!(
+        split,
+        (None, 0.0, vec![half, length - half]),
+        "split in equal halves: each half doses its own volume"
+    );
+    assert_eq!(
+        duplicated,
+        (None, 0.0, vec![length, length]),
+        "duplicated in the same substance: both copies are dosed, neither owns the chord"
     );
 }

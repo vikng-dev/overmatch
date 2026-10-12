@@ -69,6 +69,7 @@
 //! since the old marcher's 1 mm nudge alone would eat half the weld budget.
 
 use bevy::prelude::*;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::mechanism::{
@@ -1593,13 +1594,24 @@ pub struct DiscSpall {
     pub coverage: f32,
 }
 
+/// One volume met by one sample over part of an [`Encounter`]: its identity (the address a dose
+/// goes to), its material, and the stretch `[start, end)` of the encounter it covers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeContact {
+    pub volume: Entity,
+    pub material: VolumeMaterial,
+    pub start: f64,
+    pub end: f64,
+}
+
 /// What one sample of the disc meets over an [`Encounter`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SampleLayer {
     pub sample: usize,
-    /// The volumes present on that sample, in volume order; empty where the sample is in a gap of
-    /// this crossing (a welded void).
-    pub present: Vec<Presence>,
+    /// The volumes the sample meets, ordered by where they open and then by volume; empty where
+    /// the sample is in a gap of this crossing (a welded void). The substances among them are the
+    /// same at every point of the encounter; which volume carries them may change.
+    pub present: Vec<VolumeContact>,
 }
 
 /// One stretch of a disc crossing over which every sample's present volumes are constant: the
@@ -1612,12 +1624,51 @@ pub struct Encounter {
     pub end: f64,
     /// Some sample's substance set differs here from the previous encounter's (the first
     /// encounter is always one). A boundary where only volume identity changes — two plates of one
-    /// substance in contact — is not an interface: they are one plate.
+    /// substance in contact — is not an interface: they are one plate, and the driver hands a
+    /// mechanism the run they make as one encounter ([`Encounter::absorb`]).
     pub interface: bool,
     /// The samples inside the crossing over this stretch, in sample order.
     pub samples: Vec<SampleLayer>,
     /// k — the disc's sample count, the denominator of every disc mean.
     pub disc: usize,
+}
+
+impl Encounter {
+    /// Extend this encounter over `next`, which follows it across no interface: every sample's
+    /// substance set is the same over both, so to a mechanism they are one stretch of one
+    /// material. A volume met on both sides of the seam is one contact.
+    pub(crate) fn absorb(&mut self, next: &Encounter) {
+        debug_assert!(!next.interface && next.start == self.end);
+        self.end = next.end;
+        for layer in &next.samples {
+            let index = match self
+                .samples
+                .binary_search_by_key(&layer.sample, |own| own.sample)
+            {
+                Ok(index) => index,
+                Err(index) => {
+                    self.samples.insert(
+                        index,
+                        SampleLayer {
+                            sample: layer.sample,
+                            present: Vec::new(),
+                        },
+                    );
+                    index
+                }
+            };
+            let present = &mut self.samples[index].present;
+            for contact in &layer.present {
+                match present
+                    .iter_mut()
+                    .find(|own| own.volume == contact.volume && own.end == contact.start)
+                {
+                    Some(own) => own.end = contact.end,
+                    None => present.push(*contact),
+                }
+            }
+        }
+    }
 }
 
 /// One entity's share of a whole disc crossing: what the crossing presents of it, before any
@@ -2202,7 +2253,16 @@ fn encounters(
             now.insert(sample, layer.substances());
             samples.push(SampleLayer {
                 sample,
-                present: layer.present.clone(),
+                present: layer
+                    .present
+                    .iter()
+                    .map(|presence| VolumeContact {
+                        volume: presence.volume,
+                        material: presence.material,
+                        start: a,
+                        end: b,
+                    })
+                    .collect(),
             });
         }
         let interface = out.is_empty() || {
@@ -2674,6 +2734,19 @@ struct Advanced<S> {
     doses: BTreeMap<Entity, (f64, f64)>,
 }
 
+/// The encounters a mechanism advances through: each run of encounters joined across no interface
+/// is one ([`Encounter::absorb`]), so a seam inside one substance cannot change an outcome.
+fn one_substance_runs(encounters: &[Encounter]) -> Vec<Cow<'_, Encounter>> {
+    let mut out: Vec<Cow<'_, Encounter>> = Vec::with_capacity(encounters.len());
+    for encounter in encounters {
+        match out.last_mut() {
+            Some(run) if !encounter.interface => run.to_mut().absorb(encounter),
+            _ => out.push(Cow::Borrowed(encounter)),
+        }
+    }
+    out
+}
+
 /// Advance `state` through `encounters` in order until the mechanism stops.
 fn advance_through<M: Mechanism>(
     mechanism: &M,
@@ -2683,7 +2756,8 @@ fn advance_through<M: Mechanism>(
     geometry: &Geometry,
 ) -> Result<Advanced<M::State>, WalkError> {
     let mut doses: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
-    for encounter in encounters {
+    for encounter in one_substance_runs(encounters) {
+        let encounter = &*encounter;
         let advance = mechanism.advance(state, encounter, limits, geometry);
         state = advance.state;
         for effect in advance.effects {

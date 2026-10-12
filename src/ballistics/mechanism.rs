@@ -185,8 +185,11 @@ impl Mechanism for SolidShot {
     /// `A (a + k v²)` scaled by the present substance's share `factor / REFERENCE_FACTOR`, the disc
     /// force their sample mean, so the potential falls by `share · L / (m / (2 A k))` over `L`
     /// metres. Where a sample's layer holds several substances — an authoring overlap, §13.2 — it is
-    /// resisted once, by the most resistant of them (the union's law). Each volume present takes a
-    /// dose of its own factor over the progress consumed (§13.2's damage law: no ownership).
+    /// resisted once, by the most resistant of them (the union's law). A sample's substances are
+    /// the same over the whole encounter ([`SampleLayer::present`](super::walk::SampleLayer)) and
+    /// each carries one factor (`VolumeTable::new`), so its most resistant factor is read over all
+    /// its contacts. Each volume met takes a dose of its own factor over the part of its contact
+    /// the consumed progress covers (§13.2's damage law: no ownership).
     fn advance(
         &self,
         state: SolidShotState,
@@ -230,12 +233,15 @@ impl Mechanism for SolidShot {
         };
         let mut effects: Vec<Effect> = Vec::new();
         for sample in &encounter.samples {
-            for presence in &sample.present {
-                let chord = consumed / disc;
+            for contact in &sample.present {
+                let covered = (consumed - (contact.start - encounter.start))
+                    .min(contact.end - contact.start)
+                    .max(0.0);
+                let chord = covered / disc;
                 effects.push(Effect::Line {
-                    address: presence.volume,
+                    address: contact.volume,
                     chord,
-                    amount: chord * presence.material.factor as f64,
+                    amount: chord * contact.material.factor as f64,
                 });
             }
         }
@@ -274,10 +280,19 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
     ) -> Advance<M::State> {
         let charge = geometry.axis.dot(geometry.entrance_normal).abs() as f64;
         let length = encounter.end - encounter.start;
-        let projected = Encounter {
+        let project = |t: f64| encounter.start + (t - encounter.start) * charge;
+        let mut projected = Encounter {
             end: encounter.start + length * charge,
             ..encounter.clone()
         };
+        for contact in projected
+            .samples
+            .iter_mut()
+            .flat_map(|sample| sample.present.iter_mut())
+        {
+            contact.start = project(contact.start);
+            contact.end = project(contact.end);
+        }
         let mut advance = self.inner.advance(state, &projected, limits, geometry);
         advance.consumed = if advance.control == Control::Continue || charge <= 0.0 {
             length
@@ -295,7 +310,7 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ballistics::walk::{Presence, SampleLayer, VolumeMaterial};
+    use crate::ballistics::walk::{SampleLayer, VolumeContact, VolumeMaterial};
 
     /// Fixture data: an 88-class body.
     const BODY: RoundBody = RoundBody {
@@ -333,9 +348,11 @@ mod tests {
                     sample,
                     present: present
                         .iter()
-                        .map(|(index, factor)| Presence {
+                        .map(|(index, factor)| VolumeContact {
                             volume: volume(*index),
                             material: VolumeMaterial::fixture(*factor),
+                            start: 0.0,
+                            end: length,
                         })
                         .collect(),
                 })
