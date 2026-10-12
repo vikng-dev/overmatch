@@ -19,7 +19,7 @@ use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{ConsequenceState, PenCamVerdict, PenetrationReport, Role, SpallCone};
+use super::{ConsequenceState, PenetrationReport, Role, ShotVerdict, SpallCone};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -511,7 +511,7 @@ fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
 /// sample's time when no segment does. `None` when the path ends in material.
 fn departure(report: &PenetrationReport) -> Option<(f32, Vec3)> {
     let (anchor, from) = match report.impact.verdict {
-        PenCamVerdict::Ricochet => (report.impact.point, 0.0),
+        ShotVerdict::Ricochet => (report.impact.point, 0.0),
         _ => {
             let plate = report.plates.last()?;
             (plate.exit?, plate.t)
@@ -642,7 +642,7 @@ fn crossing(report: &PenetrationReport, index: usize) -> (Vec3, Vec3) {
     let entry = Vec3::from(plate.entry);
     let far = match plate.exit {
         Some(exit) => Vec3::from(exit),
-        None if !report.impact.verdict.entered() => entry,
+        None if report.impact.verdict == ShotVerdict::Ricochet => entry,
         None => report.path.last().map_or(entry, |p| Vec3::from(p.point)),
     };
     (entry, far)
@@ -992,7 +992,8 @@ fn rebuild_internals(
             InternalBox(index),
             Mesh3d(meshes.add(Cuboid::from_size(size))),
             MeshMaterial3d(materials.role(internal.role).clone()),
-            Transform::from_translation(Vec3::from(internal.center)),
+            Transform::from_translation(Vec3::from(internal.center))
+                .with_rotation(Quat::from_array(internal.rotation)),
         ));
     }
 }
@@ -1451,7 +1452,7 @@ fn draw_section_plate(
             let exit = Vec3::from(exit);
             Some((exit, (exit - entry).normalize_or(incoming)))
         }
-        None if !report.impact.verdict.entered() => None,
+        None if report.impact.verdict == ShotVerdict::Ricochet => None,
         None => {
             let along = (head - entry).normalize_or(incoming);
             let depth = (head - entry)
@@ -1491,7 +1492,7 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
     let incoming = Vec3::from(report.impact.incoming);
     let normal = Vec3::from(report.impact.normal);
     let color = match report.impact.verdict {
-        PenCamVerdict::Ricochet => RICOCHET,
+        ShotVerdict::Ricochet => RICOCHET,
         _ if report.plates.first().is_some_and(|p| p.overmatched) => OVERMATCH,
         _ => ENTRY,
     };
@@ -1614,11 +1615,11 @@ fn update_hud(
     );
 }
 
-fn verdict_word(verdict: PenCamVerdict) -> (&'static str, Color) {
+fn verdict_word(verdict: ShotVerdict) -> (&'static str, Color) {
     match verdict {
-        PenCamVerdict::Through => ("THROUGH", SPAN),
-        PenCamVerdict::Stopped => ("STOPPED", Color::srgb(0.45, 0.6, 0.85)),
-        PenCamVerdict::Ricochet => ("RICOCHET", RICOCHET),
+        ShotVerdict::Penetration => ("PENETRATION", SPAN),
+        ShotVerdict::NonPen => ("NON-PEN", Color::srgb(0.45, 0.6, 0.85)),
+        ShotVerdict::Ricochet => ("RICOCHET", RICOCHET),
     }
 }
 
@@ -1796,7 +1797,7 @@ fn update_plate_labels(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Fragment, Impact, PathPoint, Plate, Projectile};
+    use super::super::{Fragment, Impact, PathPoint, Plate, PlateClass, Projectile};
     use super::*;
 
     fn scenario(file: &str) -> PenetrationReport {
@@ -1832,6 +1833,8 @@ mod tests {
     fn straight_burst(fragment_end: [f32; 3]) -> PenetrationReport {
         PenetrationReport {
             synthetic: true,
+            vehicle: None,
+            turret_yaw_deg: 0.0,
             projectile: Projectile {
                 name: "fixture".into(),
                 caliber_mm: 88.0,
@@ -1843,9 +1846,10 @@ mod tests {
                 normal: [0.0, 0.0, -1.0],
                 incoming: [0.0, 0.0, 1.0],
                 incidence_deg: 0.0,
-                verdict: PenCamVerdict::Through,
+                verdict: ShotVerdict::Penetration,
             },
             plates: vec![],
+            ricochets: vec![],
             path: vec![
                 PathPoint {
                     t: 0.0,
@@ -1861,11 +1865,14 @@ mod tests {
                 origin: [0.0, 0.0, 0.3],
                 axis: [0.0, 0.0, 1.0],
                 half_angle_deg: 30.0,
+                strength: 0.0,
                 fragments: vec![Fragment {
                     end: fragment_end,
+                    strength: 0.0,
                     hits: vec![],
                 }],
             }],
+            doses: vec![],
             consequences: vec![],
             internals: vec![],
         }
@@ -1903,6 +1910,8 @@ mod tests {
             steel_equiv_mm: 100.0,
             cost_mm: 100.0,
             overmatched: false,
+            class: PlateClass::Main,
+            factor: 1000.0,
         };
         report.impact.point = [0.0, 1.0, 0.0];
         report.plates = vec![
@@ -2173,6 +2182,8 @@ mod tests {
             steel_equiv_mm: 100.0,
             cost_mm: 100.0,
             overmatched: false,
+            class: PlateClass::Main,
+            factor: 1000.0,
         }];
         let (left_at, anchor) = departure(&report).unwrap();
         assert!((left_at - 10.0 / speed).abs() < 1.0e-6);

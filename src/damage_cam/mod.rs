@@ -1,50 +1,76 @@
 //! The damage cam's record: [`PenetrationReport`], one per (shot, struck tank), and its player.
 //!
 //! The report is plain serde data — no entities, handles or meshes — so any source can fill it (a
-//! hand-authored RON clip today, the sim's accumulator later) and [`player`] consumes it unchanged.
+//! hand-authored RON clip, or [`record`] reading a shot the sim resolved) and [`player`] consumes
+//! it unchanged. It is not on the wire.
 //!
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
-//! first contact (the approach is negative), degrees for angles, millimetres for armour, kilograms
-//! and metres per second for the projectile. `synthetic` marks a report whose numbers were authored,
-//! not simulated; the player prints it on screen.
-//!
-//! v0: the sim-side fill will reshape it.
+//! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
+//! millimetres for doses, strengths and counts, kilograms and metres per second for the projectile.
+//! `synthetic` marks a report whose numbers were authored, not simulated; the player prints it on
+//! screen.
 
 pub mod player;
+pub mod record;
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub use crate::ballistics::{ImpactSurface, Verdict};
-
-/// What a pen cam shows the round did. A pen cam exists only for a hit on a player's tank, and
-/// only these three verdicts open one: [`Verdict::Struck`] has no counterpart, so a record cannot
-/// hold it.
+/// The pen cam's verdict on a whole shot against one tank, read from the path the authority
+/// resolved, never from damage. A pen cam exists only for a hit on a player's tank.
+///
+/// External armour ([`crate::spec::VolumeSpec::External`]) does not count: perforating a skirt
+/// or a road wheel is not perforating the tank.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PenCamVerdict {
-    Through,
-    Stopped,
+pub enum ShotVerdict {
+    /// The round perforated main armour, whatever happened after: it stopped in a far plate or
+    /// left the tank.
+    Penetration,
+    /// It bounced away without perforating main armour.
     Ricochet,
+    /// It came to rest without perforating main armour. A round that crossed only external armour
+    /// or exterior boxes and flew on is one too: it neither bounced nor got through the tank.
+    NonPen,
 }
 
-impl PenCamVerdict {
-    /// The round entered the material: it stopped inside it or went through.
-    pub fn entered(self) -> bool {
-        matches!(self, Self::Stopped | Self::Through)
-    }
+/// One armour event of a shot's path, as the verdict reads it, in path order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathStep {
+    /// Deflected off a face without entering it.
+    Bounce,
+    /// Entered the material: `perforated_main` when the whole round came out of a main armour
+    /// volume, `rested` when it came to rest inside this crossing.
+    Crossing { perforated_main: bool, rested: bool },
+    /// A walk that failed closed: an error, never a pen cam.
+    Failed,
+}
 
-    /// The pen cam an impact opens, if any. A ground hit opens none; nor does an armour contact
-    /// that resolved no crossing (`Struck` on armour: a fail-closed walk, which the march logs as
-    /// an error where the walk fails).
-    pub fn of_impact(surface: ImpactSurface, verdict: Verdict) -> Option<Self> {
-        match (surface, verdict) {
-            (ImpactSurface::Terrain, _) | (ImpactSurface::Armor, Verdict::Struck) => None,
-            (ImpactSurface::Armor, Verdict::Through) => Some(Self::Through),
-            (ImpactSurface::Armor, Verdict::Stopped) => Some(Self::Stopped),
-            (ImpactSurface::Armor, Verdict::Ricochet) => Some(Self::Ricochet),
+impl ShotVerdict {
+    /// The verdict a path earns, or `None` when it opens no pen cam: no armour event at all (a
+    /// ground hit), or any walk that failed closed.
+    pub fn of_path(steps: &[PathStep]) -> Option<Self> {
+        if steps.is_empty() || steps.contains(&PathStep::Failed) {
+            return None;
         }
+        let perforated = steps.iter().any(|step| {
+            matches!(
+                step,
+                PathStep::Crossing {
+                    perforated_main: true,
+                    ..
+                }
+            )
+        });
+        let rested = matches!(steps.last(), Some(PathStep::Crossing { rested: true, .. }));
+        Some(if perforated {
+            Self::Penetration
+        } else if !rested && steps.contains(&PathStep::Bounce) {
+            Self::Ricochet
+        } else {
+            Self::NonPen
+        })
     }
 }
 
@@ -52,15 +78,29 @@ impl PenCamVerdict {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct PenetrationReport {
     pub synthetic: bool,
+    /// The struck vehicle's tank file, relative to the asset root; `None` on a hand-authored clip.
+    #[serde(default)]
+    pub vehicle: Option<String>,
+    /// The struck turret's traverse from its spawn pose at the shot (degrees, about `+Y`,
+    /// positive from `-Z` toward `-X`).
+    #[serde(default)]
+    pub turret_yaw_deg: f32,
     pub projectile: Projectile,
     pub impact: Impact,
-    /// Shell crossings in path order.
+    /// Armour crossings in path order: one per armour volume the line put a chord into.
     pub plates: Vec<Plate>,
+    /// Bounces in path order.
+    #[serde(default)]
+    pub ricochets: Vec<Ricochet>,
     /// Timed shell path, approach included; a ricochet's deflection leg continues it.
     pub path: Vec<PathPoint>,
     pub spall: Vec<SpallCone>,
+    /// What the shot dosed each box with, in [`Self::internals`] order; a box it never reached is
+    /// absent.
+    #[serde(default)]
+    pub doses: Vec<BoxDose>,
     pub consequences: Vec<Consequence>,
-    /// The struck tank's crew and module volumes at the time of the shot.
+    /// The struck tank's boxes (crew and module volumes) at the time of the shot.
     pub internals: Vec<Internal>,
 }
 
@@ -82,22 +122,48 @@ pub struct Impact {
     pub incoming: [f32; 3],
     /// Angle between `-incoming` and `normal`.
     pub incidence_deg: f32,
-    pub verdict: PenCamVerdict,
+    pub verdict: ShotVerdict,
 }
 
-/// One plate crossing. Thickness is three numbers: the geometric chord along the path, its normal
-/// steel equivalent, and the cost actually charged against the shell's capability.
+/// Which armour a plate is: the shot verdict counts perforating main armour only.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlateClass {
+    #[default]
+    Main,
+    External,
+}
+
+/// One armour volume's crossing. Thickness is three numbers: the geometric chord along the path,
+/// its normal steel equivalent, and the cost actually charged against the shell's capability.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Plate {
     pub name: String,
     pub t: f32,
     pub entry: [f32; 3],
-    /// `None` when the shell did not come out the far side.
+    /// `None` when the shell did not come out the far side: it rests inside, at the path's end.
     pub exit: Option<[f32; 3]>,
     pub chord_mm: f32,
     pub steel_equiv_mm: f32,
     pub cost_mm: f32,
     pub overmatched: bool,
+    #[serde(default)]
+    pub class: PlateClass,
+    /// Reference-mm per metre of chord: the substance's factor. Zero on a hand-authored clip.
+    #[serde(default)]
+    pub factor: f32,
+}
+
+/// One bounce off a face.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Ricochet {
+    pub t: f32,
+    pub point: [f32; 3],
+    /// Outward surface normal at `point`.
+    pub normal: [f32; 3],
+    pub incoming: [f32; 3],
+    pub outgoing: [f32; 3],
+    /// The volume owning the struck face.
+    pub volume: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -115,14 +181,22 @@ pub struct SpallCone {
     /// Unit cone axis.
     pub axis: [f32; 3],
     pub half_angle_deg: f32,
+    /// The on-axis strength `S` (reference-mm). Zero on a hand-authored clip.
+    #[serde(default)]
+    pub strength: f32,
     pub fragments: Vec<Fragment>,
 }
 
+/// One direction of a spall cone.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Fragment {
-    /// Where the fragment stopped.
+    /// Where the direction's reach ended: inside the volume that exhausted it, or where it left
+    /// the struck tank.
     pub end: [f32; 3],
-    /// Volumes it deposited into, in flight order; empty for a fragment that hit nothing alive.
+    /// The strength it was thrown with (reference-mm). Zero on a hand-authored clip.
+    #[serde(default)]
+    pub strength: f32,
+    /// Boxes it dosed, in flight order; empty for a direction that dosed nothing.
     pub hits: Vec<FragmentHit>,
 }
 
@@ -130,7 +204,18 @@ pub struct Fragment {
 pub struct FragmentHit {
     /// An [`Internal::name`].
     pub volume: String,
+    /// Dose, reference-mm.
     pub damage: f32,
+}
+
+/// One box's dose from the shot (reference-mm): the line's, a bounce's shock included, and the
+/// spall cones'.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BoxDose {
+    /// An [`Internal::name`].
+    pub volume: String,
+    pub line: f32,
+    pub field: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -150,13 +235,24 @@ pub enum ConsequenceState {
     Cookoff,
 }
 
-/// An axis-aligned box standing in for a crew station or module volume.
+/// A box standing in for a crew station or module volume: its bounds in its own frame, placed in
+/// the record's frame.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Internal {
     pub name: String,
     pub role: Role,
     pub center: [f32; 3],
     pub half_extents: [f32; 3],
+    /// The box's orientation (`x, y, z, w` quaternion); identity is axis-aligned.
+    #[serde(default = "identity")]
+    pub rotation: [f32; 4],
+    /// The dose that disables it (reference-mm): its HP pool. Zero on a hand-authored clip.
+    #[serde(default)]
+    pub count: f32,
+}
+
+fn identity() -> [f32; 4] {
+    [0.0, 0.0, 0.0, 1.0]
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,40 +276,70 @@ impl PenetrationReport {
     pub fn internal(&self, name: &str) -> Option<&Internal> {
         self.internals.iter().find(|internal| internal.name == name)
     }
+
+    /// The record's path as the verdict reads it: its plates and bounces in time order, each
+    /// plate a crossing of its own. A plate without an exit is where the round rested.
+    pub fn steps(&self) -> Vec<PathStep> {
+        let mut steps: Vec<(f32, PathStep)> = self
+            .plates
+            .iter()
+            .map(|plate| {
+                let step = PathStep::Crossing {
+                    perforated_main: plate.class == PlateClass::Main && plate.exit.is_some(),
+                    rested: plate.exit.is_none(),
+                };
+                (plate.t, step)
+            })
+            .chain(
+                self.ricochets
+                    .iter()
+                    .map(|bounce| (bounce.t, PathStep::Bounce)),
+            )
+            .collect();
+        steps.sort_by(|a, b| a.0.total_cmp(&b.0));
+        steps.into_iter().map(|(_, step)| step).collect()
+    }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    /// Every armour verdict but `Struck` opens the pen cam of the same name; terrain opens none.
+    const MAIN_THROUGH: PathStep = PathStep::Crossing {
+        perforated_main: true,
+        rested: false,
+    };
+    const MAIN_RESTED: PathStep = PathStep::Crossing {
+        perforated_main: false,
+        rested: true,
+    };
+    const EXTERNAL_THROUGH: PathStep = PathStep::Crossing {
+        perforated_main: false,
+        rested: false,
+    };
+
+    /// The verdict reads the whole path: perforating main armour anywhere is a penetration,
+    /// whatever follows; short of that a round that comes to rest is a non-pen and one that
+    /// bounces away is a ricochet. No armour event, or any failed walk, opens no pen cam.
     #[test]
-    fn only_a_resolved_armour_verdict_opens_a_pen_cam() {
-        let all = [
-            Verdict::Through,
-            Verdict::Stopped,
-            Verdict::Ricochet,
-            Verdict::Struck,
+    fn the_shot_verdict_reads_the_whole_path() {
+        use PathStep::{Bounce, Failed};
+        let cases: [(&[PathStep], Option<ShotVerdict>); 12] = [
+            (&[], None),
+            (&[Failed], None),
+            (&[MAIN_THROUGH, Failed], None),
+            (&[Bounce], Some(ShotVerdict::Ricochet)),
+            (&[MAIN_RESTED], Some(ShotVerdict::NonPen)),
+            (&[MAIN_THROUGH], Some(ShotVerdict::Penetration)),
+            (&[MAIN_THROUGH, MAIN_RESTED], Some(ShotVerdict::Penetration)),
+            (&[EXTERNAL_THROUGH, MAIN_RESTED], Some(ShotVerdict::NonPen)),
+            (&[EXTERNAL_THROUGH, Bounce], Some(ShotVerdict::Ricochet)),
+            (&[Bounce, MAIN_RESTED], Some(ShotVerdict::NonPen)),
+            (&[Bounce, MAIN_THROUGH], Some(ShotVerdict::Penetration)),
+            (&[EXTERNAL_THROUGH], Some(ShotVerdict::NonPen)),
         ];
-        for verdict in all {
-            assert_eq!(
-                PenCamVerdict::of_impact(ImpactSurface::Terrain, verdict),
-                None
-            );
-        }
-        assert_eq!(
-            all.map(|verdict| PenCamVerdict::of_impact(ImpactSurface::Armor, verdict)),
-            [
-                Some(PenCamVerdict::Through),
-                Some(PenCamVerdict::Stopped),
-                Some(PenCamVerdict::Ricochet),
-                None,
-            ]
-        );
-        for verdict in all {
-            if let Some(opened) = PenCamVerdict::of_impact(ImpactSurface::Armor, verdict) {
-                assert_eq!(opened.entered(), verdict.entered());
-            }
+        for (steps, verdict) in cases {
+            assert_eq!(ShotVerdict::of_path(steps), verdict, "{steps:?}");
         }
     }
 
@@ -238,62 +364,67 @@ mod tests {
         for (_, file) in player::SCENARIOS {
             let report = PenetrationReport::load(&scenario_dir().join(file)).unwrap();
             assert!(report.synthetic, "{file}: demo clips are synthetic");
-            let cited = report
-                .spall
-                .iter()
-                .flat_map(|burst| &burst.fragments)
-                .flat_map(|fragment| &fragment.hits)
-                .map(|hit| hit.volume.as_str())
-                .chain(report.consequences.iter().map(|c| c.volume.as_str()));
-            for name in cited {
-                assert!(
-                    report.internal(name).is_some(),
-                    "{file}: unknown volume {name}"
-                );
-            }
-            let sorted = |ts: Vec<f32>| ts.windows(2).all(|w| w[0] <= w[1]);
-            assert!(sorted(report.path.iter().map(|p| p.t).collect()), "{file}");
+            assert_self_consistent(file, &report);
+        }
+    }
+
+    /// See [`scenarios_are_self_consistent`]; shared with the recorded scenarios.
+    pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
+        let cited = report
+            .spall
+            .iter()
+            .flat_map(|burst| &burst.fragments)
+            .flat_map(|fragment| &fragment.hits)
+            .map(|hit| hit.volume.as_str())
+            .chain(report.consequences.iter().map(|c| c.volume.as_str()));
+        for name in cited {
             assert!(
-                sorted(report.consequences.iter().map(|c| c.t).collect()),
-                "{file}"
+                report.internal(name).is_some(),
+                "{file}: unknown volume {name}"
             );
-            assert!(report.path.len() >= 2, "{file}: path needs a segment");
-            let last = report.path.last().unwrap();
-            for plate in &report.plates {
-                assert!(
-                    last.t >= plate.t,
-                    "{file}: the path ends before {}",
-                    plate.name
-                );
-            }
-            if let Some(index) = report.plates.iter().position(|p| p.exit.is_none()) {
-                assert_eq!(
-                    index + 1,
-                    report.plates.len(),
-                    "{file}: a plate without an exit is the last plate"
-                );
-            }
-            if report.impact.verdict.entered() {
-                let plate = report.plates.last().expect("a plate");
-                match plate.exit {
-                    None => {
-                        let gap = distance(last.point, plate.entry);
-                        assert!(
-                            gap <= 0.25,
-                            "{file}: the path ends {gap:.2} m from {}",
-                            plate.name
-                        );
-                    }
-                    Some(exit) => {
-                        let along: f32 = (0..3)
-                            .map(|i| (last.point[i] - exit[i]) * (exit[i] - plate.entry[i]))
-                            .sum();
-                        assert!(
-                            along >= 0.0,
-                            "{file}: the path ends behind the exit of {}",
-                            plate.name
-                        );
-                    }
+        }
+        let sorted = |ts: Vec<f32>| ts.windows(2).all(|w| w[0] <= w[1]);
+        assert!(sorted(report.path.iter().map(|p| p.t).collect()), "{file}");
+        assert!(
+            sorted(report.consequences.iter().map(|c| c.t).collect()),
+            "{file}"
+        );
+        assert!(report.path.len() >= 2, "{file}: path needs a segment");
+        let last = report.path.last().unwrap();
+        for plate in &report.plates {
+            assert!(
+                last.t >= plate.t,
+                "{file}: the path ends before {}",
+                plate.name
+            );
+        }
+        if let Some(index) = report.plates.iter().position(|p| p.exit.is_none()) {
+            assert_eq!(
+                index + 1,
+                report.plates.len(),
+                "{file}: a plate without an exit is the last plate"
+            );
+        }
+        if report.impact.verdict != ShotVerdict::Ricochet {
+            let plate = report.plates.last().expect("a plate");
+            match plate.exit {
+                None => {
+                    let gap = distance(last.point, plate.entry);
+                    assert!(
+                        gap <= 0.25,
+                        "{file}: the path ends {gap:.2} m from {}",
+                        plate.name
+                    );
+                }
+                Some(exit) => {
+                    let along: f32 = (0..3)
+                        .map(|i| (last.point[i] - exit[i]) * (exit[i] - plate.entry[i]))
+                        .sum();
+                    assert!(
+                        along >= 0.0,
+                        "{file}: the path ends behind the exit of {}",
+                        plate.name
+                    );
                 }
             }
         }

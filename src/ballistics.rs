@@ -64,6 +64,10 @@ mod goldens;
 #[cfg(test)]
 mod field_casts;
 
+/// Pen cam records read off the march: the shot verdict's class invariants on fixture plates.
+#[cfg(test)]
+mod pen_cam;
+
 /// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
 /// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
 /// composes [`sim_plugin`] and therefore opens no view artifact and emits no render component.
@@ -280,7 +284,7 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
 }
 
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
-const TRANSIT_K: f32 = 1.0;
+pub(crate) const TRANSIT_K: f32 = 1.0;
 
 /// Apply `doses` in order, each to its box's HP pool floored at zero, and return the HP removed. A
 /// box with no HP pool takes nothing. Only authority writes HP (`deposit`).
@@ -830,6 +834,66 @@ pub struct PenetrationMarks {
     pub events: Vec<PenetrationEvent>,
     /// Points where the shell ricocheted off a too-oblique face (deflected, did not enter).
     pub ricochets: Vec<Vec3>,
+    /// Every armour event the authority's march resolved, in march order: the whole path a pen cam
+    /// record is read from. A replica's march decides no armour and logs nothing.
+    pub log: Vec<ArmourMark>,
+}
+
+/// One armour event of a shell's flight, as the authority's march resolved it. Positions WORLD,
+/// speeds m/s.
+#[derive(Clone, Debug)]
+pub enum ArmourMark {
+    /// Deflected off a face without entering it.
+    Bounce {
+        position: Vec3,
+        normal: Vec3,
+        incoming: Vec3,
+        outgoing: Vec3,
+        speed_in: f32,
+        speed_out: f32,
+        /// The volume owning the struck face.
+        struck: Entity,
+        /// HP the bounce jarred into `struck` before its floor; armour has no pool and takes none.
+        shock: f32,
+    },
+    /// Entered the material: came to rest inside it or out the far side.
+    Crossing {
+        entrance: Vec3,
+        normal: Vec3,
+        incoming: Vec3,
+        speed_in: f32,
+        overmatched: bool,
+        /// Every volume the line put a chord into, in volume order.
+        volumes: Vec<VolumeCrossing>,
+        end: CrossingEnd,
+        /// The spall cones this crossing threw: the next `cones` of the shell's [`SpallMarks`].
+        cones: usize,
+    },
+    /// A walk that failed closed: the round stopped at contact with no crossing resolved.
+    Failed,
+}
+
+/// How a crossing ended.
+#[derive(Clone, Copy, Debug)]
+pub enum CrossingEnd {
+    Rest { at: Vec3 },
+    Exit { at: Vec3, speed: f32 },
+}
+
+/// How far a crossing's line got through one volume.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeCrossing {
+    pub volume: Entity,
+    /// Where the line entered it and where it left it or came to rest in it, on the crossing's axis
+    /// (WORLD).
+    pub entry: Vec3,
+    pub end: Vec3,
+    /// Disc-mean chord (m).
+    pub chord: f32,
+    /// The line's dose to it (reference-mm): chord × factor.
+    pub cost: f32,
+    /// The whole disc came out of it.
+    pub perforated: bool,
 }
 
 /// One direction of a spall cone, as marched: where it stopped (its strength exhausted, or where it
@@ -837,6 +901,10 @@ pub struct PenetrationMarks {
 pub struct SpallRay {
     pub end: Vec3,
     pub deposited: bool,
+    /// The strength (reference-mm) the direction was thrown with: the cone's `S` times its profile.
+    pub strength: f32,
+    /// The doses it addressed (volume, reference-mm), in entry order.
+    pub doses: Vec<(Entity, f32)>,
 }
 
 /// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and half-angle
@@ -906,7 +974,8 @@ pub enum ImpactSurface {
 /// is a stop at the face with no crossing resolved: every terrain strike, and an armour contact
 /// that ends without a crossing (a fail-closed walk, an unkeyed replica's neutral spark, the
 /// short-circuit probe). `Stopped` entered the material and ended inside it; `Through` came out the
-/// far side. `Struck` opens no pen cam ([`crate::damage_cam::PenCamVerdict`]).
+/// far side. `Struck` on armour is a walk that failed closed, which opens no pen cam
+/// ([`crate::damage_cam::ShotVerdict`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Through,
@@ -2382,6 +2451,7 @@ fn march_shell_step(
                     "ballistics: union walk failed, stopping the round at contact; it opens no \
                      pen cam"
                 );
+                shell.marks.log.push(ArmourMark::Failed);
                 commands.trigger(Impact {
                     position: entry,
                     normal: contact_normal,
@@ -2467,6 +2537,7 @@ fn uncertified_start(
             "ballistics: a fresh start could not be certified, stopping the round; it opens no \
              pen cam"
         );
+        shell.marks.log.push(ArmourMark::Failed);
         commands.trigger(Impact {
             position,
             normal: -Vec3::from(direction),
@@ -2697,6 +2768,7 @@ fn throw_spall_cone(
     };
     let mut failed: Option<(usize, walk::WalkError)> = None;
     for (ray_dir, profile) in shape.directions(axis) {
+        let thrown = strength * profile;
         let walked = resolve::field_direction(
             context,
             &within,
@@ -2704,7 +2776,7 @@ fn throw_spall_cone(
             &source.exited,
             source.position,
             ray_dir,
-            strength * profile,
+            thrown,
             weight,
         );
         let ray = match walked {
@@ -2721,6 +2793,12 @@ fn throw_spall_cone(
         cone.rays.push(SpallRay {
             end: ray.end,
             deposited: !ray.doses.is_empty(),
+            strength: thrown,
+            doses: ray
+                .doses
+                .iter()
+                .map(|dose| (dose.address, dose.amount))
+                .collect(),
         });
     }
     if let Some((count, error)) = failed {
@@ -4508,16 +4586,25 @@ mod march_tests {
         );
     }
 
-    /// A pen cam opens only for a hit on armour that resolved one of its three verdicts: the
-    /// ricochet, the stop and the perforation each open one; a ground hit and a fail-closed armour
-    /// contact open none. Plate thicknesses and the 75° graze are fixture data.
+    /// A pen cam opens only for a hit on armour that resolved one of its three verdicts, read
+    /// from the shell's whole logged path: the ricochet, the stop and the perforation each open
+    /// one; a ground hit and a fail-closed armour contact open none. Plate thicknesses and the 75°
+    /// graze are fixture data.
     #[test]
     fn a_pen_cam_opens_only_for_a_resolved_armour_hit() {
-        use crate::damage_cam::PenCamVerdict;
-        let opened = |hits: &[Captured]| -> Vec<Option<PenCamVerdict>> {
-            hits.iter()
-                .map(|hit| PenCamVerdict::of_impact(hit.surface, hit.verdict))
-                .collect()
+        use crate::damage_cam::{ShotVerdict, record::path_steps};
+        let opened = |app: &mut App| -> Option<ShotVerdict> {
+            let shells: Vec<Entity> = app
+                .world_mut()
+                .query_filtered::<Entity, With<PenetrationMarks>>()
+                .iter(app.world())
+                .collect();
+            assert_eq!(shells.len(), 1, "one shell, retained");
+            ShotVerdict::of_path(&path_steps(app.world(), shells[0], None))
+        };
+        let retained = |mut app: App| {
+            app.insert_resource(RetainSpentShells(true));
+            app
         };
         let graze = Vec3::new(
             75.0_f32.to_radians().sin(),
@@ -4525,56 +4612,48 @@ mod march_tests {
             -75.0_f32.to_radians().cos(),
         )
         .normalize();
-        let plate =
-            |thickness: f32| world_with_plate(Vec3::new(3.0, 3.0, thickness), Vec3::Y * 2.0);
+        let plate = |thickness: f32| {
+            retained(world_with_plate(
+                Vec3::new(3.0, 3.0, thickness),
+                Vec3::Y * 2.0,
+            ))
+        };
         let head_on = Vec3::new(0.0, 2.0, 2.0);
-        assert_eq!(
-            opened(&fire_and_capture(
-                &mut plate(0.10),
+        for (thickness, origin, direction, verdict) in [
+            (
+                0.10,
                 Vec3::new(-1.0, 2.0, 0.6),
                 graze,
-                800.0
-            )),
-            [Some(PenCamVerdict::Ricochet)],
-        );
-        assert_eq!(
-            opened(&fire_and_capture(
-                &mut plate(0.5),
-                head_on,
-                Vec3::NEG_Z,
-                800.0
-            )),
-            [Some(PenCamVerdict::Stopped)],
-        );
-        assert_eq!(
-            opened(&fire_and_capture(
-                &mut plate(0.05),
-                head_on,
-                Vec3::NEG_Z,
-                800.0
-            )),
-            [Some(PenCamVerdict::Through)],
-        );
+                ShotVerdict::Ricochet,
+            ),
+            (0.5, head_on, Vec3::NEG_Z, ShotVerdict::NonPen),
+            (0.05, head_on, Vec3::NEG_Z, ShotVerdict::Penetration),
+        ] {
+            let mut app = plate(thickness);
+            fire_and_capture(&mut app, origin, direction, 800.0);
+            assert_eq!(opened(&mut app), Some(verdict), "{thickness} m plate");
+        }
 
-        let mut ground = world_with_plate(Vec3::splat(0.5), Vec3::splat(900.0));
+        let mut ground = retained(world_with_plate(Vec3::splat(0.5), Vec3::splat(900.0)));
         ground.insert_resource(flat_grid(30.0));
-        let ground = fire_and_capture(
+        let hits = fire_and_capture(
             &mut ground,
             Vec3::new(10.0, 80.0, -20.0),
             Vec3::NEG_Y,
             800.0,
         );
-        assert_eq!(ground.len(), 1, "one ground read");
-        assert_eq!(opened(&ground), [None]);
+        assert_eq!(hits.len(), 1, "one ground read");
+        assert_eq!(hits[0].surface, ImpactSurface::Terrain);
+        assert_eq!(opened(&mut ground), None);
 
         let mut failed = plate(0.10);
         spawn_uncertifiable(&mut failed);
         spawn_free_shell(&mut failed, UNCERTIFIABLE_AT, Vec3::Z, 800.0, a_shot());
         failed.update();
-        let failed = failed.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(failed.len(), 1, "one fail-closed read");
-        assert_eq!(failed[0].surface, ImpactSurface::Armor);
-        assert_eq!(opened(&failed), [None]);
+        let hits = failed.world().resource::<ImpactLog>().0.clone();
+        assert_eq!(hits.len(), 1, "one fail-closed read");
+        assert_eq!(hits[0].surface, ImpactSurface::Armor);
+        assert_eq!(opened(&mut failed), None);
     }
 
     /// The authority fails an uncertified fresh start closed, where it stands.

@@ -9,7 +9,7 @@
         normal: (0.280, 0.050, -0.959),
         incoming: (-0.040, -0.010, 0.999),
         incidence_deg: 14.1,
-        verdict: Stopped,
+        verdict: NonPen,
     ),
     plates: [
         (

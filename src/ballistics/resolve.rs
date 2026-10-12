@@ -52,9 +52,10 @@ use super::walk::{
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
-    BallisticSurfaces, ComponentHealth, Impact, ImpactOutcome, ImpactSurface, MARCH_EPS,
-    MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet, ShellTerminal,
-    TerminalVerdict, apply_doses, apply_hit_impulse, hit_ancestor, throw_spall_cone,
+    ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
+    ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
+    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_doses, apply_hit_impulse, hit_ancestor,
+    throw_spall_cone,
 };
 
 #[cfg(test)]
@@ -953,6 +954,9 @@ pub(crate) struct Bounce {
     pub direction: Dir3,
     /// Speed retained (m/s).
     pub speed: f32,
+    /// Direction of travel and speed (m/s) at contact.
+    pub incoming: Dir3,
+    pub speed_in: f32,
     /// Momentum handed to `owner` at `position`.
     pub impulse: Vec3,
     /// Line-of-sight metres flown from the flight's position to the face, along the way in, and the
@@ -987,6 +991,11 @@ pub(crate) struct Bite {
     /// One spall source per body exit the round reached, embedded or through, positions in WORLD
     /// ([`walk::SpallSource`]).
     pub spall: Vec<SpallSource>,
+    /// Direction of travel and speed (m/s) at the entrance.
+    pub incoming: Dir3,
+    pub speed_in: f32,
+    /// Every volume the line put a chord into, with how far it got through it, in volume order.
+    pub volumes: Vec<VolumeCrossing>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
     /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
     /// and for a perforation the nudge on to the resume point.
@@ -1137,6 +1146,8 @@ pub(crate) fn decide(
                 shock: SHOCK_K * capability_in * libm::cosf(read.incidence),
                 direction: out,
                 speed: bled,
+                incoming: dir,
+                speed_in: speed,
                 impulse: body.mass * (v_in - Vec3::from(out) * bled),
                 travel: (read.position - from).dot(Vec3::from(dir)).max(0.0) + MARCH_EPS,
                 resume: position + read.normal * radius + out * MARCH_EPS,
@@ -1165,7 +1176,7 @@ pub(crate) fn decide(
                 from,
                 dir,
                 bent,
-                v_in,
+                speed,
                 owner,
                 &context.laws,
             )))
@@ -1187,10 +1198,12 @@ fn bite(
     from: Vec3,
     incoming: Dir3,
     bent: Dir3,
-    v_in: Vec3,
+    // m/s at the entrance.
+    speed_in: f32,
     owner: impl Fn(Entity) -> Option<Entity>,
     laws: &WalkLaws,
 ) -> Bite {
+    let v_in = Vec3::from(incoming) * speed_in;
     // THE BOUNDARY. Everything the walk reports is anchor-relative. What leaves for presentation and
     // physics — the entrance, the exit, the embed point, spall sources, the resume point — is
     // converted to WORLD here, in one place. The continuation ([`Interior`]) deliberately stays
@@ -1202,6 +1215,11 @@ fn bite(
     // `t` then measures the rest, along the bend.
     let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
     let entrance = world(plan.entrance.position);
+    let rest = match plan.outcome {
+        Outcome::Embedded { t, .. } => Some(t as f64),
+        Outcome::Perforated { .. } => None,
+    };
+    let volumes = volume_crossings(transit, &plan.deposits, rest, &world);
     let (end, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
@@ -1235,6 +1253,9 @@ fn bite(
     };
     Bite {
         entrance,
+        incoming,
+        speed_in,
+        volumes,
         normal: plan.entrance.normal,
         coverage: plan.entrance.coverage,
         overmatched: plan.entrance.overmatched,
@@ -1251,6 +1272,53 @@ fn bite(
         travel: approach + flown,
         end,
     }
+}
+
+/// How far the line got through each volume it put a chord into: the axis points where the disc's
+/// first sample met the volume and where its last left it (or the rest point, inside), from the
+/// crossing's encounter contacts. A volume is perforated when every sample's contact with it ends
+/// at or before `rest` — the whole disc came out — and always on a perforation (`rest` `None`).
+fn volume_crossings(
+    transit: &DiscWalk,
+    deposits: &[Dose],
+    rest: Option<f64>,
+    world: &impl Fn(Vec3) -> Vec3,
+) -> Vec<VolumeCrossing> {
+    let Some(event) = transit.events.first() else {
+        return Vec::new();
+    };
+    let mut spans: std::collections::BTreeMap<Entity, (f64, f64)> = Default::default();
+    for contact in event
+        .encounters
+        .iter()
+        .flat_map(|encounter| &encounter.samples)
+        .flat_map(|sample| &sample.present)
+    {
+        let span = spans
+            .entry(contact.volume)
+            .or_insert((contact.start, contact.end));
+        span.0 = span.0.min(contact.start);
+        span.1 = span.1.max(contact.end);
+    }
+    let at = |t: f64| world(transit.origin + transit.axis * t as f32);
+    deposits
+        .iter()
+        .filter_map(|dose| {
+            let DoseSource::Line { chord } = dose.source else {
+                return None;
+            };
+            let &(start, end) = spans.get(&dose.address)?;
+            let perforated = rest.is_none_or(|rest| end <= rest);
+            Some(VolumeCrossing {
+                volume: dose.address,
+                entry: at(start),
+                end: at(if perforated { end } else { rest.unwrap_or(end) }),
+                chord,
+                cost: dose.amount,
+                perforated,
+            })
+        })
+        .collect()
 }
 
 /// Collect and walk a corridor, extending it until the first crossing CLOSES.
@@ -1501,6 +1569,16 @@ fn apply_bounce(
         },
     });
     shell.marks.ricochets.push(bounce.position);
+    shell.marks.log.push(ArmourMark::Bounce {
+        position: bounce.position,
+        normal: bounce.normal,
+        incoming: Vec3::from(bounce.incoming),
+        outgoing: Vec3::from(bounce.direction),
+        speed_in: bounce.speed_in,
+        speed_out: bounce.speed,
+        struck: bounce.struck,
+        shock: bounce.shock,
+    });
     shell.path.points.push(bounce.position);
     if let Some(shot) = shell.shot
         && !*terminal_emitted
@@ -1562,6 +1640,22 @@ fn apply_bite(
     for source in &bite.spall {
         damage += throw_spall_cone(shell.spall, source, bite.owner, context, health);
     }
+    shell.marks.log.push(ArmourMark::Crossing {
+        entrance: bite.entrance,
+        normal: bite.normal,
+        incoming: Vec3::from(bite.incoming),
+        speed_in: bite.speed_in,
+        overmatched: bite.overmatched,
+        volumes: bite.volumes.clone(),
+        end: match &bite.end {
+            BiteEnd::Embedded { at, .. } => CrossingEnd::Rest { at: *at },
+            BiteEnd::Perforated { exit, speed, .. } => CrossingEnd::Exit {
+                at: *exit,
+                speed: *speed,
+            },
+        },
+        cones: bite.spall.len(),
+    });
 
     commands.trigger(Impact {
         position,

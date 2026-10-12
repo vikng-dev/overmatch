@@ -10,7 +10,7 @@
         normal: (-1.000, 0.000, 0.000),
         incoming: (0.970, -0.030, 0.240),
         incidence_deg: 14.0,
-        verdict: Through,
+        verdict: Penetration,
     ),
     plates: [
         (
