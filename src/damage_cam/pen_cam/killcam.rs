@@ -602,7 +602,7 @@ pub fn camera(
         });
         if let Some(hull) = hull {
             let pose = view::pose_under(hull, cam.shooter, &parents, |node| {
-                transforms.get(node).ok().map(|transform| *transform)
+                transforms.get(node).ok().copied()
             });
             cam.shooter_hull = Some(pose.inverse());
         }
@@ -650,7 +650,7 @@ pub fn camera(
         return;
     };
     let shot = &run.shots[shot_index];
-    let local = |node: Entity| transforms.get(node).ok().map(|transform| *transform);
+    let local = |node: Entity| transforms.get(node).ok().copied();
     let victim_root = local(views.world).unwrap_or_default();
     let victim_turret = view::pose_under(victim_turret, views.world, &parents, local)
         .w_axis

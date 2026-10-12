@@ -180,7 +180,7 @@ pub fn prepare(
             continue;
         };
         let hull_pose = pose_under(hull, entity, &parents, |node| {
-            transforms.get(node).ok().map(|transform| *transform)
+            transforms.get(node).ok().copied()
         });
         if let Ok(mut root_transform) = transforms.get_mut(entity) {
             *root_transform = Transform::from_matrix(hull_pose.inverse());
