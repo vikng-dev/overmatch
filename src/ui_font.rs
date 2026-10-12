@@ -112,3 +112,51 @@ pub(crate) fn plugin(app: &mut App) {
     };
     app.insert_resource(fonts);
 }
+
+/// The glyphs past printable ASCII that both shipped weights carry, each confirmed in their cmaps;
+/// `tests/ui_ascii.rs` guards source literals against the same set.
+const TYPOGRAPHIC: [char; 7] = [
+    '\u{2026}', '\u{2014}', '\u{2013}', '\u{00B0}', '\u{00D7}', '\u{00B1}', '\u{2264}',
+];
+
+/// `text` reduced to what the shipped font draws: printable ASCII and [`TYPOGRAPHIC`], every run of
+/// anything else collapsed to one space, so a dropped glyph never welds two words. `None` where no
+/// letter or digit survives: the caller says what is missing instead. For strings that come from
+/// data (a player's name, a tank file's label), which `tests/ui_ascii.rs` cannot see.
+pub(crate) fn drawable(text: &str) -> Option<String> {
+    let mut out = String::new();
+    for character in text.chars() {
+        let kept = if (' '..='~').contains(&character) || TYPOGRAPHIC.contains(&character) {
+            character
+        } else {
+            ' '
+        };
+        if kept != ' ' || !(out.is_empty() || out.ends_with(' ')) {
+            out.push(kept);
+        }
+    }
+    let out = out.trim_end().to_owned();
+    out.chars()
+        .any(|character| character.is_ascii_alphanumeric())
+        .then_some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the font draws passes unchanged; anything else collapses to a space, and a string with
+    /// nothing legible left is refused.
+    #[test]
+    fn drawable_keeps_only_what_the_font_draws() {
+        assert_eq!(drawable("Tiger I").as_deref(), Some("Tiger I"));
+        assert_eq!(
+            drawable("88mm_AP 773 m/s \u{00B1}1\u{00B0}").as_deref(),
+            Some("88mm_AP 773 m/s \u{00B1}1\u{00B0}")
+        );
+        assert_eq!(drawable("Lt. \u{674E} Wei").as_deref(), Some("Lt. Wei"));
+        assert_eq!(drawable("\u{00DC}nter").as_deref(), Some("nter"));
+        assert_eq!(drawable("\u{864E}\u{738B}"), None);
+        assert_eq!(drawable("\u{2014}"), None);
+    }
+}
