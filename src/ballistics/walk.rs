@@ -167,8 +167,8 @@ pub enum Contact {
 /// `true_normal` is the face's OUTWARD normal recovered from triangle winding — NOT parry's
 /// reported normal, which is flipped to oppose the ray, so a backface read from inside is
 /// indistinguishable from a head-on entry (§13.1). Recovering the true orientation is the adapter's
-/// contract; this module classifies entry/exit from it and would silently invert the whole walk if
-/// handed the flipped one.
+/// contract, and [`entering`](Self::entering) is that orientation decided; this module classifies
+/// entry/exit from it and would silently invert the whole walk if handed the flipped one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FaceHit {
     pub volume: Entity,
@@ -194,6 +194,12 @@ pub struct FaceHit {
     /// parameter itself stays wide from the collector's exact projection through to the cost integral.
     pub t: f64,
     pub true_normal: Vec3,
+    /// Whether the ray crosses this face INTO its shell (against the outward normal). Decided by
+    /// the collector with the predicate that admitted the face — the sign of the exact crossing
+    /// determinant — so every admitted face has a direction. `true_normal` is the face's geometry
+    /// and never re-decides it: its f32 dot with the axis can cancel to zero, or flip, on a crossing
+    /// whose exact determinant does not.
+    pub entering: bool,
 }
 
 impl FaceHit {
@@ -833,7 +839,7 @@ struct Crossing {
 /// that agrees is transverse and emits exactly one oriented crossing. That is the whole rule, and it
 /// needs neither a normal tolerance nor a minimum thickness — a shell thinner than any window is two
 /// DIFFERENT contacts and stays two crossings.
-fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
+fn canonical_crossings(order: &[&FaceHit]) -> Vec<Crossing> {
     struct Fan {
         t: f64,
         sign: i32,
@@ -844,16 +850,11 @@ fn canonical_crossings(order: &[&FaceHit], axis: Vec3) -> Vec<Crossing> {
     let mut fans: BTreeMap<(ShellKey, Contact), Fan> = BTreeMap::new();
     for hit in order {
         // EXACT ZERO IS THE ONLY TANGENT, and the collector has already refused it: a face whose
-        // plane contains the ray projects to a degenerate outline and claims nothing. So the sign of
-        // `axis · n` is the direction, with no angular threshold deciding what counts as a face.
-        let d = axis.dot(hit.true_normal);
-        let sign = if d < 0.0 {
-            1
-        } else if d > 0.0 {
-            -1
-        } else {
-            continue;
-        };
+        // plane contains the ray projects to a degenerate outline and claims nothing. So every hit
+        // has a direction, read from the collector's exact predicate rather than re-derived from
+        // `true_normal`, with no angular threshold deciding what counts as a face. A fan whose
+        // claims disagree is a tangent brush, dropped below.
+        let sign = if hit.entering { 1 } else { -1 };
         match fans.entry((hit.key(), hit.contact)) {
             std::collections::btree_map::Entry::Occupied(mut slot) => {
                 let fan = slot.get_mut();
@@ -971,7 +972,7 @@ pub fn walk_ray(
     // reversed pair is an exit before its own entry: a structured error over geometry that is
     // perfectly ordinary. An exit that STILL precedes its entry after this sort is a genuine
     // alternation violation, and stays one.
-    let mut crossings = canonical_crossings(&order, corridor.axis);
+    let mut crossings = canonical_crossings(&order);
     crossings.sort_by(|a, b| {
         a.t.total_cmp(&b.t)
             .then(a.key.cmp(&b.key))

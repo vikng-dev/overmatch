@@ -1446,10 +1446,6 @@ const GRAZED_SWEPT: Vec3 = Vec3::new(0.6, 0.8, 0.0);
 /// prism; the corridor resumed along `(0.6, 0.799999, 0)` then meets the lower face's exit (DERIVED:
 /// ~15 mm ahead) with no entry owned, `UnexpectedExit`. The certificate must either read the start
 /// inside, with the resumed corridor pairing, or refuse with a structured error. One axis sample.
-///
-/// It refuses today: the start's own line crosses the lower face transversely in exact arithmetic,
-/// but the walk reads that crossing's orientation as a tangent and drops it (see
-/// [`a_crossing_the_collector_admits_is_never_read_as_a_tangent`]), so the probe does not close.
 #[test]
 fn a_start_is_certified_on_the_ray_its_corridor_resumes_along() {
     let (mut app, built) = settled(grazed_prism);
@@ -1497,16 +1493,14 @@ fn a_start_a_hair_inside_a_grazed_face_is_certified_inside_it() {
 
 /// A CROSSING THE COLLECTOR ADMITS IS NEVER READ AS A TANGENT.
 ///
-/// The collector admits a triangle whenever the exact crossing determinant is non-zero, but the
-/// walk (`walk::canonical_crossings`) signs it by the f32 dot of the axis with the face's normalized
-/// normal, and drops it as a tangent when that dot is exactly zero. Along `(0.6, 0.8, 0)` in f32 the
-/// prism's lower-face normal `(0.8, −0.6, 0)` dots to exactly zero, while the exact determinant does
-/// not vanish (DERIVED: `0.6f·8 − 0.8f·6 ≈ 1.2e-7`), so the start's own line exits through that face
-/// and the walk never sees the exit: the probe ends with the prism open, `IncompleteCorridor`.
+/// The collector admits a triangle whenever the exact crossing determinant is non-zero, and signs it
+/// by that same determinant (`walk::FaceHit::entering`); the walk reads that sign and never the f32
+/// dot of the axis with the face's normalized normal. Along `(0.6, 0.8, 0)` in f32 the prism's
+/// lower-face normal `(0.8, −0.6, 0)` dots to exactly zero, while the exact determinant does not
+/// vanish (DERIVED: `0.6f·8 − 0.8f·6 ≈ 1.2e-7`), so the start's own line exits through that face;
+/// read from the dot, that exit is a tangent and the probe ends with the prism open,
+/// `IncompleteCorridor`.
 #[test]
-#[ignore = "open defect: a transverse crossing's orientation is read from an f32 dot that can \
-            cancel to zero, so the walk drops a crossing the collector admitted; the certificate \
-            fails closed on it"]
 fn a_crossing_the_collector_admits_is_never_read_as_a_tangent() {
     let (mut app, built) = settled(grazed_prism);
     let starts = resumed(&mut app, GRAZED_START, GRAZED_SWEPT, GRAZED_SWEPT, 0.0);

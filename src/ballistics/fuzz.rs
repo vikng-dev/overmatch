@@ -1425,7 +1425,7 @@ fn run_replay(
                     text,
                     "  t={:.7} {:>3} {:<28} volume={:?} primitive={:?} triangle={} axis·n={:+.6}",
                     hit.t,
-                    if along < 0.0 { "IN" } else { "OUT" },
+                    if hit.entering { "IN" } else { "OUT" },
                     pass.volume_name(hit.volume),
                     hit.volume,
                     hit.primitive,

@@ -70,6 +70,7 @@ fn oblique_plate(
             triangle: primitive * 100 + shell * 10,
             t: enter,
             true_normal: entry_normal.normalize(),
+            entering: AXIS.dot(entry_normal) < 0.0,
         },
         FaceHit {
             volume: volume(vol),
@@ -79,6 +80,7 @@ fn oblique_plate(
             triangle: primitive * 100 + shell * 10 + 1,
             t: exit,
             true_normal: exit_normal.normalize(),
+            entering: AXIS.dot(exit_normal) < 0.0,
         },
     ]
 }
@@ -190,9 +192,9 @@ impl Slab {
         } else {
             ((back, -n), (front, n))
         };
-        [(enter, 0u32), (exit, 1u32)]
+        [(enter, 0u32, true), (exit, 1u32, false)]
             .into_iter()
-            .filter_map(|((t, true_normal), face)| {
+            .filter_map(|((t, true_normal), face, entering)| {
                 let t = if t < 0.0 {
                     if seeded {
                         return None;
@@ -209,6 +211,7 @@ impl Slab {
                     triangle: self.primitive * 100 + face,
                     t: t as f64,
                     true_normal,
+                    entering,
                 })
             })
             .collect()
@@ -310,6 +313,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -319,6 +323,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 1,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -328,6 +333,7 @@ fn a_face_diagonal_hit_is_one_crossing() {
             triangle: 2,
             t: 1.125,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     let result = walk(&corridor(4.0, hits), &volumes);
@@ -357,6 +363,7 @@ fn a_shared_vertex_fan_is_one_crossing() {
             triangle: index as u32,
             t: 1.0,
             true_normal: normal.normalize(),
+            entering: AXIS.dot(normal) < 0.0,
         });
     }
     hits.push(FaceHit {
@@ -367,6 +374,7 @@ fn a_shared_vertex_fan_is_one_crossing() {
         triangle: 9,
         t: 1.5,
         true_normal: AXIS,
+        entering: false,
     });
     let result = walk(&corridor(4.0, hits), &volumes);
     assert_eq!(result.runs.len(), 1);
@@ -388,6 +396,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             triangle: 0,
             t: 1.0,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -397,6 +406,7 @@ fn an_exact_edge_tangent_toggles_nothing() {
             triangle: 1,
             t: 1.0,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     let result = walk(&corridor(4.0, hits), &volumes);
@@ -435,6 +445,7 @@ fn starting_inside_with_declared_presence_charges_the_partial_chord() {
             triangle: 0,
             t: 0.25,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     corridor.initial_presence = vec![key];
@@ -469,6 +480,7 @@ fn declared_presence_is_seeded_at_the_corridor_origin() {
             triangle: 0,
             t: 0.25,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     corridor.initial_presence = vec![key];
@@ -497,6 +509,7 @@ fn starting_inside_without_declared_presence_is_a_structured_error() {
             triangle: 7,
             t: 0.25,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     match walk_ray(3, &corridor, &volumes, &WalkLaws::default()) {
@@ -625,6 +638,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 0,
             t: 0.25,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -634,6 +648,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 1,
             t: 0.5,
             true_normal: -AXIS,
+            entering: true,
         },
         FaceHit {
             volume: volume(1),
@@ -643,6 +658,7 @@ fn unbalanced_nesting_in_one_primitive_is_a_structured_error() {
             triangle: 2,
             t: 1.0,
             true_normal: AXIS,
+            entering: false,
         },
     ];
     assert!(matches!(
@@ -667,6 +683,7 @@ fn an_exit_below_depth_zero_is_still_a_structured_error() {
         triangle: 9,
         t: 0.75,
         true_normal: AXIS,
+        entering: false,
     });
     assert!(matches!(
         walk_ray(2, &corridor(4.0, hits), &volumes, &WalkLaws::default()),
@@ -802,6 +819,7 @@ fn a_corridor_starting_inside_a_volume_grants_no_free_crossing() {
             triangle: 0,
             t: 0.125,
             true_normal: AXIS,
+            entering: false,
         }],
     );
     corridor.initial_presence = vec![ShellKey {
@@ -3250,17 +3268,22 @@ fn a_foreign_face_inside_a_plate_cannot_reach_its_other_side() {
     let mut hits = plate(1, 1, enter, exit);
     // A high-factor plate's entry landing between the thin plate's two faces …
     hits.extend(plate(2, 2, ulps(1.0, 4), 1.5));
-    // … and a chain of tangent faces reaching from the thin plate across the air beyond it.
+    // … and a chain of tangent brushes reaching from the thin plate across the air beyond it: each
+    // a fan of two claims on one contact that disagree about direction, as the collector reports a
+    // ray grazing a feature.
     for step in 0..40 {
-        hits.push(FaceHit {
-            volume: volume(3),
-            primitive: prim(3),
-            shell: 0,
-            contact: Contact::Face(step),
-            triangle: step,
-            t: ulps(exit as f32, (step as i32) * 8),
-            true_normal: Vec3::X,
-        });
+        for entering in [true, false] {
+            hits.push(FaceHit {
+                volume: volume(3),
+                primitive: prim(3),
+                shell: 0,
+                contact: Contact::Edge(step, step + 1),
+                triangle: 2 * step + u32::from(entering),
+                t: ulps(exit as f32, (step as i32) * 8),
+                true_normal: Vec3::X,
+                entering,
+            });
+        }
     }
     let walked = walk_ray(0, &corridor(3.0, hits), &volumes, &laws).expect("both solids resolve");
 
@@ -3301,6 +3324,7 @@ fn a_fan_of_claims_on_one_feature_is_one_crossing() {
         triangle: 77,
         t: 1.0,
         true_normal: AXIS,
+        entering: false,
     });
     let walked = walk(&corridor(2.0, hits), &volumes);
 
@@ -3431,6 +3455,7 @@ fn duplicate_claims_of_one_contact_are_one_entry() {
         triangle: 77,
         t: 1.0,
         true_normal: -AXIS,
+        entering: true,
     });
     let walked = walk_ray(0, &corridor(2.0, hits), &volumes, &laws)
         .expect("a duplicated entry claim is one entry");
@@ -3449,6 +3474,7 @@ fn duplicate_claims_of_one_contact_are_one_entry() {
         triangle: 77,
         t: ulps(1.0, 2),
         true_normal: -AXIS,
+        entering: true,
     });
     assert!(matches!(
         walk_ray(0, &corridor(2.0, hits), &volumes, &laws),
@@ -3478,6 +3504,7 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
                 triangle: a,
                 t: 1.0,
                 true_normal: AXIS,
+                entering: false,
             },
             FaceHit {
                 volume: volume(1),
@@ -3487,6 +3514,7 @@ fn a_corner_brush_is_a_tangent_in_either_triangle_order() {
                 triangle: b,
                 t: 1.0,
                 true_normal: -AXIS,
+                entering: true,
             },
         ]
     };

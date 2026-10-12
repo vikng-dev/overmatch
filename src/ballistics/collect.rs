@@ -352,8 +352,7 @@ fn collect_trimesh(
         if !t.is_finite() || t >= length as f64 {
             continue;
         }
-        // Entry or exit from the mesh's own winding, in the frame the claim was made in.
-        let entry = claim.normal.dot(axis) < 0.0;
+        let entry = claim.entering;
         claims.push((
             FaceHit {
                 volume: node,
@@ -365,6 +364,7 @@ fn collect_trimesh(
                 // Back to world space. The winding normal is the mesh's own orientation — never
                 // parry's, which is flipped to oppose the ray and so cannot tell entry from exit.
                 true_normal: rotation * claim.normal,
+                entering: entry,
             },
             entry,
         ));
@@ -501,6 +501,7 @@ fn collect_convex(
                 triangle: face,
                 t,
                 true_normal: oriented,
+                entering: entry,
             },
         ));
     };
@@ -937,6 +938,11 @@ struct TriangleClaim {
     /// and MEASURES on; see [`contact_of`].
     t: f64,
     normal: Vec3,
+    /// Whether the ray crosses against the winding normal: the sign of the exact crossing
+    /// determinant `−axis · ((b − a) × (c − a))`, the predicate that admitted the claim. Never read
+    /// from `normal`, whose f32 dot with the axis can cancel to zero on a crossing whose determinant
+    /// does not. Frame-free: a rotation preserves it.
+    entering: bool,
     /// Bit `k` set means the edge OPPOSITE corner `k` produced an exactly-zero area, so the ray
     /// lies on it. Zero bits is an interior claim; one is an edge; two is the vertex they share.
     zeros: u8,
@@ -1028,8 +1034,8 @@ fn cross_triangle(
             (d1[u].abs() * d2[v].abs() + d1[v].abs() * d2[u].abs()) * direction[k].abs()
         })
         .sum();
-    let t = if det.abs() > DETERMINANT_SLACK * permanent + f64::MIN_POSITIVE {
-        (shear.origin_exact - a64).dot(exact) / det
+    let (t, entering) = if det.abs() > DETERMINANT_SLACK * permanent + f64::MIN_POSITIVE {
+        ((shear.origin_exact - a64).dot(exact) / det, det > 0.0)
     } else {
         // Inside the band the float determinant cannot say whether the ray is parallel, so the
         // exact one does — and the same escalation hands back a parameter the cancelled quotient
@@ -1038,7 +1044,10 @@ fn cross_triangle(
         if denominator.is_zero() {
             return None;
         }
-        numerator.to_f64() / denominator.to_f64()
+        (
+            numerator.to_f64() / denominator.to_f64(),
+            denominator.signum() > 0,
+        )
     };
     // A NEEDLE'S PLANE IS NOT ITS OWN f32 CROSS PRODUCT. Two edges within `PROJECTION_SLACK` of
     // parallel cancel that product down to its last bits, and what survives is noise with a
@@ -1053,7 +1062,12 @@ fn cross_triangle(
     } else {
         coarse.normalize_or_zero()
     };
-    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim { t, normal, zeros })
+    (normal != Vec3::ZERO && t.is_finite()).then_some(TriangleClaim {
+        t,
+        normal,
+        entering,
+        zeros,
+    })
 }
 
 /// The crossing's plane parameter as an exact ratio: `((origin − a) · N, −axis · N)` with
@@ -1605,6 +1619,7 @@ mod tests {
                         } else {
                             Vec3::NEG_Z
                         },
+                        entering: boundary.entry == Some(true),
                     })
                 })
                 .collect();
