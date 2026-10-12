@@ -12,6 +12,7 @@ use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
 use super::disclosure::{CombatDisclosure, NetTankStatus};
+use super::hosting::{Hosted, HostedConfig};
 use super::protocol::{
     LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
 };
@@ -48,6 +49,13 @@ const FRAME: Duration = Duration::from_millis(4);
 const _: () = assert!(FRAME.as_nanos() < TICK.as_nanos());
 
 pub fn run() {
+    let hosted = match HostedConfig::from_env() {
+        Ok(hosted) => hosted,
+        Err(err) => {
+            eprintln!("overmatch-server: fatal: {err}");
+            std::process::exit(2);
+        }
+    };
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(None))
         // Headless composition needs its own application runner.
@@ -75,19 +83,7 @@ pub fn run() {
         .world_mut()
         .spawn((
             Name::new("Server"),
-            NetcodeServer::new(NetcodeConfig {
-                // Must match the client's `Authentication::Manual.protocol_id`.
-                protocol_id: protocol_id(),
-                private_key: [0; 32], // dev only — matches the client's Authentication::Manual
-                // OFF: a manual token names the address the CLIENT dialled — the droplet's public
-                // IP — while this socket binds `0.0.0.0`, and netcode's check matches an
-                // unspecified bind only against LOOPBACK token addresses. Left on, every
-                // non-loopback client is dropped at the connection request (an `info!`, no error)
-                // and retries forever. The server cannot know its own public address to list it
-                // in `additional_expected_addresses`.
-                server_addr_check: false,
-                ..default()
-            }),
+            netcode_server(hosted.as_ref()),
             LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), PORT)),
             ServerUdpIo::default(),
         ))
@@ -132,7 +128,36 @@ pub fn run() {
         ),
     );
 
+    let hosting = hosted.as_ref().map(Hosted::start);
+    if let Some(hosting) = &hosting {
+        hosting.install(&mut app);
+    }
+
     app.run();
+    if let Some(hosting) = hosting {
+        hosting.finish();
+    }
+}
+
+/// The netcode endpoint. Hosted: the Worker's per-match key and its player cap, past which the
+/// handshake answers `ServerFull`. Otherwise: the all-zero dev key every client's
+/// `Authentication::Manual` holds, and lightyear's default cap.
+pub(super) fn netcode_server(hosted: Option<&HostedConfig>) -> NetcodeServer {
+    let defaults = NetcodeConfig::default();
+    NetcodeServer::new(NetcodeConfig {
+        // Must match the client's `Authentication::Manual.protocol_id`.
+        protocol_id: protocol_id(),
+        private_key: hosted.map_or([0; 32], HostedConfig::netcode_key),
+        max_clients: hosted.map_or(defaults.max_clients, HostedConfig::max_clients),
+        // OFF: a manual token names the address the CLIENT dialled — the host's public IP and
+        // mapped port — while this socket binds `0.0.0.0`, and netcode's check matches an
+        // unspecified bind only against LOOPBACK token addresses. Left on, every non-loopback
+        // client is dropped at the connection request (an `info!`, no error) and retries forever.
+        // The server cannot know its own public address to list it in
+        // `additional_expected_addresses`.
+        server_addr_check: false,
+        ..defaults
+    })
 }
 
 /// Connected clients waiting for the server's next spawn pass. The simulation blueprint is eager,

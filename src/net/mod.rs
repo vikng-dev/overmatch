@@ -20,6 +20,8 @@ mod fire_presentation;
 mod harness;
 pub(crate) use harness::{env_flag, env_parse, env_value};
 mod hit_feel;
+/// The dedicated server's hosted mode: settings from the Worker, heartbeats, capacity, empty exit.
+mod hosting;
 /// Real-UDP probe of the client's one-input-message-per-tick send cadence.
 #[cfg(test)]
 mod input_cadence;

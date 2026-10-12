@@ -51,6 +51,11 @@ lightyear = { version = "0.30.1", default-features = false, features = [
 ] }
 lightyear_transport = "0.30.1"
 bevy_replicon = "0.44"
+# The dedicated server's hosted-mode reports to the matchmaking Worker (`net::hosting`): two
+# blocking JSON POSTs on a background thread. Named only there. `rustls` = rustls on ring with the
+# bundled webpki roots, so the server image needs no system CA store and no OpenSSL; `gzip` (a
+# default) is off — the replies are empty.
+ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 
 # The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
 # locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
