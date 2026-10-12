@@ -37,6 +37,18 @@ describe("GET /admin", () => {
 		}
 	});
 
+	it("refuses a correctly signed token that carries no exp", async () => {
+		const noExp = await new SignJWT({ email: "yan@example.test" })
+			.setProtectedHeader({ alg: "RS256", kid: "k1" })
+			.setIssuer(TEAM)
+			.setAudience("test-aud")
+			.setIssuedAt()
+			.sign((await keys).privateKey);
+		const res = await call("GET", "/admin", undefined, { "cf-access-jwt-assertion": noExp });
+		expect(res.status).toBe(403);
+		expect(await res.text()).toMatch(/exp/);
+	});
+
 	it("is closed when Access is not configured", async () => {
 		const req = new Request("https://x.test/admin", { headers: { "cf-access-jwt-assertion": await token() } });
 		expect(await accessDenied(req, { ...env, ACCESS_AUD: "" })).toMatch(/not configured/);

@@ -19,7 +19,8 @@ export async function accessDenied(req: Request, env: Env): Promise<string | nul
 	const url = `${team}/cdn-cgi/access/certs`;
 	if (jwks?.url !== url) jwks = { url, set: createRemoteJWKSet(new URL(url)) };
 	try {
-		await jwtVerify(token, jwks.set, { issuer: team, audience: env.ACCESS_AUD });
+		// jose checks `exp` only when present; Access always issues it, so its absence is a refusal.
+		await jwtVerify(token, jwks.set, { issuer: team, audience: env.ACCESS_AUD, requiredClaims: ["exp"] });
 		return null;
 	} catch (err) {
 		return `invalid Access token: ${err instanceof Error ? err.message : String(err)}`;
