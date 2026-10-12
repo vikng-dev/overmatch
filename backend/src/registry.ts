@@ -1,0 +1,523 @@
+// One Registry Durable Object per game version holds that version's live servers and join tickets
+// in its SQLite storage. Design: .agents/scratch/hosting-2026-10/state-store.md.
+//
+// Invariants a change here must keep:
+// - Find-or-create is check-then-act with no `await` between the read and the `starting` insert.
+//   Storage input gates do not cover outbound fetch, so that row — written before the Edgegap call —
+//   is the only thing that stops two joins starting two servers. Concurrent joins see it and attach.
+// - A server is joinable ("ready") only when Edgegap has reported its address AND it has sent a
+//   heartbeat: Edgegap says the container runs, the heartbeat says the game serves.
+// - Nothing lives only in memory; every field survives eviction. After any `await`, rows are re-read
+//   before they are acted on, and transitions are guarded by `WHERE state = …`.
+// - The alarm is idempotent (delivery is at-least-once) and is always set to the earliest deadline;
+//   with no rows left it is cleared and the object goes idle.
+// - Secrets: the netcode key leaves this object only in a ticket answer for that server; the report
+//   secret is stored only as its SHA-256 and never leaves.
+
+import { DurableObject } from "cloudflare:workers";
+import { config, type Config, type Env } from "./config";
+import { Edgegap, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
+import { recordEvent, type Outcome } from "./history";
+import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
+import { groupLocations, locationId } from "./locations";
+import type { HeartbeatRequest, LocationsResponse, TicketResponse } from "./types";
+
+type ServerState = "starting" | "ready" | "ended";
+
+type ServerRow = {
+	id: string;
+	location: string;
+	deployment_id: string | null;
+	state: ServerState;
+	outcome: Outcome | null;
+	reason: string | null;
+	players: number;
+	capacity: number;
+	server_state: "open" | "closing" | null;
+	address: string | null;
+	port: number | null;
+	netcode_key: string;
+	secret_hash: string;
+	created_at: number;
+	ready_at: number | null;
+	last_seen: number | null;
+	next_poll_at: number | null;
+	ended_at: number | null;
+	peak_players: number;
+}
+
+type TicketRow = {
+	id: string;
+	server_id: string | null;
+	locations: string;
+	pings: string;
+	excluded: string;
+	client_ip: string | null;
+	origin: string;
+	attempts: number;
+	failed_reason: string | null;
+	created_at: number;
+	attached_at: number | null;
+}
+
+/** A live server as the admin dashboard sees it: no key, no secret. */
+export type ServerSnapshot = {
+	id: string;
+	location: string;
+	deployment_id: string | null;
+	state: ServerState;
+	outcome: Outcome | null;
+	reason: string | null;
+	players: number;
+	capacity: number;
+	server_state: "open" | "closing" | null;
+	address: string | null;
+	port: number | null;
+	created_at: number;
+	ready_at: number | null;
+	last_seen: number | null;
+	ended_at: number | null;
+	peak_players: number;
+}
+
+export type JoinResult = { ok: true; ticket: string } | { ok: false; status: number; error: string };
+export type ServerCallResult = { status: 204 | 400 | 401 | 410; error?: string };
+
+interface Catalog {
+	locations: LocationData[];
+	beacons: Beacon[];
+}
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS servers (
+	id TEXT PRIMARY KEY,
+	location TEXT NOT NULL,
+	deployment_id TEXT,
+	state TEXT NOT NULL,
+	outcome TEXT,
+	reason TEXT,
+	players INTEGER NOT NULL DEFAULT 0,
+	capacity INTEGER NOT NULL,
+	server_state TEXT,
+	address TEXT,
+	port INTEGER,
+	netcode_key TEXT NOT NULL,
+	secret_hash TEXT NOT NULL,
+	created_at INTEGER NOT NULL,
+	ready_at INTEGER,
+	last_seen INTEGER,
+	next_poll_at INTEGER,
+	ended_at INTEGER,
+	peak_players INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tickets (
+	id TEXT PRIMARY KEY,
+	server_id TEXT,
+	locations TEXT NOT NULL,
+	pings TEXT NOT NULL,
+	excluded TEXT NOT NULL DEFAULT '[]',
+	client_ip TEXT,
+	origin TEXT NOT NULL,
+	attempts INTEGER NOT NULL DEFAULT 0,
+	failed_reason TEXT,
+	created_at INTEGER NOT NULL,
+	attached_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS catalog (
+	k TEXT PRIMARY KEY,
+	body TEXT NOT NULL,
+	fetched_at INTEGER NOT NULL
+);
+`;
+
+export class Registry extends DurableObject<Env> {
+	private readonly sql: SqlStorage;
+	private readonly cfg: Config;
+	private readonly provider: Provider;
+
+	constructor(ctx: DurableObjectState, env: Env) {
+		super(ctx, env);
+		this.sql = ctx.storage.sql;
+		this.cfg = config(env);
+		this.provider = new Edgegap(env.EDGEGAP_API, env.EDGEGAP_TOKEN, env.EDGEGAP_APP, env.EDGEGAP_PORT_NAME);
+		this.sql.exec(SCHEMA);
+	}
+
+	// ---- client API ---------------------------------------------------------------------------
+
+	async locations(version: string): Promise<{ ok: true; body: LocationsResponse } | { ok: false; error: string }> {
+		let cat: Catalog;
+		try {
+			cat = await this.catalog();
+		} catch (err) {
+			return { ok: false, error: `location list unavailable: ${String(err)}` };
+		}
+		const matches = new Map<string, number>();
+		for (const r of this.sql
+			.exec<{ location: string; n: number }>("SELECT location, COUNT(*) AS n FROM servers WHERE state != 'ended' GROUP BY location")
+			.toArray()) {
+			matches.set(r.location, r.n);
+		}
+		return { ok: true, body: { version, continents: groupLocations(cat.locations, cat.beacons, matches) } };
+	}
+
+	async join(
+		version: string,
+		locations: string[],
+		pings: Record<string, number>,
+		clientIp: string | null,
+		origin: string,
+	): Promise<JoinResult> {
+		let known: Set<string>;
+		try {
+			known = new Set((await this.catalog()).locations.map(locationId));
+		} catch (err) {
+			return { ok: false, status: 503, error: `location list unavailable: ${String(err)}` };
+		}
+		const unknown = locations.filter((l) => !known.has(l));
+		if (unknown.length) return { ok: false, status: 400, error: `unknown locations: ${unknown.join(", ")}` };
+
+		const ticket = newId(version);
+		this.sql.exec(
+			"INSERT INTO tickets (id, locations, pings, client_ip, origin, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+			ticket,
+			JSON.stringify(locations),
+			JSON.stringify(pings),
+			clientIp,
+			origin,
+			Date.now(),
+		);
+		await this.place(version, ticket);
+		await this.ensureAlarm(Date.now() + this.cfg.ticketTtlMs);
+		return { ok: true, ticket };
+	}
+
+	ticket(ticketId: string): TicketResponse | null {
+		const t = this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE id = ?", ticketId).toArray()[0];
+		if (!t || t.created_at + this.cfg.ticketTtlMs <= Date.now()) return null;
+		if (t.failed_reason) return { state: "failed", reason: t.failed_reason };
+		const s = t.server_id ? this.server(t.server_id) : null;
+		if (!s) return { state: "starting" };
+		if (s.state === "ready") return { state: "ready", address: s.address!, port: s.port!, key: s.netcode_key };
+		if (s.state === "ended") return { state: "failed", reason: s.reason ?? "server ended" };
+		return { state: "starting" };
+	}
+
+	// ---- server API ---------------------------------------------------------------------------
+
+	async heartbeat(serverId: string, secret: string, hb: HeartbeatRequest): Promise<ServerCallResult> {
+		const s = this.server(serverId);
+		if (!s || s.state === "ended") return { status: 410 };
+		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
+		const now = Date.now();
+		const written = this.sql.exec(
+			`UPDATE servers SET players = ?, capacity = ?, server_state = ?, last_seen = ?, peak_players = MAX(peak_players, ?)
+			 WHERE id = ? AND state != 'ended'`,
+			hb.players,
+			hb.capacity,
+			hb.state,
+			now,
+			hb.players,
+			serverId,
+		).rowsWritten;
+		if (!written) return { status: 410 };
+		if (s.state === "starting") {
+			if (!(await this.promote(serverId)) && s.deployment_id) await this.refreshStatus(serverId);
+		}
+		await this.ensureAlarm(now + this.cfg.heartbeatDeadlineMs);
+		return { status: 204 };
+	}
+
+	async end(serverId: string, secret: string, reason: string): Promise<ServerCallResult> {
+		const s = this.server(serverId);
+		if (!s || s.state === "ended") return { status: 410 };
+		if (!(await this.authorized(s, secret))) return { status: 401, error: "bad report secret" };
+		await this.finish(serverId, "ended", `server: ${reason}`);
+		return { status: 204 };
+	}
+
+	/** An Edgegap webhook is a hint only (unsigned, never retried): re-read the status and act on
+	 *  that. */
+	async webhook(serverId: string): Promise<void> {
+		const s = this.server(serverId);
+		if (!s || s.state === "ended" || !s.deployment_id) return;
+		await this.refreshStatus(serverId);
+	}
+
+	// ---- dashboard ----------------------------------------------------------------------------
+
+	snapshot(): ServerSnapshot[] {
+		return this.sql
+			.exec<ServerSnapshot>(
+				`SELECT id, location, deployment_id, state, outcome, reason, players, capacity, server_state, address, port,
+				        created_at, ready_at, last_seen, ended_at, peak_players
+				 FROM servers ORDER BY created_at`,
+			)
+			.toArray();
+	}
+
+	// ---- alarm --------------------------------------------------------------------------------
+
+	async alarm(): Promise<void> {
+		const now = Date.now();
+		const starting = this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray();
+		for (const s of starting) {
+			if (s.created_at + this.cfg.startDeadlineMs <= now) {
+				await this.finish(s.id, "failed", "never became ready before the start deadline");
+			} else if (s.deployment_id && (s.next_poll_at ?? 0) <= now) {
+				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, s.id);
+				await this.refreshStatus(s.id);
+			}
+		}
+		const silent = this.sql
+			.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'ready' AND last_seen <= ?", now - this.cfg.heartbeatDeadlineMs)
+			.toArray();
+		for (const { id } of silent) {
+			// Re-read: a heartbeat may have landed while an earlier finish() awaited.
+			const s = this.server(id);
+			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", "heartbeats stopped");
+		}
+
+		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
+		this.sql.exec("DELETE FROM servers WHERE state = 'ended' AND ended_at <= ?", now - this.cfg.endedRetentionMs);
+		await this.reschedule();
+	}
+
+	// ---- internals ----------------------------------------------------------------------------
+
+	private server(id: string): ServerRow | undefined {
+		return this.sql.exec<ServerRow>("SELECT * FROM servers WHERE id = ?", id).toArray()[0];
+	}
+
+	private async authorized(s: ServerRow, secret: string): Promise<boolean> {
+		return secret.length > 0 && timingSafeEqual(await sha256Hex(secret), s.secret_hash);
+	}
+
+	private async catalog(): Promise<Catalog> {
+		const row = this.sql.exec<{ body: string; fetched_at: number }>("SELECT body, fetched_at FROM catalog WHERE k = 'edgegap'").toArray()[0];
+		if (row && row.fetched_at + this.cfg.locationsCacheMs > Date.now()) return JSON.parse(row.body) as Catalog;
+		try {
+			const [locations, beacons] = await Promise.all([this.provider.locations(), this.provider.beacons()]);
+			const cat: Catalog = { locations, beacons };
+			this.sql.exec(
+				"INSERT INTO catalog (k, body, fetched_at) VALUES ('edgegap', ?, ?) ON CONFLICT (k) DO UPDATE SET body = excluded.body, fetched_at = excluded.fetched_at",
+				JSON.stringify(cat),
+				Date.now(),
+			);
+			return cat;
+		} catch (err) {
+			if (row) {
+				console.warn("location refresh failed, serving the stale list", err);
+				return JSON.parse(row.body) as Catalog;
+			}
+			throw err;
+		}
+	}
+
+	/** Reservations: tickets attached within the TTL count against capacity, because a player's
+	 *  arrival reaches `players` only a heartbeat later. */
+	private load(s: ServerRow, now: number): number {
+		const r = this.sql
+			.exec<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE server_id = ? AND attached_at > ?", s.id, now - this.cfg.reservationTtlMs)
+			.one().n;
+		return s.players + r;
+	}
+
+	/** Attach the ticket to the best open server in its locations, or start one. The read and the
+	 *  `starting` insert run with no `await` between them; see the module invariants. */
+	private async place(version: string, ticketId: string): Promise<void> {
+		// Minted before the read below: from that read to the `starting` insert nothing may await.
+		const reportSecret = randomHex(32);
+		const secretHash = await sha256Hex(reportSecret);
+
+		const t = this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE id = ?", ticketId).toArray()[0];
+		if (!t) return;
+		const now = Date.now();
+		const wanted: string[] = JSON.parse(t.locations);
+		const pings: Record<string, number> = JSON.parse(t.pings);
+		const excluded = new Set<string>(JSON.parse(t.excluded));
+		const ping = (loc: string) => (Number.isFinite(pings[loc]) ? pings[loc] : Infinity);
+
+		const candidates = this.sql
+			.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready') AND (server_state IS NULL OR server_state = 'open')")
+			.toArray()
+			.filter((s) => wanted.includes(s.location))
+			.map((s) => ({ s, load: this.load(s, now) }))
+			.filter(({ s, load }) => load < s.capacity)
+			.sort((a, b) => ping(a.s.location) - ping(b.s.location) || b.load - a.load || a.s.created_at - b.s.created_at);
+		if (candidates.length) {
+			this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", candidates[0].s.id, now, ticketId);
+			return;
+		}
+
+		const where = wanted
+			.map((loc, i) => ({ loc, i }))
+			.filter(({ loc }) => !excluded.has(loc))
+			.sort((a, b) => ping(a.loc) - ping(b.loc) || a.i - b.i)[0]?.loc;
+		if (!where) {
+			this.sql.exec("UPDATE tickets SET failed_reason = ? WHERE id = ?", "no selected location could start a server", ticketId);
+			return;
+		}
+
+		const serverId = newId(version);
+		const netcodeKey = randomHex(32);
+		this.sql.exec(
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?)`,
+			serverId,
+			where,
+			this.cfg.capacity,
+			netcodeKey,
+			secretHash,
+			now,
+			now + this.cfg.statusPollMs,
+		);
+		this.sql.exec("UPDATE tickets SET server_id = ?, attached_at = ? WHERE id = ?", serverId, now, ticketId);
+
+		await recordEvent(this.env.DB, { kind: "requested", serverId, version, location: where, at: now });
+		let deploymentId: string;
+		try {
+			deploymentId = await this.provider.deploy({
+				version,
+				city: where,
+				clientIp: t.client_ip,
+				webhookUrl: `${t.origin}/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(this.env.EDGEGAP_WEBHOOK_SECRET)}`,
+				env: [
+					{ key: "OVERMATCH_SERVER_ID", value: serverId, hidden: false },
+					{ key: "OVERMATCH_API", value: t.origin, hidden: false },
+					{ key: "OVERMATCH_NETCODE_KEY", value: netcodeKey, hidden: true },
+					{ key: "OVERMATCH_REPORT_SECRET", value: reportSecret, hidden: true },
+					{ key: "OVERMATCH_CAPACITY", value: String(this.cfg.capacity), hidden: false },
+					{ key: "OVERMATCH_HEARTBEAT_INTERVAL_S", value: String(this.cfg.heartbeatIntervalMs / 1000), hidden: false },
+					{ key: "OVERMATCH_EMPTY_EXIT_S", value: String(this.cfg.emptyExitS), hidden: false },
+				],
+			});
+		} catch (err) {
+			const reason = err instanceof ProviderError ? err.message : `deploy failed: ${String(err)}`;
+			await this.finish(serverId, "failed", reason);
+			return;
+		}
+
+		const still = this.sql.exec("UPDATE servers SET deployment_id = ? WHERE id = ? AND state = 'starting'", deploymentId, serverId).rowsWritten;
+		if (!still) {
+			// Ended while the deploy call was in flight: the deployment has no row to report to.
+			await this.provider.stop(deploymentId).catch((err) => console.error("stop of orphan failed", deploymentId, err));
+		}
+		await recordEvent(this.env.DB, { kind: "deployed", serverId, deploymentId });
+		await this.ensureAlarm(Math.min(now + this.cfg.statusPollMs, now + this.cfg.startDeadlineMs));
+	}
+
+	private async refreshStatus(serverId: string): Promise<void> {
+		const before = this.server(serverId);
+		if (!before?.deployment_id || before.state === "ended") return;
+		let st: DeploymentStatus;
+		try {
+			st = await this.provider.status(before.deployment_id);
+		} catch (err) {
+			console.warn("status poll failed", serverId, err);
+			return;
+		}
+		const s = this.server(serverId);
+		if (!s || s.state === "ended") return;
+		switch (st.phase) {
+			case "ready":
+				this.sql.exec("UPDATE servers SET address = ?, port = ? WHERE id = ? AND state != 'ended'", st.address, st.port, serverId);
+				await this.promote(serverId);
+				return;
+			case "error":
+				await this.finish(serverId, "failed", `edgegap error: ${st.detail ?? "unknown"}`);
+				return;
+			case "terminated":
+			case "gone":
+				await this.finish(serverId, s.state === "starting" ? "failed" : "ended", `edgegap: deployment ${st.phase}`);
+				return;
+			case "pending":
+				return;
+		}
+	}
+
+	private async promote(serverId: string): Promise<boolean> {
+		const now = Date.now();
+		const n = this.sql.exec(
+			`UPDATE servers SET state = 'ready', ready_at = ?
+			 WHERE id = ? AND state = 'starting' AND address IS NOT NULL AND last_seen IS NOT NULL`,
+			now,
+			serverId,
+		).rowsWritten;
+		if (n) await recordEvent(this.env.DB, { kind: "ready", serverId, at: now });
+		return n > 0;
+	}
+
+	/** Terminal transition: stop the deployment if one may be live, record history, and give the
+	 *  tickets of a server that never became ready another placement (bounded by JOIN_ATTEMPTS). */
+	private async finish(serverId: string, outcome: Outcome, reason: string): Promise<void> {
+		const s = this.server(serverId);
+		if (!s || s.state === "ended") return;
+		const now = Date.now();
+		this.sql.exec("UPDATE servers SET state = 'ended', outcome = ?, reason = ?, ended_at = ? WHERE id = ?", outcome, reason, now, serverId);
+		const orphans =
+			s.state === "starting"
+				? this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", serverId).toArray()
+				: [];
+		const retry: string[] = [];
+		for (const t of orphans) {
+			const excluded = new Set<string>(JSON.parse(t.excluded));
+			excluded.add(s.location);
+			const attempts = t.attempts + 1;
+			const left = (JSON.parse(t.locations) as string[]).some((l) => !excluded.has(l));
+			if (attempts >= this.cfg.joinAttempts || !left) {
+				this.sql.exec("UPDATE tickets SET attempts = ?, failed_reason = ? WHERE id = ?", attempts, reason, t.id);
+			} else {
+				this.sql.exec(
+					"UPDATE tickets SET attempts = ?, excluded = ?, server_id = NULL, attached_at = NULL WHERE id = ?",
+					attempts,
+					JSON.stringify([...excluded]),
+					t.id,
+				);
+				retry.push(t.id);
+			}
+		}
+
+		if (s.deployment_id) {
+			await this.provider.stop(s.deployment_id).catch((err) => console.error("stop failed", s.deployment_id, err));
+		}
+		await recordEvent(this.env.DB, { kind: "ended", serverId, at: now, outcome, reason, peakPlayers: s.peak_players });
+
+		const version = versionOf(serverId);
+		for (const id of retry) if (version) await this.place(version, id);
+		await this.reschedule();
+	}
+
+	private async ensureAlarm(at: number): Promise<void> {
+		const current = await this.ctx.storage.getAlarm();
+		if (current === null || at < current) await this.ctx.storage.setAlarm(at);
+	}
+
+	private async reschedule(): Promise<void> {
+		const c = this.cfg;
+		const r = this.sql
+			.exec<{ t: number | null }>(
+				`SELECT MIN(t) AS t FROM (
+					SELECT MIN(created_at + ?, CASE WHEN deployment_id IS NULL THEN created_at + ? ELSE COALESCE(next_poll_at, 0) END) AS t
+						FROM servers WHERE state = 'starting'
+					UNION ALL SELECT last_seen + ? FROM servers WHERE state = 'ready'
+					UNION ALL SELECT ended_at + ? FROM servers WHERE state = 'ended'
+					UNION ALL SELECT created_at + ? FROM tickets
+				)`,
+				c.startDeadlineMs,
+				c.startDeadlineMs,
+				c.heartbeatDeadlineMs,
+				c.endedRetentionMs,
+				c.ticketTtlMs,
+			)
+			.one().t;
+		if (r === null) await this.ctx.storage.deleteAlarm();
+		else await this.ctx.storage.setAlarm(r);
+	}
+}
+
+/** The sharding seam: one Registry per game version. Finer sharding is a change here alone. */
+export function registryFor(env: Env, version: string): DurableObjectStub<Registry> {
+	const hint = env.LOCATION_HINT as DurableObjectLocationHint | "";
+	return env.REGISTRY.getByName(version, hint ? { locationHint: hint } : undefined);
+}

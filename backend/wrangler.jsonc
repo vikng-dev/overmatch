@@ -1,0 +1,55 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "overmatch-backend",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-10-01",
+	"observability": { "enabled": true },
+
+	// One Registry object per game version (`registryFor` in src/index.ts).
+	"durable_objects": {
+		"bindings": [{ "name": "REGISTRY", "class_name": "Registry" }]
+	},
+	"exports": {
+		"Registry": { "type": "durable-object", "storage": "sqlite" }
+	},
+
+	// Per-server-lifetime history. `wrangler d1 create overmatch-sessions` prints the id to paste here.
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "overmatch-sessions",
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+
+	// Set with `wrangler secret put <NAME>`; never in this file. See README.md.
+	"secrets": { "required": ["EDGEGAP_TOKEN", "EDGEGAP_WEBHOOK_SECRET"] },
+
+	// Tunables. Every one is data read through src/config.ts; none is restated in logic.
+	"vars": {
+		"EDGEGAP_API": "https://api.edgegap.com",
+		"EDGEGAP_APP": "Overmatch",
+		"EDGEGAP_PORT_NAME": "game",
+		"CAPACITY": "10",
+		"HEARTBEAT_INTERVAL_S": "5",
+		// Three missed heartbeats.
+		"HEARTBEAT_DEADLINE_S": "15",
+		// Edgegap request to READY MEASURED 3.3 s warm, 7-12.5 s cold (risk-test.md); 60 s is headroom
+		// for a slower first image pull, not a measured bound.
+		"START_DEADLINE_S": "60",
+		"STATUS_POLL_S": "5",
+		"RESERVATION_TTL_S": "30",
+		"TICKET_TTL_S": "600",
+		"EMPTY_EXIT_S": "300",
+		"ENDED_RETENTION_S": "600",
+		"JOIN_ATTEMPTS": "2",
+		"LOCATIONS_CACHE_S": "600",
+		"VCPU_PER_SERVER": "1",
+		// Edgegap Edge Cloud list price, edgegap.com/pricing.md reviewed 2026-09-04. Dashboard cost is DERIVED.
+		"USD_PER_VCPU_MINUTE": "0.00115",
+		"LOCATION_HINT": "apac",
+		"ACCESS_TEAM_DOMAIN": "",
+		"ACCESS_AUD": ""
+	}
+}

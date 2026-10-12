@@ -1,0 +1,169 @@
+// The one provider adapter. Everything Edgegap-specific — endpoints, auth header, status strings,
+// port naming, pagination — stays in this file; the registry sees only `Provider`.
+//
+// Endpoints (Edgegap OpenAPI as published in docs.edgegap.com, fetched 2026-10-12):
+//   POST   /v1/deploy                 marked deprecated upstream, kept because it is the endpoint
+//                                     that takes a city `filters` entry (v2 places by IP/coords only)
+//   GET    /v1/status/{id}            V1DeploymentStatus
+//   DELETE /v1/stop/{id}
+//   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
+//   GET    /v1/locations/beacons      not paginated (`count`)
+
+export interface LocationData {
+	city: string;
+	country: string;
+	continent: string;
+	latitude: number;
+	longitude: number;
+}
+
+export interface Beacon {
+	host: string;
+	fqdn: string | null;
+	udp_port: number | null;
+	tcp_port: number | null;
+	location: LocationData;
+}
+
+export interface DeployRequest {
+	version: string;
+	city: string;
+	clientIp: string | null;
+	env: { key: string; value: string; hidden: boolean }[];
+	webhookUrl: string;
+}
+
+export type DeploymentPhase = "pending" | "ready" | "error" | "terminated" | "gone";
+
+export interface DeploymentStatus {
+	phase: DeploymentPhase;
+	address: string | null;
+	port: number | null;
+	detail: string | null;
+}
+
+export interface Provider {
+	/** Resolves to the deployment id. Rejects with `ProviderError` when Edgegap refuses. */
+	deploy(req: DeployRequest): Promise<string>;
+	status(deploymentId: string): Promise<DeploymentStatus>;
+	/** Idempotent: an already-stopped or unknown deployment is success. */
+	stop(deploymentId: string): Promise<void>;
+	locations(): Promise<LocationData[]>;
+	beacons(): Promise<Beacon[]>;
+}
+
+export class ProviderError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+	) {
+		super(message);
+	}
+}
+
+const PAGE_LIMIT = 100;
+const MAX_PAGES = 50;
+
+export class Edgegap implements Provider {
+	constructor(
+		private readonly api: string,
+		private readonly token: string,
+		private readonly app: string,
+		private readonly portName: string,
+	) {}
+
+	private async call(method: string, path: string, body?: unknown): Promise<Response> {
+		const auth = this.token.startsWith("token ") ? this.token : `token ${this.token}`;
+		return fetch(`${this.api}${path}`, {
+			method,
+			headers: { authorization: auth, "content-type": "application/json", accept: "application/json" },
+			body: body === undefined ? undefined : JSON.stringify(body),
+		});
+	}
+
+	private async json<T>(res: Response, what: string): Promise<T> {
+		if (!res.ok) {
+			const text = await res.text();
+			throw new ProviderError(`edgegap ${what}: HTTP ${res.status} ${text.slice(0, 300)}`, res.status);
+		}
+		return (await res.json()) as T;
+	}
+
+	async deploy(req: DeployRequest): Promise<string> {
+		const body = {
+			app_name: this.app,
+			version_name: req.version,
+			...(req.clientIp ? { ip_list: [req.clientIp] } : {}),
+			filters: [{ field: "city", values: [req.city], filter_type: "any" }],
+			env_vars: req.env.map((e) => ({ key: e.key, value: e.value, is_hidden: e.hidden })),
+			webhook_url: req.webhookUrl,
+		};
+		const out = await this.json<{ request_id: string }>(await this.call("POST", "/v1/deploy", body), "deploy");
+		if (!out.request_id) throw new ProviderError("edgegap deploy: no request_id", 502);
+		return out.request_id;
+	}
+
+	async status(deploymentId: string): Promise<DeploymentStatus> {
+		const res = await this.call("GET", `/v1/status/${encodeURIComponent(deploymentId)}`);
+		if (res.status === 404 || res.status === 410) {
+			await res.body?.cancel();
+			return { phase: "gone", address: null, port: null, detail: `HTTP ${res.status}` };
+		}
+		const s = await this.json<V1DeploymentStatus>(res, "status");
+		return interpretStatus(s, this.portName);
+	}
+
+	async stop(deploymentId: string): Promise<void> {
+		const res = await this.call("DELETE", `/v1/stop/${encodeURIComponent(deploymentId)}`);
+		if (res.ok || res.status === 404 || res.status === 410) {
+			await res.body?.cancel();
+			return;
+		}
+		await this.json(res, "stop");
+	}
+
+	async locations(): Promise<LocationData[]> {
+		const all: LocationData[] = [];
+		for (let page = 1; page <= MAX_PAGES; page++) {
+			const res = await this.call("GET", `/v1/locations?page=${page}&limit=${PAGE_LIMIT}`);
+			const out = await this.json<{ locations?: LocationData[]; pagination?: { has_next?: boolean } }>(res, "locations");
+			all.push(...(out.locations ?? []));
+			if (!out.pagination?.has_next) return all;
+		}
+		throw new ProviderError(`edgegap locations: more than ${MAX_PAGES} pages`, 502);
+	}
+
+	async beacons(): Promise<Beacon[]> {
+		const out = await this.json<{ locations?: Partial<Beacon>[] }>(await this.call("GET", "/v1/locations/beacons"), "beacons");
+		return (out.locations ?? [])
+			.filter((b): b is Partial<Beacon> & { host: string; location: LocationData } => !!b.host && !!b.location)
+			.map((b) => ({
+				host: b.host,
+				fqdn: b.fqdn ?? null,
+				udp_port: b.udp_port ?? null,
+				tcp_port: b.tcp_port ?? null,
+				location: b.location,
+			}));
+	}
+}
+
+interface V1DeploymentStatus {
+	current_status?: string;
+	running?: boolean;
+	error?: boolean;
+	error_detail?: string;
+	public_ip?: string;
+	ports?: Record<string, { external?: number } | undefined>;
+}
+
+/** Status strings are "Status.READY", "Status.ERROR", "Status.TERMINATED", … (MEASURED in the risk
+ *  test); the booleans are read first because they are the documented fields. */
+export function interpretStatus(s: V1DeploymentStatus, portName: string): DeploymentStatus {
+	const current = (s.current_status ?? "").toUpperCase();
+	const detail = s.error_detail || s.current_status || null;
+	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null, detail };
+	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null, detail };
+	const port = s.ports?.[portName]?.external ?? null;
+	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, detail };
+	return { phase: "pending", address: null, port: null, detail };
+}
