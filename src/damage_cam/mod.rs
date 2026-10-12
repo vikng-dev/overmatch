@@ -30,7 +30,7 @@ pub struct PenetrationReport {
     pub plates: Vec<Plate>,
     /// Timed shell path, approach included; a ricochet's deflection leg continues it.
     pub path: Vec<PathPoint>,
-    pub spall: Vec<SpallBurst>,
+    pub spall: Vec<SpallCone>,
     pub consequences: Vec<Consequence>,
     /// The struck tank's crew and module volumes at the time of the shot.
     pub internals: Vec<Internal>,
@@ -78,8 +78,10 @@ pub struct PathPoint {
     pub point: [f32; 3],
 }
 
+/// One spall cone — the field a body exit throws (design doc §5) — and the directions it was
+/// marched by.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct SpallBurst {
+pub struct SpallCone {
     pub t: f32,
     pub origin: [f32; 3],
     /// Unit cone axis.

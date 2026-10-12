@@ -19,7 +19,7 @@ use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{ConsequenceState, PenetrationReport, Role, SpallBurst, Verdict};
+use super::{ConsequenceState, PenetrationReport, Role, SpallCone, Verdict};
 use crate::spec::TankSpec;
 
 /// Scenario files, relative to the asset root.
@@ -386,12 +386,12 @@ struct BurstTiming {
     nose: f32,
     /// The envelope's end circle, along a generator at the cone's half-angle.
     rim: f32,
-    /// One per [`SpallBurst::fragments`] entry, in order.
+    /// One per [`SpallCone::fragments`] entry, in order.
     fragments: Vec<f32>,
 }
 
 impl BurstTiming {
-    fn new(report: &PenetrationReport, burst: &SpallBurst) -> Self {
+    fn new(report: &PenetrationReport, burst: &SpallCone) -> Self {
         let origin = Vec3::from(burst.origin);
         let axis = Vec3::from(burst.axis).normalize_or(Vec3::Z);
         let v_exit = path_speed_at(report, burst.t);
@@ -1506,7 +1506,7 @@ fn draw_impact(gizmos: &mut Gizmos, report: &PenetrationReport) {
 /// fragment's alpha by where it ends.
 fn draw_burst(
     gizmos: &mut Gizmos,
-    burst: &SpallBurst,
+    burst: &SpallCone,
     timing: &BurstTiming,
     progress: impl Fn(f32) -> f32,
     fade: impl Fn(Vec3) -> f32,
@@ -1857,7 +1857,7 @@ mod tests {
                     point: [0.0, 0.0, 0.6],
                 },
             ],
-            spall: vec![SpallBurst {
+            spall: vec![SpallCone {
                 t: 0.0005,
                 origin: [0.0, 0.0, 0.3],
                 axis: [0.0, 0.0, 1.0],
