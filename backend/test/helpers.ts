@@ -36,8 +36,8 @@ export function heartbeat(serverId: string, secret: string, hb: HeartbeatRequest
 	return call("POST", `/v1/servers/${serverId}/heartbeat`, hb, { authorization: `Bearer ${secret}` });
 }
 
-export function webhook(serverId: string, token = "test-webhook-secret"): Promise<Response> {
-	return call("POST", `/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(token)}`, { request_id: "ignored" });
+export function webhook(serverId: string, token = "test-webhook-secret", requestId = "ignored"): Promise<Response> {
+	return call("POST", `/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(token)}`, { request_id: requestId });
 }
 
 export function registry(version: string): DurableObjectStub<Registry> {

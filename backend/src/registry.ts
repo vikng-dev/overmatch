@@ -14,6 +14,10 @@
 //   persists every row's next attempt time synchronously, re-arms itself, and only then does the
 //   outbound work — each call bounded (PROVIDER_TIMEOUT_S) and independent of the others, so one
 //   slow call delays no other row.
+// - A claim whose deploy outcome is unknown (timeout, lost response, 5xx) is never replaced while
+//   its fate is unknown: its tickets stay with it, and the alarm looks the deployment up by the
+//   claim's tag (`tagOf`). Found, it is adopted (or stopped, past the deadline); a lookup past the
+//   start deadline that finds nothing is the only proof of absence that frees the tickets.
 // - A deployment is forgotten only once Edgegap confirms it stopped. Ending a server moves its row to
 //   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
 //   gone), and only then is the row `ended` and its history closed.
@@ -22,7 +26,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { config, type Config, type Env } from "./config";
-import { Edgegap, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
+import { definiteRejection, Edgegap, ProviderError, type Beacon, type DeploymentStatus, type LocationData, type Provider } from "./edgegap";
 import { settleAll } from "./deadline";
 import { recordEvent, type Outcome, type SessionEvent } from "./history";
 import { timingSafeEqual, newId, randomHex, sha256Hex, versionOf } from "./ids";
@@ -52,7 +56,9 @@ type ServerRow = {
 	next_poll_at: number | null;
 	ended_at: number | null;
 	peak_players: number;
-	deploy_pending: number;
+	/** calling: the deploy call is in flight; unknown: it ended without an answer; placed: the
+	 *  deployment id is known; refused: Edgegap answered no. */
+	deploy: "calling" | "unknown" | "placed" | "refused";
 	stop_at: number | null;
 }
 
@@ -120,7 +126,7 @@ CREATE TABLE IF NOT EXISTS servers (
 	next_poll_at INTEGER,
 	ended_at INTEGER,
 	peak_players INTEGER NOT NULL DEFAULT 0,
-	deploy_pending INTEGER NOT NULL DEFAULT 0,
+	deploy TEXT NOT NULL DEFAULT 'calling',
 	stop_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS tickets (
@@ -213,6 +219,7 @@ export class Registry extends DurableObject<Env> {
 		const s = t.server_id ? this.server(t.server_id) : null;
 		if (!s) return { state: "starting" };
 		if (s.state === "ready") return { state: "ready", address: s.address!, port: s.port!, key: s.netcode_key };
+		if (s.state === "stopping" && !this.fateKnown(s)) return { state: "starting" };
 		if (s.state === "stopping" || s.state === "ended") return { state: "failed", reason: publicReason(s.reason) };
 		return { state: "starting" };
 	}
@@ -252,11 +259,25 @@ export class Registry extends DurableObject<Env> {
 	}
 
 	/** An Edgegap webhook is a hint only (unsigned, never retried): re-read the status and act on
-	 *  that. */
-	async webhook(serverId: string): Promise<void> {
+	 *  that. Its body's request id is adopted for a claim whose deploy response was lost, but only
+	 *  once the status read shows the claim's tag. */
+	async webhook(serverId: string, requestId: string | null): Promise<void> {
 		const s = this.server(serverId);
-		if (!s || !live(s) || !s.deployment_id) return;
-		await this.refreshStatus(serverId);
+		if (!s || s.state === "ended") return;
+		if (!s.deployment_id) {
+			if (!requestId) return;
+			let st: DeploymentStatus;
+			try {
+				st = await this.provider.status(requestId);
+			} catch (err) {
+				console.warn("webhook status read failed", serverId, diag(err));
+				return;
+			}
+			if (!st.tags.includes(tagOf(serverId))) return;
+			await this.adopt(serverId, requestId);
+			return;
+		}
+		if (live(s)) await this.refreshStatus(serverId);
 	}
 
 	// ---- dashboard ----------------------------------------------------------------------------
@@ -281,9 +302,10 @@ export class Registry extends DurableObject<Env> {
 		for (const r of this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray()) {
 			if (r.created_at + this.cfg.startDeadlineMs <= now) {
 				retry.push(...(this.beginStop(r.id, "failed", REASONS.startTimeout, "starting") ?? []));
-			} else if (r.deployment_id && (r.next_poll_at ?? 0) <= now) {
+			} else if ((r.next_poll_at ?? 0) <= now) {
 				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, r.id);
-				work.push(() => this.refreshStatus(r.id));
+				if (r.deployment_id) work.push(() => this.refreshStatus(r.id));
+				else if (this.fateUnknown(r, now)) work.push(() => this.reconcile(r.id));
 			}
 		}
 		const silent = this.sql
@@ -403,8 +425,8 @@ export class Registry extends DurableObject<Env> {
 		const serverId = newId(version);
 		const netcodeKey = randomHex(32);
 		this.sql.exec(
-			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy_pending)
-			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 1)`,
+			`INSERT INTO servers (id, location, state, capacity, netcode_key, secret_hash, created_at, next_poll_at, deploy)
+			 VALUES (?, ?, 'starting', ?, ?, ?, ?, ?, 'calling')`,
 			serverId,
 			where,
 			this.cfg.capacity,
@@ -424,6 +446,7 @@ export class Registry extends DurableObject<Env> {
 			deploymentId = await this.provider.deploy({
 				version,
 				city: where,
+				tag: tagOf(serverId),
 				clientIp: t.client_ip,
 				webhookUrl: `${t.origin}/v1/edgegap/webhook?server=${encodeURIComponent(serverId)}&token=${encodeURIComponent(this.env.EDGEGAP_WEBHOOK_SECRET)}`,
 				env: [
@@ -438,17 +461,74 @@ export class Registry extends DurableObject<Env> {
 			});
 		} catch (err) {
 			console.warn("deploy failed", serverId, diag(err));
-			this.sql.exec("UPDATE servers SET deploy_pending = 0 WHERE id = ?", serverId);
+			if (!definiteRejection(err)) {
+				// A deployment may exist: keep the claim and its tickets; the alarm reconciles by tag.
+				this.sql.exec("UPDATE servers SET deploy = 'unknown' WHERE id = ? AND deploy = 'calling'", serverId);
+				if (this.server(serverId)?.state === "stopping") await this.tryStop(serverId);
+				return;
+			}
+			this.sql.exec("UPDATE servers SET deploy = 'refused' WHERE id = ?", serverId);
 			await this.finish(serverId, "failed", deployFailure(err), "starting");
 			await this.tryStop(serverId); // ended while the call was in flight: nothing to stop now
 			return;
 		}
+		await this.adopt(serverId, deploymentId, false);
+	}
 
-		// Recorded whatever the row's state: a claim that ended while the call was in flight is
-		// `stopping`, and its stop needs this id.
-		this.sql.exec("UPDATE servers SET deployment_id = ?, deploy_pending = 0 WHERE id = ?", deploymentId, serverId);
+	/** Record a claim's deployment id, whatever the row's state: a claim that ended while its id was
+	 *  unknown is `stopping`, and its stop needs the id. An id recovered late (`poll`) is followed by
+	 *  a status read, since the ready webhook may already have come and gone. */
+	private async adopt(serverId: string, deploymentId: string, poll = true): Promise<void> {
+		const written = this.sql.exec(
+			"UPDATE servers SET deployment_id = ?, deploy = 'placed' WHERE id = ? AND deployment_id IS NULL",
+			deploymentId,
+			serverId,
+		).rowsWritten;
+		if (!written) return;
 		await this.record({ kind: "deployed", serverId, deploymentId });
-		if (this.server(serverId)?.state === "stopping") await this.tryStop(serverId);
+		const s = this.server(serverId);
+		if (s?.state === "stopping") {
+			// The id makes the claim's fate known: its deferred tickets may now be placed elsewhere.
+			const retry = this.releaseTickets(s, s.reason ?? REASONS.startFailed);
+			await this.tryStop(serverId);
+			await this.replace(retry);
+		} else if (s?.state === "starting" && poll) {
+			await this.refreshStatus(serverId);
+		}
+	}
+
+	/** Look a claim of unknown fate up by its tag. Found: adopted. Not found: the claim waits, unless
+	 *  it is `stopping` past its start deadline, when the absence is accepted and the row ends. */
+	private async reconcile(serverId: string): Promise<void> {
+		const s = this.server(serverId);
+		if (!s || s.deployment_id || s.state === "ended") return;
+		let found: string | null;
+		try {
+			found = await this.provider.findByTag(tagOf(serverId));
+		} catch (err) {
+			console.warn("deployment lookup failed", serverId, diag(err));
+			return;
+		}
+		if (found) return this.adopt(serverId, found);
+		const now = Date.now();
+		const fresh = this.server(serverId);
+		if (fresh?.state === "stopping" && !fresh.deployment_id && fresh.created_at + this.cfg.startDeadlineMs <= now) {
+			this.sql.exec("UPDATE servers SET deploy = 'refused' WHERE id = ? AND deployment_id IS NULL", serverId);
+			await this.markEnded(serverId);
+		}
+	}
+
+	/** Whether the claim's deploy outcome is settled: an id, or a refusal. */
+	private fateKnown(s: ServerRow): boolean {
+		return s.deployment_id !== null || s.deploy === "refused";
+	}
+
+	/** No id and no refusal, and no live call that could still answer. The call is bounded by
+	 *  PROVIDER_TIMEOUT_S after a bounded D1 write, so a `calling` row older than three bounds
+	 *  belongs to an object that was evicted mid-call. */
+	private fateUnknown(s: ServerRow, now: number): boolean {
+		if (this.fateKnown(s)) return false;
+		return s.deploy === "unknown" || s.created_at + 3 * this.cfg.providerTimeoutMs <= now;
 	}
 
 	private async refreshStatus(serverId: string): Promise<void> {
@@ -518,10 +598,17 @@ export class Registry extends DurableObject<Env> {
 			s.state,
 		).rowsWritten;
 		if (!moved) return null;
-		const orphans =
-			s.state === "starting"
-				? this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", serverId).toArray()
-				: [];
+		// Tickets of a claim whose deployment may exist stay with it until its fate is known (`adopt`,
+		// `reconcile`): placing them now could start a second server for the same players.
+		return s.state === "starting" && this.fateKnown(s) ? this.releaseTickets(s, reason) : [];
+	}
+
+	/** Detach the waiting tickets of a server that never became ready: each gets another placement
+	 *  (bounded by JOIN_ATTEMPTS, away from this location) or fails with `reason`. Returns the ids to
+	 *  place again. */
+	private releaseTickets(s: ServerRow, reason: string): string[] {
+		if (s.ready_at !== null) return [];
+		const orphans = this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", s.id).toArray();
 		const retry: string[] = [];
 		for (const t of orphans) {
 			const excluded = new Set<string>(JSON.parse(t.excluded));
@@ -562,8 +649,9 @@ export class Registry extends DurableObject<Env> {
 		if (s?.state !== "stopping") return;
 		const now = Date.now();
 		if (!s.deployment_id) {
-			if (s.deploy_pending) this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
-			else await this.markEnded(serverId);
+			if (s.deploy === "refused") return this.markEnded(serverId);
+			this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
+			if (this.fateUnknown(s, now)) await this.reconcile(serverId);
 			return;
 		}
 		this.sql.exec("UPDATE servers SET stop_at = ? WHERE id = ?", now + this.cfg.statusPollMs, serverId);
@@ -581,6 +669,7 @@ export class Registry extends DurableObject<Env> {
 		if (s?.state !== "stopping") return;
 		const now = Date.now();
 		if (!this.sql.exec("UPDATE servers SET state = 'ended', ended_at = ? WHERE id = ? AND state = 'stopping'", now, serverId).rowsWritten) return;
+		const retry = this.releaseTickets(s, s.reason ?? REASONS.startFailed);
 		await this.record({
 			kind: "ended",
 			serverId,
@@ -589,6 +678,7 @@ export class Registry extends DurableObject<Env> {
 			reason: s.reason ?? REASONS.serverEnded,
 			peakPlayers: s.peak_players,
 		});
+		await this.replace(retry);
 	}
 
 	private async ensureAlarm(at: number): Promise<void> {
@@ -601,14 +691,12 @@ export class Registry extends DurableObject<Env> {
 		const r = this.sql
 			.exec<{ t: number | null }>(
 				`SELECT MIN(t) AS t FROM (
-					SELECT MIN(created_at + ?, CASE WHEN deployment_id IS NULL THEN created_at + ? ELSE COALESCE(next_poll_at, 0) END) AS t
-						FROM servers WHERE state = 'starting'
+					SELECT MIN(created_at + ?, COALESCE(next_poll_at, 0)) AS t FROM servers WHERE state = 'starting'
 					UNION ALL SELECT last_seen + ? FROM servers WHERE state = 'ready'
 					UNION ALL SELECT COALESCE(stop_at, 0) FROM servers WHERE state = 'stopping'
 					UNION ALL SELECT ended_at + ? FROM servers WHERE state = 'ended'
 					UNION ALL SELECT created_at + ? FROM tickets
 				)`,
-				c.startDeadlineMs,
 				c.startDeadlineMs,
 				c.heartbeatDeadlineMs,
 				c.endedRetentionMs,
@@ -645,4 +733,10 @@ const OUTBOUND_CONCURRENCY = 5;
 
 function live(s: ServerRow): boolean {
 	return s.state === "starting" || s.state === "ready";
+}
+
+/** The Edgegap tag that identifies a claim's deployment: the random half of the server id (32 hex,
+ *  35 characters with the prefix; Edgegap allows 40). */
+export function tagOf(serverId: string): string {
+	return `om-${serverId.slice(serverId.indexOf(".") + 1)}`;
 }

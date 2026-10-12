@@ -110,13 +110,15 @@ async function route(req: Request, env: Env): Promise<Response> {
 	}
 
 	if (path === "/v1/edgegap/webhook" && method === "POST") {
-		await req.body?.cancel();
+		const hook = await body(req);
+		const rid = typeof hook === "object" && hook !== null ? (hook as { request_id?: unknown }).request_id : undefined;
+		const requestId = typeof rid === "string" && /^[A-Za-z0-9-]{1,64}$/.test(rid) ? rid : null;
 		const token = url.searchParams.get("token") ?? req.headers.get("x-webhook-token") ?? "";
 		const secret = env.EDGEGAP_WEBHOOK_SECRET ?? "";
 		if (!secret || !timingSafeEqual(token, secret)) return error(401, "bad webhook token");
 		const id = url.searchParams.get("server") ?? "";
 		const version = versionOf(id);
-		if (version) await registryFor(env, version).webhook(id);
+		if (version) await registryFor(env, version).webhook(id, requestId);
 		return new Response(null, { status: 204 });
 	}
 

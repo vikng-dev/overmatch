@@ -6,6 +6,7 @@
 //                                     that takes a city `filters` entry (v2 places by IP/coords only)
 //   GET    /v1/status/{id}            V1DeploymentStatus
 //   DELETE /v1/stop/{id}
+//   GET    /v1/deployments?query=     active deployments, filtered here by one tag
 //   GET    /v1/locations?page&limit   paginated (`pagination.has_next`)
 //   GET    /v1/locations/beacons      not paginated (`count`)
 
@@ -30,6 +31,8 @@ export interface Beacon {
 export interface DeployRequest {
 	version: string;
 	city: string;
+	/** Unique to the claim; how a deployment whose deploy response was lost is found again. */
+	tag: string;
 	clientIp: string | null;
 	env: { key: string; value: string; hidden: boolean }[];
 	webhookUrl: string;
@@ -41,11 +44,15 @@ export interface DeploymentStatus {
 	phase: DeploymentPhase;
 	address: string | null;
 	port: number | null;
+	tags: string[];
 }
 
 export interface Provider {
-	/** Resolves to the deployment id. Rejects with `ProviderError` when Edgegap refuses. */
+	/** Resolves to the deployment id. Rejects with `ProviderError`; `definiteRejection` tells a
+	 *  refusal (nothing was created) from an unknown outcome (something may have been). */
 	deploy(req: DeployRequest): Promise<string>;
+	/** The active deployment carrying `tag`, or null. */
+	findByTag(tag: string): Promise<string | null>;
 	status(deploymentId: string): Promise<DeploymentStatus>;
 	/** Idempotent: an already-stopped or unknown deployment is success. */
 	stop(deploymentId: string): Promise<void>;
@@ -111,6 +118,7 @@ export class Edgegap implements Provider {
 			version_name: req.version,
 			...(req.clientIp ? { ip_list: [req.clientIp] } : {}),
 			filters: [{ field: "city", values: [req.city], filter_type: "any" }],
+			tags: [req.tag],
 			env_vars: req.env.map((e) => ({ key: e.key, value: e.value, is_hidden: e.hidden })),
 			webhook_url: req.webhookUrl,
 		};
@@ -123,10 +131,18 @@ export class Edgegap implements Provider {
 		return this.request("status", "GET", `/v1/status/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
 			if (res.status === 404 || res.status === 410) {
 				await res.body?.cancel();
-				return { phase: "gone", address: null, port: null };
+				return { phase: "gone", address: null, port: null, tags: [] };
 			}
 			return interpretStatus(await this.json<V1DeploymentStatus>(res, "status"), this.portName);
 		});
+	}
+
+	async findByTag(tag: string): Promise<string | null> {
+		const query = JSON.stringify({ filters: [{ field: "tags", operator: "eq", value: tag }] });
+		const out = await this.request("list", "GET", `/v1/deployments?query=${encodeURIComponent(query)}`, undefined, (res) =>
+			this.json<{ data?: { request_id?: string; tags?: string[] }[] }>(res, "list"),
+		);
+		return (out.data ?? []).find((d) => d.request_id && (d.tags ?? []).includes(tag))?.request_id ?? null;
 	}
 
 	async stop(deploymentId: string): Promise<void> {
@@ -173,15 +189,23 @@ interface V1DeploymentStatus {
 	error?: boolean;
 	public_ip?: string;
 	ports?: Record<string, { external?: number } | undefined>;
+	tags?: string[];
 }
 
 /** Status strings are "Status.READY", "Status.ERROR", "Status.TERMINATED", … (MEASURED in the risk
  *  test); the booleans are read first because they are the documented fields. */
 export function interpretStatus(s: V1DeploymentStatus, portName: string): DeploymentStatus {
 	const current = (s.current_status ?? "").toUpperCase();
-	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null };
-	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null };
+	const tags = s.tags ?? [];
+	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null, tags };
+	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null, tags };
 	const port = s.ports?.[portName]?.external ?? null;
-	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port };
-	return { phase: "pending", address: null, port: null };
+	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, tags };
+	return { phase: "pending", address: null, port: null, tags };
+}
+
+/** True when Edgegap answered the deploy with a refusal, so nothing was created. A timeout, a lost
+ *  connection, a 5xx or a 408 leaves the outcome unknown: a deployment may exist. */
+export function definiteRejection(err: unknown): boolean {
+	return err instanceof ProviderError && err.status >= 400 && err.status < 500 && err.status !== 408;
 }

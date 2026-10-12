@@ -72,6 +72,10 @@ export class FakeEdgegap {
 	private gate: Promise<void> | null = null;
 	private seq = 0;
 
+	/** The next this-many deploy calls create the deployment, then answer 502: the response is lost. */
+	loseDeployResponses = 0;
+	/** The next this-many deploy calls answer 502 and create nothing. */
+	failDeploysUnanswered = 0;
 	/** Deployment ids whose status call never answers. */
 	hangStatus = new Set<string>();
 	/** The next this-many stop calls answer 503 and stop nothing. */
@@ -162,9 +166,27 @@ export class FakeEdgegap {
 				const echo = this.echoInErrors ? ` request: ${JSON.stringify(body)}` : "";
 				return Response.json({ message: `Not enough space on locations or no locations available${echo}` }, { status: 422 });
 			}
+			if (this.failDeploysUnanswered > 0) {
+				this.failDeploysUnanswered--;
+				return Response.json({ message: "bad gateway" }, { status: 502 });
+			}
 			const id = `dep${++this.seq}`;
 			this.deployments.set(id, { id, body, status: "Status.DEPLOYING", publicIp: `198.51.100.${this.seq}`, port: 31000 + this.seq });
+			if (this.loseDeployResponses > 0) {
+				this.loseDeployResponses--;
+				return Response.json({ message: "bad gateway" }, { status: 502 });
+			}
 			return Response.json({ request_id: id, request_dns: `${id}.pr.edgegap.test`, request_app: body.app_name, request_version: body.version_name, request_user_count: 1, filters: body.filters });
+		}
+		if (req.method === "GET" && url.pathname === "/v1/deployments") {
+			// Only the filter src/edgegap.ts sends: one `tags eq` filter. Lists active deployments.
+			const query = JSON.parse(url.searchParams.get("query") ?? "{}") as { filters?: { field: string; operator: string; value: string }[] };
+			const tag = query.filters?.find((f) => f.field === "tags" && f.operator === "eq")?.value;
+			const data = [...this.deployments.values()]
+				.filter((d) => d.status === "Status.DEPLOYING" || d.status === "Status.READY")
+				.filter((d) => tag === undefined || ((d.body.tags as string[] | undefined) ?? []).includes(tag))
+				.map((d) => ({ request_id: d.id, fqdn: `${d.id}.pr.edgegap.test`, ready: d.status === "Status.READY", start_time: "", public_ip: d.publicIp, tags: d.body.tags ?? [] }));
+			return Response.json({ data, total_count: data.length, pagination: { number: 1, has_next: false } });
 		}
 		let m = /^\/v1\/status\/(.+)$/.exec(url.pathname);
 		if (req.method === "GET" && m) {
@@ -186,6 +208,7 @@ export class FakeEdgegap {
 				error: d.status === "Status.ERROR",
 				error_detail: d.status === "Status.ERROR" ? `Not enough space on locations${this.echoInErrors ? ` ${JSON.stringify(d.body)}` : ""}` : "",
 				ports: { game: { name: "game", internal: 5888, external: d.port, protocol: "UDP", link: `${d.id}:${d.port}`, tls_upgrade: false } },
+				tags: d.body.tags ?? [],
 			});
 		}
 		m = /^\/v1\/stop\/(.+)$/.exec(url.pathname);
