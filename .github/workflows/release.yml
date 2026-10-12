@@ -412,7 +412,9 @@ jobs:
   # meant to run.
   smoke-linux:
     needs: [build-client, build-server]
-    if: github.event_name != 'workflow_dispatch' || inputs.tag == ''
+    # Explicit results: an implicit success() also requires the skipped create-release ancestor
+    # (build-only dispatch) and would skip the smoke there.
+    if: ${{ !cancelled() && needs.build-client.result == 'success' && needs.build-server.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.tag == '') }}
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -481,7 +483,9 @@ jobs:
   # tarball and runs the fixture against its unpacked assets. Nothing is compiled here.
   smoke-windows:
     needs: [build-client, build-server]
-    if: github.event_name != 'workflow_dispatch' || inputs.tag == ''
+    # Explicit results: an implicit success() also requires the skipped create-release ancestor
+    # (build-only dispatch) and would skip the smoke there.
+    if: ${{ !cancelled() && needs.build-client.result == 'success' && needs.build-server.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.tag == '') }}
     permissions:
       contents: read
     runs-on: windows-latest
