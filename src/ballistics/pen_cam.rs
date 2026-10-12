@@ -217,7 +217,9 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
 fn ray_hit(shape: &ComponentShape, origin: Vec3, direction: Vec3) -> Option<f32> {
     shape
         .indices
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .filter_map(|tri| {
             let [a, b, c] = [0, 1, 2].map(|k| shape.positions[tri[k] as usize]);
             let (e1, e2) = (b - a, c - a);
