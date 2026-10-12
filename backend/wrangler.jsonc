@@ -1,6 +1,8 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "overmatch-backend",
+	// Yan@vikng.dev's Account; the wrangler login reaches more than one account.
+	"account_id": "cabe621e38d3e02cea53d2010fb542e0",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-10-01",
 	// Custom logs only. Invocation logs record every request URL and are off: no URL here carries a
@@ -15,12 +17,12 @@
 		"Registry": { "type": "durable-object", "storage": "sqlite" }
 	},
 
-	// Per-server-lifetime history. `wrangler d1 create overmatch-sessions` prints the id to paste here.
+	// Per-server-lifetime history.
 	"d1_databases": [
 		{
 			"binding": "DB",
 			"database_name": "overmatch-sessions",
-			"database_id": "00000000-0000-0000-0000-000000000000",
+			"database_id": "e935d889-b4bd-4ba0-9e4a-0fdd82d272ce",
 			"migrations_dir": "migrations"
 		}
 	],
