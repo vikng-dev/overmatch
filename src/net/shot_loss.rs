@@ -23,8 +23,8 @@ use lightyear::prelude::*;
 
 use super::client::{
     HeldFireEvents, InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage,
-    SeenShots, age_sanctioned_shots, install_input_buffer_guard, receive_damage_confirms,
-    receive_fire_events, shipping_input_delay,
+    SeenShots, age_sanctioned_shots, install_input_buffer_guard, install_input_send_cadence,
+    receive_damage_confirms, receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hit_feel::LocalHitConfirmed;
@@ -797,6 +797,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         tick_duration: TICK,
     });
     install_input_buffer_guard(&mut app);
+    install_input_send_cadence(&mut app);
     super::protocol::plugin(&mut app);
     // A CLIENT's composition: both halves. The view half is what dresses a shell with `ShellVisual`,
     // which is the signature the trail harness below attaches its ribbon on.

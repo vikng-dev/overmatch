@@ -20,6 +20,9 @@ mod fire_presentation;
 mod harness;
 pub(crate) use harness::{env_flag, env_parse, env_value};
 mod hit_feel;
+/// Real-UDP probe of the client's one-input-message-per-tick send cadence.
+#[cfg(test)]
+mod input_cadence;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
 mod physics;

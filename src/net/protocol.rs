@@ -2148,17 +2148,20 @@ mod tests {
     /// real bandwidth problem — at which point the mitigation is to shrink the ATTESTED payload (a
     /// `u8` tick-LSB, or a fire-fields-only sub-struct carrying the stamp), not to drop attestation.
     ///
-    /// Context for the number: this is UPSTREAM traffic only (client → server), one message per
-    /// frame. The comparison is also somewhat theoretical — the `for_tick` stamp alone differs
-    /// every tick (`net::client::stamp_input_tick`), so run-compression is dead in the shipping
-    /// configuration whatever `aim` does. It only ever paid off unstamped, for a tank sitting
+    /// Context for the number: this is UPSTREAM traffic only (client → server), and the client
+    /// sends at most one input message per tick (`net::client::install_input_send_cadence`), so
+    /// bytes per message × the tick rate is the steady upstream rate at any frame rate (states
+    /// payload only; packet framing is extra). The comparison is also somewhat theoretical — the
+    /// `for_tick` stamp alone differs every tick (`net::client::stamp_input_tick`), so
+    /// run-compression is dead in the shipping configuration whatever `aim` does. It only ever paid off unstamped, for a tank sitting
     /// perfectly still doing nothing, which is exactly when nobody cares about bandwidth.
     #[test]
     fn input_message_wire_cost() {
         use lightyear::prelude::input::native::NativeStateSequence;
 
         const REDUNDANCY: usize = 5; // lightyear `InputConfig::packet_redundancy` default
-        const TICK_HZ: usize = 64;
+        // One input message per tick: `net::client::install_input_send_cadence`.
+        const MESSAGES_PER_S: usize = 64;
 
         // `ActionStateSequence` is the trait carrying `build_from_input_buffer`.
         use lightyear::prelude::input::native::NativeBuffer;
@@ -2201,13 +2204,12 @@ mod tests {
         let before = encoded_len(&unstamped, Tick((T0 + 9) as u32));
         let after = encoded_len(&stamped, Tick((T0 + 9) as u32));
         let delta = after - before;
-        let up_bytes_per_s = delta * TICK_HZ;
 
         println!(
             "IDLE (worst case for the stamp — nothing but `for_tick` changes, so run-compression \
              was fully paying off): {before} B -> {after} B (+{delta} B/message) = +{:.1} KB/s \
-             upstream per client at {TICK_HZ} Hz",
-            up_bytes_per_s as f64 / 1024.0,
+             upstream per client at {MESSAGES_PER_S} messages/s",
+            (delta * MESSAGES_PER_S) as f64 / 1024.0,
         );
 
         // The REALISTIC regime: the player is aiming, so the `aim` point already differs every tick
@@ -2234,8 +2236,9 @@ mod tests {
         println!(
             "AIMING (the realistic regime — the `aim` point already changed every tick and \
              compression was already dead): {aim_before} B -> {aim_after} B \
-             (+{aim_delta} B/message) = +{:.1} KB/s upstream per client at {TICK_HZ} Hz",
-            (aim_delta * TICK_HZ) as f64 / 1024.0,
+             (+{aim_delta} B/message) = +{:.1} KB/s upstream per client at {MESSAGES_PER_S} \
+             messages/s",
+            (aim_delta * MESSAGES_PER_S) as f64 / 1024.0,
         );
 
         assert!(
@@ -2244,7 +2247,7 @@ mod tests {
              grown fat enough that per-tick attestation costs real bandwidth. Shrink the ATTESTED \
              payload (u8 tick-LSB, or a fire-only sub-struct carrying the stamp); do NOT drop \
              attestation, which is what keeps the server from firing rounds nobody asked for.",
-            up_bytes_per_s as f64 / 1024.0,
+            (after * MESSAGES_PER_S) as f64 / 1024.0,
         );
     }
 

@@ -561,6 +561,7 @@ pub fn run() {
         );
     }
     install_input_buffer_guard(&mut app);
+    install_input_send_cadence(&mut app);
 
     // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner now live in the overlay
     // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on same windowed condition):
@@ -892,6 +893,58 @@ fn claim_input_slot(add: On<Add, NetControlled>, mut commands: Commands) {
         ActionState::<TankCommand>::default(),
         GameControlled,
     ));
+}
+
+/// The input tick (`local tick + input delay`) the newest staged input message ends on, and whether
+/// this frame stages another.
+#[derive(Resource, Default)]
+struct InputSendCadence {
+    staged_for: Option<Tick>,
+    due: bool,
+}
+
+/// Stage at most one input message per input tick. Lightyear's `prepare_input_message` runs once
+/// per `PostUpdate` frame and, on a frame that ran no fixed tick, re-stages the same `end_tick` with
+/// the same `packet_redundancy` window, so without this gate the upload scales with frame rate
+/// rather than tick rate. The first frame of each new input tick still stages its message, so the
+/// input lead is unchanged. The gate keys on the tick, and [`shift_staged_input_tick`] moves the
+/// key with every `LocalTimelineShift` exactly as lightyear re-tags the staged message, so a shifted
+/// timeline sends on its next new tick.
+pub(super) fn install_input_send_cadence(app: &mut App) {
+    app.init_resource::<InputSendCadence>()
+        .add_systems(
+            PostUpdate,
+            decide_input_send.before(InputSystems::PrepareInputMessage),
+        )
+        .configure_sets(
+            PostUpdate,
+            InputSystems::PrepareInputMessage.run_if(input_send_due),
+        )
+        .add_observer(shift_staged_input_tick);
+}
+
+/// Unsynced, lightyear skips `prepare_input_message` itself (its `SyncedLocalTimeline` parameter),
+/// so nothing is recorded as staged.
+fn decide_input_send(
+    timeline: Res<LocalTimeline>,
+    sync: Res<LocalTimelineSync>,
+    mut cadence: ResMut<InputSendCadence>,
+) {
+    let input_tick = timeline.tick() + sync.input_delay() as i32;
+    cadence.due = sync.is_synced() && cadence.staged_for != Some(input_tick);
+    if cadence.due {
+        cadence.staged_for = Some(input_tick);
+    }
+}
+
+fn input_send_due(cadence: Res<InputSendCadence>) -> bool {
+    cadence.due
+}
+
+fn shift_staged_input_tick(shift: On<LocalTimelineShift>, mut cadence: ResMut<InputSendCadence>) {
+    if let Some(tick) = cadence.staged_for.as_mut() {
+        *tick = *tick + shift.delta;
+    }
 }
 
 /// Observable count of buffers cleared before Lightyear's native input encoder.
