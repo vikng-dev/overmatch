@@ -83,6 +83,9 @@ mod store;
 /// The page itself. Private to this module: composition roots reach it only through [`plugin`],
 /// which is what makes mounting the page without its entry declarer unrepresentable.
 mod ui;
+/// The page's root, which the UI-ownership audit counts as an owner (`net::ui_ownership`).
+#[cfg(test)]
+pub(crate) use ui::SettingsCard;
 
 /// The schema generation. See the module doc's policy: renames use `#[serde(alias)]` and do NOT
 /// bump this; only a field whose MEANING changed under the same name does.
@@ -802,6 +805,32 @@ impl WindowModeSetting {
         [WindowModeSetting::Windowed, WindowModeSetting::Fullscreen];
 }
 
+/// Whether the online client draws its debug card (ping, jitter, frame rate, frame time, version)
+/// in a corner during a match. On by default during the beta, so a tester's report carries the
+/// numbers. Read only by `net::debug_hud`; the offline root has no card.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum DebugPanel {
+    #[default]
+    On,
+    Off,
+}
+
+impl DebugPanel {
+    pub(crate) const ORDER: [DebugPanel; 2] = [DebugPanel::Off, DebugPanel::On];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            DebugPanel::On => "ON",
+            DebugPanel::Off => "OFF",
+        }
+    }
+
+    pub(crate) const fn shown(self) -> bool {
+        matches!(self, DebugPanel::On)
+    }
+}
+
 /// Which monitor the window is put on — the row that stops a two-display machine opening the game
 /// wherever the window manager last felt like.
 ///
@@ -1490,6 +1519,9 @@ pub(crate) struct Settings {
     /// UI scale percent — a multiplier on [`UiScale`]; see [`UiScalePercent`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) ui_scale: UiScalePercent,
+    /// The online debug card — see [`DebugPanel`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) debug_panel: DebugPanel,
 }
 
 impl Default for Settings {
@@ -1508,6 +1540,7 @@ impl Default for Settings {
             lod_pixel_budget: PixelBudget::default(),
             frame_cap: FrameCap::default(),
             ui_scale: UiScalePercent::default(),
+            debug_panel: DebugPanel::default(),
         }
     }
 }
@@ -4453,6 +4486,11 @@ mod tests {
         assert!(is_default(&settings.lod_pixel_budget));
         assert!(is_default(&settings.frame_cap));
         assert!(is_default(&settings.ui_scale));
+        assert!(is_default(&settings.debug_panel));
+        assert!(
+            settings.debug_panel.shown(),
+            "the debug card is on by default during the beta"
+        );
         assert!(
             settings.legacy_vsync.is_none(),
             "the legacy shadow field must default absent — it exists only inside a parse"

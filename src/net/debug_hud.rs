@@ -2,7 +2,11 @@
 //! client's version (`net::CLIENT_VERSION`). Net-only —
 //! ping is meaningless in single-player, so this lives in the net module and is mounted solely by
 //! `NetClientPlugin` (never SP, never the headless server). WIP instrumentation: hardcoded styling
-//! mirrored from `crew_ui`'s top-left status card. The card shows only over a connected link.
+//! mirrored from `crew_ui`'s top-left status card.
+//!
+//! The card belongs to the match screen (`flow::Flow::InMatch`: spawned on entering it, gone on
+//! leaving), shows only over a connected link, and only while the player's `DEBUG PANEL` setting
+//! (`settings::DebugPanel`, on by default during the beta) is on. There is no toggle key.
 //!
 //! Jitter is the delay law's instability term — `ArrivalStats::spread()` less
 //! `extrapolate::horizon()`, floored at zero: the exact milliseconds `net::interp_delay` buffers
@@ -31,6 +35,8 @@ use bevy::prelude::*;
 use lightyear::core::tick::TickDuration;
 use lightyear::prelude::*;
 
+use crate::flow::{Flow, FlowScoped};
+use crate::settings::{DebugPanel, Settings};
 use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts};
 
 use super::sync_margin::ArrivalDelay;
@@ -49,12 +55,12 @@ const JITTER_ALARM: Color = Color::srgb(1.0, 0.3, 0.2);
 
 /// The card's root node.
 #[derive(Component)]
-struct DebugCard;
+pub(super) struct DebugCard;
 
-/// Whether the card shows: only over a connected link — every row but the version reads a live
-/// session, and without one the ping is meaningless.
-fn card_shown(connected: bool) -> bool {
-    connected
+/// Whether the card shows: the setting is on, and the link is connected — every row but the version
+/// reads a live session, and without one the ping is meaningless.
+fn card_shown(setting: DebugPanel, connected: bool) -> bool {
+    setting.shown() && connected
 }
 
 /// Which metric a value column renders. Lets one update system fan out over the value nodes.
@@ -70,15 +76,20 @@ pub fn plugin(app: &mut App) {
     if !app.is_plugin_added::<FrameTimeDiagnosticsPlugin>() {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default());
     }
-    app.add_systems(Startup, spawn_debug_hud)
-        .add_systems(Update, (show_debug_card, update_debug_hud));
+    crate::flow::require(app, "net::debug_hud");
+    app.add_systems(OnEnter(Flow::InMatch), spawn_debug_hud)
+        .add_systems(
+            Update,
+            (show_debug_card, update_debug_hud).run_if(in_state(Flow::InMatch)),
+        );
 }
 
 fn show_debug_card(
+    settings: Res<Settings>,
     links: Query<(), (With<Connected>, With<Link>)>,
     mut card: Query<&mut Visibility, With<DebugCard>>,
 ) {
-    let shown = card_shown(!links.is_empty());
+    let shown = card_shown(settings.debug_panel, !links.is_empty());
     for mut visibility in &mut card {
         visibility.set_if_neq(if shown {
             Visibility::Inherited
@@ -95,6 +106,7 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // horizontal padding.
     commands
         .spawn((
+            FlowScoped(Flow::InMatch),
             DebugCard,
             Visibility::Hidden,
             Node {
@@ -264,12 +276,16 @@ mod tests {
     use crate::ui_font::TEXT;
 
     use super::{JITTER_ALARM, JITTER_WARN, card_shown, jitter_readout};
+    use crate::settings::DebugPanel;
 
-    /// No connected link, no card: the lobby, the connect screen and a dropped link show none.
+    /// The card needs both the setting and a connected link; a dropped link (RECONNECTING…) shows
+    /// none, and turning the setting off hides it in a live match.
     #[test]
-    fn the_card_shows_only_over_a_connected_link() {
-        assert!(card_shown(true));
-        assert!(!card_shown(false));
+    fn the_card_shows_with_the_setting_over_a_connected_link() {
+        assert!(card_shown(DebugPanel::On, true));
+        assert!(!card_shown(DebugPanel::On, false));
+        assert!(!card_shown(DebugPanel::Off, true));
+        assert!(!card_shown(DebugPanel::Off, false));
     }
 
     /// The game's fixed tick (64 Hz), spelled out rather than read from the runtime binding — the

@@ -16,6 +16,7 @@ use crate::aim::CommittedAim;
 use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
+use crate::flow::{Flow, FlowScoped};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
@@ -81,17 +82,19 @@ struct RangeScaleTick {
     major: bool,
 }
 
-/// Mount the presentation layer: spawn every HUD node once, then keep them in step with the sight.
+/// Mount the presentation layer: spawn the match's HUD nodes on entering a match (the view-death
+/// black, an overlay, once at startup), then keep them in step with the sight.
 pub(super) fn plugin(app: &mut App) {
+    crate::flow::require(app, "sight");
     app.init_resource::<Toast>()
         // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
         // fragment punches the glass out of it.
         .add_plugins(UiMaterialPlugin::<OpticMaskMaterial>::default())
+        .add_systems(Startup, spawn_view_death_overlay)
         .add_systems(
-            Startup,
+            OnEnter(Flow::InMatch),
             (
                 spawn_intent_reticle,
-                spawn_view_death_overlay,
                 spawn_toast,
                 spawn_range_readout,
                 spawn_ranging_reticle,
@@ -116,7 +119,8 @@ pub(super) fn plugin(app: &mut App) {
                 // readout are presentation and keep updating with the cursor free — hence no
                 // `PlayerInputSet` here.
                 .after(super::toggle_sight)
-                .in_set(GameplaySet),
+                .in_set(GameplaySet)
+                .run_if(in_state(Flow::InMatch)),
         )
         // Both reprojections run after the camera's pose is final for the frame, and after
         // propagation: the graticule anchors on the VIEW gun's own `GlobalTransform` as well as
@@ -133,12 +137,14 @@ pub(super) fn plugin(app: &mut App) {
             )
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced),
+                .after(GunnerCameraPlaced)
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 
 fn spawn_intent_reticle(mut commands: Commands) {
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         IntentReticle,
         Node {
             position_type: PositionType::Absolute,
@@ -197,13 +203,16 @@ fn spawn_view_death_overlay(mut commands: Commands, fonts: Res<UiFonts>) {
 /// raises it. Its own entity carries both `Text` and `Visibility`, so `update_toast` writes one query.
 fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            position_type: PositionType::Absolute,
-            top: Val::Percent(30.0),
-            justify_content: JustifyContent::Center,
-            ..default()
-        })
+        .spawn((
+            FlowScoped(Flow::InMatch),
+            Node {
+                width: Val::Percent(100.0),
+                position_type: PositionType::Absolute,
+                top: Val::Percent(30.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+        ))
         .with_children(|parent| {
             parent.spawn((
                 ToastText,
@@ -223,6 +232,7 @@ fn spawn_toast(mut commands: Commands, fonts: Res<UiFonts>) {
 /// The dialed-range readout, parked bottom-left; populated/shown only in the optic.
 fn spawn_range_readout(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         RangeReadout,
         Text::new(""),
         TextFont {
@@ -294,6 +304,7 @@ fn tick_width(major: bool) -> f32 {
 /// centre at any rung of `sight::GunnerBlend`. All hidden until shown in the optic.
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         ReticleLine,
         Node {
             position_type: PositionType::Absolute,
@@ -310,6 +321,7 @@ fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
         let major = (range as i32) % 400 == 0;
         let width = tick_width(major);
         let mut tick = commands.spawn((
+            FlowScoped(Flow::InMatch),
             RangeScaleTick { range, major },
             Node {
                 position_type: PositionType::Absolute,
@@ -510,6 +522,7 @@ struct OpticMask;
 /// and below every overlay that has to cover the sight picture whole.
 fn spawn_optic_mask(mut commands: Commands, mut materials: ResMut<Assets<OpticMaskMaterial>>) {
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         OpticMask,
         MaterialNode(materials.add(OpticMaskMaterial {
             // Placed by `update_optic_mask` before it is ever shown; a fully open glass is the

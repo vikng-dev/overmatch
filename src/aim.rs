@@ -25,6 +25,7 @@ use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
+use crate::flow::{Flow, FlowScoped};
 use crate::sight::{SightMode, SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
@@ -189,8 +190,9 @@ impl CommittedAim {
 
 /// The third-person aim commit + HUD dots — client-side: devices → command, and reprojection.
 pub fn client_plugin(app: &mut App) {
+    crate::flow::require(app, "aim::client_plugin");
     app.init_resource::<CommittedAim>()
-        .add_systems(Startup, spawn_hud)
+        .add_systems(OnEnter(Flow::InMatch), spawn_hud)
         .add_systems(
             Update,
             // Per-mode aim commit: third-person from the screen-center ray; the optic commits
@@ -216,7 +218,8 @@ pub fn client_plugin(app: &mut App) {
             Update,
             update_centre_reticle
                 .after(SightToggled)
-                .in_set(GameplaySet),
+                .in_set(GameplaySet)
+                .run_if(in_state(Flow::InMatch)),
         )
         // HUD markers reproject through the camera, so they run after the camera's pose is final
         // for the frame — after propagation and after the gunner camera places itself — or they
@@ -226,7 +229,8 @@ pub fn client_plugin(app: &mut App) {
             (update_bore_indicator, update_aim_indicator)
                 .in_set(GameplaySet)
                 .after(TransformSystems::Propagate)
-                .after(GunnerCameraPlaced),
+                .after(GunnerCameraPlaced)
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 
@@ -234,13 +238,16 @@ fn spawn_hud(mut commands: Commands) {
     // Centre reticle: a small white dot held at screen centre by flexbox. Third person only
     // (`update_centre_reticle`); spawned visible, which is the default view.
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            FlowScoped(Flow::InMatch),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|parent| {
             parent.spawn((
                 CentreReticle,
@@ -257,6 +264,7 @@ fn spawn_hud(mut commands: Commands) {
 
     // Green: actual bore. Amber: commanded aim (free-look only). Both hidden until shown.
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         BoreIndicator,
         Node {
             position_type: PositionType::Absolute,
@@ -269,6 +277,7 @@ fn spawn_hud(mut commands: Commands) {
         Visibility::Hidden,
     ));
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         AimIndicator,
         Node {
             position_type: PositionType::Absolute,

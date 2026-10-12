@@ -612,13 +612,7 @@ pub fn run() {
     // headless automation has no window to draw it, and verifies the state machine via the log
     // lines `drive_connection` emits instead. Mounted on the same condition as `NetClientPlugin`.
     if !simulate || sim_windowed {
-        app.add_systems(Startup, spawn_connect_status)
-            // Declares `Overlay::ConnectStatus` presence into the overlay authority, so it must run in
-            // the `Declare` phase before the cursor owner derives the input license from the set.
-            .add_systems(
-                Update,
-                update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
-            )
+        app.add_plugins(connect_screen_plugin)
             // The screen is derived after this frame's connection state and before any owner
             // declares an overlay from it.
             .add_systems(
@@ -942,6 +936,16 @@ fn abandon_unreachable_match(
     unreachable.write(super::matchmaking::MatchUnreachable(
         "could not reach the match server".into(),
     ));
+}
+
+/// The connect screen's systems. `update_connect_status` declares `Overlay::ConnectStatus` into the
+/// overlay authority, so it runs in the `Declare` phase, before the cursor owner derives the input
+/// license from the set.
+pub(super) fn connect_screen_plugin(app: &mut App) {
+    app.add_systems(Startup, spawn_connect_status).add_systems(
+        Update,
+        update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
+    );
 }
 
 /// The connect-status message node inside the connect overlay — its text is rewritten from

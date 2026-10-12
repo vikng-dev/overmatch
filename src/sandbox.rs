@@ -262,6 +262,8 @@ pub fn plugin(app: &mut App) {
     // chains are already off their source rung (up to ~16 mm of surface). A tool whose whole use is
     // "look at where this shell went into this plate" shows the authored plate.
     app.insert_resource(crate::geometry_lod::SourceDetailOnly);
+    // A sandbox is always in a match: the shared HUD/crew plugins below spawn on entering it.
+    app.add_plugins(crate::flow::in_match_plugin);
     // The sandbox's own App composition — physics + the shared shell mechanic + a battlefield to
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((

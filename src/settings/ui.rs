@@ -56,8 +56,9 @@ use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
 use super::{
-    FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel, SaveSettings, Settings,
-    ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode, WindowModeSetting,
+    DebugPanel, FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel, SaveSettings,
+    Settings, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode,
+    WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -114,6 +115,8 @@ enum Row {
     /// unless vsync is OFF (see [`Row::enabled`]).
     FrameCap,
     UiScale,
+    /// The online debug card in a match's corner — see `settings::DebugPanel`.
+    DebugPanel,
 }
 
 /// How a row's control renders and responds: a `< VALUE >` stepper or a draggable slider.
@@ -124,7 +127,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 11] = [
+    const ORDER: [Row; 12] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -136,6 +139,7 @@ impl Row {
         Row::VSync,
         Row::FrameCap,
         Row::UiScale,
+        Row::DebugPanel,
     ];
 
     /// The row's name. ASCII only — it reaches `Text`.
@@ -154,6 +158,7 @@ impl Row {
             Row::VSync => "VSYNC",
             Row::FrameCap => "FRAME CAP",
             Row::UiScale => "UI SCALE",
+            Row::DebugPanel => "DEBUG PANEL",
         }
     }
 
@@ -218,6 +223,9 @@ impl Row {
                 "Caps the frame rate to limit heat and power draw. Active only while VSYNC is OFF."
             }
             Row::UiScale => "Scales the HUD and menus. The 3D world is unaffected.",
+            Row::DebugPanel => {
+                "Ping, jitter, frame rate and version in the corner during an online match."
+            }
         }
     }
 
@@ -292,6 +300,7 @@ impl Row {
             Row::VSync => settings.vsync.label().to_string(),
             Row::FrameCap => settings.frame_cap.label(),
             Row::UiScale => settings.ui_scale.label(),
+            Row::DebugPanel => settings.debug_panel.label().to_string(),
         }
     }
 
@@ -341,6 +350,9 @@ impl Row {
             }
             Row::FrameCap => settings.frame_cap = settings.frame_cap.step(delta),
             Row::UiScale => settings.ui_scale = settings.ui_scale.step(delta),
+            Row::DebugPanel => {
+                settings.debug_panel = step_in(&DebugPanel::ORDER, settings.debug_panel, delta);
+            }
         }
     }
 
@@ -451,7 +463,7 @@ impl Selection {
 
 /// The card node, so visibility is one write.
 #[derive(Component)]
-struct SettingsCard;
+pub(crate) struct SettingsCard;
 
 /// The clipped, scrollable box the rows live in — everything between the title and the hint slot.
 /// Carries the [`ScrollPosition`] that [`scroll_rows`] drives.

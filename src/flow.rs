@@ -6,10 +6,18 @@
 //!   (zeroed) command.
 //! - **Derived, one writer per root.** Each windowed root writes [`flow_of`] of its facts every frame
 //!   with `NextState::set_if_neq`, so a frame that changes nothing transitions nothing: the offline
-//!   root from `AppState` ([`offline_plugin`]), the net client from its link (`net::client`).
+//!   root from `AppState` ([`offline_plugin`]), the net client from its link (`net::client`). A
+//!   root that is always in a match — a sandbox — inserts [`Flow::InMatch`] once
+//!   ([`in_match_plugin`]).
 //! - **The transition lands one frame after the facts change**: the writer runs in `Update`, and
 //!   `StateTransition` applies it before the next frame's `Update`.
+//! - **Every UI root has an owner**: [`FlowScoped`] (spawned on `OnEnter`, despawned on exit), an
+//!   `overlay::OverlayNode` (persistent, shown by the overlay authority), the settings page (the
+//!   Esc menu's content), or the offline pause banner (`DespawnOnExit(AppState::Paused)`).
+//!   `net::ui_ownership` fails on a root with none.
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 /// The client's screen. Overlays (pause, death, reconnecting, the Esc menu) are not screens: they
@@ -73,6 +81,37 @@ pub(crate) fn plugin(app: &mut App) {
 pub(crate) fn offline_plugin(app: &mut App) {
     plugin(app);
     app.add_systems(Update, derive_offline_flow);
+}
+
+/// A root that is always in a match: no writer, no transitions.
+pub(crate) fn in_match_plugin(app: &mut App) {
+    app.insert_state(Flow::InMatch);
+}
+
+/// Panics unless [`Flow`] is registered: a plugin that spawns on `OnEnter(Flow::…)` or gates on
+/// `in_state(Flow::…)` would otherwise never draw, since `in_state` is false while the state is
+/// absent.
+pub(crate) fn require(app: &App, plugin: &str) {
+    assert!(
+        app.world().contains_resource::<State<Flow>>(),
+        "{plugin} spawns and gates on `flow::Flow`; mount `flow::plugin` (or `in_match_plugin`) \
+         before it"
+    );
+}
+
+/// Owns a UI root for one screen: the hook stamps `DespawnOnExit` of that screen, so the tree is
+/// spawned on `OnEnter` and leaves with the screen, and no spawn site can forget the despawn.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(on_add = stamp_despawn_on_exit)]
+pub(crate) struct FlowScoped(pub(crate) Flow);
+
+fn stamp_despawn_on_exit(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+    let flow = world
+        .entity(entity)
+        .get::<FlowScoped>()
+        .expect("FlowScoped present in its own on_add hook")
+        .0;
+    world.commands().entity(entity).insert(DespawnOnExit(flow));
 }
 
 fn derive_offline_flow(
@@ -143,5 +182,34 @@ mod tests {
             playing: true,
         };
         assert_eq!(flow_of(left), Flow::Lobby);
+    }
+
+    /// A scoped root despawns, children and all, when its screen exits — and only then.
+    #[test]
+    fn a_scoped_root_leaves_with_its_screen() {
+        let mut app = App::new();
+        app.add_plugins(bevy::state::app::StatesPlugin)
+            .init_state::<Flow>();
+        let go = |app: &mut App, flow: Flow| {
+            app.world_mut().resource_mut::<NextState<Flow>>().set(flow);
+            app.update();
+        };
+        go(&mut app, Flow::InMatch);
+        let root = app
+            .world_mut()
+            .spawn((FlowScoped(Flow::InMatch), Node::default()))
+            .with_child(Node::default())
+            .id();
+        let child = app.world().entity(root).get::<Children>().unwrap()[0];
+        app.update();
+        assert!(
+            app.world().entity(root).contains::<DespawnOnExit<Flow>>(),
+            "the hook stamps the despawn"
+        );
+        assert!(app.world().get_entity(root).is_ok(), "same screen, kept");
+
+        go(&mut app, Flow::Lobby);
+        assert!(app.world().get_entity(root).is_err(), "screen exited");
+        assert!(app.world().get_entity(child).is_err(), "with its children");
     }
 }

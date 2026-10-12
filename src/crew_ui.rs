@@ -9,6 +9,7 @@ use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
+use crate::flow::{Flow, FlowScoped};
 use crate::spec::{FireMode, ViewKind};
 use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
@@ -37,17 +38,19 @@ struct CrewSelect {
 /// than an `Option` on purpose: absent, the panel could only invent a readout, and the tank whose
 /// reload state cannot be told is the one this card exists to report on.
 pub fn plugin(app: &mut App) {
+    crate::flow::require(app, "crew_ui");
     app.init_resource::<CrewSelect>()
-        .add_systems(Startup, (spawn_crew_bar, spawn_status_panel))
+        .add_systems(OnEnter(Flow::InMatch), (spawn_crew_bar, spawn_status_panel))
         .add_systems(
             Update,
-            (crew_swap_input, update_crew_bar, update_status_panel),
+            (crew_swap_input, update_crew_bar, update_status_panel).run_if(in_state(Flow::InMatch)),
         );
 }
 
 fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-left — one cell per seat, driven by `update_crew_bar`.
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         CrewBarText,
         Text::new(""),
         TextFont {
@@ -70,6 +73,7 @@ fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
     // Top-left — the controlled tank's vitals card (the crew bar owns bottom-left). A subtle dark
     // card behind a compact multi-line stat block, driven by `update_status_panel`.
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         StatusPanelText,
         Text::new(""),
         TextFont {

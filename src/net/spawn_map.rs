@@ -13,6 +13,7 @@ use bevy::window::PrimaryWindow;
 use lightyear::prelude::*;
 
 use super::protocol::{SetSpawnPoint, SpawnChannel};
+use crate::flow::Flow;
 use crate::overlay::{self, Overlay, OverlayNode, Overlays};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
@@ -112,6 +113,7 @@ struct ChosenMarker;
 struct SelfMarker;
 
 pub fn plugin(app: &mut App) {
+    crate::flow::require(app, "net::spawn_map");
     app.init_resource::<SpawnMap>()
         .add_systems(Startup, spawn_map_overlay)
         .add_systems(
@@ -128,7 +130,8 @@ pub fn plugin(app: &mut App) {
                 (size_spawn_map, click_spawn_map, place_markers)
                     .chain()
                     .after(overlay::OverlaySet::Toggle),
-            ),
+            )
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 

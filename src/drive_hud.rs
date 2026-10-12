@@ -7,6 +7,7 @@
 use avian3d::prelude::{LinearVelocity, Rotation};
 use bevy::prelude::*;
 
+use crate::flow::{Flow, FlowScoped};
 use crate::tank::Controlled;
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest};
 use crate::track::transmission::{
@@ -31,11 +32,14 @@ struct DriveDebugVisible(bool);
 pub(crate) struct DriveHudUpdate;
 
 pub(crate) fn plugin(app: &mut App) {
+    crate::flow::require(app, "drive_hud");
     app.init_resource::<DriveDebugVisible>()
-        .add_systems(Startup, spawn_drive_hud)
+        .add_systems(OnEnter(Flow::InMatch), spawn_drive_hud)
         .add_systems(
             Update,
-            (toggle_drive_debug, update_drive_hud.in_set(DriveHudUpdate)).chain(),
+            (toggle_drive_debug, update_drive_hud.in_set(DriveHudUpdate))
+                .chain()
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 
@@ -44,6 +48,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // overlay: it owns no scrim and carries no explicit z-index, so the overlay authority's explicit
     // positive `GlobalZIndex` layers still cover it.
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         StandardDriveHudText,
         Text::new(""),
         TextFont {
@@ -64,6 +69,7 @@ fn spawn_drive_hud(mut commands: Commands, fonts: Res<UiFonts>) {
     // The diagnostic block keeps the old offline HUD's top-right placement and bare-text treatment.
     // Like the standard row it is ordinary non-interactive HUD, never a second overlay/scrim.
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         DriveDebugHudText,
         Text::new(""),
         TextFont {

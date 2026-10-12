@@ -10,6 +10,7 @@ use lightyear::prelude::client::Remote;
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::damage::{CrewStation, TankVolumes};
+use crate::flow::{Flow, FlowScoped};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
@@ -82,10 +83,11 @@ struct DamageFlashNode;
 struct HitConfirmNode;
 
 pub fn plugin(app: &mut App) {
+    crate::flow::require(app, "net::hit_feel");
     app.init_resource::<DamageFlash>()
         .init_resource::<HitConfirm>()
         .add_observer(on_local_hit_confirmed)
-        .add_systems(Startup, spawn_cue_ui)
+        .add_systems(OnEnter(Flow::InMatch), spawn_cue_ui)
         .add_systems(
             Update,
             (
@@ -93,7 +95,8 @@ pub fn plugin(app: &mut App) {
                 detect_health_drops.after(arm_health_memory),
                 drive_damage_flash,
                 drive_hit_confirm.after(super::client::receive_damage_confirms),
-            ),
+            )
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 
@@ -210,11 +213,12 @@ fn worst_drop(prev: &[SlotMemory], now: &[SlotMemory]) -> Option<(usize, f32)> {
     worst
 }
 
-/// Spawn the two cue overlays once. The damage frame is a hollow full-screen red border; the
-/// hit-marker is a centred "X" tick. Both start transparent and are driven by their intensity
-/// resources. Mirrors the node idiom in `aim::spawn_hud` / `hud::spawn_labels`.
+/// Spawn the two cue overlays on entering a match. The damage frame is a hollow full-screen red
+/// border; the hit-marker is a centred "X" tick. Both start transparent and are driven by their
+/// intensity resources. Mirrors the node idiom in `aim::spawn_hud` / `hud::spawn_labels`.
 fn spawn_cue_ui(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
+        FlowScoped(Flow::InMatch),
         DamageFlashNode,
         Node {
             width: Val::Percent(100.0),
@@ -225,13 +229,16 @@ fn spawn_cue_ui(mut commands: Commands, fonts: Res<UiFonts>) {
         BorderColor::all(Color::srgba(0.9, 0.05, 0.05, 0.0)),
     ));
     commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            justify_content: JustifyContent::Center,
-            align_items: AlignItems::Center,
-            ..default()
-        })
+        .spawn((
+            FlowScoped(Flow::InMatch),
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+        ))
         .with_children(|parent| {
             parent.spawn((
                 HitConfirmNode,

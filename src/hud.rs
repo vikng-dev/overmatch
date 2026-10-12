@@ -10,6 +10,7 @@ use crate::net::NetBot;
 use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::camera::GunnerCameraPlaced;
 use crate::damage::{Ammo, CrewStation, FunctionRole};
+use crate::flow::{Flow, FlowScoped};
 use crate::tank::{Tank, ViewNode};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
@@ -23,25 +24,29 @@ struct ComponentHpLabel;
 struct TankNameplate;
 
 pub fn plugin(app: &mut App) {
-    app.add_systems(Startup, spawn_labels).add_systems(
-        PostUpdate,
-        // Reproject AFTER the frame's rendered pose is final: transform propagation has run and the
-        // gunner camera has been placed (`GunnerCameraPlaced`, itself after `Propagate`). Read in
-        // `Update` (where these used to live) the systems saw *last* frame's propagated tank and
-        // camera globals while the mesh renders from *this* frame's — a one-frame skew that isn't
-        // constant (Avian re-interpolates the overstep and the orbit camera re-tracks every frame),
-        // so the labels swam/jittered against the model. Same read-after-Propagate idiom as the
-        // gunner reticles (`sight`) and the trace recorder.
-        (update_component_hp_labels, update_tank_nameplates)
-            .after(TransformSystems::Propagate)
-            .after(GunnerCameraPlaced),
-    );
+    crate::flow::require(app, "hud");
+    app.add_systems(OnEnter(Flow::InMatch), spawn_labels)
+        .add_systems(
+            PostUpdate,
+            // Reproject AFTER the frame's rendered pose is final: transform propagation has run and the
+            // gunner camera has been placed (`GunnerCameraPlaced`, itself after `Propagate`). Read in
+            // `Update` (where these used to live) the systems saw *last* frame's propagated tank and
+            // camera globals while the mesh renders from *this* frame's — a one-frame skew that isn't
+            // constant (Avian re-interpolates the overstep and the orbit camera re-tracks every frame),
+            // so the labels swam/jittered against the model. Same read-after-Propagate idiom as the
+            // gunner reticles (`sight`) and the trace recorder.
+            (update_component_hp_labels, update_tank_nameplates)
+                .after(TransformSystems::Propagate)
+                .after(GunnerCameraPlaced)
+                .run_if(in_state(Flow::InMatch)),
+        );
 }
 
 fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
     // Pool of HP labels floated over damaged components each frame; hidden while unused.
     for _ in 0..12 {
         commands.spawn((
+            FlowScoped(Flow::InMatch),
             ComponentHpLabel,
             Text::new(""),
             TextFont {
@@ -62,6 +67,7 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
     // while unused. Four covers the current SP duel + a bit of headroom, same as the old pool.
     for _ in 0..4 {
         commands.spawn((
+            FlowScoped(Flow::InMatch),
             TankNameplate,
             Text::new(""),
             TextFont {

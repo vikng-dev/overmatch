@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
+use crate::flow::{Flow, FlowScoped};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
@@ -43,8 +44,9 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 }
 
 pub fn plugin(app: &mut App) {
+    crate::flow::require(app, "net::death_screen");
     app.init_resource::<AwaitingRespawn>()
-        .add_systems(Startup, spawn_death_status_line)
+        .add_systems(OnEnter(Flow::InMatch), spawn_death_status_line)
         .add_systems(
             Update,
             (
@@ -59,7 +61,8 @@ pub fn plugin(app: &mut App) {
                 // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
                 // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
                 apply_death_status_line.after(overlay::OverlaySet::Toggle),
-            ),
+            )
+                .run_if(in_state(Flow::InMatch)),
         );
 }
 
@@ -175,7 +178,12 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
     crate::ui_font::spawn_overlay(
         commands,
         font,
-        (state, overlay::OverlayNode(Overlay::Death)),
+        (
+            state,
+            overlay::OverlayNode(Overlay::Death),
+            // An overlay node whose life is a death inside one match.
+            DespawnOnExit(Flow::InMatch),
+        ),
         text,
         (),
         Some(Color::srgba(0.15, 0.0, 0.0, 0.6)),
@@ -187,13 +195,14 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
 /// from the one-scrim suppression — it draws no backdrop, and its `GlobalZIndex` (Death's, above the
 /// menu's) keeps it legible THROUGH the menu, so the player knows the respawn key is merely gated
 /// (menu open, cursor released) rather than gone. We never show "press R" while R can't work; this line
-/// is what stands in for it. Persistent (spawned once, visibility-swapped) like the connect/menu nodes.
+/// is what stands in for it. Spawned once per match and visibility-swapped.
 #[derive(Component)]
 struct DeathStatusLine;
 
 fn spawn_death_status_line(mut commands: Commands, fonts: Res<UiFonts>) {
     commands
         .spawn((
+            FlowScoped(Flow::InMatch),
             DeathStatusLine,
             Node {
                 width: Val::Percent(100.0),

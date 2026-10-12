@@ -44,6 +44,9 @@ pub(crate) mod spawn_map;
 mod sync_margin;
 #[cfg(test)]
 mod test_harness;
+/// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
+#[cfg(test)]
+mod ui_ownership;
 
 /// Run the network client.
 pub use client::run as run_client;

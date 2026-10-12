@@ -10,6 +10,8 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
+use crate::flow::Flow;
+
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
 /// declared LOW→HIGH, so the greatest is the top layer: `Lobby` is the maximum (the pre-connect
 /// Join menu, up only while no client link exists), then `ConnectStatus` (a connect / reconnect
@@ -264,8 +266,12 @@ pub(crate) enum OverlaySet {
 }
 
 pub(crate) fn plugin(app: &mut App) {
+    crate::flow::require(app, "overlay");
     app.init_resource::<Overlays>()
         .init_resource::<RefocusGrab>()
+        // Every overlay a match declared leaves with it: nothing latched in one match is up on the
+        // next screen.
+        .add_systems(OnExit(Flow::InMatch), clear_overlays)
         // Declare presence → gated toggles → cursor owner. The wire-command zeroing
         // (`feed_action_state`) is the fourth conceptual link but lives in `FixedPreUpdate`; it reads
         // the same [`input_blocked`] authority off the set reconciled by the previous frame's
@@ -278,8 +284,10 @@ pub(crate) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
-                // Esc's routing READS the set, so it runs in the toggle stage.
-                esc_toggle.in_set(OverlaySet::Toggle),
+                // Esc's routing READS the set, so it runs in the toggle stage. The menu is a match's.
+                esc_toggle
+                    .in_set(OverlaySet::Toggle)
+                    .run_if(in_state(Flow::InMatch)),
                 cursor_owner.in_set(OverlaySet::Cursor),
                 // The ONE scrim reconciler for every marked overlay node. Ordered after every writer —
                 // the connect / death / view-death owners in `Declare` AND the Esc / `M` toggles in
@@ -289,6 +297,10 @@ pub(crate) fn plugin(app: &mut App) {
                 apply_overlay_visibility.after(OverlaySet::Toggle),
             ),
         );
+}
+
+fn clear_overlays(mut overlays: ResMut<Overlays>) {
+    *overlays = Overlays::default();
 }
 
 /// Spawn the Esc menu backdrop once, hidden. [`apply_overlay_visibility`] reveals it whenever the
