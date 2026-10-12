@@ -22,8 +22,8 @@
 //   `stopping`; the alarm retries the stop until it succeeds (or Edgegap reports the deployment
 //   gone), and only then is the row `ended` and its history closed.
 // - A deployment carries its claim's tag (`tagOf`) from the deploy request on, and the claim's row
-//   (here) and history row (D1) are written before that request. The orphan sweep (src/sweep.ts)
-//   relies on it: a tagged deployment whose row is not live (`liveDeployments`) is stopped.
+//   is written here before that request. The orphan sweep (src/sweep.ts) relies on it: a tagged
+//   deployment of this version that no live row owns (`liveDeployments`) is stopped.
 // - Secrets: the netcode key leaves this object only in a ticket answer for that server; the report
 //   secret is stored only as its SHA-256 and never leaves.
 

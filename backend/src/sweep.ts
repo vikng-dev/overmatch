@@ -3,35 +3,34 @@
 // registry.ts) that no live claim owns. A failed stop needs no bookkeeping: the deployment is still
 // listed a minute later and judged again, until Edgegap no longer lists it.
 //
-// Ownership. The tag carries the server id's random half but not its version, and the Registry
-// object is per version, so D1 `sessions` is the index from tag to server id and version; the
-// version's Registry is the authority on liveness (`liveDeployments`).
-// - History row ended: stop. A row ends only once its stop was confirmed, so a listed deployment
-//   behind it leaked.
-// - History row open: stop unless the Registry still runs it (`starting` or `ready`, with this
-//   deployment id or none yet — a deploy in flight or of unknown outcome is kept).
-// - No history row: a suspect, stopped once the sweep has seen it unmatched for START_DEADLINE_S.
-//   The row is written before the deploy call and upserted again when the deploy id becomes known
-//   (`deployed` in history.ts), which the Registry settles by tag within the start deadline; so a
-//   claim still unmatched past it lost both writes, and anything else tagged `om-` is not ours to
-//   keep. The grace is what keeps a write still in flight from costing a live server.
-// - D1 or a Registry unreachable: nothing it would have judged is stopped this sweep.
+// Ownership is decided by the Registry alone, never by D1 history. A tag carries the random half of
+// a server id; the deployment's status names its app version, which is the Registry's name and the
+// id's other half (`idOf`). The Registry writes a claim's row before its deploy call, so a
+// deployment of a valid version that no live row of that Registry owns (`liveDeployments`) is
+// stopped at once. Decisions are per deployment: with several `om-` tags, one live claim keeps it.
+// A deployment whose status names no valid version cannot be routed; it is a suspect, stopped once
+// the sweep has seen it so for START_DEADLINE_S (suspect ages persist in D1 `sweep`). A status read
+// or a Registry that does not answer stops nothing it would have decided.
 //
-// Bounds per sweep: SWEEP_MAX_PAGES listing pages and SWEEP_MAX_STOPS stops (the rest wait a
-// minute), CONCURRENCY calls in flight, each bounded by PROVIDER_TIMEOUT_S.
+// Bounds per sweep: SWEEP_MAX_PAGES listing pages (a hard bound far above the fleet; hitting it is
+// logged), SWEEP_MAX_CHECKS status reads and SWEEP_MAX_STOPS stops, CONCURRENCY calls in flight,
+// each bounded by PROVIDER_TIMEOUT_S. Checks and stops run in id order rotated by the minute
+// (`rotated`), so candidates that keep failing cannot hold the budget from the rest.
 
 import { config, type Env } from "./config";
 import { bounded, settleAll } from "./deadline";
-import { edgegapFor } from "./edgegap";
+import { edgegapFor, type DeploymentStatus } from "./edgegap";
+import { idOf, validVersion } from "./ids";
 import { diag } from "./reasons";
 import { registryFor } from "./registry";
 
-export const SWEEP_MAX_PAGES = 10;
+export const SWEEP_MAX_PAGES = 100;
+export const SWEEP_MAX_CHECKS = 50;
 export const SWEEP_MAX_STOPS = 25;
+/** The `triggers.crons` period: one rotation step per sweep. */
+const SWEEP_PERIOD_MS = 60_000;
 /** Below the platform's six simultaneous outbound connections per invocation. */
 const CONCURRENCY = 5;
-/** Bound parameters per D1 statement; D1 allows 100. */
-const D1_BATCH = 90;
 const TAG = /^om-([0-9a-f]{32})$/;
 
 export interface SweepResult {
@@ -44,16 +43,13 @@ export interface SweepResult {
 	error: string | null;
 }
 
-interface HistoryRow {
-	server_id: string;
-	version: string;
-	ended_at: number | null;
-}
+type Claim = { serverId: string; deploymentId: string };
 
 export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const cfg = config(env);
 	const timeout = cfg.providerTimeoutMs;
 	const provider = edgegapFor(env, timeout);
+	const turn = Math.floor(now / SWEEP_PERIOD_MS);
 	const result: SweepResult = { at: now, listed: 0, stopped: 0, failed: 0, error: null };
 	const fail = (what: string, err: unknown) => {
 		result.error = `${what}: ${diag(err)}`;
@@ -68,56 +64,61 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		fail("state read", err);
 	}
 
-	// Tag hex → listed deployment ids carrying it.
-	const tagged = new Map<string, string[]>();
+	const tagged: { id: string; hexes: string[] }[] = [];
+	let truncated: boolean;
 	try {
 		const out = await provider.deployments(SWEEP_MAX_PAGES);
-		if (out.truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
+		truncated = out.truncated;
+		if (truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
 		for (const d of out.items) {
-			for (const t of d.tags) {
-				const hex = TAG.exec(t)?.[1];
-				if (hex) tagged.set(hex, [...(tagged.get(hex) ?? []), d.id]);
-			}
+			const hexes = d.tags.map((t) => TAG.exec(t)?.[1]).filter((h): h is string => !!h);
+			if (hexes.length) tagged.push({ id: d.id, hexes });
 		}
 	} catch (err) {
 		fail("list", err);
 		await save(env, result, previous, timeout);
 		return result;
 	}
-	result.listed = [...tagged.values()].reduce((n, ids) => n + ids.length, 0);
+	result.listed = tagged.length;
 
-	let history: Map<string, HistoryRow>;
-	try {
-		history = await lookup(env, [...tagged.keys()], timeout);
-	} catch (err) {
-		fail("history read", err);
-		await save(env, result, previous, timeout);
-		return result;
-	}
-
-	const stop: { id: string; why: string }[] = [];
+	// A suspect this sweep did not judge keeps its age: unlisted past a truncation, or unchecked.
 	const suspects: Record<string, number> = {};
-	const open = new Map<string, { serverId: string; deploymentId: string }[]>();
-	for (const [hex, ids] of tagged) {
-		const row = history.get(hex);
-		for (const id of ids) {
-			if (!row) {
-				// Kept while its stop is unconfirmed, so a failed stop is retried without a fresh grace.
-				suspects[id] = previous[id] ?? now;
-				if (suspects[id] + cfg.startDeadlineMs <= now) stop.push({ id, why: "unknown" });
-			} else if (row.ended_at !== null) {
-				stop.push({ id, why: "ended" });
-			} else {
-				open.set(row.version, [...(open.get(row.version) ?? []), { serverId: row.server_id, deploymentId: id }]);
+	const keepAge = (id: string) => {
+		if (previous[id] !== undefined) suspects[id] = previous[id];
+	};
+	if (truncated) for (const id of Object.keys(previous)) keepAge(id);
+
+	const checks = rotated(tagged, turn);
+	for (const d of checks.slice(SWEEP_MAX_CHECKS)) keepAge(d.id);
+	const stop: { id: string; why: string }[] = [];
+	const claims = new Map<string, Claim[]>();
+	await settleAll(
+		checks.slice(0, SWEEP_MAX_CHECKS).map((d) => async () => {
+			let st: DeploymentStatus;
+			try {
+				st = await provider.status(d.id);
+			} catch (err) {
+				fail("status", err);
+				keepAge(d.id);
+				return;
 			}
-		}
-	}
+			if (st.phase === "gone") return;
+			const version = st.version;
+			if (!validVersion(version)) {
+				suspects[d.id] = previous[d.id] ?? now;
+				if (suspects[d.id] + cfg.startDeadlineMs <= now) stop.push({ id: d.id, why: "unknown version" });
+				return;
+			}
+			claims.set(version, [...(claims.get(version) ?? []), ...d.hexes.map((hex) => ({ serverId: idOf(version, hex), deploymentId: d.id }))]);
+		}),
+		CONCURRENCY,
+	);
 
 	await settleAll(
-		[...open].map(([version, claims]) => async () => {
+		[...claims].map(([version, list]) => async () => {
 			try {
-				const keep = new Set<string>(await bounded(timeout, async () => registryFor(env, version).liveDeployments(claims)));
-				for (const c of claims) if (!keep.has(c.deploymentId)) stop.push({ id: c.deploymentId, why: "not live" });
+				const live = new Set<string>(await bounded(timeout, async () => registryFor(env, version).liveDeployments(list)));
+				for (const id of new Set(list.map((c) => c.deploymentId))) if (!live.has(id)) stop.push({ id, why: "no live claim" });
 			} catch (err) {
 				fail("registry", err);
 			}
@@ -125,18 +126,20 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		CONCURRENCY,
 	);
 
-	if (stop.length > SWEEP_MAX_STOPS) console.warn("sweep:", stop.length - SWEEP_MAX_STOPS, "stops wait for the next sweep");
+	if (stop.length > SWEEP_MAX_STOPS) console.warn("sweep:", stop.length - SWEEP_MAX_STOPS, "stops wait for a later sweep");
 	await settleAll(
-		stop.slice(0, SWEEP_MAX_STOPS).map(({ id, why }) => async () => {
-			try {
-				await provider.stop(id);
-				result.stopped++;
-				console.warn("sweep stopped", id, why);
-			} catch (err) {
-				result.failed++;
-				fail("stop", err);
-			}
-		}),
+		rotated(stop, turn)
+			.slice(0, SWEEP_MAX_STOPS)
+			.map(({ id, why }) => async () => {
+				try {
+					await provider.stop(id);
+					result.stopped++;
+					console.warn("sweep stopped", id, why);
+				} catch (err) {
+					result.failed++;
+					fail("stop", err);
+				}
+			}),
 		CONCURRENCY,
 	);
 
@@ -144,23 +147,12 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	return result;
 }
 
-/** History rows whose server id ends in one of `hexes`, keyed by that hex. */
-async function lookup(env: Env, hexes: string[], timeout: number): Promise<Map<string, HistoryRow>> {
-	const out = new Map<string, HistoryRow>();
-	if (!hexes.length) return out;
-	const stmts: D1PreparedStatement[] = [];
-	for (let i = 0; i < hexes.length; i += D1_BATCH) {
-		const chunk = hexes.slice(i, i + D1_BATCH);
-		stmts.push(
-			env.DB.prepare(`SELECT server_id, version, ended_at FROM sessions WHERE substr(server_id, -32) IN (${chunk.map(() => "?").join(", ")})`).bind(
-				...chunk,
-			),
-		);
-	}
-	for (const r of await bounded(timeout, () => env.DB.batch<HistoryRow>(stmts))) {
-		for (const row of r.results) out.set(row.server_id.slice(-32), row);
-	}
-	return out;
+/** `items` in id order, starting at position `turn` mod their count: a budget of B covers each item
+ *  in at least B of any `items.length` consecutive turns over the same set. */
+export function rotated<T extends { id: string }>(items: T[], turn: number): T[] {
+	const sorted = [...items].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	const k = sorted.length ? turn % sorted.length : 0;
+	return [...sorted.slice(k), ...sorted.slice(0, k)];
 }
 
 async function save(env: Env, r: SweepResult, suspects: Record<string, number>, timeout: number): Promise<void> {

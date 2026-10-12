@@ -47,6 +47,8 @@ export interface DeploymentStatus {
 	address: string | null;
 	port: number | null;
 	tags: string[];
+	/** The app version the deployment runs (Edgegap `app_version`), as named at deploy. */
+	version: string | null;
 }
 
 export interface ListedDeployment {
@@ -146,7 +148,7 @@ export class Edgegap implements Provider {
 		return this.request("status", "GET", `/v1/status/${encodeURIComponent(deploymentId)}`, undefined, async (res) => {
 			if (res.status === 404 || res.status === 410) {
 				await res.body?.cancel();
-				return { phase: "gone", address: null, port: null, tags: [] };
+				return { phase: "gone", address: null, port: null, tags: [], version: null };
 			}
 			return interpretStatus(await this.json<V1DeploymentStatus>(res, "status"), this.portName);
 		});
@@ -217,18 +219,19 @@ interface V1DeploymentStatus {
 	public_ip?: string;
 	ports?: Record<string, { external?: number } | undefined>;
 	tags?: string[];
+	app_version?: string;
 }
 
 /** Status strings are "Status.READY", "Status.ERROR", "Status.TERMINATED", … (MEASURED in the risk
  *  test); the booleans are read first because they are the documented fields. */
 export function interpretStatus(s: V1DeploymentStatus, portName: string): DeploymentStatus {
 	const current = (s.current_status ?? "").toUpperCase();
-	const tags = s.tags ?? [];
-	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null, tags };
-	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null, tags };
+	const base = { tags: s.tags ?? [], version: s.app_version ?? null };
+	if (s.error || current.includes("ERROR")) return { phase: "error", address: null, port: null, ...base };
+	if (current.includes("TERMINAT") || current.includes("STOP")) return { phase: "terminated", address: null, port: null, ...base };
 	const port = s.ports?.[portName]?.external ?? null;
-	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, tags };
-	return { phase: "pending", address: null, port: null, tags };
+	if (s.running && s.public_ip && port !== null) return { phase: "ready", address: s.public_ip, port, ...base };
+	return { phase: "pending", address: null, port: null, ...base };
 }
 
 /** True when Edgegap answered the deploy with a refusal, so nothing was created. A timeout, a lost

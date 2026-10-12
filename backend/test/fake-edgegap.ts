@@ -82,6 +82,8 @@ export class FakeEdgegap {
 	failStops = 0;
 	/** Deployment ids whose stop call never answers. */
 	hangStops = new Set<string>();
+	/** Deployment ids whose every stop call answers 503. */
+	refuseStops = new Set<string>();
 	private stopGate: Promise<void> | null = null;
 
 	/** Hold every stop response until the returned function is called. */
@@ -121,10 +123,11 @@ export class FakeEdgegap {
 		return v.value;
 	}
 
-	/** A running deployment this Worker did not start in this test, carrying `tags`. */
-	foreign(tags: string[]): Deployment {
+	/** A running deployment this Worker did not start in this test, carrying `tags`, of app version
+	 *  `version` (none: its status names no version). */
+	foreign(tags: string[], version?: string): Deployment {
 		const id = `dep${++this.seq}`;
-		const d: Deployment = { id, body: { tags, env_vars: [] }, status: "Status.READY", publicIp: `198.51.100.${this.seq}`, port: 31000 + this.seq };
+		const d: Deployment = { id, body: { tags, env_vars: [], ...(version ? { version_name: version } : {}) }, status: "Status.READY", publicIp: `198.51.100.${this.seq}`, port: 31000 + this.seq };
 		this.deployments.set(id, d);
 		return d;
 	}
@@ -232,6 +235,7 @@ export class FakeEdgegap {
 		m = /^\/v1\/stop\/(.+)$/.exec(url.pathname);
 		if (req.method === "DELETE" && m) {
 			if (this.hangStops.has(m[1])) return new Promise<Response>(() => {});
+			if (this.refuseStops.has(m[1])) return Response.json({ message: "unavailable" }, { status: 503 });
 			if (this.stopGate) await this.stopGate;
 			if (this.failStops > 0) {
 				this.failStops--;

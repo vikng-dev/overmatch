@@ -65,14 +65,18 @@ transitions and re-arms itself before running that outbound work, so one slow ca
 other row.
 
 **Orphan sweep.** Every minute (`triggers.crons`) the Worker lists every Edgegap deployment (all
-pages) and stops each one tagged `om-<hex>` that no live claim owns: its D1 history row is ended,
-or its version's Registry row is not `starting`/`ready` with that deployment id (or none yet), or no
-history row matches its tag for `START_DEADLINE_S` from the sweep's first sight of it. A failed stop
-is retried by the next sweep until Edgegap no longer lists the deployment. D1 or a Registry not
-answering stops nothing it would have judged. The last result shows on `/admin`. **The sweep stops
-every `om-` deployment the production D1 does not know**, so a deployment started from `wrangler
-dev` (local D1, real Edgegap) is stopped within a few minutes, and running the scheduled handler
-locally against the real token would stop production servers: never trigger it outside tests.
+pages, hard bound 100 pages) and stops each one tagged `om-<hex>` that no live claim owns. Ownership is the
+Registry's, never D1's: the deployment's status names its version, which with the tag gives the
+server id, and the version's Registry keeps it only if that row is `starting`/`ready` with this
+deployment id or none yet. One live claim keeps a deployment whatever its other tags. A status that
+names no valid version is stopped after `START_DEADLINE_S` from the sweep's first sight of it. A
+failed stop is retried by the next sweep until Edgegap no longer lists the deployment; checks and
+stops are capped per run and rotate by the minute, so persistent failures cannot starve the rest.
+A status read or Registry that does not answer stops nothing it would have decided. The last result
+shows on `/admin`. **A deployment no production Registry owns is stopped**, so one started from
+`wrangler dev` (local storage, real Edgegap) is stopped by the next sweep, and running the scheduled
+handler locally against the real token would stop production servers: never trigger it outside
+tests.
 
 **Failure reasons** shown to clients and on `/admin` come from a fixed list (`src/reasons.ts`);
 provider error text is never read, stored or logged.

@@ -1,12 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { adminPage } from "../src/admin";
 import { Registry } from "../src/registry";
-import { sweep } from "../src/sweep";
+import { sweep, SWEEP_MAX_PAGES, SWEEP_MAX_STOPS } from "../src/sweep";
 import { bringUp, call, env, expectStatus, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 const S = 1000;
-/** START_DEADLINE_S in wrangler.jsonc: the grace an unmatched tag gets. */
+const MINUTE = 60 * S;
+/** START_DEADLINE_S in wrangler.jsonc: the grace an unroutable deployment gets. */
 const GRACE = 60 * S;
 const UNKNOWN_TAG = "om-0123456789abcdef0123456789abcdef";
 
@@ -26,7 +27,7 @@ async function leakedAfterEnd(n: number, location: string): Promise<string> {
 }
 
 describe("the orphan sweep", () => {
-	it("stops a deployment whose tag matches no record, once it has stayed unmatched past the grace", async () => {
+	it("stops a tagged deployment whose status names no version, once it has stayed so past the grace", async () => {
 		const orphan = edgegap.foreign([UNKNOWN_TAG]);
 		const other = edgegap.foreign(["someone-else"]);
 		const t0 = Date.now();
@@ -37,15 +38,58 @@ describe("the orphan sweep", () => {
 		expect(running(other.id)).toBe(true); // not tagged om-<hex>: not ours
 	});
 
-	it("stops a deployment whose record is ended, and one whose history is open but whose registry row is not live", async () => {
+	it("stops a deployment whose registry row is ended, and one of a known version that no row owns, at once", async () => {
 		const ended = await leakedAfterEnd(0, "Paris");
-		const stale = await leakedAfterEnd(1, "London");
-		// The registry ended the row but D1 missed the `ended` write.
-		await env.DB.prepare("UPDATE sessions SET ended_at = NULL WHERE deployment_id = ?").bind(stale).run();
-
+		const stray = edgegap.foreign([UNKNOWN_TAG], V);
 		expect(await sweep(env)).toMatchObject({ listed: 2, stopped: 2, failed: 0, error: null });
 		expect(running(ended)).toBe(false);
-		expect(running(stale)).toBe(false);
+		expect(running(stray.id)).toBe(false);
+	});
+
+	it("keeps a live server whose history writes were all lost: ownership is the registry's", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0);
+		await env.DB.prepare("DELETE FROM sessions").run();
+		const later = Date.now() + 10 * GRACE;
+		expect(await sweep(env, later)).toMatchObject({ listed: 1, stopped: 0, error: null });
+		expect(await sweep(env, later + GRACE)).toMatchObject({ listed: 1, stopped: 0 });
+		expect(running(s.deploymentId)).toBe(true);
+	});
+
+	it("keeps a live server's deployment that also carries a tag no claim owns", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0);
+		(edgegap.deployment(0).body.tags as string[]).push(UNKNOWN_TAG);
+		expect(await sweep(env)).toMatchObject({ listed: 1, stopped: 0, error: null });
+		expect(running(s.deploymentId)).toBe(true);
+	});
+
+	it("gives every stop a turn when more keep failing than one sweep may try", async () => {
+		const strays = Array.from({ length: SWEEP_MAX_STOPS + 1 }, (_, i) => edgegap.foreign([`om-${i.toString(16).padStart(32, "0")}`], V));
+		const ids = strays.map((d) => d.id).sort();
+		const last = ids[ids.length - 1];
+		for (const id of ids.slice(0, -1)) edgegap.refuseStops.add(id);
+		const period = ids.length * MINUTE;
+		const t0 = Math.ceil(Date.now() / period) * period; // this minute's rotation starts at the first id
+		expect(await sweep(env, t0)).toMatchObject({ stopped: 0, failed: SWEEP_MAX_STOPS });
+		expect(running(last)).toBe(true);
+		expect(await sweep(env, t0 + MINUTE)).toMatchObject({ stopped: 1, failed: SWEEP_MAX_STOPS - 1 });
+		expect(running(last)).toBe(false);
+	});
+
+	it("keeps a suspect's age across a listing truncated before reaching it", async () => {
+		edgegap.maxPageSize = 1;
+		const orphan = edgegap.foreign([UNKNOWN_TAG]);
+		const t0 = Date.now();
+		await sweep(env, t0);
+		const fillers = Array.from({ length: SWEEP_MAX_PAGES }, () => edgegap.foreign(["someone-else"]));
+		edgegap.deployments.delete(orphan.id);
+		edgegap.deployments.set(orphan.id, orphan); // listed after the fillers
+		expect(await sweep(env, t0 + GRACE)).toMatchObject({ listed: 0, stopped: 0 });
+		expect(running(orphan.id)).toBe(true);
+		for (const f of fillers) edgegap.deployments.delete(f.id);
+		expect(await sweep(env, t0 + GRACE + 1)).toMatchObject({ listed: 1, stopped: 1 });
+		expect(running(orphan.id)).toBe(false);
 	});
 
 	it("leaves a ready server, a starting one and a claim whose deploy id is not yet known alone", async () => {

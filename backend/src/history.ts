@@ -33,8 +33,7 @@ async function write(db: D1Database, e: SessionEvent): Promise<void> {
 				.run();
 			return;
 		case "deployed":
-			// An upsert, so a lost `requested` write is repaired here: the orphan sweep (src/sweep.ts)
-			// stops a deployment whose tag matches no row.
+			// An upsert, so a lost `requested` write is repaired here.
 			await db
 				.prepare(
 					`INSERT INTO sessions (server_id, version, location, requested_at, deployment_id) VALUES (?1, ?2, ?3, ?4, ?5)

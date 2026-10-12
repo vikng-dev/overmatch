@@ -30,7 +30,12 @@ function unb64url(s: string): string | null {
 }
 
 export function newId(version: string): string {
-	return `${b64url(version)}.${randomHex(16)}`;
+	return idOf(version, randomHex(16));
+}
+
+/** The id whose random half is `hex`, minted for `version`. */
+export function idOf(version: string, hex: string): string {
+	return `${b64url(version)}.${hex}`;
 }
 
 /** The version an id was minted for, or null if the id is malformed. */
