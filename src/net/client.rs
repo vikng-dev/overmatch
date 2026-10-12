@@ -789,9 +789,9 @@ const MISMATCH_HINT_AFTER_ATTEMPTS: u32 = 3;
 ///     `ChallengeResponse`); wait it out.
 ///   - **`Disconnected` after initiating** — the attempt failed (timeout / denied / link drop) and
 ///     netcode inserted `Disconnected`. Arm a backoff, then fire a fresh `Connect` when it elapses.
-///     A fresh `Connect` re-runs `LinkStart`, binding a NEW source socket — which is what sidesteps
-///     the server's lingering-slot `ClientEntityInUse` drop after a hard client kill (the client_id
-///     stays the session-stable one; netcode does not key the collision on it).
+///     A fresh `Connect` re-runs netcode's handshake on the same link: while the entity is still
+///     `Linked` (a transient netcode disconnect), lightyear's UDP `LinkStart` skips it, so the retry
+///     reuses the source socket. The client_id stays the session-stable one.
 fn drive_connection(
     real: Res<Time<Real>>,
     assets: Option<Res<PendingTankAssets>>,
