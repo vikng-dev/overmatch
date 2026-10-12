@@ -1560,13 +1560,14 @@ impl DiscFrame {
 /// The disc's sample offsets: the axis, then a ring of `ring` samples at `radius`.
 ///
 /// This is a deterministic sample MEAN, not an equal-area quadrature — so `η` below is sampled
-/// coverage, not exact geometric area (§13.5's own note: k is the resolution dial).
+/// coverage, not exact geometric area (§13.5's own note: k is the resolution dial). The ring's
+/// `cos`/`sin` are `libm`'s, so the samples are the same bits on every shipped target.
 pub fn disc_offsets(frame: &DiscFrame, radius: f32, ring: usize) -> Vec<Vec3> {
     let mut out = Vec::with_capacity(ring + 1);
     out.push(Vec3::ZERO);
     for index in 0..ring {
         let angle = std::f32::consts::TAU * (index as f32) / (ring as f32);
-        out.push((frame.u * angle.cos() + frame.v * angle.sin()) * radius);
+        out.push((frame.u * libm::cosf(angle) + frame.v * libm::sinf(angle)) * radius);
     }
     out
 }

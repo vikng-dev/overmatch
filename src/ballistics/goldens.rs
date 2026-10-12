@@ -67,7 +67,7 @@ fn capture_damage(damage: On<ShellDamage>, mut log: ResMut<DamageLog>) {
 /// The probe world plus the REAL march and the two sinks a shot's outcome is read from. Spent
 /// shells are retained, so a round that stops inside the tick it entered still leaves its marks to
 /// read; a retained shell carries no `Projectile` and is not counted as a survivor.
-fn golden_world() -> App {
+pub(super) fn golden_world() -> App {
     let mut app = probe_world().expect("the bound Tiger builds");
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
         16,
@@ -115,6 +115,56 @@ struct Outcome {
     spall_origins: Vec<Vec3>,
 }
 
+/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed)`) at a tank-local origin
+/// along a tank-local direction, ready for the march.
+pub(super) fn spawn_golden_round(
+    app: &mut App,
+    local_origin: Vec3,
+    local_direction: Vec3,
+    round: (f32, f32, f32, f32),
+) -> Entity {
+    let (caliber, mass, nose_factor, speed) = round;
+    let origin = world_at(local_origin);
+    let direction = local_direction.normalize();
+    app.world_mut()
+        .spawn((
+            Projectile {
+                velocity: direction * speed,
+                round: bound(RoundBody {
+                    mass,
+                    caliber,
+                    nose_factor,
+                }),
+                drag_k: drag_k(caliber, mass),
+                disc: walk::DiscFrame::anchored(direction)
+                    .expect("a golden fires along a real axis"),
+                continuation: None,
+            },
+            DamageReport::default(),
+            TerminalReport::default(),
+            ShellPath {
+                points: vec![origin],
+                segment_starts: Vec::new(),
+            },
+            PenetrationMarks::default(),
+            SpallMarks::default(),
+            ShellReadout {
+                speed,
+                capability: capability(
+                    RoundBody {
+                        mass,
+                        caliber,
+                        nose_factor,
+                    },
+                    speed,
+                ),
+            },
+            Shot(golden_shot()),
+            Transform::from_translation(origin).looking_to(direction, Vec3::Y),
+        ))
+        .id()
+}
+
 /// Fire one round from a tank-local origin along a tank-local direction, march it to rest, and
 /// report everything the outcome tuple is read from.
 fn fire(
@@ -123,43 +173,7 @@ fn fire(
     local_direction: Vec3,
     round: (f32, f32, f32, f32),
 ) -> Outcome {
-    let (caliber, mass, nose_factor, speed) = round;
-    let origin = world_at(local_origin);
-    let direction = local_direction.normalize();
-    app.world_mut().spawn((
-        Projectile {
-            velocity: direction * speed,
-            round: bound(RoundBody {
-                mass,
-                caliber,
-                nose_factor,
-            }),
-            drag_k: drag_k(caliber, mass),
-            disc: walk::DiscFrame::anchored(direction).expect("a golden fires along a real axis"),
-            continuation: None,
-        },
-        DamageReport::default(),
-        TerminalReport::default(),
-        ShellPath {
-            points: vec![origin],
-            segment_starts: Vec::new(),
-        },
-        PenetrationMarks::default(),
-        SpallMarks::default(),
-        ShellReadout {
-            speed,
-            capability: capability(
-                RoundBody {
-                    mass,
-                    caliber,
-                    nose_factor,
-                },
-                speed,
-            ),
-        },
-        Shot(golden_shot()),
-        Transform::from_translation(origin).looking_to(direction, Vec3::Y),
-    ));
+    spawn_golden_round(app, local_origin, local_direction, round);
     // Eight ticks at 16 ms: ~100 m of flight for a main-gun round, which is far more than the whole
     // tank plus the run-out past it.
     // The marks live ON the shell and are freed with it, so each tick's fullest reading is kept
@@ -237,7 +251,7 @@ fn authored_round(weapon: &str) -> (f32, f32, f32, f32) {
 }
 
 /// The main gun.
-fn eighty_eight() -> (f32, f32, f32, f32) {
+pub(super) fn eighty_eight() -> (f32, f32, f32, f32) {
     authored_round("MainGun")
 }
 

@@ -209,8 +209,13 @@ impl RoundBody {
 
 /// The force law's readout in reference-mm for a round of `terms` ([`RoundBody::terms_against`]) at
 /// `speed` m/s: `1000 · m / (2 A k) · ln(1 + k v² / a)`.
+///
+/// The shell-state transcendentals (`ln(1 + x)` here, `exp(x) − 1` in [`speed_for`] and the
+/// mechanism, `ln` in the reference's cavity strength) are `libm`'s, not the platform's: the same
+/// functions, computed by one implementation on every shipped target, so a shot's speeds, spends
+/// and spall strengths are the same bits everywhere.
 fn capability_of((scale, inertia): (f64, f64), speed: f64) -> f64 {
-    1000.0 * scale * (inertia * speed * speed).ln_1p()
+    1000.0 * scale * libm::log1p(inertia * speed * speed)
 }
 
 /// `round`'s mechanism, bound against the shipped substance registry.
@@ -238,7 +243,7 @@ fn capability(round: RoundBody, speed: f32) -> f32 {
 /// Lambert–Jonas residual-velocity shape (design doc §3).
 fn speed_for(round: RoundBody, capability: f32) -> f32 {
     let (scale, inertia) = round.terms();
-    ((capability as f64 / (1000.0 * scale)).exp_m1() / inertia).sqrt() as f32
+    (libm::expm1(capability as f64 / (1000.0 * scale)) / inertia).sqrt() as f32
 }
 
 /// Whether the capability law can state `round` fired at `speed`: every input finite, positive

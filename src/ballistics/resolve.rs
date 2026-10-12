@@ -1097,7 +1097,7 @@ pub(crate) fn decide(
                 coverage: read.coverage,
                 struck,
                 owner: owner(struck),
-                shock: SHOCK_K * capability_in * read.incidence.cos(),
+                shock: SHOCK_K * capability_in * libm::cosf(read.incidence),
                 direction: out,
                 speed: bled,
                 impulse: body.mass * (v_in - Vec3::from(out) * bled),

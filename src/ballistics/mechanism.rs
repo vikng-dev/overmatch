@@ -171,14 +171,16 @@ impl SolidShot {
         }
     }
 
-    /// The force law's potential `ln(1 + k v² / a)` at `speed`.
+    /// The force law's potential `ln(1 + k v² / a)` at `speed`, by `libm` (see
+    /// [`super::capability_of`]).
     fn potential(&self, speed: f64) -> f64 {
-        (self.inertia * speed * speed).ln_1p()
+        libm::log1p(self.inertia * speed * speed)
     }
 
-    /// The speed at potential `potential` — the inverse of [`potential`](Self::potential).
+    /// The speed at potential `potential` — the inverse of [`potential`](Self::potential), by
+    /// `libm`.
     fn speed_at(&self, potential: f64) -> f64 {
-        (potential.exp_m1() / self.inertia).sqrt()
+        (libm::expm1(potential) / self.inertia).sqrt()
     }
 }
 

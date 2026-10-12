@@ -60,10 +60,10 @@ impl MaterialFacts {
     ///
     /// A DERIVED prior from material facts, not validated against thick-steel depth data; the
     /// compressible form was read in restatement, not in its primary (Hill 1950; Forrestal & Luk
-    /// 1988).
+    /// 1988). The logarithm is `libm`'s, so the term is the same bits on every shipped target.
     pub fn cavity_strength(&self) -> f64 {
         let ratio = self.youngs_modulus / (3.0 * (1.0 - self.poisson_ratio) * self.flow_strength);
-        let a_ce = 2.0 / 3.0 * (1.0 + ratio.ln());
+        let a_ce = 2.0 / 3.0 * (1.0 + libm::log(ratio));
         a_ce * self.flow_strength
     }
 

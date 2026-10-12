@@ -19,6 +19,13 @@
 //! - `graze`: rays skimming the four sides and the top at shallow inward angles;
 //! - `box`: rays aimed at each damageable box's centre from two quadrants.
 //!
+//! and, at spawn pose in a fresh world each, `shot`: the tank's own main-gun round fired through the
+//! real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end to end — body-exit
+//! detection, the mechanism's spends and speeds, each cone's strength and axis, and its walks. A shot
+//! record digests every penetration event, every cone (origin, axis, half-angle, and each
+//! direction's end and whether it dosed; a direction's end and its doses carry its strength), and
+//! every named box's HP after the shot.
+//!
 //! Each ray goes through two paths:
 //!
 //! 1. the ordered presence a direction is walked over ([`resolve::field_presence`]), with no
@@ -59,7 +66,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x7aea_b508_b670_f33f;
+const PINNED_TOTAL: u64 = 0x8838_06ef_4fc3_0087;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -67,6 +74,18 @@ const PINNED_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/src/ballistics/field_casts.pinned"
 );
+
+/// Fixture shots, `(label, tank-local origin, tank-local direction)`: lines into the driver's plate,
+/// the rear engine, the hull's left side at the front crew and amidships, the turret's left side and
+/// the hull's right side at the rear. Fixture data.
+const SHOTS: [(&str, Vec3, Vec3); 6] = [
+    ("driver", Vec3::new(-0.57, 1.45, -6.5), Vec3::Z),
+    ("rear", Vec3::new(0.0, 1.2, 8.0), Vec3::NEG_Z),
+    ("left-front", Vec3::new(-6.0, 1.3, -1.6), Vec3::X),
+    ("left-mid", Vec3::new(-6.0, 1.3, 0.0), Vec3::X),
+    ("turret-left", Vec3::new(-6.0, 2.2, 0.3), Vec3::X),
+    ("right-rear", Vec3::new(6.0, 1.3, 1.0), Vec3::NEG_X),
+];
 
 /// Fixture on-axis strength (reference-mm) of every ray: fixture data.
 const STRENGTH: f32 = 30.0;
@@ -497,6 +516,71 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
         .expect("the cast system runs")
 }
 
+/// One fixture shot through the real march, in a fresh world at spawn pose ([`SHOTS`]).
+fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
+    let round = super::goldens::eighty_eight();
+    let mut app = super::goldens::golden_world();
+    let shell = super::goldens::spawn_golden_round(&mut app, local_origin, local_direction, round);
+    // Eight ticks at 16 ms: the whole tank and the run-out past it, for a main-gun round.
+    for _ in 0..8 {
+        app.update();
+    }
+    let mut input = String::new();
+    bits3(&mut input, local_origin);
+    input.push(' ');
+    bits3(&mut input, local_direction);
+    for value in [round.0, round.1, round.2, round.3] {
+        input.push(' ');
+        bits(&mut input, value);
+    }
+    let mut output = String::new();
+    let world = app.world();
+    let marks = world
+        .get::<PenetrationMarks>(shell)
+        .expect("the shot's shell is retained");
+    for event in &marks.events {
+        output.push_str("event ");
+        bits3(&mut output, event.entry);
+        output.push(' ');
+        bits3(&mut output, event.exit);
+        let _ = write!(output, " {};", event.overmatched);
+    }
+    for cone in &world
+        .get::<SpallMarks>(shell)
+        .expect("the shot's shell is retained")
+        .cones
+    {
+        output.push_str("cone ");
+        bits3(&mut output, cone.origin);
+        output.push(' ');
+        bits3(&mut output, Vec3::from(cone.axis));
+        output.push(' ');
+        bits(&mut output, cone.half_angle);
+        for ray in &cone.rays {
+            output.push(' ');
+            bits3(&mut output, ray.end);
+            output.push(if ray.deposited { '+' } else { '-' });
+        }
+        output.push(';');
+    }
+    let mut health: Vec<(String, f32)> = app
+        .world_mut()
+        .query::<(&Name, &ComponentHealth)>()
+        .iter(app.world())
+        .map(|(name, hp)| (name.as_str().to_owned(), hp.current))
+        .collect();
+    health.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    for (name, current) in health {
+        let _ = write!(output, " {name}=");
+        bits(&mut output, current);
+    }
+    Record {
+        label: format!("shot/{label}"),
+        input,
+        output,
+    }
+}
+
 /// Every record, in a fixed order.
 fn measure() -> Vec<Record> {
     let mut app = probe_world().expect("the bound tank builds");
@@ -517,6 +601,9 @@ fn measure() -> Vec<Record> {
     let mut records = vec![frame];
     for pose in [spawn, tilted] {
         records.extend(cast_pose(&mut app, &layout, pose));
+    }
+    for (label, origin, direction) in SHOTS {
+        records.push(shot(label, origin, direction));
     }
     records
 }
