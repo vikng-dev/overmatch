@@ -479,6 +479,24 @@ export class Registry extends DurableObject<Env> {
 	 *  unknown is `stopping`, and its stop needs the id. An id recovered late (`poll`) is followed by
 	 *  a status read, since the ready webhook may already have come and gone. */
 	private async adopt(serverId: string, deploymentId: string, poll = true): Promise<void> {
+		const row = this.server(serverId);
+		if (!row) {
+			// The claim was forgotten (retention) before its deploy answered: one stop is all that is left.
+			await this.provider.stop(deploymentId).catch((err) => console.error("stop of forgotten claim failed", serverId, diag(err)));
+			return;
+		}
+		if (row.state === "ended" && !row.deployment_id) {
+			// Absence was accepted, then the deploy answered after all: reopen the row to stop it.
+			this.sql.exec(
+				"UPDATE servers SET state = 'stopping', stop_at = ?, deployment_id = ?, deploy = 'placed' WHERE id = ? AND state = 'ended'",
+				Date.now(),
+				deploymentId,
+				serverId,
+			);
+			await this.tryStop(serverId);
+			await this.reschedule();
+			return;
+		}
 		const written = this.sql.exec(
 			"UPDATE servers SET deployment_id = ?, deploy = 'placed' WHERE id = ? AND deployment_id IS NULL",
 			deploymentId,
