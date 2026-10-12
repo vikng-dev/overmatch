@@ -235,3 +235,29 @@ fn poll_ticket(link: Res<WorkerLink>, time: Res<Time<Real>>, mut lobby: ResMut<L
         link.poll(generation, ticket);
     }
 }
+
+/// Test seam (`net::client::hosted_e2e`): once the location list is loaded and every probe has
+/// finished, select exactly `ids` and join as the Join button does. True once a join is under way.
+#[cfg(test)]
+pub(super) fn try_join(world: &mut World, ids: &[&str]) -> bool {
+    let now = world.resource::<Time<Real>>().elapsed_secs_f64();
+    world.resource_scope(|world, mut lobby: Mut<Lobby>| {
+        if lobby.flow.busy()
+            || !lobby
+                .groups()
+                .is_some_and(|groups| picker::settled(&groups))
+        {
+            return false;
+        }
+        lobby.selection = ids.iter().map(|id| (*id).to_owned()).collect();
+        lobby.touched = true;
+        lobby.join(world.resource::<WorkerLink>(), now);
+        lobby.flow.busy()
+    })
+}
+
+/// Test seam: why the last join failed, if it did.
+#[cfg(test)]
+pub(super) fn join_failure(world: &World) -> Option<String> {
+    world.resource::<Lobby>().flow.failure().map(str::to_owned)
+}

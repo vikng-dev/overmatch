@@ -2154,6 +2154,10 @@ pub(super) fn stamp_input_tick(
     }
 }
 
+/// Two headless matchmaking clients against the live Worker (`#[ignore]`d; needs `OVERMATCH_API`).
+#[cfg(test)]
+mod hosted_e2e;
+
 /// `apply_pending_recoil_kicks` derives a remote shot's barrel recoil from the LOCAL spec — these
 /// exercise that derivation directly against a minimal rig. An external integration test can't reach
 /// the sim types (`crate::tank` is a private module — `TankSim`/`Weapon`/`WeaponIndex` are not
