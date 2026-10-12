@@ -1006,6 +1006,9 @@ const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
 pub fn sim_plugin(app: &mut App) {
+    // The spall cone's shape is authored data: parsed and validated here, while the app is built,
+    // so a malformed file stops startup rather than the first throw.
+    spall_cone::ConeShape::shipped();
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
         .insert_resource(MgShortCircuit(crate::env_flag(

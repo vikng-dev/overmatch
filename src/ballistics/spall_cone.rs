@@ -67,6 +67,11 @@ pub(crate) struct ConeShape {
 /// Largest `N` a shape may declare: a bound on the work one throw does, not a law.
 const MAX_DIRECTIONS: usize = 65_536;
 
+/// How far a shape's emitted total `(1/N) Σ f_k` may lie from ½ (the midpoint rule's exact value):
+/// the rounding of its `f32` profile weights, each within `2^-24` relative of its f64 value, so
+/// their mean is within `2^-25` of ½. DERIVED; this is `f32::EPSILON`, four times that.
+const EMISSION_TOLERANCE: f64 = f32::EPSILON as f64;
+
 /// The profile `(cos θ − cos α)/(1 − cos α)` at `mu = cos θ`, zero outside the cone.
 pub(crate) fn profile(mu: f64, cos_alpha: f64) -> f64 {
     ((mu - cos_alpha) / (1.0 - cos_alpha)).max(0.0)
@@ -74,7 +79,10 @@ pub(crate) fn profile(mu: f64, cos_alpha: f64) -> f64 {
 
 impl ConeShape {
     /// A shape of half-angle `half_angle` (rad) sampled by `directions` strata. Refuses a half-angle
-    /// outside `(0, π/2]` or a direction count outside `1..=MAX_DIRECTIONS`.
+    /// outside `(0, π/2]` or a direction count outside `1..=MAX_DIRECTIONS`, and a shape whose
+    /// construction is numerically degenerate: a half-angle so small that `cos α` rounds to 1 (the
+    /// profile's denominator `1 − cos α` vanishes), any non-finite stratum, or an emitted total
+    /// `(1/N) Σ f_k` farther from ½ than [`EMISSION_TOLERANCE`].
     pub(crate) fn new(half_angle: f64, axis: AxisRule, directions: usize) -> Result<Self, String> {
         if !(half_angle.is_finite()
             && half_angle > 0.0
@@ -91,6 +99,12 @@ impl ConeShape {
             ));
         }
         let cos_alpha = libm::cos(half_angle);
+        if 1.0 - cos_alpha <= 0.0 {
+            return Err(format!(
+                "half-angle {}° is below what the profile can resolve: cos α rounds to 1",
+                half_angle.to_degrees()
+            ));
+        }
         let n = directions as f64;
         let strata = (0..directions)
             .map(|k| {
@@ -106,7 +120,31 @@ impl ConeShape {
                     profile: profile(mu, cos_alpha) as f32,
                 }
             })
-            .collect();
+            .collect::<Vec<Stratum>>();
+        if let Some(k) = strata.iter().position(|stratum| {
+            ![
+                stratum.mu,
+                stratum.lateral.0,
+                stratum.lateral.1,
+                stratum.profile,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        }) {
+            return Err(format!("direction {k} of the cone is not finite"));
+        }
+        let emitted = strata
+            .iter()
+            .map(|stratum| stratum.profile as f64)
+            .sum::<f64>()
+            / n;
+        // Every stratum is finite (checked above), so the total is.
+        if (emitted - 0.5).abs() > EMISSION_TOLERANCE {
+            return Err(format!(
+                "the cone emits {emitted} of its on-axis strength, not ½, at half-angle {}°",
+                half_angle.to_degrees()
+            ));
+        }
         Ok(Self {
             half_angle: half_angle as f32,
             axis,
@@ -125,7 +163,8 @@ impl ConeShape {
     }
 
     /// The shipped shape, parsed once. Panics on a malformed file: a broken authored contract is a
-    /// build defect, as for the substance registry.
+    /// build defect, as for the substance registry. [`super::sim_plugin`] calls this while the app
+    /// is built, so the file is parsed and validated at startup, never at the first throw.
     pub(crate) fn shipped() -> &'static Self {
         static SHAPE: std::sync::LazyLock<ConeShape> = std::sync::LazyLock::new(|| {
             ConeShape::from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
@@ -200,6 +239,23 @@ mod tests {
             ConeShape::from_ron(text).is_err(),
             "an unknown field is refused"
         );
+    }
+
+    /// A half-angle the profile cannot resolve is refused at parse: at `1e-9` rad `cos α` rounds to
+    /// 1 and the profile's denominator vanishes (DERIVED). Every half-angle the profile resolves
+    /// emits ½ at every direction count.
+    #[test]
+    fn a_numerically_degenerate_half_angle_is_refused() {
+        let error = ConeShape::new(1.0e-9, AxisRule::ExitDirection, 24).unwrap_err();
+        assert!(error.contains("cos α rounds to 1"), "{error}");
+        for half_angle in [1.0e-3, 0.0175, ALPHA, 1.0, std::f64::consts::FRAC_PI_2] {
+            for directions in [1, 24, 97, MAX_DIRECTIONS] {
+                assert!(
+                    ConeShape::new(half_angle, AxisRule::ExitDirection, directions).is_ok(),
+                    "α = {half_angle} rad, N = {directions}"
+                );
+            }
+        }
     }
 
     /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the cone, `(1/N) Σ s_k = S/2` to float
