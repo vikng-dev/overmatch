@@ -1,11 +1,12 @@
 //! The sim-side fill: a [`PenetrationReport`] read off a shell the authority marched.
 //!
-//! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's boxes and their HP
-//! before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
-//! spall cones and the boxes' HP after it, and states it all in the struck hull's frame. Nothing
-//! here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over the
-//! logged path, plate classes come from the volumes' components, and every dose is one the march
-//! recorded.
+//! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's components and their
+//! HP before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
+//! spall cones and the components' HP after it, and states it all in the struck hull's frame.
+//! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
+//! the logged path, plate classes come from the volumes' components, the round's end is the log's
+//! last crossing or bounce, and every dose is one the march recorded. No component geometry is
+//! read: the record names each component, and its shape stays the tank asset's.
 //!
 //! The path's times are DERIVED, not marched: each leg's length over the speed in effect on it
 //! (the round's speed between crossings, the mean of its entry and exit speeds inside one, half
@@ -15,13 +16,13 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use super::{
-    BoxDose, Consequence, ConsequenceState, Fragment, FragmentHit, Impact, Internal, PathPoint,
-    PathStep, PenetrationReport, Plate, PlateClass, Projectile, Ricochet, Role, ShotVerdict,
-    SpallCone,
+    BoxDose, ComponentState, Consequence, ConsequenceState, Fragment, FragmentHit, Impact,
+    PathPoint, PathStep, PenetrationReport, Plate, PlateClass, Projectile, Ricochet, Role,
+    RoundEnd, Shooter, ShotVerdict, SpallCone,
 };
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, SpallMarks, TRANSIT_K,
+    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::Rig;
@@ -34,14 +35,13 @@ enum VolumeClass {
     Box,
 }
 
-/// One box of the struck tank, as it stood before the shot.
+/// One component of the struck tank, as it stood before the shot.
 struct BoxAtShot {
     entity: Entity,
-    internal: Internal,
-    hp: f32,
+    state: ComponentState,
 }
 
-/// The struck tank before the shot: its hull frame and its boxes.
+/// The struck tank before the shot: its hull frame and its components.
 pub struct StruckTank {
     tank: Entity,
     /// World → hull-local.
@@ -52,7 +52,8 @@ pub struct StruckTank {
 }
 
 impl StruckTank {
-    /// The tank's hull frame and every box it owns, by name. `None` for an entity with no rig.
+    /// The tank's hull frame and every component it owns, by name. `None` for an entity with no
+    /// rig.
     pub fn capture(world: &mut World, tank: Entity) -> Option<Self> {
         let hull = world.get::<Rig>(tank)?.hull;
         let (_, hull_rotation, _) = world
@@ -70,20 +71,15 @@ impl StruckTank {
         let boxes = boxes
             .into_iter()
             .filter_map(|(entity, hp)| {
-                let (center, half_extents, rotation) =
-                    bounds(world, entity, &to_hull, to_hull_rotation)?;
                 let max = world.get::<ComponentHealth>(entity)?.max;
                 Some(BoxAtShot {
                     entity,
-                    internal: Internal {
+                    state: ComponentState {
                         name: name_of(world, entity),
                         role: role_of(world, entity),
-                        center: center.to_array(),
-                        half_extents: half_extents.to_array(),
-                        rotation: rotation.to_array(),
                         count: max,
+                        hp,
                     },
-                    hp,
                 })
             })
             .collect();
@@ -104,9 +100,10 @@ impl StruckTank {
     }
 }
 
-/// The shot's facts the march does not carry: where it was fired from, what was fired, and what
-/// was struck.
+/// The shot's facts the march does not carry: who fired, from where, what was fired, and what was
+/// struck.
 pub struct ShotFacts {
+    pub shooter: Option<Shooter>,
     /// Where the round started (WORLD).
     pub launch: Vec3,
     pub projectile: String,
@@ -284,6 +281,9 @@ pub fn report(
     let mut spall = Vec::new();
     let mut line: Vec<(Entity, f32, f32)> = Vec::new();
     let mut field: Vec<(Entity, f32, f32)> = Vec::new();
+    // Where the line reached each component, with its time.
+    let mut entered: Vec<(Entity, f32, Vec3)> = Vec::new();
+    let mut end = None;
     let mut thrown = cones.iter();
     let first = marks.first()?;
     for mark in &marks {
@@ -308,19 +308,34 @@ pub fn report(
                 });
                 if class_of(world, *volume) == VolumeClass::Box {
                     line.push((*volume, *shock, t));
+                    entered.push((*volume, t, *position));
                 }
+                end = Some(RoundEnd::Left {
+                    at: struck.point(*position),
+                });
             }
             ArmourMark::Crossing {
                 volumes,
                 overmatched,
                 cones: count,
+                end: crossing_end,
                 ..
             } => {
+                end = Some(match *crossing_end {
+                    CrossingEnd::Exit { at, .. } => RoundEnd::Left {
+                        at: struck.point(at),
+                    },
+                    CrossingEnd::Rest { at } => RoundEnd::Rest {
+                        volume: rested_in(volumes, at)
+                            .map_or_else(String::new, |volume| name_of(world, volume)),
+                    },
+                });
                 for crossed in volumes {
                     let t = time_at(crossed.entry);
                     let class = class_of(world, crossed.volume);
                     if class == VolumeClass::Box {
                         line.push((crossed.volume, crossed.cost * TRANSIT_K, t));
+                        entered.push((crossed.volume, t, crossed.entry));
                         continue;
                     }
                     plates.push(Plate {
@@ -399,53 +414,7 @@ pub fn report(
     let normal = normal.normalize_or_zero();
     let incidence = (-incoming).dot(normal).clamp(-1.0, 1.0).acos();
 
-    let mut doses = Vec::new();
-    let mut consequences = Vec::new();
-    for at_shot in &struck.boxes {
-        let of = |list: &[(Entity, f32, f32)]| -> Vec<(f32, f32)> {
-            list.iter()
-                .filter(|(volume, ..)| *volume == at_shot.entity)
-                .map(|&(_, dose, t)| (t, dose))
-                .collect()
-        };
-        let (from_line, from_field) = (of(&line), of(&field));
-        if from_line.is_empty() && from_field.is_empty() {
-            continue;
-        }
-        doses.push(BoxDose {
-            volume: at_shot.internal.name.clone(),
-            line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-        });
-        let after = world
-            .get::<ComponentHealth>(at_shot.entity)
-            .map_or(at_shot.hp, |hp| hp.current);
-        if at_shot.hp > 0.0 && after <= 0.0 {
-            let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
-            landed.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut total = 0.0;
-            let t = landed
-                .iter()
-                .find(|(_, dose)| {
-                    total += dose;
-                    total >= at_shot.hp
-                })
-                .or(landed.last())
-                .map_or(0.0, |(t, _)| *t);
-            consequences.push(Consequence {
-                t,
-                volume: at_shot.internal.name.clone(),
-                state: if world.get::<Ammo>(at_shot.entity).is_some() {
-                    ConsequenceState::Cookoff
-                } else {
-                    ConsequenceState::Lost
-                },
-                function: world
-                    .get::<FunctionRole>(at_shot.entity)
-                    .map(|function| format!("{function:?}")),
-            });
-        }
-    }
+    let (doses, mut consequences) = outcomes(world, struck, &line, &field, &entered);
     consequences.sort_by(|a, b| a.t.total_cmp(&b.t));
     // A crossing lists its volumes by identity; the record lists them in path order.
     plates.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -454,6 +423,8 @@ pub fn report(
         synthetic: false,
         vehicle: facts.vehicle.clone(),
         turret_yaw_deg: facts.turret_yaw_deg,
+        shooter: facts.shooter.clone(),
+        origin: struck.point(facts.launch),
         projectile: Projectile {
             name: facts.projectile.clone(),
             caliber_mm: facts.caliber_mm,
@@ -477,14 +448,92 @@ pub fn report(
             })
             .collect(),
         spall,
+        end: end?,
         doses,
         consequences,
-        internals: struck
+        components: struck
             .boxes
             .iter()
-            .map(|at_shot| at_shot.internal.clone())
+            .map(|at_shot| at_shot.state.clone())
             .collect(),
     })
+}
+
+/// Each component's dose from the shot and, for one the shot disabled, its consequence, timed at the
+/// deposit that emptied it. `line` and `field` list `(volume, dose, t)` deposits, `entered` the
+/// `(volume, t, point)` where the line reached a component (WORLD).
+fn outcomes(
+    world: &World,
+    struck: &StruckTank,
+    line: &[(Entity, f32, f32)],
+    field: &[(Entity, f32, f32)],
+    entered: &[(Entity, f32, Vec3)],
+) -> (Vec<BoxDose>, Vec<Consequence>) {
+    let mut doses = Vec::new();
+    let mut consequences = Vec::new();
+    for at_shot in &struck.boxes {
+        let of = |list: &[(Entity, f32, f32)]| -> Vec<(f32, f32)> {
+            list.iter()
+                .filter(|(volume, ..)| *volume == at_shot.entity)
+                .map(|&(_, dose, t)| (t, dose))
+                .collect()
+        };
+        let (from_line, from_field) = (of(line), of(field));
+        if from_line.is_empty() && from_field.is_empty() {
+            continue;
+        }
+        let first_entry = entered
+            .iter()
+            .filter(|(volume, ..)| *volume == at_shot.entity)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|&(_, _, point)| struck.point(point));
+        doses.push(BoxDose {
+            volume: at_shot.state.name.clone(),
+            line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
+            field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
+            entered: first_entry,
+        });
+        let hp = at_shot.state.hp;
+        let after = world
+            .get::<ComponentHealth>(at_shot.entity)
+            .map_or(hp, |hp| hp.current);
+        if hp > 0.0 && after <= 0.0 {
+            let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
+            landed.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut total = 0.0;
+            let t = landed
+                .iter()
+                .find(|(_, dose)| {
+                    total += dose;
+                    total >= hp
+                })
+                .or(landed.last())
+                .map_or(0.0, |(t, _)| *t);
+            consequences.push(Consequence {
+                t,
+                volume: at_shot.state.name.clone(),
+                state: if world.get::<Ammo>(at_shot.entity).is_some() {
+                    ConsequenceState::Cookoff
+                } else {
+                    ConsequenceState::Lost
+                },
+                function: world
+                    .get::<FunctionRole>(at_shot.entity)
+                    .map(|function| format!("{function:?}")),
+            });
+        }
+    }
+    (doses, consequences)
+}
+
+/// The volume a crossing that ended at rest at `at` came to rest in: the one whose line ends
+/// nearest `at`, short of perforating it.
+fn rested_in(volumes: &[VolumeCrossing], at: Vec3) -> Option<Entity> {
+    volumes
+        .iter()
+        .filter(|crossed| !crossed.perforated)
+        .min_by(|a, b| a.end.distance(at).total_cmp(&b.end.distance(at)))
+        .map(|crossed| crossed.volume)
 }
 
 /// The time at which the path passes nearest `point`, interpolated along that leg.
@@ -553,46 +602,4 @@ fn role_of(world: &World, volume: Entity) -> Role {
     } else {
         Role::Module
     }
-}
-
-/// A volume's bounds in its own frame — the box around its colliders, its own and its children's —
-/// as centre, half extents and orientation in the hull frame. A child collider sits at identity
-/// under its volume at unit scale (`tank::spawn`), so its shape is volume-local; a trimesh is
-/// bounded by its vertices, any other shape by its own box.
-fn bounds(
-    world: &World,
-    volume: Entity,
-    to_hull: &Affine3A,
-    to_hull_rotation: Quat,
-) -> Option<(Vec3, Vec3, Quat)> {
-    use avian3d::parry::shape::TypedShape;
-    use avian3d::prelude::{Collider, SimpleCollider};
-    let mut lo = Vec3::splat(f32::INFINITY);
-    let mut hi = Vec3::splat(f32::NEG_INFINITY);
-    let children = world
-        .get::<Children>(volume)
-        .map(|children| children.iter());
-    for entity in std::iter::once(volume).chain(children.into_iter().flatten()) {
-        let Some(collider) = world.get::<Collider>(entity) else {
-            continue;
-        };
-        if let TypedShape::TriMesh(mesh) = collider.shape_scaled().as_typed_shape() {
-            for vertex in mesh.vertices() {
-                let vertex = Vec3::new(vertex.x, vertex.y, vertex.z);
-                lo = lo.min(vertex);
-                hi = hi.max(vertex);
-            }
-        } else {
-            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-            lo = lo.min(aabb.min);
-            hi = hi.max(aabb.max);
-        }
-    }
-    if !lo.is_finite() || !hi.is_finite() {
-        return None;
-    }
-    let node = world.get::<GlobalTransform>(volume)?;
-    let (_, rotation, _) = node.to_scale_rotation_translation();
-    let center = to_hull.transform_point3(node.transform_point(0.5 * (lo + hi)));
-    Some((center, 0.5 * (hi - lo), to_hull_rotation * rotation))
 }

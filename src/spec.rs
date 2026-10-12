@@ -765,6 +765,8 @@ pub struct LinkAngleSpec {
 #[derive(Asset, TypePath, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TankSpec {
+    /// The name a player reads for this vehicle: the kill feed's, the pen cam's.
+    pub display_name: String,
     /// Total mass (kg) — authored balance data; the collision proxy contributes none (ADR-0011).
     pub mass: f32,
     /// Hull box full dimensions (x, y, z metres) approximating the angular-inertia distribution.
@@ -1463,6 +1465,7 @@ mod tests {
     /// what makes each mutation's rejection attributable to the mutation.
     const FIXTURE_RON: &str = r#"#![enable(implicit_some)]
 TankSpec(
+    display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
     track: (

@@ -3,6 +3,7 @@
 // -Z forward, +Y up), metres, seconds from first contact, degrees, millimetres.
 (
     synthetic: true,
+    origin: (-25.985, 1.469, -0.897),
     projectile: (name: "75mm PzGr 39/42", caliber_mm: 75.0, mass_kg: 6.80, speed_mps: 820.0),
     impact: (
         point: (-1.035, 0.970, 0.600),
@@ -41,6 +42,7 @@
         (t: 0.00206, point: (0.412, 0.941, 0.687)),
         (t: 0.00292, point: (1.010, 0.929, 0.723)),
     ],
+    end: Rest(volume: "Hull_Side_Lower_R"),
     spall: [
         (
             t: 0.00012,
@@ -72,18 +74,18 @@
     consequences: [
         (t: 0.00300, volume: "Ammo_R_1", state: Cookoff, function: Some("vehicle lost")),
     ],
-    internals: [
-        (name: "Driver", role: Crew, center: (-0.574, 1.093, -1.615), half_extents: (0.221, 0.554, 0.342)),
-        (name: "BowGunner", role: Crew, center: (0.647, 1.093, -1.419), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Commander", role: Crew, center: (-0.501, 1.996, 0.389), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Gunner", role: Crew, center: (-0.500, 1.936, -0.489), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Loader", role: Crew, center: (0.647, 1.996, 0.009), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Engine", role: Engine, center: (0.000, 1.088, 1.987), half_extents: (0.352, 0.624, 0.634)),
-        (name: "Transmission", role: Module, center: (0.000, 0.713, -1.619), half_extents: (0.906, 0.250, 0.841)),
-        (name: "Breech", role: Module, center: (0.000, 2.185, -0.416), half_extents: (0.228, 0.215, 0.687)),
-        (name: "Ammo_L_0", role: Ammo, center: (-1.242, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_L_1", role: Ammo, center: (-1.242, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_R_0", role: Ammo, center: (1.278, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_R_1", role: Ammo, center: (1.278, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+    components: [
+        (name: "Driver", role: Crew, count: 3.0, hp: 3.0),
+        (name: "BowGunner", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Commander", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Gunner", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Loader", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Engine", role: Engine, count: 10.0, hp: 10.0),
+        (name: "Transmission", role: Module, count: 10.0, hp: 10.0),
+        (name: "Breech", role: Module, count: 8.0, hp: 8.0),
+        (name: "Ammo_L_0", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_L_1", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_R_0", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_R_1", role: Ammo, count: 2.0, hp: 2.0),
     ],
 )

@@ -186,6 +186,7 @@ pub(super) fn spec_with(
     format!(
         "#![enable(implicit_some)]
 TankSpec(
+    display_name: \"Fixture\",
     mass: 1.0,
     inertia_extents: (1.0, 1.0, 1.0),
     track: (

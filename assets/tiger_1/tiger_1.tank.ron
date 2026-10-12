@@ -1,5 +1,7 @@
 #![enable(implicit_some)]
 TankSpec(
+    // The name a player reads for this vehicle (kill feed, pen cam).
+    display_name: "Tiger I",
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's

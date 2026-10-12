@@ -4,6 +4,7 @@
 // The path ends 2 m past the last exit at the residual speed; departure leg length is an open item.
 (
     synthetic: true,
+    origin: (-25.292, 1.750, -7.752),
     projectile: (name: "122mm BR-471B", caliber_mm: 122.0, mass_kg: 25.00, speed_mps: 781.0),
     impact: (
         point: (-1.035, 1.000, -1.750),
@@ -42,6 +43,7 @@
         (t: 0.00286, point: (1.035, 0.936, -1.238)),
         (t: 0.00568, point: (2.976, 0.876, -0.758)),
     ],
+    end: Left(at: (1.035, 0.936, -1.238)),
     spall: [
         (
             t: 0.00010,
@@ -90,18 +92,18 @@
         (t: 0.00090, volume: "Driver", state: Lost, function: Some("drive")),
         (t: 0.00205, volume: "BowGunner", state: Damaged, function: Some("hull MG")),
     ],
-    internals: [
-        (name: "Driver", role: Crew, center: (-0.574, 1.093, -1.615), half_extents: (0.221, 0.554, 0.342)),
-        (name: "BowGunner", role: Crew, center: (0.647, 1.093, -1.419), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Commander", role: Crew, center: (-0.501, 1.996, 0.389), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Gunner", role: Crew, center: (-0.500, 1.936, -0.489), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Loader", role: Crew, center: (0.647, 1.996, 0.009), half_extents: (0.221, 0.554, 0.342)),
-        (name: "Engine", role: Engine, center: (0.000, 1.088, 1.987), half_extents: (0.352, 0.624, 0.634)),
-        (name: "Transmission", role: Module, center: (0.000, 0.713, -1.619), half_extents: (0.906, 0.250, 0.841)),
-        (name: "Breech", role: Module, center: (0.000, 2.185, -0.416), half_extents: (0.228, 0.215, 0.687)),
-        (name: "Ammo_L_0", role: Ammo, center: (-1.242, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_L_1", role: Ammo, center: (-1.242, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_R_0", role: Ammo, center: (1.278, 1.535, -0.622), half_extents: (0.296, 0.226, 0.558)),
-        (name: "Ammo_R_1", role: Ammo, center: (1.278, 1.535, 0.663), half_extents: (0.296, 0.226, 0.558)),
+    components: [
+        (name: "Driver", role: Crew, count: 3.0, hp: 3.0),
+        (name: "BowGunner", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Commander", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Gunner", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Loader", role: Crew, count: 3.0, hp: 3.0),
+        (name: "Engine", role: Engine, count: 10.0, hp: 10.0),
+        (name: "Transmission", role: Module, count: 10.0, hp: 10.0),
+        (name: "Breech", role: Module, count: 8.0, hp: 8.0),
+        (name: "Ammo_L_0", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_L_1", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_R_0", role: Ammo, count: 2.0, hp: 2.0),
+        (name: "Ammo_R_1", role: Ammo, count: 2.0, hp: 2.0),
     ],
 )

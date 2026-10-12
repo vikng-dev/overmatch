@@ -4,6 +4,12 @@
 //! hand-authored RON clip, or [`record`] reading a shot the sim resolved) and [`player`] consumes
 //! it unchanged. It is not on the wire.
 //!
+//! The record carries no geometry. It holds the shot's inputs (round, origin, shooter, struck
+//! vehicle, turret pose), the struck tank's state at the shot (each component's hit points, so a
+//! part already lost reads zero), and the authority's outcome (path, verdict, how the round's flight
+//! ended, dose and fate per component), every volume named. A component's shape is the tank
+//! asset's, resolved by name ([`shapes`]).
+//!
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
 //! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
@@ -14,6 +20,7 @@
 pub mod pen_cam;
 pub mod player;
 pub mod record;
+pub mod shapes;
 
 use std::path::Path;
 
@@ -122,6 +129,11 @@ pub struct PenetrationReport {
     /// positive from `-Z` toward `-X`).
     #[serde(default)]
     pub turret_yaw_deg: f32,
+    /// Who fired; `None` on a hand-authored clip.
+    #[serde(default)]
+    pub shooter: Option<Shooter>,
+    /// Where the round started: the path's first point.
+    pub origin: [f32; 3],
     pub projectile: Projectile,
     pub impact: Impact,
     /// Armour crossings in path order: one per armour volume the line put a chord into.
@@ -132,13 +144,34 @@ pub struct PenetrationReport {
     /// Timed shell path, approach included; a ricochet's deflection leg continues it.
     pub path: Vec<PathPoint>,
     pub spall: Vec<SpallCone>,
-    /// What the shot dosed each box with, in [`Self::internals`] order; a box it never reached is
-    /// absent.
+    /// How the round's flight ended.
+    pub end: RoundEnd,
+    /// What the shot dosed each component with, in [`Self::components`] order; a component it never
+    /// reached is absent.
     #[serde(default)]
     pub doses: Vec<BoxDose>,
     pub consequences: Vec<Consequence>,
-    /// The struck tank's boxes (crew and module volumes) at the time of the shot.
-    pub internals: Vec<Internal>,
+    /// The struck tank's components (crew and module volumes) as they stood at the shot.
+    pub components: Vec<ComponentState>,
+}
+
+/// Who fired the shot.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Shooter {
+    /// The player's name.
+    pub name: String,
+    /// The shooter's tank file, relative to the asset root.
+    pub vehicle: String,
+}
+
+/// How the round's flight ended, as the authority marched it.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum RoundEnd {
+    /// It came to rest inside `volume` (armour or a component), at the path's last point.
+    Rest { volume: String },
+    /// It left the struck tank at `at`, a point of the path: the far end of its last crossing, or
+    /// the face of its last bounce. The path runs on past it.
+    Left { at: [f32; 3] },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -240,7 +273,7 @@ pub struct Fragment {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct FragmentHit {
-    /// An [`Internal::name`].
+    /// A [`ComponentState::name`].
     pub volume: String,
     /// Dose, reference-mm.
     pub damage: f32,
@@ -250,16 +283,20 @@ pub struct FragmentHit {
 /// spall cones'.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
-    /// An [`Internal::name`].
+    /// A [`ComponentState::name`].
     pub volume: String,
     pub line: f32,
     pub field: f32,
+    /// Where the line first reached it: its entry, or the face it bounced off. `None` when only a
+    /// spall cone did.
+    #[serde(default)]
+    pub entered: Option<[f32; 3]>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Consequence {
     pub t: f32,
-    /// An [`Internal::name`].
+    /// A [`ComponentState::name`].
     pub volume: String,
     pub state: ConsequenceState,
     /// The capability this cost the tank, if any.
@@ -273,24 +310,16 @@ pub enum ConsequenceState {
     Cookoff,
 }
 
-/// A box standing in for a crew station or module volume: its bounds in its own frame, placed in
-/// the record's frame.
+/// One component of the struck tank (a crew station or module volume) as it stood at the shot, by
+/// its node name in the tank asset.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-pub struct Internal {
+pub struct ComponentState {
     pub name: String,
     pub role: Role,
-    pub center: [f32; 3],
-    pub half_extents: [f32; 3],
-    /// The box's orientation (`x, y, z, w` quaternion); identity is axis-aligned.
-    #[serde(default = "identity")]
-    pub rotation: [f32; 4],
-    /// The dose that disables it (reference-mm): its HP pool. Zero on a hand-authored clip.
-    #[serde(default)]
+    /// The dose that disables it (reference-mm): its HP pool.
     pub count: f32,
-}
-
-fn identity() -> [f32; 4] {
-    [0.0, 0.0, 0.0, 1.0]
+    /// Its hit points at the shot (reference-mm); zero for a part already lost.
+    pub hp: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,8 +340,15 @@ impl PenetrationReport {
         Self::from_ron(&text).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    pub fn internal(&self, name: &str) -> Option<&Internal> {
-        self.internals.iter().find(|internal| internal.name == name)
+    pub fn component(&self, name: &str) -> Option<&ComponentState> {
+        self.components
+            .iter()
+            .find(|component| component.name == name)
+    }
+
+    /// Whether the round came to rest in the struck tank.
+    pub fn rested(&self) -> bool {
+        matches!(self.end, RoundEnd::Rest { .. })
     }
 
     /// The record's path as the verdict reads it: its plates and bounces in time order, each
@@ -465,13 +501,43 @@ pub(crate) mod tests {
             .flat_map(|burst| &burst.fragments)
             .flat_map(|fragment| &fragment.hits)
             .map(|hit| hit.volume.as_str())
+            .chain(report.doses.iter().map(|d| d.volume.as_str()))
             .chain(report.consequences.iter().map(|c| c.volume.as_str()));
         for name in cited {
             assert!(
-                report.internal(name).is_some(),
+                report.component(name).is_some(),
                 "{file}: unknown volume {name}"
             );
         }
+        match &report.end {
+            RoundEnd::Rest { volume } => {
+                let in_plate = report
+                    .plates
+                    .last()
+                    .is_some_and(|plate| plate.exit.is_none() && plate.name == *volume);
+                assert!(
+                    in_plate || report.component(volume).is_some(),
+                    "{file}: rested in {volume}, neither its last plate without an exit nor a \
+                     component"
+                );
+            }
+            RoundEnd::Left { at } => {
+                // A hand-authored ricochet lists the face it glanced off as a plate it never left.
+                assert!(
+                    report.impact.verdict == ShotVerdict::Ricochet
+                        || report.plates.iter().all(|plate| plate.exit.is_some()),
+                    "{file}: left the tank, yet a plate holds it"
+                );
+                assert!(
+                    report.path.iter().any(|p| distance(p.point, *at) < 1.0e-5),
+                    "{file}: where it left, {at:?}, is not a point of its path"
+                );
+            }
+        }
+        assert_eq!(
+            report.origin, report.path[0].point,
+            "{file}: the path starts at the origin"
+        );
         let sorted = |ts: Vec<f32>| ts.windows(2).all(|w| w[0] <= w[1]);
         assert!(sorted(report.path.iter().map(|p| p.t).collect()), "{file}");
         assert!(

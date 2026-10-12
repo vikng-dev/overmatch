@@ -339,7 +339,6 @@ pub fn face_mark(point: Vec3, normal: Vec3, travel: Vec3, calibre: f32) -> Trans
 
 #[cfg(test)]
 mod tests {
-    use super::super::plan::REST_DEPTH_M;
     use super::super::{Settings, ShotRun};
     use super::*;
 
@@ -388,13 +387,7 @@ mod tests {
                 report.impact.point
             ));
         }
-        let rested_in_plate = report.plates.last().is_some_and(|p| p.exit.is_none());
-        let rested_in_box = report.internals.iter().any(|b| {
-            let rotation = Quat::from_array(b.rotation).normalize();
-            let local = rotation.inverse() * (last - Vec3::from(b.center));
-            (local.abs() - Vec3::from(b.half_extents)).max_element() < -REST_DEPTH_M
-        });
-        let leaves = !rested_in_plate && !rested_in_box;
+        let leaves = !report.rested();
         let (mut approach, mut onward) = (0, 0);
         let mut t = shot.fire;
         while t < shot.impact + 1.0 {
@@ -445,9 +438,8 @@ mod tests {
     /// The battlefield's tracer flies the record's path, in the record's hull frame (the
     /// battlefield's, [`tracer_head`]), for every shot the playlist fires: before
     /// the impact along the path's first leg (within [`ANGLE_TOL_DEG`]) into its entry, which is
-    /// the record's impact point (within [`POSITION_TOL_M`]); after it only when the path leaves
-    /// the tank — its last point inside no recorded box and no plate it rested in — and then along
-    /// the path's last leg.
+    /// the record's impact point (within [`POSITION_TOL_M`]); after it only when the record has the
+    /// round leave the tank, and then along the path's last leg.
     #[test]
     fn the_world_tracer_flies_the_records_path() {
         let library = Library::load();

@@ -39,6 +39,7 @@ use bevy::time::TimeUpdateStrategy;
 
 use self::plan::Plan;
 use self::timeline::{CornerKind, Turn};
+use super::shapes::TankAsset;
 use super::{PenetrationReport, ShotVerdict};
 
 /// The records, relative to the asset root.
@@ -155,29 +156,33 @@ pub struct Record {
 impl Library {
     fn load() -> Self {
         let dir = crate::assets::asset_root().join(RECORD_DIR);
-        let mut records: Vec<Record> = Vec::new();
+        let mut reports: Vec<(&'static str, PenetrationReport)> = Vec::new();
         for entry in PLAYLIST {
             for (stem, _) in entry.shots {
-                if records.iter().any(|r| r.stem == *stem) {
+                if reports.iter().any(|(known, _)| known == stem) {
                     continue;
                 }
                 let report = PenetrationReport::load(&dir.join(format!("{stem}.ron")))
                     .unwrap_or_else(|err| panic!("pen cam record: {err}"));
-                let plan = Plan::new(&report);
-                records.push(Record { stem, report, plan });
+                reports.push((stem, report));
             }
         }
-        let vehicle = records
+        let vehicle = reports
             .iter()
-            .find_map(|r| r.report.vehicle.clone())
+            .find_map(|(_, report)| report.vehicle.clone())
             .expect("a recorded scenario names its vehicle");
-        for record in &records {
-            assert!(
-                record.report.vehicle.as_deref() == Some(vehicle.as_str()),
-                "{}: the demo stages one vehicle, {vehicle}",
-                record.stem
-            );
-        }
+        let asset = TankAsset::load(&vehicle).unwrap_or_else(|err| panic!("pen cam tank: {err}"));
+        let records = reports
+            .into_iter()
+            .map(|(stem, report)| {
+                assert!(
+                    report.vehicle.as_deref() == Some(vehicle.as_str()),
+                    "{stem}: the demo stages one vehicle, {vehicle}"
+                );
+                let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
+                Record { stem, report, plan }
+            })
+            .collect();
         Self { records, vehicle }
     }
 

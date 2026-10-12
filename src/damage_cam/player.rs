@@ -1,5 +1,7 @@
 //! The damage cam's view half: plays a [`PenetrationReport`] as a four-beat clip over the struck
-//! tank's view glb. A pure consumer — it reads the report and the glb, never the sim.
+//! tank's view glb. A pure consumer — it reads the report, the glb and the tank asset's component
+//! shapes ([`super::shapes`]), never the sim. Each component the record names is drawn in its own
+//! real mesh.
 //!
 //! Clip time (the playhead, seconds) is not record time: the approach maps onto the impact beat,
 //! record `t >= 0` onto the traverse window, and consequences onto the consequence window, by
@@ -19,6 +21,7 @@ use bevy::shader::ShaderRef;
 use bevy::time::Real;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
+use super::shapes::{TankAsset, TankShapes};
 use super::{ConsequenceState, PenetrationReport, Role, ShotVerdict, SpallCone};
 use crate::spec::TankSpec;
 
@@ -157,12 +160,19 @@ struct ViewReady(bool);
 
 /// Every scenario, loaded once at startup. A malformed clip is a broken fixture, so it panics.
 #[derive(Resource)]
-struct Scenarios(Vec<(&'static str, PenetrationReport)>);
+struct Scenarios {
+    clips: Vec<(&'static str, PenetrationReport)>,
+    /// The fixture tank's component shapes; the clips leave the turret at its spawn pose.
+    shapes: TankShapes,
+}
 
 fn load_scenarios() -> Scenarios {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
-    Scenarios(
-        SCENARIOS
+    let shapes = TankAsset::load(TANK_SPEC)
+        .unwrap_or_else(|e| panic!("damage cam tank failed to load: {e}"))
+        .shapes(0.0);
+    Scenarios {
+        clips: SCENARIOS
             .iter()
             .map(|(label, file)| {
                 let report = PenetrationReport::load(&dir.join(file))
@@ -170,7 +180,8 @@ fn load_scenarios() -> Scenarios {
                 (*label, report)
             })
             .collect(),
-    )
+        shapes,
+    }
 }
 
 /// The clip on the stage, with everything derived from it once.
@@ -186,12 +197,12 @@ struct ActiveClip {
 
 impl ActiveClip {
     fn new(index: usize, scenarios: &Scenarios) -> Self {
-        let report = scenarios.0[index].1.clone();
+        let report = scenarios.clips[index].1.clone();
         let bursts = burst_timings(&report);
         Self {
             index,
             timeline: Timeline::new(&report),
-            framing: Framing::new(&report),
+            framing: Framing::new(&report, &scenarios.shapes),
             bursts,
             report,
         }
@@ -443,8 +454,8 @@ struct Framing {
 }
 
 impl Framing {
-    fn new(report: &PenetrationReport) -> Self {
-        let (lo, hi) = bounds(&framed_points(report));
+    fn new(report: &PenetrationReport, shapes: &TankShapes) -> Self {
+        let (lo, hi) = bounds(&framed_points(report, shapes));
         let radius = ((hi - lo).length() * 0.5).max(1.2);
         let normal = Vec3::from(report.impact.normal);
         let side = Vec3::new(normal.x, 0.0, normal.z)
@@ -470,8 +481,8 @@ impl Framing {
 }
 
 /// What the oblique view bounds: the impact, the post-contact path with its departure leg
-/// clamped to [`FRAME_REACH_M`], and the affected internals' boxes.
-fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
+/// clamped to [`FRAME_REACH_M`], and the bounds of the affected components' real shapes.
+fn framed_points(report: &PenetrationReport, shapes: &TankShapes) -> Vec<Vec3> {
     let affected: HashSet<&str> = report
         .spall
         .iter()
@@ -491,16 +502,14 @@ fn framed_points(report: &PenetrationReport) -> Vec<Vec3> {
             _ => point,
         }
     }));
-    for internal in report
-        .internals
+    for shape in report
+        .components
         .iter()
-        .filter(|i| affected.contains(i.name.as_str()))
+        .filter(|c| affected.contains(c.name.as_str()))
+        .filter_map(|c| shapes.get(&c.name))
     {
-        let (center, half) = (
-            Vec3::from(internal.center),
-            Vec3::from(internal.half_extents),
-        );
-        points.extend([center - half, center + half]);
+        let (lo, hi) = shape.bounds();
+        points.extend([lo, hi]);
     }
     points
 }
@@ -818,6 +827,7 @@ struct ClipMaterials {
     ammo: Handle<StandardMaterial>,
     engine: Handle<StandardMaterial>,
     damaged: Handle<StandardMaterial>,
+    lost: Handle<StandardMaterial>,
 }
 
 impl ClipMaterials {
@@ -831,7 +841,8 @@ impl ClipMaterials {
     }
 }
 
-/// One record internal drawn as a box, by its index in [`PenetrationReport::internals`].
+/// One record component drawn in its real mesh, by its index in
+/// [`PenetrationReport::components`].
 #[derive(Component)]
 struct InternalBox(usize);
 
@@ -894,6 +905,7 @@ fn spawn_scene(
         ammo: materials.add(translucent(Color::srgba(0.95, 0.85, 0.35, 0.35))),
         engine: materials.add(translucent(Color::srgba(0.55, 0.7, 0.5, 0.3))),
         damaged: materials.add(translucent(AMBER.with_alpha(0.6))),
+        lost: materials.add(translucent(LOST.with_alpha(0.6))),
     });
     let (config, _) = gizmo_store.config_mut::<DefaultGizmoConfigGroup>();
     config.line.width = 2.5;
@@ -972,10 +984,11 @@ fn spawn_hud(mut commands: Commands) {
     ));
 }
 
-/// Respawn the internal boxes for the active clip.
+/// Respawn the component meshes for the active clip.
 fn rebuild_internals(
     mut commands: Commands,
     clip: Res<ActiveClip>,
+    scenarios: Res<Scenarios>,
     materials: Option<Res<ClipMaterials>>,
     mut meshes: ResMut<Assets<Mesh>>,
     boxes: Query<Entity, With<InternalBox>>,
@@ -986,14 +999,15 @@ fn rebuild_internals(
     for entity in &boxes {
         commands.entity(entity).despawn();
     }
-    for (index, internal) in clip.report.internals.iter().enumerate() {
-        let size = Vec3::from(internal.half_extents) * 2.0;
+    for (index, component) in clip.report.components.iter().enumerate() {
+        let Some(shape) = scenarios.shapes.get(&component.name) else {
+            continue;
+        };
         commands.spawn((
             InternalBox(index),
-            Mesh3d(meshes.add(Cuboid::from_size(size))),
-            MeshMaterial3d(materials.role(internal.role).clone()),
-            Transform::from_translation(Vec3::from(internal.center))
-                .with_rotation(Quat::from_array(internal.rotation)),
+            Mesh3d(meshes.add(shape.mesh())),
+            MeshMaterial3d(materials.role(component.role).clone()),
+            Transform::IDENTITY,
         ));
     }
 }
@@ -1024,10 +1038,10 @@ fn prepare_view(
         .map(String::as_str)
         .chain(
             scenarios
-                .0
+                .clips
                 .iter()
-                .flat_map(|(_, report)| &report.internals)
-                .map(|internal| internal.name.as_str()),
+                .flat_map(|(_, report)| &report.components)
+                .map(|component| component.name.as_str()),
         )
         .collect();
     for (entity, material) in &candidates {
@@ -1144,7 +1158,8 @@ fn apply_cut(
     }
 }
 
-/// A `Damaged` internal's box turns amber once its consequence lands.
+/// A component's mesh turns amber once a `Damaged` consequence lands on it, red once a `Lost` or
+/// `Cookoff` one does.
 fn tint_internals(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
@@ -1155,14 +1170,14 @@ fn tint_internals(
         return;
     };
     for (internal_box, mut material) in &mut boxes {
-        let Some(internal) = clip.report.internals.get(internal_box.0) else {
+        let Some(component) = clip.report.components.get(internal_box.0) else {
             continue;
         };
-        let state = landed_state(&clip.report, &clip.timeline, playhead.clip, &internal.name);
-        let want = if state == Some(ConsequenceState::Damaged) {
-            &materials.damaged
-        } else {
-            materials.role(internal.role)
+        let state = landed_state(&clip.report, &clip.timeline, playhead.clip, &component.name);
+        let want = match state {
+            Some(ConsequenceState::Damaged) => &materials.damaged,
+            Some(ConsequenceState::Lost | ConsequenceState::Cookoff) => &materials.lost,
+            None => materials.role(component.role),
         };
         if material.0 != *want {
             material.0 = want.clone();
@@ -1200,7 +1215,7 @@ fn handle_keys(
         section.rule = section.rule.next();
     }
     for (index, key) in SCENARIO_KEYS.iter().enumerate() {
-        if keys.just_pressed(*key) && index < scenarios.0.len() {
+        if keys.just_pressed(*key) && index < scenarios.clips.len() {
             *clip = ActiveClip::new(index, &scenarios);
             playhead.clip = 0.0;
         }
@@ -1369,6 +1384,7 @@ fn draw_clip(
     mut gizmos: Gizmos,
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
+    scenarios: Res<Scenarios>,
     section: Res<SectionView>,
 ) {
     let (report, timeline, now) = (&clip.report, &clip.timeline, playhead.clip);
@@ -1430,7 +1446,7 @@ fn draw_clip(
         };
         draw_burst(&mut gizmos, burst, timing, progress, fade);
     }
-    draw_internals(&mut gizmos, report, timeline, now);
+    draw_internals(&mut gizmos, report, &scenarios.shapes, timeline, now);
 }
 
 /// The section's reading of one plate: the chord as a bar with end ticks (an embed's chord runs
@@ -1562,19 +1578,21 @@ fn landed_state(
         .next_back()
 }
 
-fn draw_internals(gizmos: &mut Gizmos, report: &PenetrationReport, timeline: &Timeline, now: f32) {
-    for internal in &report.internals {
-        let center = Vec3::from(internal.center);
-        let size = Vec3::from(internal.half_extents) * 2.0;
-        let cube = |scale: f32| Transform::from_translation(center).with_scale(size * scale);
-        match landed_state(report, timeline, now, &internal.name) {
-            None => {}
-            Some(ConsequenceState::Damaged) => gizmos.cube(cube(1.0), AMBER),
-            Some(ConsequenceState::Lost) => gizmos.cube(cube(1.06), LOST),
-            Some(ConsequenceState::Cookoff) => {
-                gizmos.cube(cube(1.06), LOST);
-                gizmos.sphere(Isometry3d::from_translation(center), 0.45, SPAN);
-            }
+/// A cooked-off component's flash, at the centre of its real shape; its mesh carries the rest of
+/// its state ([`tint_internals`]).
+fn draw_internals(
+    gizmos: &mut Gizmos,
+    report: &PenetrationReport,
+    shapes: &TankShapes,
+    timeline: &Timeline,
+    now: f32,
+) {
+    for component in &report.components {
+        let Some(shape) = shapes.get(&component.name) else {
+            continue;
+        };
+        if landed_state(report, timeline, now, &component.name) == Some(ConsequenceState::Cookoff) {
+            gizmos.sphere(Isometry3d::from_translation(shape.center()), 0.45, SPAN);
         }
     }
 }
@@ -1609,8 +1627,8 @@ fn update_hud(
         beat,
         if playhead.paused { "  [paused]" } else { "" },
         clip.index + 1,
-        scenarios.0.len(),
-        scenarios.0[clip.index].0,
+        scenarios.clips.len(),
+        scenarios.clips[clip.index].0,
         law.label(),
     );
 }
@@ -1738,6 +1756,7 @@ fn rebuild_labels(
 fn update_labels(
     playhead: Res<Playhead>,
     clip: Res<ActiveClip>,
+    scenarios: Res<Scenarios>,
     camera: Single<(&Camera, &Transform), With<ClipCamera>>,
     mut labels: Query<(&ConsequenceLabel, &mut Node, &mut Visibility)>,
 ) {
@@ -1749,10 +1768,10 @@ fn update_labels(
             continue;
         };
         let landed = playhead.clip >= clip.timeline.consequence_clip(consequence.t);
-        let anchor = clip
-            .report
-            .internal(&consequence.volume)
-            .map(|internal| Vec3::from(internal.center) + Vec3::Y * internal.half_extents[1]);
+        let anchor = scenarios.shapes.get(&consequence.volume).map(|shape| {
+            let (lo, hi) = shape.bounds();
+            Vec3::new(0.5 * (lo.x + hi.x), hi.y, 0.5 * (lo.z + hi.z))
+        });
         let screen = anchor.and_then(|a| camera.world_to_viewport(camera_transform, a).ok());
         match screen {
             Some(screen) if landed => {
@@ -1798,7 +1817,7 @@ fn update_plate_labels(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Fragment, Impact, PathPoint, Plate, PlateClass, Projectile};
+    use super::super::{Fragment, Impact, PathPoint, Plate, PlateClass, Projectile, RoundEnd};
     use super::*;
 
     fn scenario(file: &str) -> PenetrationReport {
@@ -1823,8 +1842,8 @@ mod tests {
         let leg = (Vec3::from(end.point) - exit).normalize();
         end.point = (exit + leg * 20.0).into();
         end.t += 18.0 / 700.0;
-        let envelope = bounds(&framed_points(&short));
-        let (lo, hi) = bounds(&framed_points(&long));
+        let envelope = bounds(&framed_points(&short, &TankShapes::default()));
+        let (lo, hi) = bounds(&framed_points(&long, &TankShapes::default()));
         assert!(within(lo, envelope, FRAME_REACH_M) && within(hi, envelope, FRAME_REACH_M));
         let unclamped = Vec3::from(long.path.last().unwrap().point);
         assert!(!within(unclamped, envelope, FRAME_REACH_M));
@@ -1836,6 +1855,8 @@ mod tests {
             synthetic: true,
             vehicle: None,
             turret_yaw_deg: 0.0,
+            shooter: None,
+            origin: [0.0; 3],
             projectile: Projectile {
                 name: "fixture".into(),
                 caliber_mm: 88.0,
@@ -1873,9 +1894,12 @@ mod tests {
                     hits: vec![],
                 }],
             }],
+            end: RoundEnd::Left {
+                at: [0.0, 0.0, 0.6],
+            },
             doses: vec![],
             consequences: vec![],
-            internals: vec![],
+            components: vec![],
         }
     }
 
@@ -2189,7 +2213,7 @@ mod tests {
         let (left_at, anchor) = departure(&report).unwrap();
         assert!((left_at - 10.0 / speed).abs() < 1.0e-6);
         assert_eq!(anchor, Vec3::new(0.0, 0.0, 10.0));
-        let (_, hi) = bounds(&framed_points(&report));
+        let (_, hi) = bounds(&framed_points(&report, &TankShapes::default()));
         assert!((hi.z - (10.0 + FRAME_REACH_M)).abs() < 1.0e-4, "{hi}");
     }
 

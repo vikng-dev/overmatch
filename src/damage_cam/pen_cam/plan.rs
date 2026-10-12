@@ -1,26 +1,27 @@
-//! What the corner draws for one record, read off it and nothing else: the line as an
-//! arc-length polyline, the crossings, the bounce, the stop, each spall cone's directions and
-//! reach, and each box's dose and the moment the picture reaches it. Positions are in the record's
-//! frame (hull-local, metres).
+//! What the corner draws for one record, read off it and the tank asset's component shapes: the
+//! line as an arc-length polyline, the crossings, the bounce, the stop or the point the round left
+//! the tank, each spall cone's directions and reach, and each component's dose and the moment the
+//! picture reaches it. Positions are in the record's frame (hull-local, metres).
 //!
-//! Two things are derived here rather than read, and are labelled where they are made: the line's
-//! remaining capability, `(v/v₀)²` from the path's times (the record carries no capability), and
-//! the moment a box is reached (where the line first enters its box, or the cone that dosed it).
+//! Whether the round stopped, where it left the tank and where the line entered a component are the
+//! record's own facts; nothing here re-derives them from geometry. A component's shape serves only
+//! framing (its centre). Two things are derived rather than read, and are labelled where they are
+//! made: the line's remaining capability, `(v/v₀)²` from the path's times (the record carries no
+//! capability), and the moment a component is reached (the arc of the line's recorded entry, or
+//! the cone that dosed it).
 
 use bevy::prelude::*;
 
 use super::timeline::CornerKind;
+use crate::damage_cam::shapes::TankShapes;
 use crate::damage_cam::{
-    ConsequenceState, PenetrationReport, PlateClass, Role, ShotVerdict, SpallCone,
+    ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, ShotVerdict, SpallCone,
 };
 
 /// The line is drawn from this far (m) before first contact.
 pub const LEAD_M: f32 = 1.5;
-/// A path that leaves the tank is drawn this far (m) past its last event.
+/// A path that leaves the tank is drawn this far (m) past the point it left.
 pub const RUN_OUT_M: f32 = 1.5;
-/// A path that ends more than this far (m) inside a box ended at rest there; a crossing's exit
-/// lies on the box's face.
-pub const REST_DEPTH_M: f32 = 1.0e-3;
 /// Every length the corner draws or frames around the round, [`LEAD_M`] and [`RUN_OUT_M`]
 /// included, is at most this many calibres ([`Plan::reach`]), so a small round is framed as tightly
 /// as its size asks: 0.16 m for a 7.9 mm round, while an 88 mm round's 1.76 m leaves every metre
@@ -42,13 +43,15 @@ pub struct Plan {
     pub end_arc: f32,
     /// The record's path runs on past the drawn span: the round left.
     pub left: bool,
+    /// Where the record has the round leave the tank, and its arc length; `None` when it rested.
+    pub left_at: Option<(Vec3, f32)>,
     pub crossings: Vec<Crossing>,
     /// Outward normal and incidence (rad) at first contact.
     pub impact_point: Vec3,
     pub impact_normal: Vec3,
     pub incidence: f32,
     pub bounce: Option<Bounce>,
-    /// Where the round came to rest, inside armour or a box, if it did.
+    /// Where the round came to rest, inside armour or a component, if the record has it rest.
     pub stop: Option<Vec3>,
     pub cones: Vec<Cone>,
     pub boxes: Vec<BoxPlan>,
@@ -122,39 +125,6 @@ impl Polyline {
         }
         best.1
     }
-
-    /// The first arc length at which the line is inside the oriented box, if it ever is.
-    pub fn enters(&self, center: Vec3, half: Vec3, rotation: Quat) -> Option<f32> {
-        let to_local = rotation.inverse();
-        for i in 1..self.points.len() {
-            let a = to_local * (self.points[i - 1] - center);
-            let b = to_local * (self.points[i] - center);
-            let d = b - a;
-            let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
-            let mut hit = true;
-            for axis in 0..3 {
-                if d[axis].abs() < 1e-9 {
-                    if a[axis].abs() > half[axis] {
-                        hit = false;
-                        break;
-                    }
-                    continue;
-                }
-                let t0 = (-half[axis] - a[axis]) / d[axis];
-                let t1 = (half[axis] - a[axis]) / d[axis];
-                lo = lo.max(t0.min(t1));
-                hi = hi.min(t0.max(t1));
-                if lo > hi {
-                    hit = false;
-                    break;
-                }
-            }
-            if hit {
-                return Some(self.arc[i - 1] + lo * (self.arc[i] - self.arc[i - 1]));
-            }
-        }
-        None
-    }
 }
 
 /// One armour crossing.
@@ -194,20 +164,20 @@ pub struct Ray {
     pub weight: f32,
 }
 
-/// One box of the struck tank.
+/// One component of the struck tank, by its name in the tank asset.
 pub struct BoxPlan {
     pub name: String,
     pub role: Role,
-    pub center: Vec3,
-    pub half: Vec3,
-    pub rotation: Quat,
+    /// The centre of its real shape's bounds, for framing; `None` when the tank asset has no
+    /// component of that name.
+    pub center: Option<Vec3>,
     pub count: f32,
     pub line: f32,
     pub field: f32,
-    /// When the picture reaches it: the arc where the line enters its box, else the arc of the
-    /// first cone that dosed it.
+    /// When the picture reaches it: the arc where the record has the line enter it, else the arc of
+    /// the first cone that dosed it.
     pub reached_at: Option<Reach>,
-    /// Lost or cooked off by this shot.
+    /// Lost before the shot (no hit points left at it), or lost or cooked off by it.
     pub lost: bool,
 }
 
@@ -224,19 +194,24 @@ impl BoxPlan {
 }
 
 impl Plan {
-    pub fn new(report: &PenetrationReport) -> Self {
+    /// The plan of `report`, its components' shapes resolved in `shapes`.
+    pub fn new(report: &PenetrationReport, shapes: &TankShapes) -> Self {
         let verdict = report.impact.verdict;
         let line = polyline(report);
         let contact = Vec3::from(report.impact.point);
         let contact_arc = line.arc_of(contact);
-        let rested = rested(report, &line);
         let calibre = report.projectile.caliber_mm * 1.0e-3;
         let reach = |metres: f32| metres.min(REACH_CALIBRES * calibre);
-        let n = line.points.len();
-        let end_arc = if rested || n < 3 {
-            line.length()
-        } else {
-            (line.arc[n - 2] + reach(RUN_OUT_M)).min(line.length())
+        let left_at = match &report.end {
+            RoundEnd::Rest { .. } => None,
+            RoundEnd::Left { at } => {
+                let at = Vec3::from(*at);
+                Some((at, line.arc_of(at)))
+            }
+        };
+        let end_arc = match left_at {
+            None => line.length(),
+            Some((_, arc)) => (arc + reach(RUN_OUT_M)).min(line.length()),
         };
         let crossings = report
             .plates
@@ -257,18 +232,16 @@ impl Plan {
         });
         let cones: Vec<Cone> = report.spall.iter().map(|c| cone(c, &line)).collect();
         let boxes = report
-            .internals
+            .components
             .iter()
-            .map(|internal| {
-                let dose = report.doses.iter().find(|d| d.volume == internal.name);
+            .map(|component| {
+                let dose = report.doses.iter().find(|d| d.volume == component.name);
                 let (line_dose, field_dose) = dose.map_or((0.0, 0.0), |d| (d.line, d.field));
-                let center = Vec3::from(internal.center);
-                let half = Vec3::from(internal.half_extents);
-                let rotation = Quat::from_array(internal.rotation).normalize();
+                let center = shapes.get(&component.name).map(|shape| shape.center());
                 let by_line = (line_dose > 0.0)
-                    .then(|| line.enters(center, half, rotation))
+                    .then(|| dose.and_then(|d| d.entered))
                     .flatten()
-                    .map(Reach::Line);
+                    .map(|entered| Reach::Line(line.arc_of(Vec3::from(entered))));
                 let by_cone = report
                     .spall
                     .iter()
@@ -277,31 +250,34 @@ impl Plan {
                             fragment
                                 .hits
                                 .iter()
-                                .any(|hit| hit.volume == internal.name && hit.damage > 0.0)
+                                .any(|hit| hit.volume == component.name && hit.damage > 0.0)
                         })
                     })
                     .map(Reach::Cone);
                 let reached_at = if line_dose + field_dose > 0.0 {
-                    by_line
-                        .or(by_cone)
-                        .or(Some(Reach::Line(line.arc_of(center))))
+                    by_line.or(by_cone).or(Some(Reach::Line(
+                        center.map_or(contact_arc, |c| line.arc_of(c)),
+                    )))
                 } else {
                     None
                 };
+                let lost_before = component.count > 0.0 && component.hp <= 0.0;
                 BoxPlan {
-                    name: internal.name.clone(),
-                    role: internal.role,
+                    name: component.name.clone(),
+                    role: component.role,
                     center,
-                    half,
-                    rotation,
-                    count: internal.count,
+                    count: component.count,
                     line: line_dose,
                     field: field_dose,
                     reached_at,
-                    lost: report.consequences.iter().any(|c| {
-                        c.volume == internal.name
-                            && matches!(c.state, ConsequenceState::Lost | ConsequenceState::Cookoff)
-                    }),
+                    lost: lost_before
+                        || report.consequences.iter().any(|c| {
+                            c.volume == component.name
+                                && matches!(
+                                    c.state,
+                                    ConsequenceState::Lost | ConsequenceState::Cookoff
+                                )
+                        }),
                 }
             })
             .collect();
@@ -314,12 +290,13 @@ impl Plan {
             contact_arc,
             end_arc,
             left: end_arc < line.length() - 1e-4,
+            left_at,
             crossings,
             impact_point: contact,
             impact_normal: normal,
             incidence: report.impact.incidence_deg.to_radians(),
             bounce,
-            stop: rested.then(|| line.at(line.length())),
+            stop: report.rested().then(|| line.at(line.length())),
             cones,
             boxes,
             line,
@@ -355,9 +332,12 @@ impl Plan {
             points.extend(crossing.exit);
         }
         points.extend(self.bounce.as_ref().map(|b| b.point));
-        for b in self.boxes.iter().filter(|b| b.dose() > 0.0) {
-            points.push(b.center);
-        }
+        points.extend(
+            self.boxes
+                .iter()
+                .filter(|b| b.dose() > 0.0)
+                .filter_map(|b| b.center),
+        );
         points
     }
 
@@ -369,27 +349,6 @@ impl Plan {
             .map_or(self.contact_arc, |c| c.entry_arc);
         self.line.direction_at(at + 1e-3)
     }
-}
-
-/// Whether the round came to rest: in the last plate it crossed, when that plate has no exit, or
-/// in a box, when the path ends more than [`REST_DEPTH_M`] inside one. A round that flies on has a
-/// path ending outside the tank, at the march's next point past its last crossing or bounce.
-fn rested(report: &PenetrationReport, line: &Polyline) -> bool {
-    if report
-        .plates
-        .last()
-        .is_some_and(|plate| plate.exit.is_none())
-    {
-        return true;
-    }
-    let Some(&end) = line.points.last() else {
-        return false;
-    };
-    report.internals.iter().any(|internal| {
-        let rotation = Quat::from_array(internal.rotation).normalize();
-        let local = rotation.inverse() * (end - Vec3::from(internal.center));
-        (local.abs() - Vec3::from(internal.half_extents)).max_element() < -REST_DEPTH_M
-    })
 }
 
 fn polyline(report: &PenetrationReport) -> Polyline {
@@ -467,6 +426,16 @@ mod tests {
     use super::*;
     use crate::damage_cam::PenetrationReport;
 
+    pub(crate) fn shapes(report: &PenetrationReport) -> TankShapes {
+        let vehicle = report
+            .vehicle
+            .as_deref()
+            .expect("a recorded scenario names its vehicle");
+        crate::damage_cam::shapes::TankAsset::load(vehicle)
+            .unwrap()
+            .shapes(report.turret_yaw_deg)
+    }
+
     fn record(name: &str) -> PenetrationReport {
         let path = crate::assets::asset_root()
             .join("dev/pen_cam")
@@ -494,8 +463,12 @@ mod tests {
     /// line ends.
     #[test]
     fn every_record_plans_a_drawable_picture() {
-        for (name, report) in records() {
-            let plan = Plan::new(&report);
+        let all = records();
+        let asset =
+            crate::damage_cam::shapes::TankAsset::load(all[0].1.vehicle.as_deref().unwrap())
+                .unwrap();
+        for (name, report) in all {
+            let plan = Plan::new(&report, &asset.shapes(report.turret_yaw_deg));
             assert!(plan.start_arc <= plan.contact_arc, "{name}");
             assert!(plan.contact_arc <= plan.end_arc + 1e-4, "{name}");
             assert!(plan.end_arc <= plan.line.length() + 1e-4, "{name}");
@@ -512,6 +485,9 @@ mod tests {
             if report.plates.last().is_some_and(|p| p.exit.is_none()) {
                 assert!(plan.stop.is_some(), "{name}: rested in a plate");
             }
+            for b in &plan.boxes {
+                assert!(b.center.is_some(), "{name}: {} has a shape", b.name);
+            }
             if let Some(stop) = plan.stop {
                 assert_eq!(Some(&stop), plan.line.points.last(), "{name}");
                 assert_eq!(plan.end_arc, plan.line.length(), "{name}");
@@ -522,25 +498,11 @@ mod tests {
     /// The line's brightness steps down after a crossing and never under the floor.
     #[test]
     fn the_line_dims_after_each_crossing() {
-        let plan = Plan::new(&record("s1_through_crew"));
+        let report = record("s1_through_crew");
+        let plan = Plan::new(&report, &shapes(&report));
         let before = plan.brightness_at(plan.contact_arc - 0.5);
         let after = plan.brightness_at(plan.crossings[0].entry_arc + 0.3);
         assert_eq!(before, 1.0);
         assert!(after < before && after >= LINE_FLOOR);
-    }
-
-    #[test]
-    fn a_segment_through_a_box_enters_it() {
-        let line = Polyline {
-            points: vec![Vec3::new(0.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 5.0)],
-            arc: vec![0.0, 10.0],
-            energy: vec![1.0, 1.0],
-        };
-        let at = line.enters(Vec3::ZERO, Vec3::splat(1.0), Quat::IDENTITY);
-        assert!((at.unwrap() - 4.0).abs() < 1e-4);
-        assert!(
-            line.enters(Vec3::new(3.0, 0.0, 0.0), Vec3::splat(1.0), Quat::IDENTITY)
-                .is_none()
-        );
     }
 }

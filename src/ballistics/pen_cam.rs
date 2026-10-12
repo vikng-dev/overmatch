@@ -21,7 +21,7 @@ use super::march_tests::{FIXTURE_88, fixture_round};
 use super::*;
 use crate::damage::VolumeOf;
 use crate::damage_cam::record::{self, ShotFacts, StruckTank};
-use crate::damage_cam::{PenetrationReport, PlateClass, ShotVerdict};
+use crate::damage_cam::{PenetrationReport, PlateClass, RoundEnd, Shooter, ShotVerdict};
 use crate::spec::VolumeSpec;
 use crate::tank::Rig;
 
@@ -31,6 +31,10 @@ const SCENARIO_LIST: &str = "scenarios.ron";
 
 /// Fixed-step length the march is driven at (s), as the goldens drive it.
 const STEP: Duration = Duration::from_millis(16);
+/// The shooter every scenario names: fixture data, a player name no match produced. The shooter
+/// fires one of the bound tank's own weapons, so its vehicle is the bound tank's.
+const FIXTURE_SHOOTER: &str = "Fixture Gunner";
+
 /// Steps a shot is marched for: 8 × 16 ms carries a main-gun round ~100 m (DERIVED), the whole
 /// tank and the run-out past it.
 const STEPS: usize = 8;
@@ -149,6 +153,10 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
         app.update();
     }
     let facts = ShotFacts {
+        shooter: Some(Shooter {
+            name: FIXTURE_SHOOTER.to_owned(),
+            vehicle: crate::tank::TIGER_SPEC_PATH.to_owned(),
+        }),
         launch: origin,
         projectile: scenario.weapon.clone(),
         caliber_mm: body.caliber * 1000.0,
@@ -161,7 +169,7 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
 }
 
 /// A record is stated in the struck hull's frame: one shot fired at the bound tank at two hull
-/// poses, turned with the tank, records the same verdict, plates, boxes and path. The shot down a
+/// poses, turned with the tank, records the same verdict, plates, components and path. The shot down a
 /// front plate and the 30° pose are fixture data; 1 mm is the tolerance on a position.
 #[test]
 fn a_record_is_stated_in_the_struck_hull_frame() {
@@ -194,10 +202,8 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
     for (a, b) in still.plates.iter().zip(&turned.plates) {
         assert!(near(a.entry, b.entry), "{}", a.name);
     }
-    for (a, b) in still.internals.iter().zip(&turned.internals) {
-        assert_eq!(a.name, b.name);
-        assert!(near(a.center, b.center), "{}", a.name);
-    }
+    assert_eq!(still.components, turned.components);
+    assert!(near(still.origin, turned.origin));
     assert_eq!(still.path.len(), turned.path.len());
     for (a, b) in still.path.iter().zip(&turned.path) {
         assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
@@ -441,6 +447,7 @@ fn fixture_shot_along(volumes: &[FixtureVolume], from: Vec3, direction: Vec3) ->
     }
     let logged = ShotVerdict::of_path(&record::path_steps(app.world(), shell, Some(tank)));
     let facts = ShotFacts {
+        shooter: None,
         launch: from,
         projectile: "fixture".to_owned(),
         caliber_mm: FIXTURE_88.caliber * 1000.0,
@@ -500,6 +507,29 @@ fn perforating_a_skirt_and_stopping_in_the_hull_is_a_non_pen() {
         classes,
         [(PlateClass::External, true), (PlateClass::Main, false)]
     );
+    assert_eq!(
+        report.end,
+        RoundEnd::Rest {
+            volume: "hull".to_owned()
+        },
+        "the round's end names the plate it rests in"
+    );
+}
+
+/// A round stopped inside a component rests in it, by name, however close to its face it stopped.
+#[test]
+fn a_round_stopped_inside_a_component_rests_in_it() {
+    let report = fixture_shot(
+        &[plate("component", THICK, 0.0, Kind::SteelBox(1000.0))],
+        LINE_FROM,
+    );
+    assert_eq!(
+        report.end,
+        RoundEnd::Rest {
+            volume: "component".to_owned()
+        }
+    );
+    assert!(report.plates.is_empty(), "a component is not a plate");
 }
 
 /// Perforating main armour is a penetration even when a far plate then stops the round.
@@ -524,6 +554,20 @@ fn through_and_out_is_a_penetration() {
     assert_eq!(report.impact.verdict, ShotVerdict::Penetration);
     let last = report.path.last().expect("a path");
     assert!(last.point[2] < -THIN, "the path leaves past the plate");
+    // The plate's exit is its disc-mean chord's end, the round's the crossing's exit on the line:
+    // the same face, 1 mm apart at most (fixture tolerance).
+    let exit = Vec3::from(report.plates[0].exit.expect("perforated"));
+    let RoundEnd::Left { at } = report.end else {
+        panic!("it leaves the tank: {:?}", report.end);
+    };
+    assert!(
+        Vec3::from(at).distance(exit) < 1.0e-3,
+        "it leaves where it came out of the plate: {at:?} vs {exit}"
+    );
+    assert!(
+        report.path.iter().any(|p| p.point == at),
+        "where it left is a point of its path"
+    );
 }
 
 /// A penetration that doses nothing is still a penetration: the box beside the line is recorded
@@ -544,8 +588,9 @@ fn a_penetration_with_no_dose_is_a_penetration() {
     );
     assert_eq!(report.impact.verdict, ShotVerdict::Penetration);
     assert!(report.doses.is_empty(), "{:?}", report.doses);
-    assert_eq!(report.internals.len(), 1, "the box is recorded");
-    assert_eq!(report.internals[0].count, 3.0);
+    assert_eq!(report.components.len(), 1, "the box is recorded");
+    assert_eq!(report.components[0].count, 3.0);
+    assert_eq!(report.components[0].hp, 3.0, "whole at the shot");
 }
 
 /// A box on the line takes the line's dose and the spall cone's, and the record names both.
@@ -567,6 +612,9 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
     let dose = report.doses.first().expect("the box is dosed");
     assert_eq!(dose.volume, "box");
     assert!(dose.line > 0.0 && dose.field > 0.0, "{dose:?}");
+    // The box's near face: 0.25 m in front of its centre at z = -1, fixture data.
+    let entered = dose.entered.expect("the line entered the box");
+    assert!((entered[2] + 0.75).abs() < 1.0e-3, "{entered:?}");
     assert!(!report.spall.is_empty(), "the plate's exit throws a cone");
 }
 
@@ -660,4 +708,11 @@ fn a_bounce_off_armour_that_doses_nothing_is_a_ricochet() {
     );
     assert_eq!(report.impact.verdict, ShotVerdict::Ricochet);
     assert!(report.doses.is_empty(), "{:?}", report.doses);
+    assert_eq!(
+        report.end,
+        RoundEnd::Left {
+            at: report.ricochets[0].point
+        },
+        "it leaves off the face it bounced from"
+    );
 }

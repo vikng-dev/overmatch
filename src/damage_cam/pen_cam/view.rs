@@ -51,6 +51,8 @@ pub struct Views {
     pub stage: Entity,
     /// The turret node and its rest rotation, per root.
     turret: [Option<(Entity, Quat)>; 2],
+    /// The hull node, per root (world, stage): its frame is the record's.
+    pub hull: [Option<Entity>; 2],
     placed: [bool; 2],
     /// The ground's height under the battlefield view, once measured.
     pub ground_y: Option<f32>,
@@ -81,6 +83,7 @@ pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Re
         world,
         stage,
         turret: [None, None],
+        hull: [None, None],
         placed: [false, false],
         ground_y: None,
     });
@@ -172,6 +175,7 @@ pub fn prepare(
         if let Ok(mut root_transform) = transforms.get_mut(entity) {
             *root_transform = Transform::from_matrix(hull_pose.inverse());
         }
+        views.hull[index] = Some(hull);
         views.turret[index] = turret_node(spec, &named, &parents, &names).and_then(|node| {
             transforms
                 .get(node)

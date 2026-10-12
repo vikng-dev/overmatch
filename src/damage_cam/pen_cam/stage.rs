@@ -1,14 +1,20 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
-//! face, every spall cone as a translucent reach surface, and each box tinted by the dose it took.
+//! face, every spall cone as a translucent reach surface, and each component's real mesh tinted by
+//! the dose it took.
 //! The shell rests where the record ends; a round whose path runs on past the drawn span leaves.
 //! Rebuilt when the corner's record or a look setting changes; animated every frame from the
 //! corner's clock alone, so a scrub lands on the same picture.
 //!
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
-//! boxes from the record), the plate slice (the tank's own materials, the eye's side of a vertical
+//! components the record names drawn in their own meshes), the plate slice (the tank's own materials, the eye's side of a vertical
 //! plane through the chord dissolved away), and the outside view (the tank as built).
+//!
+//! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
+//! entity (whose frame is the record's) and the tank's own meshes of the components the record
+//! names ([`component_meshes`]), and spawns every record element under them. [`animate`] plays
+//! them from the corner's clock.
 
 use std::collections::HashMap;
 
@@ -22,7 +28,7 @@ use super::field::reach_mesh;
 use super::material::{GlowMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{Plan, Reach};
 use super::timeline::{self, CornerKind};
-use super::view::{Proxy, ViewMesh, ViewRoot};
+use super::view::{Proxy, ViewMesh, ViewRoot, Views};
 use super::{Corner, DoseScale, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
@@ -58,11 +64,10 @@ const CONE_PEAK: f32 = 0.35;
 const CONE_GAIN: f32 = 4.0;
 /// The reach surface's rim glow at the top of the dose scale.
 const CONE_RIM: f32 = 1.4;
-/// A dosed box's emission at full fill.
+/// A dosed component's emission at full fill.
 const BOX_GLOW: f32 = 1.6;
 /// The lost-box fill (victim glass): `#2A2F36` at 70 %.
 const LOST_FILL: Color = Color::srgb_u8(0x2A, 0x2F, 0x36);
-const OUTLINE: Color = Color::srgb_u8(0x8A, 0x96, 0xA3);
 /// The slice's cut face.
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 /// The corner camera's vertical field (deg) in perspective.
@@ -113,10 +118,42 @@ pub(super) struct ConeShell {
     peak: f32,
 }
 
-/// Box `index` of the plan, tinted by its dose.
+/// A copy of one mesh of component `index` of the plan, over the tank's own, tinted by its dose.
 #[derive(Component)]
 pub(super) struct BoxTint {
     index: usize,
+}
+
+/// One of a tank's own meshes that belongs to a component the record names.
+#[derive(Clone, Debug)]
+pub struct ComponentMesh {
+    /// Index into [`Plan::boxes`].
+    pub index: usize,
+    /// The mesh's entity in the tank's hierarchy: the tint is drawn as its child.
+    pub entity: Entity,
+    pub mesh: Handle<Mesh>,
+}
+
+/// Which of a tank's meshes belong to which of the plan's components. Each mesh comes with the
+/// names of its node chain, nearest first; it belongs to the component its nearest named node of
+/// the plan's names is, so a component nested in another is its own.
+pub fn component_meshes<'a>(
+    plan: &Plan,
+    meshes: impl IntoIterator<Item = (Entity, &'a [String], Handle<Mesh>)>,
+) -> Vec<ComponentMesh> {
+    meshes
+        .into_iter()
+        .filter_map(|(entity, names, mesh)| {
+            let index = names
+                .iter()
+                .find_map(|name| plan.boxes.iter().position(|b| b.name == *name))?;
+            Some(ComponentMesh {
+                index,
+                entity,
+                mesh,
+            })
+        })
+        .collect()
 }
 
 #[derive(GizmoConfigGroup, Default, Reflect)]
@@ -147,7 +184,7 @@ pub fn plugin(app: &mut App) {
         StageGizmos,
         GizmoConfig {
             render_layers: render_policy::pen_cam_gizmo_layers(),
-            // Outlines draw over the tank, so a dosed box buried in an opaque hull still shows.
+            // The axis line draws over the tank.
             depth_bias: -1.0,
             line: GizmoLineConfig {
                 width: 1.5,
@@ -236,7 +273,8 @@ pub fn rebuild(
     library: Res<Library>,
     mut stage: ResMut<Stage>,
     items: Query<Entity, With<StageItem>>,
-    tank: Query<(Entity, &ViewMesh), Without<Proxy>>,
+    views: Res<Views>,
+    tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
@@ -251,6 +289,9 @@ pub fn rebuild(
     if key == stage.key {
         return;
     }
+    let Some(hull) = views.hull[1] else {
+        return;
+    };
     stage.key = key.clone();
     for entity in &items {
         commands.entity(entity).despawn();
@@ -273,7 +314,7 @@ pub fn rebuild(
             .iter()
             .any(|plate| mesh.is(&plate.name))
     };
-    for (entity, mesh) in &tank {
+    for (entity, mesh, _) in &tank {
         if mesh.root != ViewRoot::Stage {
             continue;
         }
@@ -323,8 +364,44 @@ pub fn rebuild(
         }
     }
 
+    let components = component_meshes(
+        plan,
+        tank.iter()
+            .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
+            .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
+    );
+    spawn_glass(
+        &mut commands,
+        &mut meshes,
+        &mut glows,
+        plan,
+        kind,
+        &settings,
+        hull,
+        stage.plane,
+        &components,
+    );
+}
+
+/// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
+/// dose tints. Every element but the tints is spawned under `hull`, an entity whose frame is the
+/// record's (the struck hull's); each tint is a copy of one of `components`, the tank's own meshes
+/// of the components the record names, spawned under that mesh. `clip` is the slice plane (unit
+/// normal toward the eye, a point on it) the cones are cut by. Everything spawned is a
+/// [`StageItem`], hidden until [`animate`] places it.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_glass(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    glows: &mut Assets<GlowMaterial>,
+    plan: &Plan,
+    kind: CornerKind,
+    settings: &Settings,
+    hull: Entity,
+    clip: Option<(Vec3, Vec3)>,
+    components: &[ComponentMesh],
+) {
     let scope = VisualScope::PEN_CAM_STAGE;
-    let clip = stage.plane;
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
     // trails on past the span behind the shell.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
@@ -351,6 +428,7 @@ pub fn rebuild(
             },
             scope,
             StageItem,
+            ChildOf(hull),
         ));
     }
 
@@ -368,6 +446,7 @@ pub fn rebuild(
             MarkItem { at_arc, at_c },
             scope,
             StageItem,
+            ChildOf(hull),
         ));
     };
     let radius = plan.calibre * 0.5;
@@ -384,7 +463,7 @@ pub fn rebuild(
                 ring_across(crossing.entry, travel, radius)
             };
             mark(
-                &mut commands,
+                commands,
                 transform,
                 Some(crossing.entry_arc),
                 0.0,
@@ -393,7 +472,7 @@ pub fn rebuild(
             if let Some(exit) = crossing.exit {
                 let exit_arc = line.arc_of(exit);
                 mark(
-                    &mut commands,
+                    commands,
                     ring_across(exit, travel, radius),
                     Some(exit_arc),
                     0.0,
@@ -404,7 +483,7 @@ pub fn rebuild(
     }
     if let Some(bounce) = &plan.bounce {
         mark(
-            &mut commands,
+            commands,
             ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
             Some(bounce.arc),
             0.0,
@@ -452,13 +531,16 @@ pub fn rebuild(
                 },
                 scope,
                 StageItem,
+                ChildOf(hull),
             ));
         }
     }
 
-    // Boxes: dose tint where the shot dosed one; the victim's lost boxes in the state tint.
-    let cube = meshes.add(Cuboid::new(2.0, 2.0, 2.0));
-    for (index, b) in plan.boxes.iter().enumerate() {
+    // Components, in their own meshes: dose tint where the shot dosed one; the victim's lost ones in
+    // the state tint.
+    for component in components {
+        let index = component.index;
+        let b = &plan.boxes[index];
         let material = match kind {
             CornerKind::Victim if b.lost => {
                 GlowMaterial::blended(LOST_FILL.into(), 0.7).with_hatch()
@@ -475,15 +557,14 @@ pub fn rebuild(
         let mut material = material;
         material.set_fade(0.0);
         commands.spawn((
-            Mesh3d(cube.clone()),
+            Mesh3d(component.mesh.clone()),
             MeshMaterial3d(glows.add(material)),
-            Transform::from_translation(b.center)
-                .with_rotation(b.rotation)
-                .with_scale(b.half),
+            Transform::IDENTITY,
             Visibility::Hidden,
             BoxTint { index },
             scope,
             StageItem,
+            ChildOf(component.entity),
         ));
     }
 }
@@ -769,28 +850,6 @@ pub fn animate(
         } else {
             Visibility::Hidden
         });
-        // A drawn box is outlined over the tank: a dosed one on the glass faintly, a lost one
-        // (victim glass) in full, a dosed one in the outside view in its tint, since the opaque
-        // hull may bury it.
-        if fill > 0.0 {
-            let color = match kind {
-                CornerKind::Victim => OUTLINE,
-                CornerKind::Damaged => {
-                    let x = match settings.dose {
-                        DoseScale::Absolute => timeline::absolute_dose(b.dose()),
-                        DoseScale::Relative => timeline::relative_dose(b.dose(), b.count),
-                    };
-                    Color::from(timeline::dose_ramp(x))
-                }
-                _ => OUTLINE.with_alpha(0.45),
-            };
-            gizmos.cube(
-                Transform::from_translation(b.center)
-                    .with_rotation(b.rotation)
-                    .with_scale(b.half * 2.0),
-                color.with_alpha(color.alpha() * fill),
-            );
-        }
     }
 
     if settings.axis_line {
@@ -888,9 +947,9 @@ fn framing(
     };
     match kind {
         CornerKind::Glass | CornerKind::Victim => {
-            // The whole hull: the record's path inside the tank its boxes span.
+            // The whole hull: the record's path inside the tank its components span.
             let mut points = plan.framed_points();
-            points.extend(plan.boxes.iter().map(|b| b.center));
+            points.extend(plan.boxes.iter().filter_map(|b| b.center));
             three_quarter(&points, &points, timeline::ORBIT_DEG_S, 0.0)
         }
         CornerKind::Damaged => {
@@ -905,7 +964,7 @@ fn framing(
                     plan.boxes
                         .iter()
                         .filter(|b| b.dose() > 0.0)
-                        .map(|b| b.center),
+                        .filter_map(|b| b.center),
                 );
                 points
             };
