@@ -1599,7 +1599,7 @@ pub struct DiscCorridor {
 }
 
 /// One sample's part in a [`BodyExit`]: the body's extent along that sample's ray.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExitMember {
     pub sample: usize,
     /// Where the sample entered the body.
@@ -1611,6 +1611,9 @@ pub struct ExitMember {
     /// The rear face's outward normal at a genuine exit (material to air); `None` at an internal
     /// step (material to softer material), which has no face of its own.
     pub face: Option<Vec3>,
+    /// The volumes this sample's exit leaves, in entity order: present in the body's last layer on
+    /// this ray and absent from the next (every one of them at a genuine exit).
+    pub exited: Vec<Entity>,
 }
 
 /// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
@@ -1633,10 +1636,6 @@ pub struct BodyExit {
     pub genuine: bool,
     /// The contributing samples, in sample order.
     pub members: Vec<ExitMember>,
-    /// The volumes the exit leaves, over every member, in entity order: present in the body's last
-    /// layer and absent from the next (every one of them at a genuine exit). The surface a spall
-    /// cone is thrown from is theirs, which is how its directions recognise it ([`SpallSource`]).
-    pub exited: Vec<Entity>,
 }
 
 /// A body exit the round reached: where it throws its spall cone from, and the round's state across
@@ -1653,8 +1652,10 @@ pub struct SpallSource {
     pub direction: Vec3,
     /// The substances of the body exited, in id order.
     pub substances: Vec<SubstanceId>,
-    /// The volumes the exit leaves ([`BodyExit::exited`]): a direction of the cone that starts
-    /// inside one of them has not entered it, and does not dose it there.
+    /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order. The
+    /// surface the cone is thrown from is theirs, so a direction that starts inside one of them has
+    /// not entered it, and does not dose it there. A volume only an unreached member leaves is not
+    /// among them: the round never left it, and a direction starting inside it enters it there.
     pub exited: Vec<Entity>,
     /// Reference-mm the mechanism spent across this body: its readout drop over the body's
     /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
@@ -2211,8 +2212,8 @@ fn build_event(
         .collect();
 
     // Body exits, per sample, then grouped over the disc ([`BodyExit`]).
-    type ExitGroup = (Vec<ExitMember>, BTreeSet<Entity>);
-    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), ExitGroup> = BTreeMap::new();
+    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), Vec<ExitMember>> =
+        BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in &by_sample {
         let base = corridor.origin + corridor.samples[sample].offset;
@@ -2221,20 +2222,22 @@ fn build_event(
                           start: f64,
                           end: f64,
                           face: Option<Vec3>,
-                          exited: Vec<Entity>| {
+                          mut exited: Vec<Entity>| {
             let genuine = face.is_some();
             let ordinal = ordinals.entry((substances.clone(), genuine)).or_insert(0);
-            let group = exit_groups
+            exited.sort();
+            exited.dedup();
+            exit_groups
                 .entry((substances, genuine, *ordinal))
-                .or_default();
-            group.0.push(ExitMember {
-                sample,
-                start,
-                end,
-                position: base + corridor.axis * end as f32,
-                face,
-            });
-            group.1.extend(exited);
+                .or_default()
+                .push(ExitMember {
+                    sample,
+                    start,
+                    end,
+                    position: base + corridor.axis * end as f32,
+                    face,
+                    exited,
+                });
             *ordinal += 1;
         };
         let mut saw_exit = false;
@@ -2293,11 +2296,10 @@ fn build_event(
     }
     let mut exits: Vec<BodyExit> = exit_groups
         .into_iter()
-        .map(|((substances, genuine, _), (members, exited))| BodyExit {
+        .map(|((substances, genuine, _), members)| BodyExit {
             substances,
             genuine,
             members,
-            exited: exited.into_iter().collect(),
         })
         .collect();
     let mean_end = |exit: &BodyExit| {
@@ -3038,13 +3040,17 @@ fn spall_sources<M: Mechanism>(
             [one] => Some(*one),
             several => Some(unit_or_zero(several.iter().copied().sum())),
         };
+        let exited: BTreeSet<Entity> = reached
+            .iter()
+            .flat_map(|m| m.exited.iter().copied())
+            .collect();
         out.push(SpallSource {
             t: reached.iter().map(|m| m.end).sum::<f64>() / count as f64,
             position: reached.iter().map(|m| m.position).sum::<Vec3>() / count as f32,
             face,
             direction,
             substances: exit.substances.clone(),
-            exited: exit.exited.clone(),
+            exited: exited.into_iter().collect(),
             spend: spend as f32,
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,

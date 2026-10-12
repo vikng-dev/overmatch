@@ -1140,7 +1140,7 @@ fn exits_of(volumes: &VolumeTable, hits: Vec<FaceHit>) -> Vec<(Vec<SubstanceId>,
                 1,
                 "a point disc has one member per exit"
             );
-            let member = exit.members[0];
+            let member = &exit.members[0];
             assert_eq!(member.face.is_some(), exit.genuine);
             (
                 exit.substances.clone(),

@@ -2043,6 +2043,77 @@ fn an_exit_before_a_stop_throws_at_runtime() {
     );
 }
 
+/// A volume only an unreached member of a grouped exit leaves is not left: the cone's directions
+/// start inside it and dose it there. Fixture (DERIVED): an annulus A of four plates 0.1 m thick
+/// that every ring sample crosses and the axis does not, and a column box B that only the axis
+/// crosses, 2 m long; one substance, so A's exits on the ring and B's on the axis group together.
+/// The factor is set so the round stops a metre in, inside B: only A's members are reached, their
+/// mean exit lies on the axis inside B, and B — whose exit was never reached — takes the cone's
+/// initial dose on every direction.
+#[test]
+fn a_cone_doses_a_box_only_an_unreached_member_leaves() {
+    let mut app = world_with_trimesh_plates(&[]);
+    let (x, z) = (DROP_FROM.x, DROP_FROM.z);
+    // Ring samples lie 44 mm off the axis (the 88's radius): outside the 15 mm hole, never on a
+    // seam between plates, and never in the 8 mm column.
+    let (hole, outer, column) = (0.015f32, 0.5f32, 0.008f32);
+    // Spend to a metre in: all 13 samples through A's 0.1 m, then the axis alone through 0.9 m of B.
+    let factor = capability(FIXTURE_88, 800.0) / (0.1 + 0.9 / 13.0);
+    let plate = |app: &mut App, centre: (f32, f32), half: (f32, f32)| {
+        volume(
+            app,
+            Vec3::new(2.0 * half.0, 0.1, 2.0 * half.1),
+            Transform::from_translation(Vec3::new(x + centre.0, 0.95, z + centre.1)),
+            factor,
+            None,
+        );
+    };
+    let side = 0.5 * (outer - hole);
+    let mid = 0.5 * (outer + hole);
+    plate(&mut app, (mid, 0.0), (side, outer));
+    plate(&mut app, (-mid, 0.0), (side, outer));
+    plate(&mut app, (0.0, mid), (hole, side));
+    plate(&mut app, (0.0, -mid), (hole, side));
+    let b = volume(
+        &mut app,
+        Vec3::new(2.0 * column, 2.0, 2.0 * column),
+        Transform::from_translation(Vec3::new(x, 0.0, z)),
+        factor,
+        Some(FIELD_HP),
+    );
+    app.insert_resource(RetainSpentShells(true))
+        .init_resource::<Read>()
+        .add_observer(read_impact);
+    for _ in 0..8 {
+        app.update();
+    }
+    app.world_mut().resource_mut::<Read>().0.clear();
+    let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
+    app.update();
+    let read = app.world().resource::<Read>().0.clone();
+    assert!(
+        matches!(read.as_slice(), [(Verdict::Stopped, at)] if at.y < 0.9 && at.y > -1.0),
+        "the round stops inside B, past A's exit and short of B's: {read:?}"
+    );
+    let cones = &app.world().get::<SpallMarks>(shell).unwrap().cones;
+    assert_eq!(cones.len(), 1, "A's exit throws; B's is never reached");
+    let cone = &cones[0];
+    assert!(
+        (cone.origin.y - 0.9).abs() < 2.0e-3
+            && Vec2::new(cone.origin.x - x, cone.origin.z - z).length() < column,
+        "the cone comes off A's rear face, on the axis inside B: {:?}",
+        cone.origin
+    );
+    let undosed = cone.rays.iter().filter(|ray| !ray.deposited).count();
+    assert_eq!(
+        undosed,
+        0,
+        "every direction starts inside B, never left, and doses it ({} directions)",
+        cone.rays.len()
+    );
+    assert!(app.world().get::<ComponentHealth>(b).unwrap().current < FIELD_HP);
+}
+
 // ---------------------------------------------------------------------------------------------
 // One direction of a field, walked: ordered presence along the ray, membership established
 // ---------------------------------------------------------------------------------------------
