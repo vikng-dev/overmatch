@@ -21,6 +21,11 @@ pub const RUN_OUT_M: f32 = 1.5;
 /// A path that ends more than this far (m) inside a box ended at rest there; a crossing's exit
 /// lies on the box's face.
 pub const REST_DEPTH_M: f32 = 1.0e-3;
+/// Every length the corner draws or frames around the round, [`LEAD_M`] and [`RUN_OUT_M`]
+/// included, is at most this many calibres ([`Plan::reach`]), so a small round is framed as tightly
+/// as its size asks: 0.16 m for a 7.9 mm round, while an 88 mm round's 1.76 m leaves every metre
+/// figure in force (DERIVED).
+pub const REACH_CALIBRES: f32 = 20.0;
 /// The line's brightness never falls below this: a diagram rule for legibility, not physics.
 pub const LINE_FLOOR: f32 = 0.35;
 
@@ -28,13 +33,15 @@ pub const LINE_FLOOR: f32 = 0.35;
 pub struct Plan {
     pub verdict: ShotVerdict,
     pub kind: CornerKind,
-    /// Calibre (m): the line's width.
+    /// Calibre (m): the shell's diameter and the scale of the trail, the rings and the framing.
     pub calibre: f32,
     pub line: Polyline,
     /// The drawn span of the line, arc length (m).
     pub start_arc: f32,
     pub contact_arc: f32,
     pub end_arc: f32,
+    /// The record's path runs on past the drawn span: the round left.
+    pub left: bool,
     pub crossings: Vec<Crossing>,
     /// Outward normal and incidence (rad) at first contact.
     pub impact_point: Vec3,
@@ -223,11 +230,13 @@ impl Plan {
         let contact = Vec3::from(report.impact.point);
         let contact_arc = line.arc_of(contact);
         let rested = rested(report, &line);
+        let calibre = report.projectile.caliber_mm * 1.0e-3;
+        let reach = |metres: f32| metres.min(REACH_CALIBRES * calibre);
         let n = line.points.len();
         let end_arc = if rested || n < 3 {
             line.length()
         } else {
-            (line.arc[n - 2] + RUN_OUT_M).min(line.length())
+            (line.arc[n - 2] + reach(RUN_OUT_M)).min(line.length())
         };
         let crossings = report
             .plates
@@ -300,10 +309,11 @@ impl Plan {
         Self {
             verdict,
             kind: CornerKind::of(verdict),
-            calibre: report.projectile.caliber_mm * 1.0e-3,
-            start_arc: (contact_arc - LEAD_M).max(0.0),
+            calibre,
+            start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
             contact_arc,
             end_arc,
+            left: end_arc < line.length() - 1e-4,
             crossings,
             impact_point: contact,
             impact_normal: normal,
@@ -314,6 +324,11 @@ impl Plan {
             boxes,
             line,
         }
+    }
+
+    /// `metres`, or [`REACH_CALIBRES`] calibres if that is shorter.
+    pub fn reach(&self, metres: f32) -> f32 {
+        metres.min(REACH_CALIBRES * self.calibre)
     }
 
     /// The line's brightness at arc length `s`: remaining capability over initial, floored.

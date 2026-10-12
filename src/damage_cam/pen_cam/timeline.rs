@@ -53,7 +53,7 @@ impl CornerKind {
         }
     }
 
-    /// The window the line travels in, corner seconds.
+    /// The window in which the shell crosses the drawn span, corner seconds.
     pub fn line_window(self) -> (f32, f32) {
         match self {
             Self::Slice => (0.48, 1.08),
@@ -81,8 +81,6 @@ pub const CONE_GROW_S: f32 = 0.40;
 pub const BOX_FILL_S: f32 = 0.25;
 /// The slice's cut reveal: the eye's half dissolves over this window.
 pub const SLICE_REVEAL: (f32, f32) = (0.18, 0.48);
-/// The slice's crater resolves at the tip over this window.
-pub const SLICE_CRATER: (f32, f32) = (1.08, 1.28);
 /// Reduce motion: an element fades in whole over this.
 pub const REDUCED_FADE_S: f32 = 0.15;
 /// The glass orbit and the ricochet drift, degrees per second.
@@ -97,11 +95,6 @@ pub fn ease_enter(x: f32) -> f32 {
 /// Exits: emphasized accelerate.
 pub fn ease_exit(x: f32) -> f32 {
     curve((0.3, 0.0), (0.8, 0.15), x)
-}
-
-/// Travel: standard decelerate.
-pub fn ease_travel(x: f32) -> f32 {
-    curve((0.0, 0.0), (0.0, 1.0), x)
 }
 
 fn curve(p1: (f32, f32), p2: (f32, f32), x: f32) -> f32 {
@@ -228,14 +221,13 @@ mod tests {
 
     #[test]
     fn easings_run_from_zero_to_one() {
-        for ease in [ease_enter, ease_exit, ease_travel] {
+        for ease in [ease_enter, ease_exit] {
             assert!(ease(0.0).abs() < 1e-4);
             assert!((ease(1.0) - 1.0).abs() < 1e-4);
             assert!(ease(0.5) > 0.0 && ease(0.5) < 1.0);
         }
-        // Decelerating curves are ahead of linear at mid-time, the accelerating one behind.
+        // The decelerating curve is ahead of linear at mid-time, the accelerating one behind.
         assert!(ease_enter(0.5) > 0.5);
-        assert!(ease_travel(0.5) > 0.5);
         assert!(ease_exit(0.5) < 0.5);
     }
 

@@ -1,8 +1,10 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
-//! over it — the line as wide as the calibre, a ring where it crossed each plate, the mark it left,
-//! every spall cone as a translucent reach surface, and each box tinted by the dose it took. Rebuilt
-//! when the corner's record or a look setting changes; animated every frame from the corner's
-//! clock alone, so a scrub lands on the same picture.
+//! over it — the round as the game's shell model at the record's calibre, travelling the recorded
+//! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
+//! face, every spall cone as a translucent reach surface, and each box tinted by the dose it took.
+//! The shell rests where the record ends; a round whose path runs on past the drawn span leaves.
+//! Rebuilt when the corner's record or a look setting changes; animated every frame from the
+//! corner's clock alone, so a scrub lands on the same picture.
 //!
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
 //! boxes from the record), the plate slice (the tank's own materials, the eye's side of a vertical
@@ -14,6 +16,7 @@ use bevy::camera::ScalingMode;
 use bevy::camera::{Hdr, RenderTarget};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
 use super::material::{GlowMaterial, SliceCut, SliceMaterial, SliceParams};
@@ -25,11 +28,24 @@ use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
 const BACKGROUND: Color = Color::srgb_u8(0x0F, 0x13, 0x18);
-/// The glass hull's colour and the line's.
+/// The glass hull's colour and the trail's.
 const GLASS: Color = Color::srgb_u8(0x9F, 0xB0, 0xC0);
 const LINE: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
-/// The line's emission at full capability, for the bloom.
+/// The trail's emission at full capability, for the bloom.
 const LINE_GLOW: f32 = 1.8;
+/// The trail's width in calibres: a diagram choice, thin beside the shell it follows.
+const TRAIL_CALIBRES: f32 = 0.3;
+/// The game's shell model, the one `ballistics::view` dresses the main-gun round with: origin at
+/// the tip, body along +Z, so `looking_to(travel)` puts the nose forward.
+const SHELL_SCENE: &str = "shell/shell.glb";
+/// The model's authored diameter and length (m), MEASURED from its position bounds
+/// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
+const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
+const SHELL_MODEL_LENGTH_M: f32 = 0.263;
+/// The framed radius is at most this many calibres, about the stop or else the contact: the main
+/// gun's whole-hull frame (7.0 m for 88 mm, DERIVED) is untouched, a 7.9 mm round's is held to
+/// 0.63 m.
+const FRAME_CALIBRES: f32 = 80.0;
 /// A ring at a crossing: a calibre across, this thick (fraction of its radius).
 const RING_THICKNESS: f32 = 0.12;
 const RING_GLOW: f32 = 2.0;
@@ -51,24 +67,29 @@ const OUTLINE: Color = Color::srgb_u8(0x8A, 0x96, 0xA3);
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 /// The corner camera's vertical field (deg) in perspective.
 const CORNER_FOV_DEG: f32 = 30.0;
-/// The outside view frames this much of each leg either side of the contact (m).
+/// The outside view frames this much of each leg either side of the contact (m). This and every
+/// other framing length below is taken through [`Plan::reach`], so a small calibre frames tighter.
 const LEG_FRAME_M: f32 = 1.5;
 /// A slice cut along a shot within this angle (deg) of vertical spans no vertical plane, and is
 /// cut through the shot and the struck face's normal instead.
 const SLICE_VERTICAL_FALLBACK_DEG: f32 = 10.0;
-/// The slice frames this far (m) before the first crossing and past the stop, and at least this
-/// tall across the shot.
+/// The slice frames this far (m) before the first crossing and past the stop (that shortened by
+/// 0.6), and at least this tall across the shot.
 const SLICE_LEAD_M: f32 = 1.0;
 const SLICE_MIN_HEIGHT_M: f32 = 1.0;
 
 #[derive(Component)]
 pub struct StageCamera;
 
+/// The round: one shell model, placed and scaled for the record on show.
+#[derive(Component)]
+pub(super) struct StageShell;
+
 /// Everything [`rebuild`] spawns for one record.
 #[derive(Component)]
 pub(super) struct StageItem;
 
-/// One leg of the line between arc lengths `from` and `to`.
+/// One leg of the trail between arc lengths `from` and `to`.
 #[derive(Component)]
 pub(super) struct LineSeg {
     from: f32,
@@ -139,6 +160,7 @@ pub fn plugin(app: &mut App) {
 
 pub fn spawn(
     mut commands: Commands,
+    asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     mut stage: ResMut<Stage>,
@@ -184,6 +206,15 @@ pub fn spawn(
     }
     stage.glass = glows.add(glass_material(0));
     stage.ghost = glows.add(GlowMaterial::blended(GLASS.into(), 0.18));
+    let shell: Handle<WorldAsset> =
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
+    commands.spawn((
+        WorldAssetRoot(shell),
+        Transform::IDENTITY,
+        Visibility::Hidden,
+        VisualScope::PEN_CAM_STAGE,
+        StageShell,
+    ));
 }
 
 /// The glass hull, by look-test variant: the specified rim `0.03 + 0.5·(1 − |n·v|)³`, a
@@ -294,18 +325,16 @@ pub fn rebuild(
 
     let scope = VisualScope::PEN_CAM_STAGE;
     let clip = stage.plane;
-    // The line, one cylinder per leg inside the drawn span.
+    // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
+    // trails on past the span behind the shell.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
     let line = &plan.line;
     for i in 1..line.points.len() {
-        let (from, to) = (
-            line.arc[i - 1].max(plan.start_arc),
-            line.arc[i].min(plan.end_arc),
-        );
+        let (from, to) = (line.arc[i - 1].max(plan.start_arc), line.arc[i]);
         if to <= from {
             continue;
         }
-        // In the slice the line lies in the cut, so it is dimmed for the band to read through it.
+        // In the slice the trail lies in the cut, so it is dimmed for the band to read through it.
         let brightness = plan.brightness_at(0.5 * (from + to))
             * if kind == CornerKind::Slice { 0.45 } else { 1.0 };
         let mut material = GlowMaterial::additive(LINE.into(), LINE_GLOW * brightness);
@@ -325,7 +354,8 @@ pub fn rebuild(
         ));
     }
 
-    // Rings where the line crossed each plate; the gouge of a bounce; the crater at a stop.
+    // Rings where the round crossed each plate, and the gouge of a bounce. The stop is the shell's
+    // nose, so it gets no ring.
     let ring = meshes.add(Torus::new(1.0 - RING_THICKNESS, 1.0 + RING_THICKNESS));
     let mut mark = |commands: &mut Commands, transform: Transform, at_arc, at_c, glow: f32| {
         let mut material = GlowMaterial::additive(LINE.into(), glow);
@@ -376,25 +406,10 @@ pub fn rebuild(
         mark(
             &mut commands,
             ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
-            None,
+            Some(bounce.arc),
             0.0,
             RING_GLOW,
         );
-    }
-    if let Some(stop) = plan.stop {
-        let (transform, at_arc, at_c) = match (kind, stage.plane) {
-            (CornerKind::Slice, Some((normal, _))) => (
-                ring_facing(stop, normal, radius),
-                None,
-                timeline::SLICE_CRATER.0,
-            ),
-            _ => (
-                ring_across(stop, line.direction_at(plan.end_arc), radius),
-                Some(plan.end_arc),
-                0.0,
-            ),
-        };
-        mark(&mut commands, transform, at_arc, at_c, RING_GLOW * 1.5);
     }
 
     // Spall cones: nested reach surfaces and a rim-lit outer one, clipped by the slice plane.
@@ -489,13 +504,11 @@ fn ring_on_face(point: Vec3, normal: Vec3, travel: Vec3, radius: f32) -> Transfo
 
 /// A ring a calibre across, square to the line.
 fn ring_across(point: Vec3, travel: Vec3, radius: f32) -> Transform {
-    ring_facing(point, travel, radius)
-}
-
-/// A ring a calibre across whose axis is `axis`.
-fn ring_facing(point: Vec3, axis: Vec3, radius: f32) -> Transform {
     Transform::from_translation(point)
-        .with_rotation(Quat::from_rotation_arc(Vec3::Y, axis.normalize_or(Vec3::Y)))
+        .with_rotation(Quat::from_rotation_arc(
+            Vec3::Y,
+            travel.normalize_or(Vec3::Y),
+        ))
         .with_scale(Vec3::splat(radius))
 }
 
@@ -520,50 +533,51 @@ fn slice_plane(plan: &Plan) -> (Vec3, Vec3) {
     (normal, point)
 }
 
-/// The arc length of the line's head at corner time `c`.
-fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
+/// The on-screen speed of the shell (m of path per corner second): the drawn span over the frame's
+/// travel window, constant in every frame. An eased run would have the shell slow in the air
+/// before it strikes, which no record says.
+fn travel_speed(plan: &Plan, kind: CornerKind) -> f32 {
     let (from, to) = kind.line_window();
-    let p = timeline::progress(c, from, to - from);
+    (plan.end_arc - plan.start_arc).max(1e-3) / (to - from)
+}
+
+/// The arc length of the shell's nose at corner time `c`. It crosses the drawn span in the travel
+/// window and stops where the record's path ends; a round that left runs on along the path at the
+/// same speed, out of the frame. Reduce motion puts it at the span's end when the window opens.
+fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
+    let (from, _) = kind.line_window();
     if reduce {
         return if c >= from {
             plan.end_arc
         } else {
-            start_of(plan, kind)
+            plan.start_arc
         };
     }
-    let start = start_of(plan, kind);
-    let eased = match kind {
-        CornerKind::Glass | CornerKind::Victim => p,
-        _ => timeline::ease_travel(p),
-    };
-    start + (plan.end_arc - start) * eased
+    let run = travel_speed(plan, kind) * (c - from).max(0.0);
+    (plan.start_arc + run).min(plan.line.length())
 }
 
-/// Where the head stands before the line window opens: the outside view already has the approach
-/// drawn to the face.
-fn start_of(plan: &Plan, kind: CornerKind) -> f32 {
-    match kind {
-        CornerKind::Ricochet | CornerKind::Damaged => plan.contact_arc,
-        _ => plan.start_arc,
-    }
-}
-
-/// The corner time at which the head reaches arc `s`.
+/// The corner time at which the nose reaches arc `s`.
 fn time_at_arc(plan: &Plan, kind: CornerKind, s: f32, reduce: bool) -> f32 {
-    let (from, to) = kind.line_window();
-    if s <= start_of(plan, kind) {
-        return 0.0;
+    let (from, _) = kind.line_window();
+    if reduce {
+        return from;
     }
-    let (mut lo, mut hi) = (from, to);
-    for _ in 0..24 {
-        let mid = 0.5 * (lo + hi);
-        if head_arc(plan, kind, mid, reduce) >= s {
-            hi = mid;
-        } else {
-            lo = mid;
-        }
+    from + (s - plan.start_arc).max(0.0) / travel_speed(plan, kind)
+}
+
+/// Whether the shell is drawn at corner time `c`: from the travel window on, until a round that
+/// left runs off the end of its recorded path. Under reduce motion a round that left is never
+/// drawn, since it would stand parked in the air at the span's end.
+fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
+    let (from, _) = kind.line_window();
+    if c < from {
+        return false;
     }
-    hi
+    if !plan.left {
+        return true;
+    }
+    !reduce && head_arc(plan, kind, c, reduce) < plan.line.length() - 1e-4
 }
 
 /// Animate the stage from the corner's clock and frame the corner camera.
@@ -605,13 +619,28 @@ pub fn animate(
         (&mut Camera, &mut Transform, &mut Projection),
         (With<StageCamera>, Without<LineSeg>, Without<ConeShell>),
     >,
+    mut shell: Query<
+        (&mut Transform, &mut Visibility),
+        (
+            With<StageShell>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<ConeShell>,
+            Without<BoxTint>,
+            Without<StageCamera>,
+        ),
+    >,
     mut gizmos: Gizmos<StageGizmos>,
 ) {
     let Ok((mut camera, mut eye, mut projection)) = camera.single_mut() else {
         return;
     };
+    let Ok((mut shell_transform, mut shell_visibility)) = shell.single_mut() else {
+        return;
+    };
     let Some(showing) = corner.showing else {
         camera.is_active = false;
+        shell_visibility.set_if_neq(Visibility::Hidden);
         return;
     };
     camera.is_active = true;
@@ -634,8 +663,29 @@ pub fn animate(
         1.0
     };
 
+    // The shell, nose at the head, at the record's calibre; the trail ends at its tail.
+    let scale = plan.calibre / SHELL_MODEL_CALIBRE_M;
+    let drawn = shell_drawn(plan, kind, c, reduce);
+    let trail_end = if drawn {
+        head - SHELL_MODEL_LENGTH_M * scale
+    } else {
+        head
+    };
+    if drawn {
+        let want = Transform::from_translation(plan.line.at(head))
+            .looking_to(plan.line.direction_at(head), Vec3::Y)
+            .with_scale(Vec3::splat(scale));
+        if *shell_transform != want {
+            *shell_transform = want;
+        }
+        shell_visibility.set_if_neq(Visibility::Inherited);
+    } else {
+        shell_visibility.set_if_neq(Visibility::Hidden);
+    }
+
+    let trail_width = plan.calibre * TRAIL_CALIBRES;
     for (seg, material, mut transform, mut visibility) in &mut lines {
-        let to = seg.to.min(head);
+        let to = seg.to.min(trail_end);
         if to <= seg.from {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
@@ -649,7 +699,7 @@ pub fn animate(
         }
         *transform = Transform::from_translation(0.5 * (a + b))
             .with_rotation(Quat::from_rotation_arc(Vec3::Y, span / length))
-            .with_scale(Vec3::new(plan.calibre, length, plan.calibre));
+            .with_scale(Vec3::new(trail_width, length, trail_width));
         if let Some(mut m) = glows.get_mut(&material.0) {
             m.set_fade(line_fade);
             m.set_intensity(LINE_GLOW * seg.brightness);
@@ -798,9 +848,28 @@ fn framing(
             rate_deg.to_radians() * (c - from).max(0.0)
         }
     };
+    // The eye stands where the metre figures put it, on `direction` from the `wide` sphere (centre,
+    // radius) that frames, and so as clear of the hull as the main gun's view; a small calibre's
+    // tighter `tight` sphere is framed by aiming at it and narrowing the field, never by closing
+    // the distance. Where the reach leaves the metres in force the two spheres are one and the
+    // field is the corner's own.
+    let aim = |wide: (Vec3, f32), tight: (Vec3, f32), direction: Vec3, up: Vec3, margin: f32| {
+        let eye = wide.0 + direction * (wide.1 * margin / half_fov.sin());
+        let half = (tight.1 * margin / eye.distance(tight.0).max(1e-3))
+            .clamp(1e-4, half_fov.sin())
+            .asin();
+        (
+            Transform::from_translation(eye).looking_at(tight.0, up),
+            Projection::Perspective(PerspectiveProjection {
+                fov: 2.0 * half,
+                ..default()
+            }),
+        )
+    };
     // A three-quarter view from the shot's side, orbiting about the vertical at `rate` (deg/s).
-    let three_quarter = |points: &[Vec3], rate: f32, from: f32| {
-        let (center, radius) = enclose(points);
+    let three_quarter = |wide: &[Vec3], tight: &[Vec3], rate: f32, from: f32| {
+        let (wide_center, wide_radius) = enclose(wide);
+        let (center, radius) = framed(plan, tight);
         let d = plan.line.direction_at(plan.contact_arc);
         let flat = Vec3::new(d.x, 0.0, d.z)
             .try_normalize()
@@ -809,10 +878,12 @@ fn framing(
         let side = Quat::from_rotation_y(yaw) * -flat;
         let pitch = (0.5 + orbit.y).clamp(-1.2, 1.4);
         let direction = (side + Vec3::Y * pitch).normalize();
-        let distance = radius.max(1.0) * 1.1 / half_fov.sin();
-        (
-            Transform::from_translation(center + direction * distance).looking_at(center, Vec3::Y),
-            perspective(),
+        aim(
+            (wide_center, wide_radius.max(1.0)),
+            (center, radius.max(plan.reach(1.0))),
+            direction,
+            Vec3::Y,
+            1.1,
         )
     };
     match kind {
@@ -820,33 +891,41 @@ fn framing(
             // The whole hull: the record's path inside the tank its boxes span.
             let mut points = plan.framed_points();
             points.extend(plan.boxes.iter().map(|b| b.center));
-            three_quarter(&points, timeline::ORBIT_DEG_S, 0.0)
+            three_quarter(&points, &points, timeline::ORBIT_DEG_S, 0.0)
         }
         CornerKind::Damaged => {
             let incoming = plan.line.direction_at(plan.contact_arc - 1e-3);
-            let mut points = vec![
-                plan.impact_point - incoming * LEG_FRAME_M,
-                plan.line
-                    .at(plan.end_arc.min(plan.contact_arc + LEG_FRAME_M)),
-                plan.impact_point,
-            ];
-            points.extend(
-                plan.boxes
-                    .iter()
-                    .filter(|b| b.dose() > 0.0)
-                    .map(|b| b.center),
-            );
-            three_quarter(&points, timeline::DRIFT_DEG_S, kind.hold_from())
+            let points = |leg: f32| {
+                let mut points = vec![
+                    plan.impact_point - incoming * leg,
+                    plan.line.at(plan.end_arc.min(plan.contact_arc + leg)),
+                    plan.impact_point,
+                ];
+                points.extend(
+                    plan.boxes
+                        .iter()
+                        .filter(|b| b.dose() > 0.0)
+                        .map(|b| b.center),
+                );
+                points
+            };
+            three_quarter(
+                &points(LEG_FRAME_M),
+                &points(plan.reach(LEG_FRAME_M)),
+                timeline::DRIFT_DEG_S,
+                kind.hold_from(),
+            )
         }
         CornerKind::Slice => {
             let (normal, _) = stage.plane.unwrap_or((Vec3::X, Vec3::ZERO));
             let d = plan.chord_direction();
+            let lead = plan.reach(SLICE_LEAD_M);
             let start = plan
                 .crossings
                 .first()
                 .map_or(plan.impact_point, |crossing| crossing.entry)
-                - d * SLICE_LEAD_M;
-            let end = plan.stop.unwrap_or(plan.line.at(plan.end_arc)) + d * (SLICE_LEAD_M * 0.6);
+                - d * lead;
+            let end = plan.stop.unwrap_or(plan.line.at(plan.end_arc)) + d * (lead * 0.6);
             let up = (Vec3::Y - normal * normal.y)
                 .try_normalize()
                 .unwrap_or_else(|| normal.any_orthonormal_vector());
@@ -854,7 +933,7 @@ fn framing(
             let center = 0.5 * (start + end);
             let width = (end - start).dot(right).abs();
             let height = ((end - start).dot(up).abs() + 6.0 * plan.calibre)
-                .max(SLICE_MIN_HEIGHT_M)
+                .max(plan.reach(SLICE_MIN_HEIGHT_M))
                 .max(width / 1.6);
             let width = width.max(height * 1.6);
             let yawed = Quat::from_axis_angle(up, orbit.x) * normal;
@@ -879,7 +958,8 @@ fn framing(
         }
         CornerKind::Ricochet => {
             let Some(bounce) = plan.bounce.as_ref() else {
-                return three_quarter(&plan.framed_points(), timeline::DRIFT_DEG_S, 0.0);
+                let points = plan.framed_points();
+                return three_quarter(&points, &points, timeline::DRIFT_DEG_S, 0.0);
             };
             // The eye on the normal of the plane through both legs, so the angle shows at its
             // true size; above the plane when the legs are level.
@@ -899,25 +979,41 @@ fn framing(
             {
                 normal = -normal;
             }
-            let points = [
-                bounce.point - bounce.incoming * LEG_FRAME_M,
-                bounce.point + bounce.outgoing * LEG_FRAME_M,
-                bounce.point,
-            ];
-            let (center, radius) = enclose(&points);
+            let points = |leg: f32| {
+                [
+                    bounce.point - bounce.incoming * leg,
+                    bounce.point + bounce.outgoing * leg,
+                    bounce.point,
+                ]
+            };
+            let (wide_center, wide_radius) = enclose(&points(LEG_FRAME_M));
+            let (center, radius) = framed(plan, &points(plan.reach(LEG_FRAME_M)));
             // The struck face's normal points up the frame: the legs open above the face.
             let up = (bounce.normal - normal * bounce.normal.dot(normal))
                 .try_normalize()
                 .unwrap_or_else(|| normal.any_orthonormal_vector());
             let drift = motion(timeline::DRIFT_DEG_S, kind.hold_from());
             let direction = Quat::from_axis_angle(up, drift + orbit.x) * normal;
-            let distance = radius.max(0.6) * 1.15 / half_fov.sin();
-            (
-                Transform::from_translation(center + direction * distance).looking_at(center, up),
-                perspective(),
+            aim(
+                (wide_center, wide_radius.max(0.6)),
+                (center, radius.max(plan.reach(0.6))),
+                direction,
+                up,
+                1.15,
             )
         }
     }
+}
+
+/// The sphere the corner frames: the one around `points`, or, when that is wider than
+/// [`FRAME_CALIBRES`] calibres, one that wide about the stop, else the contact.
+fn framed(plan: &Plan, points: &[Vec3]) -> (Vec3, f32) {
+    let (center, radius) = enclose(points);
+    let cap = FRAME_CALIBRES * plan.calibre;
+    if radius <= cap {
+        return (center, radius);
+    }
+    (plan.stop.unwrap_or(plan.impact_point), cap)
 }
 
 /// The centre and radius of a sphere around `points`.
@@ -931,4 +1027,72 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
         .map(|p| p.distance(center))
         .fold(0.0, f32::max);
     (center, radius)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shell model is one calibre of [`SHELL_MODEL_CALIBRE_M`] across, its tip at the origin and
+    /// its body along +Z for [`SHELL_MODEL_LENGTH_M`], so the scale law and the nose placement hold.
+    #[test]
+    fn the_shell_model_has_its_tip_at_the_origin() {
+        let path = crate::assets::asset_root().join(SHELL_SCENE);
+        let model = gltf::Gltf::open(&path).unwrap();
+        let (mut lo, mut hi) = (Vec3::MAX, Vec3::MIN);
+        for node in model.nodes() {
+            let Some(mesh) = node.mesh() else {
+                continue;
+            };
+            assert_eq!(node.transform().matrix(), Mat4::IDENTITY.to_cols_array_2d());
+            for primitive in mesh.primitives() {
+                let bounds = primitive.bounding_box();
+                lo = lo.min(Vec3::from(bounds.min));
+                hi = hi.max(Vec3::from(bounds.max));
+            }
+        }
+        let size = hi - lo;
+        assert!((size.x - SHELL_MODEL_CALIBRE_M).abs() < 1e-3, "{size}");
+        assert!((size.y - SHELL_MODEL_CALIBRE_M).abs() < 1e-3, "{size}");
+        assert!(lo.z.abs() < 1e-4, "{lo}");
+        assert!((hi.z - SHELL_MODEL_LENGTH_M).abs() < 1e-3, "{hi}");
+        assert!((lo.x + hi.x).abs() < 1e-4 && (lo.y + hi.y).abs() < 1e-4);
+    }
+
+    /// For every record: the shell sets off from the drawn span's start as its travel window opens
+    /// and crosses the span by the window's end; a round that came to rest keeps its nose on the
+    /// record's last point to the end of the frame, and one that left is drawn no longer once its
+    /// nose runs off the end of its path; every arc is reached at the time named for it.
+    #[test]
+    fn the_shell_ends_where_the_record_ends() {
+        let library = Library::load();
+        for record in &library.records {
+            let plan = &record.plan;
+            let kind = plan.kind;
+            let (from, to) = kind.line_window();
+            let name = record.stem;
+            assert_eq!(head_arc(plan, kind, from, false), plan.start_arc, "{name}");
+            assert!(
+                (head_arc(plan, kind, to, false) - plan.end_arc).abs() < 1e-3,
+                "{name}"
+            );
+            let last = *plan.line.points.last().unwrap();
+            if plan.left {
+                let gone = time_at_arc(plan, kind, plan.line.length(), false) + 1e-3;
+                assert!(!shell_drawn(plan, kind, gone, false), "{name}");
+                assert!(!shell_drawn(plan, kind, to, true), "{name}");
+            } else {
+                for reduce in [false, true] {
+                    let end = kind.duration();
+                    assert!(shell_drawn(plan, kind, end, reduce), "{name}");
+                    let nose = plan.line.at(head_arc(plan, kind, end, reduce));
+                    assert!(nose.distance(last) < 1e-4, "{name}");
+                }
+            }
+            for s in [plan.contact_arc, plan.end_arc] {
+                let at = time_at_arc(plan, kind, s, false);
+                assert!((head_arc(plan, kind, at, false) - s).abs() < 1e-3, "{name}");
+            }
+        }
+    }
 }
