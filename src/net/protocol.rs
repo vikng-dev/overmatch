@@ -2146,7 +2146,10 @@ mod tests {
     /// This prints both regimes so the cost is on the record rather than assumed. It asserts only a
     /// CEILING, so it fails loudly if `TankCommand` ever grows fat enough to make the input stream a
     /// real bandwidth problem — at which point the mitigation is to shrink the ATTESTED payload (a
-    /// `u8` tick-LSB, or a fire-fields-only sub-struct carrying the stamp), not to drop attestation.
+    /// fire-fields-only sub-struct carrying the full stamp), not to drop attestation and not to
+    /// narrow the stamp: inputs hold their last value under starvation, so a wrapping stamp
+    /// re-attests a held command once per wrap (a `u8` every 256 ticks, DERIVED 4 s at 64 Hz) and
+    /// re-latches its fire edges.
     ///
     /// Context for the number: this is UPSTREAM traffic only (client → server), and the client
     /// sends at most one input message per tick (`net::client::install_input_send_cadence`), so
@@ -2245,8 +2248,9 @@ mod tests {
             after <= 256,
             "the attested input payload is {after} B/message ({:.1} KB/s upstream) — TankCommand has \
              grown fat enough that per-tick attestation costs real bandwidth. Shrink the ATTESTED \
-             payload (u8 tick-LSB, or a fire-only sub-struct carrying the stamp); do NOT drop \
-             attestation, which is what keeps the server from firing rounds nobody asked for.",
+             payload (a fire-only sub-struct carrying the full stamp); do NOT drop attestation, \
+             which keeps the server from firing rounds nobody asked for, and do NOT narrow the \
+             stamp, which a held command would re-attest once per wrap.",
             (after * MESSAGES_PER_S) as f64 / 1024.0,
         );
     }
