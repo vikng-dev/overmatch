@@ -928,10 +928,12 @@ fn abandon_unreachable_match(
 /// overlay authority, so it runs in the `Declare` phase, before the cursor owner derives the input
 /// license from the set.
 pub(super) fn connect_screen_plugin(app: &mut App) {
-    app.add_systems(Startup, spawn_connect_status).add_systems(
-        Update,
-        update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
-    );
+    app.init_resource::<ConnectRetry>()
+        .add_systems(Startup, spawn_connect_status)
+        .add_systems(
+            Update,
+            update_connect_status.in_set(crate::overlay::OverlaySet::Declare),
+        );
 }
 
 /// The connect-status message node inside the connect overlay — its text is rewritten from

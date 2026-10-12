@@ -2,10 +2,11 @@
 //! own UI.
 //!
 //! The app is the net client's UI layer — every plugin `NetClientPlugin` and `net::client` mount that
-//! spawns a UI tree — on a GPU-less window, with no link, no sim and no server. Systems whose
-//! resources only a live client has are skipped (the error handler ignores failed parameter
-//! validation): what is measured is what the spawns and the screen transitions build.
-//! The screen is driven through `NextState<Flow>` directly; its derivation is `flow::flow_of`'s.
+//! spawns a UI tree — on a GPU-less window, with no link, no sim and no server. The resources the
+//! client's sim, link and window plugins would provide are inserted at their defaults, and the error
+//! handler panics: a UI system whose parameters fail validation fails the test rather than being
+//! skipped unseen. The screen is driven through `NextState<Flow>` directly; its derivation is
+//! `flow::flow_of`'s.
 
 use bevy::prelude::*;
 
@@ -78,13 +79,73 @@ fn visible_owners(world: &mut World) -> Vec<Vec<Owner>> {
         .collect()
 }
 
+/// The short type names of each root's components: how the test names a module's private marker.
+fn root_names(world: &mut World) -> Vec<Vec<String>> {
+    roots(world)
+        .into_iter()
+        .map(|root| {
+            let entity = world.entity(root);
+            entity
+                .archetype()
+                .components()
+                .iter()
+                .filter_map(|id| world.components().get_name(*id))
+                .map(|name| name.shortname().to_string())
+                .collect()
+        })
+        .collect()
+}
+
+/// Every root marker in `expected` is on some root.
+fn assert_roots(world: &mut World, flow: Flow, expected: &[&str]) {
+    let names = root_names(world);
+    for marker in expected {
+        assert!(
+            names
+                .iter()
+                .any(|root| root.iter().any(|name| name == marker)),
+            "{flow:?}: no UI root carries `{marker}`"
+        );
+    }
+}
+
+/// The persistent roots: the overlays and the settings page, on every screen.
+const PERSISTENT_ROOTS: &[&str] = &["SettingsCard", "ViewDeathOverlay", "OverlayNode"];
+
+/// The match's HUD roots, one marker each (`TankNameplate` and `ComponentHpLabel` are pools).
+const MATCH_ROOTS: &[&str] = &[
+    "DebugCard",
+    "CrewBarText",
+    "StatusPanelText",
+    "StandardDriveHudText",
+    "DriveDebugHudText",
+    "OpticMask",
+    "RangeReadout",
+    "IntentReticle",
+    "AimIndicator",
+    "BoreIndicator",
+    "DeathStatusLine",
+    "DamageFlashNode",
+    "TankNameplate",
+    "ComponentHpLabel",
+];
+
 fn client_ui_app() -> App {
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(Some(Window {
         resolution: bevy::window::WindowResolution::new(1280, 720),
         ..default()
     })));
-    app.set_error_handler(bevy::ecs::error::ignore);
+    app.set_error_handler(bevy::ecs::error::panic);
+    // What the sim, the link and winit provide on a live client.
+    app.insert_resource(lightyear::core::tick::TickDuration(
+        std::time::Duration::from_secs_f64(1.0 / 64.0),
+    ))
+    .init_resource::<super::sync_margin::ArrivalDelay>()
+    .init_resource::<crate::WeaponClock>()
+    .init_resource::<crate::firecontrol::Ranging>()
+    .init_resource::<avian3d::collider_tree::ColliderTrees>()
+    .init_resource::<bevy::winit::WinitMonitors>();
     app.add_plugins((crate::ui_font::plugin, crate::flow::plugin))
         .add_plugins((
             crate::overlay::plugin,
@@ -135,6 +196,7 @@ fn every_root_is_owned_and_each_screen_draws_only_its_own_ui() {
         Flow::InMatch,
     ] {
         enter(&mut app, flow);
+        assert_roots(app.world_mut(), flow, PERSISTENT_ROOTS);
         let world = app.world_mut();
         let misowned = misowned(world);
         assert!(
@@ -173,21 +235,53 @@ fn every_root_is_owned_and_each_screen_draws_only_its_own_ui() {
     }
 }
 
-/// The match's HUD is real: entering it builds trees, and every one of them is the match's.
+/// The match's HUD is real: entering it builds each of its roots, a dead controlled tank puts the
+/// death screen over them, and leaving takes every one of them away.
 #[test]
 fn the_match_builds_its_hud_and_leaving_takes_it_away() {
     let mut app = client_ui_app();
     enter(&mut app, Flow::InMatch);
+    assert_roots(app.world_mut(), Flow::InMatch, PERSISTENT_ROOTS);
+    assert_roots(app.world_mut(), Flow::InMatch, MATCH_ROOTS);
+
+    app.world_mut().spawn((
+        crate::tank::Controlled,
+        crate::damage::TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        },
+    ));
+    for _ in 0..3 {
+        app.update();
+    }
     let world = app.world_mut();
-    let in_match = world
-        .query::<&FlowScoped>()
-        .iter(world)
-        .filter(|scope| scope.0 == Flow::InMatch)
-        .count();
-    assert!(
-        in_match >= 10,
-        "the match spawns its HUD roots on entry (found {in_match})"
+    assert!(misowned(world).is_empty(), "{:#?}", misowned(world));
+    let drawn_overlays: Vec<Vec<String>> = roots(world)
+        .into_iter()
+        .filter(|root| world.get::<Visibility>(*root) != Some(&Visibility::Hidden))
+        .filter(|root| owners(world.entity(*root)) == vec![Owner::Overlay])
+        .map(|root| {
+            let entity = world.entity(root);
+            entity
+                .archetype()
+                .components()
+                .iter()
+                .filter_map(|id| world.components().get_name(*id))
+                .map(|name| name.shortname().to_string())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        drawn_overlays.len(),
+        1,
+        "a dead controlled tank draws exactly one overlay: {drawn_overlays:?}"
     );
+    assert!(
+        drawn_overlays[0]
+            .iter()
+            .any(|name| name == "DeathScreenNode"),
+        "the drawn overlay is the death screen: {drawn_overlays:?}"
+    );
+
     enter(&mut app, Flow::Lobby);
     let world = app.world_mut();
     assert_eq!(
@@ -195,6 +289,11 @@ fn the_match_builds_its_hud_and_leaving_takes_it_away() {
         0,
         "leaving the match takes every one of its trees"
     );
+    let deaths = root_names(world)
+        .iter()
+        .filter(|root| root.iter().any(|name| name == "DeathScreenNode"))
+        .count();
+    assert_eq!(deaths, 0, "the death screen leaves with the match");
 }
 
 /// The audit sees what it guards against: a bare root, and a root claimed twice.
