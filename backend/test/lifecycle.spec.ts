@@ -157,6 +157,23 @@ describe("the alarm", () => {
 		expect(await ticket(t)).toEqual({ state: "starting" });
 	});
 
+	it("never times out a server that became ready while the sweep was busy with another", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		await join({ version: V, locations: ["London"], pings: {} });
+		const b = launched(1);
+		await age(V, 61 * S); // both past the start deadline
+		const release = edgegap.holdStops();
+		const sweep = runDurableObjectAlarm(registry(V)); // stops Paris first, held
+		await new Promise((r) => setTimeout(r, 50));
+		edgegap.ready(edgegap.deployment(1));
+		await heartbeat(b.id, b.secret, { players: 0, capacity: 10, state: "open" });
+		release();
+		await sweep;
+		const row = (await registry(V).snapshot()).find((s) => s.id === b.id)!;
+		// Either the sweep claimed it first (never ready) or it is ready and stays so; never both.
+		expect(row.ready_at === null || row.state === "ready").toBe(true);
+	});
+
 	it("fails the ticket when no selected location is left to try", async () => {
 		const t = await join({ version: V, locations: ["Paris"], pings: {} });
 		await age(V, 61 * S);

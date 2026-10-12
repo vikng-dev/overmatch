@@ -72,6 +72,18 @@ export class FakeEdgegap {
 	private gate: Promise<void> | null = null;
 	private seq = 0;
 
+	private stopGate: Promise<void> | null = null;
+
+	/** Hold every stop response until the returned function is called. */
+	holdStops(): () => void {
+		let release!: () => void;
+		this.stopGate = new Promise((r) => (release = r));
+		return () => {
+			this.stopGate = null;
+			release();
+		};
+	}
+
 	/** Hold every deploy response until the returned function is called. */
 	holdDeploys(): () => void {
 		let release!: () => void;
@@ -173,6 +185,7 @@ export class FakeEdgegap {
 		}
 		m = /^\/v1\/stop\/(.+)$/.exec(url.pathname);
 		if (req.method === "DELETE" && m) {
+			if (this.stopGate) await this.stopGate;
 			const d = this.deployments.get(m[1]);
 			if (!d) return Response.json({ message: "not found" }, { status: 404 });
 			d.status = "Status.TERMINATED";

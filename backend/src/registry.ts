@@ -264,10 +264,13 @@ export class Registry extends DurableObject<Env> {
 
 	async alarm(): Promise<void> {
 		const now = Date.now();
-		const starting = this.sql.exec<ServerRow>("SELECT * FROM servers WHERE state = 'starting'").toArray();
-		for (const s of starting) {
+		const starting = this.sql.exec<{ id: string }>("SELECT id FROM servers WHERE state = 'starting'").toArray();
+		for (const { id } of starting) {
+			// Re-read: an earlier iteration's await lets heartbeats and webhooks promote this row.
+			const s = this.server(id);
+			if (s?.state !== "starting") continue;
 			if (s.created_at + this.cfg.startDeadlineMs <= now) {
-				await this.finish(s.id, "failed", REASONS.startTimeout);
+				await this.finish(s.id, "failed", REASONS.startTimeout, "starting");
 			} else if (s.deployment_id && (s.next_poll_at ?? 0) <= now) {
 				this.sql.exec("UPDATE servers SET next_poll_at = ? WHERE id = ?", now + this.cfg.statusPollMs, s.id);
 				await this.refreshStatus(s.id);
@@ -279,7 +282,7 @@ export class Registry extends DurableObject<Env> {
 		for (const { id } of silent) {
 			// Re-read: a heartbeat may have landed while an earlier finish() awaited.
 			const s = this.server(id);
-			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", REASONS.serverLost);
+			if (s?.state === "ready" && (s.last_seen ?? 0) <= now - this.cfg.heartbeatDeadlineMs) await this.finish(id, "lost", REASONS.serverLost, "ready");
 		}
 
 		this.sql.exec("DELETE FROM tickets WHERE created_at <= ?", now - this.cfg.ticketTtlMs);
@@ -476,11 +479,11 @@ export class Registry extends DurableObject<Env> {
 
 	/** Terminal transition: stop the deployment if one may be live, record history, and give the
 	 *  tickets of a server that never became ready another placement (bounded by JOIN_ATTEMPTS). */
-	private async finish(serverId: string, outcome: Outcome, reason: string): Promise<void> {
+	private async finish(serverId: string, outcome: Outcome, reason: string, from?: "starting" | "ready"): Promise<void> {
 		const s = this.server(serverId);
-		if (!s || s.state === "ended") return;
+		if (!s || s.state === "ended" || (from && s.state !== from)) return;
 		const now = Date.now();
-		this.sql.exec("UPDATE servers SET state = 'ended', outcome = ?, reason = ?, ended_at = ? WHERE id = ?", outcome, reason, now, serverId);
+		this.sql.exec("UPDATE servers SET state = 'ended', outcome = ?, reason = ?, ended_at = ? WHERE id = ? AND state = ?", outcome, reason, now, serverId, s.state);
 		const orphans =
 			s.state === "starting"
 				? this.sql.exec<TicketRow>("SELECT * FROM tickets WHERE server_id = ? AND failed_reason IS NULL", serverId).toArray()
