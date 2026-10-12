@@ -340,40 +340,7 @@ pub fn report(
     let steps = path_steps(world, shell, Some(struck.tank));
     let verdict = ShotVerdict::of_path(&steps)?;
     let marks: Vec<ArmourMark> = world.get::<PenetrationMarks>(shell)?.log.clone();
-    // Where the struck tank's first contact is a volume entered inside a crossing another tank's
-    // volume opened, its face is read off its own colliders: the march marks no face normal there.
-    let entered_inside = marks
-        .iter()
-        .find(|mark| touches(world, mark, struck.tank))
-        .and_then(|mark| match mark {
-            ArmourMark::Crossing {
-                entrance,
-                incoming,
-                volumes,
-                end,
-                ..
-            } => share(world, *entrance, *incoming, volumes, end, Some(struck.tank))
-                .filter(|share| share.entry.distance(*entrance) > 1.0e-6)
-                .map(|share| (share.first, *incoming)),
-            _ => None,
-        });
-    let own_face = entered_inside.map(|(first, incoming)| {
-        let normal = entry_face_normal(
-            world,
-            first.volume,
-            first.entry,
-            first.end,
-            incoming,
-            facts.caliber_mm / 1000.0,
-        );
-        if normal.is_none() {
-            warn!(
-                "pen cam record: no entering face of {} at {}; its impact keeps the crossing's normal",
-                first.volume, first.entry
-            );
-        }
-        normal
-    });
+    let own_face = own_entry_face(world, struck, &marks, facts.caliber_mm / 1000.0);
     let world: &World = world;
     let cones = &world.get::<SpallMarks>(shell)?.cones;
     let tail = world.get::<ShellPath>(shell)?.points.clone();
@@ -612,7 +579,7 @@ pub fn report(
             ..
         } => (
             mine(first).map_or(*entrance, |share| share.entry),
-            own_face.flatten().unwrap_or(*normal),
+            own_face.unwrap_or(*normal),
             *incoming,
         ),
         ArmourMark::Failed => return None,
@@ -665,6 +632,48 @@ pub fn report(
             .map(|at_shot| at_shot.state.clone())
             .collect(),
     })
+}
+
+/// The outward normal of the struck tank's entry face (WORLD) where its first contact is a volume
+/// entered inside a crossing another tank's volume opened, read off that volume's own colliders
+/// for a round of `caliber` (m): the march marks no face normal there. `None` where the crossing
+/// opened on the tank, or no entering face is found.
+fn own_entry_face(
+    world: &mut World,
+    struck: &StruckTank,
+    marks: &[ArmourMark],
+    caliber: f32,
+) -> Option<Vec3> {
+    let (first, incoming) = marks
+        .iter()
+        .find(|mark| touches(world, mark, struck.tank))
+        .and_then(|mark| match mark {
+            ArmourMark::Crossing {
+                entrance,
+                incoming,
+                volumes,
+                end,
+                ..
+            } => share(world, *entrance, *incoming, volumes, end, Some(struck.tank))
+                .filter(|share| share.entry.distance(*entrance) > 1.0e-6)
+                .map(|share| (share.first, *incoming)),
+            _ => None,
+        })?;
+    let normal = entry_face_normal(
+        world,
+        first.volume,
+        first.entry,
+        first.end,
+        incoming,
+        caliber,
+    );
+    if normal.is_none() {
+        warn!(
+            "pen cam record: no entering face of {} at {}; its impact keeps the crossing's normal",
+            first.volume, first.entry
+        );
+    }
+    normal
 }
 
 /// Each component's dose from the shot and, for one the shot disabled, its consequence, timed at the
@@ -735,8 +744,9 @@ fn outcomes(
 }
 
 /// The volume among `volumes` that a crossing ended at rest at `at` came to rest in: the one whose
-/// line ends nearest `at`, short of perforating it. Every volume the round stopped inside ends at
-/// `at`, so overlapping tanks' volumes each hold it and each tank's own volumes name its own.
+/// line ends nearest `at`, short of perforating it. The march ends every unperforated volume's line
+/// at the rest point (`resolve::volume_crossings`), so overlapping tanks' volumes each hold it and
+/// each tank's own volumes name its own.
 fn rested_in<'a>(volumes: impl Iterator<Item = &'a VolumeCrossing>, at: Vec3) -> Option<Entity> {
     volumes
         .filter(|crossed| !crossed.perforated)
