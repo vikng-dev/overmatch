@@ -105,7 +105,7 @@ export async function adminPage(env: Env, now = Date.now()): Promise<string> {
 		.join("");
 
 	const sweepLine = swept
-		? `Orphan sweep ${ago(now, swept.at)} ago: ${swept.listed} tagged deployments, ${swept.stopped} stopped, ${swept.failed} stops failed` +
+		? `Orphan sweep ${ago(now, swept.at)} ago: ${swept.listed} tagged deployments, ${swept.unattributed} unattributed, ${swept.stopped} stopped, ${swept.failed} stops failed` +
 			(swept.error ? `; last error: ${esc(swept.error)}` : "")
 		: "Orphan sweep: none recorded";
 

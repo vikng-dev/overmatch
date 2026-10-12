@@ -82,6 +82,8 @@ export class FakeEdgegap {
 	failStops = 0;
 	/** Deployment ids whose stop call never answers. */
 	hangStops = new Set<string>();
+	/** When set, status answers carry no `app_version`. */
+	omitVersion = false;
 	/** Deployment ids whose every stop call answers 503. */
 	refuseStops = new Set<string>();
 	private stopGate: Promise<void> | null = null;
@@ -220,7 +222,7 @@ export class FakeEdgegap {
 				fqdn: `${d.id}.pr.edgegap.test`,
 				public_ip: d.publicIp,
 				app_name: d.body.app_name,
-				app_version: d.body.version_name,
+				...(this.omitVersion ? {} : { app_version: d.body.version_name }),
 				current_status: d.status,
 				running: ready,
 				start_time: "2026-10-12T00:00:00Z",

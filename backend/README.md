@@ -68,8 +68,9 @@ other row.
 pages, hard bound 100 pages) and stops each one tagged `om-<hex>` that no live claim owns. Ownership is the
 Registry's, never D1's: the deployment's status names its version, which with the tag gives the
 server id, and the version's Registry keeps it only if that row is `starting`/`ready` with this
-deployment id or none yet. One live claim keeps a deployment whatever its other tags. A status that
-names no valid version is stopped after `START_DEADLINE_S` from the sweep's first sight of it. A
+deployment id or none yet. One live claim keeps a deployment whatever its other tags. A deployment
+whose status names no valid version is never stopped by the sweep: it is logged, counted
+"unattributed" on `/admin`, and left to Edgegap's `max_duration`. A
 failed stop is retried by the next sweep until Edgegap no longer lists the deployment; checks and
 stops are capped per run and rotate by the minute, so persistent failures cannot starve the rest.
 A status read or Registry that does not answer stops nothing it would have decided. The last result

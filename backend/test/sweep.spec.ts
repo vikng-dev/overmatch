@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { adminPage } from "../src/admin";
 import { Registry } from "../src/registry";
-import { sweep, SWEEP_MAX_PAGES, SWEEP_MAX_STOPS } from "../src/sweep";
+import { sweep, SWEEP_MAX_STOPS } from "../src/sweep";
 import { bringUp, call, env, expectStatus, join, launched, registry } from "./helpers";
 
 const V = "0.5.0";
 const S = 1000;
 const MINUTE = 60 * S;
-/** START_DEADLINE_S in wrangler.jsonc: the grace an unroutable deployment gets. */
-const GRACE = 60 * S;
+const DAY = 24 * 60 * MINUTE;
 const UNKNOWN_TAG = "om-0123456789abcdef0123456789abcdef";
 
 function running(id: string): boolean {
@@ -27,15 +26,27 @@ async function leakedAfterEnd(n: number, location: string): Promise<string> {
 }
 
 describe("the orphan sweep", () => {
-	it("stops a tagged deployment whose status names no version, once it has stayed so past the grace", async () => {
+	it("never stops a tagged deployment whose status names no version, and counts it unattributed", async () => {
 		const orphan = edgegap.foreign([UNKNOWN_TAG]);
 		const other = edgegap.foreign(["someone-else"]);
 		const t0 = Date.now();
-		expect(await sweep(env, t0)).toMatchObject({ listed: 1, stopped: 0 });
+		for (const t of [t0, t0 + 10 * MINUTE, t0 + DAY]) {
+			expect(await sweep(env, t)).toMatchObject({ listed: 1, unattributed: 1, stopped: 0 });
+		}
 		expect(running(orphan.id)).toBe(true);
-		expect(await sweep(env, t0 + GRACE)).toMatchObject({ listed: 1, stopped: 1, failed: 0 });
-		expect(running(orphan.id)).toBe(false);
 		expect(running(other.id)).toBe(true); // not tagged om-<hex>: not ours
+	});
+
+	it("keeps a live server whose status carries no app_version through repeated sweeps", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const s = await bringUp(0);
+		edgegap.omitVersion = true;
+		const t0 = Date.now();
+		for (const t of [t0, t0 + 10 * MINUTE, t0 + DAY]) {
+			expect(await sweep(env, t)).toMatchObject({ listed: 1, unattributed: 1, stopped: 0 });
+		}
+		expect(running(s.deploymentId)).toBe(true);
+		expect(await adminPage(env)).toMatch(/1 tagged deployments, 1 unattributed, 0 stopped/);
 	});
 
 	it("stops a deployment whose registry row is ended, and one of a known version that no row owns, at once", async () => {
@@ -50,9 +61,9 @@ describe("the orphan sweep", () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = await bringUp(0);
 		await env.DB.prepare("DELETE FROM sessions").run();
-		const later = Date.now() + 10 * GRACE;
+		const later = Date.now() + 10 * MINUTE;
 		expect(await sweep(env, later)).toMatchObject({ listed: 1, stopped: 0, error: null });
-		expect(await sweep(env, later + GRACE)).toMatchObject({ listed: 1, stopped: 0 });
+		expect(await sweep(env, later + MINUTE)).toMatchObject({ listed: 1, stopped: 0 });
 		expect(running(s.deploymentId)).toBe(true);
 	});
 
@@ -77,21 +88,6 @@ describe("the orphan sweep", () => {
 		expect(running(last)).toBe(false);
 	});
 
-	it("keeps a suspect's age across a listing truncated before reaching it", async () => {
-		edgegap.maxPageSize = 1;
-		const orphan = edgegap.foreign([UNKNOWN_TAG]);
-		const t0 = Date.now();
-		await sweep(env, t0);
-		const fillers = Array.from({ length: SWEEP_MAX_PAGES }, () => edgegap.foreign(["someone-else"]));
-		edgegap.deployments.delete(orphan.id);
-		edgegap.deployments.set(orphan.id, orphan); // listed after the fillers
-		expect(await sweep(env, t0 + GRACE)).toMatchObject({ listed: 0, stopped: 0 });
-		expect(running(orphan.id)).toBe(true);
-		for (const f of fillers) edgegap.deployments.delete(f.id);
-		expect(await sweep(env, t0 + GRACE + 1)).toMatchObject({ listed: 1, stopped: 1 });
-		expect(running(orphan.id)).toBe(false);
-	});
-
 	it("leaves a ready server, a starting one and a claim whose deploy id is not yet known alone", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const ready = await bringUp(0);
@@ -102,39 +98,33 @@ describe("the orphan sweep", () => {
 		const unknown = launched(2);
 		expect((await registry(V).snapshot()).find((r) => r.id === unknown.id)?.deployment_id).toBeNull();
 
-		const later = Date.now() + 10 * GRACE;
+		const later = Date.now() + 10 * MINUTE;
 		expect(await sweep(env, later)).toMatchObject({ listed: 3, stopped: 0, error: null });
-		expect(await sweep(env, later + GRACE)).toMatchObject({ listed: 3, stopped: 0 });
+		expect(await sweep(env, later + MINUTE)).toMatchObject({ listed: 3, stopped: 0 });
 		for (const d of [ready, starting, unknown]) expect(running(d.deploymentId)).toBe(true);
 		expect(edgegap.count("DELETE", "/v1/stop/")).toBe(0);
 	});
 
-	it("retries a failed stop on the next sweep, with no fresh grace for an unmatched tag", async () => {
+	it("retries a failed stop on the next sweep", async () => {
 		const ended = await leakedAfterEnd(0, "Paris");
-		const orphan = edgegap.foreign([UNKNOWN_TAG]);
-		const t0 = Date.now();
-		edgegap.failStops = 1;
-		expect(await sweep(env, t0)).toMatchObject({ stopped: 0, failed: 1, error: "stop: stop HTTP 503" });
+		const stray = edgegap.foreign([UNKNOWN_TAG], V);
+		edgegap.refuseStops = new Set([ended, stray.id]);
+		expect(await sweep(env)).toMatchObject({ stopped: 0, failed: 2, error: "stop: stop HTTP 503" });
 		expect(running(ended)).toBe(true);
-		expect(await sweep(env, t0 + 1)).toMatchObject({ stopped: 1, failed: 0, error: null });
+		expect(running(stray.id)).toBe(true);
+		edgegap.refuseStops.clear();
+		expect(await sweep(env)).toMatchObject({ stopped: 2, failed: 0, error: null });
 		expect(running(ended)).toBe(false);
-
-		edgegap.failStops = 1;
-		expect(await sweep(env, t0 + GRACE)).toMatchObject({ stopped: 0, failed: 1 });
-		expect(running(orphan.id)).toBe(true);
-		expect(await sweep(env, t0 + GRACE + 1)).toMatchObject({ stopped: 1, failed: 0 });
-		expect(running(orphan.id)).toBe(false);
-		expect(await sweep(env, t0 + GRACE + 2)).toMatchObject({ listed: 0, stopped: 0 });
+		expect(running(stray.id)).toBe(false);
+		expect(await sweep(env)).toMatchObject({ listed: 0, stopped: 0 });
 	});
 
 	it("follows the listing's pages", async () => {
 		edgegap.maxPageSize = 2;
-		const orphans = Array.from({ length: 7 }, (_, i) => edgegap.foreign([`om-${i.toString(16).padStart(32, "0")}`]));
-		const t0 = Date.now();
-		expect((await sweep(env, t0)).listed).toBe(7);
+		const strays = Array.from({ length: 7 }, (_, i) => edgegap.foreign([`om-${i.toString(16).padStart(32, "0")}`], V));
+		expect(await sweep(env)).toMatchObject({ listed: 7, stopped: 7 });
 		expect(edgegap.count("GET", "/v1/deployments?page=")).toBe(4);
-		expect(await sweep(env, t0 + GRACE)).toMatchObject({ listed: 7, stopped: 7 });
-		for (const d of orphans) expect(running(d.id)).toBe(false);
+		for (const d of strays) expect(running(d.id)).toBe(false);
 	});
 
 	it("bounds a stop that never answers, and the other stops still land", async () => {
@@ -148,7 +138,7 @@ describe("the orphan sweep", () => {
 		expect(running(hung)).toBe(true);
 
 		const page = await adminPage(env);
-		expect(page).toMatch(/2 tagged deployments, 1 stopped, 1 stops failed; last error: stop: stop HTTP 0/);
+		expect(page).toMatch(/2 tagged deployments, 0 unattributed, 1 stopped, 1 stops failed; last error: stop: stop HTTP 0/);
 	});
 
 	it("stops nothing, and waits no longer than the bound, when the registry that owns a claim does not answer", async () => {

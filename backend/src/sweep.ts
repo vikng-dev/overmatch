@@ -8,9 +8,9 @@
 // id's other half (`idOf`). The Registry writes a claim's row before its deploy call, so a
 // deployment of a valid version that no live row of that Registry owns (`liveDeployments`) is
 // stopped at once. Decisions are per deployment: with several `om-` tags, one live claim keeps it.
-// A deployment whose status names no valid version cannot be routed; it is a suspect, stopped once
-// the sweep has seen it so for START_DEADLINE_S (suspect ages persist in D1 `sweep`). A status read
-// or a Registry that does not answer stops nothing it would have decided.
+// A deployment whose status names no valid version cannot be routed and is never stopped here: it is
+// logged and counted `unattributed`, and left to Edgegap's max_duration. A status read or a Registry
+// that does not answer stops nothing it would have decided.
 //
 // Bounds per sweep: SWEEP_MAX_PAGES listing pages (a hard bound far above the fleet; hitting it is
 // logged), SWEEP_MAX_CHECKS status reads and SWEEP_MAX_STOPS stops, CONCURRENCY calls in flight,
@@ -37,6 +37,8 @@ export interface SweepResult {
 	at: number;
 	/** Deployments carrying an `om-` tag. */
 	listed: number;
+	/** Tagged deployments whose status named no valid version: never stopped here. */
+	unattributed: number;
 	stopped: number;
 	failed: number;
 	/** The last failure, as diag() text. */
@@ -50,46 +52,28 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 	const timeout = cfg.providerTimeoutMs;
 	const provider = edgegapFor(env, timeout);
 	const turn = Math.floor(now / SWEEP_PERIOD_MS);
-	const result: SweepResult = { at: now, listed: 0, stopped: 0, failed: 0, error: null };
+	const result: SweepResult = { at: now, listed: 0, unattributed: 0, stopped: 0, failed: 0, error: null };
 	const fail = (what: string, err: unknown) => {
 		result.error = `${what}: ${diag(err)}`;
 		console.error("sweep", result.error);
 	};
 
-	let previous: Record<string, number> = {};
-	try {
-		const row = await bounded(timeout, () => env.DB.prepare("SELECT suspects FROM sweep WHERE id = 1").first<{ suspects: string }>());
-		if (row) previous = JSON.parse(row.suspects) as Record<string, number>;
-	} catch (err) {
-		fail("state read", err);
-	}
-
 	const tagged: { id: string; hexes: string[] }[] = [];
-	let truncated: boolean;
 	try {
 		const out = await provider.deployments(SWEEP_MAX_PAGES);
-		truncated = out.truncated;
-		if (truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
+		if (out.truncated) console.warn("sweep: listing truncated at", SWEEP_MAX_PAGES, "pages");
 		for (const d of out.items) {
 			const hexes = d.tags.map((t) => TAG.exec(t)?.[1]).filter((h): h is string => !!h);
 			if (hexes.length) tagged.push({ id: d.id, hexes });
 		}
 	} catch (err) {
 		fail("list", err);
-		await save(env, result, previous, timeout);
+		await save(env, result, timeout);
 		return result;
 	}
 	result.listed = tagged.length;
 
-	// A suspect this sweep did not judge keeps its age: unlisted past a truncation, or unchecked.
-	const suspects: Record<string, number> = {};
-	const keepAge = (id: string) => {
-		if (previous[id] !== undefined) suspects[id] = previous[id];
-	};
-	if (truncated) for (const id of Object.keys(previous)) keepAge(id);
-
 	const checks = rotated(tagged, turn);
-	for (const d of checks.slice(SWEEP_MAX_CHECKS)) keepAge(d.id);
 	const stop: { id: string; why: string }[] = [];
 	const claims = new Map<string, Claim[]>();
 	await settleAll(
@@ -99,14 +83,13 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 				st = await provider.status(d.id);
 			} catch (err) {
 				fail("status", err);
-				keepAge(d.id);
 				return;
 			}
 			if (st.phase === "gone") return;
 			const version = st.version;
 			if (!validVersion(version)) {
-				suspects[d.id] = previous[d.id] ?? now;
-				if (suspects[d.id] + cfg.startDeadlineMs <= now) stop.push({ id: d.id, why: "unknown version" });
+				result.unattributed++;
+				console.warn("sweep: no version in status, left to max_duration", d.id);
 				return;
 			}
 			claims.set(version, [...(claims.get(version) ?? []), ...d.hexes.map((hex) => ({ serverId: idOf(version, hex), deploymentId: d.id }))]);
@@ -143,7 +126,7 @@ export async function sweep(env: Env, now = Date.now()): Promise<SweepResult> {
 		CONCURRENCY,
 	);
 
-	await save(env, result, suspects, timeout);
+	await save(env, result, timeout);
 	return result;
 }
 
@@ -155,15 +138,15 @@ export function rotated<T extends { id: string }>(items: T[], turn: number): T[]
 	return [...sorted.slice(k), ...sorted.slice(0, k)];
 }
 
-async function save(env: Env, r: SweepResult, suspects: Record<string, number>, timeout: number): Promise<void> {
+async function save(env: Env, r: SweepResult, timeout: number): Promise<void> {
 	try {
 		await bounded(timeout, () =>
 			env.DB.prepare(
-				`INSERT INTO sweep (id, at, listed, stopped, failed, error, suspects) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
-				 ON CONFLICT (id) DO UPDATE SET at = excluded.at, listed = excluded.listed, stopped = excluded.stopped,
-				   failed = excluded.failed, error = excluded.error, suspects = excluded.suspects`,
+				`INSERT INTO sweep (id, at, listed, unattributed, stopped, failed, error) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)
+				 ON CONFLICT (id) DO UPDATE SET at = excluded.at, listed = excluded.listed, unattributed = excluded.unattributed,
+				   stopped = excluded.stopped, failed = excluded.failed, error = excluded.error`,
 			)
-				.bind(r.at, r.listed, r.stopped, r.failed, r.error, JSON.stringify(suspects))
+				.bind(r.at, r.listed, r.unattributed, r.stopped, r.failed, r.error)
 				.run(),
 		);
 	} catch (err) {
@@ -174,7 +157,7 @@ async function save(env: Env, r: SweepResult, suspects: Record<string, number>, 
 /** The last sweep's result, for /admin; null before the first sweep or if D1 does not answer. */
 export async function lastSweep(env: Env): Promise<SweepResult | null> {
 	try {
-		return await env.DB.prepare("SELECT at, listed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>();
+		return await env.DB.prepare("SELECT at, listed, unattributed, stopped, failed, error FROM sweep WHERE id = 1").first<SweepResult>();
 	} catch (err) {
 		console.error("sweep state read failed", diag(err));
 		return null;
