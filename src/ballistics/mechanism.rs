@@ -10,11 +10,12 @@
 //! The target structure and its staging are the design doc's:
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md`, Parts 1 and 5.
 //! What this module still decides by a compatibility rule rather than a law is the overmatch switch
-//! ([`OvermatchProjection`]).
+//! ([`OvermatchProjection`]); what it decides by a modelling convention rather than a law is how an
+//! authoring overlap of different substances resists ([`overlap_factor`]).
 
 use bevy::prelude::*;
 
-use super::walk::Encounter;
+use super::walk::{Encounter, VolumeContact};
 use super::{RoundBody, capability_of};
 use crate::substances::{REFERENCE_FACTOR, SubstanceRegistry};
 
@@ -184,12 +185,10 @@ impl Mechanism for SolidShot {
     /// The rigid force law across the encounter: on each sample the force is the reference's
     /// `A (a + k v²)` scaled by the present substance's share `factor / REFERENCE_FACTOR`, the disc
     /// force their sample mean, so the potential falls by `share · L / (m / (2 A k))` over `L`
-    /// metres. Where a sample's layer holds several substances — an authoring overlap, §13.2 — it is
-    /// resisted once, by the most resistant of them (the union's law). A sample's substances are
-    /// the same over the whole encounter ([`SampleLayer::present`](super::walk::SampleLayer)) and
-    /// each carries one factor (`VolumeTable::new`), so its most resistant factor is read over all
-    /// its contacts. Each volume met takes a dose of its own factor over the part of its contact
-    /// the consumed progress covers (§13.2's damage law: no ownership).
+    /// metres, each sample's share read by [`overlap_factor`]. Encounters are advanced strictly in
+    /// order, each from the state the last one left: nothing is reduced across them. Each volume
+    /// met takes a dose of its own factor over the part of its contact the consumed progress covers
+    /// (§13.2's damage law: no ownership).
     fn advance(
         &self,
         state: SolidShotState,
@@ -202,13 +201,7 @@ impl Mechanism for SolidShot {
         let resisted: f64 = encounter
             .samples
             .iter()
-            .map(|sample| {
-                sample
-                    .present
-                    .iter()
-                    .fold(0.0f32, |most, presence| most.max(presence.material.factor))
-                    as f64
-            })
+            .map(|sample| overlap_factor(&sample.present) as f64)
             .sum();
         let drop = length * resisted / disc / REFERENCE_FACTOR as f64 / self.scale;
         let potential = self.potential(state.speed);
@@ -256,6 +249,20 @@ impl Mechanism for SolidShot {
     fn reference_mm(&self, state: SolidShotState) -> f64 {
         capability_of((self.scale, self.inertia), state.speed)
     }
+}
+
+/// THE UNION-FIELD OVERLAP RULE: what one sample is resisted by where several volumes are present
+/// at once. Where they are of different substances — an authoring overlap, §13.2 — the sample is
+/// resisted once, by the most resistant of them. This is a modelling convention for overlap in the
+/// authored geometry (armour is a union field, §13), not a material law: no physical body is two
+/// substances at one point. It reads factors over all `contacts`, which is the factor at every
+/// point of the encounter because a sample's substances are the same over the whole encounter
+/// ([`SampleLayer::present`](super::walk::SampleLayer)) and each substance carries one factor
+/// (`VolumeTable::new`).
+pub(crate) fn overlap_factor(contacts: &[VolumeContact]) -> f32 {
+    contacts
+        .iter()
+        .fold(0.0f32, |most, contact| most.max(contact.material.factor))
 }
 
 /// COMPATIBILITY ADAPTER: the overmatch switch, kept only until turning at the face replaces the
@@ -310,7 +317,7 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ballistics::walk::{SampleLayer, VolumeContact, VolumeMaterial};
+    use crate::ballistics::walk::{SampleLayer, VolumeMaterial};
 
     /// Fixture data: an 88-class body.
     const BODY: RoundBody = RoundBody {
@@ -399,8 +406,9 @@ mod tests {
         }
     }
 
-    /// An authoring overlap is resisted once, by its most resistant substance; every volume in it
-    /// still takes a dose of its own factor (no ownership).
+    /// THE UNION-FIELD OVERLAP RULE. An overlap of two different substances is resisted once, by
+    /// the most resistant of them; every volume in it still takes a dose of its own factor (no
+    /// ownership).
     #[test]
     fn an_overlap_is_resisted_once_by_its_most_resistant_substance() {
         let round = round();
@@ -417,6 +425,13 @@ mod tests {
             &HEAD_ON,
         );
         assert_eq!(alone.state, overlapped.state);
+        let listed_weak_first = round.advance(
+            round.at(800.0),
+            &encounter(0.05, 1, &[&[(2, 10.0), (1, 1000.0)]]),
+            &LIMITS,
+            &HEAD_ON,
+        );
+        assert_eq!(alone.state, listed_weak_first.state);
         assert_eq!(
             overlapped.effects,
             vec![

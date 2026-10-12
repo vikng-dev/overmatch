@@ -3923,3 +3923,78 @@ fn a_same_substance_seam_does_not_change_the_outcome() {
         "duplicated in the same substance: both copies are dosed, neither owns the chord"
     );
 }
+
+/// SEQUENTIAL LAYERS ARE ORDERED, NEVER REDUCED. Two plates of different substances in sequence
+/// cost the round both of them, never the more resistant one alone. The rigid force law's
+/// potential drop is additive over encounters, so a round that perforates both leaves at the same
+/// speed in either order (to the rounding of the per-encounter speed round trip); a round that
+/// stops inside them stops at a different depth, in a different volume, by order. Fixture data:
+/// an 88-class body, 0.05 m of reference steel and 0.05 m of a substance at a tenth of it.
+#[test]
+fn sequential_layers_advance_in_order_and_cost_both() {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let (hard, soft) = (REFERENCE_FACTOR, 0.1 * REFERENCE_FACTOR);
+    let through = |speed: f32, layers: [(u32, f32); 2]| {
+        let encounters: Vec<Encounter> = layers
+            .iter()
+            .enumerate()
+            .map(|(index, layer)| {
+                let start = 0.05 * index as f64;
+                stretch(start, start + 0.05, true, &[*layer])
+            })
+            .collect();
+        advance_through(
+            &round,
+            round.at(speed),
+            &encounters,
+            &Limits { rest: 0.0 },
+            &geometry,
+        )
+        .unwrap()
+    };
+    let hard_alone = advance_through(
+        &round,
+        round.at(1000.0),
+        &[stretch(0.0, 0.05, true, &[(1, hard)])],
+        &Limits { rest: 0.0 },
+        &geometry,
+    )
+    .unwrap();
+
+    let hard_first = through(1000.0, [(1, hard), (2, soft)]);
+    let soft_first = through(1000.0, [(2, soft), (1, hard)]);
+    assert_eq!((hard_first.stop, soft_first.stop), (None, None));
+    assert!(
+        hard_first.state.speed < hard_alone.state.speed,
+        "the soft plate behind the hard one costs the round: {} against {}",
+        hard_first.state.speed,
+        hard_alone.state.speed
+    );
+    assert!(
+        (hard_first.state.speed / soft_first.state.speed - 1.0).abs() < 1.0e-12,
+        "{} against {}",
+        hard_first.state.speed,
+        soft_first.state.speed
+    );
+
+    let hard_first = through(200.0, [(1, hard), (2, soft)]);
+    let soft_first = through(200.0, [(2, soft), (1, hard)]);
+    let (Some(a), Some(b)) = (hard_first.stop, soft_first.stop) else {
+        panic!("both orders stop the round inside the stack");
+    };
+    assert!(
+        a < 0.05 && b > 0.05,
+        "hard first rests at {a}, soft first at {b}"
+    );
+    assert!(!hard_first.doses.contains_key(&volume(2)));
+    assert!(soft_first.doses.contains_key(&volume(1)));
+}
