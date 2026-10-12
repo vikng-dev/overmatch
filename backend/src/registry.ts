@@ -59,6 +59,7 @@ type TicketRow = {
 	failed_reason: string | null;
 	created_at: number;
 	attached_at: number | null;
+	arrived_at: number | null;
 }
 
 /** A live server as the admin dashboard sees it: no key, no secret. */
@@ -122,7 +123,8 @@ CREATE TABLE IF NOT EXISTS tickets (
 	attempts INTEGER NOT NULL DEFAULT 0,
 	failed_reason TEXT,
 	created_at INTEGER NOT NULL,
-	attached_at INTEGER
+	attached_at INTEGER,
+	arrived_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS catalog (
 	k TEXT PRIMARY KEY,
@@ -222,6 +224,7 @@ export class Registry extends DurableObject<Env> {
 			serverId,
 		).rowsWritten;
 		if (!written) return { status: 410 };
+		this.acknowledgeArrivals(serverId, hb.players - s.players, now);
 		if (s.state === "starting") {
 			if (!(await this.promote(serverId)) && s.deployment_id) await this.refreshStatus(serverId);
 		}
@@ -315,13 +318,33 @@ export class Registry extends DurableObject<Env> {
 		}
 	}
 
-	/** Reservations: tickets attached within the TTL count against capacity, because a player's
-	 *  arrival reaches `players` only a heartbeat later. */
+	/** Reservations: a ticket attached within the TTL and not yet seen to arrive counts against
+	 *  capacity, because a player's arrival reaches `players` only a heartbeat later. */
 	private load(s: ServerRow, now: number): number {
 		const r = this.sql
-			.exec<{ n: number }>("SELECT COUNT(*) AS n FROM tickets WHERE server_id = ? AND attached_at > ?", s.id, now - this.cfg.reservationTtlMs)
+			.exec<{ n: number }>(
+				"SELECT COUNT(*) AS n FROM tickets WHERE server_id = ? AND attached_at > ? AND arrived_at IS NULL",
+				s.id,
+				now - this.cfg.reservationTtlMs,
+			)
 			.one().n;
 		return s.players + r;
+	}
+
+	/** A heartbeat's player increase is that many arrivals: the oldest outstanding reservations are
+	 *  marked arrived and stop counting. Arrivals are not attributable to tickets, so a departure and
+	 *  an arrival inside one interval leave a reservation outstanding until its TTL — the safe side. */
+	private acknowledgeArrivals(serverId: string, increase: number, now: number): void {
+		if (increase <= 0) return;
+		this.sql.exec(
+			`UPDATE tickets SET arrived_at = ? WHERE id IN (
+				SELECT id FROM tickets WHERE server_id = ? AND arrived_at IS NULL AND attached_at > ? ORDER BY attached_at LIMIT ?
+			)`,
+			now,
+			serverId,
+			now - this.cfg.reservationTtlMs,
+			increase,
+		);
 	}
 
 	/** Attach the ticket to the best open server in its locations, or start one. The read and the

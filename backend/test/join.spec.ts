@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bringUp, call, join, launched, ticket } from "./helpers";
+import { bringUp, call, join, launched, registry, ticket } from "./helpers";
 
 const V = "0.5.0";
 
@@ -78,14 +78,27 @@ describe("join-or-create", () => {
 	it("full servers are skipped; a reservation counts before the heartbeat shows the player", async () => {
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		const full = await bringUp(0, 10);
-		const t = await join({ version: V, locations: ["Paris"], pings: {} });
+		await join({ version: V, locations: ["Paris"], pings: {} }); // full is full: a second server
 		expect(edgegap.count("POST", "/v1/deploy")).toBe(2);
-		const second = await bringUp(1, 9);
+		const second = await bringUp(1, 8); // 8 players, the joiner among them
+
+		const t = await join({ version: V, locations: ["Paris"], pings: {} });
 		expect((await ticket(t)).key).toBe(second.key);
 		expect((await ticket(t)).key).not.toBe(full.key);
-		// `t` is reserved on `second` (9 + 1 = 10): the next join must start a third server.
+		const u = await join({ version: V, locations: ["Paris"], pings: {} });
+		expect((await ticket(u)).key).toBe(second.key);
+		// 8 present + t and u reserved = 10: the next join must start a third server.
 		await join({ version: V, locations: ["Paris"], pings: {} });
 		expect(edgegap.count("POST", "/v1/deploy")).toBe(3);
+	});
+
+	it("players who arrived are not counted again as reservations", async () => {
+		for (let i = 0; i < 5; i++) await join({ version: V, locations: ["Paris"], pings: {} });
+		await bringUp(0, 5); // the five ticket holders arrived
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(1);
+		const [s] = await registry(V).snapshot();
+		expect(s.players).toBe(5);
 	});
 
 	it("a closing server is not joinable", async () => {
