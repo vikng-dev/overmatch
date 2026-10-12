@@ -7,9 +7,8 @@
 //! ```
 //!
 //! Each client is [`run`](super::run)'s matchmaking composition without the window or the
-//! presentation layer: the Join menu's state and Worker link (`matchmaking::install`), the link
-//! spawned from a ready ticket (`spawn_matched_link`), the connection driver, the screen derivation
-//! and the sim. The join is the menu's own (`matchmaking::try_join`: the selection set, then the
+//! presentation layer: the Join menu's state, Worker link and match-link systems
+//! (`install_matchmaking_link`), the connection driver, the screen derivation and the sim. The join is the menu's own (`matchmaking::try_join`: the selection set, then the
 //! Join button's handler), selecting only [`LOCATION`]. Client B joins [`B_JOIN_DELAY`] after A, so
 //! the Worker places B on the server A's join claimed, whether it is still starting or ready. Once
 //! both are in the match and each sees both tanks, both disconnect cleanly, which starts the
@@ -24,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::flow::Flow;
-use crate::net::matchmaking::{self, MatchReady, MatchUnreachable, ReadyMatch};
+use crate::net::matchmaking::{self, MatchClosed, MatchReady, ReadyMatch};
 
 /// The only location selected: a Worker location id from `GET /v1/locations`.
 const LOCATION: &str = "Singapore";
@@ -66,9 +65,11 @@ fn record_ready(mut ready: MessageReader<MatchReady>, mut probe: ResMut<Probe>) 
     }
 }
 
-fn record_unreachable(mut unreachable: MessageReader<MatchUnreachable>, mut probe: ResMut<Probe>) {
-    if let Some(MatchUnreachable(reason)) = unreachable.read().last() {
-        probe.unreachable = Some(reason.clone());
+fn record_unreachable(mut closed: MessageReader<MatchClosed>, mut probe: ResMut<Probe>) {
+    for closed in closed.read() {
+        if let MatchClosed::Unreachable(reason) = closed {
+            probe.unreachable = Some(reason.clone());
+        }
     }
 }
 
@@ -128,16 +129,12 @@ fn client_app(api: &str, log: bool) -> App {
 
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
-    matchmaking::install(&mut app, api);
+    install_matchmaking_link(&mut app, api);
     app.add_systems(
         Update,
-        (
-            spawn_matched_link,
-            abandon_unreachable_match.after(drive_connection),
-            derive_flow
-                .after(drive_connection)
-                .before(crate::overlay::OverlaySet::Declare),
-        ),
+        derive_flow
+            .after(drive_connection)
+            .before(crate::overlay::OverlaySet::Declare),
     );
     app.insert_resource(ClientLinkTemplate {
         client_id: std::hash::RandomState::new().build_hasher().finish(),

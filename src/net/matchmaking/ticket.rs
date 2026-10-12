@@ -1,5 +1,6 @@
 //! The Join button's state machine: request a ticket, poll it until the Worker answers `ready` or
-//! `failed`, hand a ready match to the connection. Pure — times are seconds of real time passed in
+//! `failed`, hand a ready match to the connection, and — while that match's link is down — keep
+//! polling the ticket, whose `failed` says the server is gone. Pure — times are seconds of real time passed in
 //! by the caller, and every request it asks for carries the flow's generation, so an answer that
 //! lands after a cancel (or after a newer join) is recognised as stale and dropped.
 
@@ -48,16 +49,44 @@ pub(super) enum Phase {
         in_flight: bool,
         errors: u32,
     },
-    /// Ready: the lobby has handed the match to the connection and stays closed while it lives.
-    Connecting(ReadyMatch),
+    /// Ready: the lobby has handed the match to the connection and stays closed while it lives. The
+    /// ticket is kept: while the match's link is down it is polled ([`JoinFlow::due_lost_poll`]),
+    /// `in_flight` while a poll is out.
+    Connecting {
+        ready: ReadyMatch,
+        ticket: String,
+        next_poll: f64,
+        in_flight: bool,
+    },
+}
+
+/// What a status answer changed, for the caller to act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum StatusEvent {
+    Nothing,
+    /// The ticket turned ready: connect to this match.
+    Ready(ReadyMatch),
+    /// The join failed; [`JoinFlow::failure`] says why.
+    Failed,
+    /// The connected match's server is gone, for this reason.
+    ServerGone(String),
+}
+
+/// Why the lobby is idle again, shown until the next join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Notice {
+    /// The join failed.
+    Failed(String),
+    /// The match the player was in ended.
+    Ended(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct JoinFlow {
     generation: u64,
     phase: Phase,
-    /// Why the last attempt ended, shown in the lobby until the next join.
-    failure: Option<String>,
+    /// Why the last attempt or match ended, shown in the lobby until the next join.
+    notice: Option<Notice>,
 }
 
 impl Default for JoinFlow {
@@ -65,7 +94,7 @@ impl Default for JoinFlow {
         Self {
             generation: 0,
             phase: Phase::Idle,
-            failure: None,
+            notice: None,
         }
     }
 }
@@ -75,8 +104,20 @@ impl JoinFlow {
         &self.phase
     }
 
+    /// Why the last join failed, if it did.
     pub(super) fn failure(&self) -> Option<&str> {
-        self.failure.as_deref()
+        match &self.notice {
+            Some(Notice::Failed(reason)) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Why the last match ended, if the server went away.
+    pub(super) fn ended(&self) -> Option<&str> {
+        match &self.notice {
+            Some(Notice::Ended(reason)) => Some(reason),
+            _ => None,
+        }
     }
 
     pub(super) fn busy(&self) -> bool {
@@ -89,7 +130,7 @@ impl JoinFlow {
             return None;
         }
         self.generation += 1;
-        self.failure = None;
+        self.notice = None;
         self.phase = Phase::Requesting { since: now };
         Some(self.generation)
     }
@@ -100,14 +141,19 @@ impl JoinFlow {
         if matches!(self.phase, Phase::Requesting { .. } | Phase::Waiting { .. }) {
             self.generation += 1;
             self.phase = Phase::Idle;
-            self.failure = None;
+            self.notice = None;
         }
     }
 
-    fn fail(&mut self, reason: String) {
+    /// Back to idle with `notice`; every answer still out becomes stale.
+    fn idle(&mut self, notice: Option<Notice>) {
         self.generation += 1;
         self.phase = Phase::Idle;
-        self.failure = Some(reason);
+        self.notice = notice;
+    }
+
+    fn fail(&mut self, reason: String) {
+        self.idle(Some(Notice::Failed(reason)));
     }
 
     /// The `POST /v1/join` answer: a ticket to poll at once, or the reason it was refused.
@@ -150,47 +196,114 @@ impl JoinFlow {
         }
     }
 
-    pub(super) fn status(&mut self, generation: u64, outcome: StatusOutcome, now: f64) {
-        if generation != self.generation {
-            return;
+    /// The poll due now while the match's link is down, if any: `(generation, ticket)`. Marks it in
+    /// flight.
+    pub(super) fn due_lost_poll(&mut self, now: f64) -> Option<(u64, String)> {
+        let generation = self.generation;
+        match &mut self.phase {
+            Phase::Connecting {
+                ticket,
+                next_poll,
+                in_flight,
+                ..
+            } if !*in_flight && now >= *next_poll => {
+                *in_flight = true;
+                Some((generation, ticket.clone()))
+            }
+            _ => None,
         }
-        let Phase::Waiting {
-            starting,
-            next_poll,
-            in_flight,
-            errors,
-            ..
-        } = &mut self.phase
-        else {
-            return;
-        };
-        *in_flight = false;
-        match outcome {
-            StatusOutcome::Starting => {
-                *starting = true;
-                *errors = 0;
-                *next_poll = now + POLL_INTERVAL_S;
-            }
-            StatusOutcome::Ready(ready) => {
-                self.failure = None;
-                self.phase = Phase::Connecting(ready);
-            }
-            StatusOutcome::Failed(reason) | StatusOutcome::Rejected(reason) => self.fail(reason),
-            StatusOutcome::Transient(reason) => {
-                *errors += 1;
-                if *errors >= POLL_ERROR_LIMIT {
-                    self.fail(format!("lost contact with the matchmaker ({reason})"));
-                } else {
-                    *next_poll = now + POLL_INTERVAL_S;
+    }
+
+    pub(super) fn status(
+        &mut self,
+        generation: u64,
+        outcome: StatusOutcome,
+        now: f64,
+    ) -> StatusEvent {
+        if generation != self.generation {
+            return StatusEvent::Nothing;
+        }
+        match &mut self.phase {
+            Phase::Waiting {
+                ticket,
+                starting,
+                next_poll,
+                in_flight,
+                errors,
+                ..
+            } => {
+                *in_flight = false;
+                match outcome {
+                    StatusOutcome::Starting => {
+                        *starting = true;
+                        *errors = 0;
+                        *next_poll = now + POLL_INTERVAL_S;
+                        StatusEvent::Nothing
+                    }
+                    StatusOutcome::Ready(ready) => {
+                        let ticket = std::mem::take(ticket);
+                        self.phase = Phase::Connecting {
+                            ready,
+                            ticket,
+                            next_poll: now + POLL_INTERVAL_S,
+                            in_flight: false,
+                        };
+                        StatusEvent::Ready(ready)
+                    }
+                    StatusOutcome::Failed(reason) | StatusOutcome::Rejected(reason) => {
+                        self.fail(reason);
+                        StatusEvent::Failed
+                    }
+                    StatusOutcome::Transient(reason) => {
+                        *errors += 1;
+                        if *errors >= POLL_ERROR_LIMIT {
+                            self.fail(format!("lost contact with the matchmaker ({reason})"));
+                            StatusEvent::Failed
+                        } else {
+                            *next_poll = now + POLL_INTERVAL_S;
+                            StatusEvent::Nothing
+                        }
+                    }
                 }
             }
+            // Only `failed` says the server is gone. `ready` and `starting` (the Worker answers
+            // `starting` for a stopping server whose fate it does not yet know) keep the
+            // reconnects going; so do an expired ticket (`Rejected`) and a lost answer, which say
+            // nothing about the server — the reconnect give-up covers those.
+            Phase::Connecting {
+                next_poll,
+                in_flight,
+                ..
+            } => {
+                *in_flight = false;
+                *next_poll = now + POLL_INTERVAL_S;
+                match outcome {
+                    StatusOutcome::Failed(reason) => StatusEvent::ServerGone(reason),
+                    _ => StatusEvent::Nothing,
+                }
+            }
+            _ => StatusEvent::Nothing,
         }
     }
 
     /// The connection to a ready match gave up before it ever connected.
     pub(super) fn connection_failed(&mut self, reason: String) {
-        if matches!(self.phase, Phase::Connecting(_)) {
+        if matches!(self.phase, Phase::Connecting { .. }) {
             self.fail(reason);
+        }
+    }
+
+    /// The match's server went away after the player was in it.
+    pub(super) fn match_ended(&mut self, reason: String) {
+        if matches!(self.phase, Phase::Connecting { .. }) {
+            self.idle(Some(Notice::Ended(reason)));
+        }
+    }
+
+    /// The player left the match.
+    pub(super) fn left(&mut self) {
+        if matches!(self.phase, Phase::Connecting { .. }) {
+            self.idle(None);
         }
     }
 
@@ -254,8 +367,11 @@ mod tests {
         let (generation, _) = flow.due_poll(0.4 + POLL_INTERVAL_S).unwrap();
         assert_eq!(flow.elapsed(1.4), Some(1.4));
 
-        flow.status(generation, StatusOutcome::Ready(ready()), 1.6);
-        assert_eq!(flow.phase(), &Phase::Connecting(ready()));
+        assert_eq!(
+            flow.status(generation, StatusOutcome::Ready(ready()), 1.6),
+            StatusEvent::Ready(ready())
+        );
+        assert!(matches!(flow.phase(), Phase::Connecting { ready: r, .. } if *r == ready()));
         assert!(flow.busy());
         assert_eq!(flow.join(2.0), None, "no second join while connecting");
     }
@@ -363,6 +479,61 @@ mod tests {
         assert_eq!(flow.failure(), Some("could not reach the match server"));
         flow.connection_failed("ignored when idle".into());
         assert_eq!(flow.failure(), Some("could not reach the match server"));
+    }
+
+    /// While the match's link is down the kept ticket is polled once per interval; only `failed`
+    /// reports the server gone, and an ended match or a leave returns to idle.
+    #[test]
+    fn a_connected_match_polls_its_ticket_and_hears_the_server_go() {
+        let mut flow = JoinFlow::default();
+        let generation = waiting(&mut flow);
+        flow.status(generation, StatusOutcome::Ready(ready()), 1.0);
+        assert_eq!(flow.due_poll(5.0), None, "the join poll is over");
+        assert_eq!(
+            flow.due_lost_poll(1.5),
+            None,
+            "the first lost poll waits its interval"
+        );
+        let (polled, ticket) = flow.due_lost_poll(1.0 + POLL_INTERVAL_S).unwrap();
+        assert_eq!((polled, ticket.as_str()), (generation, "T"));
+        assert_eq!(
+            flow.due_lost_poll(9.0),
+            None,
+            "one poll in flight at a time"
+        );
+        for keep in [
+            StatusOutcome::Ready(ready()),
+            StatusOutcome::Starting,
+            StatusOutcome::Rejected("unknown ticket".into()),
+            StatusOutcome::Transient("timeout".into()),
+        ] {
+            assert_eq!(flow.status(generation, keep, 2.0), StatusEvent::Nothing);
+            assert!(flow.due_lost_poll(2.0 + POLL_INTERVAL_S).is_some());
+        }
+        assert_eq!(
+            flow.status(
+                generation,
+                StatusOutcome::Failed("server stopped".into()),
+                3.0
+            ),
+            StatusEvent::ServerGone("server stopped".into())
+        );
+        flow.match_ended("server stopped".into());
+        assert_eq!(flow.phase(), &Phase::Idle);
+        assert_eq!(flow.ended(), Some("server stopped"));
+        assert_eq!(flow.failure(), None, "an ended match is not a failed join");
+        flow.join(4.0).unwrap();
+        assert_eq!(flow.ended(), None, "a new join clears the notice");
+    }
+
+    #[test]
+    fn leaving_returns_to_idle_with_no_notice() {
+        let mut flow = JoinFlow::default();
+        let generation = waiting(&mut flow);
+        flow.status(generation, StatusOutcome::Ready(ready()), 1.0);
+        flow.left();
+        assert_eq!(flow.phase(), &Phase::Idle);
+        assert_eq!((flow.failure(), flow.ended()), (None, None));
     }
 
     #[test]

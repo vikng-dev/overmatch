@@ -100,6 +100,26 @@ pub(crate) fn in_match_plugin(app: &mut App) {
     configure_in_match(app);
 }
 
+/// Per-match view state: a resource reset to its initial value when the client leaves a match, so
+/// nothing one match latched (a sight mode, an open map, a pending respawn) carries into the next.
+/// A root that never leaves a match (offline, a sandbox) never resets it.
+pub(crate) trait MatchResourceExt {
+    /// `init_resource::<R>()`, plus the reset on leaving a match.
+    fn init_match_resource<R: Resource + FromWorld>(&mut self) -> &mut Self;
+}
+
+impl MatchResourceExt for App {
+    fn init_match_resource<R: Resource + FromWorld>(&mut self) -> &mut Self {
+        self.init_resource::<R>()
+            .add_systems(OnExit(Flow::InMatch), reset_resource::<R>)
+    }
+}
+
+fn reset_resource<R: Resource + FromWorld>(world: &mut World) {
+    let initial = R::from_world(world);
+    world.insert_resource(initial);
+}
+
 /// Panics unless [`Flow`] is registered: a plugin that spawns on `OnEnter(Flow::…)` or gates on
 /// `in_state(Flow::…)` would otherwise never draw, since `in_state` is false while the state is
 /// absent.

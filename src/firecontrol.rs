@@ -19,6 +19,7 @@ use bevy::prelude::*;
 
 use crate::ballistics::{drag_k, freeflight_step};
 use crate::command::gather_commands;
+use crate::flow::MatchResourceExt;
 use crate::sight::in_gunner;
 use crate::state::{GameplaySet, PlayerInputSet};
 
@@ -163,7 +164,7 @@ pub fn lob(v: Vec3, theta: f32) -> Vec3 {
 /// The player's range dial — client-side control state; its value rides to the sim inside the
 /// command (`gather_commands` copies it absolute each frame).
 pub fn client_plugin(app: &mut App) {
-    app.init_resource::<Ranging>()
+    app.init_match_resource::<Ranging>()
         // Scroll dials the range in the optic (mutually exclusive with `orbit_camera`'s third-person
         // zoom, which also reads scroll — they're gated on opposite view modes, so no contention).
         //

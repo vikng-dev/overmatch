@@ -9,7 +9,7 @@ use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::spec::{FireMode, ViewKind};
 use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
@@ -39,7 +39,7 @@ struct CrewSelect {
 /// reload state cannot be told is the one this card exists to report on.
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "crew_ui");
-    app.init_resource::<CrewSelect>()
+    app.init_match_resource::<CrewSelect>()
         .add_systems(OnEnter(Flow::InMatch), (spawn_crew_bar, spawn_status_panel))
         .add_systems(
             Update,

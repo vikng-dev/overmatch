@@ -27,6 +27,8 @@ mod hosting;
 mod input_cadence;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
+#[cfg(test)]
+mod link_drop;
 /// The pre-connect Join menu against the matchmaking Worker (matchmaking mode only).
 mod matchmaking;
 mod physics;

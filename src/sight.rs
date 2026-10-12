@@ -16,6 +16,7 @@ use crate::camera::{GUNNER_FOV_FALLBACK, view_fov};
 use crate::command::{AimIntent, TankCommand, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
+use crate::flow::MatchResourceExt;
 use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::ViewKind;
 use crate::state::{GameplaySet, PlayerInputSet};
@@ -146,7 +147,7 @@ impl GunnerIntent {
 }
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<SightMode>()
+    app.init_match_resource::<SightMode>()
         // Where the optic camera rides between the gun and the intent.
         .init_resource::<GunnerBlend>()
         // Every HUD widget the sight draws, and the systems that keep them in step. The presentation

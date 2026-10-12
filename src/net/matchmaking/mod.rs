@@ -7,8 +7,12 @@
 //!   probed ([`ping`]); the picker ([`picker`]) shows continents and locations with ping and match
 //!   counts. Join posts the selection and the measured pings, then polls the ticket ([`ticket`])
 //!   until `ready` or `failed`. A ready ticket is sent as [`MatchReady`]; `net::client` spawns the
-//!   link to that address with that key. If that link never connects, `net::client` despawns it
-//!   and sends [`MatchUnreachable`], which returns the lobby to idle with the reason.
+//!   link to that address with that key.
+//! - **Exits.** `net::client` owns the link and closes it with a [`MatchClosed`], which returns the
+//!   lobby to idle: a link that never connects (shown as a failed join), the player's LEAVE MATCH
+//!   ([`leave_ui`], sent as [`LeaveMatch`]), or a match whose server is gone (shown as the match's
+//!   end). While the match's link is down the ticket is polled again; its `failed` is sent as
+//!   [`ServerGone`].
 //! - **Presence.** The lobby is the `Flow::Lobby` screen (no client link): its card is spawned on
 //!   entering it and leaves with it, and its view systems run only there. [`Lobby`] persists, so a
 //!   return to the lobby keeps the selection and the pings.
@@ -19,10 +23,12 @@
 use std::collections::BTreeSet;
 
 use bevy::prelude::*;
+use lightyear::prelude::client::{Connected, NetcodeClient};
 
 use crate::flow::Flow;
 
 mod contract;
+mod leave_ui;
 mod lobby_ui;
 mod picker;
 mod ping;
@@ -32,16 +38,36 @@ mod worker;
 use contract::LocationsResponse;
 use picker::PingTable;
 pub(super) use ticket::ReadyMatch;
-use ticket::{JoinFlow, Phase};
+use ticket::{JoinFlow, Phase, StatusEvent};
 use worker::{Reply, WorkerLink};
 
 /// A ticket came back ready: connect to this match.
 #[derive(Message, Debug, Clone, Copy)]
 pub(super) struct MatchReady(pub(super) ReadyMatch);
 
-/// The link to a ready match gave up before it ever connected; the reason is shown in the lobby.
+/// `net::client` closed the match's link; the lobby is idle again.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub(super) enum MatchClosed {
+    /// The link never connected; shown as a failed join.
+    Unreachable(String),
+    /// The server went away after the player was in the match; shown as the match's end.
+    Ended(String),
+    /// The player left.
+    Left,
+}
+
+/// The ticket of the match whose link is down answered `failed`: its server is gone.
 #[derive(Message, Debug, Clone)]
-pub(super) struct MatchUnreachable(pub(super) String);
+pub(super) struct ServerGone(pub(super) String);
+
+/// The player asked to leave the match.
+#[derive(Message, Debug, Clone, Copy)]
+pub(super) struct LeaveMatch;
+
+/// The LEAVE MATCH button, for a windowed root that mounts the match screen.
+pub(super) fn leave_ui_plugin(app: &mut App) {
+    leave_ui::plugin(app);
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Locations {
@@ -121,14 +147,16 @@ pub(super) fn install(app: &mut App, api: &str) {
     app.insert_resource(WorkerLink::new(api))
         .init_resource::<Lobby>()
         .add_message::<MatchReady>()
-        .add_message::<MatchUnreachable>()
+        .add_message::<MatchClosed>()
+        .add_message::<ServerGone>()
+        .add_message::<LeaveMatch>()
         .add_observer(lobby_ui::clicked)
         .add_systems(Startup, request_locations)
         .add_systems(OnEnter(Flow::Lobby), lobby_ui::spawn)
         .add_systems(
             Update,
             (
-                (receive_replies, take_unreachable, poll_ticket).chain(),
+                (receive_replies, take_closed, poll_ticket).chain(),
                 (lobby_ui::refresh_list, lobby_ui::refresh_footer)
                     .after(poll_ticket)
                     .run_if(in_state(Flow::Lobby)),
@@ -145,6 +173,7 @@ fn receive_replies(
     time: Res<Time<Real>>,
     mut lobby: ResMut<Lobby>,
     mut ready: MessageWriter<MatchReady>,
+    mut gone: MessageWriter<ServerGone>,
 ) {
     let replies = link.drain();
     if replies.is_empty() {
@@ -175,21 +204,22 @@ fn receive_replies(
             Reply::Status {
                 generation,
                 outcome,
-            } => {
-                lobby.flow.status(generation, outcome, now);
-                match lobby.flow.phase() {
-                    Phase::Connecting(match_) => {
-                        info!("matchmaking: ticket ready — server {}", match_.addr);
-                        ready.write(MatchReady(*match_));
-                    }
-                    Phase::Idle => {
-                        if let Some(reason) = lobby.flow.failure() {
-                            warn!("matchmaking: ticket failed: {reason}");
-                        }
-                    }
-                    _ => {}
+            } => match lobby.flow.status(generation, outcome, now) {
+                StatusEvent::Ready(match_) => {
+                    info!("matchmaking: ticket ready — server {}", match_.addr);
+                    ready.write(MatchReady(match_));
                 }
-            }
+                StatusEvent::Failed => {
+                    if let Some(reason) = lobby.flow.failure() {
+                        warn!("matchmaking: ticket failed: {reason}");
+                    }
+                }
+                StatusEvent::ServerGone(reason) => {
+                    warn!("matchmaking: the match's server is gone: {reason}");
+                    gone.write(ServerGone(reason));
+                }
+                StatusEvent::Nothing => {}
+            },
         }
     }
     apply_default_selection(&mut lobby);
@@ -212,17 +242,32 @@ fn apply_default_selection(lobby: &mut Lobby) {
     lobby.defaulted = true;
 }
 
-fn take_unreachable(mut unreachable: MessageReader<MatchUnreachable>, mut lobby: ResMut<Lobby>) {
-    for MatchUnreachable(reason) in unreachable.read() {
-        lobby.flow.connection_failed(reason.clone());
+fn take_closed(mut closed: MessageReader<MatchClosed>, mut lobby: ResMut<Lobby>) {
+    for closed in closed.read() {
+        match closed {
+            MatchClosed::Unreachable(reason) => lobby.flow.connection_failed(reason.clone()),
+            MatchClosed::Ended(reason) => lobby.flow.match_ended(reason.clone()),
+            MatchClosed::Left => lobby.flow.left(),
+        }
     }
 }
 
-fn poll_ticket(link: Res<WorkerLink>, time: Res<Time<Real>>, mut lobby: ResMut<Lobby>) {
-    if !matches!(lobby.flow.phase(), Phase::Waiting { .. }) {
-        return;
-    }
-    if let Some((generation, ticket)) = lobby.flow.due_poll(time.elapsed_secs_f64()) {
+/// Poll the ticket while a join waits on it, and while the match it found has a link that is down.
+fn poll_ticket(
+    link: Res<WorkerLink>,
+    time: Res<Time<Real>>,
+    links: Query<Has<Connected>, With<NetcodeClient>>,
+    mut lobby: ResMut<Lobby>,
+) {
+    let now = time.elapsed_secs_f64();
+    let due = match lobby.flow.phase() {
+        Phase::Waiting { .. } => lobby.flow.due_poll(now),
+        Phase::Connecting { .. } if links.iter().any(|connected| !connected) => {
+            lobby.flow.due_lost_poll(now)
+        }
+        _ => None,
+    };
+    if let Some((generation, ticket)) = due {
         link.poll(generation, ticket);
     }
 }

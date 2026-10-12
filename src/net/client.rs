@@ -581,14 +581,10 @@ pub fn run() {
                 "client: matchmaking via {api} (source: {}), client_id={client_id}",
                 source.label()
             );
-            super::matchmaking::install(&mut app, api);
-            app.add_systems(
-                Update,
-                (
-                    spawn_matched_link,
-                    abandon_unreachable_match.after(drive_connection),
-                ),
-            );
+            install_matchmaking_link(&mut app, api);
+            if !simulate || sim_windowed {
+                app.add_plugins(super::matchmaking::leave_ui_plugin);
+            }
         }
         (ClientMode::Direct(_), None) => unreachable!("a direct mode resolved its target above"),
     }
@@ -729,7 +725,15 @@ struct ConnectRetry {
     /// Wall-clock deadline (`Time::elapsed_secs_f64`) for the next retry `Connect`. Armed the frame
     /// we first observe the failed/`Disconnected` state, cleared the frame we fire the retry.
     next_retry_at: Option<f64>,
+    /// When (`Time::elapsed_secs_f64`) a once-connected link was first seen down; cleared on
+    /// `Connected`. Matchmaking mode gives the match up [`RECONNECT_GIVE_UP_S`] after it.
+    down_since: Option<f64>,
 }
+
+/// Seconds a once-connected matchmaking link may stay down before the client gives the match up
+/// and returns to the lobby. TUNED: twice the Worker's 15 s heartbeat deadline, after which the
+/// Worker has dropped a silent server (`decisions.md`, "Reconnect give-up").
+const RECONNECT_GIVE_UP_S: f64 = 30.0;
 
 /// Backoff before the next reconnect attempt, in seconds. `attempts` is how many connect attempts
 /// have already failed (0 = the first retry, right after the initial attempt fell over). A short,
@@ -743,9 +747,11 @@ fn reconnect_backoff_secs(attempts: u32) -> f64 {
 }
 
 /// The ceiling on [`reconnect_backoff_secs`] — a client that has been retrying for a while still
-/// re-checks for a server at least this often. Retries are indefinite (no attempt cap): the primary
-/// workflow is "launch the client, then the server", where the wait can exceed any small cap, and a
-/// mid-game drop should keep trying to reconnect for as long as the player leaves the window open.
+/// re-checks for a server at least this often. In direct mode retries are indefinite (no attempt
+/// cap): the primary workflow is "launch the client, then the server", where the wait can exceed
+/// any small cap, and a mid-game drop keeps reconnecting while the window is open. Matchmaking mode
+/// closes a link that never connects, or a match down for [`RECONNECT_GIVE_UP_S`]
+/// ([`close_verdict`]).
 const RECONNECT_BACKOFF_CAP: f64 = 5.0;
 
 /// After this many failed connect attempts the status overlay stops saying only "CONNECTING…" and
@@ -787,7 +793,7 @@ fn drive_connection(
             Has<Connecting>,
             Option<&Disconnected>,
         ),
-        With<NetcodeClient>,
+        (With<NetcodeClient>, Without<Leaving>),
     >,
     mut retry: ResMut<ConnectRetry>,
     mut commands: Commands,
@@ -800,7 +806,11 @@ fn drive_connection(
         retry.connected_once = true;
         retry.attempts = 0;
         retry.next_retry_at = None;
+        retry.down_since = None;
         return;
+    }
+    if retry.connected_once && retry.down_since.is_none() {
+        retry.down_since = Some(time.elapsed_secs_f64());
     }
 
     if !retry.initiated {
@@ -900,28 +910,112 @@ fn spawn_matched_link(
     commands.insert_resource(ConnectRetry::default());
 }
 
-/// Matchmaking mode: a link to a ready match that has failed [`MISMATCH_HINT_AFTER_ATTEMPTS`]
-/// connects without ever connecting is despawned, and the Join menu returns with the reason. A
-/// link that connected once keeps reconnecting, as in direct mode.
-fn abandon_unreachable_match(
-    retry: Res<ConnectRetry>,
-    links: Query<Entity, With<NetcodeClient>>,
-    mut unreachable: MessageWriter<super::matchmaking::MatchUnreachable>,
+/// Matchmaking mode's link systems: spawn the link for a ready match, and close it on every exit
+/// from it — never connected, the server gone, or the player leaving. Shared by [`run`] and the
+/// hosted end-to-end test.
+pub(super) fn install_matchmaking_link(app: &mut App, api: &str) {
+    super::matchmaking::install(app, api);
+    app.add_systems(
+        Update,
+        (
+            spawn_matched_link,
+            start_leaving,
+            finish_leaving,
+            close_lost_match.after(drive_connection),
+        ),
+    );
+}
+
+/// Marks a link the player is leaving: [`drive_connection`] no longer reconnects it, the reconnect
+/// overlay ignores it, and [`finish_leaving`] despawns it on a later frame than its `Disconnect`,
+/// so the disconnect packets leave first. `seen` is set the first frame `finish_leaving` sees it.
+#[derive(Component, Default)]
+struct Leaving {
+    seen: bool,
+}
+
+/// The player asked to leave: disconnect the link and mark it [`Leaving`].
+fn start_leaving(
+    mut leave: MessageReader<super::matchmaking::LeaveMatch>,
+    links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
     mut commands: Commands,
 ) {
-    if retry.connected_once || retry.attempts < MISMATCH_HINT_AFTER_ATTEMPTS {
+    if leave.read().last().is_none() {
         return;
     }
+    for link in &links {
+        info!("client: leaving the match");
+        commands.entity(link).insert(Leaving::default());
+        commands.trigger(Disconnect { entity: link });
+    }
+}
+
+/// Despawn a left link one frame after it was marked, and return the lobby to idle.
+fn finish_leaving(
+    mut links: Query<(Entity, &mut Leaving)>,
+    mut retry: ResMut<ConnectRetry>,
+    mut closed: MessageWriter<super::matchmaking::MatchClosed>,
+    mut commands: Commands,
+) {
+    for (link, mut leaving) in &mut links {
+        if !leaving.seen {
+            leaving.seen = true;
+            continue;
+        }
+        commands.entity(link).despawn();
+        *retry = ConnectRetry::default();
+        closed.write(super::matchmaking::MatchClosed::Left);
+    }
+}
+
+/// Whether, and how, the match's link is closed this frame: the server reported gone (`gone`), a
+/// link that never connected after [`MISMATCH_HINT_AFTER_ATTEMPTS`] attempts, or a once-connected
+/// link down for [`RECONNECT_GIVE_UP_S`]. A link that connected once is the match's: its close is
+/// the match's end; one that never connected is a failed join.
+fn close_verdict(
+    retry: &ConnectRetry,
+    now: f64,
+    gone: Option<String>,
+) -> Option<super::matchmaking::MatchClosed> {
+    use super::matchmaking::MatchClosed;
+    if let Some(reason) = gone {
+        return Some(if retry.connected_once {
+            MatchClosed::Ended(reason)
+        } else {
+            MatchClosed::Unreachable(reason)
+        });
+    }
+    if !retry.connected_once {
+        return (retry.attempts >= MISMATCH_HINT_AFTER_ATTEMPTS)
+            .then(|| MatchClosed::Unreachable("could not reach the match server".into()));
+    }
+    let down_for = now - retry.down_since?;
+    (down_for >= RECONNECT_GIVE_UP_S)
+        .then(|| MatchClosed::Ended("the match server stopped answering".into()))
+}
+
+/// Close the match's link on a [`close_verdict`]: despawn it, start the connection ledger afresh
+/// and tell the lobby why.
+fn close_lost_match(
+    time: Res<Time>,
+    mut retry: ResMut<ConnectRetry>,
+    mut gone: MessageReader<super::matchmaking::ServerGone>,
+    links: Query<Entity, (With<NetcodeClient>, Without<Leaving>)>,
+    mut closed: MessageWriter<super::matchmaking::MatchClosed>,
+    mut commands: Commands,
+) {
+    let gone = gone.read().last().map(|gone| gone.0.clone());
+    let Some(verdict) = close_verdict(&retry, time.elapsed_secs_f64(), gone) else {
+        return;
+    };
     let Ok(link) = links.single() else { return };
     warn!(
-        "client: the match server never answered after {} attempts; back to the Join menu",
+        "client: closing the match link after {} attempts: {verdict:?}",
         retry.attempts
     );
     commands.entity(link).despawn();
-    commands.insert_resource(ConnectRetry::default());
-    unreachable.write(super::matchmaking::MatchUnreachable(
-        "could not reach the match server".into(),
-    ));
+    *retry = ConnectRetry::default();
+    closed.write(verdict);
 }
 
 /// The connect screens. The first connect is the [`Flow::Joining`](crate::flow::Flow) screen,
@@ -1002,9 +1096,10 @@ fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, Wi
     }
 }
 
-/// Declare the reconnect overlay while the match's link is down.
+/// Declare the reconnect overlay while the match's link is down; a link being left declares
+/// nothing.
 fn update_connect_status(
-    links: Query<Has<Connected>, With<NetcodeClient>>,
+    links: Query<Has<Connected>, (With<NetcodeClient>, Without<Leaving>)>,
     mut overlays: ResMut<crate::overlay::Overlays>,
 ) {
     let down = links.iter().any(|connected| !connected);
@@ -3486,6 +3581,64 @@ mod tests {
     /// The backoff never exceeds the cap, no matter how many attempts have piled up — an
     /// indefinitely-retrying client still re-checks for a server at least that often. Also asserts
     /// monotonic growth so a broken BASE/STEP schedule can't hide behind a still-correct cap.
+    #[test]
+    fn match_link_closes_on_each_exit_and_not_before() {
+        use super::super::matchmaking::MatchClosed;
+        let joining = ConnectRetry {
+            initiated: true,
+            attempts: MISMATCH_HINT_AFTER_ATTEMPTS - 1,
+            ..default()
+        };
+        assert_eq!(close_verdict(&joining, 100.0, None), None);
+        assert_eq!(
+            close_verdict(
+                &ConnectRetry {
+                    attempts: MISMATCH_HINT_AFTER_ATTEMPTS,
+                    ..joining
+                },
+                0.0,
+                None
+            ),
+            Some(MatchClosed::Unreachable(
+                "could not reach the match server".into()
+            ))
+        );
+        assert_eq!(
+            close_verdict(&joining, 0.0, Some("start failed".into())),
+            Some(MatchClosed::Unreachable("start failed".into())),
+            "a server gone before the first connect is a failed join"
+        );
+
+        let down = ConnectRetry {
+            initiated: true,
+            connected_once: true,
+            attempts: 40,
+            down_since: Some(10.0),
+            ..default()
+        };
+        assert_eq!(
+            close_verdict(&down, 10.0 + RECONNECT_GIVE_UP_S - 0.1, None),
+            None,
+            "a dropped match keeps reconnecting, whatever the attempt count"
+        );
+        assert_eq!(
+            close_verdict(&down, 10.0 + RECONNECT_GIVE_UP_S, None),
+            Some(MatchClosed::Ended(
+                "the match server stopped answering".into()
+            ))
+        );
+        assert_eq!(
+            close_verdict(&down, 11.0, Some("server stopped".into())),
+            Some(MatchClosed::Ended("server stopped".into())),
+            "the Worker's verdict closes at once"
+        );
+        let up = ConnectRetry {
+            down_since: None,
+            ..down
+        };
+        assert_eq!(close_verdict(&up, 1_000.0, None), None, "a live link stays");
+    }
+
     #[test]
     fn reconnect_backoff_is_capped() {
         assert_eq!(reconnect_backoff_secs(100), RECONNECT_BACKOFF_CAP);

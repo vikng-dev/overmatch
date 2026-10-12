@@ -443,7 +443,7 @@ pub(super) fn refresh_list(
 /// The status line's text and colour for the current lobby state.
 fn status(lobby: &Lobby, now: f64) -> (String, Color) {
     let flow = &lobby.flow;
-    if let Phase::Connecting(_) = flow.phase() {
+    if let Phase::Connecting { .. } = flow.phase() {
         return ("Connecting to the match server…".into(), TEXT);
     }
     if let (Some(label), Some(elapsed)) = (flow.progress_label(), flow.elapsed(now)) {
@@ -451,6 +451,9 @@ fn status(lobby: &Lobby, now: f64) -> (String, Color) {
     }
     if let Some(reason) = flow.failure() {
         return (format!("Couldn't join: {}", printable(reason)), WARN);
+    }
+    if let Some(reason) = flow.ended() {
+        return (format!("The match ended: {}", printable(reason)), TEXT);
     }
     match &lobby.locations {
         Locations::Loaded(_) if lobby.selection.is_empty() => {

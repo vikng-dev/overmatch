@@ -7,7 +7,7 @@
 use avian3d::prelude::{LinearVelocity, Rotation};
 use bevy::prelude::*;
 
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest};
 use crate::track::transmission::{
@@ -33,7 +33,7 @@ pub(crate) struct DriveHudUpdate;
 
 pub(crate) fn plugin(app: &mut App) {
     crate::flow::require(app, "drive_hud");
-    app.init_resource::<DriveDebugVisible>()
+    app.init_match_resource::<DriveDebugVisible>()
         .add_systems(OnEnter(Flow::InMatch), spawn_drive_hud)
         .add_systems(
             Update,

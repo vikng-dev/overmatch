@@ -5,12 +5,13 @@
 //! aim. Being-hit presents at ARRIVAL (reaction time).
 
 use bevy::prelude::*;
+
 use lightyear::prelude::client::Remote;
 
 use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::damage::{CrewStation, TankVolumes};
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
@@ -84,8 +85,8 @@ struct HitConfirmNode;
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::hit_feel");
-    app.init_resource::<DamageFlash>()
-        .init_resource::<HitConfirm>()
+    app.init_match_resource::<DamageFlash>()
+        .init_match_resource::<HitConfirm>()
         .add_observer(on_local_hit_confirmed)
         .add_systems(OnEnter(Flow::InMatch), spawn_cue_ui)
         .add_systems(

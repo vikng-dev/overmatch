@@ -9,11 +9,12 @@
 //! cursor (a click needs a cursor position) and zeroes the wire command while the map is up.
 
 use bevy::prelude::*;
+
 use bevy::window::PrimaryWindow;
 use lightyear::prelude::*;
 
 use super::protocol::{SetSpawnPoint, SpawnChannel};
-use crate::flow::InMatchSystems;
+use crate::flow::{InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, OverlayNode, Overlays};
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
@@ -114,7 +115,7 @@ struct SelfMarker;
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::spawn_map");
-    app.init_resource::<SpawnMap>()
+    app.init_match_resource::<SpawnMap>()
         .add_systems(Startup, spawn_map_overlay)
         .add_systems(
             Update,

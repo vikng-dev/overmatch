@@ -25,7 +25,7 @@ use crate::camera::GunnerCameraPlaced;
 use crate::command::{AimIntent, TankCommand};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::sight::{SightMode, SightToggled, in_third_person};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{
@@ -191,7 +191,7 @@ impl CommittedAim {
 /// The third-person aim commit + HUD dots — client-side: devices → command, and reprojection.
 pub fn client_plugin(app: &mut App) {
     crate::flow::require(app, "aim::client_plugin");
-    app.init_resource::<CommittedAim>()
+    app.init_match_resource::<CommittedAim>()
         .add_systems(OnEnter(Flow::InMatch), spawn_hud)
         .add_systems(
             Update,

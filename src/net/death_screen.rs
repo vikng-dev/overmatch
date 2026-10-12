@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
@@ -45,7 +45,7 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::death_screen");
-    app.init_resource::<AwaitingRespawn>()
+    app.init_match_resource::<AwaitingRespawn>()
         .add_systems(OnEnter(Flow::InMatch), spawn_death_status_line)
         .add_systems(
             Update,

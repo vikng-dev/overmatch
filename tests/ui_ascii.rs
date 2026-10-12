@@ -72,6 +72,7 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/net/matchmaking/ticket.rs",
     "src/net/matchmaking/worker.rs",
     "src/net/matchmaking/contract.rs",
+    "src/net/matchmaking/leave_ui.rs",
 ];
 
 /// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so

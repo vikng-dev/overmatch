@@ -145,6 +145,7 @@ const MATCH_ROOTS: &[&str] = &[
     "DamageFlashNode",
     "TankNameplate",
     "ComponentHpLabel",
+    "LeaveMatchRoot",
 ];
 
 fn client_ui_app() -> App {
@@ -184,6 +185,7 @@ fn client_ui_app() -> App {
         ));
     // A closed local port: the location fetch fails at once, and the lobby draws that failure.
     super::matchmaking::install(&mut app, "http://127.0.0.1:9");
+    app.add_plugins(super::matchmaking::leave_ui_plugin);
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
@@ -337,6 +339,104 @@ fn the_match_builds_its_hud_and_leaving_takes_it_away() {
         .filter(|root| root.iter().any(|name| name == "DeathScreenNode"))
         .count();
     assert_eq!(deaths, 0, "the death screen leaves with the match");
+}
+
+/// Whether a root carrying `marker` is drawn.
+fn drawn(world: &mut World, marker: &str) -> bool {
+    entities_named(world, marker)
+        .into_iter()
+        .any(|root| world.get::<Visibility>(root) != Some(&Visibility::Hidden))
+}
+
+/// Lobby → joining → match → lobby → match: the match's per-match state does not survive the trip
+/// (an open spawn map, a gunner sight, the latched overlays, the death screen), LEAVE MATCH shows
+/// only over the Esc menu, and back in the lobby only the lobby is drawn.
+#[test]
+fn a_return_to_the_lobby_leaves_nothing_of_the_match() {
+    let mut app = client_ui_app();
+    enter(&mut app, Flow::Lobby);
+    enter(&mut app, Flow::Joining);
+    enter(&mut app, Flow::InMatch);
+    assert!(
+        !drawn(app.world_mut(), "LeaveMatchRoot"),
+        "LEAVE MATCH waits for the menu"
+    );
+
+    // A key press through the input plugin's own path, so `just_pressed` lands on the next frame.
+    let press = |app: &mut App, key: KeyCode| {
+        use bevy::input::ButtonState;
+        use bevy::input::keyboard::{Key, KeyboardInput, NativeKey};
+        for state in [ButtonState::Pressed, ButtonState::Released] {
+            app.world_mut().write_message(KeyboardInput {
+                key_code: key,
+                logical_key: Key::Unidentified(NativeKey::Unidentified),
+                state,
+                text: None,
+                repeat: false,
+                window: Entity::PLACEHOLDER,
+            });
+            app.update();
+        }
+    };
+    press(&mut app, KeyCode::KeyM);
+    assert!(
+        app.world()
+            .resource::<crate::overlay::Overlays>()
+            .contains(crate::overlay::Overlay::SpawnMap),
+        "fixture: M opens the spawn map"
+    );
+    press(&mut app, KeyCode::KeyM);
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        drawn(app.world_mut(), "LeaveMatchRoot"),
+        "LEAVE MATCH shows while the menu owns the scrim"
+    );
+    press(&mut app, KeyCode::Escape);
+    press(&mut app, KeyCode::KeyM);
+    *app.world_mut().resource_mut::<crate::sight::SightMode>() = crate::sight::SightMode::Gunner;
+    app.world_mut().spawn((
+        crate::tank::Controlled,
+        crate::damage::TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        },
+    ));
+    for _ in 0..3 {
+        app.update();
+    }
+    assert!(
+        drawn(app.world_mut(), "OverlayNode"),
+        "fixture: the map is up"
+    );
+
+    enter(&mut app, Flow::Lobby);
+    let world = app.world_mut();
+    for owners in visible_owners(world) {
+        assert_eq!(
+            owners,
+            vec![Owner::Screen(Flow::Lobby)],
+            "back in the lobby only the lobby is drawn"
+        );
+    }
+    assert!(
+        *world.resource::<crate::sight::SightMode>() == crate::sight::SightMode::ThirdPerson,
+        "the sight mode is the match's"
+    );
+
+    // The replicas leave with the link (lightyear despawns them on disconnect; `net::link_drop`).
+    let tanks: Vec<Entity> = app
+        .world_mut()
+        .query_filtered::<Entity, With<crate::tank::Controlled>>()
+        .iter(app.world())
+        .collect();
+    for tank in tanks {
+        app.world_mut().despawn(tank);
+    }
+    enter(&mut app, Flow::InMatch);
+    let overlays = app.world().resource::<crate::overlay::Overlays>();
+    assert!(
+        !overlays.contains(crate::overlay::Overlay::SpawnMap),
+        "a spawn map open when the last match ended is not open in the next"
+    );
 }
 
 /// The audit sees what it guards against: a bare root, and a root claimed twice.

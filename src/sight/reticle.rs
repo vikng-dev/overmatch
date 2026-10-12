@@ -9,6 +9,7 @@
 //! needs to raise ("X unavailable" on a refused view switch).
 
 use bevy::prelude::*;
+
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
@@ -16,7 +17,7 @@ use crate::aim::CommittedAim;
 use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
 use crate::damage::ControlledTank;
 use crate::firecontrol::{RangeTable, Ranging};
-use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
@@ -86,7 +87,7 @@ struct RangeScaleTick {
 /// black, an overlay, once at startup), then keep them in step with the sight.
 pub(super) fn plugin(app: &mut App) {
     crate::flow::require(app, "sight");
-    app.init_resource::<Toast>()
+    app.init_match_resource::<Toast>()
         // The optic surround is the sight's one custom-shaded widget: a full-screen node whose
         // fragment punches the glass out of it.
         .add_plugins(UiMaterialPlugin::<OpticMaskMaterial>::default())
