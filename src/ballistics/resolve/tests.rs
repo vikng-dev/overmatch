@@ -135,11 +135,9 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                             &'static Collider,
                             Option<&'static BallisticSurfaces>,
                         )>| {
-                            let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                             let context = ResolveContext {
                                 world: &world,
                                 colliders: &colliders,
-                                armor: &armor,
                                 deposit: false,
                                 laws: WalkLaws::default(),
                             };
@@ -290,11 +288,9 @@ fn try_driven(app: &mut App, body: RoundBody, speed: f32) -> Result<Drive, fuzz:
                 &'static Collider,
                 Option<&'static BallisticSurfaces>,
             )>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    armor: &armor,
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
@@ -881,11 +877,9 @@ fn a_raised_floor_reaches_a_box_after_a_bounce_no_listed_gun_takes() {
                     &'static Collider,
                     Option<&'static BallisticSurfaces>,
                 )>| {
-                    let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                     let context = ResolveContext {
                         world: &world,
                         colliders: &colliders,
-                        armor: &armor,
                         deposit: false,
                         laws: WalkLaws::default(),
                     };
@@ -1197,11 +1191,9 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                 &'static Collider,
                 Option<&'static BallisticSurfaces>,
             )>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    armor: &armor,
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
@@ -1277,11 +1269,9 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                 &'static Collider,
                 Option<&'static BallisticSurfaces>,
             )>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    armor: &armor,
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
@@ -1364,11 +1354,9 @@ fn certified_then_resumed(
                 &'static Collider,
                 Option<&'static BallisticSurfaces>,
             )>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    armor: &armor,
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
@@ -1594,11 +1582,9 @@ fn certify(app: &mut App, at: Vec3, axis: Vec3, radius: f32) -> Result<Interior,
                 &'static Collider,
                 Option<&'static BallisticSurfaces>,
             )>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
                 let context = ResolveContext {
                     world: &world,
                     colliders: &colliders,
-                    armor: &armor,
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
@@ -1721,8 +1707,62 @@ fn a_probe_past_its_face_ceiling_fails_closed() {
 // The spall cone's field law (design doc §5): class invariants on fixture worlds
 // ---------------------------------------------------------------------------------------------
 
+use crate::ballistics::ProjectileMarchWorld;
 use crate::ballistics::spall_cone::{AxisRule, ConeShape};
-use crate::ballistics::{ProjectileMarchWorld, cast_field_ray};
+
+/// The colliders a fixture's field walk reads, as the runtime's systems hold them.
+type Colliders<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Position,
+        &'static Rotation,
+        &'static Collider,
+        Option<&'static BallisticSurfaces>,
+    ),
+>;
+
+/// Walk every `(origin, direction, strength)` of `rays` with weight `weight` through every volume
+/// of the world (volumes of no tank: one tank), none of them exited, each walk failing the test.
+fn field_rays(
+    app: &mut App,
+    rays: Vec<(Vec3, Dir3, f32)>,
+    weight: f32,
+    exited: Vec<Entity>,
+) -> Vec<FieldRay> {
+    app.world_mut()
+        .run_system_once(
+            move |world: ProjectileMarchWorld,
+                  colliders: Colliders,
+                  health: Query<&mut ComponentHealth>| {
+                let context = ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: false,
+                    laws: WalkLaws::default(),
+                };
+                let within = |collider: Entity| {
+                    hit_ancestor(collider, &world.volumes, &world.parents).is_some()
+                };
+                rays.iter()
+                    .map(|&(origin, dir, strength)| {
+                        field_direction(
+                            &context,
+                            &within,
+                            &|volume| health.contains(volume),
+                            &exited,
+                            origin,
+                            dir,
+                            strength,
+                            weight,
+                        )
+                        .expect("a fixture direction walks")
+                    })
+                    .collect::<Vec<FieldRay>>()
+            },
+        )
+        .expect("the field system runs")
+}
 
 /// Fixture half-angle (rad) of the cones below: fixture data, not the shipped value.
 const FIELD_ALPHA: f64 = 0.436;
@@ -1759,39 +1799,19 @@ fn below(app: &mut App, size: Vec3, depth: f32, lateral: f32, factor: f32, hp: b
 /// (volumes of no tank: one tank).
 fn field_doses(app: &mut App, boxes: &[Entity], strength: f32, directions: usize) -> Vec<f64> {
     let shape = ConeShape::new(FIELD_ALPHA, AxisRule::ExitDirection, directions).unwrap();
-    let boxes = boxes.to_vec();
-    app.world_mut()
-        .run_system_once(
-            move |world: ProjectileMarchWorld, health: Query<&mut ComponentHealth>| {
-                let armor = SpatialQueryFilter::from_mask(crate::Layer::Armor);
-                let within = |collider: Entity| {
-                    hit_ancestor(collider, &world.volumes, &world.parents).is_some()
-                };
-                let weight = 1.0 / directions as f32;
-                let mut dose = vec![0.0f64; boxes.len()];
-                for (dir, profile) in shape.directions(Dir3::NEG_Y) {
-                    let (_, doses) = cast_field_ray(
-                        Vec3::ZERO,
-                        dir,
-                        strength * profile,
-                        weight,
-                        &world.spatial,
-                        &world.volumes,
-                        &world.parents,
-                        &health,
-                        &armor,
-                        &within,
-                    );
-                    for applied in doses {
-                        if let Some(index) = boxes.iter().position(|b| *b == applied.address) {
-                            dose[index] += applied.amount as f64;
-                        }
-                    }
-                }
-                dose
-            },
-        )
-        .expect("the field system runs")
+    let rays = shape
+        .directions(Dir3::NEG_Y)
+        .map(|(dir, profile)| (Vec3::ZERO, dir, strength * profile))
+        .collect();
+    let mut dose = vec![0.0f64; boxes.len()];
+    for ray in field_rays(app, rays, 1.0 / directions as f32, Vec::new()) {
+        for applied in ray.doses {
+            if let Some(index) = boxes.iter().position(|b| *b == applied.address) {
+                dose[index] += applied.amount as f64;
+            }
+        }
+    }
+    dose
 }
 
 /// CLASS INVARIANT 2, RESOLUTION STABILITY: a box's dose converges as the direction count grows —
@@ -2020,5 +2040,217 @@ fn an_exit_before_a_stop_throws_at_runtime() {
         (cones[0].origin.y - 0.98).abs() < 2.0e-3,
         "the cone comes off the steel's rear face: {:?}",
         cones[0].origin
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// One direction of a field, walked: ordered presence along the ray, membership established
+// ---------------------------------------------------------------------------------------------
+
+/// One direction of strength `strength` and weight 1 thrown from `origin` along `-Y` through every
+/// volume of the world (volumes of no tank: one tank), with `exited` the volumes the throw leaves:
+/// where it ends, and each dose it addressed, in entry order.
+fn walk_direction(
+    app: &mut App,
+    origin: Vec3,
+    strength: f32,
+    exited: &[Entity],
+) -> (Vec3, Vec<(Entity, f32)>) {
+    let ray = field_rays(
+        app,
+        vec![(origin, Dir3::NEG_Y, strength)],
+        1.0,
+        exited.to_vec(),
+    )
+    .remove(0);
+    (
+        ray.end,
+        ray.doses
+            .into_iter()
+            .map(|dose| (dose.address, dose.amount))
+            .collect(),
+    )
+}
+
+/// The dose `walk_direction` addressed to `target`, summed.
+fn dose_to(doses: &[(Entity, f32)], target: Entity) -> f32 {
+    doses
+        .iter()
+        .filter(|(address, _)| *address == target)
+        .map(|(_, amount)| amount)
+        .sum()
+}
+
+/// A box of `size` spanning `top` down to `top - size.y` on the `-Y` axis.
+fn slab_below(app: &mut App, top: f32, thickness: f32, factor: f32, hp: bool) -> Entity {
+    volume(
+        app,
+        Vec3::new(1.0, thickness, 1.0),
+        Transform::from_translation(Vec3::new(0.0, top - thickness * 0.5, 0.0)),
+        factor,
+        hp.then_some(FIELD_HP),
+    )
+}
+
+/// A direction thrown from inside a soft block starts inside it and pays for it: strength 10 into
+/// a block of factor 150 exhausts 10/150 m in, and the box beyond the block takes nothing. Fixture:
+/// the block spans 0.5 m above the origin to 1 m below it.
+#[test]
+fn a_direction_thrown_inside_a_block_pays_for_it() {
+    let (mut app, boxes) = field_world(|app| {
+        slab_below(app, 0.5, 1.5, 150.0, false);
+        vec![slab_below(app, -1.4, 0.2, 0.0, true)]
+    });
+    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the box beyond is shadowed");
+    assert!(
+        (end.y + 10.0 / 150.0).abs() < 1.0e-4,
+        "the direction exhausts 66.7 mm into the block: {end:?}"
+    );
+}
+
+/// A shield nested inside a soft volume still shadows, and adding the soft volume never raises
+/// the dose. Fixture: steel of factor 1000 over `[1.5, 2.0]` m along the direction, soft of factor
+/// 1 over `[1, 3]` m, the box at 4 m, strength 10.
+#[test]
+fn a_nested_shield_shadows_and_the_volume_around_it_adds_nothing() {
+    let target = |app: &mut App| slab_below(app, -3.9, 0.2, 0.0, true);
+    let (mut app, boxes) = field_world(|app| {
+        slab_below(app, -1.5, 0.5, 1000.0, false);
+        vec![target(app)]
+    });
+    let (_, steel_alone) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    let (mut app, nested) = field_world(|app| {
+        slab_below(app, -1.5, 0.5, 1000.0, false);
+        slab_below(app, -1.0, 2.0, 1.0, false);
+        vec![target(app)]
+    });
+    let (_, with_soft) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    assert_eq!(dose_to(&steel_alone, boxes[0]), 0.0, "the steel blocks it");
+    assert_eq!(
+        dose_to(&with_soft, nested[0]),
+        0.0,
+        "the nested steel still blocks it"
+    );
+}
+
+/// A box wholly inside another volume the direction crosses is entered, and dosed with the
+/// strength that reaches its entry. Fixture: a soft volume of factor 1 over `[1, 3]` m, the box
+/// over `[1.9, 2.1]` m inside it: 0.9 reference-mm is spent before it.
+#[test]
+fn a_box_inside_a_traversed_volume_is_dosed() {
+    let (mut app, boxes) = field_world(|app| {
+        slab_below(app, -1.0, 2.0, 1.0, false);
+        vec![slab_below(app, -1.9, 0.2, 0.0, true)]
+    });
+    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    let dose = dose_to(&doses, boxes[0]);
+    assert!((dose - 9.1).abs() < 1.0e-4, "dosed at entry: {dose}");
+}
+
+/// A plate thinner than any nudge is still material: half a millimetre of steel costs 0.5
+/// reference-mm, so a direction of strength 0.25 exhausts halfway through it and the box behind
+/// takes nothing.
+#[test]
+fn a_direction_exhausts_halfway_through_a_thin_plate() {
+    let (mut app, boxes) = field_world(|app| {
+        slab_below(app, -1.0, 0.0005, 1000.0, false);
+        vec![slab_below(app, -2.0, 0.2, 0.0, true)]
+    });
+    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 0.25, &[]);
+    assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the box behind is shadowed");
+    assert!(
+        (end.y + 1.000_25).abs() < 2.0e-6,
+        "the direction exhausts halfway through the plate: {end:?}"
+    );
+}
+
+/// CLASS INVARIANT, SHADOWING IS MONOTONE ALONG ONE DIRECTION: adding any volume anywhere along a
+/// direction — before, around, inside or overlapping the volumes already there — never raises any
+/// box's dose. Fixture: randomized stacks of overlapping volumes of random factor along `-Y`.
+#[test]
+fn adding_material_along_a_direction_never_raises_a_dose() {
+    let mut state = 0x2545_f491_u32;
+    let mut unit = move || {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        (state >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let factors = [0.0, 1.0, 20.0, 150.0, 1000.0];
+    for trial in 0..16 {
+        // (top, thickness, factor, box) of each volume; the first three are boxes.
+        let mut stack: Vec<(f32, f32, f32, bool)> = (0..6)
+            .map(|index| {
+                let top = -0.2 - 3.0 * unit();
+                let thickness = 0.001 + 1.2 * unit() * unit();
+                let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
+                (top, thickness, factor, index < 3)
+            })
+            .collect();
+        let doses = |stack: &[(f32, f32, f32, bool)]| {
+            let (mut app, boxes) = field_world(|app| {
+                stack
+                    .iter()
+                    .filter_map(|&(top, thickness, factor, hp)| {
+                        let entity = slab_below(app, top, thickness, factor, hp);
+                        hp.then_some(entity)
+                    })
+                    .collect()
+            });
+            let (_, doses) =
+                walk_direction(&mut app, Vec3::ZERO, 4.0 + 20.0 * unit_free(trial), &[]);
+            boxes
+                .iter()
+                .map(|b| dose_to(&doses, *b))
+                .collect::<Vec<f32>>()
+        };
+        let before = doses(&stack);
+        stack.push((
+            -0.1 - 3.2 * unit(),
+            0.001 + 2.0 * unit() * unit(),
+            factors[(unit() * factors.len() as f32) as usize % factors.len()],
+            false,
+        ));
+        let after = doses(&stack);
+        for (index, (b, a)) in before.iter().zip(&after).enumerate() {
+            assert!(
+                a <= b,
+                "trial {trial}, box {index}: adding {:?} raised the dose {b} to {a} (stack \
+                 {stack:?})",
+                stack.last()
+            );
+        }
+    }
+}
+
+/// A trial's strength, a function of the trial alone so both walks of a trial throw the same.
+fn unit_free(trial: u32) -> f32 {
+    ((trial.wrapping_mul(2_654_435_761) >> 8) as f32 / (1u32 << 24) as f32).fract()
+}
+
+/// A direction recognises the volume it is thrown from by identity, never by displacement: starting
+/// a millimetre inside the box its throw leaves, it pays for that millimetre but does not dose the
+/// box, and it doses the box it steps into with the strength left at its entry. Named as anything
+/// but the volume the throw leaves, the same box is entered at the throw point and dosed. Fixture: a
+/// box of factor 150 ending 1 mm along the direction, a box of factor 20 in contact behind it.
+#[test]
+fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
+    let (mut app, boxes) = field_world(|app| {
+        vec![
+            slab_below(app, 0.5, 0.501, 150.0, true),
+            slab_below(app, -0.001, 0.5, 20.0, true),
+        ]
+    });
+    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[boxes[0]]);
+    assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the throw's own box");
+    let behind = dose_to(&doses, boxes[1]);
+    assert!(
+        (behind - (10.0 - 0.001 * 150.0)).abs() < 1.0e-4,
+        "the box stepped into, at entry: {behind}"
+    );
+    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    assert_eq!(
+        dose_to(&doses, boxes[0]),
+        10.0,
+        "entered at the throw point"
     );
 }

@@ -44,13 +44,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use avian3d::prelude::{Collider, ColliderAabb, Position, RigidBody, Rotation, SpatialQueryFilter};
+use avian3d::prelude::{Collider, ColliderAabb, Position, RigidBody, Rotation};
 use bevy::prelude::*;
 
 use super::resolve::{self, Decision, Flight, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
 use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for};
-use crate::Layer;
 use crate::damage::{Ammo, CrewStation, hit_ancestor};
 use crate::substances::SubstanceId;
 use crate::tank::{TankSimSource, spawn_headless_tank};
@@ -1072,11 +1071,9 @@ fn run_fuzz(
         .expect("the probe tank has a global transform");
     let to_local = root.affine().inverse();
 
-    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
     let pass_context = ResolveContext {
         world: &world,
         colliders: &colliders,
-        armor: &armor,
         deposit: false,
         laws: walk::WalkLaws::default(),
     };
@@ -1384,11 +1381,9 @@ fn run_replay(
         .get(tank.0)
         .expect("the probe tank has a global transform");
     let to_local = root.affine().inverse();
-    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
     let context = ResolveContext {
         world: &world,
         colliders: &colliders,
-        armor: &armor,
         deposit: false,
         laws: walk::WalkLaws::default(),
     };

@@ -1632,6 +1632,10 @@ pub struct BodyExit {
     pub genuine: bool,
     /// The contributing samples, in sample order.
     pub members: Vec<ExitMember>,
+    /// The volumes the exit leaves, over every member, in entity order: present in the body's last
+    /// layer and absent from the next (every one of them at a genuine exit). The surface a spall
+    /// cone is thrown from is theirs, which is how its directions recognise it ([`SpallSource`]).
+    pub exited: Vec<Entity>,
 }
 
 /// A body exit the round reached: where it throws its spall cone from, and the round's state across
@@ -1648,6 +1652,9 @@ pub struct SpallSource {
     pub direction: Vec3,
     /// The substances of the body exited, in id order.
     pub substances: Vec<SubstanceId>,
+    /// The volumes the exit leaves ([`BodyExit::exited`]): a direction of the cone that starts
+    /// inside one of them has not entered it, and does not dose it there.
+    pub exited: Vec<Entity>,
     /// Reference-mm the mechanism spent across this body: its readout drop over the body's
     /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
     /// summed over the reached members.
@@ -2203,28 +2210,32 @@ fn build_event(
         .collect();
 
     // Body exits, per sample, then grouped over the disc ([`BodyExit`]).
-    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), Vec<ExitMember>> =
-        BTreeMap::new();
+    type ExitGroup = (Vec<ExitMember>, BTreeSet<Entity>);
+    let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), ExitGroup> = BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in &by_sample {
         let base = corridor.origin + corridor.samples[sample].offset;
         let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
-        let mut member =
-            |substances: Vec<SubstanceId>, start: f64, end: f64, face: Option<Vec3>| {
-                let genuine = face.is_some();
-                let ordinal = ordinals.entry((substances.clone(), genuine)).or_insert(0);
-                exit_groups
-                    .entry((substances, genuine, *ordinal))
-                    .or_default()
-                    .push(ExitMember {
-                        sample,
-                        start,
-                        end,
-                        position: base + corridor.axis * end as f32,
-                        face,
-                    });
-                *ordinal += 1;
-            };
+        let mut member = |substances: Vec<SubstanceId>,
+                          start: f64,
+                          end: f64,
+                          face: Option<Vec3>,
+                          exited: Vec<Entity>| {
+            let genuine = face.is_some();
+            let ordinal = ordinals.entry((substances.clone(), genuine)).or_insert(0);
+            let group = exit_groups
+                .entry((substances, genuine, *ordinal))
+                .or_default();
+            group.0.push(ExitMember {
+                sample,
+                start,
+                end,
+                position: base + corridor.axis * end as f32,
+                face,
+            });
+            group.1.extend(exited);
+            *ordinal += 1;
+        };
         let mut saw_exit = false;
         for &run in runs {
             let extent = &walks[sample].runs[run];
@@ -2235,9 +2246,11 @@ fn build_event(
             {
                 saw_exit = true;
             }
-            // (substances so far, factor of its latest layer, start, end) of the body the sample
-            // is in. A layer resisting at least as much as the one before it continues the body.
-            let mut body: Option<(Vec<SubstanceId>, f32, f64, f64)> = None;
+            // (substances so far, factor of its latest layer, start, end, volumes of its latest
+            // layer) of the body the sample is in. A layer resisting at least as much as the one
+            // before it continues the body.
+            type Body = (Vec<SubstanceId>, f32, f64, f64, Vec<Entity>);
+            let mut body: Option<Body> = None;
             for layer in layers_over(&walks[sample].layers, extent.start, extent.end) {
                 let (from, to) = (layer.start.max(extent.start), layer.end.min(extent.end));
                 if layer.present.is_empty() || to <= from {
@@ -2248,24 +2261,29 @@ fn build_event(
                     .present
                     .iter()
                     .fold(0.0f32, |most, presence| most.max(presence.material.factor));
+                let volumes: Vec<Entity> = layer.present.iter().map(|p| p.volume).collect();
                 body = Some(match body.take() {
-                    Some((exited, before, start, end)) if factor < before => {
-                        member(exited, start, end, None);
-                        (substances, factor, from, to)
+                    Some((held, before, start, end, last)) if factor < before => {
+                        let left = last
+                            .into_iter()
+                            .filter(|volume| !volumes.contains(volume))
+                            .collect();
+                        member(held, start, end, None, left);
+                        (substances, factor, from, to, volumes)
                     }
-                    Some((mut held, _, start, _)) => {
+                    Some((mut held, _, start, _, _)) => {
                         held.extend(substances);
                         held.sort();
                         held.dedup();
-                        (held, factor, start, to)
+                        (held, factor, start, to, volumes)
                     }
-                    None => (substances, factor, from, to),
+                    None => (substances, factor, from, to, volumes),
                 });
             }
-            if let Some((exited, factor, start, end)) = body
+            if let Some((held, factor, start, end, last)) = body
                 && factor > 0.0
             {
-                member(exited, start, end, Some(extent.exit_normal));
+                member(held, start, end, Some(extent.exit_normal), last);
             }
         }
         if saw_exit {
@@ -2274,10 +2292,11 @@ fn build_event(
     }
     let mut exits: Vec<BodyExit> = exit_groups
         .into_iter()
-        .map(|((substances, genuine, _), members)| BodyExit {
+        .map(|((substances, genuine, _), (members, exited))| BodyExit {
             substances,
             genuine,
             members,
+            exited: exited.into_iter().collect(),
         })
         .collect();
     let mean_end = |exit: &BodyExit| {
@@ -3024,6 +3043,7 @@ fn spall_sources<M: Mechanism>(
             face,
             direction,
             substances: exit.substances.clone(),
+            exited: exit.exited.clone(),
             spend: spend as f32,
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,

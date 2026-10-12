@@ -267,9 +267,12 @@ impl Mechanism for SolidShot {
 /// ([`SampleLayer::present`](super::walk::SampleLayer)) and each substance carries one factor
 /// (`VolumeTable::new`).
 pub(crate) fn overlap_factor(contacts: &[VolumeContact]) -> f32 {
-    contacts
-        .iter()
-        .fold(0.0f32, |most, contact| most.max(contact.material.factor))
+    overlap_of(contacts.iter().map(|contact| contact.material.factor))
+}
+
+/// [`overlap_factor`] over the factors of the volumes present at one point.
+pub(crate) fn overlap_of(factors: impl IntoIterator<Item = f32>) -> f32 {
+    factors.into_iter().fold(0.0f32, f32::max)
 }
 
 /// COMPATIBILITY ADAPTER: the overmatch switch, kept only until turning at the face replaces the

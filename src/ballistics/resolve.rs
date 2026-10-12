@@ -35,11 +35,11 @@
 //! warning is not.
 
 use avian3d::parry::shape::TypedShape;
-use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider, SpatialQueryFilter};
+use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider};
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::mechanism::{Dose, Limits, Mechanism, SolidShot};
+use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot, overlap_of};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
@@ -463,6 +463,211 @@ pub(crate) fn certified(
     })
 }
 
+/// One direction of a field, walked ([`field_direction`]).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FieldRay {
+    /// Where the direction ended: inside the volume that exhausted it, or where it left the last
+    /// volume of the struck tank it crossed (its throw point, if it crossed none).
+    pub end: Vec3,
+    /// The doses it addressed, in entry order.
+    pub doses: Vec<Dose>,
+}
+
+/// The ordered presence along one direction of a field thrown from the world point `at`: the
+/// volumes `within` admits (the struck tank's), walked from outside all of their bounds through
+/// `at` to the far side of them, with nothing declared. Returns the walk and the progress of `at`
+/// along it.
+///
+/// The same collector and pairing walk as any corridor ([`walk::walk_ray`]), so its layers carry
+/// every volume present along the ray in order, nested and overlapping ones included, and what the
+/// direction starts inside is the parity of oriented crossings behind `at`, never assumed. It reaches
+/// back from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at `at`
+/// itself. Candidates are the admitted volumes whose bounds, grown by [`PROBE_MARGIN`], the
+/// forward ray meets within [`MAX_CORRIDOR`]; the walk starts and ends outside the union of those
+/// grown bounds, so no candidate's face lies within the collector's sitting reach of either end.
+/// A walk longer than [`MAX_CORRIDOR`] is [`WalkError::UncertifiedStart`].
+pub(crate) fn field_presence(
+    context: &ResolveContext<'_, '_, '_>,
+    within: &dyn Fn(Entity) -> bool,
+    at: Vec3,
+    dir: Dir3,
+) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
+    let axis = Vec3::from(dir);
+    let margin = Vec3::splat(PROBE_MARGIN);
+    // Where the line `at + t·axis` lies inside the box `[min, max]` (relative to `at`): the
+    // parameter interval, empty when it misses.
+    let meets = |min: Vec3, max: Vec3| {
+        let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
+        for i in 0..3 {
+            if axis[i] == 0.0 {
+                if min[i] > 0.0 || max[i] < 0.0 {
+                    return None;
+                }
+            } else {
+                let (a, b) = (min[i] / axis[i], max[i] / axis[i]);
+                enter = enter.max(a.min(b));
+                leave = leave.min(a.max(b));
+            }
+        }
+        (enter <= leave).then_some((enter, leave))
+    };
+    let mut near = Vec::new();
+    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for (node, primitive) in candidates(context, within, at, axis, MAX_CORRIDOR, 0.0) {
+        let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
+            return Err(WalkError::CollectorFailed {
+                volume: node,
+                reason: "a candidate collider has no resolved pose",
+            });
+        };
+        let bounds = collider.aabb(position.0, *rotation);
+        let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
+        if meets(min, max).is_none_or(|(_, leave)| leave < 0.0) {
+            continue;
+        }
+        lo = lo.min(min);
+        hi = hi.max(max);
+        near.push((node, primitive));
+    }
+    if near.is_empty() {
+        return Ok(None);
+    }
+    let Some((enter, leave)) = meets(lo, hi) else {
+        return Err(WalkError::UncertifiedStart {
+            volume: near[0].0,
+            reason: "a field direction's line misses the bounds its candidates were admitted by",
+        });
+    };
+    // `at` is inside the union or behind it, so the walk starts behind both.
+    let behind = (-enter).max(0.0);
+    let length = behind + leave.max(0.0);
+    if !length.is_finite() || length > MAX_CORRIDOR {
+        return Err(WalkError::UncertifiedStart {
+            volume: near[0].0,
+            reason: "a field direction's walk through the struck tank's bounds exceeds the \
+                     corridor ceiling",
+        });
+    }
+    let mut hits = Vec::new();
+    collect::collect(
+        &Corridor {
+            anchor: at,
+            origin: Vec3::ZERO,
+            axis,
+            length,
+            behind,
+            seeded: &[],
+            handoff: None,
+            laws: &context.laws,
+        },
+        &near,
+        context.colliders,
+        &mut hits,
+    )?;
+    let mut entries: Vec<(Entity, walk::VolumeMaterial)> = Vec::new();
+    for hit in &hits {
+        if !entries.iter().any(|(volume, _)| *volume == hit.volume) {
+            let material = context
+                .world
+                .volumes
+                .get(hit.volume)
+                .map(|found| found.material)
+                .map_err(|_| WalkError::UnknownVolume { volume: hit.volume })?;
+            entries.push((hit.volume, material));
+        }
+    }
+    let walked = walk::walk_ray(
+        0,
+        &RayCorridor {
+            anchor: at,
+            origin: -axis * behind,
+            axis,
+            length,
+            initial_presence: Vec::new(),
+            hits,
+        },
+        &VolumeTable::new(entries)?,
+        &context.laws,
+    )?;
+    Ok(Some((behind as f64, walked)))
+}
+
+/// March one direction of a field thrown from the world point `at` through the volumes `within`
+/// admits (the struck tank's), from its ordered presence ([`field_presence`]).
+///
+/// `strength` (reference-mm) is constant in air and spent by `chord × factor` through each layer in
+/// order, an overlap resisting by the union-field overlap rule ([`overlap_of`]). Entering a volume
+/// that `is_box` (an HP-bearing one), the direction doses it `strength × weight` — its strength at
+/// entry times its share of the field — once, never scaled by the box's factor; armour shadows and
+/// takes nothing. A volume the direction starts inside it enters at `at`, except one of `exited`,
+/// the volumes the throw leaves: the direction has not entered them there. It stops where its
+/// strength is exhausted, inside the layer at `strength / factor` of it, or where it leaves the
+/// last admitted volume.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the field kernel: the world, the struck tank, the throw and the direction's own state"
+)]
+pub(crate) fn field_direction(
+    context: &ResolveContext<'_, '_, '_>,
+    within: &dyn Fn(Entity) -> bool,
+    is_box: &dyn Fn(Entity) -> bool,
+    exited: &[Entity],
+    at: Vec3,
+    dir: Dir3,
+    strength: f32,
+    weight: f32,
+) -> Result<FieldRay, WalkError> {
+    let Some((start, walked)) = field_presence(context, within, at, dir)? else {
+        return Ok(FieldRay {
+            end: at,
+            doses: Vec::new(),
+        });
+    };
+    let mut strength = strength as f64;
+    let mut end = start;
+    let mut doses: Vec<Dose> = Vec::new();
+    let mut previous: &[walk::Presence] = &[];
+    for (index, layer) in walked
+        .layers
+        .iter()
+        .filter(|layer| layer.end > start)
+        .enumerate()
+    {
+        let from = layer.start.max(start);
+        for presence in &layer.present {
+            let volume = presence.volume;
+            let entered = !previous.iter().any(|before| before.volume == volume)
+                && !(index == 0 && exited.contains(&volume));
+            if entered
+                && strength > 0.0
+                && is_box(volume)
+                && !doses.iter().any(|dose| dose.address == volume)
+            {
+                doses.push(Dose {
+                    address: volume,
+                    amount: (strength * weight as f64) as f32,
+                    source: DoseSource::Field,
+                });
+            }
+        }
+        if !layer.present.is_empty() {
+            end = layer.end;
+        }
+        let factor = overlap_of(layer.present.iter().map(|p| p.material.factor)) as f64;
+        let cost = (layer.end - from) * factor;
+        if cost > 0.0 && cost >= strength {
+            end = from + (layer.end - from) * (strength / cost);
+            break;
+        }
+        strength -= cost;
+        previous = &layer.present;
+    }
+    Ok(FieldRay {
+        end: at + Vec3::from(dir) * (end - start) as f32,
+        doses,
+    })
+}
+
 /// The state successive crossings read and advance: where the round is, where it is going, and the
 /// sampling frame and per-sample starts it carries out of the last crossing.
 ///
@@ -797,7 +1002,6 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
             Option<&'static BallisticSurfaces>,
         ),
     >,
-    pub armor: &'a SpatialQueryFilter,
     /// Authority = not a replica: only then does a crossing mutate health.
     pub deposit: bool,
     pub laws: WalkLaws,
@@ -1319,15 +1523,7 @@ fn apply_bite(
     };
     // Every exit the round reached throws, whether it then stopped or went on.
     for source in &bite.spall {
-        damage += throw_spall_cone(
-            shell.spall,
-            source,
-            bite.owner,
-            context.world,
-            health,
-            context.armor,
-            context.deposit,
-        );
+        damage += throw_spall_cone(shell.spall, source, bite.owner, context, health);
     }
 
     commands.trigger(Impact {

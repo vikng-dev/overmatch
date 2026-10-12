@@ -308,86 +308,6 @@ fn dosed(current: f32, dose: &mechanism::Dose) -> f32 {
     (current - amount).max(0.0)
 }
 
-/// March one direction of a spall cone through the struck tank's volumes: its trace, and the doses
-/// it addresses to the HP-bearing boxes it enters, in entry order (design doc §5).
-///
-/// `strength` (reference-mm) is constant in air and spent only by `chord × factor` through
-/// material. On entering a box the direction doses it `strength × weight` — its strength at entry
-/// times its share `1/N` of the cone — never scaled by the box's factor; armour (no HP) shadows and
-/// takes nothing. The direction stops where its strength is exhausted, or where no volume `within`
-/// the struck tank lies further along it.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the field march's kernel, shared with the cross-platform cast digest; every argument \
-              is world state or the direction's own"
-)]
-fn cast_field_ray(
-    origin: Vec3,
-    dir: Dir3,
-    mut strength: f32,
-    weight: f32,
-    spatial: &SpatialQuery,
-    volumes: &Query<&BallisticVolume>,
-    parents: &Query<&ChildOf>,
-    health: &Query<&mut ComponentHealth>,
-    filter: &SpatialQueryFilter,
-    within: &dyn Fn(Entity) -> bool,
-) -> (SpallRay, Vec<mechanism::Dose>) {
-    const EPS: f32 = 1.0e-3;
-    // Query bounds, not a range law: no tank is near this size, and the march spends strength by
-    // material alone.
-    const PROBE: f32 = resolve::MAX_CORRIDOR;
-    let mut range = resolve::MAX_CORRIDOR;
-    let mut pos = origin;
-    let mut deposited = false;
-    let mut doses = Vec::new();
-    while strength > 0.0 && range > EPS {
-        let Some(hit) = spatial.cast_ray_predicate(pos, dir, range, true, filter, within) else {
-            break; // left the struck tank
-        };
-        let at = pos + Vec3::from(dir) * hit.distance;
-        let Some((node, volume)) = hit_ancestor(hit.entity, volumes, parents) else {
-            pos = at;
-            break;
-        };
-        if health.contains(node) {
-            doses.push(mechanism::Dose {
-                address: node,
-                amount: strength * weight,
-                source: mechanism::DoseSource::Field,
-            });
-            deposited = true;
-        }
-        let span = spatial
-            .cast_ray_predicate(
-                at + Vec3::from(dir) * EPS,
-                dir,
-                PROBE,
-                false,
-                filter,
-                &|e| e == hit.entity,
-            )
-            .map(|exit| EPS + exit.distance)
-            .unwrap_or(0.0);
-        let cost = span * volume.material.factor;
-        if strength > cost {
-            strength -= cost;
-            pos = at + Vec3::from(dir) * (span + EPS);
-            range -= hit.distance + span + EPS;
-        } else {
-            pos = at + Vec3::from(dir) * span * (strength / cost);
-            break;
-        }
-    }
-    (
-        SpallRay {
-            end: pos,
-            deposited,
-        },
-        doses,
-    )
-}
-
 /// Mirror a travel direction about a surface normal — the specular deflection of a ricochet.
 fn reflect(dir: Dir3, normal: Dir3) -> Dir3 {
     let d = Vec3::from(dir);
@@ -2123,10 +2043,6 @@ fn march_shell_step(
     // client's cosmetic model describe different worlds.
     let shooter = shell.source.map(|source| source.tank);
     let not_own = |entity: Entity| not_own_volume(entity, shooter, &world.owners, &world.parents);
-    // The march casts against terrain (which stops the shell) and ballistic volumes (which it
-    // crosses) — split per [`cast_march_segment`], nearer hit wins. This filter serves the
-    // interior probes (thickness / exit faces / spall), which are armor-only by construction.
-    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
     // Gravity and drag on the velocity through the free-flight kernel the FireEvent catch-up folds
     // ([`fast_forward_shell`]). An unbent open-air step flies exactly `stepped × dt`. The march may
     // *bend* the direction (normalization / ricochet), so we carry direction + speed and rebuild the
@@ -2169,7 +2085,6 @@ fn march_shell_step(
     let context = resolve::ResolveContext {
         world,
         colliders,
-        armor: &armor,
         deposit,
         laws: walk::WalkLaws::default(),
     };
@@ -2715,8 +2630,9 @@ fn resolve_replica_armor_contact(
 ///
 /// Strength `S = spend × (v_exit / v_entry)²` ([`walk::SpallSource::strength`]); direction `k` of the
 /// shipped shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the cone. Each
-/// direction is marched through the volumes of `tank`, the struck tank, alone
-/// ([`cast_field_ray`]).
+/// direction is walked through the volumes of `tank`, the struck tank, alone
+/// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing,
+/// and the cone logs its first error.
 ///
 /// Returns the HP the authority actually removed; a replica resolves the identical geometry and the
 /// identical trace, and deposits nothing.
@@ -2724,15 +2640,10 @@ fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
     source: &walk::SpallSource,
     tank: Option<Entity>,
-    world: &ProjectileMarchWorld,
+    context: &resolve::ResolveContext<'_, '_, '_>,
     health: &mut Query<&mut ComponentHealth>,
-    armor: &SpatialQueryFilter,
-    // Only authority writes HP; replicas retain the trace.
-    deposit: bool,
 ) -> f32 {
-    // Nudge past the exit face so a direction's first cast doesn't re-touch it — the same 1 mm
-    // boundary nudge the march itself uses.
-    const EPS: f32 = 1.0e-3;
+    let world = context.world;
     let shape = spall_cone::ConeShape::shipped();
     let strength = source.strength();
     let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
@@ -2749,21 +2660,40 @@ fn throw_spall_cone(
         half_angle: shape.half_angle(),
         rays: Vec::with_capacity(shape.directions_count()),
     };
+    let mut failed: Option<(usize, walk::WalkError)> = None;
     for (ray_dir, profile) in shape.directions(axis) {
-        let (ray, doses) = cast_field_ray(
-            source.position + Vec3::from(ray_dir) * EPS,
+        let walked = resolve::field_direction(
+            context,
+            &within,
+            &|volume| health.contains(volume),
+            &source.exited,
+            source.position,
             ray_dir,
             strength * profile,
             weight,
-            &world.spatial,
-            &world.volumes,
-            &world.parents,
-            health,
-            armor,
-            &within,
         );
-        damage_dealt += apply_doses(&doses, health, deposit);
-        cone.rays.push(ray);
+        let ray = match walked {
+            Ok(ray) => ray,
+            Err(error) => {
+                failed = Some(failed.map_or((1, error), |(count, first)| (count + 1, first)));
+                resolve::FieldRay {
+                    end: source.position,
+                    doses: Vec::new(),
+                }
+            }
+        };
+        damage_dealt += apply_doses(&ray.doses, health, context.deposit);
+        cone.rays.push(SpallRay {
+            end: ray.end,
+            deposited: !ray.doses.is_empty(),
+        });
+    }
+    if let Some((count, error)) = failed {
+        error!(
+            origin = ?source.position,
+            ?error,
+            "ballistics: {count} spall cone direction(s) could not be walked; each doses nothing"
+        );
     }
     spall.cones.push(cone);
     damage_dealt
@@ -6169,11 +6099,9 @@ mod march_tests {
                     &'static Collider,
                     Option<&'static BallisticSurfaces>,
                 )>| {
-                    let armor = SpatialQueryFilter::from_mask(Layer::Armor);
                     let context = resolve::ResolveContext {
                         world: &world,
                         colliders: &colliders,
-                        armor: &armor,
                         deposit: false,
                         laws: walk::WalkLaws::default(),
                     };

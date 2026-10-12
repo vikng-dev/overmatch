@@ -1,10 +1,10 @@
 //! Cross-platform reproducibility of the spall-cone casts.
 //!
-//! A client may re-cast a spall cone from a shot record's parameters only if the casts the sim runs
-//! for it (physics-engine ray casts against the struck tank's armour and boxes) come out
-//! bit-identical on every shipped target: Windows x86_64, Linux x86_64, macOS arm64. This test
-//! measures that and decides nothing; the decision and its two outcomes are in
-//! `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`.
+//! A client may re-cast a spall cone from a shot record's parameters only if the walks the sim runs
+//! for it (the collector and the pairing walk along each direction, against the struck tank's
+//! armour and boxes) come out bit-identical on every shipped target: Windows x86_64, Linux x86_64,
+//! macOS arm64. This test measures that and decides nothing; the decision and its two outcomes are
+//! in `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`.
 //!
 //! # What runs
 //!
@@ -21,16 +21,16 @@
 //!
 //! Each ray goes through two paths:
 //!
-//! 1. the engine walk: the same `cast_ray` (solid) and same-entity `cast_ray_predicate` (hollow)
-//!    pair [`cast_field_ray`] issues, with no strength, recording every entry and exit as
-//!    (struck collider, distance, normal);
-//! 2. [`cast_field_ray`] itself, through the probe tank's volumes, dosing every box after all
-//!    boxes are reset to [`BOX_RESET_HP`]; the remaining HP of each touched box and the ray's end
-//!    are recorded, and each box's dose (`reset - remaining`) accumulates in f32 in ray order.
+//! 1. the ordered presence a direction is walked over ([`resolve::field_presence`]), with no
+//!    strength: the progress of the ray's origin, then every layer as its `[start, end)` and the
+//!    volumes present over it (stable identity and factor);
+//! 2. [`resolve::field_direction`] itself, through the probe tank's volumes, dosing every box after
+//!    all boxes are reset to [`BOX_RESET_HP`]; the remaining HP of each touched box and the ray's
+//!    end are recorded, and each box's dose (`reset - remaining`) accumulates in f32 in ray order.
 //!
 //! # Digest
 //!
-//! Each ray is written as text with every f32 as its raw IEEE-754 bits in hex, and the text is
+//! Each ray is written as text with every f32 and f64 as its raw IEEE-754 bits in hex, and the text is
 //! hashed with 64-bit FNV-1a over its UTF-8 bytes ([`fnv1a`]). The INPUT (origin, direction,
 //! strength) and the OUTPUT (hits, ray end, HP) are digested separately, so a red run says whether
 //! the direction generator moved or the casts did. The cone directions are built with `libm` and
@@ -51,7 +51,7 @@
 
 use std::fmt::Write as _;
 
-use avian3d::prelude::{ColliderAabb, Position, Rotation, SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::ecs::system::RunSystemOnce;
 
 use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world};
@@ -59,7 +59,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x9deb_5d6f_72d6_4c35;
+const PINNED_TOTAL: u64 = 0x7aea_b508_b670_f33f;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -75,12 +75,6 @@ const STRENGTH: f32 = 30.0;
 /// crossing ([`STRENGTH`]), so a single hit's dose is not clamped away.
 const BOX_RESET_HP: f32 = 40.0;
 
-/// The nudge and exit-probe reach [`cast_field_ray`] uses, mirrored by the engine walk.
-const EPS: f32 = 1.0e-3;
-const PROBE: f32 = super::resolve::MAX_CORRIDOR;
-/// Upper bound on entries one engine walk records; a ray reaching it is recorded as truncated.
-const MAX_WALK_HITS: usize = 64;
-
 /// 64-bit FNV-1a over bytes. Stable by definition: offset basis `0xcbf29ce484222325`, prime
 /// `0x100000001b3`.
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -94,6 +88,10 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 fn bits(text: &mut String, value: f32) {
     let _ = write!(text, "{:08x}", value.to_bits());
+}
+
+fn bits64(text: &mut String, value: f64) {
+    let _ = write!(text, "{:016x}", value.to_bits());
 }
 
 fn bits3(text: &mut String, value: Vec3) {
@@ -365,18 +363,27 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
     let label = pose.label;
     app.world_mut()
         .run_system_once(
-            move |spatial: SpatialQuery,
-                  volumes: Query<&BallisticVolume>,
-                  owners: Query<&VolumeOf>,
-                  parents: Query<&ChildOf>,
+            move |world: ProjectileMarchWorld,
+                  colliders: Query<(
+                &'static Position,
+                &'static Rotation,
+                &'static Collider,
+                Option<&'static BallisticSurfaces>,
+            )>,
                   children: Query<&Children>,
                   names: Query<&Name>,
                   labelled: Query<(Entity, &Name), With<ComponentHealth>>,
                   mut health: Query<&mut ComponentHealth>| {
-                let armor = SpatialQueryFilter::from_mask(Layer::Armor);
+                let context = resolve::ResolveContext {
+                    world: &world,
+                    colliders: &colliders,
+                    deposit: true,
+                    laws: walk::WalkLaws::default(),
+                };
+                let parents = &world.parents;
                 let within = |collider: Entity| {
-                    hit_ancestor(collider, &volumes, &parents).is_some_and(|(node, _)| {
-                        owners.get(node).ok().map(VolumeOf::tank) == Some(tank)
+                    hit_ancestor(collider, &world.volumes, parents).is_some_and(|(node, _)| {
+                        world.owners.get(node).ok().map(VolumeOf::tank) == Some(tank)
                     })
                 };
                 let boxes: Vec<(String, Entity)> = box_names
@@ -402,77 +409,55 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                     input.push(' ');
                     bits(&mut input, ray.weight);
 
-                    // 1. The engine walk: every entry and exit along the ray.
+                    // 1. The ordered presence the direction is walked over.
                     let mut output = String::new();
-                    let dir = Vec3::from(ray.dir);
-                    let (mut pos, mut range, mut entries) = (ray.origin, PROBE, 0);
-                    while range > EPS {
-                        if entries == MAX_WALK_HITS {
-                            output.push_str("truncated;");
-                            break;
+                    match resolve::field_presence(&context, &within, ray.origin, ray.dir) {
+                        Ok(None) => output.push_str("clear"),
+                        Ok(Some((start, walked))) => {
+                            bits64(&mut output, start);
+                            for layer in &walked.layers {
+                                output.push(';');
+                                bits64(&mut output, layer.start);
+                                output.push(',');
+                                bits64(&mut output, layer.end);
+                                for presence in &layer.present {
+                                    let _ = write!(
+                                        output,
+                                        " {}:",
+                                        stable_id(presence.volume, &names, parents, &children)
+                                    );
+                                    bits(&mut output, presence.material.factor);
+                                }
+                            }
                         }
-                        let Some(hit) = spatial.cast_ray(pos, ray.dir, range, true, &armor) else {
-                            break;
-                        };
-                        entries += 1;
-                        let _ = write!(
-                            output,
-                            "{}:",
-                            stable_id(hit.entity, &names, &parents, &children)
-                        );
-                        bits(&mut output, hit.distance);
-                        output.push(':');
-                        bits3(&mut output, hit.normal);
-                        let at = pos + dir * hit.distance;
-                        let exit = spatial.cast_ray_predicate(
-                            at + dir * EPS,
-                            ray.dir,
-                            PROBE,
-                            false,
-                            &armor,
-                            &|e| e == hit.entity,
-                        );
-                        let span = match exit {
-                            Some(exit) => {
-                                output.push('>');
-                                bits(&mut output, exit.distance);
-                                output.push(':');
-                                bits3(&mut output, exit.normal);
-                                EPS + exit.distance
-                            }
-                            None => {
-                                output.push_str(">none");
-                                0.0
-                            }
-                        };
-                        output.push(';');
-                        pos = at + dir * (span + EPS);
-                        range -= hit.distance + span + EPS;
+                        Err(error) => {
+                            let _ = write!(output, "error {error:?}");
+                        }
                     }
 
-                    // 2. The sim's field cast, into freshly reset boxes.
+                    // 2. The sim's field walk, into freshly reset boxes.
                     for (_, entity) in &boxes {
                         health
                             .get_mut(*entity)
                             .expect("a laid-out box has health")
                             .current = BOX_RESET_HP;
                     }
-                    let (cast, doses) = cast_field_ray(
+                    let cast = resolve::field_direction(
+                        &context,
+                        &within,
+                        &|volume| health.contains(volume),
+                        &[],
                         ray.origin,
                         ray.dir,
                         ray.strength,
                         ray.weight,
-                        &spatial,
-                        &volumes,
-                        &parents,
-                        &health,
-                        &armor,
-                        &within,
-                    );
+                    )
+                    .unwrap_or_else(|error| panic!("{}: the walk failed: {error:?}", ray.label));
+                    let doses = cast.doses;
                     let dealt = apply_doses(&doses, &mut health, true);
                     output.push_str(" end ");
                     bits3(&mut output, cast.end);
-                    let _ = write!(output, " deposited {} dealt ", cast.deposited);
+                    let _ = write!(output, " deposited {} dealt ", !doses.is_empty());
                     bits(&mut output, dealt);
                     for (i, (name, entity)) in boxes.iter().enumerate() {
                         let left = health
