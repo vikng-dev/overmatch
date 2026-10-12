@@ -602,14 +602,28 @@ pub(crate) fn field_presence(
 /// March one direction of a field thrown from the world point `at` through the volumes `within`
 /// admits (the struck tank's), from its ordered presence ([`field_presence`]).
 ///
-/// `strength` (reference-mm) is constant in air and spent by `chord × factor` through each layer in
-/// order, an overlap resisting by the union-field overlap rule ([`overlap_of`]). Entering a volume
-/// that `is_box` (an HP-bearing one), the direction doses it `strength × weight` — its strength at
-/// entry times its share of the field — once, never scaled by the box's factor; armour shadows and
-/// takes nothing. A volume the direction starts inside it enters at `at`, except one of `exited`,
-/// the volumes the throw leaves: the direction has not entered them there. It stops where its
-/// strength is exhausted, inside the layer at `strength / factor` of it, or where it leaves the
-/// last admitted volume.
+/// `strength` (reference-mm) is constant in air and spent by `chord × factor` through each SPAN in
+/// order: a maximal run of consecutive layers over which the governing factor — the union-field
+/// overlap rule's ([`overlap_of`]) — is one value, coalesced as the line walker coalesces its own
+/// spans. The layers inside a span only address doses. Entering a volume that `is_box` (an
+/// HP-bearing one), the direction doses it `strength × weight` — its strength at entry, the span's
+/// strength less `factor` times the progress into the span, times its share of the field — once,
+/// never scaled by the box's factor; armour shadows and takes nothing. A volume the direction starts
+/// inside it enters at `at`, except one of `exited`, the volumes the throw leaves: the direction has
+/// not entered them there. It stops where its strength is exhausted, inside the span at
+/// `strength / factor` of it, or where it leaves the last admitted volume.
+///
+/// MONOTONICITY, exactly as it holds. The strength arriving at a point, and the point where it is
+/// exhausted, are computed from the spans before it and the point's own position alone: a presence
+/// boundary that leaves the governing factor unchanged takes no part. So material that leaves the
+/// governing factor unchanged at every point (softer material inside harder, equal-factor material
+/// in contact) changes no bit of the strength arriving anywhere, and so of no other box's dose,
+/// provided the walk's start is unchanged: added bounds that reach behind `at` move the start, and
+/// every boundary's f64 position with it. Material that raises the governing factor over a stretch
+/// lowers every strength beyond it in exact arithmetic, since a maximum cannot fall when a factor
+/// is added; in f64 that holds up to the rounding of the spans the raise splits one into, one
+/// product and one subtraction each (DERIVED: a few ulp of the larger of the strength and those
+/// spans' costs), so only a raise whose own cost is within that rounding is not guaranteed to show.
 #[expect(
     clippy::too_many_arguments,
     reason = "the field kernel: the world, the struck tank, the throw and the direction's own state"
@@ -630,44 +644,60 @@ pub(crate) fn field_direction(
             doses: Vec::new(),
         });
     };
+    let layers: Vec<&walk::Layer> = walked
+        .layers
+        .iter()
+        .filter(|layer| layer.end > start)
+        .collect();
+    let factor_of =
+        |layer: &walk::Layer| overlap_of(layer.present.iter().map(|p| p.material.factor));
+    // Strength at the start of the current span.
     let mut strength = strength as f64;
     let mut end = start;
     let mut doses: Vec<Dose> = Vec::new();
     let mut previous: &[walk::Presence] = &[];
-    for (index, layer) in walked
-        .layers
-        .iter()
-        .filter(|layer| layer.end > start)
-        .enumerate()
-    {
-        let from = layer.start.max(start);
-        for presence in &layer.present {
-            let volume = presence.volume;
-            let entered = !previous.iter().any(|before| before.volume == volume)
-                && !(index == 0 && exited.contains(&volume));
-            if entered
-                && strength > 0.0
-                && is_box(volume)
-                && !doses.iter().any(|dose| dose.address == volume)
-            {
-                doses.push(Dose {
-                    address: volume,
-                    amount: (strength * weight as f64) as f32,
-                    source: DoseSource::Field,
-                });
+    let mut first = 0;
+    while first < layers.len() {
+        // The span: this layer and every following one the governing factor does not change over.
+        let governing = factor_of(layers[first]);
+        let last = (first + 1..layers.len())
+            .take_while(|&index| factor_of(layers[index]).to_bits() == governing.to_bits())
+            .last()
+            .unwrap_or(first);
+        let from = layers[first].start.max(start);
+        let to = layers[last].end;
+        let factor = governing as f64;
+        let cost = (to - from) * factor;
+        for (index, layer) in layers.iter().enumerate().take(last + 1).skip(first) {
+            // The span's first layer is entered with the span's strength itself.
+            let arriving = strength - (layer.start.max(start) - from) * factor;
+            for presence in &layer.present {
+                let volume = presence.volume;
+                let entered = !previous.iter().any(|before| before.volume == volume)
+                    && !(index == 0 && exited.contains(&volume));
+                if entered
+                    && arriving > 0.0
+                    && is_box(volume)
+                    && !doses.iter().any(|dose| dose.address == volume)
+                {
+                    doses.push(Dose {
+                        address: volume,
+                        amount: (arriving * weight as f64) as f32,
+                        source: DoseSource::Field,
+                    });
+                }
             }
+            if !layer.present.is_empty() {
+                end = layer.end;
+            }
+            previous = &layer.present;
         }
-        if !layer.present.is_empty() {
-            end = layer.end;
-        }
-        let factor = overlap_of(layer.present.iter().map(|p| p.material.factor)) as f64;
-        let cost = (layer.end - from) * factor;
         if cost > 0.0 && cost >= strength {
-            end = from + (layer.end - from) * (strength / cost);
+            end = from + (to - from) * (strength / cost);
             break;
         }
         strength -= cost;
-        previous = &layer.present;
+        first = last + 1;
     }
     Ok(FieldRay {
         end: at + Vec3::from(dir) * (end - start) as f32,

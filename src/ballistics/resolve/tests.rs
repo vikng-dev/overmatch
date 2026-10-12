@@ -2238,7 +2238,9 @@ fn a_direction_exhausts_halfway_through_a_thin_plate() {
 
 /// CLASS INVARIANT, SHADOWING IS MONOTONE ALONG ONE DIRECTION: adding any volume anywhere along a
 /// direction — before, around, inside or overlapping the volumes already there — never raises any
-/// box's dose. Fixture: randomized stacks of overlapping volumes of random factor along `-Y`.
+/// box's dose, a box sitting exactly on its exhaustion threshold included ([`field_direction`]
+/// states the exact guarantee). Fixture: randomized stacks of overlapping volumes of random factor
+/// along `-Y`.
 #[test]
 fn adding_material_along_a_direction_never_raises_a_dose() {
     let mut state = 0x2545_f491_u32;
@@ -2291,11 +2293,213 @@ fn adding_material_along_a_direction_never_raises_a_dose() {
             );
         }
     }
+
+    // Exhaustion thresholds: stacks on a 1/1024 m grid, where every cost is exact in f64 and the
+    // cost of reaching a box is exact in f32, thrown with exactly that strength — the box sits on
+    // the threshold, undosed, and a strength one ulp higher doses it. The added material is a slab
+    // off the grid or a sloped prism whose crossings are non-dyadic; neither may lift the box off
+    // the threshold, nor raise any dose.
+    let grid = |value: f32| (value * 1024.0).round() / 1024.0;
+    for trial in 0..16 {
+        let stack: Vec<(f32, f32, f32, bool)> = (0..6)
+            .map(|index| {
+                let top = grid(-0.2 - 3.0 * unit());
+                let thickness = grid(0.01 + 1.2 * unit() * unit());
+                let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
+                (top, thickness, factor, index < 3)
+            })
+            .collect();
+        // `∫ max(factor)` from the origin down to `depth`, over the stack's own cuts.
+        let cost_to = |depth: f64| -> f64 {
+            let mut cuts: Vec<f64> = stack
+                .iter()
+                .flat_map(|&(top, thickness, _, _)| {
+                    [-(top as f64), -(top as f64) + thickness as f64]
+                })
+                .filter(|t| *t < depth)
+                .chain([0.0, depth])
+                .collect();
+            cuts.sort_by(f64::total_cmp);
+            cuts.dedup();
+            cuts.windows(2)
+                .map(|w| {
+                    let mid = 0.5 * (w[0] + w[1]);
+                    let factor = stack
+                        .iter()
+                        .filter(|&&(top, thickness, _, _)| {
+                            -(top as f64) <= mid && mid < -(top as f64) + thickness as f64
+                        })
+                        .fold(0.0f64, |most, &(_, _, factor, _)| most.max(factor as f64));
+                    (w[1] - w[0]) * factor
+                })
+                .sum()
+        };
+        let Some((target, cost)) = (0..3)
+            .map(|index| (index, cost_to(-(stack[index].0 as f64))))
+            .filter(|(_, cost)| *cost > 0.0)
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+        else {
+            continue;
+        };
+        let strength = cost as f32;
+        assert_eq!(
+            strength as f64, cost,
+            "trial {trial}: the threshold is exact"
+        );
+        let doses =
+            |stack: &[(f32, f32, f32, bool)], prism: Option<(f32, f32, f32)>, strength: f32| {
+                let (mut app, boxes) = field_world(|app| {
+                    if let Some((base, height, factor)) = prism {
+                        sloped_prism(app, base, height, factor);
+                    }
+                    stack
+                        .iter()
+                        .filter_map(|&(top, thickness, factor, hp)| {
+                            let entity = slab_below(app, top, thickness, factor, hp);
+                            hp.then_some(entity)
+                        })
+                        .collect()
+                });
+                let (_, doses) = walk_direction(&mut app, Vec3::ZERO, strength, &[]);
+                boxes
+                    .iter()
+                    .map(|b| dose_to(&doses, *b))
+                    .collect::<Vec<f32>>()
+            };
+        let before = doses(&stack, None, strength);
+        assert_eq!(
+            before[target], 0.0,
+            "trial {trial}: box {target} sits on the threshold (stack {stack:?})"
+        );
+        let above = doses(&stack, None, f32::from_bits(strength.to_bits() + 1));
+        assert!(
+            above[target] > 0.0,
+            "trial {trial}: one ulp more strength doses box {target} (stack {stack:?})"
+        );
+        let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
+        let (stacked, prism) = if trial % 2 == 0 {
+            let mut stacked = stack.clone();
+            stacked.push((
+                -0.1 - 3.2 * unit(),
+                0.001 + 2.0 * unit() * unit(),
+                factor,
+                false,
+            ));
+            (stacked, None)
+        } else {
+            // Inside the target's shadow — between the origin and its entry — where there is room.
+            let height = grid(0.01 + 1.5 * unit() * unit());
+            let (lowest, highest) = (stack[target].0 - 0.2, -(height + 0.6));
+            let base = if highest > lowest {
+                grid(lowest + (highest - lowest) * unit())
+            } else {
+                grid(-(height + 0.6) - 2.5 * unit())
+            };
+            (stack.clone(), Some((base, height, factor)))
+        };
+        let after = doses(&stacked, prism, strength);
+        for (index, (b, a)) in before.iter().zip(&after).enumerate() {
+            assert!(
+                a <= b,
+                "threshold trial {trial}, box {index}: adding {:?} raised the dose {b} to {a} \
+                 (stack {stack:?})",
+                prism.map_or(stacked.last().copied(), |(base, height, factor)| Some((
+                    base, height, factor, false
+                )))
+            );
+        }
+    }
+}
+
+/// A static trimesh volume of `factor` reference-mm per metre, of the closed shell `mesh`.
+fn factored_mesh(app: &mut App, mesh: (Collider, BallisticSurfaces), factor: f32) -> Entity {
+    app.world_mut()
+        .spawn((
+            Transform::IDENTITY,
+            RigidBody::Static,
+            mesh,
+            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+            BallisticVolume {
+                material: walk::VolumeMaterial::fixture(factor),
+                substance: "fixture".to_string(),
+            },
+        ))
+        .id()
+}
+
+/// A prism of `factor` whose top and bottom faces rise 0.4 per metre of `+X`, over `x ∈ [-0.5,
+/// 0.75]`: it crosses the `-Y` axis at heights `base + 0.2` and `base + height + 0.2`, non-dyadic
+/// though every vertex is exact in f32 for `base` and `height` on a dyadic grid.
+fn sloped_prism(app: &mut App, base: f32, height: f32, factor: f32) -> Entity {
+    let mesh = mapped_box_trimesh(|c| {
+        Vec3::new(
+            0.625 * c.x + 0.125,
+            base + 0.5 * height * (c.y + 1.0) + 0.25 * (c.x + 1.0),
+            0.5 * c.z,
+        )
+    });
+    factored_mesh(app, mesh, factor)
 }
 
 /// A trial's strength, a function of the trial alone so both walks of a trial throw the same.
 fn unit_free(trial: u32) -> f32 {
     ((trial.wrapping_mul(2_654_435_761) >> 8) as f32 / (1u32 << 24) as f32).fract()
+}
+
+/// Softer material inside a plate leaves the plate's cost bit-identical: strength 1 thrown along
+/// `+X` from 0.125 m before a plate of factor 1 over `[0, 1]` m is exhausted exactly at its rear
+/// face, with or without a factor-0.5 prism crossing the ray over `[0.1, 0.3]` m inside it, and the
+/// box behind takes nothing either way. Fixture (DERIVED): the prism is bounded by the planes
+/// `10x − y = 1` and `10x − y = 3`, its vertices exact in f32, so its crossings are the non-dyadic
+/// `0.1` and `0.3` along the ray; charged boundary by boundary, the three pieces of the plate
+/// leave `2^-53` of strength (DERIVED in f64), which reaches the box.
+#[test]
+fn softer_material_inside_a_plate_leaves_its_cost_unchanged() {
+    let dose_behind = |prism: bool| {
+        let (mut app, boxes) = field_world(|app| {
+            volume(
+                app,
+                Vec3::new(1.0, 2.0, 2.0),
+                Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
+                1.0,
+                None,
+            );
+            if prism {
+                // The cube's faces `x = ∓1` land on the planes `10x − y = 1` and `10x − y = 3`.
+                let mesh = mapped_box_trimesh(|c| {
+                    Vec3::new(0.25 * (c.y + 1.0), 2.5 * (c.y + 1.0) - c.x - 2.0, c.z)
+                });
+                factored_mesh(app, mesh, 0.5);
+            }
+            vec![volume(
+                app,
+                Vec3::new(0.2, 2.0, 2.0),
+                Transform::from_translation(Vec3::new(1.6, 0.0, 0.0)),
+                0.0,
+                Some(FIELD_HP),
+            )]
+        });
+        let ray = field_rays(
+            &mut app,
+            vec![(Vec3::new(-0.125, 0.0, 0.0), Dir3::X, 1.0)],
+            1.0,
+            Vec::new(),
+        )
+        .remove(0);
+        dose_to(
+            &ray.doses
+                .iter()
+                .map(|dose| (dose.address, dose.amount))
+                .collect::<Vec<_>>(),
+            boxes[0],
+        )
+    };
+    assert_eq!(dose_behind(false), 0.0, "the plate alone");
+    assert_eq!(
+        dose_behind(true),
+        0.0,
+        "the plate with softer material inside it"
+    );
 }
 
 /// A direction recognises the volume it is thrown from by identity, never by displacement: starting
