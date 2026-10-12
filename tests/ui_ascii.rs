@@ -65,6 +65,12 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     "src/net/debug_hud.rs",
     "src/net/hit_feel.rs",
     "src/net/spawn_map.rs",
+    // The Join menu: its own labels, and the reasons the other files compose for it.
+    "src/net/matchmaking/lobby_ui.rs",
+    "src/net/matchmaking/picker.rs",
+    "src/net/matchmaking/ticket.rs",
+    "src/net/matchmaking/worker.rs",
+    "src/net/matchmaking/contract.rs",
 ];
 
 /// The dev-sandbox files that spawn `Text`. These keep Bevy's default ASCII-only font (AGENTS.md), so

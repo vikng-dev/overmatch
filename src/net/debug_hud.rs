@@ -1,4 +1,5 @@
-//! Bottom-right net-client debug panel: ping (RTT), jitter buffer, FPS, and frame time. Net-only —
+//! Bottom-right net-client debug panel: ping (RTT), jitter buffer, FPS, frame time, and the
+//! client's version (`net::CLIENT_VERSION`). Net-only —
 //! ping is meaningless in single-player, so this lives in the net module and is mounted solely by
 //! `NetClientPlugin` (never SP, never the headless server). WIP instrumentation: hardcoded styling
 //! mirrored from `crew_ui`'s top-left status card, one spawn system + one update system, no config
@@ -31,7 +32,7 @@ use bevy::prelude::*;
 use lightyear::core::tick::TickDuration;
 use lightyear::prelude::*;
 
-use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
+use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts};
 
 use super::sync_margin::ArrivalDelay;
 
@@ -124,6 +125,27 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     ));
                 });
             }
+            // The build this client is, constant for the process: the string a bug report and
+            // the matchmaking Worker both name.
+            card.spawn(Node {
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::SpaceBetween,
+                column_gap: Val::Px(8.0),
+                ..default()
+            })
+            .with_children(|row| {
+                for text in ["Version", super::CLIENT_VERSION] {
+                    row.spawn((
+                        Text::new(text),
+                        TextFont {
+                            font: fonts.body.clone().into(),
+                            font_size: FontSize::Px(15.0),
+                            ..default()
+                        },
+                        TextColor(TEXT_DIM),
+                    ));
+                }
+            });
         });
 }
 

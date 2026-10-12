@@ -44,6 +44,130 @@ const DEFAULT_SERVER: &str = match option_env!("OVERMATCH_DEFAULT_SERVER") {
     Some(server) => server,
     None => "droplet.overmatch.win:5888",
 };
+/// The matchmaking Worker's base URL baked in at build time (the release workflow sets
+/// `OVERMATCH_DEFAULT_API`); when set, a client with neither `--local` nor `OVERMATCH_SERVER`
+/// starts in the Join menu instead of connecting to [`DEFAULT_SERVER`].
+const DEFAULT_API: Option<&str> = option_env!("OVERMATCH_DEFAULT_API");
+
+/// Where the Worker base URL came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApiSource {
+    Environment,
+    BakedDefault,
+}
+
+impl ApiSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Environment => "OVERMATCH_API",
+            Self::BakedDefault => "baked default API",
+        }
+    }
+}
+
+/// How this client finds its server: a fixed address, or the Join menu against a Worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientMode<'a> {
+    Direct(ServerSelection<'a>),
+    Matchmaking { api: &'a str, source: ApiSource },
+}
+
+/// `--local` and `OVERMATCH_SERVER` select their direct paths whatever else is set; otherwise a
+/// non-empty Worker URL — `OVERMATCH_API`, then the baked one — selects matchmaking; otherwise the
+/// baked server.
+fn choose_mode<'a>(
+    local: bool,
+    server: Option<&'a str>,
+    api: Option<&'a str>,
+    baked_api: Option<&'a str>,
+    baked_server: &'a str,
+) -> ClientMode<'a> {
+    let direct = ClientMode::Direct(choose_server(local, server, baked_server));
+    if local || server.is_some() {
+        return direct;
+    }
+    let present = |url: Option<&'a str>| url.map(str::trim).filter(|url| !url.is_empty());
+    if let Some(api) = present(api) {
+        ClientMode::Matchmaking {
+            api,
+            source: ApiSource::Environment,
+        }
+    } else if let Some(api) = present(baked_api) {
+        ClientMode::Matchmaking {
+            api,
+            source: ApiSource::BakedDefault,
+        }
+    } else {
+        direct
+    }
+}
+
+/// Everything the client link entity is built from except its server and key, fixed at startup so
+/// the link can be spawned then (direct mode) or when a match is ready (matchmaking mode).
+#[derive(Resource, Clone)]
+struct ClientLinkTemplate {
+    /// See the client-id note in [`run`].
+    client_id: u64,
+    conditioner: Option<LinkConditionerConfig>,
+    seeded: Option<SeededLink>,
+}
+
+#[derive(Clone, Copy)]
+struct SeededLink {
+    seed: u64,
+    latency_ms: u64,
+    jitter_ms: u64,
+    /// `(burst, period)`.
+    burst: Option<(Duration, Duration)>,
+}
+
+impl ClientLinkTemplate {
+    /// The single client connection entity's components — found by the retry driver via
+    /// `With<NetcodeClient>` (there is at most one), so its id need not be threaded through.
+    fn bundle(&self, server_addr: SocketAddr, private_key: [u8; 32]) -> impl Bundle {
+        (
+            Name::new("Client"),
+            Client,
+            Link::default()
+                .with_conditioner(self.conditioner.clone().map(RecvLinkConditioner::new)),
+            LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
+            PeerAddr(server_addr),
+            // Lightyear's client replication systems all filter on this marker: without it the
+            // link connects and nothing replicates.
+            ReplicationReceiver,
+            NetcodeClient::new(
+                Authentication::Manual {
+                    server_addr,
+                    client_id: self.client_id,
+                    private_key,
+                    // Must match the server's `NetcodeConfig.protocol_id`.
+                    protocol_id: protocol_id(),
+                },
+                NetcodeConfig {
+                    client_timeout_secs: 3,
+                    token_expire_secs: -1,
+                    ..default()
+                },
+            )
+            .expect("a manual token always builds"),
+            UdpIo::default(),
+        )
+    }
+
+    /// The seeded receive conditioner, inserted beside [`Self::bundle`] when configured. Its burst
+    /// epoch is the spawn instant; the phase needs no cross-endpoint agreement, only a fixed
+    /// anchor, because the signature is periodic.
+    fn seeded(&self) -> Option<harness::SeededRecvConditioner> {
+        self.seeded.map(|link| {
+            let mut seeded =
+                harness::SeededRecvConditioner::new(link.seed, link.latency_ms, link.jitter_ms);
+            if let Some((burst, period)) = link.burst {
+                seeded = seeded.with_burst(burst, period, lightyear::core::time::Instant::now());
+            }
+            seeded
+        })
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerSource {
@@ -143,7 +267,9 @@ pub fn run() {
     // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
     // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
     // eyes-on diagnostic.
-    let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
+    // A documentation capture (`dev_capture`, `OVERMATCH_CAPTURE`) is hidden for the same reason.
+    let capture = !simulate && std::env::var_os("OVERMATCH_CAPTURE").is_some();
+    let hidden = (sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false)) || capture;
 
     let mut app = App::new();
     if simulate && !sim_windowed {
@@ -284,6 +410,10 @@ pub fn run() {
     if !simulate || sim_windowed {
         app.add_plugins(NetClientPlugin);
     }
+    if capture {
+        // Documentation frames to disk (the Join menu, a connect screen); exits once they are.
+        app.add_plugins(crate::dev_capture::plugin);
+    }
     // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless
     // `SPIKE_TRACE` is set.
     app.add_plugins(crate::trace::client_plugin);
@@ -300,23 +430,40 @@ pub fn run() {
     // (FPS + frame-time diagnostics used to be registered here. They now belong to their SOLE
     // consumer, `net::debug_hud::plugin`, which `NetClientPlugin` mounts.)
 
-    // Resolve once at startup. Raw socket addresses bypass DNS; hostnames select their resolver's
-    // first IPv4 result because the UDP transport binds an IPv4 wildcard below.
+    // A direct target is resolved once at startup. Raw socket addresses bypass DNS; hostnames
+    // select their resolver's first IPv4 result because the UDP transport binds an IPv4 wildcard
+    // below. The scripted harness has no menu to click, so it always connects directly.
     let local = std::env::args().any(|arg| arg == "--local");
     let environment = std::env::var("OVERMATCH_SERVER").ok();
-    let selection = choose_server(local, environment.as_deref(), DEFAULT_SERVER);
-    let server_addr = match parse_server_endpoint(selection.raw)
-        .and_then(|endpoint| resolve_server_endpoint(&endpoint).map_err(|error| error.to_string()))
-    {
-        Ok(server_addr) => server_addr,
-        Err(error) => {
-            error!(
-                "client: cannot resolve target server {:?} from {}: {error}; exiting",
-                selection.raw,
-                selection.source.label()
-            );
-            return;
+    let api = std::env::var("OVERMATCH_API").ok();
+    let mode = if simulate {
+        ClientMode::Direct(choose_server(local, environment.as_deref(), DEFAULT_SERVER))
+    } else {
+        choose_mode(
+            local,
+            environment.as_deref(),
+            api.as_deref(),
+            DEFAULT_API,
+            DEFAULT_SERVER,
+        )
+    };
+    let direct_target = match mode {
+        ClientMode::Direct(selection) => {
+            match parse_server_endpoint(selection.raw).and_then(|endpoint| {
+                resolve_server_endpoint(&endpoint).map_err(|error| error.to_string())
+            }) {
+                Ok(server_addr) => Some((server_addr, selection)),
+                Err(error) => {
+                    error!(
+                        "client: cannot resolve target server {:?} from {}: {error}; exiting",
+                        selection.raw,
+                        selection.source.label()
+                    );
+                    return;
+                }
+            }
         }
+        ClientMode::Matchmaking { .. } => None,
     };
     // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
     // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
@@ -350,12 +497,12 @@ pub fn run() {
             info!(
                 "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
             );
-            Some(RecvLinkConditioner::new(
+            Some(
                 LinkConditionerConfig::default()
                     .with_incoming_latency(Duration::from_millis(latency_ms))
                     .with_incoming_jitter(Duration::from_millis(jitter_ms))
                     .with_fixed_loss(0.0),
-            ))
+            )
         }
         RecvConditionerMode::Seeded(seed) => {
             info!(
@@ -412,52 +559,54 @@ pub fn run() {
     // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
     // sizing law and rewrites `min_delay` every frame.
     app.insert_resource(interpolation);
-    // The single client connection entity — found by the retry driver via `With<NetcodeClient>`
-    // (there is exactly one), so its id need not be threaded through.
-    let mut client_entity = app.world_mut().spawn((
-        Name::new("Client"),
-        Client,
-        Link::default().with_conditioner(conditioner),
-        LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0)),
-        PeerAddr(server_addr),
-        // Lightyear's client replication systems all filter on this marker: without it the link
-        // connects and nothing replicates.
-        ReplicationReceiver,
-        NetcodeClient::new(
-            Authentication::Manual {
-                server_addr,
-                client_id,
-                private_key: [0; 32],
-                // Must match the server's `NetcodeConfig.protocol_id`.
-                protocol_id: protocol_id(),
-            },
-            NetcodeConfig {
-                client_timeout_secs: 3,
-                token_expire_secs: -1,
-                ..default()
-            },
-        )
-        .expect("manual dev token should always build"),
-        UdpIo::default(),
-    ));
-    if let RecvConditionerMode::Seeded(seed) = conditioner_mode {
-        let mut seeded = harness::SeededRecvConditioner::new(seed, latency_ms, jitter_ms);
-        if let Some((burst, period)) = burst {
-            // The epoch is this install instant; the phase needs no cross-endpoint agreement,
-            // only a fixed anchor, because the signature is periodic.
-            seeded = seeded.with_burst(burst, period, lightyear::core::time::Instant::now());
-        }
-        client_entity.insert(seeded);
-    }
+    let template = ClientLinkTemplate {
+        client_id,
+        conditioner,
+        seeded: match conditioner_mode {
+            RecvConditionerMode::Seeded(seed) => Some(SeededLink {
+                seed,
+                latency_ms,
+                jitter_ms,
+                burst,
+            }),
+            _ => None,
+        },
+    };
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
-    // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states;
-    // the target endpoint is fixed for the session, so record it once for the retry driver's log.
-    info!(
-        "client: target server {server_addr} (source: {}), client_id={client_id}",
-        selection.source.label()
-    );
+    // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states.
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
+    match (mode, direct_target) {
+        (_, Some((server_addr, selection))) => {
+            // A direct link exists from startup, with the all-zero dev key the direct-connect
+            // servers hold; its endpoint is fixed for the session, so it is logged once here.
+            info!(
+                "client: target server {server_addr} (source: {}), client_id={client_id}",
+                selection.source.label()
+            );
+            let mut client_entity = app.world_mut().spawn(template.bundle(server_addr, [0; 32]));
+            if let Some(seeded) = template.seeded() {
+                client_entity.insert(seeded);
+            }
+        }
+        (ClientMode::Matchmaking { api, source }, None) => {
+            // No link until a ticket is ready: the Join menu owns the screen until then.
+            info!(
+                "client: matchmaking via {api} (source: {}), client_id={client_id}",
+                source.label()
+            );
+            super::matchmaking::install(&mut app, api);
+            app.add_systems(
+                Update,
+                (
+                    spawn_matched_link,
+                    abandon_unreachable_match.after(drive_connection),
+                ),
+            );
+        }
+        (ClientMode::Direct(_), None) => unreachable!("a direct mode resolved its target above"),
+    }
+    app.insert_resource(template);
     app.add_systems(Startup, load_tank_assets);
     // The connect-status overlay ("CONNECTING…" / "RECONNECTING…") is windowed presentation only —
     // headless automation has no window to draw it, and verifies the state machine via the log
@@ -715,6 +864,60 @@ fn drive_connection(
     }
 }
 
+/// Matchmaking mode: spawn the client link for a ready match, with that match's key, and start the
+/// connection state machine afresh for it. At most one link exists: a ready match arriving while
+/// one does is dropped.
+fn spawn_matched_link(
+    mut ready: MessageReader<super::matchmaking::MatchReady>,
+    template: Res<ClientLinkTemplate>,
+    links: Query<(), With<NetcodeClient>>,
+    mut commands: Commands,
+) {
+    let Some(super::matchmaking::MatchReady(matched)) = ready.read().last() else {
+        return;
+    };
+    if !links.is_empty() {
+        warn!(
+            "client: a ready match at {} arrived while a link exists; ignored",
+            matched.addr
+        );
+        return;
+    }
+    info!(
+        "client: target server {} (source: matchmaking), client_id={}",
+        matched.addr, template.client_id
+    );
+    let mut link = commands.spawn(template.bundle(matched.addr, matched.key));
+    if let Some(seeded) = template.seeded() {
+        link.insert(seeded);
+    }
+    commands.insert_resource(ConnectRetry::default());
+}
+
+/// Matchmaking mode: a link to a ready match that has failed [`MISMATCH_HINT_AFTER_ATTEMPTS`]
+/// connects without ever connecting is despawned, and the Join menu returns with the reason. A
+/// link that connected once keeps reconnecting, as in direct mode.
+fn abandon_unreachable_match(
+    retry: Res<ConnectRetry>,
+    links: Query<Entity, With<NetcodeClient>>,
+    mut unreachable: MessageWriter<super::matchmaking::MatchUnreachable>,
+    mut commands: Commands,
+) {
+    if retry.connected_once || retry.attempts < MISMATCH_HINT_AFTER_ATTEMPTS {
+        return;
+    }
+    let Ok(link) = links.single() else { return };
+    warn!(
+        "client: the match server never answered after {} attempts; back to the Join menu",
+        retry.attempts
+    );
+    commands.entity(link).despawn();
+    commands.insert_resource(ConnectRetry::default());
+    unreachable.write(super::matchmaking::MatchUnreachable(
+        "could not reach the match server".into(),
+    ));
+}
+
 /// The connect-status message node inside the connect overlay — its text is rewritten from
 /// [`ConnectRetry`] by [`update_connect_status`]. The backdrop node itself carries no bespoke marker:
 /// it is an `overlay::OverlayNode(ConnectStatus)`, so its z and scrim visibility are the shared
@@ -759,6 +962,7 @@ fn spawn_connect_status(mut commands: Commands, fonts: Res<UiFonts>) {
 /// retries run, never accusing a mid-game player's client of being out of date.
 fn update_connect_status(
     retry: Res<ConnectRetry>,
+    links: Query<(), With<NetcodeClient>>,
     connected: Query<(), (With<Connected>, With<NetcodeClient>)>,
     mut overlays: ResMut<crate::overlay::Overlays>,
     mut text: Query<&mut Text, With<ConnectStatusText>>,
@@ -766,12 +970,13 @@ fn update_connect_status(
 ) {
     use crate::overlay::Overlay;
     let is_connected = !connected.is_empty();
-    // Declare presence into the overlay authority: the connect screen is latched whenever the link is
-    // not up. It is the highest-priority overlay, so it will own the scrim whenever present — and the
-    // shared `overlay::apply_overlay_visibility` reconciler swaps the backdrop's visibility from that.
-    // This system only owns the label text now (its zindex/visibility moved to the `OverlayNode`).
-    overlays.declare(Overlay::ConnectStatus, !is_connected);
-    if is_connected {
+    // Declare presence into the overlay authority: the connect screen is latched whenever a link
+    // exists and is not up. Direct mode has a link from startup; matchmaking mode has none until a
+    // match is ready, and the Join menu owns the screen until then. Above every in-play overlay,
+    // so it owns the scrim whenever present — and the shared `overlay::apply_overlay_visibility`
+    // reconciler swaps the backdrop's visibility from that.
+    overlays.declare(Overlay::ConnectStatus, !links.is_empty() && !is_connected);
+    if is_connected || links.is_empty() {
         return;
     }
 
@@ -2007,6 +2212,73 @@ mod tests {
                 raw: "baked.example",
                 source: ServerSource::BakedDefault,
             }
+        );
+    }
+
+    /// `--local` and `OVERMATCH_SERVER` keep exactly today's direct selection whatever Worker URL
+    /// is set or baked.
+    #[test]
+    fn direct_paths_win_over_any_worker_url() {
+        for (api, baked_api) in [
+            (None, None),
+            (Some("https://api.example"), None),
+            (None, Some("https://baked-api.example")),
+            (
+                Some("https://api.example"),
+                Some("https://baked-api.example"),
+            ),
+        ] {
+            assert_eq!(
+                choose_mode(true, Some("env.example"), api, baked_api, "baked.example"),
+                ClientMode::Direct(choose_server(true, Some("env.example"), "baked.example")),
+            );
+            assert_eq!(
+                choose_mode(false, Some("env.example"), api, baked_api, "baked.example"),
+                ClientMode::Direct(choose_server(false, Some("env.example"), "baked.example")),
+            );
+        }
+    }
+
+    #[test]
+    fn worker_url_selects_matchmaking_runtime_first() {
+        assert_eq!(
+            choose_mode(
+                false,
+                None,
+                Some(" https://api.example "),
+                Some("https://baked-api.example"),
+                "baked.example"
+            ),
+            ClientMode::Matchmaking {
+                api: "https://api.example",
+                source: ApiSource::Environment,
+            }
+        );
+        assert_eq!(
+            choose_mode(
+                false,
+                None,
+                Some(""),
+                Some("https://baked-api.example"),
+                "baked.example"
+            ),
+            ClientMode::Matchmaking {
+                api: "https://baked-api.example",
+                source: ApiSource::BakedDefault,
+            },
+            "an empty OVERMATCH_API is unset"
+        );
+    }
+
+    /// With no Worker URL anywhere the client connects to the baked server, as before.
+    #[test]
+    fn no_worker_url_keeps_the_baked_server() {
+        assert_eq!(
+            choose_mode(false, None, None, Some("  "), "baked.example"),
+            ClientMode::Direct(ServerSelection {
+                raw: "baked.example",
+                source: ServerSource::BakedDefault,
+            })
         );
     }
 

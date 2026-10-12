@@ -11,8 +11,9 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
-/// declared LOW→HIGH, so the greatest is the top layer: `ConnectStatus` is the maximum (a connect /
-/// reconnect takes over everything), then `Menu` (an open menu is the top INTERACTIVE layer — Esc
+/// declared LOW→HIGH, so the greatest is the top layer: `Lobby` is the maximum (the pre-connect
+/// Join menu, up only while no client link exists), then `ConnectStatus` (a connect / reconnect
+/// takes over everything in play), then `Menu` (an open menu is the top INTERACTIVE layer — Esc
 /// closes it, R can't respawn under it), then `SpawnMap`, then `Death`, then `ViewDead` at the
 /// bottom.
 ///
@@ -34,8 +35,12 @@ pub(crate) enum Overlay {
     /// The Esc cursor-release menu (the net stand-in for SP pause; the sim never stops). Esc is the
     /// only thing that opens it — losing focus releases the cursor without declaring an overlay.
     Menu,
-    /// Not connected yet, or the in-game link dropped: "CONNECTING…" / "RECONNECTING…". Highest.
+    /// Not connected yet, or the in-game link dropped: "CONNECTING…" / "RECONNECTING…". Declared
+    /// only while a client link entity exists.
     ConnectStatus,
+    /// Matchmaking mode's Join menu (`net::matchmaking`), declared exactly while no client link
+    /// entity exists — so never together with `ConnectStatus`. Highest.
+    Lobby,
 }
 
 impl Overlay {
@@ -45,6 +50,7 @@ impl Overlay {
     /// outranks it in priority, precisely so the death status line shows THROUGH the menu.
     pub(crate) const fn zindex(self) -> i32 {
         match self {
+            Overlay::Lobby => 400,
             Overlay::ConnectStatus => 300,
             Overlay::Death => 200,
             Overlay::SpawnMap => 150,
@@ -90,10 +96,11 @@ impl Overlay {
     /// The spawn map blocks too, and must: picking a point needs a visible, free cursor, which is
     /// exactly what a blocking overlay buys (the cursor owner releases, `feed_action_state` zeroes
     /// the wire command, so the tank coasts to a stop instead of driving blind under the map).
+    /// The lobby is a menu with buttons and no tank behind it.
     const fn blocks_input(self) -> bool {
         matches!(
             self,
-            Overlay::Menu | Overlay::ConnectStatus | Overlay::SpawnMap
+            Overlay::Menu | Overlay::ConnectStatus | Overlay::SpawnMap | Overlay::Lobby
         )
     }
 
@@ -468,6 +475,7 @@ mod tests {
     /// the death status line (which rides Death's z) shows through the menu.
     #[test]
     fn zindex_contract_is_pinned() {
+        assert_eq!(Overlay::Lobby.zindex(), 400);
         assert_eq!(Overlay::ConnectStatus.zindex(), 300);
         assert_eq!(Overlay::Death.zindex(), 200);
         assert_eq!(Overlay::Menu.zindex(), 100);
@@ -688,6 +696,22 @@ mod tests {
     /// overlay, exactly like `net::client::update_connect_status` does from the live link state.
     fn declare_connect_status(mut overlays: ResMut<Overlays>) {
         overlays.declare(Overlay::ConnectStatus, true);
+    }
+
+    /// The lobby owns the screen: it is the top layer over anything else latched, blocks input, and
+    /// neither Esc nor `M` can latch a layer beneath it.
+    #[test]
+    fn lobby_is_the_top_blocking_undismissable_layer() {
+        let set = overlays(&[Overlay::Lobby, Overlay::Death]);
+        assert_eq!(set.top(), Some(Overlay::Lobby));
+        assert!(draws_scrim(&set, Overlay::Lobby));
+        assert!(input_blocked(&overlays(&[Overlay::Lobby]), true));
+        assert_eq!(top_dismissable(&overlays(&[Overlay::Lobby])), None);
+        assert!(
+            !esc_menu_target(&overlays(&[Overlay::Lobby])),
+            "Esc over the lobby latches no menu",
+        );
+        assert!(!may_open(&overlays(&[Overlay::Lobby]), Overlay::SpawnMap));
     }
 
     /// The status line is menu-over-death ONLY: it does not show when Death owns the scrim (full screen

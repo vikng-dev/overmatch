@@ -1,5 +1,6 @@
 //! In-engine frames to disk, for documentation. Inert unless `OVERMATCH_CAPTURE` is set; mounted
-//! AFTER `DefaultPlugins` by the offline root and the damage cam demo, never by the network client.
+//! AFTER `DefaultPlugins` by the offline root and the damage cam demo, and by the windowed network
+//! client only when the variable is set (that client then creates its window hidden itself).
 //!
 //! * `OVERMATCH_CAPTURE=<png>` — the frame's path. With several times the time goes before the
 //!   extension: `shot.png` → `shot-8.5s.png`, `shot-4s.png`.

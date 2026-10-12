@@ -27,6 +27,8 @@ mod hosting;
 mod input_cadence;
 /// The interpolation buffer's size, derived from the measured link instead of pinned.
 mod interp_delay;
+/// The pre-connect Join menu against the matchmaking Worker (matchmaking mode only).
+mod matchmaking;
 mod physics;
 mod protocol;
 mod rig;
@@ -56,6 +58,10 @@ pub(super) use spawn_map::plugin as spawn_map_plugin;
 
 use crate::state::AppState;
 use crate::tank::PendingTankAssets;
+
+/// This build's version: the string the release tag names (`v` + it), the protocol fingerprint
+/// folds, the matchmaking Worker matches servers on, and the Edgegap app version is named after.
+pub(crate) const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Shared protocol, physics, and safety wiring. Both endpoints must mount it identically.
 fn plugin(app: &mut App) {
