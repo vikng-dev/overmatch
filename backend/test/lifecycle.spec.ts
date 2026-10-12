@@ -102,6 +102,21 @@ describe("readiness", () => {
 		expect(await session(fra.id)).toMatchObject({ outcome: "failed", location: "Frankfurt" });
 	});
 
+	it("a re-placed ticket does not attach to a server in the location that failed it", async () => {
+		await join({ version: V, locations: ["Paris"], pings: {} });
+		const p1 = await bringUp(0, 10); // Paris, full
+		const t = await join({ version: V, locations: ["Paris", "London"], pings: { Paris: 10, London: 20 } });
+		const p2 = launched(1); // a second Paris server for t
+		expect(edgegap.deployment(1).body.filters).toEqual([{ field: "city", values: ["Paris"], filter_type: "any" }]);
+		await heartbeat(p1.id, p1.secret, { players: 2, capacity: 10, state: "open" }); // p1 has room again
+
+		edgegap.deployment(1).status = "Status.ERROR";
+		await webhook(p2.id); // Paris failed t: its retry must leave Paris, open p1 included
+		expect(edgegap.deployment(2).body.filters).toEqual([{ field: "city", values: ["London"], filter_type: "any" }]);
+		const london = await bringUp(2);
+		expect((await ticket(t)).key).toBe(london.key);
+	});
+
 	it("the alarm polls status when the ready webhook is lost", async () => {
 		const t = await join({ version: V, locations: ["Paris"], pings: {} });
 		const s = launched();

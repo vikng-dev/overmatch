@@ -342,7 +342,7 @@ export class Registry extends DurableObject<Env> {
 		const candidates = this.sql
 			.exec<ServerRow>("SELECT * FROM servers WHERE state IN ('starting', 'ready') AND (server_state IS NULL OR server_state = 'open')")
 			.toArray()
-			.filter((s) => wanted.includes(s.location))
+			.filter((s) => wanted.includes(s.location) && !excluded.has(s.location))
 			.map((s) => ({ s, load: this.load(s, now) }))
 			.filter(({ s, load }) => load < s.capacity)
 			.sort((a, b) => ping(a.s.location) - ping(b.s.location) || b.load - a.load || a.s.created_at - b.s.created_at);
