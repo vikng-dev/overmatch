@@ -402,14 +402,15 @@ pub fn sync(
     }
 }
 
-/// How a hull mesh of tier `tier` is drawn in `look`: its own material (`None` for the baseline,
-/// which the stage draws) and whether the hull mask holds it.
+/// How a hull mesh is drawn in a look: its material (one that draws nothing where the look drops
+/// the tier) and whether the hull mask holds it.
 pub struct HullDraw {
     pub material: LookMaterial,
     pub masked: bool,
 }
 
-/// The hull materials of `look` for each tier, built once per stage.
+/// How a hull mesh of tier `tier` is drawn in `look`; `None` for the baseline, which the stage
+/// draws itself.
 pub fn hull(look: GlassLook, tier: Tier, masks: &Masks) -> Option<HullDraw> {
     let none = || LookMaterial::new(MODE_NONE, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
     let glass = |color: Color, alpha: f32, blend| {
@@ -517,8 +518,8 @@ fn share(b: &BoxPlan, settings: &Settings) -> f32 {
     }
 }
 
-/// How component `b` is drawn in `look` and frame `kind`; empty where it is not drawn. `HitMark`
-/// goes on the first element.
+/// How component `b` is drawn in `look` and frame `kind`; empty where it is not drawn. The stage
+/// marks the first element [`HitMark`].
 pub fn component(
     look: GlassLook,
     b: &BoxPlan,
@@ -578,8 +579,7 @@ pub fn component(
     }
 }
 
-/// One element a cone's field is drawn with in a look: its material and whether it is the field's
-/// outer surface (whose intensity the stage leaves alone).
+/// The one surface a cone's field is drawn with in a look, in the stage's material or the look's.
 pub enum FieldDraw {
     Glow(GlowMaterial),
     Look(LookMaterial),

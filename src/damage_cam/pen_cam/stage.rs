@@ -12,7 +12,8 @@
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
 //! components the record names drawn in their own meshes), the plate slice (the tank's own
 //! materials, everything on the eye's side of a vertical plane through the chord dissolved away),
-//! and the outside view (the tank as built).
+//! and the outside view (the tank as built). In the corner, a glass look other than the baseline
+//! ([`GlassLook`], dev-only) draws the hull, the components and the field as [`look`] chooses.
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
