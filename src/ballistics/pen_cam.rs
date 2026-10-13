@@ -621,9 +621,10 @@ const SOFT: f32 = 10.0;
 /// One fixture volume: name, full extents and centre (m), kind.
 type FixtureVolume = (&'static str, Vec3, Vec3, Kind);
 
-/// Static fixture tanks, each volume its own static cuboid on the `Armor` layer owned by the tank
-/// its index names, and the real march driven on [`STEP`] with spent shells kept.
-fn fixture_tanks(volumes: &[(FixtureVolume, usize)]) -> (App, Vec<Entity>) {
+/// Static fixture tanks, each volume its own static cuboid turned by its rotation, on the `Armor`
+/// layer and owned by the tank its index names, and the real march driven on [`STEP`] with spent
+/// shells kept.
+fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -642,7 +643,7 @@ fn fixture_tanks(volumes: &[(FixtureVolume, usize)]) -> (App, Vec<Entity>) {
     app.cleanup();
     let count = volumes
         .iter()
-        .map(|(_, owner)| owner + 1)
+        .map(|(_, owner, _)| owner + 1)
         .max()
         .unwrap_or(1);
     let tanks: Vec<Entity> = (0..count)
@@ -660,7 +661,7 @@ fn fixture_tanks(volumes: &[(FixtureVolume, usize)]) -> (App, Vec<Entity>) {
             tank
         })
         .collect();
-    for &((name, size, at, kind), owner) in volumes {
+    for &((name, size, at, kind), owner, turn) in volumes {
         let factor = if matches!(kind, Kind::Box(_)) {
             SOFT
         } else {
@@ -668,7 +669,7 @@ fn fixture_tanks(volumes: &[(FixtureVolume, usize)]) -> (App, Vec<Entity>) {
         };
         let mut volume = app.world_mut().spawn((
             Name::new(name),
-            Transform::from_translation(at),
+            Transform::from_translation(at).with_rotation(turn),
             RigidBody::Static,
             Collider::cuboid(size.x, size.y, size.z),
             CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
@@ -705,13 +706,16 @@ fn fixture_shot(volumes: &[FixtureVolume], from: Vec3) -> PenetrationReport {
 /// Fire the fixture 88 from `from` along `direction` at 800 m/s (fixture data), read back its
 /// record, and check the record's own path and the march's logged path read its verdict.
 fn fixture_shot_along(volumes: &[FixtureVolume], from: Vec3, direction: Vec3) -> PenetrationReport {
-    let owned: Vec<(FixtureVolume, usize)> = volumes.iter().map(|&volume| (volume, 0)).collect();
+    let owned: Vec<(FixtureVolume, usize, Quat)> = volumes
+        .iter()
+        .map(|&volume| (volume, 0, Quat::IDENTITY))
+        .collect();
     fixture_shot_at(&owned, from, direction, 0)
 }
 
 /// [`fixture_shot_along`] among several fixture tanks, recorded against tank `struck`.
 fn fixture_shot_at(
-    volumes: &[(FixtureVolume, usize)],
+    volumes: &[(FixtureVolume, usize, Quat)],
     from: Vec3,
     direction: Vec3,
     struck: usize,
@@ -1019,8 +1023,8 @@ fn a_bounce_off_armour_that_doses_nothing_is_a_ricochet() {
 #[test]
 fn a_record_holds_the_selected_tanks_outcome_alone() {
     let volumes = [
-        (plate("front", THIN, 0.0, Kind::Main), 0),
-        (plate("far", THICK, -3.0, Kind::Main), 1),
+        (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),
+        (plate("far", THICK, -3.0, Kind::Main), 1, Quat::IDENTITY),
     ];
     let a = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 0);
     assert_eq!(a.impact.verdict, ShotVerdict::Penetration);
@@ -1051,6 +1055,41 @@ fn a_record_holds_the_selected_tanks_outcome_alone() {
         .find(|node| (node.point[2] + 2.75).abs() < 1.0e-3)
         .expect("B's contact is a node of B's path");
     assert_eq!(contact.t, 0.0, "B's clock starts at B");
+}
+
+/// Where two tanks' plates overlap inside one crossing, both tanks' records carry the crossing's
+/// one entrance face: A's plate square to the line, B's turned 30° about `+Y` and entered inside
+/// A's, and B's record reads A's normal and incidence with its own impact point. The plates' places
+/// and the turn are fixture data; B's front face crosses the line at
+/// z = -0.3 + 0.25 / cos 30° = -0.011, inside A's plate (DERIVED). 0.5° is the tolerance on a
+/// direction.
+#[test]
+fn a_shared_crossing_carries_its_entrance_face_to_every_tank() {
+    let turn = Quat::from_rotation_y(30.0_f32.to_radians());
+    let volumes = [
+        (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),
+        (plate("turned", THICK, -0.3, Kind::Main), 1, turn),
+    ];
+    let degrees = |a: [f32; 3], b: Vec3| Vec3::from(a).angle_between(b).to_degrees();
+    let a = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 0);
+    let b = fixture_shot_at(&volumes, LINE_FROM, Vec3::NEG_Z, 1);
+    assert!(
+        b.impact.point[2] < THIN / 2.0 - 1.0e-3,
+        "B's impact is inside A's plate: {:?}",
+        b.impact.point
+    );
+    for (tank, report) in [("A", &a), ("B", &b)] {
+        assert!(
+            degrees(report.impact.normal, Vec3::Z) < 0.5,
+            "{tank} carries the crossing's normal: {:?}",
+            report.impact.normal
+        );
+        assert!(
+            report.impact.incidence_deg < 0.5,
+            "{tank} carries the crossing's incidence: {}",
+            report.impact.incidence_deg
+        );
+    }
 }
 
 /// A round that glances off one plate and then stops in another rests in the second: the recorder's

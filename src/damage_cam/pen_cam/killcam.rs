@@ -1719,6 +1719,28 @@ mod tests {
     /// The missing path is fixture data.
     #[test]
     fn a_missing_shooter_file_skips_beat_three() {
+        an_unreadable_shooter_file_skips_beat_three("no_such_tank/no_such_tank.tank.ron");
+    }
+
+    /// A kill record whose shooter's tank file exists but does not parse plays as one whose file
+    /// is missing. The file and its text are fixture data, removed when the test ends.
+    #[test]
+    fn an_unparseable_shooter_file_skips_beat_three() {
+        struct Removed(std::path::PathBuf);
+        impl Drop for Removed {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let vehicle = format!("unparseable-{}.tank.ron", std::process::id());
+        let file = Removed(crate::assets::asset_root().join(&vehicle));
+        std::fs::write(&file.0, "(this is not a tank").expect("the fixture file");
+        an_unreadable_shooter_file_skips_beat_three(&vehicle);
+    }
+
+    /// The kill entry, its record's shooter's tank file replaced by `vehicle`, played until beat 3
+    /// drops: the card names the record's player and an unknown vehicle.
+    fn an_unreadable_shooter_file_skips_beat_three(vehicle: &str) {
         let entry = kill_entry();
         let mut player = String::new();
         let mut app = demo_app_with(entry, Shooting::Unloadable, |library| {
@@ -1729,7 +1751,7 @@ mod tests {
                 .map(|(known, mut report)| {
                     if known == stem {
                         let shooter = report.shooter.as_mut().expect("the kill names a shooter");
-                        shooter.vehicle = "no_such_tank/no_such_tank.tank.ron".to_owned();
+                        shooter.vehicle = vehicle.to_owned();
                         player = shooter.name.clone();
                     }
                     (known, report)
