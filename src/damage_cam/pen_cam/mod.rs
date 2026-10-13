@@ -655,6 +655,7 @@ pub fn demo_plugin(app: &mut App) {
         MaterialPlugin::<material::OutlineMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
         MaterialPlugin::<look::LookMaterial>::default(),
+        bevy_mod_outline::OutlinePlugin::EXTRUDE_VERTEX,
     ))
     .insert_resource(ClearColor(world::SKY))
     .insert_resource(library)

@@ -7,7 +7,9 @@
 //! corner camera's own pose before it: the hull mask (each pixel's nearest hull surface: view
 //! normal and distance) and the part mask (the struck components' colour and distance). The glass
 //! draws only where its fragment is the hull mask's nearest surface, so the hull is one layer deep;
-//! the full-screen overlays (feature lines, silhouette, dilated outline) read the masks directly.
+//! the full-screen overlays (feature lines, silhouette) read the hull mask directly, and the soft
+//! field shell fades against the part mask. The CAD look's constant-pixel outline is
+//! `bevy_mod_outline`'s jump flood.
 //!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
@@ -42,9 +44,9 @@ const HOLO_RED: Color = Color::srgb_u8(0xFF, 0x28, 0x10);
 const GHOST_ARMOUR: f32 = 0.15;
 const GHOST_RUNNING_GEAR: f32 = 0.04;
 const GHOST_COMPONENT: f32 = 0.04;
-/// The CAD look's dither coverage and outline width (physical px).
+/// The CAD look's dither coverage and outline width (logical px, `bevy_mod_outline`'s unit).
 const DITHER_COVER: f32 = 0.25;
-const CAD_OUTLINE_PX: f32 = 5.0;
+const CAD_OUTLINE_PX: f32 = 2.5;
 /// The hologram's scanline period (m, world).
 const SCANLINE_M: f32 = 0.12;
 /// The ray-marched field's optical depth gain per metre of unit density.
@@ -108,7 +110,6 @@ const MODE_MARCH: f32 = 7.0;
 const MODE_SOFT: f32 = 8.0;
 const MODE_LINES: f32 = 10.0;
 const MODE_SILHOUETTE: f32 = 11.0;
-const MODE_DILATE: f32 = 12.0;
 /// A mode the shader draws nothing in.
 const MODE_NONE: f32 = 99.0;
 
@@ -472,12 +473,6 @@ pub fn overlay(look: GlassLook, kind: CornerKind, masks: &Masks) -> Option<LookM
             Blend::Blended,
             masks,
         ),
-        GlassLook::Cad => {
-            let mut m =
-                LookMaterial::new(MODE_DILATE, LinearRgba::WHITE, 1.0, Blend::Blended, masks);
-            m.params.cone2.x = CAD_OUTLINE_PX;
-            m
-        }
         _ => return None,
     };
     material.depth = Depth::Always;
@@ -507,6 +502,8 @@ pub fn spawn_overlay(
 /// One element a component is drawn with in a look.
 pub enum PartDraw {
     Look(LookMaterial),
+    /// A fill with a jump-flood outline of a colour and width (logical px) about its silhouette.
+    Flooded(LookMaterial, LinearRgba, f32),
     Outline(LinearRgba, f32),
     /// The part mask's copy.
     Mask(LookMaterial),
@@ -566,7 +563,7 @@ pub fn component(
             hidden.bias = true;
             vec![PartDraw::Look(fill(ramp)), PartDraw::Look(hidden)]
         }
-        GlassLook::Cad => vec![PartDraw::Look(fill(ramp)), mask(ramp)],
+        GlassLook::Cad => vec![PartDraw::Flooded(fill(ramp), ramp, CAD_OUTLINE_PX)],
         GlassLook::Hologram => {
             let color = LinearRgba::from(HOLO_AMBER).mix(&LinearRgba::from(HOLO_RED), x);
             let mut m = fill(color).with_edge(color * 4.0, 1.6, 2.0);
@@ -627,8 +624,8 @@ pub fn field(
             FieldDraw::Look(m)
         }
         GlassLook::Cad => FieldDraw::Glow(
-            GlowMaterial::blended(hue, 0.25 * (0.4 + 0.6 * strength))
-                .with_edge(timeline::FIELD_EDGE.into(), 1.6, 3.0)
+            GlowMaterial::blended(hue, 0.12 * (0.4 + 0.6 * strength))
+                .with_edge(timeline::FIELD_EDGE.into(), 1.0, 4.0)
                 .with_falloff(r0),
         ),
         GlassLook::Silhouette => FieldDraw::Look(

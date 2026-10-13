@@ -682,6 +682,18 @@ pub fn spawn_glass(
                         material.set_fade(0.0);
                         e.insert(MeshMaterial3d(ctx.looks.add(material)));
                     }
+                    PartDraw::Flooded(mut material, color, width) => {
+                        material.set_fade(0.0);
+                        e.insert((
+                            MeshMaterial3d(ctx.looks.add(material)),
+                            bevy_mod_outline::OutlineVolume {
+                                visible: true,
+                                width,
+                                colour: color.into(),
+                            },
+                            bevy_mod_outline::OutlineMode::FloodFlat,
+                        ));
+                    }
                     PartDraw::Mask(mut material) => {
                         material.set_fade(0.0);
                         e.insert((

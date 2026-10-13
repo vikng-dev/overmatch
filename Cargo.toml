@@ -51,6 +51,10 @@ lightyear = { version = "0.30.1", default-features = false, features = [
 ] }
 lightyear_transport = "0.30.1"
 bevy_replicon = "0.44"
+# The pen cam's CAD glass look (dev variant L4, `damage_cam::pen_cam::look`): a constant-pixel
+# jump-flood outline around the struck components. MIT OR Apache-2.0; its bevy features are a
+# subset of the defaults this crate already builds.
+bevy_mod_outline = { version = "0.13", default-features = false, features = ["flood"] }
 # Blocking HTTPS to the matchmaking Worker, never on the frame loop: the hosted server's reports
 # (`net::hosting`, a background thread) and the client's join calls (`net::matchmaking::worker`,
 # short-lived threads). `rustls` = rustls on ring with the bundled webpki roots, so neither the

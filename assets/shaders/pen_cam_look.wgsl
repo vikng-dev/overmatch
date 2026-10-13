@@ -18,7 +18,6 @@
 //  10 lines       full screen: depth and normal edges of the hull mask, the depth threshold
 //                 growing with distance.
 //  11 silhouette  full screen: the hull mask's outer edge.
-//  12 dilate      full screen: the part mask grown by `cone2.x` pixels, outside the parts only.
 //
 // Output: additive (`flags.y = 1`) writes `rgb` with alpha 0 for `AlphaMode::Add`; otherwise
 // straight `rgb, a`.
@@ -36,7 +35,7 @@ struct LookParams {
     field: vec4<f32>,
     // xyz: the cone's axis in the mesh's frame; w: its half-angle (rad).
     cone: vec4<f32>,
-    // x: pixels (dilate) or gain (march); y: additive (1) or blended (0); z: dissolve band (m);
+    // x: gain (march); y: additive (1) or blended (0); z: dissolve band (m) or reach (march, m);
     // w: Gooch (1) or flat (0).
     cone2: vec4<f32>,
     // x: mode; y: hit clearing on (1); z: flicker on (1); w: hatch on (1).
@@ -315,32 +314,6 @@ fn fragment(
             discard;
         }
         return vec4(look.color.rgb, look.color.a);
-    }
-    if m == 12 {
-        let p = vec2<i32>(frag);
-        if mask_at(part_mask, p).a > 0.0 {
-            discard;
-        }
-        let r = i32(look.cone2.x);
-        var best = 1e9;
-        var rgb = vec3(0.0);
-        for (var j = -r; j <= r; j = j + 1) {
-            for (var i = -r; i <= r; i = i + 1) {
-                let d2 = f32(i * i + j * j);
-                if d2 > f32(r * r) || d2 >= best {
-                    continue;
-                }
-                let s = mask_at(part_mask, p + vec2(i, j));
-                if s.a > 0.0 {
-                    best = d2;
-                    rgb = s.rgb;
-                }
-            }
-        }
-        if best > 1e8 {
-            discard;
-        }
-        return vec4(rgb, look.color.a);
     }
     discard;
     return vec4(0.0);
