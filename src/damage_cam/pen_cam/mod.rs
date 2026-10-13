@@ -18,9 +18,9 @@
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
-//! servo angles ([`super::shapes`]), supplies only each component's shape and so the centres the
-//! camera frames. Every timing comes from [`timeline`] and the record's own places, and the
-//! record's few derived quantities are named in [`plan`].
+//! servo angles ([`super::shapes`]), supplies only each component's shape and the whole tank's
+//! bounds, which the camera frames. Every timing comes from [`timeline`] and the record's own
+//! places, and the record's few derived quantities are named in [`plan`].
 //!
 //! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
 //! `dev_capture`'s frame times are presentation times; virtual time stays paused until both tank

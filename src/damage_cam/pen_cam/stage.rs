@@ -9,8 +9,9 @@
 //! corner's clock alone, so a scrub lands on the same picture.
 //!
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
-//! components the record names drawn in their own meshes), the plate slice (the tank's own materials, the eye's side of a vertical
-//! plane through the chord dissolved away), and the outside view (the tank as built).
+//! components the record names drawn in their own meshes), the plate slice (the tank's own
+//! materials, the eye's side of a vertical plane through the chord dissolved away, a mesh lying
+//! wholly on that side drawn as the ghost), and the outside view (the tank as built).
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
@@ -20,6 +21,7 @@
 use std::collections::HashMap;
 
 use bevy::camera::ScalingMode;
+use bevy::camera::primitives::Aabb;
 use bevy::camera::{Hdr, RenderTarget};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -29,7 +31,7 @@ use super::field::reach_mesh;
 use super::material::{GlowMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{Plan, Reach};
 use super::timeline::{self, CornerKind};
-use super::view::{Proxy, ViewMesh, ViewRoot, Views};
+use super::view::{Proxy, ViewMesh, ViewRoot, Views, pose_under};
 use super::{Corner, DoseScale, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
@@ -49,9 +51,8 @@ const SHELL_SCENE: &str = "shell/shell.glb";
 /// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
 const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
 const SHELL_MODEL_LENGTH_M: f32 = 0.263;
-/// The framed radius is at most this many calibres (TUNED), about the stop or else the contact:
-/// the main gun's whole-hull frame (7.0 m for 88 mm, DERIVED) is untouched, a 7.9 mm round's is
-/// held to 0.63 m (DERIVED).
+/// The slice's and the ricochet's framed radius is at most this many calibres (TUNED), about the
+/// stop or else the contact: 7.0 m for 88 mm, 0.63 m for a 7.9 mm round (DERIVED).
 const FRAME_CALIBRES: f32 = 80.0;
 /// A ring at a crossing: a calibre across, this thick (fraction of its radius). TUNED, as is its
 /// glow.
@@ -78,6 +79,13 @@ const CORNER_FOV_DEG: f32 = 30.0;
 /// other framing length below is taken through [`Plan::reach`], so a small calibre frames tighter.
 /// TUNED, as are the slice's figures below.
 const LEG_FRAME_M: f32 = 1.5;
+/// The Pen and Damaged frames look along the shot turned this far (deg) off it. TUNED.
+const SHOT_NUDGE_DEG: f32 = 20.0;
+/// Those frames hold the tank's bounds' sphere this much inside the field. TUNED.
+const BOUNDS_MARGIN: f32 = 1.1;
+/// A direction whose cross product with the vertical is shorter than this (the sine of 0.06°) is
+/// vertical, for choosing an axis or an up.
+const VERTICAL_SIN: f32 = 1.0e-3;
 /// A slice cut along a shot within this angle (deg) of vertical spans no vertical plane, and is
 /// cut through the shot and the struck face's normal instead.
 const SLICE_VERTICAL_FALLBACK_DEG: f32 = 10.0;
@@ -276,7 +284,9 @@ pub fn rebuild(
     mut stage: ResMut<Stage>,
     items: Query<Entity, With<StageItem>>,
     views: Res<Views>,
-    tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
+    tank: Query<(Entity, &ViewMesh, &Mesh3d, Option<&Aabb>), Without<Proxy>>,
+    parents: Query<&ChildOf>,
+    transforms: Query<&Transform>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
@@ -316,7 +326,12 @@ pub fn rebuild(
             .iter()
             .any(|plate| mesh.is(&plate.name))
     };
-    for (entity, mesh, _) in &tank {
+    // A mesh's pose in the record's frame: the stage root's placement over its local chain, current
+    // since the servos were posed this frame.
+    let root_pose = transforms
+        .get(views.stage)
+        .map_or(Mat4::IDENTITY, Transform::to_matrix);
+    for (entity, mesh, _, aabb) in &tank {
         if mesh.root != ViewRoot::Stage {
             continue;
         }
@@ -337,6 +352,16 @@ pub fn rebuild(
             }
             CornerKind::Slice => {
                 let (normal, point) = stage.plane.unwrap_or((Vec3::Z, Vec3::ZERO));
+                let pose = || {
+                    root_pose
+                        * pose_under(entity, views.stage, &parents, |node| {
+                            transforms.get(node).ok().copied()
+                        })
+                };
+                if aabb.is_some_and(|aabb| beyond_plane(aabb, pose(), (normal, point))) {
+                    e.insert((MeshMaterial3d(stage.ghost.clone()), Visibility::Inherited));
+                    continue;
+                }
                 let params = SliceParams {
                     plane: normal.extend(normal.dot(point)),
                     cut_color: LinearRgba::from(CUT).to_vec4(),
@@ -369,8 +394,8 @@ pub fn rebuild(
     let components = component_meshes(
         plan,
         tank.iter()
-            .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
-            .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
+            .filter(|(_, mesh, ..)| mesh.root == ViewRoot::Stage)
+            .map(|(entity, mesh, handle, _)| (entity, mesh.names.as_slice(), handle.0.clone())),
     );
     spawn_glass(
         &mut commands,
@@ -585,6 +610,22 @@ fn ring_across(point: Vec3, travel: Vec3, radius: f32) -> Transform {
             travel.normalize_or(Vec3::Y),
         ))
         .with_scale(Vec3::splat(radius))
+}
+
+/// Whether a mesh lies wholly on the eye's side of the slice plane `(normal toward the eye, point)`,
+/// so the cut misses it: every corner of its local bounds `aabb`, carried into the record's frame by
+/// `pose`, beyond the plane. The slice draws such a mesh as ghost glass rather than dissolving it,
+/// so the tank stays whole around the cut.
+fn beyond_plane(aabb: &Aabb, pose: Mat4, (normal, point): (Vec3, Vec3)) -> bool {
+    let (center, half) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+    (0..8).all(|corner| {
+        let sign = Vec3::new(
+            if corner & 1 == 0 { -1.0 } else { 1.0 },
+            if corner & 2 == 0 { -1.0 } else { 1.0 },
+            if corner & 4 == 0 { -1.0 } else { 1.0 },
+        );
+        (pose.transform_point3(center + half * sign) - point).dot(normal) > 0.0
+    })
 }
 
 /// The slice plane: vertical through the stopping chord, its normal horizontal and toward the
@@ -941,56 +982,8 @@ fn framing(
             }),
         )
     };
-    // A three-quarter view from the shot's side, orbiting about the vertical at `rate` (deg/s).
-    let three_quarter = |wide: &[Vec3], tight: &[Vec3], rate: f32, from: f32| {
-        let (wide_center, wide_radius) = enclose(wide);
-        let (center, radius) = framed(plan, tight);
-        let d = plan.line.direction_at(plan.contact_arc);
-        let flat = Vec3::new(d.x, 0.0, d.z)
-            .try_normalize()
-            .unwrap_or(Vec3::NEG_Z);
-        let yaw = 55f32.to_radians() + motion(rate, from) + orbit.x;
-        let side = Quat::from_rotation_y(yaw) * -flat;
-        let pitch = (0.5 + orbit.y).clamp(-1.2, 1.4);
-        let direction = (side + Vec3::Y * pitch).normalize();
-        aim(
-            (wide_center, wide_radius.max(1.0)),
-            (center, radius.max(plan.reach(1.0))),
-            direction,
-            Vec3::Y,
-            1.1,
-        )
-    };
     match kind {
-        CornerKind::Glass | CornerKind::Victim => {
-            // The whole hull: the record's path inside the tank its components span.
-            let mut points = plan.framed_points();
-            points.extend(plan.boxes.iter().filter_map(|b| b.center));
-            three_quarter(&points, &points, timeline::ORBIT_DEG_S, 0.0)
-        }
-        CornerKind::Damaged => {
-            let incoming = plan.line.direction_at(plan.contact_arc - 1e-3);
-            let points = |leg: f32| {
-                let mut points = vec![
-                    plan.impact_point - incoming * leg,
-                    plan.line.at(plan.end_arc.min(plan.contact_arc + leg)),
-                    plan.impact_point,
-                ];
-                points.extend(
-                    plan.boxes
-                        .iter()
-                        .filter(|b| b.dose() > 0.0)
-                        .filter_map(|b| b.center),
-                );
-                points
-            };
-            three_quarter(
-                &points(LEG_FRAME_M),
-                &points(plan.reach(LEG_FRAME_M)),
-                timeline::DRIFT_DEG_S,
-                kind.hold_from(),
-            )
-        }
+        CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => along_shot(plan, orbit),
         CornerKind::Slice => {
             let (normal, _) = stage.plane.unwrap_or((Vec3::X, Vec3::ZERO));
             let up = (Vec3::Y - normal * normal.y)
@@ -1033,8 +1026,7 @@ fn framing(
         }
         CornerKind::Ricochet => {
             let Some(bounce) = plan.bounce.as_ref() else {
-                let points = plan.framed_points();
-                return three_quarter(&points, &points, timeline::DRIFT_DEG_S, 0.0);
+                return along_shot(plan, orbit);
             };
             // The eye on the normal of the plane through both legs, so the angle shows at its
             // true size; above the plane when the legs are level.
@@ -1078,6 +1070,62 @@ fn framing(
             )
         }
     }
+}
+
+/// The Pen and Damaged frames' camera: the eye looks at the impact from the shooter's side, along
+/// the shot's own direction at first contact turned [`SHOT_NUDGE_DEG`] off it, so the path reads as
+/// a line rather than a dot, and frames the whole tank's bounds whatever the calibre or the hit's
+/// extent. The line along the shot is clear up to the first impact, because the round travelled
+/// it; the eye's sightline to the impact lies the nudge off that line.
+///
+/// The nudge turns about `Y × shot`, lifting the eye toward the vertical. A vertical shot has no
+/// such axis and turns about the record frame's longitudinal axis (Z) instead, so its eye stands
+/// above the tank to one side. The camera stays upright: its up is the world vertical, except when
+/// it looks straight up or down, where it is the shot's horizontal heading, so the path runs up the
+/// frame.
+/// The eye holds still through the frame; `orbit` (the viewer's drag, rad) yaws it about the
+/// vertical and adds to the nudge.
+///
+/// The bounds' sphere fits the vertical field, which binds while the corner is landscape.
+fn along_shot(plan: &Plan, orbit: Vec2) -> (Transform, Projection) {
+    let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
+    let (center, radius) = match plan.tank_bounds {
+        Some((lo, hi)) => (0.5 * (lo + hi), 0.5 * (hi - lo).length()),
+        None => enclose(&plan.framed_points()),
+    };
+    let shot = plan.line.direction_at(plan.contact_arc - 1e-3);
+    let lift = Vec3::Y.cross(shot);
+    let axis = if lift.length() > VERTICAL_SIN {
+        lift.normalize()
+    } else {
+        Vec3::Z
+    };
+    let toward_eye = Quat::from_rotation_y(orbit.x)
+        * Quat::from_axis_angle(axis, SHOT_NUDGE_DEG.to_radians() + orbit.y)
+        * -shot;
+    // A vertical shot under a vertical sightline (a drag that undoes the nudge) has no heading;
+    // the nudge axis, horizontal, is its up.
+    let up = if Vec3::Y.cross(toward_eye).length() > VERTICAL_SIN {
+        Vec3::Y
+    } else {
+        Vec3::new(shot.x, 0.0, shot.z)
+            .try_normalize()
+            .unwrap_or(axis)
+    };
+    // The eye on the sightline from the impact, `far` from the bounds' centre: the positive root of
+    // `|q + e·t| = far` for `q` the impact off the centre, real while `|q| ≤ far`, which holds
+    // for an impact inside the bounds (`|q| ≤ radius < far`).
+    let far = radius * BOUNDS_MARGIN / half_fov.sin();
+    let q = plan.impact_point - center;
+    let b = toward_eye.dot(q);
+    let t = -b + (b * b - q.length_squared() + far * far).max(0.0).sqrt();
+    (
+        Transform::from_translation(plan.impact_point + toward_eye * t).looking_at(center, up),
+        Projection::Perspective(PerspectiveProjection {
+            fov: CORNER_FOV_DEG.to_radians(),
+            ..default()
+        }),
+    )
 }
 
 /// The slice's frame on its plane: centre, and width and height across and up the plane at a 1.6
@@ -1460,6 +1508,273 @@ mod tests {
             slices += 1;
         }
         assert!(slices > 0, "a record opens on the slice");
+    }
+
+    /// The frames that look along the shot.
+    const ALONG_SHOT: [CornerKind; 3] =
+        [CornerKind::Glass, CornerKind::Victim, CornerKind::Damaged];
+    /// The corner's narrowest aspect in these tests: square, stricter than any landscape corner.
+    const SQUARE: f32 = 1.0;
+    /// Angle tolerance (deg) on the sightline's nudge: DERIVED, f32 rounding of a unit direction
+    /// through two rotations is ~1e-5°.
+    const NUDGE_TOL_DEG: f32 = 1.0e-2;
+
+    /// Whether `p` lies inside the perspective frustum of the camera at `eye`, at `aspect`.
+    fn in_view(eye: &Transform, projection: &Projection, p: Vec3, aspect: f32) -> bool {
+        let Projection::Perspective(lens) = projection else {
+            panic!("perspective");
+        };
+        let v = eye.compute_affine().inverse().transform_point3(p);
+        let depth = -v.z;
+        let tan = (0.5 * lens.fov).tan();
+        depth > 0.0 && v.y.abs() <= depth * tan && v.x.abs() <= depth * tan * aspect
+    }
+
+    /// The eight corners of `(lo, hi)`.
+    fn corners((lo, hi): (Vec3, Vec3)) -> [Vec3; 8] {
+        std::array::from_fn(|k| {
+            Vec3::new(
+                if k & 1 == 0 { lo.x } else { hi.x },
+                if k & 2 == 0 { lo.y } else { hi.y },
+                if k & 4 == 0 { lo.z } else { hi.z },
+            )
+        })
+    }
+
+    /// The angle (deg) between `a` and `b`.
+    fn angle_deg(a: Vec3, b: Vec3) -> f32 {
+        a.normalize()
+            .dot(b.normalize())
+            .clamp(-1.0, 1.0)
+            .acos()
+            .to_degrees()
+    }
+
+    /// Every record, in every frame that looks along the shot, as recorded and with its calibre cut
+    /// to 2 mm (fixture data): the whole tank's bounds and the impact lie in the field, the camera is
+    /// upright (its right is level), the sightline to the impact is the shot turned
+    /// [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does not depend on the calibre.
+    #[test]
+    fn the_shot_frames_hold_the_whole_tank() {
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        for record in &library.records {
+            let name = record.stem;
+            let frames: Vec<Vec<(Transform, Projection)>> =
+                [record.report.projectile.caliber_mm, 2.0]
+                    .into_iter()
+                    .map(|calibre_mm| {
+                        let mut report = record.report.clone();
+                        report.projectile.caliber_mm = calibre_mm;
+                        let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
+                        ALONG_SHOT
+                            .iter()
+                            .map(|&kind| {
+                                framing(
+                                    &plan,
+                                    kind,
+                                    2.0,
+                                    &Settings::default(),
+                                    &Stage::default(),
+                                    Vec2::ZERO,
+                                )
+                            })
+                            .collect()
+                    })
+                    .collect();
+            let plan = &record.plan;
+            let bounds = plan.tank_bounds.expect("the tank asset has bounds");
+            let shot = plan.line.direction_at(plan.contact_arc - 1e-3);
+            for (kind, (eye, projection)) in ALONG_SHOT.iter().zip(&frames[0]) {
+                for p in corners(bounds) {
+                    assert!(
+                        in_view(eye, projection, p, SQUARE),
+                        "{name} {kind:?}: {p} is out of frame"
+                    );
+                }
+                assert!(
+                    in_view(eye, projection, plan.impact_point, SQUARE),
+                    "{name} {kind:?}"
+                );
+                let right = eye.rotation * Vec3::X;
+                assert!(
+                    right.y.abs() < 1e-5,
+                    "{name} {kind:?}: rolled, right {right}"
+                );
+                let nudge = angle_deg(eye.translation - plan.impact_point, -shot);
+                assert!(
+                    (nudge - SHOT_NUDGE_DEG).abs() < NUDGE_TOL_DEG,
+                    "{name} {kind:?}: the sightline is {nudge}° off the shot"
+                );
+            }
+            for (a, b) in frames[0].iter().zip(&frames[1]) {
+                assert!(
+                    a.0.translation.distance(b.0.translation) < POSITION_TOL_M,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// A shot within 1° of straight down (the records' class, at least one) is seen from above the
+    /// tank, the impact in the field, with no fallback to a heading it does not have.
+    #[test]
+    fn a_vertical_shot_is_seen_from_above() {
+        let library = Library::load();
+        let mut vertical = 0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let shot = plan.line.direction_at(plan.contact_arc - 1e-3);
+            if angle_deg(shot, Vec3::NEG_Y) > 1.0 {
+                continue;
+            }
+            let (_, hi) = plan.tank_bounds.expect("the tank asset has bounds");
+            for kind in ALONG_SHOT {
+                let (eye, projection) = framing(
+                    plan,
+                    kind,
+                    2.0,
+                    &Settings::default(),
+                    &Stage::default(),
+                    Vec2::ZERO,
+                );
+                assert!(
+                    eye.translation.is_finite() && eye.rotation.is_finite(),
+                    "{}",
+                    record.stem
+                );
+                assert!(
+                    eye.translation.y > hi.y,
+                    "{} {kind:?}: eye {}",
+                    record.stem,
+                    eye.translation
+                );
+                assert!(
+                    in_view(&eye, &projection, plan.impact_point, SQUARE),
+                    "{}",
+                    record.stem
+                );
+            }
+            vertical += 1;
+        }
+        assert!(vertical > 0, "a record shoots straight down");
+    }
+
+    /// In the slice, a mesh lying wholly on the eye's side of the cut is drawn as the ghost, not
+    /// dissolved, while a mesh the plane cuts keeps the slice: the real [`rebuild`] over every
+    /// slice record, each of the tank's component shapes standing in for its view mesh under a
+    /// parent node (the chain carries them into the record's frame). A component whose
+    /// bounds lie beyond the plane is ghosted, one with vertices on both sides keeps the slice;
+    /// at least one record ghosts one.
+    #[test]
+    fn the_slice_ghosts_what_its_plane_misses() {
+        use bevy::camera::primitives::MeshAabb;
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        let (mut ghosted, mut cut) = (0, 0);
+        for (index, record) in library.records.iter().enumerate() {
+            let plan = &record.plan;
+            if plan.kind != CornerKind::Slice {
+                continue;
+            }
+            let (normal, point) = slice_plane(plan);
+            let beyond = |p: Vec3| (p - point).dot(normal) > 0.0;
+            let shapes = asset.shapes(&record.report.servo_deg);
+            let mut app = App::new();
+            let mut meshes = Assets::<Mesh>::default();
+            let mut glows = Assets::<GlowMaterial>::default();
+            let ghost = glows.add(GlowMaterial::blended(GLASS.into(), 0.18));
+            let world = app.world_mut();
+            let root = world.spawn(Transform::IDENTITY).id();
+            let hull = world.spawn((Transform::IDENTITY, ChildOf(root))).id();
+            // The parent stands a metre off the plane toward the eye and each mesh is authored a
+            // metre back, so only their chain together puts a mesh where the record has it.
+            let offset = normal;
+            let parent = world
+                .spawn((Transform::from_translation(offset), ChildOf(root)))
+                .id();
+            // (entity, whether it lies beyond the plane); a shape whose vertices lie beyond but
+            // whose bounds straddle is neither and is not checked.
+            let mut expect = Vec::new();
+            for (name, shape) in shapes.iter() {
+                let mesh = crate::damage_cam::shapes::ComponentShape {
+                    positions: shape.positions.iter().map(|p| *p - offset).collect(),
+                    indices: shape.indices.clone(),
+                }
+                .mesh();
+                let Some(aabb) = mesh.compute_aabb() else {
+                    continue;
+                };
+                let local = (Vec3::from(aabb.min()), Vec3::from(aabb.max()));
+                let wholly = corners(local).into_iter().all(|p| beyond(p + offset));
+                let crossed = !shape.positions.iter().copied().all(beyond)
+                    && shape.positions.iter().copied().any(beyond);
+                let entity = world
+                    .spawn((
+                        ViewMesh {
+                            root: ViewRoot::Stage,
+                            names: vec![name.to_owned()],
+                            original: Handle::default(),
+                        },
+                        Mesh3d(meshes.add(mesh)),
+                        aabb,
+                        Transform::IDENTITY,
+                        ChildOf(parent),
+                    ))
+                    .id();
+                if wholly || crossed {
+                    expect.push((entity, name.to_owned(), wholly));
+                }
+            }
+            let mut views = Views::fixture();
+            views.stage = root;
+            views.hull[1] = Some(hull);
+            app.insert_resource(Library::load())
+                .insert_resource(Settings::default())
+                .insert_resource(Corner {
+                    showing: Some(super::super::Showing {
+                        record: index,
+                        turn: 0,
+                        kind: CornerKind::Slice,
+                        c: 0.0,
+                        opacity: 1.0,
+                        scale: 1.0,
+                        remaining: 1.0,
+                        surface: super::super::Surface::Corner,
+                    }),
+                    fading: None,
+                })
+                .insert_resource(Stage {
+                    ghost: ghost.clone(),
+                    ..default()
+                })
+                .insert_resource(views)
+                .insert_resource(meshes)
+                .insert_resource(glows)
+                .insert_resource(Assets::<StandardMaterial>::default())
+                .insert_resource(Assets::<SliceMaterial>::default())
+                .add_systems(Update, rebuild);
+            app.update();
+            let world = app.world();
+            for (entity, name, wholly) in expect {
+                let glass = world.get::<MeshMaterial3d<GlowMaterial>>(entity);
+                let sliced = world.get::<MeshMaterial3d<SliceMaterial>>(entity).is_some();
+                if wholly {
+                    assert_eq!(
+                        glass.map(|m| m.0.id()),
+                        Some(ghost.id()),
+                        "{}: {name}",
+                        record.stem
+                    );
+                    assert!(!sliced, "{}: {name}", record.stem);
+                    ghosted += 1;
+                } else {
+                    assert!(sliced && glass.is_none(), "{}: {name}", record.stem);
+                    cut += 1;
+                }
+            }
+        }
+        assert!(ghosted > 0 && cut > 0, "{ghosted} ghosted, {cut} cut");
     }
 
     /// Each of a tank's meshes belongs to the component its nearest named node of the plan's

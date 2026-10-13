@@ -101,10 +101,13 @@ impl TankAsset {
     }
 }
 
-/// Every component of a tank by name, posed for one record.
+/// Every component of a tank by name, posed for one record, and the whole tank's bounds.
 #[derive(Clone, Debug, Default)]
 pub struct TankShapes {
     by_name: HashMap<String, ComponentShape>,
+    /// The low and high corners, in the record's frame, of every ballistic primitive of every node
+    /// (armour and components alike) as posed; `None` when the geometry holds none.
+    bounds: Option<(Vec3, Vec3)>,
 }
 
 impl TankShapes {
@@ -136,6 +139,16 @@ impl TankShapes {
             .by_name
             .get(HULL_NODE)
             .map_or(Affine3A::IDENTITY, |&hull| poses[hull].inverse());
+        let mut bounds: Option<(Vec3, Vec3)> = None;
+        for (pose, node) in poses.iter().zip(&geometry.nodes) {
+            let to_record = hull_from_root * *pose;
+            for primitive in node.primitives.iter().filter(|p| p.substance.is_some()) {
+                for p in &primitive.positions {
+                    let p = to_record.transform_point3(Vec3::from(*p));
+                    bounds = Some(bounds.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))));
+                }
+            }
+        }
         let mut by_name = HashMap::new();
         for name in components {
             let Some(&index) = geometry.by_name.get(name) else {
@@ -164,12 +177,26 @@ impl TankShapes {
             }
             by_name.insert(name.to_owned(), shape);
         }
-        Self { by_name }
+        Self { by_name, bounds }
+    }
+
+    /// The whole tank's bounds in the record's frame, low and high corners: every ballistic
+    /// primitive, posed.
+    pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        self.bounds
     }
 
     /// The shape of the component the record names `name`.
     pub fn get(&self, name: &str) -> Option<&ComponentShape> {
         self.by_name.get(name)
+    }
+
+    /// Every component's name and shape, in no particular order.
+    #[cfg(test)]
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ComponentShape)> {
+        self.by_name
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape))
     }
 }
 

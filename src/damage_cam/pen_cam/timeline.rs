@@ -83,7 +83,7 @@ pub const BOX_FILL_S: f32 = 0.25;
 pub const SLICE_REVEAL: (f32, f32) = (0.18, 0.48);
 /// Reduce motion: an element fades in whole over this.
 pub const REDUCED_FADE_S: f32 = 0.15;
-/// The glass orbit and the ricochet drift, degrees per second.
+/// The kill cam lesson's orbit and the ricochet drift, degrees per second.
 pub const ORBIT_DEG_S: f32 = 10.0;
 pub const DRIFT_DEG_S: f32 = 3.0;
 

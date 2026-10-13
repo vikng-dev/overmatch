@@ -4,10 +4,10 @@
 //! picture reaches it. Positions are in the record's frame (hull-local, metres).
 //!
 //! Whether the round stopped, where it left the tank and where the line entered a component are the
-//! record's own facts; nothing here re-derives them from geometry. A component's shape serves only
-//! framing (its centre), never timing. Two things are derived rather than read, and are labelled
-//! where they are made: the line's remaining capability, `(v/v₀)²` from the path's times (the
-//! record carries no capability), and the moment a component is reached (the arc of the line's
+//! record's own facts; nothing here re-derives them from geometry. A component's shape, and the
+//! whole tank's bounds, serve only framing, never timing. Two things are derived rather than read,
+//! and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
+//! path's times (the record carries no capability), and the moment a component is reached (the arc of the line's
 //! recorded entry, or the cone that dosed it; a synthetic clip that names neither is reached at
 //! contact).
 
@@ -62,6 +62,9 @@ pub struct Plan {
     pub stop: Option<Vec3>,
     pub cones: Vec<Cone>,
     pub boxes: Vec<BoxPlan>,
+    /// The whole struck tank's bounds (low, high corners), posed as the record has it
+    /// ([`TankShapes::bounds`]); `None` without the tank asset's shapes.
+    pub tank_bounds: Option<(Vec3, Vec3)>,
 }
 
 /// The path as points with cumulative arc length and the remaining-capability fraction of the
@@ -316,6 +319,7 @@ impl Plan {
             stop: report.rested().then(|| line.at(line.length())),
             cones,
             boxes,
+            tank_bounds: shapes.bounds(),
             line,
         }
     }
