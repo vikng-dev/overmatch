@@ -72,41 +72,43 @@ const PROMPT_DIM: f32 = 0.6;
 /// The card's accent bar.
 const ACCENT_PX: f32 = 3.0;
 
-/// Who fired the killing round, as the victim's copy of the record names them: the player and
-/// their vehicle where the record names a shooter, and the round in every record.
+/// Who fired the killing round, as the victim's copy of the record names them: each part only
+/// where the record and the files it names supply it, so a card shows what is known.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Killer {
-    /// The shooter's name and vehicle, as its tank file names it to players.
-    pub shooter: Option<(String, String)>,
-    /// The round, by its key in the round registry.
-    pub round: String,
-    /// The round's muzzle speed (m/s), from the registry.
-    pub muzzle_speed: f32,
+    /// The shooter's name, where the record names a shooter.
+    pub player: Option<String>,
+    /// The shooter's vehicle as its tank file names it to players, where that file reads.
+    pub vehicle: Option<String>,
+    /// The round's registry key and muzzle speed (m/s), where the registry has the round.
+    pub round: Option<(String, f32)>,
 }
 
 impl Killer {
     /// The killer of a record fired by `shooter` with the round `round` (a round registry key):
-    /// the vehicle read from the shooter's own tank file, the muzzle speed from the registry.
-    pub fn of(shooter: Option<&Shooter>, round: &str) -> Result<Self, String> {
-        let shooter = match shooter {
-            Some(shooter) => {
-                let path = crate::assets::asset_root().join(&shooter.vehicle);
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                let spec: TankSpec =
-                    ron::de::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-                Some((shooter.name.clone(), spec.display_name.clone()))
-            }
-            None => None,
-        };
-        let fired = crate::rounds::RoundRegistry::shipped()
+    /// the vehicle read from the shooter's own tank file, only where there is a shooter, and the
+    /// muzzle speed from the registry. A tank file that does not read or a round the registry
+    /// lacks leaves that part unknown.
+    pub fn of(shooter: Option<&Shooter>, round: &str) -> Self {
+        let vehicle = shooter.and_then(|shooter| {
+            let path = crate::assets::asset_root().join(&shooter.vehicle);
+            let spec = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| ron::de::from_str::<TankSpec>(&text).map_err(|e| e.to_string()));
+            spec.inspect_err(|e| warn!("kill cam: the shooter's tank file {}: {e}", path.display()))
+                .ok()
+                .map(|spec| spec.display_name)
+        });
+        let round = crate::rounds::RoundRegistry::shipped()
             .get(round)
-            .map_err(|e| e.to_string())?;
-        Ok(Self {
-            shooter,
-            round: round.to_owned(),
-            muzzle_speed: fired.muzzle_speed,
-        })
+            .inspect_err(|e| warn!("kill cam: the round {round}: {e}"))
+            .ok()
+            .map(|fired| (round.to_owned(), fired.muzzle_speed));
+        Self {
+            player: shooter.map(|shooter| shooter.name.clone()),
+            vehicle,
+            round,
+        }
     }
 }
 
@@ -435,26 +437,20 @@ pub fn shooter_scene(report: &PenetrationReport) -> Option<(String, String)> {
 }
 
 /// The killer card's three data lines, each reduced to what the font draws and named by what is
-/// missing where the record names nothing legible; the range only where the record has the
+/// missing where the killer has nothing legible; the range only where the record has the
 /// shooter's muzzle (`range_m`).
 pub fn card_lines(killer: &Killer, range_m: Option<f32>) -> [String; 3] {
     let shown = |text: Option<&str>, missing: &str| {
         text.and_then(drawable)
             .unwrap_or_else(|| missing.to_owned())
     };
-    let (name, vehicle) = killer
-        .shooter
-        .as_ref()
-        .map(|(name, vehicle)| (name.as_str(), vehicle.as_str()))
-        .unzip();
-    let round = format!(
-        "{}    {:.0} m/s",
-        shown(Some(&killer.round), "UNKNOWN ROUND"),
-        killer.muzzle_speed
-    );
+    let round = match &killer.round {
+        Some((key, speed)) => format!("{}    {speed:.0} m/s", shown(Some(key), "UNKNOWN ROUND")),
+        None => "UNKNOWN ROUND".to_owned(),
+    };
     [
-        shown(name, "UNKNOWN PLAYER"),
-        shown(vehicle, "UNKNOWN VEHICLE"),
+        shown(killer.player.as_deref(), "UNKNOWN PLAYER"),
+        shown(killer.vehicle.as_deref(), "UNKNOWN VEHICLE"),
         match range_m {
             Some(range_m) => format!("{range_m:.0} m    {round}"),
             None => round,
@@ -1047,9 +1043,14 @@ mod tests {
             assert!(entry.victim, "{}", entry.label);
             let record = &library.records[run.shots[shot].record];
             let killer = &record.killer;
-            let (name, vehicle) = killer.shooter.as_ref().expect("a kill names its killer");
+            let name = killer.player.as_ref().expect("a kill names its killer");
+            let vehicle = killer
+                .vehicle
+                .as_ref()
+                .expect("the killer's tank file reads");
             assert!(!name.is_empty() && !vehicle.is_empty());
-            assert!(killer.muzzle_speed > 0.0);
+            let (_, muzzle_speed) = killer.round.as_ref().expect("the registry has the round");
+            assert!(*muzzle_speed > 0.0);
             assert!(
                 run.turns.is_empty(),
                 "{}: the corner opens on a kill",
@@ -1266,21 +1267,23 @@ mod tests {
     #[test]
     fn the_card_draws_only_what_the_font_covers() {
         let mut killer = Killer {
-            shooter: Some(("\u{864E}\u{738B}".into(), "Tiger \u{864E} I".into())),
-            round: "88mm_AP".into(),
-            muzzle_speed: 773.0,
+            player: Some("\u{864E}\u{738B}".into()),
+            vehicle: Some("Tiger \u{864E} I".into()),
+            round: Some(("88mm_AP".into(), 773.0)),
         };
         let [name, vehicle, round] = card_lines(&killer, Some(700.0));
         assert_eq!(name, "UNKNOWN PLAYER");
         assert_eq!(vehicle, "Tiger I");
         assert!(round.contains("88mm_AP") && round.contains("700 m"));
-        killer.shooter = None;
+        (killer.player, killer.vehicle) = (None, None);
         let [name, vehicle, round] = card_lines(&killer, None);
         assert_eq!(
             (name.as_str(), vehicle.as_str()),
             ("UNKNOWN PLAYER", "UNKNOWN VEHICLE")
         );
         assert_eq!(round, "88mm_AP    773 m/s");
+        killer.round = None;
+        assert_eq!(card_lines(&killer, None)[2], "UNKNOWN ROUND");
     }
 
     /// Where a standing-in view's nodes sit under their parents (m). Fixture data.
@@ -1711,6 +1714,67 @@ mod tests {
         assert!(app.world().resource::<Run>().t > start, "the clock runs");
     }
 
+    /// A kill record whose shooter's tank file does not exist loads, and plays as a shooter whose
+    /// load failed: beat 3 drops, and the card names the record's player and an unknown vehicle.
+    /// The missing path is fixture data.
+    #[test]
+    fn a_missing_shooter_file_skips_beat_three() {
+        let entry = kill_entry();
+        let mut player = String::new();
+        let mut app = demo_app_with(entry, Shooting::Unloadable, |library| {
+            let run = Run::new(entry, library, &Settings::default(), true);
+            let stem = library.records[run.shots[run.kill.unwrap().0].record].stem;
+            let reports = Library::reports()
+                .into_iter()
+                .map(|(known, mut report)| {
+                    if known == stem {
+                        let shooter = report.shooter.as_mut().expect("the kill names a shooter");
+                        shooter.vehicle = "no_such_tank/no_such_tank.tank.ron".to_owned();
+                        player = shooter.name.clone();
+                    }
+                    (known, report)
+                })
+                .collect();
+            *library = Library::of(reports);
+        });
+        let mut frames = 0;
+        while app.world().resource::<Run>().kill.unwrap().1.shooter {
+            frames += 1;
+            assert!(frames < 2000, "the load never failed");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            app.update();
+        }
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        app.world_mut().resource_mut::<Run>().t = beats.death() + 1e-4;
+        app.update();
+        let mut rows: Vec<(usize, String)> = app
+            .world_mut()
+            .query::<(&CardText, &Index, &Text)>()
+            .iter(app.world())
+            .map(|(_, index, text)| (index.0, text.0.clone()))
+            .collect();
+        rows.sort();
+        assert_eq!(rows[1].1, player);
+        assert_eq!(rows[2].1, "UNKNOWN VEHICLE");
+    }
+
+    /// A synthetic record with no shooter and a round the registry lacks loads: the card names an
+    /// unknown player, vehicle and round. The round key is fixture data.
+    #[test]
+    fn a_shooterless_record_of_an_unknown_round_loads() {
+        let mut reports = Library::reports();
+        let (stem, report) = reports.first_mut().expect("the playlist has records");
+        let stem = *stem;
+        report.shooter = None;
+        report.round = "no_such_round".to_owned();
+        let library = Library::of(reports);
+        let killer = &library.records[library.index(stem)].killer;
+        assert_eq!(
+            card_lines(killer, None),
+            ["UNKNOWN PLAYER", "UNKNOWN VEHICLE", "UNKNOWN ROUND"].map(str::to_owned)
+        );
+    }
+
     /// A kill record that names no shooter plays the hit, the lesson and the death screen with no
     /// beat 3 and no hold: the death screen orbits the victim, continuing the lesson's look, and
     /// the card shows what the record has.
@@ -1722,7 +1786,7 @@ mod tests {
             let run = Run::new(entry, library, &settings, true);
             let record = &mut library.records[run.shots[run.kill.unwrap().0].record];
             record.report.shooter = None;
-            record.killer.shooter = None;
+            record.killer = Killer::of(None, &record.report.round);
         });
         app.update();
         let beats = app.world().resource::<Run>().kill.unwrap().1;

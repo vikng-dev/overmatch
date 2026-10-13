@@ -172,6 +172,11 @@ pub struct Record {
 
 impl Library {
     fn load() -> Self {
+        Self::of(Self::reports())
+    }
+
+    /// The playlist's records as they stand on disk, each once, by stem.
+    fn reports() -> Vec<(&'static str, PenetrationReport)> {
         let dir = crate::assets::asset_root().join(RECORD_DIR);
         let mut reports: Vec<(&'static str, PenetrationReport)> = Vec::new();
         for entry in PLAYLIST {
@@ -184,6 +189,11 @@ impl Library {
                 reports.push((stem, report));
             }
         }
+        reports
+    }
+
+    /// The library of `reports`, staged on the one vehicle they name.
+    fn of(reports: Vec<(&'static str, PenetrationReport)>) -> Self {
         let vehicle = reports
             .iter()
             .find_map(|(_, report)| report.vehicle.clone())
@@ -203,8 +213,7 @@ impl Library {
                 );
                 let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
                 let knockout = killcam::knockout(&report);
-                let killer = killcam::Killer::of(report.shooter.as_ref(), &report.round)
-                    .unwrap_or_else(|err| panic!("{stem}: the killer: {err}"));
+                let killer = killcam::Killer::of(report.shooter.as_ref(), &report.round);
                 Record {
                     stem,
                     report,
