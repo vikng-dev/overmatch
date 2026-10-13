@@ -49,8 +49,7 @@ pub(crate) const PANEL_BG: Color = Color::srgba(0.04, 0.06, 0.08, 0.62);
 /// backing rather than a readable-through one.
 pub(crate) const MODAL_BG: Color = Color::srgba(0.03, 0.05, 0.07, 0.92);
 
-/// The death screen's red wash over the world (TUNED): the net death overlay's backdrop and the kill
-/// cam's death tint.
+/// The death screen's red wash over the world (TUNED), drawn only by `overlay::death_tint`.
 pub(crate) const DEATH_TINT: Color = Color::srgba(0.15, 0.0, 0.0, 0.6);
 
 /// Spawn a full-screen, centered overlay: an optional dim translucent backdrop with one line (or

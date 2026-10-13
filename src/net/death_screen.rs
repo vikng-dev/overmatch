@@ -161,12 +161,12 @@ fn request_respawn(
     }
 }
 
-/// Spawn the graybox death overlay: a dim full-screen backdrop with centered white text, its message
-/// chosen by `state`. Deliberately minimal; shares `ui_font::spawn_overlay` with the menu, connect,
-/// and pause overlays so the family reads as one. The backdrop carries a red tint (its only departure
-/// from the others' black) and the state enum doubles as the node's marker + despawn handle. Stamped
-/// with the one-scrim contract's `GlobalZIndex` (Death sits above the menu's z so the status line —
-/// which rides the same z — shows through the menu, though the full screen itself is hidden then).
+/// Spawn the graybox death overlay: centered white text, its message chosen by `state`, over the
+/// death tint. Shares `ui_font::spawn_overlay` with the menu, connect and pause overlays so the
+/// family reads as one, but draws no backdrop of its own on Death's z: its wash is the tint child
+/// ([`overlay::death_tint`]), which escapes to the bottom UI rung, so the HUD and this text stay
+/// untinted on top of it. The tint inherits the overlay node's visibility, so the one-scrim rule
+/// hides it with the death screen. The state enum doubles as the node's marker + despawn handle.
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
         DeathScreenNode::Died => "YOU DIED\npress R to respawn",
@@ -175,7 +175,7 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
     // Two markers: the stateful `DeathScreenNode` enum (text form + despawn handle) and the shared
     // `OverlayNode(Death)`, which stamps the one-scrim `GlobalZIndex` via its hook and hands the full
     // backdrop's visibility to `overlay::apply_overlay_visibility` (the status line is exempt, below).
-    crate::ui_font::spawn_overlay(
+    let screen = crate::ui_font::spawn_overlay(
         commands,
         font,
         (
@@ -186,8 +186,9 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
         ),
         text,
         (),
-        Some(crate::ui_font::DEATH_TINT),
+        None,
     );
+    commands.entity(screen).with_child(overlay::death_tint());
 }
 
 /// A thin, top-pinned, NON-interactive status line shown only while the death state is latched but the
@@ -281,5 +282,75 @@ mod tests {
     fn inactive_never_times_out() {
         let a = awaiting(false, 0.0);
         assert!(!respawn_timed_out(&a, false, 100.0));
+    }
+
+    /// The node's draw layer as bevy_ui stacks it: its own `GlobalZIndex`, else its nearest
+    /// ancestor's, else 0 (a root without one).
+    fn layer(world: &World, mut node: Entity) -> i32 {
+        loop {
+            if let Some(z) = world.get::<GlobalZIndex>(node) {
+                return z.0;
+            }
+            match world.get::<ChildOf>(node) {
+                Some(parent) => node = parent.parent(),
+                None => return 0,
+            }
+        }
+    }
+
+    /// Through the real death-screen and HUD spawners, with the own tank knocked out: exactly one
+    /// node carries the death tint's colour, and it draws below every other UI node — the HUD and
+    /// the death screen's own — so it tints the world and no UI element.
+    #[test]
+    fn the_death_tint_draws_beneath_every_ui_node() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Overlays>()
+            .init_resource::<AwaitingRespawn>()
+            .insert_resource(UiFonts {
+                hud: Handle::default(),
+                body: Handle::default(),
+            })
+            .add_systems(
+                Startup,
+                (
+                    crate::crew_ui::spawn_crew_bar,
+                    crate::crew_ui::spawn_status_panel,
+                ),
+            )
+            .add_systems(Update, toggle_death_screen);
+        app.world_mut().spawn((
+            Controlled,
+            TankKnockedOut {
+                reason: crate::damage::KnockoutReason::CrewLoss,
+            },
+        ));
+        app.update();
+
+        let world = app.world_mut();
+        let mut nodes = world.query_filtered::<(Entity, Option<&BackgroundColor>), With<Node>>();
+        let nodes: Vec<_> = nodes
+            .iter(world)
+            .map(|(node, fill)| {
+                let tint = fill.is_some_and(|fill| fill.0 == crate::ui_font::DEATH_TINT);
+                (tint, layer(world, node))
+            })
+            .collect();
+        let tints: Vec<i32> = nodes.iter().filter(|n| n.0).map(|n| n.1).collect();
+        let rest: Vec<i32> = nodes.iter().filter(|n| !n.0).map(|n| n.1).collect();
+        assert_eq!(tints.len(), 1, "one death tint: {tints:?}");
+        assert!(
+            world
+                .query::<&DeathScreenNode>()
+                .iter(world)
+                .eq([&DeathScreenNode::Died]),
+            "fixture: the death screen is up",
+        );
+        assert!(rest.len() >= 3, "fixture: HUD and death text: {rest:?}");
+        assert!(
+            rest.iter().all(|&other| other > tints[0]),
+            "the tint at {} must draw below every UI node: {rest:?}",
+            tints[0],
+        );
     }
 }

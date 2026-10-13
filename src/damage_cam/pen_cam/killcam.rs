@@ -41,7 +41,7 @@ use crate::damage_cam::{ConsequenceState, PenetrationReport, Role, Shooter};
 use crate::overlay::Overlay;
 use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::{TankSpec, ViewKind};
-use crate::ui_font::{DEATH_TINT, PANEL_BG, TEXT, TEXT_DIM, UiFonts, drawable};
+use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts, drawable};
 
 /// Beat 1 runs this long after the world impact; respawn is live from its end.
 pub const HIT_S: f32 = 0.5;
@@ -472,18 +472,7 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
         )
     };
     // The death tint: the whole screen, on the bottom UI rung so it washes the world alone.
-    commands.spawn((
-        Node {
-            position_type: PositionType::Absolute,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            ..default()
-        },
-        BackgroundColor(DEATH_TINT),
-        GlobalZIndex(Overlay::DEATH_TINT_Z),
-        Visibility::Hidden,
-        DeathTint,
-    ));
+    commands.spawn((crate::overlay::death_tint(), Visibility::Hidden, DeathTint));
     // The killer card, lower left: clear of the shooter the look centres in beat 3.
     commands
         .spawn((

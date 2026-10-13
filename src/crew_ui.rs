@@ -47,7 +47,7 @@ pub fn plugin(app: &mut App) {
         );
 }
 
-fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
+pub(crate) fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
     // Bottom-left — one cell per seat, driven by `update_crew_bar`.
     commands.spawn((
         FlowScoped(Flow::InMatch),
@@ -69,7 +69,7 @@ fn spawn_crew_bar(mut commands: Commands, fonts: Res<UiFonts>) {
     ));
 }
 
-fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
+pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
     // Top-left — the controlled tank's vitals card (the crew bar owns bottom-left). A subtle dark
     // card behind a compact multi-line stat block, driven by `update_status_panel`.
     commands.spawn((

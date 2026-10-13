@@ -86,11 +86,12 @@ impl Overlay {
     /// of the VIEW the overlays cover, not one of them.
     pub(crate) const SIGHT_FURNITURE_Z: i32 = -10;
 
-    /// The z-layer for the death tint, the full-screen wash over the world once a kill cam hands
-    /// off to the death screen (`damage_cam::pen_cam::killcam`): the bottom rung, below
-    /// [`Overlay::SIGHT_FURNITURE_Z`] and every UI node, so it colours the world and never a UI
-    /// element. Like the sight's furniture it carries no [`OverlayNode`]: it declares no presence,
-    /// captures no input, owns no scrim and is never suppressed by the one-scrim rule.
+    /// The z-layer for the death tint ([`death_tint`]), the full-screen wash over the world on a
+    /// death screen — the net client's (`net::death_screen`) and the kill cam's from its handoff
+    /// (`damage_cam::pen_cam::killcam`): the bottom rung, below [`Overlay::SIGHT_FURNITURE_Z`] and
+    /// every UI node, so it colours the world and never a UI element. It carries no
+    /// [`OverlayNode`]: it declares no presence, captures no input and owns no scrim; its
+    /// visibility is its owner's.
     pub(crate) const DEATH_TINT_Z: i32 = Overlay::SIGHT_FURNITURE_Z - 10;
 
     /// The z-layer for the pen cam corner, the inset that explains a hit (`damage_cam::pen_cam`):
@@ -121,6 +122,22 @@ impl Overlay {
     const fn dismissable(self) -> bool {
         matches!(self, Overlay::Menu)
     }
+}
+
+/// The death tint's node: the whole screen in [`crate::ui_font::DEATH_TINT`] on
+/// [`Overlay::DEATH_TINT_Z`]. Absolute, so as a child it spans its parent without entering its
+/// layout; its `GlobalZIndex` lifts it out of the parent's stacking context to the bottom rung.
+pub(crate) fn death_tint() -> impl Bundle {
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(crate::ui_font::DEATH_TINT),
+        GlobalZIndex(Overlay::DEATH_TINT_Z),
+    )
 }
 
 /// The active overlay set — the single source of truth for which overlays are latched. Owners declare
