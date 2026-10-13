@@ -8,10 +8,8 @@
 //! crossing or bounce the log has on the struck tank, and every dose is one the march recorded.
 //! The outcome is the struck tank's alone: first contact, plates, bounces, cones and their
 //! fragments' hits are read only off marks and volumes the tank owns, and the path stops one leg
-//! past the struck tank's last mark. The record carries no geometry: it names each component, and
-//! its shape stays the tank asset's. The one shape the recorder reads is the struck tank's entry
-//! face where its first contact lies inside a crossing another tank's volume opened, from its own
-//! colliders ([`entry_face_normal`]), since the march marks no face normal there.
+//! past the struck tank's last mark. No component geometry is
+//! read: the record names each component, and its shape stays the tank asset's.
 //!
 //! The path's times are DERIVED, not marched: each leg's length over the speed in effect on it
 //! (the round's speed between crossings, the mean of its entry and exit speeds inside one, half
@@ -29,7 +27,7 @@ use super::{
 };
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing, entry_face_normal,
+    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -245,8 +243,6 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
 /// the second.
 struct Share {
     entry: Vec3,
-    /// The tank's first volume along the line.
-    first: VolumeCrossing,
     end: ShareEnd,
     perforated_armour: bool,
 }
@@ -278,10 +274,13 @@ fn share(
     }
     let whole = mine.len() == volumes.len();
     let along = |point: Vec3| (point - entrance).dot(incoming);
-    let first = **mine
-        .iter()
-        .min_by(|a, b| along(a.entry).total_cmp(&along(b.entry)))?;
-    let entry = if whole { entrance } else { first.entry };
+    let entry = if whole {
+        entrance
+    } else {
+        mine.iter()
+            .map(|crossed| crossed.entry)
+            .min_by(|a, b| along(*a).total_cmp(&along(*b)))?
+    };
     let last_out = || {
         mine.iter()
             .map(|crossed| crossed.end)
@@ -299,7 +298,6 @@ fn share(
     };
     Some(Share {
         entry,
-        first,
         end,
         perforated_armour: mine.iter().any(|crossed| {
             crossed.perforated && class_of(world, crossed.volume) == VolumeClass::Main
@@ -340,7 +338,6 @@ pub fn report(
     let steps = path_steps(world, shell, Some(struck.tank));
     let verdict = ShotVerdict::of_path(&steps)?;
     let marks: Vec<ArmourMark> = world.get::<PenetrationMarks>(shell)?.log.clone();
-    let own_face = own_entry_face(world, struck, &marks, facts.caliber_mm / 1000.0);
     let world: &World = world;
     let cones = &world.get::<SpallMarks>(shell)?.cones;
     let tail = world.get::<ShellPath>(shell)?.points.clone();
@@ -571,7 +568,9 @@ pub fn report(
             incoming,
             ..
         } => (*position, *normal, *incoming),
-        // The tank's own entry face: the crossing's entrance where the crossing opened on it.
+        // The march records one entrance face per crossing, so a crossing that spans tanks
+        // attributes it to every tank in it: a tank first entered inside the crossing keeps the
+        // crossing's normal and incidence, though its impact point is its own entry.
         ArmourMark::Crossing {
             entrance,
             normal,
@@ -579,7 +578,7 @@ pub fn report(
             ..
         } => (
             mine(first).map_or(*entrance, |share| share.entry),
-            own_face.unwrap_or(*normal),
+            *normal,
             *incoming,
         ),
         ArmourMark::Failed => return None,
@@ -632,48 +631,6 @@ pub fn report(
             .map(|at_shot| at_shot.state.clone())
             .collect(),
     })
-}
-
-/// The outward normal of the struck tank's entry face (WORLD) where its first contact is a volume
-/// entered inside a crossing another tank's volume opened, read off that volume's own colliders
-/// for a round of `caliber` (m): the march marks no face normal there. `None` where the crossing
-/// opened on the tank, or no entering face is found.
-fn own_entry_face(
-    world: &mut World,
-    struck: &StruckTank,
-    marks: &[ArmourMark],
-    caliber: f32,
-) -> Option<Vec3> {
-    let (first, incoming) = marks
-        .iter()
-        .find(|mark| touches(world, mark, struck.tank))
-        .and_then(|mark| match mark {
-            ArmourMark::Crossing {
-                entrance,
-                incoming,
-                volumes,
-                end,
-                ..
-            } => share(world, *entrance, *incoming, volumes, end, Some(struck.tank))
-                .filter(|share| share.entry.distance(*entrance) > 1.0e-6)
-                .map(|share| (share.first, *incoming)),
-            _ => None,
-        })?;
-    let normal = entry_face_normal(
-        world,
-        first.volume,
-        first.entry,
-        first.end,
-        incoming,
-        caliber,
-    );
-    if normal.is_none() {
-        warn!(
-            "pen cam record: no entering face of {} at {}; its impact keeps the crossing's normal",
-            first.volume, first.entry
-        );
-    }
-    normal
 }
 
 /// Each component's dose from the shot and, for one the shot disabled, its consequence, timed at the

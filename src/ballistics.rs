@@ -37,7 +37,6 @@ mod spall_cone;
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
-pub(crate) use resolve::entry_face_normal;
 
 /// The spatial half of the §13 walk: turning a corridor of world rays into EVERY face crossing along
 /// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
