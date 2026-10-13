@@ -22,7 +22,7 @@ each with its default, preserved alternatives, and revert cost. See
 
 - **Never** `git checkout`, `git restore`, `git stash` or `git clean` — another agent may be working in the same tree.
 - **Never** bare `cargo fmt`; format per file with `rustfmt --edition 2024 <file>`. `cargo fmt --all --check` as a *check* is fine.
-- One cargo command at a time (`pgrep -f "cargo|rustc"` first). Commits to the working branch are authorized; pushing, merging to main, tagging and releasing are not, without explicit approval.
+- One cargo command at a time (`pgrep -f "cargo|rustc"` first). Iterate with targeted tests (`cargo test --lib <module>`, one integration target); run the full `--all-targets` suite and CI clippy once, at the end. Commits to the working branch are authorized; pushing, merging to main, tagging and releasing are not, without explicit approval.
 - Never file, open or comment on anything in an external repository. `upstream/` holds local drafts only — Yan sends them, if ever.
 - Codex is the verification and review lane; Claude agents implement.
 
