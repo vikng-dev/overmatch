@@ -14,10 +14,13 @@ on:
   # could not see is bounded by the next release, not by a calendar.
   workflow_dispatch:
 
-# Supersede in-flight runs on the same ref.
+# Other refs supersede in-flight runs on the same ref. Every main commit runs to a verdict: a
+# cancelled run is not red, and the assets scope diffs only from the previous push, so a cancelled
+# main run is a failure no later run reports. Main groups by sha, because a group keeps only one
+# pending run and would cancel the rest even with cancel-in-progress off.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least privilege: this job only reads the code, so drop the default token down to
 # read-only contents (GitHub/OpenSSF hardening guidance).
