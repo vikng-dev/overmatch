@@ -54,6 +54,7 @@ SPEC = """\
 // value `TankSpec::validate` accepts, because none of them is what is under test: the door is,
 // and the door needs a sheet that parses, validates, and names real nodes.
 TankSpec(
+    display_name: "Testbed",
     mass: 1000.0,
     inertia_extents: (2.0, 1.0, 3.0),
     track: (
