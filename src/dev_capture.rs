@@ -3,7 +3,10 @@
 //! client only when the variable is set (that client then creates its window hidden itself).
 //!
 //! * `OVERMATCH_CAPTURE=<png>` — the frame's path. With several times the time goes before the
-//!   extension: `shot.png` → `shot-8.5s.png`, `shot-4s.png`.
+//!   extension, zero-padded to a fixed width: `shot.png` → `shot-00004.0000s.png`,
+//!   `shot-00008.5000s.png`. Byte order of the names is time order, so a glob assembles a sequence
+//!   as is: `ffmpeg -framerate 30 -pattern_type glob -i 'shot-*s.png' out.mp4`. Times that round
+//!   to the same name are one frame.
 //! * `OVERMATCH_CAPTURE_AT=<s>[,<s>…]` — app seconds (`Time` as `Update` sees it) of each frame;
 //!   default 6.
 //! * `OVERMATCH_CAPTURE_SIGHT=1` — switch to the gunner optic two seconds before the first frame,
@@ -119,14 +122,22 @@ fn hide_ui(mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>) {
     }
 }
 
-/// Comma-separated seconds; unparsable entries are dropped; empty means the default.
+/// Comma-separated seconds; unparsable entries are dropped; empty means the default. Times that
+/// share a [`stamp`] are kept once, so every frame has its own file.
 fn parse_times(s: &str) -> Vec<f32> {
     let mut at: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
     if at.is_empty() {
         at.push(6.0);
     }
     at.sort_by(f32::total_cmp);
+    at.dedup_by(|a, b| stamp(*a) == stamp(*b));
     at
+}
+
+/// A frame time as its file names it: fixed width, so byte order is numeric order for times in
+/// [0, 100000) s, at 0.1 ms resolution.
+fn stamp(at: f32) -> String {
+    format!("{at:010.4}")
 }
 
 fn parse_size(s: &str) -> Option<UVec2> {
@@ -141,7 +152,7 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
     }
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("png");
-    path.with_file_name(format!("{stem}-{at}s.{ext}"))
+    path.with_file_name(format!("{stem}-{}s.{ext}", stamp(at)))
 }
 
 /// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
@@ -262,6 +273,30 @@ mod tests {
     fn one_frame_keeps_the_path_and_several_stamp_it() {
         let path = Path::new("/out/shot.png");
         assert_eq!(frame_path(path, 8.0, 1), path);
-        assert_eq!(frame_path(path, 8.5, 2), Path::new("/out/shot-8.5s.png"));
+        assert_eq!(
+            frame_path(path, 8.5, 2),
+            Path::new("/out/shot-00008.5000s.png")
+        );
+    }
+
+    /// A sequence assembled by name plays in time order: across whole seconds, across digit counts
+    /// and between a short decimal and a long one (`1.1` before `1.1333`).
+    #[test]
+    fn frame_names_sort_in_time_order() {
+        let spec: Vec<String> = (0..3750)
+            .map(|k| format!("{:.4}", 1.0 + k as f32 / 30.0))
+            .collect();
+        let at = parse_times(&spec.join(","));
+        assert_eq!(at.len(), 3750);
+        let path = Path::new("/out/f.png");
+        let names: Vec<PathBuf> = at.iter().map(|&t| frame_path(path, t, at.len())).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(sorted, names);
+    }
+
+    #[test]
+    fn times_sharing_a_name_are_one_frame() {
+        assert_eq!(parse_times("2.00001,2,3"), vec![2.0, 3.0]);
     }
 }
