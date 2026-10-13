@@ -11,7 +11,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/sh</string>
-        <string>/Users/Yan/Desktop/github/vikng-dev/personal/overmatch/scripts/disk/sweep.sh</string>
+        <string>/Users/Yan/github/vikng-dev/overmatch/scripts/disk/sweep.sh</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -20,17 +20,9 @@
         <string>/Users/Yan/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 
-    <!-- Weekly: Sunday (weekday 0) at 04:00. If the box is asleep at the fire time,
-         launchd runs it once at the next wake. -->
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Weekday</key>
-        <integer>0</integer>
-        <key>Hour</key>
-        <integer>4</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
+    <!-- Every 6 h; sweep.sh itself exits unless a Claude Code session is running. -->
+    <key>StartInterval</key>
+    <integer>21600</integer>
 
     <key>StandardOutPath</key>
     <string>/tmp/overmatch-target-sweep.log</string>
