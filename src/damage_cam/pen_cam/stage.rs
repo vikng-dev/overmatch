@@ -504,7 +504,12 @@ pub fn spawn_glass(
             }
         }
     }
-    if let Some(bounce) = &plan.bounce {
+    // The Ricochet frame's eye turns about the struck face's normal, square to the plane of both
+    // legs ([`framing`]); a bounce leaves in its plane of incidence, which holds that normal, so
+    // the eye lies in the face's plane and a gouge on the face would read as a flat bar at the apex.
+    if let Some(bounce) = &plan.bounce
+        && kind != CornerKind::Ricochet
+    {
         mark(
             commands,
             ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
@@ -814,24 +819,36 @@ fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
     !reduce && head_arc(plan, kind, c, reduce) < plan.line.length() - 1e-4
 }
 
-/// The shell model's transform with its nose at arc `head`: the tip on the line, the body back
-/// along the travel there, scaled from the model's calibre to the record's.
+/// The shell model's transform with its nose at arc `head`: the tip on the line, the body along
+/// the chord to the line's point one model length back, scaled from the model's calibre to the
+/// record's. On a straight leg the chord is the travel; within a model length past a bend the body
+/// pivots across it, so past a bounce it stays on the face's outer side as the path does, where
+/// the travel's own direction would stand it inside the face.
 fn shell_transform(plan: &Plan, head: f32) -> Transform {
-    Transform::from_translation(plan.line.at(head))
-        .looking_to(plan.line.direction_at(head), Vec3::Y)
+    let nose = plan.line.at(head);
+    let back = plan.line.at(head - shell_length(plan));
+    let body = (nose - back)
+        .try_normalize()
+        .unwrap_or_else(|| plan.line.direction_at(head));
+    Transform::from_translation(nose)
+        .looking_to(body, Vec3::Y)
         .with_scale(Vec3::splat(plan.calibre / SHELL_MODEL_CALIBRE_M))
 }
 
+/// The shell model's length (m) at the record's calibre.
+fn shell_length(plan: &Plan) -> f32 {
+    SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M
+}
+
 /// Where the trail ends: its arc along the line and its point. Behind a drawn shell it ends at the
-/// model's tail, which on a leg just past a bend stands off the line behind the bend; otherwise at
-/// the nose.
+/// model's tail, which within a model length past a bend stands just off the line, the body's chord
+/// across the bend being shorter than the model; otherwise at the nose.
 fn trail_end(plan: &Plan, head: f32, drawn: bool) -> (f32, Vec3) {
     if !drawn {
         return (head, plan.line.at(head));
     }
-    let length = SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M;
     let tail = shell_transform(plan, head).transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
-    (head - length, tail)
+    (head - shell_length(plan), tail)
 }
 
 /// The drawn extent of the trail leg between arcs `from` and `to`, cut at the trail's end: the
@@ -1314,6 +1331,7 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::plan::LEG_EPS_M;
     use super::*;
     use crate::damage_cam::RoundEnd;
 
@@ -1444,8 +1462,13 @@ mod tests {
                     "{name}: the nose is off the line"
                 );
                 let forward = pose.rotation * Vec3::NEG_Z;
+                // Within a model length past a bend the body pivots across it, nose still ahead.
+                let line = &plan.line;
+                let straight = line.leg_after((head - shell_length(plan)).max(0.0))
+                    == line.leg_after(head - 2.0 * LEG_EPS_M);
+                let lead = if straight { 1.0 - 1e-5 } else { 0.0 };
                 assert!(
-                    forward.dot(plan.line.direction_at(head)) > 1.0 - 1e-5,
+                    forward.dot(line.direction_at(head)) > lead,
                     "{name}: the nose does not lead"
                 );
                 let across = pose.scale.x * SHELL_MODEL_CALIBRE_M;
@@ -1558,6 +1581,86 @@ mod tests {
             bends += 1;
         }
         assert!(bends > 0, "a record bounces");
+    }
+
+    /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:
+    /// for every record that bounces, the model's nose and tail stand no deeper than
+    /// [`POSITION_TOL_M`] behind the face's plane at every sample across the first two model
+    /// lengths past the apex.
+    #[test]
+    fn the_shell_never_sinks_into_the_face_it_glances_off() {
+        let library = Library::load();
+        let mut bounces = 0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let Some(bounce) = &plan.bounce else {
+                continue;
+            };
+            let length = shell_length(plan);
+            let samples = 32;
+            for k in 0..=samples {
+                let head = bounce.arc + 2.0 * length * k as f32 / samples as f32;
+                let pose = shell_transform(plan, head);
+                let tail = pose.transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
+                for (part, p) in [("nose", pose.translation), ("tail", tail)] {
+                    let depth = (bounce.point - p).dot(bounce.normal);
+                    assert!(
+                        depth < POSITION_TOL_M,
+                        "{}: the {part} stands {depth} m inside the face {} m past the apex",
+                        record.stem,
+                        head - bounce.arc
+                    );
+                }
+            }
+            bounces += 1;
+        }
+        assert!(bounces > 0, "a record bounces");
+    }
+
+    /// No ring the Ricochet frame draws is seen within [`EDGE_ON_DEG`] of edge-on at any moment of
+    /// the frame, where it would read as a flat bar rather than a ring.
+    #[test]
+    fn the_ricochet_frame_sees_no_ring_edge_on() {
+        const EDGE_ON_DEG: f32 = 10.0;
+        let library = Library::load();
+        let mut frames = 0;
+        for (index, record) in library.records.iter().enumerate() {
+            let plan = &record.plan;
+            if plan.kind != CornerKind::Ricochet {
+                continue;
+            }
+            let (mut app, _) = staged(index, CornerKind::Ricochet, Vec3::ZERO);
+            let rings: Vec<Transform> = app
+                .world_mut()
+                .query_filtered::<&Transform, With<MarkItem>>()
+                .iter(app.world())
+                .copied()
+                .collect();
+            let samples = 16;
+            for k in 0..=samples {
+                let c = CornerKind::Ricochet.duration() * k as f32 / samples as f32;
+                let (eye, _) = framing(
+                    plan,
+                    CornerKind::Ricochet,
+                    c,
+                    &Settings::default(),
+                    &Stage::default(),
+                    Vec2::ZERO,
+                );
+                for ring in &rings {
+                    let sight = (ring.translation - eye.translation).normalize();
+                    let axis = ring.rotation * Vec3::Y;
+                    let off_edge = sight.dot(axis).abs().asin().to_degrees();
+                    assert!(
+                        off_edge > EDGE_ON_DEG,
+                        "{}: a ring is seen {off_edge}° off edge-on at {c} s",
+                        record.stem
+                    );
+                }
+            }
+            frames += 1;
+        }
+        assert!(frames > 0, "a record ricochets");
     }
 
     /// The slice frames a small round from where the metre figures put the eye, narrowing the
