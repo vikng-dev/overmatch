@@ -366,13 +366,25 @@ fn scenarios() -> Vec<Scenario> {
     ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-const RECORD_REL_TOLERANCE: f64 = 0.0;
+/// A checked-in record matches today's march when every fact but a float is exact and every float
+/// is within [`RECORD_REL_TOLERANCE`] of its recorded value, or within [`RECORD_ABS_TOLERANCE`] of
+/// it. The march is server-only, so it need not be bit-identical across platforms: a record is a
+/// view fixture, blessed on one platform and checked on all, and libm's transcendentals differ by
+/// an f32 ulp between them.
+///
+/// DERIVED: 75x the largest cross-platform spread MEASURED between macOS-blessed records and a
+/// Linux march, 1.33e-7 relative (about one f32 ulp).
+const RECORD_REL_TOLERANCE: f64 = 1e-5;
+/// The floor for a value whose recorded magnitude is a cancellation residue (records hold values
+/// near 1e-8). DERIVED: one f32 ulp at the largest magnitude a record holds (1000, ulp 6.1e-5),
+/// with headroom.
+const RECORD_ABS_TOLERANCE: f64 = 1e-4;
 
 /// A record's text, split into float literals and the exact text between them. An integer, or
-/// digits inside a name (`s3_ricochet`, `88mm_AP`), stay text.
+/// digits inside a name (`s3_ricochet`, `88mm_AP`), stay in the exact text, a [`Token::Fact`].
 #[derive(Debug, PartialEq)]
 enum Token<'a> {
-    Text(&'a str),
+    Fact(&'a str),
     Float(f64),
 }
 
@@ -400,7 +412,7 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
         match literal.parse::<f64>() {
             Ok(value) if literal.contains(['.', 'e', 'E']) => {
                 if text_from < i {
-                    out.push(Token::Text(&text[text_from..i]));
+                    out.push(Token::Fact(&text[text_from..i]));
                 }
                 out.push(Token::Float(value));
                 text_from = end;
@@ -410,12 +422,13 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
         i = end;
     }
     if text_from < bytes.len() {
-        out.push(Token::Text(&text[text_from..]));
+        out.push(Token::Fact(&text[text_from..]));
     }
     out
 }
 
-/// The largest float difference between two records whose text matches exactly everywhere else.
+/// The largest float difference above [`RECORD_ABS_TOLERANCE`] between two records whose text
+/// matches exactly everywhere else.
 #[derive(Debug, Default)]
 struct Spread {
     abs: f64,
@@ -439,6 +452,9 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
                 } else {
                     abs / x.abs().max(y.abs())
                 };
+                if abs <= RECORD_ABS_TOLERANCE {
+                    continue;
+                }
                 spread.abs = spread.abs.max(abs);
                 if rel > spread.rel {
                     spread.rel = rel;
@@ -446,6 +462,14 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
                 }
             }
             (x, y) if x == y => {}
+            (Token::Fact(x), Token::Fact(y)) => {
+                let (x, y) = x
+                    .lines()
+                    .zip(y.lines())
+                    .find(|(x, y)| x != y)
+                    .unwrap_or((x, y));
+                return Err(format!("{:?} became {:?}", x.trim(), y.trim()));
+            }
             (x, y) => return Err(format!("{x:?} became {y:?}")),
         }
     }
@@ -456,7 +480,7 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
         .iter()
         .rev()
         .find_map(|token| match token {
-            Token::Text(text) => text.rsplit('\n').next(),
+            Token::Fact(text) => text.rsplit('\n').next(),
             Token::Float(_) => None,
         })
         .unwrap_or_default();
@@ -465,7 +489,8 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
 }
 
 /// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
-/// path, and the checked-in record is exactly what the march records today. No record is left
+/// path, and the checked-in record is what the march records today: every discrete fact exact,
+/// every float within [`RECORD_REL_TOLERANCE`] or [`RECORD_ABS_TOLERANCE`]. No record is left
 /// without a scenario.
 #[test]
 fn the_pen_cam_scenarios_are_current() {
