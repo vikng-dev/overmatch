@@ -21,6 +21,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -47,6 +48,28 @@ import chains  # noqa: E402
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────────────────────────
+
+#: A spec projection in the canon document's shape, canonically encoded. Fixture data.
+PROJECTION = json.dumps(
+    {"node_references": [{"field": "volumes", "node": "Hull_Front"}],
+     "spec_validates": True, "substance_keys": ["Cast"]},
+    sort_keys=True, separators=(",", ":"),
+).encode()
+
+
+def write_layout(root, stem):
+    """`<root>/<stem>/<stem>.{blend,tank.ron}` beside `<root>/materials/materials.{blend,ron}` — the
+    asset layout `material_sources` derives from — each holding a few placeholder bytes."""
+    for parts, payload in (
+        ((stem, stem + ".blend"), b"BLENDER-FI"),
+        ((stem, stem + ".tank.ron"), b"TankSpec()"),
+        (("materials", "materials.blend"), b"BLENDER-MATERIALS"),
+        (("materials", "materials.ron"), b"SubstanceRegistry()"),
+    ):
+        path = os.path.join(root, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as handle:
+            handle.write(payload)
 
 def _box(scale=1.0, shift=0.0):
     """A closed box as (positions, triangles): twelve triangles over eight corners."""
@@ -666,15 +689,19 @@ class VerifyRefusals(unittest.TestCase):
     """
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="trio-verify-")
+        self.root = tempfile.mkdtemp(prefix="trio-verify-")
+        self.dir = os.path.join(self.root, "testbed")
         self.blend = os.path.join(self.dir, "testbed.blend")
         self.spec = os.path.join(self.dir, "testbed.tank.ron")
-        for path, payload in ((self.blend, b"BLENDER-FI"), (self.spec, b"TankSpec()")):
-            with open(path, "wb") as handle:
-                handle.write(payload)
+        write_layout(self.root, "testbed")
         self.glb = os.path.join(self.dir, "testbed.glb")
         self.view, self.sim, cert = certificate_over(document(), [("Hull#0_LOD1", rung(0.9))])
-        self.cert = dict(cert, blend_digest=build.blend_digest(self.blend, self.spec))
+        # The projection is the canon document `asset_verify` emits; stubbed, because producing it
+        # is a cargo build and this suite runs without one. Its content is `bake.rs`'s own test.
+        stub = mock.patch.object(build, "spec_projection", lambda *_: PROJECTION)
+        stub.start()
+        self.addCleanup(stub.stop)
+        self.cert = dict(cert, blend_digest=build.blend_digest(self.blend, PROJECTION))
         TRIO.publish(self.glb, self.view, self.sim, self.cert)
         self.cert_path = TRIO.paths(self.glb)[2]
 
@@ -736,6 +763,56 @@ class VerifyRefusals(unittest.TestCase):
         self.assertEqual(refused.stage, "certificate")
         self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
 
+    def test_a_moved_projection_is_caught_by_the_blend_digest(self):
+        with mock.patch.object(build, "spec_projection", lambda *_: PROJECTION + b" "):
+            refused = self.refusal()
+        self.assertEqual(refused.stage, "certificate")
+        self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
+
+
+# ── what the staleness field reads ───────────────────────────────────────────────────────────────
+
+class StalenessInputs(unittest.TestCase):
+    """`blend_digest` moves exactly when an input the build reads does.
+
+    The spec sheet is read through its projection only, so a spec byte outside the projection is
+    not an input; the material library and the registry are read whole, so every byte of either is.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="trio-staleness-")
+        write_layout(self.root, "testbed")
+        self.blend = os.path.join(self.root, "testbed", "testbed.blend")
+        self.base = build.blend_digest(self.blend, PROJECTION)
+
+    def edit(self, *parts):
+        with open(os.path.join(self.root, *parts), "ab") as handle:
+            handle.write(b"\n")
+
+    def test_the_spec_sheets_own_bytes_are_not_an_input(self):
+        self.edit("testbed", "testbed.tank.ron")
+        self.assertEqual(self.base, build.blend_digest(self.blend, PROJECTION))
+
+    def test_a_moved_projection_moves_the_digest(self):
+        for moved in (PROJECTION.replace(b"Hull_Front", b"Hull_Glacis"),
+                      PROJECTION.replace(b"true", b"false")):
+            with self.subTest(projection=moved):
+                self.assertNotEqual(self.base, build.blend_digest(self.blend, moved))
+
+    def test_every_material_source_is_an_input(self):
+        for name in ("materials.blend", "materials.ron"):
+            with self.subTest(source=name):
+                before = build.blend_digest(self.blend, PROJECTION)
+                self.edit("materials", name)
+                self.assertNotEqual(before, build.blend_digest(self.blend, PROJECTION))
+
+    def test_the_material_sources_are_the_registrys_neighbours(self):
+        self.assertEqual(
+            build.material_sources(self.blend),
+            (os.path.join(self.root, "materials", "materials.blend"),
+             os.path.join(self.root, "materials", "materials.ron")),
+        )
+
 
 # ── the work split ───────────────────────────────────────────────────────────────────────────────
 
@@ -784,7 +861,6 @@ class FingerprintLaw(unittest.TestCase):
 
     def setUp(self):
         self.blend = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.blend")
-        self.spec = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.tank.ron")
         if not os.path.isfile(self.blend):
             self.skipTest("the tiger source is not hydrated")
 
@@ -793,12 +869,12 @@ class FingerprintLaw(unittest.TestCase):
         before = getattr(build.CONFIG, name)
         setattr(build.CONFIG, name, value)
         try:
-            return build.search_digest(), build.blend_digest(self.blend, self.spec)
+            return build.search_digest(), build.blend_digest(self.blend, PROJECTION)
         finally:
             setattr(build.CONFIG, name, before)
 
     def test_the_right_wall_moves_both_the_cache_key_and_the_staleness_field(self):
-        base = (build.search_digest(), build.blend_digest(self.blend, self.spec))
+        base = (build.search_digest(), build.blend_digest(self.blend, PROJECTION))
         grown = self.moved("RIGHT_WALL_M", build.CONFIG.RIGHT_WALL_M * 2.0)
         self.assertNotEqual(base[0], grown[0], "a grown world must MISS the cache")
         self.assertNotEqual(base[1], grown[1], "a grown world must make the trio stale")
@@ -834,8 +910,8 @@ class FingerprintLaw(unittest.TestCase):
 
     def test_the_fingerprint_is_stable_when_nothing_moves(self):
         self.assertEqual(build.search_digest(), build.search_digest())
-        self.assertEqual(build.blend_digest(self.blend, self.spec),
-                         build.blend_digest(self.blend, self.spec))
+        self.assertEqual(build.blend_digest(self.blend, PROJECTION),
+                         build.blend_digest(self.blend, PROJECTION))
 
     def test_a_non_finite_constant_cannot_be_fingerprinted_silently(self):
         with self.assertRaises(ValueError):

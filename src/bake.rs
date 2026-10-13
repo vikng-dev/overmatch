@@ -834,15 +834,21 @@ pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
 }
 
 /// **The canon file.** The two lists the `.blend` source pass may not maintain for itself, read
-/// off the canonical Rust definitions and handed across the language boundary as one JSON document:
+/// off the canonical Rust definitions and handed across the language boundary as one JSON document,
+/// with the sheet's [`TankSpec::validate`] verdict:
 ///
 /// ```json
-/// {"node_references": [{"field": "volumes", "node": "Hull_Front"}], "substance_keys": ["Cast"]}
+/// {"node_references": [{"field": "volumes", "node": "Hull_Front"}], "spec_validates": true,
+///  "substance_keys": ["Cast"]}
 /// ```
 ///
 /// `node_references` is [`TankSpec::node_references`] — so a spec field added later reaches
 /// `L1.SPEC_REFERENCES` without Python learning its name — and `substance_keys` is the registry
 /// [`classify`] decides membership by. Both are already ordered by their producers.
+///
+/// The document is also everything the tank build reads of the sheet: `scripts/tank/build.py`
+/// hashes it into `blend_digest` in place of the sheet's bytes, so a field it omits is one whose
+/// edits never make a trio stale. `spec_validates` is the verdict alone, not its message.
 ///
 /// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
 /// is one report shape, and a canon generator that invented a second vocabulary would be a second
@@ -872,6 +878,7 @@ pub fn canon_lists(spec_path: &Path, registry: Option<&Path>) -> Result<String, 
         .collect();
     Ok(serde_json::json!({
         "node_references": references,
+        "spec_validates": spec.validate().is_ok(),
         "substance_keys": registry_at(registry)?.keys(),
     })
     .to_string())
@@ -1935,11 +1942,44 @@ mod tests {
             "the vocabulary is the registry's"
         );
 
+        assert_eq!(document["spec_validates"], serde_json::json!(true));
+
         // A sheet that does not parse is the consumer contract's own refusal, not a second one.
         let broken = fixture::write("canon-unparsable", &nodes, "TankSpec(mass: ");
         let findings = canon_lists(Path::new(&spec_ron_name(&broken.glb)), None)
             .expect_err("an unparsable sheet has no canon");
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+    }
+
+    /// The canon document is the build's projection of the sheet: a field the build does not read
+    /// leaves it unchanged, and a renamed node reference or a lost `validate` verdict moves it.
+    #[test]
+    fn the_canon_file_moves_exactly_when_what_the_build_reads_does() {
+        let (nodes, spec) = sound_vehicle();
+        let canon = |id: &str, sheet: &str| {
+            let asset = fixture::write(id, &nodes, sheet);
+            canon_lists(Path::new(&spec_ron_name(&asset.glb)), None).expect("the sheet parses")
+        };
+        let base = canon("projection-base", &spec);
+        let renamed = spec.replace("display_name: \"Fixture\"", "display_name: \"Renamed\"");
+        assert_ne!(renamed, spec, "the fixture sheet carries a display name");
+        assert_eq!(
+            canon("projection-name", &renamed),
+            base,
+            "a gameplay-only field is not read by the build"
+        );
+        assert_ne!(
+            canon(
+                "projection-node",
+                &spec.replace("\"Proxy\"", "\"Proxy_Renamed\"")
+            ),
+            base,
+            "a renamed node reference is read by the build"
+        );
+        let invalid = fixture::spec(&[], &[("Station_L", "Left"), ("Station_R", "Right")], &[]);
+        let document: serde_json::Value =
+            serde_json::from_str(&canon("projection-invalid", &invalid)).expect("one document");
+        assert_eq!(document["spec_validates"], serde_json::json!(false));
     }
 
     /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.

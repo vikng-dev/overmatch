@@ -78,8 +78,9 @@ SEARCH_SOURCES = (
     "chains.py", "../lod/config.py", "../lod/measure.py", "../lod/generate.py", "../toolchain.py",
 )
 
-#: What can move ANY of the three artifacts. `blend_digest` is taken over the source, the spec sheet
-#: and this, which is what makes it the staleness check ADR 0035 asks for.
+#: What can move ANY of the three artifacts. `blend_digest` is taken over the source, what the build
+#: reads of the spec sheet, the materials and this, which is what makes it the staleness check ADR
+#: 0035 asks for.
 PIPELINE_SOURCES = SEARCH_SOURCES + (
     "build.py", "trio.py", "asset_door.py", "glb_ktx2.py", "../encode-tank-ktx2.sh",
     "../../.agents/blender/export_tank.py",
@@ -199,19 +200,42 @@ def search_digest() -> str:
     ).hexdigest()
 
 
-def blend_digest(blend: str, spec: str) -> str:
-    """The staleness field: the source, the spec sheet, and every input that can move an artifact.
+def material_sources(blend: str) -> tuple:
+    """The material library the blend links its substances out of, and the substance registry the
+    door reads the asset against — both beside each other in `assets/materials/`. Either one moves
+    the view artifact's bytes, and neither is the asset's own file."""
+    registry = asset_door.registry_of(blend)
+    return (os.path.join(os.path.dirname(registry), "materials.blend"), registry)
 
-    A tank rebuilt from an unchanged blend under a changed pipeline is a different tank, and a
-    certificate that only hashed the blend would call it current. `ladder_digest` is in it for the
-    same reason it keys the cache — a world that grew moves the right wall and therefore the chains,
-    while every file this hashes is unchanged.
+
+def spec_projection(spec: str, root: str, work: str, registry: str) -> bytes:
+    """What the build reads of the spec sheet, and nothing else of it.
+
+    The sheet reaches the artifacts only through `asset_verify --canon`: its typed node references,
+    the registry's substance keys, and whether `TankSpec::validate` accepts it. Everything else in
+    it — names, masses, gameplay tuning — is read by the game and never by this build, so hashing
+    the raw bytes made every gameplay edit a stale trio. Re-encoded with sorted keys so the hash
+    does not read the producer's whitespace; list order is the producer's canonical order.
+    """
+    with open(asset_door.canon_file(spec, root, work, registry), encoding="utf-8") as handle:
+        document = json.load(handle)
+    return json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def blend_digest(blend: str, projection: bytes) -> str:
+    """The staleness field: every input the build reads, and only what it reads of each.
+
+    The source's bytes, the spec sheet's `spec_projection`, the material library and the registry
+    (`material_sources`), the pipeline's own sources, the resolved ladder, and the toolchain. A tank
+    rebuilt from an unchanged blend under a changed pipeline is a different tank, and a certificate
+    that only hashed the blend would call it current. `ladder_digest` is in it for the same reason
+    it keys the cache — a world that grew moves the right wall and therefore the chains, while every
+    file this hashes is unchanged.
     """
     digest = hashlib.sha256()
-    for path in (blend, spec):
-        with open(path, "rb") as handle:
-            for block in iter(lambda: handle.read(1 << 20), b""):
-                digest.update(block)
+    for path in (blend,) + material_sources(blend):
+        digest.update(TRIO.sha256_file(path).encode())
+    digest.update(hashlib.sha256(projection).hexdigest().encode())
     digest.update(sources_digest(PIPELINE_SOURCES).encode())
     digest.update(ladder_digest().encode())
     for _key, value in toolchain.ENVIRONMENT:
@@ -513,7 +537,8 @@ def build(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
         view_blob, mesh_count, chains = assemble(candidate_blob, rows, records, cache)
         sim_blob = TRIO.sim_bytes(view_blob, mesh_count)
         cert = TRIO.certificate(
-            blend_digest(blend, spec), TRIO.sha256_bytes(view_blob), TRIO.sha256_bytes(sim_blob),
+            blend_digest(blend, spec_projection(spec, root, work, asset_door.registry_of(blend))),
+            TRIO.sha256_bytes(view_blob), TRIO.sha256_bytes(sim_blob),
             mesh_count, chains,
         )
 
@@ -551,7 +576,8 @@ def verify(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
         cert = json.loads(handle.read().decode())
 
     with timeline.stage("certificate"):
-        failures = TRIO.coherence(cert, view_blob, sim_blob, blend_digest(blend, spec))
+        projection = spec_projection(spec, root, work, asset_door.registry_of(blend))
+        failures = TRIO.coherence(cert, view_blob, sim_blob, blend_digest(blend, projection))
         findings += [
             finding(TRIO_INCOHERENT, Subject(SubjectKind.FILE, os.path.relpath(cert_path, root)),
                     text, REBUILD)
