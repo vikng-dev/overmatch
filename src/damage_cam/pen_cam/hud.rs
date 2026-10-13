@@ -343,7 +343,7 @@ pub fn animate(
         };
         let dose = match settings.dose {
             DoseScale::Absolute => "absolute",
-            DoseScale::Relative => "per count",
+            DoseScale::HpShare => "hp share",
         };
         let line = format!(
             "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  slice {}{}\n\

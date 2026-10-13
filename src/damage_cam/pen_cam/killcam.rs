@@ -1043,7 +1043,8 @@ mod tests {
 
     /// The beats run in order; the camera is captive exactly in the lesson and the killer beats;
     /// respawn is live from the end of the hit; by the lesson's end the record's corner clock is
-    /// past its last event (the travel window's end, a cone's growth, a component's fill).
+    /// past its last event for every record that knocks its tank out (the travel window's end, a
+    /// cone's front at its longest reach, a component's fill).
     #[test]
     fn the_beats_run_in_order() {
         let beats = Beats {
@@ -1065,9 +1066,18 @@ mod tests {
         }
         assert!(!beats.respawn_live(beats.impact + HIT_S - 0.01));
         assert!(beats.respawn_live(beats.impact + HIT_S));
-        let last_event =
-            CornerKind::Glass.line_window().1 + timeline::CONE_GROW_S + timeline::BOX_FILL_S;
-        assert!(beats.lesson_c(beats.killer() - 1e-3).unwrap() >= last_event);
+        let library = Library::load();
+        let mut knockouts = 0;
+        for record in library.records.iter().filter(|r| r.knockout.is_some()) {
+            let last_event = super::super::stage::settled(&record.plan, CornerKind::Glass);
+            assert!(
+                beats.lesson_c(beats.killer() - 1e-3).unwrap() >= last_event,
+                "{}: settles at {last_event}",
+                record.stem
+            );
+            knockouts += 1;
+        }
+        assert!(knockouts > 0, "a record knocks its tank out");
         assert!(beats.lesson_c(beats.killer()).is_none());
     }
 

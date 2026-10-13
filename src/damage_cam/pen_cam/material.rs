@@ -14,16 +14,31 @@ pub struct GlowParams {
     pub rim: Vec4,
     pub plane: Vec4,
     pub flags: Vec4,
+    pub edge: Vec4,
+    pub field: Vec4,
 }
 
-/// One flat colour, optionally rim-lit by view angle, vertex-coloured, clipped by a plane or
-/// hatched; both faces drawn. Additive materials are commutative, so they need no sort order.
+/// How a [`GlowMaterial`] composites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Blend {
+    /// Commutative, so it needs no sort order.
+    Additive,
+    /// Straight alpha.
+    Blended,
+}
+
+/// One flat colour, optionally rim-lit by view angle or edged in a second colour, vertex-coloured,
+/// clipped by a plane, hatched, faded by distance from the mesh's origin or cut off at a radius from
+/// it; both faces drawn.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
     #[uniform(0)]
     pub params: GlowParams,
-    pub additive: bool,
+    pub blend: Blend,
 }
+
+/// [`GlowParams::field`] with no front (`x < 0`) and no falloff (`y = 0`).
+const NO_FIELD: Vec4 = Vec4::new(-1.0, 0.0, 0.0, 0.0);
 
 impl GlowMaterial {
     /// An additive glow of `color` (linear) at `intensity`, without rim.
@@ -34,8 +49,10 @@ impl GlowMaterial {
                 rim: Vec4::new(intensity, 0.0, 1.0, 0.0),
                 plane: Vec4::ZERO,
                 flags: Vec4::new(0.0, 0.0, 1.0, 1.0),
+                edge: Vec4::ZERO,
+                field: NO_FIELD,
             },
-            additive: true,
+            blend: Blend::Additive,
         }
     }
 
@@ -47,8 +64,10 @@ impl GlowMaterial {
                 rim: Vec4::new(1.0, 0.0, 1.0, 0.0),
                 plane: Vec4::ZERO,
                 flags: Vec4::new(0.0, 0.0, 0.0, 1.0),
+                edge: Vec4::ZERO,
+                field: NO_FIELD,
             },
-            additive: false,
+            blend: Blend::Blended,
         }
     }
 
@@ -69,6 +88,28 @@ impl GlowMaterial {
     pub fn with_hatch(mut self) -> Self {
         self.params.flags.y = 1.0;
         self
+    }
+
+    /// Blended: the rim term `gain · (1 − |n·v|)^power`, clamped to 1, mixes the fill
+    /// toward `color` and its alpha toward 1, so the edge reads over the fill at grazing angles.
+    pub fn with_edge(mut self, color: LinearRgba, gain: f32, power: f32) -> Self {
+        self.params.edge = Vec4::new(color.red, color.green, color.blue, 1.0);
+        self.params.rim.y = gain;
+        self.params.rim.z = power;
+        self
+    }
+
+    /// Intensity falls as `min(1, (r₀ / r)²)` with `r` the distance (m) from the mesh's origin: a
+    /// field's fluence from its source, unity inside `r₀`.
+    pub fn with_falloff(mut self, r0: f32) -> Self {
+        self.params.field.y = r0;
+        self
+    }
+
+    /// Every vertex farther than `radius` (m) from the mesh's origin is drawn at that radius, along
+    /// its own direction: a front grown that far. `None` draws the mesh whole.
+    pub fn set_front(&mut self, radius: Option<f32>) {
+        self.params.field.x = radius.map_or(NO_FIELD.x, |r| r.max(0.0));
     }
 
     /// Discard fragments on `normal`'s side of the plane through `point`; `None` clips nothing.
@@ -92,15 +133,18 @@ impl GlowMaterial {
 }
 
 impl Material for GlowMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/pen_cam_glow.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/pen_cam_glow.wgsl".into()
     }
 
     fn alpha_mode(&self) -> AlphaMode {
-        if self.additive {
-            AlphaMode::Add
-        } else {
-            AlphaMode::Blend
+        match self.blend {
+            Blend::Additive => AlphaMode::Add,
+            Blend::Blended => AlphaMode::Blend,
         }
     }
 

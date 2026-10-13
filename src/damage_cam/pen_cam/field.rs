@@ -6,7 +6,8 @@
 //! over the half-angle, azimuth about the axis — are triangulated (Delaunay), and each triangle is
 //! subdivided with its corners' reach and strength interpolated linearly: a drawing between the
 //! record's samples, never a direction the record does not hold at a corner. Positions are relative
-//! to the cone's origin, so scaling the entity about its origin grows the field from it.
+//! to the cone's origin, so a copy scales about it and the stage's material holds a front, and
+//! falls off, by distance from it.
 //!
 //! Vertex colour alpha carries the strength fraction `s(θ)/S` the record gave each direction; the
 //! material turns it into brightness.

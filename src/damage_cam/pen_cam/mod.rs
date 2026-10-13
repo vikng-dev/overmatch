@@ -244,10 +244,10 @@ pub enum CornerSetting {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DoseScale {
-    /// (a): absolute, log-mapped reference millimetres, one scale for every box.
+    /// The share of its hit points a component lost (the default).
+    HpShare,
+    /// Absolute, log-mapped reference millimetres, one scale for every box.
     Absolute,
-    /// (b): the dose over the box's count.
-    Relative,
 }
 
 /// The demo's switches.
@@ -268,7 +268,7 @@ impl Default for Settings {
         Self {
             corner: CornerSetting::All,
             reduce_motion: false,
-            dose: DoseScale::Absolute,
+            dose: DoseScale::HpShare,
             glass: 0,
             slice_ortho: true,
             expanded: false,
@@ -654,8 +654,8 @@ fn controls(
     }
     if keys.just_pressed(KeyCode::KeyD) {
         settings.dose = match settings.dose {
-            DoseScale::Absolute => DoseScale::Relative,
-            DoseScale::Relative => DoseScale::Absolute,
+            DoseScale::HpShare => DoseScale::Absolute,
+            DoseScale::Absolute => DoseScale::HpShare,
         };
     }
     if keys.just_pressed(KeyCode::KeyG) {

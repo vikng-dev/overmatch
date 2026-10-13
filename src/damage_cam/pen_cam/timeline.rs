@@ -75,15 +75,14 @@ pub const OPEN_LATENCY_S: f32 = 0.20;
 pub const MIN_SHOWN_S: f32 = 0.60;
 /// The replacement crossfade.
 pub const CROSSFADE_S: f32 = 0.12;
-/// A spall cone's reach surface grows over this.
-pub const CONE_GROW_S: f32 = 0.40;
 /// A box fills to its dose tint over this.
 pub const BOX_FILL_S: f32 = 0.25;
 /// The slice's cut reveal: the eye's half dissolves over this window.
 pub const SLICE_REVEAL: (f32, f32) = (0.18, 0.48);
 /// Reduce motion: an element fades in whole over this.
 pub const REDUCED_FADE_S: f32 = 0.15;
-/// The kill cam lesson's orbit and the ricochet drift, degrees per second.
+/// The Pen frames' and the kill cam lesson's orbit, and the Damaged and ricochet drift, degrees
+/// per second.
 pub const ORBIT_DEG_S: f32 = 10.0;
 pub const DRIFT_DEG_S: f32 = 3.0;
 
@@ -199,9 +198,17 @@ pub fn dose_ramp(x: f32) -> LinearRgba {
     stop(lo).mix(&stop(lo + 1), t)
 }
 
-/// The absolute dose scale (option (a), the default): log-mapped reference millimetres, the same
-/// for every box and every cone. [`DOSE_SCALE_MM`] spans the doses the scenario records hold,
-/// 0.02 to 40 ref-mm (MEASURED from `assets/dev/pen_cam/`), with headroom.
+/// The spall field's hue: a cool teal off the dose ramp and apart from the glass hull's blue-grey,
+/// so a field never reads as damage or as hull.
+pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
+/// The field's edge shell: near-white, a contour with no hue of its own.
+pub const FIELD_EDGE: Color = Color::srgb_u8(0xE6, 0xEE, 0xF5);
+/// A damaged or destroyed component's edge: a chartreuse outside the ramp's hues and the field's.
+pub const VOLUME_EDGE: Color = Color::srgb_u8(0xC4, 0xF2, 0x3A);
+
+/// The absolute dose scale (the alternative): log-mapped reference millimetres, the same for every
+/// box and every cone. [`DOSE_SCALE_MM`] spans the doses the scenario records hold, 0.02 to 40
+/// ref-mm (MEASURED from `assets/dev/pen_cam/`), with headroom.
 pub const DOSE_SCALE_MM: (f32, f32) = (0.02, 60.0);
 
 pub fn absolute_dose(dose_mm: f32) -> f32 {
@@ -212,12 +219,14 @@ pub fn absolute_dose(dose_mm: f32) -> f32 {
     ((dose_mm.ln() - lo.ln()) / (hi.ln() - lo.ln())).clamp(0.0, 1.0)
 }
 
-/// Option (b): the dose over the box's count, clamped at 1 — full exactly when the box is disabled.
-pub fn relative_dose(dose_mm: f32, count: f32) -> f32 {
-    if dose_mm <= 0.0 || count <= 0.0 {
-        return 0.0;
+/// The default: the share of its hit points a component lost, the dose over the hit points it had
+/// at the shot, clamped at 1 — full exactly when the shot disabled it. A component with none left
+/// at the shot reads full.
+pub fn hp_share(dose_mm: f32, hp: f32) -> f32 {
+    if hp <= 0.0 {
+        return 1.0;
     }
-    (dose_mm / count).clamp(0.0, 1.0)
+    (dose_mm.max(0.0) / hp).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -331,9 +340,10 @@ mod tests {
         assert!(absolute_dose(0.1) < absolute_dose(1.0));
         assert!(absolute_dose(1.0) < absolute_dose(10.0));
         assert_eq!(absolute_dose(1.0e6), 1.0);
-        assert_eq!(relative_dose(1.0, 3.0), 1.0 / 3.0);
-        assert_eq!(relative_dose(9.0, 3.0), 1.0);
-        assert_eq!(relative_dose(1.0, 0.0), 0.0);
+        assert_eq!(hp_share(1.0, 3.0), 1.0 / 3.0);
+        assert_eq!(hp_share(9.0, 3.0), 1.0);
+        assert_eq!(hp_share(0.0, 3.0), 0.0);
+        assert_eq!(hp_share(1.0, 0.0), 1.0);
     }
 
     /// The ramp gets lighter as the dose rises.

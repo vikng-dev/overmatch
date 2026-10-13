@@ -1,17 +1,18 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
-//! face, every spall cone as a translucent reach surface, and each component's real mesh tinted by
-//! the dose it took.
+//! face, every spall cone as a translucent reach surface in a cool hue whose density falls as 1/r²
+//! from its origin, and each component's real mesh tinted by the share of its hit points it lost,
+//! a destroyed one solid.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
-//! frame.
+//! frame. A cone's front runs from its origin at the shell's own on-screen speed.
 //! Rebuilt when the corner's record or a look setting changes; animated every frame from the
 //! corner's clock alone, so a scrub lands on the same picture.
 //!
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
 //! components the record names drawn in their own meshes), the plate slice (the tank's own
-//! materials, the eye's side of a vertical plane through the chord dissolved away, a mesh lying
-//! wholly on that side drawn as the ghost), and the outside view (the tank as built).
+//! materials, everything on the eye's side of a vertical plane through the chord dissolved away),
+//! and the outside view (the tank as built).
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
@@ -21,7 +22,6 @@
 use std::collections::HashMap;
 
 use bevy::camera::ScalingMode;
-use bevy::camera::primitives::Aabb;
 use bevy::camera::{Hdr, RenderTarget};
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -29,9 +29,9 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
 use super::material::{GlowMaterial, SliceCut, SliceMaterial, SliceParams};
-use super::plan::{Plan, Reach};
+use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
-use super::view::{Proxy, ViewMesh, ViewRoot, Views, pose_under};
+use super::view::{Proxy, ViewMesh, ViewRoot, Views};
 use super::{Corner, DoseScale, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
@@ -60,15 +60,25 @@ const RING_THICKNESS: f32 = 0.12;
 const RING_GLOW: f32 = 2.0;
 /// The spall cone is drawn as this many nested copies of its reach surface, scaled about its
 /// origin, so its density reads as depth; the on-axis brightness of all of them together is
-/// [`CONE_PEAK`] at the top of the dose scale. TUNED, as are the cone's and the boxes' glows below.
+/// [`CONE_PEAK`] at the top of the dose scale. TUNED, as are the cone's and the boxes' figures
+/// below.
 const CONE_SHELLS: usize = 4;
 const CONE_PEAK: f32 = 0.35;
 /// The shells' emission gain over [`CONE_PEAK`], for the bloom: a diagram choice.
 const CONE_GAIN: f32 = 4.0;
-/// The reach surface's rim glow at the top of the dose scale.
-const CONE_RIM: f32 = 1.4;
-/// A dosed component's emission at full fill.
-const BOX_GLOW: f32 = 1.6;
+/// The outer reach surface's view-angle glow at the top of the dose scale, held at this fraction
+/// of the nested shells' on-axis sum so the directions' own strengths, not the outline, carry the
+/// field's shape.
+const CONE_RIM_SHARE: f32 = 0.3;
+/// The field's density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this fraction of
+/// the cone's longest reach.
+const FIELD_FALLOFF_REACH: f32 = 0.3;
+/// A damaged component's fill opacity; a destroyed one's fill is opaque.
+const DAMAGED_ALPHA: f32 = 0.45;
+/// A component's edge: the rim term `gain · (1 − |n·v|)^power` mixing its fill toward
+/// [`timeline::VOLUME_EDGE`].
+const EDGE_GAIN: f32 = 1.8;
+const EDGE_POWER: f32 = 2.0;
 /// The lost-box fill (victim glass): `#2A2F36` at 70 %.
 const LOST_FILL: Color = Color::srgb_u8(0x2A, 0x2F, 0x36);
 /// The slice's cut face.
@@ -119,11 +129,10 @@ pub(super) struct MarkItem {
     at_arc: f32,
 }
 
-/// One copy of cone `cone`'s reach surface at scale `k`; `rim` marks the outer surface's glow.
+/// One copy of cone `cone`'s reach surface, scaled about its origin; `rim` marks the outer surface.
 #[derive(Component)]
 pub(super) struct ConeShell {
     cone: usize,
-    k: f32,
     rim: bool,
     peak: f32,
 }
@@ -284,9 +293,7 @@ pub fn rebuild(
     mut stage: ResMut<Stage>,
     items: Query<Entity, With<StageItem>>,
     views: Res<Views>,
-    tank: Query<(Entity, &ViewMesh, &Mesh3d, Option<&Aabb>), Without<Proxy>>,
-    parents: Query<&ChildOf>,
-    transforms: Query<&Transform>,
+    tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
@@ -326,12 +333,7 @@ pub fn rebuild(
             .iter()
             .any(|plate| mesh.is(&plate.name))
     };
-    // A mesh's pose in the record's frame: the stage root's placement over its local chain, current
-    // since the servos were posed this frame.
-    let root_pose = transforms
-        .get(views.stage)
-        .map_or(Mat4::IDENTITY, Transform::to_matrix);
-    for (entity, mesh, _, aabb) in &tank {
+    for (entity, mesh, _) in &tank {
         if mesh.root != ViewRoot::Stage {
             continue;
         }
@@ -352,16 +354,6 @@ pub fn rebuild(
             }
             CornerKind::Slice => {
                 let (normal, point) = stage.plane.unwrap_or((Vec3::Z, Vec3::ZERO));
-                let pose = || {
-                    root_pose
-                        * pose_under(entity, views.stage, &parents, |node| {
-                            transforms.get(node).ok().copied()
-                        })
-                };
-                if aabb.is_some_and(|aabb| beyond_plane(aabb, pose(), (normal, point))) {
-                    e.insert((MeshMaterial3d(stage.ghost.clone()), Visibility::Inherited));
-                    continue;
-                }
                 let params = SliceParams {
                     plane: normal.extend(normal.dot(point)),
                     cut_color: LinearRgba::from(CUT).to_vec4(),
@@ -394,8 +386,8 @@ pub fn rebuild(
     let components = component_meshes(
         plan,
         tank.iter()
-            .filter(|(_, mesh, ..)| mesh.root == ViewRoot::Stage)
-            .map(|(entity, mesh, handle, _)| (entity, mesh.names.as_slice(), handle.0.clone())),
+            .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
+            .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
     );
     spawn_glass(
         &mut commands,
@@ -510,13 +502,11 @@ pub fn spawn_glass(
         );
     }
 
-    // Spall cones: nested reach surfaces and a rim-lit outer one, clipped by the slice plane.
-    let cone_color: LinearRgba = timeline::dose_ramp(0.75);
+    // Spall cones: nested reach surfaces and a muted outer one, clipped by the slice plane.
     for (index, cone) in plan.cones.iter().enumerate() {
         if matches!(kind, CornerKind::Ricochet) {
             break;
         }
-        let strength = timeline::absolute_dose(cone.strength.max(1e-3));
         let mesh = meshes.add(reach_mesh(cone));
         for shell in 0..=CONE_SHELLS {
             let rim = shell == CONE_SHELLS;
@@ -525,26 +515,16 @@ pub fn spawn_glass(
             } else {
                 (shell + 1) as f32 / CONE_SHELLS as f32
             };
-            let peak = if rim {
-                CONE_RIM * strength
-            } else {
-                CONE_GAIN * CONE_PEAK * strength / CONE_SHELLS as f32
-            };
-            let mut material = if rim {
-                GlowMaterial::additive(cone_color, 0.0).with_rim(0.0, peak, 2.5)
-            } else {
-                GlowMaterial::additive(cone_color, peak).with_vertex_color()
-            };
+            let (mut material, peak) = field_material(cone, rim);
             material.set_clip(clip);
             material.set_fade(0.0);
             commands.spawn((
                 Mesh3d(mesh.clone()),
                 MeshMaterial3d(glows.add(material)),
-                Transform::from_translation(cone.origin).with_scale(Vec3::splat(1e-4)),
+                Transform::from_translation(cone.origin).with_scale(Vec3::splat(k)),
                 Visibility::Hidden,
                 ConeShell {
                     cone: index,
-                    k,
                     rim,
                     peak,
                 },
@@ -555,25 +535,13 @@ pub fn spawn_glass(
         }
     }
 
-    // Components, in their own meshes: dose tint where the shot dosed one; the victim's lost ones in
-    // the state tint.
+    // Components, in their own meshes: the share of hit points lost where the shot dosed one, a
+    // destroyed one solid; the victim's lost ones in the state tint.
     for component in components {
         let index = component.index;
-        let b = &plan.boxes[index];
-        let material = match kind {
-            CornerKind::Victim if b.lost => {
-                GlowMaterial::blended(LOST_FILL.into(), 0.7).with_hatch()
-            }
-            CornerKind::Glass | CornerKind::Damaged if b.dose() > 0.0 => {
-                let x = match settings.dose {
-                    DoseScale::Absolute => timeline::absolute_dose(b.dose()),
-                    DoseScale::Relative => timeline::relative_dose(b.dose(), b.count),
-                };
-                GlowMaterial::additive(timeline::dose_ramp(x), BOX_GLOW * (0.25 + 0.75 * x))
-            }
-            _ => continue,
+        let Some(mut material) = component_material(&plan.boxes[index], kind, settings) else {
+            continue;
         };
-        let mut material = material;
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(component.mesh.clone()),
@@ -585,6 +553,60 @@ pub fn spawn_glass(
             StageItem,
             ChildOf(component.entity),
         ));
+    }
+}
+
+/// One of a cone's reach surfaces, and its peak intensity at full fade: the nested shells carry
+/// each direction's strength in their vertex alpha, so the field's angular profile is theirs; the
+/// outer shell (`rim`) adds only a view-angle edge at [`CONE_RIM_SHARE`] of their on-axis sum. Both
+/// fall off as 1/r² from the origin, in [`timeline::FIELD`]'s cool hue.
+fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
+    let strength = timeline::absolute_dose(cone.strength.max(1e-3));
+    let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+    let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
+    let interior = CONE_GAIN * CONE_PEAK * strength;
+    let (material, peak) = if rim {
+        let peak = CONE_RIM_SHARE * interior;
+        (
+            GlowMaterial::additive(timeline::FIELD_EDGE.into(), 0.0).with_rim(0.0, peak, 2.5),
+            peak,
+        )
+    } else {
+        let peak = interior / CONE_SHELLS as f32;
+        (
+            GlowMaterial::additive(timeline::FIELD.into(), peak).with_vertex_color(),
+            peak,
+        )
+    };
+    (material.with_falloff(r0), peak)
+}
+
+/// A component's tint in frame `kind`, `None` where it is not drawn: in the glass and the outside
+/// view a dosed component is filled translucent with the dose ramp at the share of its hit points
+/// it lost (or the absolute scale), a destroyed one opaque, both edged in
+/// [`timeline::VOLUME_EDGE`]; the victim's lost components wear the state tint.
+fn component_material(b: &BoxPlan, kind: CornerKind, settings: &Settings) -> Option<GlowMaterial> {
+    match kind {
+        CornerKind::Victim if b.lost => {
+            Some(GlowMaterial::blended(LOST_FILL.into(), 0.7).with_hatch())
+        }
+        CornerKind::Glass | CornerKind::Damaged if b.dose() > 0.0 => {
+            let x = match settings.dose {
+                DoseScale::HpShare => timeline::hp_share(b.dose(), b.hp),
+                DoseScale::Absolute => timeline::absolute_dose(b.dose()),
+            };
+            let (color, alpha) = if b.lost {
+                (timeline::dose_ramp(1.0), 1.0)
+            } else {
+                (timeline::dose_ramp(x), DAMAGED_ALPHA)
+            };
+            Some(GlowMaterial::blended(color, alpha).with_edge(
+                timeline::VOLUME_EDGE.into(),
+                EDGE_GAIN,
+                EDGE_POWER,
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -610,22 +632,6 @@ fn ring_across(point: Vec3, travel: Vec3, radius: f32) -> Transform {
             travel.normalize_or(Vec3::Y),
         ))
         .with_scale(Vec3::splat(radius))
-}
-
-/// Whether a mesh lies wholly on the eye's side of the slice plane `(normal toward the eye, point)`,
-/// so the cut misses it: every corner of its local bounds `aabb`, carried into the record's frame by
-/// `pose`, beyond the plane. The slice draws such a mesh as ghost glass rather than dissolving it,
-/// so the tank stays whole around the cut.
-fn beyond_plane(aabb: &Aabb, pose: Mat4, (normal, point): (Vec3, Vec3)) -> bool {
-    let (center, half) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
-    (0..8).all(|corner| {
-        let sign = Vec3::new(
-            if corner & 1 == 0 { -1.0 } else { 1.0 },
-            if corner & 2 == 0 { -1.0 } else { 1.0 },
-            if corner & 4 == 0 { -1.0 } else { 1.0 },
-        );
-        (pose.transform_point3(center + half * sign) - point).dot(normal) > 0.0
-    })
 }
 
 /// The slice plane: vertical through the stopping chord, its normal horizontal and toward the
@@ -680,6 +686,56 @@ fn time_at_arc(plan: &Plan, kind: CornerKind, s: f32, reduce: bool) -> f32 {
         return from;
     }
     from + (s - plan.start_arc).max(0.0) / travel_speed(plan, kind)
+}
+
+/// The corner time at which cone `index` is thrown: the shell's nose at its origin.
+fn cone_start(plan: &Plan, kind: CornerKind, index: usize, reduce: bool) -> f32 {
+    time_at_arc(plan, kind, plan.cones[index].arc, reduce)
+}
+
+/// How far (m) cone `index`'s front has run from its origin at corner time `c`, negative before the
+/// cone is thrown. It runs from the moment the shell's nose reaches the origin at the shell's own
+/// on-screen speed, [`travel_speed`]: on the shell's replay clock every leg, the one leaving the
+/// plate that threw the cone included, plays at that one speed, so this is the round's exit speed,
+/// the same in every direction (the record holds no fragment speed). The front keeps pace with
+/// the shell and never outruns it.
+fn front_radius(plan: &Plan, kind: CornerKind, index: usize, c: f32) -> f32 {
+    travel_speed(plan, kind) * (c - cone_start(plan, kind, index, false))
+}
+
+/// The corner time at which component `b`'s fill starts: the line's entry, or the moment the dosing
+/// cone's front has run the distance the plan gives; the victim's own glass shows its state from
+/// the open.
+fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
+    match (kind, b.reached_at) {
+        (CornerKind::Victim, _) => 0.0,
+        (_, Some(Reach::Line(arc))) => time_at_arc(plan, kind, arc, reduce),
+        (_, Some(Reach::Cone { cone, distance })) => {
+            if reduce {
+                cone_start(plan, kind, cone, true)
+            } else {
+                cone_start(plan, kind, cone, false) + distance / travel_speed(plan, kind)
+            }
+        }
+        (_, None) => f32::INFINITY,
+    }
+}
+
+/// The corner time by which every element of `plan` has arrived in frame `kind`: each cone's front
+/// at its longest reach and each dosed component's fill complete.
+#[cfg(test)]
+pub(super) fn settled(plan: &Plan, kind: CornerKind) -> f32 {
+    let speed = travel_speed(plan, kind);
+    let cones = plan.cones.iter().enumerate().map(|(index, cone)| {
+        let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+        cone_start(plan, kind, index, false) + reach / speed
+    });
+    let boxes = plan
+        .boxes
+        .iter()
+        .map(|b| box_start(plan, kind, b, false) + timeline::BOX_FILL_S)
+        .filter(|t| t.is_finite());
+    cones.chain(boxes).fold(kind.line_window().1, f32::max)
 }
 
 /// Whether the shell is drawn at corner time `c`: from the travel window on, until a round the
@@ -760,13 +816,8 @@ pub fn animate(
         (Without<LineSeg>, Without<ConeShell>, Without<BoxTint>),
     >,
     mut shells: Query<
-        (
-            &ConeShell,
-            &MeshMaterial3d<GlowMaterial>,
-            &mut Transform,
-            &mut Visibility,
-        ),
-        (Without<LineSeg>, Without<MarkItem>, Without<StageCamera>),
+        (&ConeShell, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
+        (Without<LineSeg>, Without<MarkItem>, Without<BoxTint>),
     >,
     mut boxes: Query<
         (&BoxTint, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
@@ -867,24 +918,21 @@ pub fn animate(
         });
     }
 
-    let cone_start = |index: usize| time_at_arc(plan, kind, plan.cones[index].arc, reduce);
-    for (shell, material, mut transform, mut visibility) in &mut shells {
-        let cone = &plan.cones[shell.cone];
-        let start = cone_start(shell.cone);
-        let (grow, fade) = if reduce {
-            (1.0, fade_from(start))
+    for (shell, material, mut visibility) in &mut shells {
+        // Reduce motion fades the whole field in; otherwise its front runs out from the origin.
+        let (front, fade) = if reduce {
+            (None, fade_from(cone_start(plan, kind, shell.cone, true)))
         } else {
-            let g = timeline::ease_enter(timeline::progress(c, start, timeline::CONE_GROW_S));
-            (g, if c >= start { 1.0 } else { 0.0 })
+            let front = front_radius(plan, kind, shell.cone, c);
+            (Some(front), if front > 0.0 { 1.0 } else { 0.0 })
         };
-        if fade <= 0.0 || grow <= 0.0 {
+        if fade <= 0.0 {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        *transform = Transform::from_translation(cone.origin)
-            .with_scale(Vec3::splat((shell.k * grow).max(1e-4)));
         if let Some(mut m) = glows.get_mut(&material.0) {
             m.set_fade(fade);
+            m.set_front(front);
             if !shell.rim {
                 m.set_intensity(shell.peak);
             }
@@ -893,13 +941,7 @@ pub fn animate(
     }
 
     for (tint, material, mut visibility) in &mut boxes {
-        let b = &plan.boxes[tint.index];
-        let start = match (kind, b.reached_at) {
-            (CornerKind::Victim, _) => 0.0,
-            (_, Some(Reach::Line(arc))) => time_at_arc(plan, kind, arc, reduce),
-            (_, Some(Reach::Cone(index))) => cone_start(index) + timeline::CONE_GROW_S,
-            (_, None) => f32::INFINITY,
-        };
+        let start = box_start(plan, kind, &plan.boxes[tint.index], reduce);
         let fill = if reduce {
             fade_from(start)
         } else {
@@ -917,7 +959,7 @@ pub fn animate(
 
     if settings.axis_line {
         for (index, cone) in plan.cones.iter().enumerate() {
-            if c >= cone_start(index) {
+            if c >= cone_start(plan, kind, index, reduce) {
                 let reach = cone.rays.iter().map(|r| r.reach).fold(0.0, f32::max);
                 gizmos.line(
                     cone.origin,
@@ -983,7 +1025,12 @@ fn framing(
         )
     };
     match kind {
-        CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => along_shot(plan, orbit),
+        CornerKind::Glass | CornerKind::Victim => {
+            along_shot(plan, orbit, motion(timeline::ORBIT_DEG_S, 0.0))
+        }
+        CornerKind::Damaged => {
+            along_shot(plan, orbit, motion(timeline::DRIFT_DEG_S, kind.hold_from()))
+        }
         CornerKind::Slice => {
             let (normal, _) = stage.plane.unwrap_or((Vec3::X, Vec3::ZERO));
             let up = (Vec3::Y - normal * normal.y)
@@ -1026,7 +1073,7 @@ fn framing(
         }
         CornerKind::Ricochet => {
             let Some(bounce) = plan.bounce.as_ref() else {
-                return along_shot(plan, orbit);
+                return along_shot(plan, orbit, motion(timeline::DRIFT_DEG_S, 0.0));
             };
             // The eye on the normal of the plane through both legs, so the angle shows at its
             // true size; above the plane when the legs are level.
@@ -1083,11 +1130,12 @@ fn framing(
 /// above the tank to one side. The camera stays upright: its up is the world vertical, except when
 /// it looks straight up or down, where it is the shot's horizontal heading, so the path runs up the
 /// frame.
-/// The eye holds still through the frame; `orbit` (the viewer's drag, rad) yaws it about the
-/// vertical and adds to the nudge.
+/// `orbit` (the viewer's drag, rad) yaws the sightline about the vertical and adds to the nudge;
+/// from there the eye turns `spin` (rad) about the vertical through the bounds' centre, keeping
+/// its distance and height, so the frame's slow orbit starts on the shot line.
 ///
 /// The bounds' sphere fits the vertical field, which binds while the corner is landscape.
-fn along_shot(plan: &Plan, orbit: Vec2) -> (Transform, Projection) {
+fn along_shot(plan: &Plan, orbit: Vec2, spin: f32) -> (Transform, Projection) {
     let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
     let (center, radius) = match plan.tank_bounds {
         Some((lo, hi)) => (0.5 * (lo + hi), 0.5 * (hi - lo).length()),
@@ -1119,8 +1167,10 @@ fn along_shot(plan: &Plan, orbit: Vec2) -> (Transform, Projection) {
     let q = plan.impact_point - center;
     let b = toward_eye.dot(q);
     let t = -b + (b * b - q.length_squared() + far * far).max(0.0).sqrt();
+    let turn = Quat::from_rotation_y(spin);
+    let eye = center + turn * (plan.impact_point + toward_eye * t - center);
     (
-        Transform::from_translation(plan.impact_point + toward_eye * t).looking_at(center, up),
+        Transform::from_translation(eye).looking_at(center, turn * up),
         Projection::Perspective(PerspectiveProjection {
             fov: CORNER_FOV_DEG.to_radians(),
             ..default()
@@ -1551,9 +1601,10 @@ mod tests {
     }
 
     /// Every record, in every frame that looks along the shot, as recorded and with its calibre cut
-    /// to 2 mm (fixture data): the whole tank's bounds and the impact lie in the field, the camera is
-    /// upright (its right is level), the sightline to the impact is the shot turned
-    /// [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does not depend on the calibre.
+    /// to 2 mm (fixture data), as the frame opens: the whole tank's bounds and the impact lie in the
+    /// field, the camera is upright (its right is level), the sightline to the impact is the shot
+    /// turned [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does not depend on the
+    /// calibre.
     #[test]
     fn the_shot_frames_hold_the_whole_tank() {
         let library = Library::load();
@@ -1573,7 +1624,7 @@ mod tests {
                                 framing(
                                     &plan,
                                     kind,
-                                    2.0,
+                                    0.0,
                                     &Settings::default(),
                                     &Stage::default(),
                                     Vec2::ZERO,
@@ -1660,121 +1711,322 @@ mod tests {
         assert!(vertical > 0, "a record shoots straight down");
     }
 
-    /// In the slice, a mesh lying wholly on the eye's side of the cut is drawn as the ghost, not
-    /// dissolved, while a mesh the plane cuts keeps the slice: the real [`rebuild`] over every
-    /// slice record, each of the tank's component shapes standing in for its view mesh under a
-    /// parent node (the chain carries them into the record's frame). A component whose
-    /// bounds lie beyond the plane is ghosted, one with vertices on both sides keeps the slice;
-    /// at least one record ghosts one.
+    /// The frames that orbit start on the shot line and turn about the vertical through the tank's
+    /// bounds' centre at their rates: the Pen frames at [`timeline::ORBIT_DEG_S`] from the open, the
+    /// Damaged frame at [`timeline::DRIFT_DEG_S`] from its hold. Two seconds on, every record's eye
+    /// has turned that far about the centre at its distance and height, the tank still in the field;
+    /// under reduce motion it has not moved.
     #[test]
-    fn the_slice_ghosts_what_its_plane_misses() {
+    fn the_shot_frames_orbit_the_tank_centre() {
+        let library = Library::load();
+        let elapsed = 2.0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let bounds = plan.tank_bounds.expect("the tank asset has bounds");
+            let center = 0.5 * (bounds.0 + bounds.1);
+            for (kind, rate, from) in [
+                (CornerKind::Glass, timeline::ORBIT_DEG_S, 0.0),
+                (CornerKind::Victim, timeline::ORBIT_DEG_S, 0.0),
+                (
+                    CornerKind::Damaged,
+                    timeline::DRIFT_DEG_S,
+                    CornerKind::Damaged.hold_from(),
+                ),
+            ] {
+                let at = |c: f32, reduce: bool| {
+                    let settings = Settings {
+                        reduce_motion: reduce,
+                        ..default()
+                    };
+                    framing(plan, kind, c, &settings, &Stage::default(), Vec2::ZERO)
+                };
+                let (start, _) = at(from, false);
+                let (later, projection) = at(from + elapsed, false);
+                let (a, b) = (start.translation - center, later.translation - center);
+                let turned = Vec2::new(a.x, a.z)
+                    .angle_to(Vec2::new(b.x, b.z))
+                    .to_degrees()
+                    .abs();
+                let name = record.stem;
+                assert!(
+                    (turned - rate * elapsed).abs() < NUDGE_TOL_DEG,
+                    "{name} {kind:?}: turned {turned}°"
+                );
+                assert!((a.length() - b.length()).abs() < POSITION_TOL_M, "{name}");
+                assert!((a.y - b.y).abs() < POSITION_TOL_M, "{name}");
+                for p in corners(bounds) {
+                    assert!(in_view(&later, &projection, p, SQUARE), "{name} {kind:?}");
+                }
+                let (still, _) = at(from + elapsed, true);
+                assert!(
+                    still.translation.distance(start.translation) < POSITION_TOL_M,
+                    "{name} {kind:?}"
+                );
+            }
+        }
+    }
+
+    /// The stage over record `index` in frame `kind`, built by the real [`rebuild`] once: each of
+    /// the tank's component shapes stands in for its view mesh, authored a metre back from where the
+    /// record has it under a parent a metre forward along `offset`, so only the chain carries it into
+    /// the record's frame. Returns the app and each shape's entity, name and bounds' corners in the
+    /// record's frame.
+    fn staged(
+        index: usize,
+        kind: CornerKind,
+        offset: Vec3,
+    ) -> (App, Vec<(Entity, String, [Vec3; 8])>) {
         use bevy::camera::primitives::MeshAabb;
         let library = Library::load();
+        let record = &library.records[index];
         let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
-        let (mut ghosted, mut cut) = (0, 0);
+        let shapes = asset.shapes(&record.report.servo_deg);
+        let mut app = App::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let world = app.world_mut();
+        let root = world.spawn(Transform::IDENTITY).id();
+        let hull = world.spawn((Transform::IDENTITY, ChildOf(root))).id();
+        let parent = world
+            .spawn((Transform::from_translation(offset), ChildOf(root)))
+            .id();
+        let mut placed = Vec::new();
+        for (name, shape) in shapes.iter() {
+            let mesh = crate::damage_cam::shapes::ComponentShape {
+                positions: shape.positions.iter().map(|p| *p - offset).collect(),
+                indices: shape.indices.clone(),
+            }
+            .mesh();
+            let Some(aabb) = mesh.compute_aabb() else {
+                continue;
+            };
+            let local = (Vec3::from(aabb.min()), Vec3::from(aabb.max()));
+            let entity = world
+                .spawn((
+                    ViewMesh {
+                        root: ViewRoot::Stage,
+                        names: vec![name.to_owned()],
+                        original: Handle::default(),
+                    },
+                    Mesh3d(meshes.add(mesh)),
+                    aabb,
+                    Transform::IDENTITY,
+                    ChildOf(parent),
+                ))
+                .id();
+            placed.push((entity, name.to_owned(), corners(local).map(|p| p + offset)));
+        }
+        let mut views = Views::fixture();
+        views.stage = root;
+        views.hull[1] = Some(hull);
+        app.insert_resource(library)
+            .insert_resource(Settings::default())
+            .insert_resource(Corner {
+                showing: Some(super::super::Showing {
+                    record: index,
+                    turn: 0,
+                    kind,
+                    c: 0.0,
+                    opacity: 1.0,
+                    scale: 1.0,
+                    remaining: 1.0,
+                    surface: super::super::Surface::Corner,
+                }),
+                fading: None,
+            })
+            .insert_resource(Stage::default())
+            .insert_resource(views)
+            .insert_resource(meshes)
+            .insert_resource(Assets::<GlowMaterial>::default())
+            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(Assets::<SliceMaterial>::default())
+            .add_systems(Update, rebuild);
+        app.update();
+        (app, placed)
+    }
+
+    /// The slice dissolves everything on the eye's side of its plane, a mesh lying wholly on that
+    /// side included: the real [`rebuild`] over every slice record gives every one of the tank's
+    /// component meshes the slice material, never the glass, whether the plane cuts it or misses
+    /// it; at least one record has a mesh wholly on the eye's side.
+    #[test]
+    fn the_slice_dissolves_what_its_plane_misses() {
+        let library = Library::load();
+        let (mut wholly, mut cut) = (0, 0);
         for (index, record) in library.records.iter().enumerate() {
-            let plan = &record.plan;
-            if plan.kind != CornerKind::Slice {
+            if record.plan.kind != CornerKind::Slice {
                 continue;
             }
-            let (normal, point) = slice_plane(plan);
-            let beyond = |p: Vec3| (p - point).dot(normal) > 0.0;
-            let shapes = asset.shapes(&record.report.servo_deg);
-            let mut app = App::new();
-            let mut meshes = Assets::<Mesh>::default();
-            let mut glows = Assets::<GlowMaterial>::default();
-            let ghost = glows.add(GlowMaterial::blended(GLASS.into(), 0.18));
-            let world = app.world_mut();
-            let root = world.spawn(Transform::IDENTITY).id();
-            let hull = world.spawn((Transform::IDENTITY, ChildOf(root))).id();
-            // The parent stands a metre off the plane toward the eye and each mesh is authored a
-            // metre back, so only their chain together puts a mesh where the record has it.
-            let offset = normal;
-            let parent = world
-                .spawn((Transform::from_translation(offset), ChildOf(root)))
-                .id();
-            // (entity, whether it lies beyond the plane); a shape whose vertices lie beyond but
-            // whose bounds straddle is neither and is not checked.
-            let mut expect = Vec::new();
-            for (name, shape) in shapes.iter() {
-                let mesh = crate::damage_cam::shapes::ComponentShape {
-                    positions: shape.positions.iter().map(|p| *p - offset).collect(),
-                    indices: shape.indices.clone(),
-                }
-                .mesh();
-                let Some(aabb) = mesh.compute_aabb() else {
-                    continue;
-                };
-                let local = (Vec3::from(aabb.min()), Vec3::from(aabb.max()));
-                let wholly = corners(local).into_iter().all(|p| beyond(p + offset));
-                let crossed = !shape.positions.iter().copied().all(beyond)
-                    && shape.positions.iter().copied().any(beyond);
-                let entity = world
-                    .spawn((
-                        ViewMesh {
-                            root: ViewRoot::Stage,
-                            names: vec![name.to_owned()],
-                            original: Handle::default(),
-                        },
-                        Mesh3d(meshes.add(mesh)),
-                        aabb,
-                        Transform::IDENTITY,
-                        ChildOf(parent),
-                    ))
-                    .id();
-                if wholly || crossed {
-                    expect.push((entity, name.to_owned(), wholly));
-                }
-            }
-            let mut views = Views::fixture();
-            views.stage = root;
-            views.hull[1] = Some(hull);
-            app.insert_resource(Library::load())
-                .insert_resource(Settings::default())
-                .insert_resource(Corner {
-                    showing: Some(super::super::Showing {
-                        record: index,
-                        turn: 0,
-                        kind: CornerKind::Slice,
-                        c: 0.0,
-                        opacity: 1.0,
-                        scale: 1.0,
-                        remaining: 1.0,
-                        surface: super::super::Surface::Corner,
-                    }),
-                    fading: None,
-                })
-                .insert_resource(Stage {
-                    ghost: ghost.clone(),
-                    ..default()
-                })
-                .insert_resource(views)
-                .insert_resource(meshes)
-                .insert_resource(glows)
-                .insert_resource(Assets::<StandardMaterial>::default())
-                .insert_resource(Assets::<SliceMaterial>::default())
-                .add_systems(Update, rebuild);
-            app.update();
+            let (normal, point) = slice_plane(&record.plan);
+            let (app, placed) = staged(index, CornerKind::Slice, normal);
             let world = app.world();
-            for (entity, name, wholly) in expect {
+            for (entity, name, corners) in placed {
                 let glass = world.get::<MeshMaterial3d<GlowMaterial>>(entity);
                 let sliced = world.get::<MeshMaterial3d<SliceMaterial>>(entity).is_some();
-                if wholly {
-                    assert_eq!(
-                        glass.map(|m| m.0.id()),
-                        Some(ghost.id()),
-                        "{}: {name}",
-                        record.stem
-                    );
-                    assert!(!sliced, "{}: {name}", record.stem);
-                    ghosted += 1;
+                assert!(sliced && glass.is_none(), "{}: {name}", record.stem);
+                if corners.iter().all(|p| (*p - point).dot(normal) > 0.0) {
+                    wholly += 1;
                 } else {
-                    assert!(sliced && glass.is_none(), "{}: {name}", record.stem);
                     cut += 1;
                 }
             }
         }
-        assert!(ghosted > 0 && cut > 0, "{ghosted} ghosted, {cut} cut");
+        assert!(wholly > 0 && cut > 0, "{wholly} wholly beyond, {cut} cut");
+    }
+
+    /// Whether `color` (linear) lies on the dose ramp: within a small distance of one of its
+    /// samples.
+    fn on_ramp(color: Vec3) -> bool {
+        (0..=100).any(|i| {
+            let r = timeline::dose_ramp(i as f32 / 100.0);
+            color.distance(Vec3::new(r.red, r.green, r.blue)) < 0.05
+        })
+    }
+
+    /// Every record's spall field as the real [`rebuild`] draws it: every shell falls off as 1/r²
+    /// from the cone's origin, in a cool hue (more blue than red) off the dose ramp, and the outer
+    /// shell's view-angle glow is at most half the nested shells' on-axis sum, so the directions'
+    /// strengths shape the field. At least one record throws a cone.
+    #[test]
+    fn the_field_is_cool_and_falls_off_from_its_origin() {
+        let library = Library::load();
+        let mut fields = 0;
+        for (index, record) in library.records.iter().enumerate() {
+            let kind = record.plan.kind;
+            if record.plan.cones.is_empty() || kind == CornerKind::Ricochet {
+                continue;
+            }
+            let (mut app, _) = staged(index, kind, Vec3::X);
+            let mut shells = app
+                .world_mut()
+                .query::<(&ConeShell, &MeshMaterial3d<GlowMaterial>)>();
+            let world = app.world();
+            let glows = world.resource::<Assets<GlowMaterial>>();
+            for (cone, _) in record.plan.cones.iter().enumerate() {
+                let materials: Vec<(bool, &GlowMaterial)> = shells
+                    .iter(world)
+                    .filter(|(shell, _)| shell.cone == cone)
+                    .map(|(shell, m)| (shell.rim, glows.get(&m.0).unwrap()))
+                    .collect();
+                assert_eq!(materials.len(), CONE_SHELLS + 1, "{}", record.stem);
+                let mut interior = 0.0;
+                let mut rim = 0.0;
+                for (is_rim, m) in &materials {
+                    assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
+                    let color = m.params.color.truncate();
+                    assert!(color.z > color.x, "{}: {color} is warm", record.stem);
+                    assert!(!on_ramp(color), "{}: {color} is on the ramp", record.stem);
+                    if *is_rim {
+                        rim += m.params.rim.y;
+                    } else {
+                        interior += m.params.rim.x;
+                    }
+                }
+                assert!(
+                    rim <= 0.5 * interior,
+                    "{}: rim {rim} against {interior}",
+                    record.stem
+                );
+                fields += 1;
+            }
+        }
+        assert!(fields > 0, "a record throws a cone");
+    }
+
+    /// Every dosed component in the glass and the outside view, as the real [`rebuild`] draws it: a
+    /// damaged one is filled translucent with the dose ramp at the share of its hit points it lost,
+    /// a destroyed one opaque, both edged; across the records at least one of each, and at least
+    /// one whose share differs from its absolute dose's place on the log scale.
+    #[test]
+    fn a_component_reads_its_share_of_hit_points_lost() {
+        let library = Library::load();
+        let (mut damaged, mut destroyed, mut distinct) = (0, 0, 0);
+        for (index, record) in library.records.iter().enumerate() {
+            for kind in [CornerKind::Glass, CornerKind::Damaged] {
+                let (mut app, _) = staged(index, kind, Vec3::X);
+                let mut tints = app
+                    .world_mut()
+                    .query::<(&BoxTint, &MeshMaterial3d<GlowMaterial>)>();
+                let world = app.world();
+                let glows = world.resource::<Assets<GlowMaterial>>();
+                for (tint, material) in tints.iter(world) {
+                    let b = &record.plan.boxes[tint.index];
+                    let m = glows.get(&material.0).unwrap();
+                    let name = format!("{} {kind:?} {}", record.stem, b.name);
+                    assert!(b.dose() > 0.0, "{name}");
+                    assert!(m.params.edge.w > 0.5, "{name}: no edge");
+                    if b.lost {
+                        assert_eq!(m.params.color.w, 1.0, "{name}: not solid");
+                        destroyed += 1;
+                        continue;
+                    }
+                    let share = timeline::hp_share(b.dose(), b.hp);
+                    let want = timeline::dose_ramp(share);
+                    let got = m.params.color;
+                    assert!(
+                        got.truncate()
+                            .distance(Vec3::new(want.red, want.green, want.blue))
+                            < 1e-5,
+                        "{name}: {got} for share {share}"
+                    );
+                    assert!(got.w < 1.0, "{name}: a damaged fill is translucent");
+                    if (share - timeline::absolute_dose(b.dose())).abs() > 0.05 {
+                        distinct += 1;
+                    }
+                    damaged += 1;
+                }
+            }
+        }
+        assert!(
+            damaged > 0 && destroyed > 0 && distinct > 0,
+            "{damaged} damaged, {destroyed} destroyed, {distinct} distinct"
+        );
+    }
+
+    /// Every record's spall fronts run on the shell's own clock: each starts as the shell's nose
+    /// reaches the cone's origin and, while the shell is still moving, stands exactly as far from
+    /// the origin as the nose has run along the line since, so it neither lags nor outruns the
+    /// shell; a component a cone dosed starts to fill when the front has run the distance the plan
+    /// gives it.
+    #[test]
+    fn the_field_front_keeps_pace_with_the_shell() {
+        let library = Library::load();
+        let mut fronts = 0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let kind = plan.kind;
+            if kind == CornerKind::Ricochet {
+                continue;
+            }
+            for (index, cone) in plan.cones.iter().enumerate() {
+                let start = cone_start(plan, kind, index, false);
+                assert!(front_radius(plan, kind, index, start).abs() < 1e-5);
+                assert!(front_radius(plan, kind, index, start - 0.01) < 0.0);
+                let gone = time_at_arc(plan, kind, plan.line.length(), false);
+                for k in 1..=16 {
+                    let c = start + (gone - start) * k as f32 / 16.0;
+                    let run = head_arc(plan, kind, c, false) - cone.arc;
+                    let front = front_radius(plan, kind, index, c);
+                    assert!(
+                        (front - run).abs() < 1e-3,
+                        "{} cone {index}: front {front} m, shell {run} m at {c}",
+                        record.stem
+                    );
+                }
+                fronts += 1;
+            }
+            for b in &plan.boxes {
+                if let Some(Reach::Cone { cone, distance }) = b.reached_at {
+                    let at = box_start(plan, kind, b, false);
+                    assert!(
+                        (front_radius(plan, kind, cone, at) - distance).abs() < 1e-3,
+                        "{}: {}",
+                        record.stem,
+                        b.name
+                    );
+                }
+            }
+        }
+        assert!(fronts > 0, "a record throws a cone");
     }
 
     /// Each of a tank's meshes belongs to the component its nearest named node of the plan's

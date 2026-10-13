@@ -198,6 +198,8 @@ pub struct BoxPlan {
     /// component of that name.
     pub center: Option<Vec3>,
     pub count: f32,
+    /// Its hit points at the shot (ref-mm).
+    pub hp: f32,
     pub line: f32,
     pub field: f32,
     /// When the picture reaches it: the arc where the record has the line enter it, else the first
@@ -210,7 +212,14 @@ pub struct BoxPlan {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reach {
     Line(f32),
-    Cone(usize),
+    /// Cone `cone`, by the time its front has run `distance` (m) from its origin: the reach of the
+    /// shortest of its directions that dosed the component. The record holds no point where a
+    /// direction met the component, only where it ended, so this is the latest the front can have
+    /// reached it.
+    Cone {
+        cone: usize,
+        distance: f32,
+    },
 }
 
 impl BoxPlan {
@@ -268,18 +277,23 @@ impl Plan {
                     .then(|| dose.and_then(|d| d.entered))
                     .flatten()
                     .map(|entered| Reach::Line(line.arc_of(Vec3::from(entered))));
-                let by_cone = report
-                    .spall
-                    .iter()
-                    .position(|cone| {
-                        cone.fragments.iter().any(|fragment| {
+                let by_cone = report.spall.iter().enumerate().find_map(|(index, cone)| {
+                    let origin = Vec3::from(cone.origin);
+                    cone.fragments
+                        .iter()
+                        .filter(|fragment| {
                             fragment
                                 .hits
                                 .iter()
                                 .any(|hit| hit.volume == component.name && hit.damage > 0.0)
                         })
-                    })
-                    .map(Reach::Cone);
+                        .map(|fragment| Vec3::from(fragment.end).distance(origin))
+                        .reduce(f32::min)
+                        .map(|distance| Reach::Cone {
+                            cone: index,
+                            distance,
+                        })
+                });
                 let reached_at = (line_dose + field_dose > 0.0)
                     .then(|| by_line.or(by_cone).unwrap_or(Reach::Line(contact_arc)));
                 let lost_before = component.count > 0.0 && component.hp <= 0.0;
@@ -288,6 +302,7 @@ impl Plan {
                     role: component.role,
                     center,
                     count: component.count,
+                    hp: component.hp,
                     line: line_dose,
                     field: field_dose,
                     reached_at,
