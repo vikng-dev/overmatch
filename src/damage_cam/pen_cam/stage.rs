@@ -28,11 +28,11 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
-use super::material::{GlowMaterial, SliceCut, SliceMaterial, SliceParams};
+use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, DoseScale, Library, Run, Settings};
+use super::{Corner, DoseScale, FieldRim, Library, Run, Settings, VolumeStyle};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -79,6 +79,14 @@ const DAMAGED_ALPHA: f32 = 0.45;
 /// [`timeline::VOLUME_EDGE`].
 const EDGE_GAIN: f32 = 1.8;
 const EDGE_POWER: f32 = 2.0;
+/// The look test's alternatives (dev-only, [`VolumeStyle`] and [`FieldRim`]): the outline's width
+/// in physical pixels, the glow style's emission at full fill, the hatch style's softer edge, and
+/// the coloured field shell's fill as a share of its edge.
+const OUTLINE_PX: f32 = 3.0;
+const GLOW_STYLE_GAIN: f32 = 1.6;
+const HATCH_EDGE_GAIN: f32 = 0.8;
+const HATCH_EDGE_POWER: f32 = 3.0;
+const FIELD_COLOURED_FILL: f32 = 0.35;
 /// The lost-box fill (victim glass): `#2A2F36` at 70 %.
 const LOST_FILL: Color = Color::srgb_u8(0x2A, 0x2F, 0x36);
 /// The slice's cut face.
@@ -296,6 +304,7 @@ pub fn rebuild(
     tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
+    mut outlines: ResMut<Assets<OutlineMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
 ) {
@@ -393,6 +402,7 @@ pub fn rebuild(
         &mut commands,
         &mut meshes,
         &mut glows,
+        &mut outlines,
         plan,
         kind,
         &settings,
@@ -413,6 +423,7 @@ pub fn spawn_glass(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     glows: &mut Assets<GlowMaterial>,
+    outlines: &mut Assets<OutlineMaterial>,
     plan: &Plan,
     kind: CornerKind,
     settings: &Settings,
@@ -515,7 +526,7 @@ pub fn spawn_glass(
             } else {
                 (shell + 1) as f32 / CONE_SHELLS as f32
             };
-            let (mut material, peak) = field_material(cone, rim);
+            let (mut material, peak) = field_material(cone, rim, settings.field_rim);
             material.set_clip(clip);
             material.set_fade(0.0);
             commands.spawn((
@@ -539,7 +550,8 @@ pub fn spawn_glass(
     // destroyed one solid; the victim's lost ones in the state tint.
     for component in components {
         let index = component.index;
-        let Some(mut material) = component_material(&plan.boxes[index], kind, settings) else {
+        let b = &plan.boxes[index];
+        let Some(mut material) = component_material(b, kind, settings) else {
             continue;
         };
         material.set_fade(0.0);
@@ -553,6 +565,18 @@ pub fn spawn_glass(
             StageItem,
             ChildOf(component.entity),
         ));
+        if let Some(outline) = component_outline(b, kind, settings, meshes.get(&component.mesh)) {
+            commands.spawn((
+                Mesh3d(component.mesh.clone()),
+                MeshMaterial3d(outlines.add(outline)),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                BoxTint { index },
+                scope,
+                StageItem,
+                ChildOf(component.entity),
+            ));
+        }
     }
 }
 
@@ -560,15 +584,20 @@ pub fn spawn_glass(
 /// each direction's strength in their vertex alpha, so the field's angular profile is theirs; the
 /// outer shell (`rim`) adds only a view-angle edge at [`CONE_RIM_SHARE`] of their on-axis sum. Both
 /// fall off as 1/r² from the origin, in [`timeline::FIELD`]'s cool hue.
-fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
+fn field_material(cone: &Cone, rim: bool, style: FieldRim) -> (GlowMaterial, f32) {
     let strength = timeline::absolute_dose(cone.strength.max(1e-3));
     let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
     let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
     let interior = CONE_GAIN * CONE_PEAK * strength;
     let (material, peak) = if rim {
         let peak = CONE_RIM_SHARE * interior;
+        let (color, base) = match style {
+            FieldRim::Edge => (timeline::FIELD_EDGE, 0.0),
+            // The look test's alternative: the shell filled in the field's hue under the edge.
+            FieldRim::Coloured => (timeline::FIELD, FIELD_COLOURED_FILL * peak),
+        };
         (
-            GlowMaterial::additive(timeline::FIELD_EDGE.into(), 0.0).with_rim(0.0, peak, 2.5),
+            GlowMaterial::additive(color.into(), 0.0).with_rim(base, peak, 2.5),
             peak,
         )
     } else {
@@ -582,9 +611,11 @@ fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
 }
 
 /// A component's tint in frame `kind`, `None` where it is not drawn: in the glass and the outside
-/// view a dosed component is filled translucent with the dose ramp at the share of its hit points
-/// it lost (or the absolute scale), a destroyed one opaque, both edged in
-/// [`timeline::VOLUME_EDGE`]; the victim's lost components wear the state tint.
+/// view a dosed component wears the dose ramp at the share of its hit points it lost (or the
+/// absolute scale), a destroyed one the ramp's top, in the look test's [`VolumeStyle`] — by default
+/// a translucent fill, a destroyed one opaque, both edged in [`timeline::VOLUME_EDGE`]. An opaque
+/// fill ignores the fade, so it appears whole when its fill starts. The victim's lost components
+/// wear the state tint.
 fn component_material(b: &BoxPlan, kind: CornerKind, settings: &Settings) -> Option<GlowMaterial> {
     match kind {
         CornerKind::Victim if b.lost => {
@@ -595,19 +626,50 @@ fn component_material(b: &BoxPlan, kind: CornerKind, settings: &Settings) -> Opt
                 DoseScale::HpShare => timeline::hp_share(b.dose(), b.hp),
                 DoseScale::Absolute => timeline::absolute_dose(b.dose()),
             };
-            let (color, alpha) = if b.lost {
-                (timeline::dose_ramp(1.0), 1.0)
-            } else {
-                (timeline::dose_ramp(x), DAMAGED_ALPHA)
-            };
-            Some(GlowMaterial::blended(color, alpha).with_edge(
-                timeline::VOLUME_EDGE.into(),
-                EDGE_GAIN,
-                EDGE_POWER,
-            ))
+            let edge = timeline::VOLUME_EDGE.into();
+            let full = timeline::dose_ramp(1.0);
+            let fill = timeline::dose_ramp(x);
+            Some(match (settings.volume, b.lost) {
+                (VolumeStyle::Rim, true) => {
+                    GlowMaterial::blended(full, 1.0).with_edge(edge, EDGE_GAIN, EDGE_POWER)
+                }
+                (VolumeStyle::Rim, false) => GlowMaterial::blended(fill, DAMAGED_ALPHA)
+                    .with_edge(edge, EDGE_GAIN, EDGE_POWER),
+                // The outline's band shows only around an opaque fill.
+                (VolumeStyle::Outline, true) => GlowMaterial::opaque(full).with_hatch(),
+                (VolumeStyle::Outline, false) => GlowMaterial::opaque(fill),
+                (VolumeStyle::Glow, true) => GlowMaterial::blended(full, 1.0),
+                (VolumeStyle::Glow, false) => {
+                    GlowMaterial::additive(fill, GLOW_STYLE_GAIN * (0.25 + 0.75 * x))
+                }
+                (VolumeStyle::Hatch, true) => GlowMaterial::blended(full, 1.0)
+                    .with_hatch()
+                    .with_edge(edge, HATCH_EDGE_GAIN, HATCH_EDGE_POWER),
+                (VolumeStyle::Hatch, false) => GlowMaterial::blended(fill, DAMAGED_ALPHA)
+                    .with_edge(edge, HATCH_EDGE_GAIN, HATCH_EDGE_POWER),
+            })
         }
         _ => None,
     }
+}
+
+/// The look test's outline (style A) around one of a component's meshes: `None` in any other style
+/// or frame, or for a mesh with no extent.
+fn component_outline(
+    b: &BoxPlan,
+    kind: CornerKind,
+    settings: &Settings,
+    mesh: Option<&Mesh>,
+) -> Option<OutlineMaterial> {
+    use bevy::camera::primitives::MeshAabb;
+    let drawn = matches!(kind, CornerKind::Glass | CornerKind::Damaged) && b.dose() > 0.0;
+    if settings.volume != VolumeStyle::Outline || !drawn {
+        return None;
+    }
+    let center = Vec3::from(mesh?.compute_aabb()?.center);
+    let mut material = OutlineMaterial::new(timeline::VOLUME_EDGE.into(), OUTLINE_PX, center);
+    material.set_fade(0.0);
+    Some(material)
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -801,6 +863,7 @@ pub fn animate(
     run: Res<Run>,
     stage: Res<Stage>,
     mut glows: ResMut<Assets<GlowMaterial>>,
+    mut outlines: ResMut<Assets<OutlineMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
     mut lines: Query<
         (
@@ -820,7 +883,12 @@ pub fn animate(
         (Without<LineSeg>, Without<MarkItem>, Without<BoxTint>),
     >,
     mut boxes: Query<
-        (&BoxTint, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
+        (
+            &BoxTint,
+            Option<&MeshMaterial3d<GlowMaterial>>,
+            Option<&MeshMaterial3d<OutlineMaterial>>,
+            &mut Visibility,
+        ),
         (Without<LineSeg>, Without<MarkItem>, Without<ConeShell>),
     >,
     mut camera: Query<
@@ -940,14 +1008,17 @@ pub fn animate(
         visibility.set_if_neq(Visibility::Inherited);
     }
 
-    for (tint, material, mut visibility) in &mut boxes {
+    for (tint, glow, outline, mut visibility) in &mut boxes {
         let start = box_start(plan, kind, &plan.boxes[tint.index], reduce);
         let fill = if reduce {
             fade_from(start)
         } else {
             timeline::ease_enter(timeline::progress(c, start, timeline::BOX_FILL_S))
         };
-        if let Some(mut m) = glows.get_mut(&material.0) {
+        if let Some(mut m) = glow.and_then(|m| glows.get_mut(&m.0)) {
+            m.set_fade(fill);
+        }
+        if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
             m.set_fade(fill);
         }
         visibility.set_if_neq(if fill > 0.0 {
@@ -1837,6 +1908,7 @@ mod tests {
             .insert_resource(views)
             .insert_resource(meshes)
             .insert_resource(Assets::<GlowMaterial>::default())
+            .insert_resource(Assets::<OutlineMaterial>::default())
             .insert_resource(Assets::<StandardMaterial>::default())
             .insert_resource(Assets::<SliceMaterial>::default())
             .add_systems(Update, rebuild);

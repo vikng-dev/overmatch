@@ -1,6 +1,8 @@
-//! The pen cam stage's two materials: [`GlowMaterial`], the unlit diagram material every record
-//! element wears (`pen_cam_glow.wgsl`), and [`SliceMaterial`], the tank's own materials with the
-//! eye's side of the slice plane dissolved away (`pen_cam_slice.wgsl`).
+//! The pen cam stage's materials: [`GlowMaterial`], the unlit diagram material every record element
+//! wears (`pen_cam_glow.wgsl`); [`OutlineMaterial`], a component's silhouette as an inverted hull
+//! (`pen_cam_outline.wgsl`), one of the look test's component styles; and [`SliceMaterial`], the
+//! tank's own materials with the eye's side of the slice plane dissolved away
+//! (`pen_cam_slice.wgsl`).
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
@@ -25,6 +27,8 @@ pub enum Blend {
     Additive,
     /// Straight alpha.
     Blended,
+    /// Writes depth: what an inverted-hull outline needs in front of it.
+    Opaque,
 }
 
 /// One flat colour, optionally rim-lit by view angle or edged in a second colour, vertex-coloured,
@@ -71,6 +75,14 @@ impl GlowMaterial {
         }
     }
 
+    /// An opaque fill of `color`: writes depth.
+    pub fn opaque(color: LinearRgba) -> Self {
+        Self {
+            blend: Blend::Opaque,
+            ..Self::blended(color, 1.0)
+        }
+    }
+
     /// Intensity `base + gain · (1 − |n·v|)^power`: clear face-on, bright at grazing angles.
     pub fn with_rim(mut self, base: f32, gain: f32, power: f32) -> Self {
         self.params.rim.x = base;
@@ -90,7 +102,7 @@ impl GlowMaterial {
         self
     }
 
-    /// Blended: the rim term `gain · (1 − |n·v|)^power`, clamped to 1, mixes the fill
+    /// Blended or opaque: the rim term `gain · (1 − |n·v|)^power`, clamped to 1, mixes the fill
     /// toward `color` and its alpha toward 1, so the edge reads over the fill at grazing angles.
     pub fn with_edge(mut self, color: LinearRgba, gain: f32, power: f32) -> Self {
         self.params.edge = Vec4::new(color.red, color.green, color.blue, 1.0);
@@ -145,6 +157,7 @@ impl Material for GlowMaterial {
         match self.blend {
             Blend::Additive => AlphaMode::Add,
             Blend::Blended => AlphaMode::Blend,
+            Blend::Opaque => AlphaMode::Opaque,
         }
     }
 
@@ -163,6 +176,74 @@ impl Material for GlowMaterial {
         _key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
+        // A component's tint is a copy of the mesh it covers, at the same depth; the bias (toward
+        // the eye under bevy's reverse Z) settles the tie in the tint's favour, opaque tank
+        // materials included.
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            depth.bias.constant = 8;
+            depth.bias.slope_scale = 1.0;
+        }
+        Ok(())
+    }
+}
+
+/// The uniform block `pen_cam_outline.wgsl` reads; its lanes are documented there.
+#[derive(ShaderType, Debug, Clone, Copy, Default)]
+pub struct OutlineParams {
+    pub color: Vec4,
+    pub center: Vec4,
+}
+
+/// A mesh's silhouette as an inverted hull: the mesh pushed out on screen from its centre by a
+/// fixed pixel width with its front faces culled, so its back faces show only as a band around the
+/// opaque fill the mesh itself wears.
+#[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
+pub struct OutlineMaterial {
+    #[uniform(0)]
+    pub params: OutlineParams,
+}
+
+impl OutlineMaterial {
+    /// An outline of `color` (linear), `width_px` physical pixels wide, pushed out from `center` in
+    /// the mesh's own frame.
+    pub fn new(color: LinearRgba, width_px: f32, center: Vec3) -> Self {
+        Self {
+            params: OutlineParams {
+                color: Vec4::new(color.red, color.green, color.blue, 1.0),
+                center: center.extend(width_px),
+            },
+        }
+    }
+
+    pub fn set_fade(&mut self, fade: f32) {
+        self.params.color.w = fade;
+    }
+}
+
+impl Material for OutlineMaterial {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/pen_cam_outline.wgsl".into()
+    }
+
+    fn fragment_shader() -> ShaderRef {
+        "shaders/pen_cam_outline.wgsl".into()
+    }
+
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &bevy::pbr::MaterialPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: bevy::pbr::MaterialPipelineKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Front);
         Ok(())
     }
 }

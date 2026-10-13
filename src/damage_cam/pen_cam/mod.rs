@@ -14,7 +14,9 @@
 //! `Space` pauses, `←`/`→` scrub, `[`/`]`
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
 //! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
-//! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion.
+//! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion; the look test's `K`
+//! cycles the component style ([`VolumeStyle`]) and `J` the field rim ([`FieldRim`]), which
+//! captures set through [`Settings::from_env`].
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -250,6 +252,51 @@ pub enum DoseScale {
     Absolute,
 }
 
+/// The look test's damaged and destroyed component styles (dev-only, `K` or `PEN_CAM_VOLUME`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VolumeStyle {
+    /// (A) An opaque flat fill with a true silhouette outline (an inverted hull).
+    Outline,
+    /// (B, the default) A translucent fill edged in a hue outside the ramp, blended.
+    Rim,
+    /// (C) The additive dose glow, a destroyed component a solid fill.
+    Glow,
+    /// (D) A flat fill with a soft fresnel edge, a destroyed component hatched.
+    Hatch,
+}
+
+impl VolumeStyle {
+    pub const ALL: [Self; 4] = [Self::Outline, Self::Rim, Self::Glow, Self::Hatch];
+
+    /// The option's letter and name, ASCII.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Outline => "A outline",
+            Self::Rim => "B rim",
+            Self::Glow => "C glow",
+            Self::Hatch => "D hatch",
+        }
+    }
+}
+
+/// The look test's spall field rim (dev-only, `J` or `PEN_CAM_RIM`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FieldRim {
+    /// (E, the default) The outer shell as a near-white edge only.
+    Edge,
+    /// (F) The outer shell filled in the field's hue under the same edge.
+    Coloured,
+}
+
+impl FieldRim {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Edge => "E edge shell",
+            Self::Coloured => "F coloured shell",
+        }
+    }
+}
+
 /// The demo's switches.
 #[derive(Resource, Clone, PartialEq)]
 pub struct Settings {
@@ -258,6 +305,8 @@ pub struct Settings {
     pub dose: DoseScale,
     /// 0: the specified rim glass, 1: a stronger rim, 2: flat alpha, for the look test.
     pub glass: u8,
+    pub volume: VolumeStyle,
+    pub field_rim: FieldRim,
     pub slice_ortho: bool,
     pub expanded: bool,
     pub axis_line: bool,
@@ -270,10 +319,33 @@ impl Default for Settings {
             reduce_motion: false,
             dose: DoseScale::HpShare,
             glass: 0,
+            volume: VolumeStyle::Rim,
+            field_rim: FieldRim::Edge,
             slice_ortho: true,
             expanded: false,
             axis_line: false,
         }
+    }
+}
+
+impl Settings {
+    /// The defaults with the look test's environment applied, for headless captures:
+    /// `PEN_CAM_VOLUME` = `a`–`d`, `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_EXPANDED=1`.
+    fn from_env() -> Self {
+        let mut settings = Self::default();
+        let var = |name: &str| std::env::var(name).unwrap_or_default().to_ascii_lowercase();
+        let letter = var("PEN_CAM_VOLUME").to_ascii_uppercase();
+        if let Some(style) = VolumeStyle::ALL
+            .into_iter()
+            .find(|style| !letter.is_empty() && style.label().starts_with(&letter))
+        {
+            settings.volume = style;
+        }
+        if var("PEN_CAM_RIM") == "coloured" {
+            settings.field_rim = FieldRim::Coloured;
+        }
+        settings.expanded = var("PEN_CAM_EXPANDED") == "1";
+        settings
     }
 }
 
@@ -511,7 +583,7 @@ pub fn demo_plugin(app: &mut App) {
         })
         .unwrap_or(0);
     let library = Library::load();
-    let settings = Settings::default();
+    let settings = Settings::from_env();
     let run = Run::new(start, &library, &settings, once);
     if std::env::var_os("OVERMATCH_CAPTURE").is_some() {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_STEP));
@@ -522,6 +594,7 @@ pub fn demo_plugin(app: &mut App) {
         crate::render_policy::plugin,
         crate::ui_font::plugin,
         MaterialPlugin::<material::GlowMaterial>::default(),
+        MaterialPlugin::<material::OutlineMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
     ))
     .insert_resource(ClearColor(world::SKY))
@@ -660,6 +733,19 @@ fn controls(
     }
     if keys.just_pressed(KeyCode::KeyG) {
         settings.glass = (settings.glass + 1) % 3;
+    }
+    if keys.just_pressed(KeyCode::KeyK) {
+        let at = VolumeStyle::ALL
+            .iter()
+            .position(|style| *style == settings.volume)
+            .unwrap_or(0);
+        settings.volume = VolumeStyle::ALL[(at + 1) % VolumeStyle::ALL.len()];
+    }
+    if keys.just_pressed(KeyCode::KeyJ) {
+        settings.field_rim = match settings.field_rim {
+            FieldRim::Edge => FieldRim::Coloured,
+            FieldRim::Coloured => FieldRim::Edge,
+        };
     }
     if keys.just_pressed(KeyCode::KeyO) {
         settings.slice_ortho = !settings.slice_ortho;
