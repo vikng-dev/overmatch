@@ -186,7 +186,7 @@ fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Ha
         ),
         text,
         (),
-        Some(Color::srgba(0.15, 0.0, 0.0, 0.6)),
+        Some(crate::ui_font::DEATH_TINT),
     );
 }
 

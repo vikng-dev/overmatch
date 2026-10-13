@@ -86,6 +86,13 @@ impl Overlay {
     /// of the VIEW the overlays cover, not one of them.
     pub(crate) const SIGHT_FURNITURE_Z: i32 = -10;
 
+    /// The z-layer for the death tint, the full-screen wash over the world once a kill cam hands
+    /// off to the death screen (`damage_cam::pen_cam::killcam`): the bottom rung, below
+    /// [`Overlay::SIGHT_FURNITURE_Z`] and every UI node, so it colours the world and never a UI
+    /// element. Like the sight's furniture it carries no [`OverlayNode`]: it declares no presence,
+    /// captures no input, owns no scrim and is never suppressed by the one-scrim rule.
+    pub(crate) const DEATH_TINT_Z: i32 = Overlay::SIGHT_FURNITURE_Z - 10;
+
     /// The z-layer for the pen cam corner, the inset that explains a hit (`damage_cam::pen_cam`):
     /// above the unindexed HUD nodes at 0, whose fixed slot it shares with nothing, and below
     /// every overlay, so a death screen, a map, a menu or a connect screen covers it whole. It

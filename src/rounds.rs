@@ -1,11 +1,13 @@
 //! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
-//! name. A weapon names its round ([`crate::spec::WeaponSpec::round`]); the round states its core
-//! material, nose geometry, mass, calibre and muzzle speed, each with its provenance
-//! ([`crate::provenance`]).
+//! key. A weapon names its round by that key ([`crate::spec::WeaponSpec::round`]); the round states
+//! its display name, core material, nose geometry, mass, calibre and muzzle speed, each with its
+//! provenance ([`crate::provenance`]). The key is the data's handle and is never shown to a player;
+//! the display name is ([`RoundRegistry::name`]).
 //!
-//! Parsed once from the embedded file and validated at parse: a core that is not a substance with
-//! material facts, a nose parameter outside its family's range, or a round outside the force law's
-//! domain is a load error naming the round. What a round derives — its nose factor and the body
+//! Parsed once from the embedded file and validated at parse: a missing display name or one the
+//! shipped font does not draw whole ([`crate::ui_font::drawable`]), a core that is not a substance
+//! with material facts, a nose parameter outside its family's range, or a round outside the force
+//! law's domain is a load error naming the round. What a round derives — its nose factor and the body
 //! the force law reads ([`RoundBody`]) — is computed here, once; the mechanism binds from that body
 //! at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and from data alone.
 //!
@@ -42,6 +44,8 @@ pub(crate) struct Round {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundFile {
+    /// What a player reads: the round's own designation.
+    name: Sourced<String>,
     core: Sourced<String>,
     nose: Sourced<NoseShape>,
     mass: Sourced<f32>,
@@ -114,8 +118,16 @@ impl std::fmt::Display for RoundError {
     }
 }
 
-/// Resolve one authored round against `substances`, or say why it cannot be fired.
-fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<Round, String> {
+/// Resolve one authored round against `substances` into the round and its display name, or say why
+/// it cannot be fired or shown.
+fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, String), String> {
+    let name = file.name.0;
+    if crate::ui_font::drawable(&name).as_deref() != Some(name.as_str()) {
+        return Err(format!(
+            "name {name:?} is not drawn whole by the shipped font — a round's display name is \
+             what the kill card shows"
+        ));
+    }
     let core_name = file.core.0;
     let core = substances
         .get(&core_name)
@@ -140,17 +152,21 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<Round, St
     round_in_domain(body, muzzle_speed).map_err(|reason| {
         format!("the round (nose {nose:?}) is outside the capability law's domain: {reason}")
     })?;
-    Ok(Round {
-        body,
-        muzzle_speed,
-        core,
-    })
+    Ok((
+        Round {
+            body,
+            muzzle_speed,
+            core,
+        },
+        name,
+    ))
 }
 
 /// The parsed, validated `rounds.ron`.
 #[derive(Clone, Debug)]
 pub(crate) struct RoundRegistry {
-    rounds: BTreeMap<String, Round>,
+    /// Each round and its display name, by key.
+    rounds: BTreeMap<String, (Round, String)>,
 }
 
 impl RoundRegistry {
@@ -163,7 +179,7 @@ impl RoundRegistry {
             .0
             .into_iter()
             .map(|(name, round)| match resolved(round, substances) {
-                Ok(round) => Ok((name, round)),
+                Ok(resolved) => Ok((name, resolved)),
                 Err(reason) => Err(RoundError::Invalid {
                     round: name,
                     reason,
@@ -185,13 +201,19 @@ impl RoundRegistry {
 
     /// The round named `name`; a hard error naming the name and the vocabulary, never a default.
     pub(crate) fn get(&self, name: &str) -> Result<Round, RoundError> {
-        self.rounds
-            .get(name)
-            .copied()
-            .ok_or_else(|| RoundError::Unknown {
-                name: name.to_string(),
-                known: self.rounds.keys().cloned().collect(),
-            })
+        self.entry(name).map(|(round, _)| *round)
+    }
+
+    /// The display name of the round keyed `name`; an error as [`Self::get`]'s, never the key.
+    pub(crate) fn name(&self, name: &str) -> Result<&str, RoundError> {
+        self.entry(name).map(|(_, shown)| shown.as_str())
+    }
+
+    fn entry(&self, name: &str) -> Result<&(Round, String), RoundError> {
+        self.rounds.get(name).ok_or_else(|| RoundError::Unknown {
+            name: name.to_string(),
+            known: self.rounds.keys().cloned().collect(),
+        })
     }
 }
 
@@ -213,7 +235,8 @@ mod tests {
     }
 
     /// The fixture round's fields: fixture data, not a shipped round.
-    const FIXTURE: [(&str, &str); 5] = [
+    const FIXTURE: [(&str, &str); 6] = [
+        ("name", r#""Probe Mk. 1""#),
         ("core", r#""GunSteel""#),
         ("nose", "Ogive(crh: 1.0)"),
         ("mass", "5.0"),
@@ -230,15 +253,47 @@ mod tests {
     }
 
     /// Every shipped round loads, and each binds a body inside the force law's domain with a core
-    /// that states its facts.
+    /// that states its facts, and a display name of its own the font draws whole.
     #[test]
     fn the_shipped_rounds_load() {
         let registry = RoundRegistry::shipped();
         assert!(!registry.rounds.is_empty());
-        for (name, round) in &registry.rounds {
+        for (name, (round, shown)) in &registry.rounds {
             round_in_domain(round.body, round.muzzle_speed)
                 .unwrap_or_else(|reason| panic!("{name}: {reason}"));
             assert!(round.core.flow_strength > 0.0, "{name}");
+            assert_eq!(registry.name(name).unwrap(), shown);
+            assert_ne!(shown, name, "{name} shows its key");
+            assert_eq!(
+                crate::ui_font::drawable(shown).as_deref(),
+                Some(shown.as_str())
+            );
+        }
+    }
+
+    /// A round without a display name does not load, and there is no fallback to its key; nor does
+    /// one whose name is blank or not drawn whole by the shipped font. The fixture round's name is
+    /// what [`RoundRegistry::name`] gives.
+    #[test]
+    fn a_round_without_a_drawable_name_does_not_load() {
+        assert_eq!(
+            with("mass", "5.0").unwrap().name("Probe").unwrap(),
+            "Probe Mk. 1"
+        );
+        let unnamed: Vec<_> = FIXTURE
+            .iter()
+            .copied()
+            .filter(|(field, _)| *field != "name")
+            .collect();
+        let err = one(&unnamed).unwrap_err().to_string();
+        assert!(err.contains("name"), "{err}");
+        for name in [r#""""#, r#""   ""#, "\"8.8 cm \u{864E}\""] {
+            let err = with("name", name).unwrap_err();
+            assert!(
+                matches!(&err, RoundError::Invalid { round, reason }
+                    if round == "Probe" && reason.contains("name")),
+                "{name}: {err}"
+            );
         }
     }
 
@@ -279,7 +334,8 @@ mod tests {
     #[test]
     fn malformed_files_do_not_load() {
         let substances = SubstanceRegistry::shipped_static();
-        let bare = r#"(rounds: { "Probe": (core: ("GunSteel", Tuned("fixture")),
+        let bare = r#"(rounds: { "Probe": (name: ("Probe", Tuned("fixture")),
+            core: ("GunSteel", Tuned("fixture")),
             nose: (Flat, Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
             muzzle_speed: (700.0, Tuned("fixture"))) })"#;
         let err = RoundRegistry::from_ron(bare, substances).unwrap_err();

@@ -6,22 +6,26 @@
 //!    swaps to [`CameraProfile::KillCamLesson`], so the tank it rides leaves the view and the pen
 //!    cam stage, which sits on it in the record's frame, draws the record over the live world at
 //!    [`LESSON_RATE`] of the corner's tempo. The world clock is untouched.
-//! 3. **Killer** — captive: the look turns down the round's line, the orbit's pivot rides the line
-//!    back to the shooter's pivot, and the killer card shows name, vehicle, range and round.
-//! 4. **Death** — free: the orbit about the shooter, the death panel and the respawn prompt.
+//! 3. **Killer** — captive: back on the victim's own orbit at the play radius, the look turns
+//!    toward the shooter and tracks it, and the killer card shows name, vehicle, range and round.
+//! 4. **Death** — free: the orbit about the victim, opening on the shooter where beat 3 played,
+//!    with the death tint under the UI, the death panel and the respawn prompt.
+//!
+//! The kill cam never shows more of the enemy than the victim could see from where they died:
+//! every pose orbits the victim's own pivot at the game's play radius, with no zoom, so beat 3
+//! frames the shooter from the victim's place alone.
 //!
 //! Beat 3 plays only for a shooter the kill cam stages: a record that names none, a shooter whose
 //! tank file or scene fails to load, or one not staged within [`SHOOTER_WAIT_S`] skips it, and the
-//! death screen, orbiting the victim, follows the lesson with the killer card showing what the
-//! record names.
+//! death screen follows the lesson with the killer card showing what the record names.
 //!
 //! Respawn is live from [`HIT_S`] after the impact. Every pose is the game's own orbit
 //! ([`crate::camera::orbit_rotation`], [`crate::camera::orbit_body`],
-//! [`crate::camera::orbit_pivot`]) about one of three pivots: the victim's, a pivot travelling the
-//! line, the shooter's. Which entries play it: a victim entry whose record knocks the tank out by
-//! the game's own rule ([`knockout`]). Plan and owner record:
-//! `.agents/scratch/damage-cam-2026-10-08/demo/killcam-plan.md`. Every duration and angle here is
-//! TUNED (a look-test choice).
+//! [`crate::camera::orbit_pivot`]) about the victim's pivot. Which entries play it: a victim entry
+//! whose record knocks the tank out by the game's own rule ([`knockout`]). Plan and owner record:
+//! `.agents/scratch/damage-cam-2026-10-08/demo/killcam-plan.md`; the shooter framing's open
+//! alternative: `.agents/scratch/playtest-forks/killcam-shooter-framing.md`. Every duration, angle
+//! and colour here is TUNED (a look-test choice).
 
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -37,7 +41,7 @@ use crate::damage_cam::{ConsequenceState, PenetrationReport, Role, Shooter};
 use crate::overlay::Overlay;
 use crate::render_policy::{CameraProfile, VisualScope};
 use crate::spec::{TankSpec, ViewKind};
-use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts, drawable};
+use crate::ui_font::{DEATH_TINT, PANEL_BG, TEXT, TEXT_DIM, UiFonts, drawable};
 
 /// Beat 1 runs this long after the world impact; respawn is live from its end.
 pub const HIT_S: f32 = 0.5;
@@ -47,11 +51,8 @@ const MOVE_S: f32 = 0.6;
 pub const LESSON_S: f32 = 3.6;
 /// The record's tempo in the lesson, as a fraction of the corner's.
 pub const LESSON_RATE: f32 = 0.5;
-/// Beat 3: the look turns down the line, the ride, the hold on the shooter.
-const ALIGN_S: f32 = 0.4;
-const RIDE_S: f32 = 1.6;
-const FRAME_TURN_S: f32 = 0.4;
-const KILLER_HOLD_S: f32 = 2.0;
+/// Beat 3's length: the look's turn toward the shooter over [`MOVE_S`], then the track.
+const KILLER_S: f32 = 3.0;
 /// The demo's run ends this long into the death screen.
 const DEATH_HOLD_S: f32 = 2.0;
 /// The longest a kill run's clock holds for its shooter to stage, before beat 3 is dropped.
@@ -60,9 +61,6 @@ pub const SHOOTER_WAIT_S: f32 = 3.0;
 /// corner's three-quarter).
 const LESSON_YAW_DEG: f32 = 55.0;
 const LESSON_SLOPE: f32 = 0.5;
-/// The shooter's framing: yawed off the line, looking down.
-const FRAME_YAW_DEG: f32 = 30.0;
-const FRAME_PITCH_DEG: f32 = 12.0;
 /// The player's look at the hit, before any input: along the hull's forward, looking down. A
 /// staging choice; in play it is wherever the player was looking.
 const PLAYER_PITCH_DEG: f32 = 12.0;
@@ -80,15 +78,16 @@ pub struct Killer {
     pub player: Option<String>,
     /// The shooter's vehicle as its tank file names it to players, where that file reads.
     pub vehicle: Option<String>,
-    /// The round's registry key and muzzle speed (m/s), where the registry has the round.
+    /// The round's display name and muzzle speed (m/s), where the registry has the round; never
+    /// its registry key.
     pub round: Option<(String, f32)>,
 }
 
 impl Killer {
     /// The killer of a record fired by `shooter` with the round `round` (a round registry key):
     /// the vehicle read from the shooter's own tank file, only where there is a shooter, and the
-    /// muzzle speed from the registry. A tank file that does not read or a round the registry
-    /// lacks leaves that part unknown.
+    /// round's display name and muzzle speed from the registry. A tank file that does not read or
+    /// a round the registry lacks leaves that part unknown.
     pub fn of(shooter: Option<&Shooter>, round: &str) -> Self {
         let vehicle = shooter.and_then(|shooter| {
             let path = crate::assets::asset_root().join(&shooter.vehicle);
@@ -99,11 +98,12 @@ impl Killer {
                 .ok()
                 .map(|spec| spec.display_name)
         });
-        let round = crate::rounds::RoundRegistry::shipped()
+        let registry = crate::rounds::RoundRegistry::shipped();
+        let round = registry
             .get(round)
+            .and_then(|fired| Ok((registry.name(round)?.to_owned(), fired.muzzle_speed)))
             .inspect_err(|e| warn!("kill cam: the round {round}: {e}"))
-            .ok()
-            .map(|fired| (round.to_owned(), fired.muzzle_speed));
+            .ok();
         Self {
             player: shooter.map(|shooter| shooter.name.clone()),
             vehicle,
@@ -168,20 +168,18 @@ impl Beats {
     pub fn killer(self) -> f32 {
         self.lesson() + LESSON_S
     }
-    fn ride(self) -> f32 {
-        self.killer() + ALIGN_S
-    }
-    /// Where the killer card enters: the ride's end, or the death screen's start without beat 3.
+    /// Where the killer card enters: the look's arrival on the shooter, or the death screen's
+    /// start without beat 3.
     pub fn arrive(self) -> f32 {
         if self.shooter {
-            self.ride() + RIDE_S
+            self.killer() + MOVE_S
         } else {
             self.killer()
         }
     }
     pub fn death(self) -> f32 {
         if self.shooter {
-            self.arrive() + KILLER_HOLD_S
+            self.killer() + KILLER_S
         } else {
             self.killer()
         }
@@ -234,7 +232,8 @@ pub fn lesson_showing(beats: Beats, t: f32, record: usize) -> Option<Showing> {
 #[derive(Clone, Copy, Debug)]
 pub struct Rig {
     pub victim_pivot: Vec3,
-    /// `None` where no shooter is staged ([`Beats::shooter`]): the death screen orbits the victim.
+    /// What the look turns toward in beat 3; never an orbit centre. `None` where no shooter is
+    /// staged ([`Beats::shooter`]).
     pub shooter_pivot: Option<Vec3>,
     pub impact: Vec3,
     pub muzzle: Vec3,
@@ -276,29 +275,12 @@ impl Rig {
         look_along(-(side + Vec3::Y * LESSON_SLOPE))
     }
 
-    /// Down the round's line toward the shooter.
-    fn line_look(&self) -> Quat {
-        look_along(-self.incoming())
-    }
-
-    /// The shooter framed: a three-quarter from the victim's side, looking down.
-    fn frame_look(&self) -> Quat {
-        let side = Quat::from_rotation_y(FRAME_YAW_DEG.to_radians()) * self.incoming_flat();
-        let pitch = FRAME_PITCH_DEG.to_radians();
-        look_along(-(side * pitch.cos() + Vec3::Y * pitch.sin()))
-    }
-
-    /// The pivot travelling the round's line from the victim's pivot to the shooter's at ride
-    /// fraction `e`: the line's point, offset by the two pivots' offsets from the line's ends,
-    /// blended.
-    fn ride_pivot(&self, e: f32) -> Vec3 {
-        let on_line = self.impact.lerp(self.muzzle, e);
-        on_line + (self.victim_pivot - self.impact).lerp(self.death_pivot() - self.muzzle, e)
-    }
-
-    /// The death screen's pivot: the shooter's, else the victim's.
-    fn death_pivot(&self) -> Vec3 {
-        self.shooter_pivot.unwrap_or(self.victim_pivot)
+    /// From the victim's pivot toward the shooter's where one is staged: the look the victim's own
+    /// orbit takes to see the shooter, recomputed from the rig each frame so it tracks the shooter
+    /// wherever the stage places it.
+    fn shooter_look(&self) -> Option<Quat> {
+        self.shooter_pivot
+            .map(|shooter| look_along((shooter - self.victim_pivot).normalize_or(Vec3::NEG_Z)))
     }
 
     /// The lesson's drift (rad) at run time `t`.
@@ -310,14 +292,11 @@ impl Rig {
         }
     }
 
-    /// The death screen's opening look: the shooter framed, or without one the lesson's look as
-    /// the lesson ends.
+    /// The death screen's opening look: toward the shooter, or without one the lesson's look as the
+    /// lesson ends.
     pub fn death_look(&self, beats: Beats, reduce: bool) -> Quat {
-        if self.shooter_pivot.is_some() {
-            self.frame_look()
-        } else {
-            self.lesson_look(Self::drift(beats, beats.killer(), reduce))
-        }
+        self.shooter_look()
+            .unwrap_or_else(|| self.lesson_look(Self::drift(beats, beats.killer(), reduce)))
     }
 
     /// The game's orbit body for `pivot` and `look`, pulled in by the flat ground.
@@ -353,24 +332,15 @@ impl Rig {
                 let w = timeline::ease_standard(timeline::progress(t, beats.lesson(), MOVE_S));
                 (self.victim_pivot, hit.slerp(self.lesson_look(drift(t)), w))
             }
-            Beat::Killer if t < beats.ride() => {
-                let w = timeline::ease_standard(timeline::progress(t, beats.killer(), ALIGN_S));
-                let from = self.lesson_look(drift(beats.killer()));
-                (self.victim_pivot, from.slerp(self.line_look(), w))
-            }
             Beat::Killer => {
-                let e = timeline::ease_standard(timeline::progress(t, beats.ride(), RIDE_S));
-                let turn = timeline::ease_standard(timeline::progress(
-                    t,
-                    beats.arrive() - FRAME_TURN_S,
-                    FRAME_TURN_S,
-                ));
+                let w = timeline::ease_standard(timeline::progress(t, beats.killer(), MOVE_S));
+                let from = self.lesson_look(drift(beats.killer()));
                 (
-                    self.ride_pivot(e),
-                    self.line_look().slerp(self.frame_look(), turn),
+                    self.victim_pivot,
+                    from.slerp(self.shooter_look().unwrap_or(from), w),
                 )
             }
-            Beat::Death => (self.death_pivot(), death),
+            Beat::Death => (self.victim_pivot, death),
         }
     }
 
@@ -445,7 +415,7 @@ pub fn card_lines(killer: &Killer, range_m: Option<f32>) -> [String; 3] {
             .unwrap_or_else(|| missing.to_owned())
     };
     let round = match &killer.round {
-        Some((key, speed)) => format!("{}    {speed:.0} m/s", shown(Some(key), "UNKNOWN ROUND")),
+        Some((name, speed)) => format!("{}    {speed:.0} m/s", shown(Some(name), "UNKNOWN ROUND")),
         None => "UNKNOWN ROUND".to_owned(),
     };
     [
@@ -476,6 +446,11 @@ pub(super) struct DeathText;
 #[derive(Component)]
 pub(super) struct Prompt;
 
+/// The death screen's wash over the world: shown from the kill cam's handoff to the death screen
+/// or the respawn, never during the kill cam's own beats.
+#[derive(Component)]
+pub(super) struct DeathTint;
+
 /// A text row's place in its block.
 #[derive(Component)]
 pub(super) struct Index(usize);
@@ -496,7 +471,20 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
             TextColor(color),
         )
     };
-    // The killer card, lower left: clear of the framed shooter at the centre.
+    // The death tint: the whole screen, on the bottom UI rung so it washes the world alone.
+    commands.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(DEATH_TINT),
+        GlobalZIndex(Overlay::DEATH_TINT_Z),
+        Visibility::Hidden,
+        DeathTint,
+    ));
+    // The killer card, lower left: clear of the shooter the look centres in beat 3.
     commands
         .spawn((
             Node {
@@ -878,7 +866,7 @@ pub fn place(
     }
 }
 
-/// The killer card, the death panel and the respawn prompt.
+/// The killer card, the death panel, the death tint and the respawn prompt.
 #[allow(clippy::type_complexity)]
 pub fn hud(
     run: Res<Run>,
@@ -889,7 +877,11 @@ pub fn hud(
     mut panel: Query<&mut Visibility, (With<DeathPanel>, Without<Card>)>,
     mut panel_text: Query<(&Index, &mut Text), (With<DeathText>, Without<CardText>)>,
     mut prompt: Query<(&ChildOf, &mut TextColor), (With<Prompt>, Without<CardText>)>,
-    mut visibility: Query<&mut Visibility, (Without<Card>, Without<DeathPanel>)>,
+    mut tint: Query<&mut Visibility, (With<DeathTint>, Without<Card>, Without<DeathPanel>)>,
+    mut visibility: Query<
+        &mut Visibility,
+        (Without<Card>, Without<DeathPanel>, Without<DeathTint>),
+    >,
 ) {
     let kill = run.kill.map(|(shot, beats)| (&run.shots[shot], beats));
     let t = run.t;
@@ -950,12 +942,13 @@ pub fn hud(
         }
     }
     let death = respawning || kill.is_some_and(|(_, beats)| beats.beat(t) == Beat::Death);
-    if let Ok(mut v) = panel.single_mut() {
-        v.set_if_neq(if death {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    let shown = if death {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in panel.iter_mut().chain(tint.iter_mut()) {
+        v.set_if_neq(shown);
     }
     for (parent, mut color) in &mut prompt {
         let live = !respawning && kill.is_some_and(|(_, beats)| beats.respawn_live(t));
@@ -1098,13 +1091,11 @@ mod tests {
             shooter: true,
         };
         let hit = Rig::player_look();
-        let death = rig.frame_look();
+        let death = rig.death_look(beats, false);
         for boundary in [
             beats.lesson(),
             beats.lesson() + MOVE_S,
             beats.killer(),
-            beats.ride(),
-            beats.arrive() - FRAME_TURN_S,
             beats.arrive(),
             beats.death(),
         ] {
@@ -1122,45 +1113,88 @@ mod tests {
         }
     }
 
-    /// The lesson is the game's orbit about the victim's pivot at the play radius, and the ride
-    /// keeps the camera on the round's line, off it by no more than the pivots' offsets, until the
-    /// look turns to frame the shooter; the ride ends at the play radius from the shooter's pivot,
-    /// looking at it.
+    /// Through the demo's wiring, from the lesson to the death screen: the camera stays on the
+    /// victim's own orbit, never farther than the play radius from the victim's pivot, so it never
+    /// zooms or changes centre; from the look's arrival in beat 3 it looks through the victim's
+    /// pivot at the shooter's, and when the stage moves the shooter it follows. Where the look
+    /// does not reach the ground the body sits at the play radius. The shooter's move is fixture
+    /// data.
     #[test]
-    fn the_camera_orbits_then_rides_the_line() {
-        let rig = rig();
+    fn the_killer_beat_tracks_the_shooter_from_the_victims_orbit() {
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        app.update();
+        let (shot, beats) = app.world().resource::<Run>().kill.unwrap();
+        assert!(beats.shooter);
+        let mut t = beats.lesson();
+        while t < beats.end() {
+            app.world_mut().resource_mut::<Run>().t = t;
+            app.update();
+            let rig = staged(&app);
+            let (pose, _) = camera(&mut app);
+            let r = pose.translation.distance(rig.victim_pivot);
+            assert!(
+                r <= rig.radius + 1e-3,
+                "t {t}: {r} m off the victim's pivot"
+            );
+            if beats.beat(t) == Beat::Killer && t >= beats.arrive() {
+                let shooter = rig.shooter_pivot.expect("a staged shooter");
+                let to_shooter = (shooter - pose.translation).normalize();
+                assert!(
+                    pose.forward().dot(to_shooter) > 0.9999,
+                    "t {t}: off the shooter"
+                );
+                let to_victim = (rig.victim_pivot - pose.translation).normalize();
+                assert!(
+                    pose.forward().dot(to_victim) > 0.9999,
+                    "t {t}: off the victim"
+                );
+                assert!(
+                    (r - rig.radius).abs() < 1e-2,
+                    "t {t}: {r} m, not the play radius"
+                );
+            }
+            t += 1.0 / 10.0;
+        }
+
+        let moved = Vec3::new(40.0, 0.0, -25.0);
+        let t = beats.arrive() + 0.5;
+        app.world_mut().resource_mut::<Run>().t = t;
+        app.update();
+        let before = staged(&app).shooter_pivot.unwrap();
+        app.world_mut().resource_mut::<Run>().shots[shot].muzzle += moved;
+        app.update();
+        let rig = staged(&app);
+        let shooter = rig.shooter_pivot.unwrap();
+        assert!(
+            shooter.distance(before) > 10.0,
+            "the stage moved the shooter"
+        );
+        let (pose, _) = camera(&mut app);
+        let to_shooter = (shooter - pose.translation).normalize();
+        assert!(
+            pose.forward().dot(to_shooter) > 0.9999,
+            "the look tracks the shooter"
+        );
+        assert!((pose.translation.distance(rig.victim_pivot) - rig.radius).abs() < 1e-2);
+    }
+
+    /// Beat 3's look follows the shooter's pivot wherever it stands, off the round's line too, and
+    /// its orbit stays the victim's. The 60 m sidestep is fixture data.
+    #[test]
+    fn the_killer_look_follows_the_shooter_not_the_line() {
+        let mut rig = rig();
         let beats = Beats {
             impact: 2.0,
             shooter: true,
         };
+        let side = rig.incoming_flat().cross(Vec3::Y) * 60.0;
+        rig.shooter_pivot = rig.shooter_pivot.map(|pivot| pivot + side);
+        let t = beats.arrive() + 0.5;
         let hit = Rig::player_look();
-        let death = rig.frame_look();
-        let mut t = beats.lesson();
-        while t < beats.killer() {
-            let pose = rig.pose(beats, t, hit, death, false);
-            let r = pose.translation.distance(rig.victim_pivot);
-            assert!(r <= rig.radius + 1e-3, "t {t}: {r} m off the pivot");
-            t += 1.0 / 30.0;
-        }
-        let incoming = rig.incoming();
-        let off_line = |p: Vec3| {
-            let v = p - rig.impact;
-            (v - incoming * v.dot(incoming)).length()
-        };
-        let perpendicular = |v: Vec3| (v - incoming * v.dot(incoming)).length();
-        let bound = perpendicular(rig.victim_pivot - rig.impact)
-            .max(perpendicular(rig.shooter_pivot.unwrap() - rig.muzzle))
-            + 1e-2;
-        let mut t = beats.ride();
-        while t < beats.arrive() - FRAME_TURN_S {
-            let pose = rig.pose(beats, t, hit, death, false);
-            assert!(off_line(pose.translation) <= bound, "t {t}: off the line");
-            t += 1.0 / 30.0;
-        }
-        let end = rig.pose(beats, beats.arrive(), hit, death, false);
-        assert!((end.translation.distance(rig.shooter_pivot.unwrap()) - rig.radius).abs() < 1e-2);
-        let to_pivot = (rig.shooter_pivot.unwrap() - end.translation).normalize();
-        assert!(end.forward().dot(to_pivot) > 0.9999);
+        let pose = rig.pose(beats, t, hit, rig.death_look(beats, false), false);
+        let to_shooter = (rig.shooter_pivot.unwrap() - pose.translation).normalize();
+        assert!(pose.forward().dot(to_shooter) > 0.9999);
+        assert!((pose.translation.distance(rig.victim_pivot) - rig.radius).abs() < 1e-2);
     }
 
     /// The flat ground pulls the body in, as the game's ground ray does.
@@ -1269,19 +1303,19 @@ mod tests {
         let mut killer = Killer {
             player: Some("\u{864E}\u{738B}".into()),
             vehicle: Some("Tiger \u{864E} I".into()),
-            round: Some(("88mm_AP".into(), 773.0)),
+            round: Some(("Probe Mk. 1".into(), 773.0)),
         };
         let [name, vehicle, round] = card_lines(&killer, Some(700.0));
         assert_eq!(name, "UNKNOWN PLAYER");
         assert_eq!(vehicle, "Tiger I");
-        assert!(round.contains("88mm_AP") && round.contains("700 m"));
+        assert!(round.contains("Probe Mk. 1") && round.contains("700 m"));
         (killer.player, killer.vehicle) = (None, None);
         let [name, vehicle, round] = card_lines(&killer, None);
         assert_eq!(
             (name.as_str(), vehicle.as_str()),
             ("UNKNOWN PLAYER", "UNKNOWN VEHICLE")
         );
-        assert_eq!(round, "88mm_AP    773 m/s");
+        assert_eq!(round, "Probe Mk. 1    773 m/s");
         killer.round = None;
         assert_eq!(card_lines(&killer, None)[2], "UNKNOWN ROUND");
     }
@@ -1533,7 +1567,7 @@ mod tests {
                 beats,
                 t,
                 cam.hit,
-                cam.death.unwrap_or_else(|| rig.frame_look()),
+                cam.death.unwrap_or_else(|| rig.death_look(beats, false)),
                 false,
             );
             let (transform, profile) = camera(&mut app);
@@ -1550,7 +1584,7 @@ mod tests {
     }
 
     /// The stage stands the shooter's hull on the ground at the record's muzzle, facing the
-    /// impact, and rides the camera to the pivot above it: the shooter's view root is placed so
+    /// impact, with the pivot beat 3 looks toward above it: the shooter's view root is placed so
     /// its hull node, wherever the scene puts it under the root, lands there.
     #[test]
     fn the_staged_shooter_stands_at_the_muzzle_facing_the_impact() {
@@ -1907,6 +1941,99 @@ mod tests {
         unstaged.muzzle = None;
         let staged = super::super::staged_muzzle(&unstaged);
         assert!((staged.distance(impact) - staging).abs() < 1e-2);
+    }
+
+    /// Through the demo's wiring: the death tint is off through the hit, the lesson and beat 3, and
+    /// on from the handoff to the death screen, or to the respawn where `R` cuts the kill cam
+    /// short; it sits below every other UI node, so it never colours one.
+    #[test]
+    fn the_death_tint_starts_at_the_handoff_beneath_the_ui() {
+        let tint = |app: &mut App| {
+            let mut query = app
+                .world_mut()
+                .query_filtered::<&Visibility, With<DeathTint>>();
+            *query.single(app.world()).expect("one death tint")
+        };
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        app.update();
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        assert!(beats.shooter);
+        let mut t = beats.impact;
+        while t < beats.end() {
+            app.world_mut().resource_mut::<Run>().t = t;
+            app.update();
+            let want = if beats.beat(t) == Beat::Death {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            assert_eq!(tint(&mut app), want, "t {t}: {:?}", beats.beat(t));
+            t += 1.0 / 10.0;
+        }
+
+        let mut z = app
+            .world_mut()
+            .query_filtered::<(Option<&GlobalZIndex>, Has<DeathTint>), With<Node>>();
+        let mut rest = Vec::new();
+        let mut own = None;
+        for (index, is_tint) in z.iter(app.world()) {
+            let index = index.map_or(0, |index| index.0);
+            if is_tint {
+                own = Some(index);
+            } else {
+                rest.push(index);
+            }
+        }
+        let own = own.expect("the tint is a node");
+        assert!(!rest.is_empty());
+        assert!(rest.iter().all(|&other| other > own), "{own} vs {rest:?}");
+
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        app.update();
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
+        app.update();
+        assert_eq!(tint(&mut app), Visibility::Hidden, "the lesson is untinted");
+        press(&mut app, KeyCode::KeyR);
+        app.update();
+        assert!(app.world().resource::<Run>().respawned_at.is_some());
+        assert_eq!(
+            tint(&mut app),
+            Visibility::Inherited,
+            "the respawn is tinted"
+        );
+    }
+
+    /// Through the demo's wiring, every kill's card names its round by the registry's display
+    /// name, never by the record's registry key.
+    #[test]
+    fn the_card_names_the_round_never_its_key() {
+        let library = library();
+        let registry = crate::rounds::RoundRegistry::shipped();
+        for entry in 0..PLAYLIST.len() {
+            if Run::new(entry, &library, &Settings::default(), true)
+                .kill
+                .is_none()
+            {
+                continue;
+            }
+            let mut app = demo_app(entry, Shooting::Spawned);
+            app.update();
+            let (shot, beats) = app.world().resource::<Run>().kill.unwrap();
+            app.world_mut().resource_mut::<Run>().t = beats.death() + 1e-4;
+            app.update();
+            let run = app.world().resource::<Run>();
+            let key = library.records[run.shots[shot].record].report.round.clone();
+            let line = app
+                .world_mut()
+                .query::<(&CardText, &Index, &Text)>()
+                .iter(app.world())
+                .find(|(_, index, _)| index.0 == 3)
+                .map(|(_, _, text)| text.0.clone())
+                .expect("the card's round line");
+            let name = registry.name(&key).expect("the kill's round is registered");
+            assert!(line.contains(name), "{line}");
+            assert!(!line.contains(&key), "{line} shows the key {key}");
+        }
     }
 
     /// The legend names `=` and what `R` does on the run.

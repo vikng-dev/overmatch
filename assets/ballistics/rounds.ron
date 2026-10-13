@@ -2,9 +2,11 @@
 // Read by `src/rounds.rs`, embedded and parsed once, validated at parse; a round is bound to its
 // mechanism at spawn from this data alone.
 //
-// A round states its core material (a substance in `assets/materials/materials.ron` that carries
-// material facts), its nose as geometry in calibres (the nose factor is DERIVED from it at load),
-// its mass (kg), its calibre (m) and its muzzle speed (m/s).
+// A round states its display name (its historical designation, what a player reads; the key is
+// never shown, and a round without a name does not load), its core material (a substance in
+// `assets/materials/materials.ron` that carries material facts), its nose as geometry in calibres
+// (the nose factor is DERIVED from it at load), its mass (kg), its calibre (m) and its muzzle
+// speed (m/s).
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
@@ -14,6 +16,9 @@
 (
     rounds: {
         "88mm_AP": (
+            name: ("8.8 cm Pzgr. 39", Measured("the 8.8 cm KwK 36's APCBC round, whose 10.2 kg
+                and 773 m/s this entry carries; en.wikipedia.org/wiki/8.8_cm_KwK_36, ammunition
+                table")),
             core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered 4340-class alloy-steel
                 body, the class Q7 recommends for the large round; GunSteel carries that class's
                 facts. The rigid regime reads no core fact")),
@@ -25,6 +30,10 @@
                 firing table")),
         ),
         "7.9mm_AP": (
+            name: ("7.92 mm S.m.K.", Measured("Spitzgeschoss mit Kern, the German 7.92 mm
+                steel-cored armour-piercing bullet (panzerworld.com/german-ammunition-nomenclature;
+                en.wikipedia.org/wiki/7.92x94mm_Patronen). The best-attested match: this entry's
+                mass and speed are unsourced and not tied to it")),
             core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered alloy-steel core,
                 Q7's 'hardened' belt; GunSteel carries that class's facts. The rigid regime reads
                 no core fact")),
