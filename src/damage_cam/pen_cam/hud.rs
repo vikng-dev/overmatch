@@ -61,6 +61,13 @@ pub(super) struct CornerImages {
     turn: Option<usize>,
 }
 
+impl CornerImages {
+    /// The corner image's size (physical px) and scale factor.
+    pub(super) fn size_and_scale(&self) -> (UVec2, f32) {
+        (self.size, self.scale)
+    }
+}
+
 /// One rasterized glyph per frame kind.
 #[derive(Resource)]
 pub(super) struct Glyphs {
@@ -347,10 +354,10 @@ pub fn animate(
         };
         let line = format!(
             "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  volume {}  rim {}  \
-             slice {}{}\n\
+             look {}  slice {}{}\n\
              1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
              X dismiss  C hold  V own tank  P setting  F expand  O ortho  G glass  D dose  \
-             K volume  J rim  L axis  M reduce motion",
+             K volume  J rim  H look  L axis  M reduce motion",
             entry.label,
             verdicts.join(", "),
             run.t,
@@ -362,6 +369,7 @@ pub fn animate(
             settings.glass,
             settings.volume.label(),
             settings.field_rim.label(),
+            settings.look.label(),
             if settings.slice_ortho {
                 "ortho"
             } else {

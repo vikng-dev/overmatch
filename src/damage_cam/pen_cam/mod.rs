@@ -15,8 +15,8 @@
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
 //! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
 //! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion; the look test's `K`
-//! cycles the component style ([`VolumeStyle`]) and `J` the field rim ([`FieldRim`]), which
-//! captures set through [`Settings::from_env`].
+//! cycles the component style ([`VolumeStyle`]), `J` the field rim ([`FieldRim`]) and `H` the
+//! glass look ([`GlassLook`]), which captures set through [`Settings::from_env`].
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -31,6 +31,7 @@
 mod field;
 mod hud;
 mod killcam;
+mod look;
 mod material;
 mod plan;
 mod stage;
@@ -297,6 +298,52 @@ impl FieldRim {
     }
 }
 
+/// The glass looks (dev-only, `H` or `PEN_CAM_LOOK`): the see-through hull, the components and
+/// the field drawn together in one of seven styles. Each look but the baseline draws the hull one
+/// visible layer deep, or reduced to an outline, before styling it; [`look`] holds them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GlassLook {
+    /// (L0, the default) Every mesh of the tank as additive rim-lit glass.
+    Baseline,
+    /// (L1) Feature lines of the hull; Gooch-toned components; a ray-marched field.
+    Technical,
+    /// (L2) The armour alone as a one-layer fresnel shell; opaque outlined components.
+    Envelope,
+    /// (L3) Every part at its tier's opacity, one layer deep, cleared over the struck components.
+    Ghost,
+    /// (L4) The hull dithered grey; components outlined at a constant pixel width.
+    Cad,
+    /// (L5) The armour as a cyan scanned hologram; emissive components; an additive field.
+    Hologram,
+    /// (L6) The tank's outer silhouette alone; Gooch-shaded components; a soft field shell.
+    Silhouette,
+}
+
+impl GlassLook {
+    pub const ALL: [Self; 7] = [
+        Self::Baseline,
+        Self::Technical,
+        Self::Envelope,
+        Self::Ghost,
+        Self::Cad,
+        Self::Hologram,
+        Self::Silhouette,
+    ];
+
+    /// The look's number and name, ASCII.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Baseline => "L0 baseline",
+            Self::Technical => "L1 technical",
+            Self::Envelope => "L2 envelope",
+            Self::Ghost => "L3 ghost",
+            Self::Cad => "L4 CAD",
+            Self::Hologram => "L5 hologram",
+            Self::Silhouette => "L6 silhouette",
+        }
+    }
+}
+
 /// The demo's switches.
 #[derive(Resource, Clone, PartialEq)]
 pub struct Settings {
@@ -307,6 +354,7 @@ pub struct Settings {
     pub glass: u8,
     pub volume: VolumeStyle,
     pub field_rim: FieldRim,
+    pub look: GlassLook,
     pub slice_ortho: bool,
     pub expanded: bool,
     pub axis_line: bool,
@@ -321,6 +369,7 @@ impl Default for Settings {
             glass: 0,
             volume: VolumeStyle::Rim,
             field_rim: FieldRim::Edge,
+            look: GlassLook::Baseline,
             slice_ortho: true,
             expanded: false,
             axis_line: false,
@@ -330,7 +379,8 @@ impl Default for Settings {
 
 impl Settings {
     /// The defaults with the look test's environment applied, for headless captures:
-    /// `PEN_CAM_VOLUME` = `a`–`d`, `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_EXPANDED=1`.
+    /// `PEN_CAM_VOLUME` = `a`–`d`, `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`6`,
+    /// `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
         let mut settings = Self::default();
         let var = |name: &str| std::env::var(name).unwrap_or_default().to_ascii_lowercase();
@@ -343,6 +393,14 @@ impl Settings {
         }
         if var("PEN_CAM_RIM") == "coloured" {
             settings.field_rim = FieldRim::Coloured;
+        }
+        if let Some(look) = var("PEN_CAM_LOOK")
+            .trim_start_matches('l')
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| GlassLook::ALL.get(n))
+        {
+            settings.look = *look;
         }
         settings.expanded = var("PEN_CAM_EXPANDED") == "1";
         settings
@@ -596,6 +654,7 @@ pub fn demo_plugin(app: &mut App) {
         MaterialPlugin::<material::GlowMaterial>::default(),
         MaterialPlugin::<material::OutlineMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
+        MaterialPlugin::<look::LookMaterial>::default(),
     ))
     .insert_resource(ClearColor(world::SKY))
     .insert_resource(library)
@@ -604,7 +663,7 @@ pub fn demo_plugin(app: &mut App) {
     .add_systems(Startup, (hold_clock, view::spawn, world::spawn))
     .add_systems(
         Startup,
-        (stage::spawn, hud::spawn, killcam::spawn).after(view::spawn),
+        (stage::spawn, hud::spawn, killcam::spawn, look::spawn).after(view::spawn),
     );
     sequence(app);
     stage::plugin(app);
@@ -617,6 +676,7 @@ pub(super) fn sequence(app: &mut App) {
     app.init_resource::<Corner>()
         .init_resource::<Ready>()
         .init_resource::<killcam::KillCam>()
+        .init_resource::<look::Masks>()
         .add_systems(
             Update,
             (
@@ -633,6 +693,8 @@ pub(super) fn sequence(app: &mut App) {
                 stage::animate,
                 world::animate,
                 hud::layout,
+                look::layout,
+                look::sync,
                 hud::animate,
                 killcam::hud,
             )
@@ -746,6 +808,13 @@ fn controls(
             FieldRim::Edge => FieldRim::Coloured,
             FieldRim::Coloured => FieldRim::Edge,
         };
+    }
+    if keys.just_pressed(KeyCode::KeyH) {
+        let at = GlassLook::ALL
+            .iter()
+            .position(|look| *look == settings.look)
+            .unwrap_or(0);
+        settings.look = GlassLook::ALL[(at + 1) % GlassLook::ALL.len()];
     }
     if keys.just_pressed(KeyCode::KeyO) {
         settings.slice_ortho = !settings.slice_ortho;

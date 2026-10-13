@@ -28,11 +28,12 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
+use super::look::{self, FieldDraw, HitMark, LookMaterial, Masks, PartDraw};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, DoseScale, FieldRim, Library, Run, Settings, VolumeStyle};
+use super::{Corner, DoseScale, FieldRim, GlassLook, Library, Run, Settings, VolumeStyle};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -193,6 +194,8 @@ pub(super) struct StageKey {
     record: usize,
     kind: CornerKind,
     settings: Settings,
+    /// The glass look in force: the settings' in the corner, the baseline elsewhere.
+    look: GlassLook,
 }
 
 /// The built stage's shared state.
@@ -204,6 +207,21 @@ pub struct Stage {
     glass: Handle<GlowMaterial>,
     ghost: Handle<GlowMaterial>,
     slices: HashMap<AssetId<StandardMaterial>, Handle<SliceMaterial>>,
+    camera: Option<Entity>,
+}
+
+impl Stage {
+    /// Rebuild on the next frame.
+    pub(super) fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    /// The glass look the built stage is drawn in.
+    pub(super) fn look(&self) -> GlassLook {
+        self.key
+            .as_ref()
+            .map_or(GlassLook::Baseline, |key| key.look)
+    }
 }
 
 pub fn plugin(app: &mut App) {
@@ -235,7 +253,7 @@ pub fn spawn(
         bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
         None,
     ));
-    commands.spawn((
+    let camera = commands.spawn((
         Camera3d::default(),
         Camera {
             order: -1,
@@ -254,6 +272,7 @@ pub fn spawn(
         CameraProfile::PenCamInset,
         StageCamera,
     ));
+    stage.camera = Some(camera.id());
     for (illuminance, toward) in [
         (3500.0, Vec3::new(0.4, 1.0, 0.3)),
         (1200.0, Vec3::new(-0.6, 0.3, -0.5)),
@@ -307,12 +326,19 @@ pub fn rebuild(
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
+    mut looks: ResMut<Assets<LookMaterial>>,
+    masks: Res<Masks>,
 ) {
     let key = corner.showing.map(|showing| StageKey {
         turn: showing.turn,
         record: showing.record,
         kind: showing.kind,
         settings: settings.clone(),
+        look: if inset_active(&showing) {
+            settings.look
+        } else {
+            GlassLook::Baseline
+        },
     });
     if key == stage.key {
         return;
@@ -333,6 +359,10 @@ pub fn rebuild(
         *glass = glass_material(settings.glass);
     }
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
+    let look = key.look;
+    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, bool)> =
+        HashMap::new();
+    let hull_mask = looks.add(look::hull_mask(&masks));
 
     // The tank, dressed for the frame.
     let struck = |mesh: &ViewMesh| {
@@ -342,7 +372,7 @@ pub fn rebuild(
             .iter()
             .any(|plate| mesh.is(&plate.name))
     };
-    for (entity, mesh, _) in &tank {
+    for (entity, mesh, handle) in &tank {
         if mesh.root != ViewRoot::Stage {
             continue;
         }
@@ -351,8 +381,28 @@ pub fn rebuild(
             MeshMaterial3d<StandardMaterial>,
             MeshMaterial3d<GlowMaterial>,
             MeshMaterial3d<SliceMaterial>,
+            MeshMaterial3d<LookMaterial>,
         )>();
         match kind {
+            CornerKind::Glass | CornerKind::Victim if look != GlassLook::Baseline => {
+                let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
+                    let draw = look::hull(look, mesh.tier, &masks)
+                        .expect("every look but the baseline draws the hull");
+                    (looks.add(draw.material), draw.masked)
+                });
+                let (material, masked) = (entry.0.clone(), entry.1);
+                e.insert((MeshMaterial3d(material), Visibility::Inherited));
+                if masked {
+                    commands.spawn((
+                        Mesh3d(handle.0.clone()),
+                        MeshMaterial3d(hull_mask.clone()),
+                        Transform::IDENTITY,
+                        VisualScope::PEN_CAM_HULL_MASK,
+                        StageItem,
+                        ChildOf(entity),
+                    ));
+                }
+            }
             CornerKind::Glass | CornerKind::Victim => {
                 let material = if struck(mesh) && settings.glass != 2 {
                     stage.ghost.clone()
@@ -398,6 +448,10 @@ pub fn rebuild(
             .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
             .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
     );
+    if let (Some(material), Some(camera)) = (look::overlay(look, kind, &masks), stage.camera) {
+        let overlay = look::spawn_overlay(&mut commands, &mut meshes, looks.add(material), camera);
+        commands.entity(overlay).insert(StageItem);
+    }
     spawn_glass(
         &mut commands,
         &mut meshes,
@@ -409,7 +463,19 @@ pub fn rebuild(
         hull,
         stage.plane,
         &components,
+        Some(LookCtx {
+            looks: &mut looks,
+            masks: &masks,
+            look,
+        }),
     );
+}
+
+/// The glass look a record is drawn in, and what drawing it needs.
+pub struct LookCtx<'a> {
+    pub looks: &'a mut Assets<LookMaterial>,
+    pub masks: &'a Masks,
+    pub look: GlassLook,
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
@@ -430,6 +496,7 @@ pub fn spawn_glass(
     hull: Entity,
     clip: Option<(Vec3, Vec3)>,
     components: &[ComponentMesh],
+    mut look_ctx: Option<LookCtx>,
 ) {
     let scope = VisualScope::PEN_CAM_STAGE;
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
@@ -524,6 +591,42 @@ pub fn spawn_glass(
             break;
         }
         let mesh = meshes.add(reach_mesh(cone));
+        let styled = match (&look_ctx, kind) {
+            (Some(ctx), CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged) => {
+                let strength = timeline::absolute_dose(cone.strength.max(1e-3));
+                let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+                let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
+                look::field(ctx.look, cone, strength, r0, ctx.masks)
+            }
+            _ => None,
+        };
+        if let Some(draw) = styled {
+            let mut e = commands.spawn((
+                Mesh3d(mesh.clone()),
+                Transform::from_translation(cone.origin),
+                Visibility::Hidden,
+                ConeShell {
+                    cone: index,
+                    rim: true,
+                    peak: 0.0,
+                },
+                scope,
+                StageItem,
+                ChildOf(hull),
+            ));
+            match draw {
+                FieldDraw::Glow(mut material) => {
+                    material.set_fade(0.0);
+                    e.insert(MeshMaterial3d(glows.add(material)));
+                }
+                FieldDraw::Look(mut material) => {
+                    material.set_fade(0.0);
+                    let looks = &mut look_ctx.as_mut().expect("styled by a look").looks;
+                    e.insert(MeshMaterial3d(looks.add(material)));
+                }
+            }
+            continue;
+        }
         for shell in 0..=CONE_SHELLS {
             let rim = shell == CONE_SHELLS;
             let k = if rim {
@@ -556,6 +659,50 @@ pub fn spawn_glass(
     for component in components {
         let index = component.index;
         let b = &plan.boxes[index];
+        if let Some(ctx) = look_ctx.as_mut()
+            && ctx.look != GlassLook::Baseline
+            && matches!(kind, CornerKind::Glass | CornerKind::Damaged)
+        {
+            let draws = look::component(ctx.look, b, kind, settings, ctx.masks);
+            for (n, draw) in draws.into_iter().enumerate() {
+                let mut e = commands.spawn((
+                    Mesh3d(component.mesh.clone()),
+                    Transform::IDENTITY,
+                    Visibility::Hidden,
+                    BoxTint { index },
+                    scope,
+                    StageItem,
+                    ChildOf(component.entity),
+                ));
+                if n == 0 {
+                    e.insert(HitMark);
+                }
+                match draw {
+                    PartDraw::Look(mut material) => {
+                        material.set_fade(0.0);
+                        e.insert(MeshMaterial3d(ctx.looks.add(material)));
+                    }
+                    PartDraw::Mask(mut material) => {
+                        material.set_fade(0.0);
+                        e.insert((
+                            MeshMaterial3d(ctx.looks.add(material)),
+                            VisualScope::PEN_CAM_PART_MASK,
+                        ));
+                    }
+                    PartDraw::Outline(color, width) => {
+                        use bevy::camera::primitives::MeshAabb;
+                        let center = meshes
+                            .get(&component.mesh)
+                            .and_then(|mesh| mesh.compute_aabb())
+                            .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
+                        let mut material = OutlineMaterial::new(color, width, center);
+                        material.set_fade(0.0);
+                        e.insert(MeshMaterial3d(outlines.add(material)));
+                    }
+                }
+            }
+            continue;
+        }
         let Some(mut material) = component_material(b, kind, settings) else {
             continue;
         };
@@ -882,6 +1029,7 @@ pub fn animate(
     mut glows: ResMut<Assets<GlowMaterial>>,
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
+    mut looks: ResMut<Assets<LookMaterial>>,
     mut lines: Query<
         (
             &LineSeg,
@@ -896,7 +1044,12 @@ pub fn animate(
         (Without<LineSeg>, Without<ConeShell>, Without<BoxTint>),
     >,
     mut shells: Query<
-        (&ConeShell, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
+        (
+            &ConeShell,
+            Option<&MeshMaterial3d<GlowMaterial>>,
+            Option<&MeshMaterial3d<LookMaterial>>,
+            &mut Visibility,
+        ),
         (Without<LineSeg>, Without<MarkItem>, Without<BoxTint>),
     >,
     mut boxes: Query<
@@ -904,6 +1057,7 @@ pub fn animate(
             &BoxTint,
             Option<&MeshMaterial3d<GlowMaterial>>,
             Option<&MeshMaterial3d<OutlineMaterial>>,
+            Option<&MeshMaterial3d<LookMaterial>>,
             &mut Visibility,
         ),
         (Without<LineSeg>, Without<MarkItem>, Without<ConeShell>),
@@ -1003,7 +1157,7 @@ pub fn animate(
         });
     }
 
-    for (shell, material, mut visibility) in &mut shells {
+    for (shell, material, look_material, mut visibility) in &mut shells {
         // Reduce motion fades the whole field in; otherwise its front runs out from the origin.
         let (front, fade) = if reduce {
             (None, fade_from(cone_start(plan, kind, shell.cone, true)))
@@ -1015,17 +1169,21 @@ pub fn animate(
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         }
-        if let Some(mut m) = glows.get_mut(&material.0) {
+        if let Some(mut m) = material.and_then(|m| glows.get_mut(&m.0)) {
             m.set_fade(fade);
             m.set_front(front);
             if !shell.rim {
                 m.set_intensity(shell.peak);
             }
         }
+        if let Some(mut m) = look_material.and_then(|m| looks.get_mut(&m.0)) {
+            m.set_fade(fade);
+            m.set_front(front);
+        }
         visibility.set_if_neq(Visibility::Inherited);
     }
 
-    for (tint, glow, outline, mut visibility) in &mut boxes {
+    for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
         let start = box_start(plan, kind, &plan.boxes[tint.index], reduce);
         let fill = if reduce {
             fade_from(start)
@@ -1036,6 +1194,9 @@ pub fn animate(
             m.set_fade(fill);
         }
         if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
+            m.set_fade(fill);
+        }
+        if let Some(mut m) = look_material.and_then(|m| looks.get_mut(&m.0)) {
             m.set_fade(fill);
         }
         visibility.set_if_neq(if fill > 0.0 {
@@ -1980,6 +2141,7 @@ mod tests {
                         root: ViewRoot::Stage,
                         names: vec![name.to_owned()],
                         original: Handle::default(),
+                        tier: super::super::view::Tier::Component,
                     },
                     Mesh3d(meshes.add(mesh)),
                     aabb,
@@ -2014,6 +2176,8 @@ mod tests {
             .insert_resource(Assets::<OutlineMaterial>::default())
             .insert_resource(Assets::<StandardMaterial>::default())
             .insert_resource(Assets::<SliceMaterial>::default())
+            .insert_resource(Assets::<LookMaterial>::default())
+            .init_resource::<Masks>()
             .add_systems(Update, rebuild);
         app.update();
         (app, placed)

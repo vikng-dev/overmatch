@@ -29,6 +29,8 @@
 //! | `ViewSubjectBody`  | the body whose view the local camera currently occupies             |
 //! | `ShadowOnly`       | invisible caster geometry standing in for something expensive       |
 //! | `PenCamStage`      | the pen cam inset's own stage: the struck tank as the record draws it |
+//! | `PenCamHullMask`   | the stage's hull as the glass looks' mask camera draws it           |
+//! | `PenCamPartMask`   | the stage's struck components as the part mask camera draws them    |
 //!
 //! `ViewSubjectBody` is deliberately NOT called `Self` or `Local`: the channel means "the body this
 //! camera is riding", which is the right answer for a future spectator or replay camera too, and
@@ -95,6 +97,10 @@ enum Channel {
     ShadowOnly,
     /// The pen cam inset's stage, drawn by that inset alone.
     PenCamStage,
+    /// The stage's hull, drawn into the glass looks' hull mask (distance and normal) alone.
+    PenCamHullMask,
+    /// The stage's struck components, drawn into the glass looks' part mask alone.
+    PenCamPartMask,
 }
 
 impl Channel {
@@ -105,6 +111,8 @@ impl Channel {
             Self::ViewSubjectBody => 1,
             Self::ShadowOnly => 2,
             Self::PenCamStage => 3,
+            Self::PenCamHullMask => 4,
+            Self::PenCamPartMask => 5,
         }
     }
 
@@ -209,6 +217,18 @@ impl VisualScope {
         channel: Some(Channel::PenCamStage),
         shadow: ShadowRole::Neither,
     };
+
+    /// A copy of a stage hull mesh for the hull mask camera alone.
+    pub(crate) const PEN_CAM_HULL_MASK: Self = Self {
+        channel: Some(Channel::PenCamHullMask),
+        shadow: ShadowRole::Neither,
+    };
+
+    /// A copy of a stage component mesh for the part mask camera alone.
+    pub(crate) const PEN_CAM_PART_MASK: Self = Self {
+        channel: Some(Channel::PenCamPartMask),
+        shadow: ShadowRole::Neither,
+    };
 }
 
 /// Which channels a camera draws. Put this on a `Camera3d` and change it to switch views; the mask
@@ -225,6 +245,10 @@ pub(crate) enum CameraProfile {
     PenCamInset,
     /// The victim kill cam's lesson: the world, the pen cam stage in place of the body it rides.
     KillCamLesson,
+    /// The pen cam glass looks' hull mask: the stage hull's copies alone.
+    PenCamHullMask,
+    /// The pen cam glass looks' part mask: the stage components' copies alone.
+    PenCamPartMask,
 }
 
 impl CameraProfile {
@@ -238,6 +262,8 @@ impl CameraProfile {
             Self::KillCamLesson => {
                 Channel::mask(&[Channel::BattlefieldWorld, Channel::PenCamStage])
             }
+            Self::PenCamHullMask => Channel::mask(&[Channel::PenCamHullMask]),
+            Self::PenCamPartMask => Channel::mask(&[Channel::PenCamPartMask]),
         }
     }
 }

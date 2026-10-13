@@ -31,6 +31,46 @@ pub struct ViewMesh {
     pub root: ViewRoot,
     pub names: Vec<String>,
     pub original: Handle<StandardMaterial>,
+    pub tier: Tier,
+}
+
+/// What a mesh of a tank view is, by the tank's own data: membership is the substance material
+/// it wears, and the tank file's volume entry for its nearest named node says what such a volume is
+/// beyond armour.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Tier {
+    /// A substance volume with no entry: main armour.
+    Armour,
+    /// A substance volume the tank file tags external: skirts, wheels, tracks.
+    External,
+    /// A substance volume with component facets.
+    Component,
+    /// No substance: drawing only.
+    Detail,
+}
+
+impl Tier {
+    /// The tier of a mesh wearing material `material` (its datablock name) under the node chain
+    /// `chain`, nearest first, of a tank whose volume entries are `volumes`.
+    pub fn of(
+        material: Option<&str>,
+        chain: &[String],
+        volumes: &std::collections::HashMap<String, crate::spec::VolumeSpec>,
+    ) -> Self {
+        let substance = material.is_some_and(|name| {
+            crate::substances::SubstanceRegistry::shipped_static()
+                .get(name)
+                .is_ok()
+        });
+        if !substance {
+            return Self::Detail;
+        }
+        match chain.iter().find_map(|name| volumes.get(name)) {
+            None => Self::Armour,
+            Some(crate::spec::VolumeSpec::External) => Self::External,
+            Some(crate::spec::VolumeSpec::Component(_)) => Self::Component,
+        }
+    }
 }
 
 impl ViewMesh {
@@ -173,7 +213,14 @@ pub fn prepare(
     mut commands: Commands,
     mut views: ResMut<Views>,
     specs: Res<Assets<TankSpec>>,
-    fresh: Query<(Entity, &MeshMaterial3d<StandardMaterial>), (With<Mesh3d>, Without<ViewMesh>)>,
+    fresh: Query<
+        (
+            Entity,
+            &MeshMaterial3d<StandardMaterial>,
+            Option<&bevy::gltf::GltfMaterialName>,
+        ),
+        (With<Mesh3d>, Without<ViewMesh>),
+    >,
     roots: Query<&ViewRoot>,
     parents: Query<&ChildOf>,
     children: Query<&Children>,
@@ -185,7 +232,7 @@ pub fn prepare(
     let Some(spec) = specs.get(&views.spec) else {
         return;
     };
-    for (entity, material) in &fresh {
+    for (entity, material, material_name) in &fresh {
         let mut chain = Vec::new();
         let mut root = None;
         for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
@@ -210,11 +257,17 @@ pub fn prepare(
             continue;
         };
         let proxy = chain.iter().any(|name| root_spec.colliders.contains(name));
+        let tier = Tier::of(
+            material_name.map(|name| name.0.as_str()),
+            &chain,
+            &root_spec.volumes,
+        );
         let mut entity_commands = commands.entity(entity);
         entity_commands.insert(ViewMesh {
             root,
             names: chain,
             original: material.0.clone(),
+            tier,
         });
         if proxy {
             entity_commands.insert((Proxy, Visibility::Hidden));

@@ -1405,7 +1405,8 @@ mod tests {
             .init_asset::<Image>()
             .init_asset::<super::super::material::GlowMaterial>()
             .init_asset::<super::super::material::OutlineMaterial>()
-            .init_asset::<super::super::material::SliceMaterial>();
+            .init_asset::<super::super::material::SliceMaterial>()
+            .init_asset::<super::super::look::LookMaterial>();
 
         let victim = tank_spec(&library.vehicle);
         let world = app.world_mut();
