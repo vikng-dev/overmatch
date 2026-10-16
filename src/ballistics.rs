@@ -342,8 +342,9 @@ pub(crate) fn hp_points(dose: f32) -> u32 {
 /// shot goes and lands on the rounded total when it ends.
 ///
 /// Every figure here is this shot's own, never a difference of pool HP: a march step resolves one
-/// shell whole before the next, so what a shell finds in a pool and takes from it is its own even
-/// where several shells dose one box in a tick.
+/// shell whole before the next, and one settle closes each armour mark, so what a shell finds in a
+/// pool at a mark and takes from it there is its own even where other rounds dose the box between
+/// its marks ([`Settle`]).
 ///
 /// Invariant: created with the projectile, never attached after replication. See ADR-0014.
 #[derive(Component, Default)]
@@ -353,15 +354,34 @@ pub(crate) struct ShotDose {
     emptied: Vec<Entity>,
 }
 
-/// A box's running dose this shot (dose units), the HP points taken for it so far, the HP its
-/// pool lost to them (the points taken, floored at the pool's zero), and the HP the pool held when
-/// this shot's first settle reached it (authority only).
+/// A box's running dose this shot (dose units), the units its last settle took HP for, whether a
+/// dose has been added since, and each settle that took a dose of its pool (authority only).
 struct BoxTally {
     address: Entity,
     units: u64,
-    taken: u32,
-    lost: u32,
-    found: Option<u32>,
+    settled: u64,
+    fresh: bool,
+    settles: Vec<Settle>,
+}
+
+/// One settle of a box's pool for a mark that dosed it: the armour mark it closed (its index in the
+/// shell's log), the HP the pool held before it, this shot's dose units on the box before that
+/// mark, and the HP the pool lost. Every deposit of that mark is the shot's own and lands between
+/// the two pool readings, so the deposit that emptied a pool is the first of the mark's, in path
+/// order, whose running total from `units_before` takes `held` points.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Settle {
+    pub mark: usize,
+    pub held: u32,
+    pub units_before: u64,
+    pub lost: u32,
+}
+
+impl Settle {
+    /// This settle took the pool to zero.
+    pub(crate) fn emptied(&self) -> bool {
+        self.lost > 0 && self.lost == self.held
+    }
 }
 
 impl ShotDose {
@@ -373,13 +393,16 @@ impl ShotDose {
             .iter_mut()
             .find(|entry| entry.address == address)
         {
-            Some(entry) => entry.units = entry.units.saturating_add(units),
+            Some(entry) => {
+                entry.units = entry.units.saturating_add(units);
+                entry.fresh = true;
+            }
             None => self.tallies.push(BoxTally {
                 address,
                 units,
-                taken: 0,
-                lost: 0,
-                found: None,
+                settled: 0,
+                fresh: true,
+                settles: Vec::new(),
             }),
         }
     }
@@ -396,33 +419,41 @@ impl ShotDose {
         }
     }
 
-    /// Take from each box's HP pool the points its rounded total has gained since the last settle,
-    /// floored at zero, and return the HP removed. A box with no HP pool takes nothing. Only
-    /// authority writes HP (`deposit`).
-    fn settle(&mut self, health: &mut Query<&mut ComponentHealth>, deposit: bool) -> u32 {
+    /// Close armour mark `mark` (its index in the shell's log): take from each box's HP pool the
+    /// points its rounded total has gained since the last settle, floored at zero, and return the HP
+    /// removed. A box with no HP pool takes nothing. Only authority writes HP (`deposit`).
+    fn settle(
+        &mut self,
+        health: &mut Query<&mut ComponentHealth>,
+        deposit: bool,
+        mark: usize,
+    ) -> u32 {
         if !deposit {
             return 0;
         }
         let mut removed = 0;
         for entry in &mut self.tallies {
-            if entry.found.is_none()
-                && let Ok(hp) = health.get(entry.address)
-            {
-                entry.found = Some(hp.current);
-            }
-            let due = hp_of_units(entry.units).saturating_sub(entry.taken);
-            if due == 0 {
+            let fresh = std::mem::take(&mut entry.fresh);
+            let units_before = std::mem::replace(&mut entry.settled, entry.units);
+            let due = hp_of_units(entry.units).saturating_sub(hp_of_units(units_before));
+            if !fresh && due == 0 {
                 continue;
             }
-            entry.taken += due;
-            if let Ok(mut hp) = health.get_mut(entry.address) {
-                let lost = due.min(hp.current);
-                hp.current -= lost;
-                entry.lost += lost;
-                removed += lost;
-                if lost > 0 && hp.current == 0 {
-                    self.emptied.push(entry.address);
-                }
+            let Ok(mut hp) = health.get_mut(entry.address) else {
+                continue;
+            };
+            let held = hp.current;
+            let lost = due.min(held);
+            hp.current -= lost;
+            removed += lost;
+            entry.settles.push(Settle {
+                mark,
+                held,
+                units_before,
+                lost,
+            });
+            if lost > 0 && hp.current == 0 {
+                self.emptied.push(entry.address);
             }
         }
         removed
@@ -432,16 +463,19 @@ impl ShotDose {
     /// with no HP pool or one already empty, and for every box where HP is not deposited (a
     /// replica).
     pub(crate) fn losses(&self) -> impl Iterator<Item = (Entity, u32)> + '_ {
-        self.tallies.iter().map(|entry| (entry.address, entry.lost))
+        self.tallies.iter().map(|entry| {
+            let lost = entry.settles.iter().map(|settle| settle.lost).sum();
+            (entry.address, lost)
+        })
     }
 
-    /// The HP `address`'s pool held when this shot first reached it, before any of its own loss;
-    /// `None` for a box it has not reached, one with no HP pool, or on a replica.
-    pub(crate) fn found(&self, address: Entity) -> Option<u32> {
+    /// Each settle of `address`'s pool, in mark order; empty for a box this shot has not reached,
+    /// one with no HP pool, or on a replica.
+    pub(crate) fn settles(&self, address: Entity) -> &[Settle] {
         self.tallies
             .iter()
             .find(|entry| entry.address == address)
-            .and_then(|entry| entry.found)
+            .map_or(&[], |entry| &entry.settles)
     }
 
     /// The boxes whose pool this shot took to zero, in the order it emptied them.
@@ -3069,7 +3103,7 @@ mod tests {
                         for amount in &amounts {
                             shot.add(target, *amount);
                         }
-                        shot.settle(&mut health, true)
+                        shot.settle(&mut health, true, 0)
                     },
                 )
                 .unwrap()

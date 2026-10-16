@@ -1,7 +1,8 @@
 //! The pen cam recorder in the game's fixed-tick sim ([`crate::damage_cam::recorder`]): rounds fired
 //! through [`FireShell`] at generic fixture tanks, the real march, the damage consequences and the
-//! physics step, read back as [`RecordedShot`]s. Every geometry, HP pool and speed here is fixture
-//! data; the assertions are class invariants.
+//! physics step, read back as [`RecordedShot`]s; and one hand-built shell log read straight through
+//! the record, for a pool drained between the shot's marks. Every geometry, HP pool and speed here
+//! is fixture data; the assertions are class invariants.
 
 use std::time::Duration;
 
@@ -173,10 +174,22 @@ fn settle(app: &mut App) {
 
 /// Fire the fixture 88 from `from` along `-Z` with `mechanism`, from a tank-less shooter entity.
 fn fire(app: &mut App, from: Vec3, mechanism: FireMechanism) {
+    fire_along(app, from, Dir3::NEG_Z, mechanism, None);
+}
+
+/// Fire the fixture 88 from `from` along `direction` with `mechanism` as shot `shot`, from a
+/// tank-less shooter entity.
+fn fire_along(
+    app: &mut App,
+    from: Vec3,
+    direction: Dir3,
+    mechanism: FireMechanism,
+    shot: Option<crate::ShotId>,
+) {
     let shooter = app.world_mut().spawn_empty().id();
     app.world_mut().trigger(FireShell {
         origin: from,
-        direction: Dir3::NEG_Z,
+        direction,
         speed: SPEED,
         caliber: FIXTURE_88.caliber,
         mass: FIXTURE_88.mass,
@@ -189,7 +202,7 @@ fn fire(app: &mut App, from: Vec3, mechanism: FireMechanism) {
         tracer: false,
         shot_origin: FireShellOrigin::Local,
         catch_up_ticks: 0,
-        shot: None,
+        shot,
     });
 }
 
@@ -542,4 +555,269 @@ fn a_record_is_stated_in_the_frame_the_march_resolved() {
             point[2]
         );
     }
+}
+
+/// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
+/// own record of the one shot, their losses partition the shot's loss on the tank, and a knockout
+/// the second encounter dealt is that encounter's. Fixture geometry: the round crosses the struck
+/// tank's front box, glances off a thick plate on a second tank 6 m to its side at ~78° incidence
+/// (past the ricochet angle), and comes back across the struck tank's rear box and the ammunition
+/// behind it, clear of the struck tank's bounds for over a tick in between.
+#[test]
+fn a_round_that_strikes_a_tank_again_records_each_encounter() {
+    let mut app = recording_world(false);
+    let wide = |name, z, kind| (name, Vec3::new(6.0, 2.0, 0.4), Vec3::new(0.0, 0.0, z), kind);
+    let (struck, volumes) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &[
+            (
+                "front",
+                Vec3::new(2.0, 2.0, 0.4),
+                Vec3::ZERO,
+                Kind::Crew(DEEP),
+            ),
+            wide("rear", -56.0, Kind::Crew(DEEP)),
+            wide("ammo", -57.0, Kind::Ammo(ONE)),
+        ],
+    );
+    // Held in place: its soft volumes weigh next to nothing, so the first hit's impulse would throw
+    // it out of the returning round's path.
+    app.world_mut()
+        .entity_mut(struck)
+        .insert(avian3d::prelude::LockedAxes::ALL_LOCKED);
+    tank(
+        &mut app,
+        Vec3::new(6.15, 0.0, -28.0),
+        0.0,
+        Vec3::ZERO,
+        &[("glacis", Vec3::new(0.3, 3.0, 40.0), Vec3::ZERO, Kind::Plate)],
+    );
+    settle(&mut app);
+    let shot = crate::ShotId {
+        combatant: crate::CombatantId(7),
+        weapon: 0,
+        fire_tick: 1,
+    };
+    let graze = 15.0_f32.to_radians();
+    fire_along(
+        &mut app,
+        Vec3::new(-30.0 * graze.tan(), 0.0, 30.0),
+        Dir3::new(Vec3::new(graze.sin(), 0.0, -graze.cos())).unwrap(),
+        FireMechanism::Single,
+        Some(shot),
+    );
+    let recorded = run(&mut app, 16);
+    let mut encounters: Vec<&RecordedShot> = recorded
+        .iter()
+        .filter(|record| record.tank == struck)
+        .collect();
+    encounters.sort_by_key(|record| record.encounter);
+    assert_eq!(
+        encounters
+            .iter()
+            .map(|record| record.encounter)
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "two encounters with the struck tank"
+    );
+    assert!(encounters.iter().all(|record| record.shot == Some(shot)));
+    let (first, second) = (&encounters[0].report, &encounters[1].report);
+
+    // The shot's own tally: the cookoff then empties every pool, so the pools' drop is not the
+    // shot's.
+    let tally: Vec<(Entity, u32)> = app
+        .world_mut()
+        .query_filtered::<&ShotDose, With<ShotRecording>>()
+        .single(app.world())
+        .expect("the round flies on")
+        .losses()
+        .collect();
+    for (name, volume) in ["front", "rear", "ammo"].into_iter().zip(&volumes) {
+        let shot_loss = tally
+            .iter()
+            .find(|(box_, _)| box_ == volume)
+            .map_or(0, |(_, lost)| *lost);
+        assert_eq!(
+            lost(first, name) + lost(second, name),
+            shot_loss,
+            "{name}: the encounters partition the shot's loss"
+        );
+    }
+    assert!(
+        lost(first, "front") > 0,
+        "the first encounter crossed the front"
+    );
+    assert_eq!(
+        lost(second, "front"),
+        0,
+        "and the second does not count it again"
+    );
+    assert_eq!(
+        at_shot(second, "front"),
+        DEEP - lost(first, "front"),
+        "the second encounter found what the first left"
+    );
+    assert!(lost(second, "rear") > 0);
+    assert_eq!((lost(first, "ammo"), lost(second, "ammo")), (0, ONE));
+
+    assert_eq!(first.killed, None);
+    assert_eq!(second.killed, Some(KnockoutReason::Cookoff));
+    assert!(first.consequences.is_empty());
+    assert!(
+        second
+            .consequences
+            .iter()
+            .any(|consequence| consequence.volume == "ammo"
+                && consequence.state == ConsequenceState::Cookoff)
+    );
+    assert!(app.world().resource::<ShotRecorder>().is_idle());
+}
+
+/// An emptying is timed at the deposit that took the pool's last point, though another round
+/// drained the pool between the shot's marks: the shot doses an ammunition box at one mark, the
+/// pool is drained, and at the next mark a spall cone's dose empties it before the line reaches
+/// it. Fixture log and doses (reference-mm), hull frame = world.
+#[test]
+fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
+    use crate::damage_cam::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
+    use bevy::ecs::system::RunSystemOnce;
+    use std::collections::BTreeMap;
+
+    let mut world = World::new();
+    let tank = world.spawn_empty().id();
+    let ammo = world
+        .spawn((
+            Name::new("ammo"),
+            VolumeOf(tank),
+            ComponentHealth {
+                current: 100,
+                max: 100,
+            },
+            Ammo,
+        ))
+        .id();
+    let plate = world.spawn((Name::new("plate"), VolumeOf(tank))).id();
+    let shell = world.spawn(ShotDose::default()).id();
+    // 4 reference-mm (40 points) at mark 0; 2 by the cone and 3 by the line at mark 1.
+    let (line_0, cone, line_1) = (4.0, 2.0, 3.0);
+    let dose = |world: &mut World, amounts: Vec<f32>, mark: usize| {
+        world
+            .run_system_once(
+                move |mut shot: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
+                    let mut shot = shot.single_mut().unwrap();
+                    for amount in &amounts {
+                        shot.add(ammo, *amount);
+                    }
+                    shot.settle(&mut health, true, mark);
+                },
+            )
+            .unwrap();
+    };
+    dose(&mut world, vec![line_0], 0);
+    // Another round leaves 10 of the 60 points.
+    world.get_mut::<ComponentHealth>(ammo).unwrap().current = 10;
+    dose(&mut world, vec![cone, line_1], 1);
+    assert_eq!(world.get::<ComponentHealth>(ammo).unwrap().current, 0);
+
+    let crossing =
+        |entrance: Vec3, volumes: Vec<VolumeCrossing>, exit: Vec3, cones| ArmourMark::Crossing {
+            entrance,
+            normal: Vec3::Z,
+            incoming: -Vec3::Z,
+            speed_in: SPEED,
+            overmatched: false,
+            volumes,
+            end: CrossingEnd::Exit {
+                at: exit,
+                speed: SPEED,
+            },
+            cones,
+        };
+    let through = |volume, entry: Vec3, end: Vec3, cost| VolumeCrossing {
+        volume,
+        entry,
+        end,
+        chord: entry.distance(end),
+        cost,
+        perforated: true,
+    };
+    let z = |z: f32| Vec3::new(0.0, 0.0, z);
+    let marks = vec![
+        crossing(
+            z(10.0),
+            vec![through(ammo, z(10.0), z(9.0), line_0)],
+            z(9.0),
+            0,
+        ),
+        crossing(
+            z(5.0),
+            vec![
+                through(plate, z(5.0), z(4.9), 100.0),
+                through(ammo, z(4.0), z(3.0), line_1),
+            ],
+            z(3.0),
+            1,
+        ),
+    ];
+    let cones = vec![SpallCone {
+        origin: z(4.9),
+        axis: Dir3::NEG_Z,
+        half_angle: 0.5,
+        spend: 100.0,
+        entry_speed: SPEED,
+        exit_speed: SPEED,
+        strength: cone,
+        rays: vec![SpallRay {
+            end: z(3.5),
+            deposited: true,
+            strength: cone,
+            doses: vec![(ammo, cone)],
+        }],
+    }];
+    let struck = StruckTank::recorded(
+        tank,
+        0,
+        vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
+        BTreeMap::new(),
+        vec![(ammo, 100)],
+    );
+    let facts = ShotFacts {
+        launch: z(20.0),
+        ..ShotFacts::default()
+    };
+    let path = [z(20.0), z(9.0), z(3.0)];
+    let report = record::report_from(
+        &world,
+        &struck,
+        &ShotLog {
+            marks: &marks,
+            cones: &cones,
+            path: &path,
+            dose: world.get::<ShotDose>(shell),
+        },
+        &facts,
+    )
+    .unwrap();
+    assert_eq!(lost(&report, "ammo"), 50, "40, then the 10 left");
+    let [cookoff] = report.consequences.as_slice() else {
+        panic!("one consequence: {:?}", report.consequences);
+    };
+    assert_eq!(cookoff.state, ConsequenceState::Cookoff);
+    assert_eq!(
+        cookoff.t, report.spall[0].t,
+        "the cone's dose emptied the drained pool"
+    );
+    // The line enters the box 1 m past the mark's entrance, at full speed.
+    let entrance = report
+        .path
+        .iter()
+        .find(|node| node.point == [0.0, 0.0, 5.0])
+        .unwrap();
+    assert!(
+        cookoff.t < entrance.t + 1.0 / SPEED,
+        "before the line reached the box"
+    );
 }

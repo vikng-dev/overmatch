@@ -7,10 +7,13 @@
 //! (`super::recorder`) fills the same [`StruckTank`] from the pose each mark was resolved against
 //! and reads the logs through `report_from`.
 //!
-//! A component's HP at the shot is what the shot found in its pool when it first reached it
-//! ([`ShotDose::found`]), and one it never reached reads the HP the struck tank's capture holds.
-//! What it lost and whether the shot emptied it are the shot's own tally, never a difference of
-//! pool HP, so a shot overlapping another in one tick reads only its own loss.
+//! A report covers one encounter of the shell with the struck tank, its marks and settles from the
+//! encounter's first mark on (the whole flight, for a capture). A component's HP at the shot is what
+//! the encounter's first settle of its pool found there ([`ShotDose::settles`]), and one it never
+//! reached reads the HP the struck tank's capture holds. What it lost, whether the shot emptied it
+//! and the deposit that did are the shot's own settles, never a difference of pool HP, so a shot
+//! overlapping another reads only its own loss, and another round draining the pool between the
+//! shot's marks moves the emptying to the deposit that actually took the last point.
 //!
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the last
@@ -80,10 +83,12 @@ impl HullFrame {
     }
 }
 
-/// The struck tank at the shot: the hull frame each of the shell's marks was resolved in, its
-/// servos' angles and its components' HP.
+/// The struck tank at the shot: the first mark of the shell's encounter with it, the hull frame each
+/// of the shell's marks was resolved in, its servos' angles and its components' HP.
 pub struct StruckTank {
     tank: Entity,
+    /// The encounter's first mark: the report reads the shell's marks and settles from it on.
+    from: usize,
     /// `(first mark, frame)`, ascending: a mark is stated in the last frame that starts at or
     /// before it, a point read before the first mark in the first frame.
     frames: Vec<(usize, HullFrame)>,
@@ -107,21 +112,25 @@ impl StruckTank {
             .collect();
         Some(Self {
             tank,
+            from: 0,
             frames: vec![(0, frame)],
             servo_deg: servo_angles(world, tank),
             boxes,
         })
     }
 
-    /// The tank as a recorder saw it: `frames` by first mark, ascending, never empty.
+    /// The tank as a recorder saw it in an encounter from mark `from` on: `frames` by first mark,
+    /// ascending, never empty.
     pub(crate) fn recorded(
         tank: Entity,
+        from: usize,
         frames: Vec<(usize, HullFrame)>,
         servo_deg: BTreeMap<String, f32>,
         boxes: Vec<(Entity, u32)>,
     ) -> Self {
         Self {
             tank,
+            from,
             frames,
             servo_deg,
             boxes,
@@ -237,18 +246,19 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
     };
-    steps_of(world, &marks.log, world.get::<ShotDose>(shell), tank)
+    steps_of(world, &marks.log, world.get::<ShotDose>(shell), tank, 0)
 }
 
-/// [`path_steps`] over a shell's logs.
+/// [`path_steps`] over a shell's logs from mark `from` on.
 fn steps_of(
     world: &World,
     marks: &[ArmourMark],
     dose: Option<&ShotDose>,
     tank: Option<Entity>,
+    from: usize,
 ) -> Vec<PathStep> {
     let mut steps = Vec::new();
-    for mark in marks {
+    for mark in marks.iter().skip(from) {
         let step = match mark {
             ArmourMark::Bounce { .. } => Some(PathStep::Bounce),
             ArmourMark::Crossing {
@@ -273,8 +283,8 @@ fn steps_of(
         }
     }
     let dosed = dose.is_some_and(|dose| {
-        dose.losses().any(|(volume, lost)| {
-            lost > 0
+        dose.losses().any(|(volume, _)| {
+            lost_from(dose, volume, from) > 0
                 && class_of(world, volume) == VolumeClass::Box
                 && tank.is_none_or(|tank| owned_by(world, volume, tank))
         })
@@ -283,6 +293,15 @@ fn steps_of(
         steps.push(PathStep::Dosed);
     }
     steps
+}
+
+/// The HP `volume`'s pool lost to the shot's settles from mark `from` on.
+fn lost_from(dose: &ShotDose, volume: Entity, from: usize) -> u32 {
+    dose.settles(volume)
+        .iter()
+        .filter(|settle| settle.mark >= from)
+        .map(|settle| settle.lost)
+        .sum()
 }
 
 /// One tank's part of a crossing, whose volumes may belong to several tanks where hulls overlap:
@@ -391,8 +410,18 @@ fn share_of(world: &World, mark: &ArmourMark, tank: Entity) -> Option<Share> {
     }
 }
 
-/// The path's timed nodes up to the struck tank's last mark `last_touch`, t = 0 at its first
-/// contact, and the round's speed at that contact.
+/// The encounter's path, from its start up to the struck tank's last mark `last_touch`.
+struct Timeline {
+    /// Timed nodes, t = 0 at the struck tank's first contact.
+    nodes: Vec<Node>,
+    /// Where the path starts (WORLD): the launch, or for a later encounter where the round left
+    /// the mark before it.
+    start: Vec3,
+    /// The round's speed at first contact.
+    contact_speed: f32,
+}
+
+/// The encounter's [`Timeline`]; `None` where a mark failed or the encounter has no start.
 fn timeline(
     world: &World,
     struck: &StruckTank,
@@ -400,20 +429,30 @@ fn timeline(
     facts: &ShotFacts,
     first_touch: usize,
     last_touch: usize,
-) -> Option<(Vec<Node>, f32)> {
+) -> Option<Timeline> {
     let marks = log.marks;
+    let start = match struck.from.checked_sub(1).map(|before| &marks[before]) {
+        None => facts.launch,
+        Some(ArmourMark::Bounce { position, .. }) => *position,
+        Some(ArmourMark::Crossing {
+            end: CrossingEnd::Exit { at, .. },
+            ..
+        }) => *at,
+        Some(_) => return None,
+    };
     // Each node with the speed of the leg that reaches it and the mark whose frame states it;
     // `contact` is the node of the struck tank's first contact.
     let mut legs: Vec<(Vec3, f32, usize)> = Vec::new();
-    let mut speed = match marks.first()? {
+    let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
         ArmourMark::Failed => return None,
     };
-    legs.push((facts.launch, speed, first_touch));
-    let mut last = facts.launch;
+    legs.push((start, speed, first_touch));
+    let mut last = start;
     let mut flying = true;
     let mut contact = 0;
-    for (index, mark) in marks[..=last_touch].iter().enumerate() {
+    let span = marks[..=last_touch].iter().enumerate().skip(struck.from);
+    for (index, mark) in span {
         if index == first_touch {
             contact = legs.len();
         }
@@ -481,7 +520,11 @@ fn timeline(
     for node in &mut nodes {
         node.t -= contact_t;
     }
-    Some((nodes, legs[contact].1))
+    Some(Timeline {
+        nodes,
+        start,
+        contact_speed: legs[contact].1,
+    })
 }
 
 /// The report of `shell`'s flight against `struck`, or `None` when it opens no pen cam
@@ -504,22 +547,27 @@ pub(crate) fn report_from(
     log: &ShotLog,
     facts: &ShotFacts,
 ) -> Option<PenetrationReport> {
-    let steps = steps_of(world, log.marks, log.dose, Some(struck.tank));
+    let steps = steps_of(world, log.marks, log.dose, Some(struck.tank), struck.from);
     let verdict = ShotVerdict::of_path(&steps)?;
     let marks = log.marks;
     let owns = |mark: &ArmourMark| touches(world, mark, struck.tank);
-    let first_touch = marks.iter().position(owns)?;
+    let first_touch = struck.from + marks.get(struck.from..)?.iter().position(owns)?;
     let last_touch = marks.iter().rposition(owns)?;
 
-    let (nodes, contact_speed) = timeline(world, struck, log, facts, first_touch, last_touch)?;
+    let Timeline {
+        nodes,
+        start,
+        contact_speed,
+    } = timeline(world, struck, log, facts, first_touch, last_touch)?;
     let mine = |mark: &ArmourMark| share_of(world, mark, struck.tank);
     let time_at = |point: Vec3| time_on(&nodes, point);
 
     let mut plates = Vec::new();
     let mut ricochets = Vec::new();
     let mut spall = Vec::new();
-    let mut line: Vec<(Entity, f32, f32)> = Vec::new();
-    let mut field: Vec<(Entity, f32, f32)> = Vec::new();
+    // Every deposit on a component: `(volume, dose, t, mark)`.
+    let mut line: Vec<Deposit> = Vec::new();
+    let mut field: Vec<Deposit> = Vec::new();
     // Where the line reached each component, with its time and the mark that reached it.
     let mut entered: Vec<(Entity, f32, Vec3, usize)> = Vec::new();
     let mut end = None;
@@ -527,8 +575,9 @@ pub(crate) fn report_from(
     let first = &marks[first_touch];
     let owned = |volume: Entity| owned_by(world, volume, struck.tank);
     for (index, mark) in marks[..=last_touch].iter().enumerate() {
-        if !owns(mark) {
-            // Its cones are another tank's; the cone log stays aligned with the crossings.
+        if index < struck.from || !owns(mark) {
+            // Its cones are an earlier encounter's or another tank's; the cone log stays aligned
+            // with the crossings.
             if let ArmourMark::Crossing { cones: count, .. } = mark {
                 thrown.by_ref().take(*count).for_each(drop);
             }
@@ -556,7 +605,7 @@ pub(crate) fn report_from(
                     volume: name_of(world, *volume),
                 });
                 if class_of(world, *volume) == VolumeClass::Box {
-                    line.push((*volume, *shock, t));
+                    line.push((*volume, *shock, t, index));
                     entered.push((*volume, t, *position, index));
                 }
                 end = Some(RoundEnd::Left {
@@ -579,7 +628,7 @@ pub(crate) fn report_from(
                     let t = time_at(crossed.entry);
                     let class = class_of(world, crossed.volume);
                     if class == VolumeClass::Box {
-                        line.push((crossed.volume, crossed.cost * TRANSIT_K, t));
+                        line.push((crossed.volume, crossed.cost * TRANSIT_K, t, index));
                         entered.push((crossed.volume, t, crossed.entry, index));
                         continue;
                     }
@@ -612,7 +661,7 @@ pub(crate) fn report_from(
                         .map(|ray| {
                             let doses = ray.doses.iter().filter(|(volume, _)| owned(*volume));
                             for &(volume, dose) in doses.clone() {
-                                field.push((volume, dose, t));
+                                field.push((volume, dose, t, index));
                             }
                             Fragment {
                                 end: point(ray.end),
@@ -685,7 +734,7 @@ pub(crate) fn report_from(
         servo_deg: struck.servo_deg.clone(),
         round: facts.round.clone(),
         shooter: facts.shooter.clone(),
-        origin: struck.point(first_touch, facts.launch),
+        origin: struck.point(first_touch, start),
         muzzle: facts.muzzle.map(|muzzle| struck.point(first_touch, muzzle)),
         projectile: Projectile {
             name: facts.projectile.clone(),
@@ -718,8 +767,12 @@ pub(crate) fn report_from(
     })
 }
 
-/// The struck tank's components by name, each at its HP at the shot: what the shot found in its
-/// pool where it reached it ([`ShotDose::found`]), the tank's captured HP elsewhere.
+/// One deposit on a component: `(volume, dose, t, mark)`, its dose in reference-mm and `mark` the
+/// armour mark that dealt it.
+type Deposit = (Entity, f32, f32, usize);
+
+/// The struck tank's components by name, each at its HP at the shot: what the encounter's first
+/// settle of its pool found there ([`ShotDose::settles`]), the tank's captured HP elsewhere.
 fn components(
     world: &World,
     struck: &StruckTank,
@@ -730,13 +783,19 @@ fn components(
         .iter()
         .filter_map(|&(entity, captured)| {
             let max = world.get::<ComponentHealth>(entity)?.max;
+            let found = dose.and_then(|dose| {
+                dose.settles(entity)
+                    .iter()
+                    .find(|settle| settle.mark >= struck.from)
+                    .map(|settle| settle.held)
+            });
             Some((
                 entity,
                 ComponentState {
                     name: name_of(world, entity),
                     role: role_of(world, entity),
                     count: max,
-                    hp: dose.and_then(|dose| dose.found(entity)).unwrap_or(captured),
+                    hp: found.unwrap_or(captured),
                 },
             ))
         })
@@ -745,26 +804,26 @@ fn components(
     components
 }
 
-/// Each component's dose from the shot and, for one the shot emptied, its consequence, timed at the
-/// deposit that emptied it. `line` and `field` list `(volume, dose, t)` deposits, `entered` the
+/// Each component's dose from the encounter and, for one it emptied, its consequence, timed at the
+/// deposit that emptied it. `line` and `field` list the encounter's deposits, `entered` the
 /// `(volume, t, point, mark)` where the line reached a component (WORLD). The HP lost and the
-/// emptying are the shot's own tally's ([`ShotDose`]).
+/// emptying are the shot's own settles from the encounter's first mark on ([`ShotDose::settles`]).
 fn outcomes(
     world: &World,
     struck: &StruckTank,
     components: &[(Entity, ComponentState)],
     dose: Option<&ShotDose>,
-    line: &[(Entity, f32, f32)],
-    field: &[(Entity, f32, f32)],
+    line: &[Deposit],
+    field: &[Deposit],
     entered: &[(Entity, f32, Vec3, usize)],
 ) -> (Vec<BoxDose>, Vec<Consequence>) {
     let mut doses = Vec::new();
     let mut consequences = Vec::new();
     for (entity, state) in components {
-        let of = |list: &[(Entity, f32, f32)]| -> Vec<(f32, f32)> {
+        let of = |list: &[Deposit]| -> Vec<Deposit> {
             list.iter()
                 .filter(|(volume, ..)| volume == entity)
-                .map(|&(_, dose, t)| (t, dose))
+                .copied()
                 .collect()
         };
         let (from_line, from_field) = (of(line), of(field));
@@ -776,31 +835,36 @@ fn outcomes(
             .filter(|(volume, ..)| volume == entity)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|&(_, _, point, mark)| struck.point(mark, point));
-        let lost = dose.map_or(0, |dose| {
-            dose.losses()
-                .find(|(volume, _)| volume == entity)
-                .map_or(0, |(_, lost)| lost)
-        });
+        let sum = |list: &[Deposit]| list.iter().fold(0.0, |sum, (_, dose, ..)| sum + dose);
         doses.push(BoxDose {
             volume: state.name.clone(),
-            line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            lost,
+            line: sum(&from_line),
+            field: sum(&from_field),
+            lost: dose.map_or(0, |dose| lost_from(dose, *entity, struck.from)),
             entered: first_entry,
         });
-        if dose.is_some_and(|dose| dose.emptied().contains(entity)) {
-            let hp = state.hp;
-            let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
-            landed.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut total = 0;
+        let emptying = dose.and_then(|dose| {
+            dose.settles(*entity)
+                .iter()
+                .find(|settle| settle.mark >= struck.from && settle.emptied())
+        });
+        if let Some(emptying) = emptying {
+            let mut landed: Vec<Deposit> = from_line
+                .into_iter()
+                .chain(from_field)
+                .filter(|&(.., mark)| mark == emptying.mark)
+                .collect();
+            landed.sort_by(|a, b| a.2.total_cmp(&b.2));
+            let taken_before = hp_of_units(emptying.units_before);
+            let mut total = emptying.units_before;
             let t = landed
                 .iter()
-                .find(|(_, dose)| {
+                .find(|(_, dose, ..)| {
                     total += dose_units(*dose);
-                    hp_of_units(total) >= hp
+                    hp_of_units(total) - taken_before >= emptying.held
                 })
                 .or(landed.last())
-                .map_or(0.0, |(t, _)| *t);
+                .map_or(0.0, |&(_, _, t, _)| t);
             consequences.push(Consequence {
                 t,
                 volume: state.name.clone(),

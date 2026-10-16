@@ -1599,7 +1599,9 @@ pub(crate) fn apply(
             commands,
         ),
     }
-    shell.dose.settle(health, context.deposit)
+    // Both arms log exactly one mark, so the settle closes the last.
+    let mark = shell.marks.log.len().saturating_sub(1);
+    shell.dose.settle(health, context.deposit, mark)
 }
 
 fn apply_bounce(

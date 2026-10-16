@@ -1,13 +1,22 @@
 //! The game's pen cam recorder: on the authority (the server and offline play, never a net
-//! client), one [`PenetrationReport`] per main-gun round ([`FireMechanism::Single`]) and tank its
-//! path struck, emitted as a [`RecordedShot`]. Automatic fire records nothing.
+//! client), one [`PenetrationReport`] per main-gun round ([`FireMechanism::Single`]) and encounter
+//! of its path with a tank, emitted as a [`RecordedShot`]. Automatic fire records nothing.
+//!
+//! An encounter runs from the round's first mark on a tank until its record is finished; a round
+//! that strikes the tank again after that, say off another tank's armour, opens the next encounter,
+//! whose record reads only the marks and settles from its own first mark on. A record is built the
+//! tick its encounter finishes, before any later mark exists, so it ends where the next begins: a
+//! shell's encounters with one tank partition its marks and its loss there, no dose in two records.
+//! A dose whose mark touches no volume of the tank (another tank's spall reaching it) opens no
+//! encounter, and lands in a record only while one is open.
 //!
 //! A recorded shell is born with its [`ShotRecording`]. After each march step the shell notes every
-//! tank its new marks touch ([`MarchRecorder::note`]): a tank first touched has its components' HP
-//! taken there, and each tick that logs marks on it opens a hull frame. [`pose_struck`] fills those
-//! frames in the same tick from the pose the march's colliders were placed at, before the damage
-//! consequences can detach a turret. A shell that despawns hands its logs to the [`ShotRecorder`]
-//! ([`keep_spent`]), so a record never depends on how long the shell lives.
+//! tank its new marks touch ([`MarchRecorder::note`]): an encounter opened has the tank's
+//! components' HP taken there, and each tick that logs marks on it opens a hull frame.
+//! [`pose_struck`] fills those frames in the same tick from the pose the march's colliders were
+//! placed at, before the damage consequences can detach a turret. A shell that despawns hands its
+//! logs to the [`ShotRecorder`] ([`keep_spent`]), so a record never depends on how long the shell
+//! lives.
 //!
 //! The record's HP figures are the shot's own ([`crate::ballistics::ShotDose`], see
 //! [`super::record`]). A tank's death is the shot's when its own deposition emptied the box that
@@ -15,9 +24,8 @@
 //! emptied that tick, for crew loss the last crew station, in deposition order across every shell
 //! (automatic fire included, which can kill though it is not recorded).
 //!
-//! A struck tank's record is finished ([`finish_records`]) once the shell can add nothing to it:
-//! the shell ended, or it is clear of the tank's colliders. A tank gone by then (despawned, or
-//! respawned as a new entity) gets no record.
+//! An encounter's record is finished ([`finish_records`]) once the shell ended or is clear of the
+//! tank's colliders. A tank gone by then (despawned, or respawned as a new entity) gets no record.
 
 use std::collections::BTreeMap;
 
@@ -47,7 +55,8 @@ use crate::{ClientReplica, ShotId};
 /// still inside.
 const CLEAR_MARGIN: f32 = 0.5;
 
-/// A finished record: the tank the round struck, who fired it, and the report.
+/// A finished record: the tank the round struck, who fired it, which of the round's encounters with
+/// the tank it is (0 the first), and the report.
 #[cfg_attr(
     not(test),
     expect(
@@ -60,6 +69,7 @@ pub(crate) struct RecordedShot {
     pub tank: Entity,
     pub shooter: Option<ShotSource>,
     pub shot: Option<ShotId>,
+    pub encounter: u32,
     pub report: PenetrationReport,
 }
 
@@ -68,11 +78,11 @@ pub(crate) struct RecordedShot {
 pub(crate) struct ShotRecorder {
     /// This tick's emptied pools, `(shell, volume)`, in deposition order.
     emptied: Vec<(Entity, Entity)>,
-    /// Recordings whose shell despawned, with its logs.
+    /// Recordings whose shell despawned with an encounter unfinished, with its logs.
     spent: Vec<Spent>,
-    /// Struck tanks not yet finished, live or spent.
+    /// Encounters not yet finished, live or spent.
     open: usize,
-    /// A struck tank has a frame this tick's [`pose_struck`] has not filled.
+    /// An encounter has a frame this tick's [`pose_struck`] has not filled.
     unposed: bool,
 }
 
@@ -94,7 +104,7 @@ struct Spent {
     dose: ShotDose,
 }
 
-/// A recorded round: the facts the march does not carry and every tank its path has struck.
+/// A recorded round: the facts the march does not carry and every encounter of its path with a tank.
 ///
 /// Invariant: born with the shell, on the authority only. See ADR-0014.
 #[derive(Component, Default)]
@@ -105,10 +115,14 @@ pub(crate) struct ShotRecording {
     struck: Vec<Struck>,
 }
 
-/// One tank a recorded round's path struck.
+/// One encounter of a recorded round's path with a tank.
 struct Struck {
     tank: Entity,
-    /// Its components and their HP when the round first touched it.
+    /// Which of the round's encounters with the tank, 0 the first.
+    encounter: u32,
+    /// The encounter's first mark.
+    from: usize,
+    /// Its components and their HP when the encounter opened.
     boxes: Vec<(Entity, u32)>,
     /// `(first mark, hull frame)` per tick that logged marks on it; `None` until posed.
     frames: Vec<(usize, Option<HullFrame>)>,
@@ -152,7 +166,8 @@ pub(crate) struct MarchRecorder<'w, 's> {
 
 impl MarchRecorder<'_, '_> {
     /// After `shell`'s march step: log the pools its tally `dose` emptied from `emptied_from` on,
-    /// and note each tank its marks from `marks_from` on touch in its `recording`.
+    /// and note each tank its marks from `marks_from` on touch in its `recording`, in the tank's
+    /// open encounter or a new one.
     pub(crate) fn note(
         &mut self,
         shell: Entity,
@@ -188,13 +203,14 @@ impl MarchRecorder<'_, '_> {
             touched.sort();
             touched.dedup();
             for tank in touched {
-                let at = match recording
+                let latest = recording
                     .struck
                     .iter()
-                    .position(|struck| struck.tank == tank)
-                {
-                    Some(at) => at,
-                    None => {
+                    .rposition(|struck| struck.tank == tank);
+                let at = match latest {
+                    Some(at) if !recording.struck[at].done => at,
+                    _ => {
+                        let encounter = latest.map_or(0, |at| recording.struck[at].encounter + 1);
                         let boxes = self
                             .tanks
                             .get(tank)
@@ -204,6 +220,8 @@ impl MarchRecorder<'_, '_> {
                             .collect();
                         recording.struck.push(Struck {
                             tank,
+                            encounter,
+                            from: index,
                             boxes,
                             frames: Vec::new(),
                             servo_deg: None,
@@ -247,7 +265,7 @@ pub(crate) fn plugin(app: &mut App) {
         );
 }
 
-/// Hand a despawning recorded shell's recording and logs to the recorder while it has struck tanks
+/// Hand a despawning recorded shell's recording and logs to the recorder while it has an encounter
 /// to finish.
 fn keep_spent(
     remove: On<Remove, ShotRecording>,
@@ -364,7 +382,8 @@ fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
 }
 
 /// Attribute each tank knocked out this tick to the shell whose deposition emptied the box that
-/// decided it, and clear the tick's emptied log.
+/// decided it, in that shell's open encounter with the tank (the one this tick's marks are in), and
+/// clear the tick's emptied log.
 fn attribute_kills(
     knocked: Query<(Entity, &TankKnockedOut), Added<TankKnockedOut>>,
     facets: Query<(&VolumeOf, Has<Ammo>, Has<CrewStation>)>,
@@ -397,14 +416,14 @@ fn attribute_kills(
                 None => continue,
             },
         };
-        for struck in struck.filter(|struck| struck.tank == tank) {
+        if let Some(struck) = struck.rev().find(|struck| struck.tank == tank) {
             struck.killed = Some(reason);
         }
     }
     recorder.emptied.clear();
 }
 
-/// Finish every struck tank the shell can add nothing more to, and emit its record.
+/// Finish every encounter whose shell ended or is clear of the tank, and emit its record.
 fn finish_records(world: &mut World) {
     let spent = std::mem::take(&mut world.resource_mut::<ShotRecorder>().spent);
     let mut finished: Vec<(Entity, usize)> = Vec::new();
@@ -446,8 +465,8 @@ fn finish_records(world: &mut World) {
     world.write_message_batch(records);
 }
 
-/// `struck`'s record of `recording`'s round, its logs `log`; `None` where the tank is gone, a
-/// frame was never posed, or the round opens no pen cam.
+/// The record of `recording`'s round in encounter `struck`, its logs `log`; `None` where the tank
+/// is gone, a frame was never posed, or the encounter opens no pen cam.
 fn recorded(
     world: &World,
     recording: &ShotRecording,
@@ -462,6 +481,7 @@ fn recorded(
         .collect::<Option<Vec<_>>>()?;
     let tank = StruckTank::recorded(
         struck.tank,
+        struck.from,
         frames,
         struck.servo_deg.clone().unwrap_or_default(),
         struck.boxes.clone(),
@@ -472,6 +492,7 @@ fn recorded(
         tank: struck.tank,
         shooter: recording.source,
         shot: recording.shot,
+        encounter: struck.encounter,
         report,
     })
 }
