@@ -29,7 +29,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// The pen cam's verdict on a whole shot against one tank, read from the path the authority
-/// resolved: its crossings, its bounces and the doses they gave the tank's components. The first
+/// resolved: its crossings, its bounces and the HP they cost the tank's components. The first
 /// variant whose rule holds is the verdict, in declaration order. A pen cam exists only for a hit on
 /// a player's tank.
 ///
@@ -39,12 +39,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShotVerdict {
     /// The round perforated armour, whatever happened after: it stopped in a far plate, left the
-    /// tank, or dosed nothing.
+    /// tank, or cost no HP.
     Penetration,
-    /// No penetration, and a component took a dose: from the line, a spall cone or a bounce's
-    /// shock. An exposed component, or a barrel clipped on the way into armour.
+    /// No penetration, and a component lost HP: its dose from the line, the spall cones and a
+    /// bounce's shock, rounded once per box per shot, came to at least one point. An exposed
+    /// component, or a barrel clipped on the way into armour.
     Damaged,
-    /// No penetration, no dose, and the round bounced away.
+    /// No penetration, no HP lost, and the round bounced away.
     Ricochet,
     /// Everything else: stopped by armour or external armour, or through external armour alone
     /// and flown on.
@@ -62,8 +63,8 @@ pub enum PenCamFrame {
     Outside,
 }
 
-/// One event of a shot's path, as the verdict reads it. Crossings and bounces are in path order; a
-/// dose's place among them is not read.
+/// One event of a shot's path, as the verdict reads it. Crossings and bounces are in path order;
+/// [`Self::Dosed`]'s place among them is not read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathStep {
     /// Deflected off a face without entering it.
@@ -74,7 +75,9 @@ pub enum PathStep {
         perforated_armour: bool,
         rested: bool,
     },
-    /// A component of the struck tank took a dose above zero.
+    /// A component of the struck tank lost HP to the shot: its dose rounded once per box per shot
+    /// ([`crate::ballistics::hp_points`]) came to at least one point and its pool had it. A dose
+    /// that rounds to none changed nothing in the game and is not this step.
     Dosed,
     /// A walk that failed closed: an error, never a pen cam.
     Failed,
@@ -390,7 +393,7 @@ impl PenetrationReport {
     }
 
     /// The record's path as the verdict reads it: its plates and bounces in time order, each
-    /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box took a dose. A plate
+    /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box lost HP. A plate
     /// without an exit is where the round rested.
     pub fn steps(&self) -> Vec<PathStep> {
         let mut steps: Vec<(f32, PathStep)> = self
@@ -410,7 +413,7 @@ impl PenetrationReport {
             )
             .collect();
         steps.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let dosed = self.doses.iter().any(|dose| dose.line + dose.field > 0.0);
+        let dosed = self.doses.iter().any(|dose| dose.lost > 0);
         steps
             .into_iter()
             .map(|(_, step)| step)
@@ -438,7 +441,7 @@ pub(crate) mod tests {
     };
 
     /// The verdict reads the whole path, first rule wins: perforating armour anywhere is a
-    /// penetration, whatever follows and whether or not anything was dosed; short of that any dose
+    /// penetration, whatever follows and whether or not any HP was lost; short of that any HP lost
     /// is damage, wherever it sits among the path's events; short of that a round that bounces
     /// away is a ricochet and any other a non-pen. No event, or any failed walk, opens no pen cam.
     #[test]
@@ -490,6 +493,31 @@ pub(crate) mod tests {
         for (steps, verdict) in cases {
             assert_eq!(ShotVerdict::of_path(steps), verdict, "{steps:?}");
         }
+    }
+
+    /// A record's path is dosed only where a box lost HP: a dose that rounded to no point leaves
+    /// the box's record but no [`PathStep::Dosed`]. Fixture doses (reference-mm).
+    #[test]
+    fn a_record_is_dosed_only_where_hp_was_lost() {
+        let mut report = PenetrationReport::load(&scenario_dir().join("through.ron")).unwrap();
+        report.plates.clear();
+        report.ricochets.clear();
+        let dose = |lost| BoxDose {
+            volume: "fixture box".to_owned(),
+            line: 0.04,
+            field: 0.0,
+            lost,
+            entered: None,
+        };
+        report.doses = vec![dose(0)];
+        assert_eq!(report.steps(), Vec::new());
+        assert_eq!(ShotVerdict::of_path(&report.steps()), None);
+        report.doses.push(dose(1));
+        assert_eq!(report.steps(), vec![PathStep::Dosed]);
+        assert_eq!(
+            ShotVerdict::of_path(&report.steps()),
+            Some(ShotVerdict::Damaged)
+        );
     }
 
     /// Penetration shows the hull see-through, a non-pen the plate slice, a ricochet and damage

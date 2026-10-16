@@ -291,18 +291,47 @@ pub(crate) const TRANSIT_K: f32 = 1.0;
 /// from one shot is rounded to (design doc §6). RESOLUTION: the unit every component's `hp` in the
 /// tank data is authored in, and the quantum below which a spall cone is not thrown; it is a unit,
 /// not a balance value, so changing it rescales every authored pool with it.
-pub(crate) const HP_PER_REFERENCE_MM: f32 = 10.0;
+pub(crate) const HP_PER_REFERENCE_MM: u64 = 10;
 
-/// The whole HP points a dose of `dose` reference-mm converts to: `dose × HP_PER_REFERENCE_MM`
-/// rounded to nearest, ties away from zero (IEEE `roundToIntegralTiesToAway`, no transcendental),
-/// so it is the same on every target. A negative or NaN dose converts to none.
-pub(crate) fn hp_points(dose: f32) -> u32 {
-    (dose * HP_PER_REFERENCE_MM).round() as u32
+/// Fixed-point dose units per reference-mm. Every dose contribution is quantized to whole units
+/// before it is summed, so a box's per-shot total is an integer sum: the same for every order its
+/// contributions arrive in. RESOLUTION: 1 unit = 1e-9 reference-mm = 1e-8 HP point, finer than an
+/// f32 dose's own spacing from 0.01 reference-mm up (ulp(0.01) = 9.3e-10, DERIVED), so quantizing
+/// costs no more than the f32 dose already did. Decimal, so the HP quantum is exactly
+/// [`DOSE_UNITS_PER_HP`] units and a tie is an exact integer. A u64 total holds 1.8e10
+/// reference-mm (DERIVED).
+pub(crate) const DOSE_UNITS_PER_REFERENCE_MM: u64 = 1_000_000_000;
+
+/// Dose units per HP point: [`DOSE_UNITS_PER_REFERENCE_MM`] / [`HP_PER_REFERENCE_MM`], exact.
+const DOSE_UNITS_PER_HP: u64 = DOSE_UNITS_PER_REFERENCE_MM / HP_PER_REFERENCE_MM;
+const _: () = assert!(DOSE_UNITS_PER_HP * HP_PER_REFERENCE_MM == DOSE_UNITS_PER_REFERENCE_MM);
+
+/// One dose contribution of `dose` reference-mm in whole dose units: widened to f64 (exact), one
+/// IEEE multiply and a round to nearest, ties away from zero, so it is the same on every target. A
+/// negative or NaN dose is none; the cast saturates.
+pub(crate) fn dose_units(dose: f32) -> u64 {
+    (f64::from(dose) * DOSE_UNITS_PER_REFERENCE_MM as f64).round() as u64
 }
 
-/// One shot's dose to each box it has reached (reference-mm), and the HP points already taken for
-/// it. A box loses `hp_points(total)` over the shot, its total from the line, a bounce's shock and
-/// every spall cone summed first: rounded once per box per shot, never per direction or per source.
+/// The whole HP points `units` dose units convert to, rounded to nearest, ties away from zero.
+pub(crate) fn hp_of_units(units: u64) -> u32 {
+    let points =
+        units / DOSE_UNITS_PER_HP + u64::from(units % DOSE_UNITS_PER_HP >= DOSE_UNITS_PER_HP / 2);
+    u32::try_from(points).unwrap_or(u32::MAX)
+}
+
+/// The whole HP points one dose of `dose` reference-mm converts to: [`dose_units`] then
+/// [`hp_of_units`], the rounding a box's per-shot total takes. A negative or NaN dose converts to
+/// none.
+pub(crate) fn hp_points(dose: f32) -> u32 {
+    hp_of_units(dose_units(dose))
+}
+
+/// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the HP points
+/// already taken for it and the HP its pool actually lost. A box loses `hp_of_units(total)` over the
+/// shot, its total from the line, a bounce's shock and every spall cone summed first: each
+/// contribution quantized, the integers summed, the sum rounded once per box per shot, never per
+/// direction or per source, and never dependent on the order the contributions arrive in.
 /// [`Self::settle`] takes what the running total has added since it last ran, so HP falls as the
 /// shot goes and lands on the rounded total when it ends.
 ///
@@ -310,22 +339,26 @@ pub(crate) fn hp_points(dose: f32) -> u32 {
 #[derive(Component, Default)]
 pub(crate) struct ShotDose(Vec<BoxTally>);
 
-/// A box's running dose this shot and the HP points taken for it so far.
+/// A box's running dose this shot (dose units), the HP points taken for it so far, and the HP its
+/// pool lost to them (the points taken, floored at the pool's zero; authority only).
 struct BoxTally {
     address: Entity,
-    dose: f32,
+    units: u64,
     taken: u32,
+    lost: u32,
 }
 
 impl ShotDose {
-    /// Add `amount` reference-mm to `address`'s dose, in the order the march resolves it.
+    /// Add `amount` reference-mm to `address`'s dose.
     fn add(&mut self, address: Entity, amount: f32) {
+        let units = dose_units(amount);
         match self.0.iter_mut().find(|entry| entry.address == address) {
-            Some(entry) => entry.dose += amount,
+            Some(entry) => entry.units = entry.units.saturating_add(units),
             None => self.0.push(BoxTally {
                 address,
-                dose: amount,
+                units,
                 taken: 0,
+                lost: 0,
             }),
         }
     }
@@ -351,7 +384,7 @@ impl ShotDose {
         }
         let mut removed = 0;
         for entry in &mut self.0 {
-            let due = hp_points(entry.dose).saturating_sub(entry.taken);
+            let due = hp_of_units(entry.units).saturating_sub(entry.taken);
             if due == 0 {
                 continue;
             }
@@ -359,10 +392,18 @@ impl ShotDose {
             if let Ok(mut hp) = health.get_mut(entry.address) {
                 let lost = due.min(hp.current);
                 hp.current -= lost;
+                entry.lost += lost;
                 removed += lost;
             }
         }
         removed
+    }
+
+    /// Each box this shot has reached and the HP its pool has lost to the shot so far: zero for one
+    /// with no HP pool or one already empty, and for every box where HP is not deposited (a
+    /// replica).
+    pub(crate) fn losses(&self) -> impl Iterator<Item = (Entity, u32)> + '_ {
+        self.0.iter().map(|entry| (entry.address, entry.lost))
     }
 }
 
@@ -2961,6 +3002,65 @@ mod tests {
         assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 25);
         assert_eq!(dose(&mut world, &[100.0]), 25, "the pool stops at zero");
         assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 0);
+    }
+
+    /// A box's HP lost depends only on the multiset of its contributions, never their order:
+    /// several cones' rays summed forward, reversed, sorted either way, interleaved and shuffled
+    /// take the same points, including totals beside a rounding tie. Fixture doses (reference-mm),
+    /// each cone 256 equal rays.
+    #[test]
+    fn a_boxs_hp_lost_is_independent_of_the_order_of_its_doses() {
+        let target = Entity::from_raw_u32(1).unwrap();
+        let cone = |total: f32| vec![total / 256.0; 256];
+        let lost = |amounts: &[f32]| -> u32 {
+            let mut shot = ShotDose::default();
+            for amount in amounts {
+                shot.add(target, *amount);
+            }
+            hp_of_units(shot.0[0].units)
+        };
+        let shot_sets: [Vec<Vec<f32>>; 4] = [
+            vec![cone(0.05), cone(0.1)],
+            vec![cone(0.05), cone(0.1), vec![0.0001; 7]],
+            vec![cone(0.03), cone(0.015), cone(0.005), vec![0.0123, 0.0456]],
+            vec![cone(0.149_999), vec![5.0e-7; 2]],
+        ];
+        for cones in shot_sets {
+            let forward: Vec<f32> = cones.iter().flatten().copied().collect();
+            let mut orders = vec![
+                forward.clone(),
+                forward.iter().rev().copied().collect(),
+                cones.iter().rev().flatten().copied().collect(),
+            ];
+            let mut ascending = forward.clone();
+            ascending.sort_by(f32::total_cmp);
+            orders.push(ascending.iter().rev().copied().collect());
+            orders.push(ascending);
+            let longest = cones.iter().map(Vec::len).max().unwrap();
+            orders.push(
+                (0..longest)
+                    .flat_map(|i| cones.iter().filter_map(move |cone| cone.get(i)))
+                    .copied()
+                    .collect(),
+            );
+            let mut shuffled = forward.clone();
+            let mut state = 0x9e37_79b9_u32;
+            for i in (1..shuffled.len()).rev() {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                shuffled.swap(i, state as usize % (i + 1));
+            }
+            orders.push(shuffled);
+            let expected = lost(&forward);
+            for order in &orders {
+                assert_eq!(lost(order), expected, "{cones:?}");
+            }
+        }
+        assert_eq!(
+            hp_of_units(3 * DOSE_UNITS_PER_HP / 2),
+            2,
+            "1.5 points, a tie, rounds away from zero"
+        );
+        assert_eq!(hp_of_units(3 * DOSE_UNITS_PER_HP / 2 - 1), 1);
     }
 
     /// Rounds the capability-law invariants are swept over. Fixture data, not a spec: the laws

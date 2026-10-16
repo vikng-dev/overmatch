@@ -27,7 +27,7 @@ use super::{
 };
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing, hp_points,
+    ShellPath, ShotDose, SpallMarks, TRANSIT_K, VolumeCrossing, dose_units, hp_of_units,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -173,55 +173,29 @@ fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, f32> {
 
 /// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
 /// bounces off and crossings of the tank's volumes and every walk that failed closed, in march
-/// order, each followed by [`PathStep::Dosed`] when it dosed one of the tank's components. A
-/// component's dose is the record's: a crossing's line through it, a bounce's shock off it, a
-/// spall cone direction entering it. A cone is read with the crossing that threw it, whichever
-/// tank that crossing touched.
+/// order, then one [`PathStep::Dosed`] when one of the tank's components lost HP to the shot
+/// ([`ShotDose::losses`], the shot's per-box tally rounded once).
 pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<PathStep> {
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
     };
-    let cones = world
-        .get::<SpallMarks>(shell)
-        .map_or(&[][..], |marks| &marks.cones[..]);
-    let dosed = |volume: Entity, dose: f32| {
-        dose > 0.0
-            && class_of(world, volume) == VolumeClass::Box
-            && tank.is_none_or(|tank| owned_by(world, volume, tank))
-    };
-    let mut thrown = cones.iter();
     let mut steps = Vec::new();
     for mark in &marks.log {
-        let (step, dosed_here) = match mark {
-            ArmourMark::Bounce { struck, shock, .. } => {
-                (Some(PathStep::Bounce), dosed(*struck, *shock))
-            }
+        let step = match mark {
+            ArmourMark::Bounce { .. } => Some(PathStep::Bounce),
             ArmourMark::Crossing {
                 entrance,
                 incoming,
                 volumes,
                 end,
-                cones,
                 ..
-            } => {
-                let field = thrown.by_ref().take(*cones).any(|cone| {
-                    cone.rays
-                        .iter()
-                        .flat_map(|ray| &ray.doses)
-                        .any(|&(volume, dose)| dosed(volume, dose))
-                });
-                let line = volumes
-                    .iter()
-                    .any(|crossed| dosed(crossed.volume, crossed.cost * TRANSIT_K));
-                let step = share(world, *entrance, *incoming, volumes, end, tank).map(|share| {
-                    PathStep::Crossing {
-                        perforated_armour: share.perforated_armour,
-                        rested: matches!(share.end, ShareEnd::Rest { .. }),
-                    }
-                });
-                (step, line || field)
-            }
-            ArmourMark::Failed => (Some(PathStep::Failed), false),
+            } => share(world, *entrance, *incoming, volumes, end, tank).map(|share| {
+                PathStep::Crossing {
+                    perforated_armour: share.perforated_armour,
+                    rested: matches!(share.end, ShareEnd::Rest { .. }),
+                }
+            }),
+            ArmourMark::Failed => Some(PathStep::Failed),
         };
         // A crossing has a step for the tank only where one of its volumes is the tank's.
         if let Some(step) = step
@@ -229,9 +203,16 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
         {
             steps.push(step);
         }
-        if dosed_here {
-            steps.push(PathStep::Dosed);
-        }
+    }
+    let dosed = world.get::<ShotDose>(shell).is_some_and(|dose| {
+        dose.losses().any(|(volume, lost)| {
+            lost > 0
+                && class_of(world, volume) == VolumeClass::Box
+                && tank.is_none_or(|tank| owned_by(world, volume, tank))
+        })
+    });
+    if dosed {
+        steps.push(PathStep::Dosed);
     }
     steps
 }
@@ -675,12 +656,12 @@ fn outcomes(
         if hp > 0 && after == 0 {
             let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
             landed.sort_by(|a, b| a.0.total_cmp(&b.0));
-            let mut total = 0.0;
+            let mut total = 0;
             let t = landed
                 .iter()
                 .find(|(_, dose)| {
-                    total += dose;
-                    hp_points(total) >= hp
+                    total += dose_units(*dose);
+                    hp_of_units(total) >= hp
                 })
                 .or(landed.last())
                 .map_or(0.0, |(t, _)| *t);
