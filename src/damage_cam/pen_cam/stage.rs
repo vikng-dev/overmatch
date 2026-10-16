@@ -1,8 +1,8 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
-//! face, every spall cone in a cool hue cut where its directions stopped ([`look::field`] in the
-//! corner, nested reach surfaces on the baseline glass), and each struck component's real mesh on
+//! face, every spall cone in a cool hue cut where its directions stopped ([`look::field`], nested
+//! reach surfaces cut by the plane in the slice), and each struck component's real mesh on
 //! the state scale ([`look::component`]):
 //! filled red from the bottom up to the share of its hit points lost, a dead one charcoal and
 //! hatched.
@@ -11,11 +11,9 @@
 //! Rebuilt when the corner's record or frame changes; animated every frame from the corner's clock
 //! alone, so a scrub lands on the same picture.
 //!
-//! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
-//! components the record names drawn in their own meshes), the plate slice (the tank's own
-//! materials, everything on the eye's side of a vertical plane through the chord dissolved away),
-//! and the outside view (the tank as built). In the corner, a glass look other than the baseline
-//! ([`GlassLook::Base`]) draws the hull, the components and the field as [`look`] chooses.
+//! Frames: the see-through hull (the base look, [`look`], in the corner and in the kill cam's
+//! lesson alike), the plate slice (the tank's own materials, everything on the eye's side of a
+//! vertical plane through the chord dissolved away), and the outside view (the tank as built).
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
@@ -36,13 +34,12 @@ use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, Sl
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, GlassLook, Library, Run, Settings};
+use super::{Corner, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
 const BACKGROUND: Color = Color::srgb_u8(0x0F, 0x13, 0x18);
-/// The glass hull's colour and the trail's.
-const GLASS: Color = Color::srgb_u8(0x9F, 0xB0, 0xC0);
+/// The trail's colour.
 const LINE: Color = Color::srgb_u8(0xFF, 0xF4, 0xE0);
 /// The trail's emission at full capability, for the bloom. TUNED.
 const LINE_GLOW: f32 = 1.8;
@@ -62,8 +59,8 @@ const FRAME_CALIBRES: f32 = 80.0;
 /// glow.
 const RING_THICKNESS: f32 = 0.12;
 const RING_GLOW: f32 = 2.0;
-/// The spall cone is drawn as this many nested copies of its reach surface, scaled about its
-/// origin, so its density reads as depth; the on-axis brightness of all of them together is
+/// In the slice, the spall cone is drawn as this many nested copies of its reach surface, scaled
+/// about its origin and cut by the plane, so its density reads as depth; the on-axis brightness of all of them together is
 /// [`CONE_PEAK`] at the top of the dose scale. TUNED, as are the cone's and the boxes' figures
 /// below.
 const CONE_SHELLS: usize = 4;
@@ -74,9 +71,10 @@ const CONE_GAIN: f32 = 4.0;
 /// of the nested shells' on-axis sum so the directions' own strengths, not the outline, carry the
 /// field's shape.
 const CONE_RIM_SHARE: f32 = 0.3;
-/// The baseline glass's field density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this
-/// fraction of the cone's longest reach. The base look draws the law's own `1/(r² + ε²)` instead
-/// ([`look::field`]).
+/// The slice's field density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this
+/// fraction of the cone's longest reach. Every other frame draws the law's own `1/(r² + ε²)`
+/// ([`look::field`]), whose entries and exits cancel only across the whole volume, so it takes no
+/// plane cut.
 const FIELD_FALLOFF_REACH: f32 = 0.3;
 /// The slice's cut face.
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
@@ -181,18 +179,16 @@ pub(super) struct StageKey {
     turn: usize,
     record: usize,
     kind: CornerKind,
-    /// The glass look in force: the base look in the corner, the baseline elsewhere.
-    look: GlassLook,
 }
 
 /// The built stage's shared state.
 #[derive(Resource, Default)]
 pub struct Stage {
     key: Option<StageKey>,
+    /// Whether the built stage holds materials made before a change they depend on (the masks).
+    stale: bool,
     /// The slice plane: unit normal toward the eye, and a point on it.
     plane: Option<(Vec3, Vec3)>,
-    glass: Handle<GlowMaterial>,
-    ghost: Handle<GlowMaterial>,
     slices: HashMap<AssetId<StandardMaterial>, Handle<SliceMaterial>>,
     camera: Option<Entity>,
     /// The hull the built stage is drawn under: its frame is the record's, its up the tank's.
@@ -200,16 +196,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    /// Rebuild on the next frame.
+    /// Rebuild at the next [`rebuild`].
     pub(super) fn invalidate(&mut self) {
-        self.key = None;
-    }
-
-    /// The glass look the built stage is drawn in.
-    pub(super) fn look(&self) -> GlassLook {
-        self.key
-            .as_ref()
-            .map_or(GlassLook::Baseline, |key| key.look)
+        self.stale = true;
     }
 }
 
@@ -233,7 +222,6 @@ pub fn spawn(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
-    mut glows: ResMut<Assets<GlowMaterial>>,
     mut stage: ResMut<Stage>,
 ) {
     let placeholder = images.add(Image::new_target_texture(
@@ -276,8 +264,6 @@ pub fn spawn(
             LightProfile::PenCamKey,
         ));
     }
-    stage.glass = glows.add(GlowMaterial::additive(GLASS.into(), 0.03).with_rim(0.03, 0.5, 3.0));
-    stage.ghost = glows.add(GlowMaterial::blended(GLASS.into(), 0.18));
     let shell: Handle<WorldAsset> =
         asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
     commands.spawn((
@@ -310,22 +296,30 @@ pub fn rebuild(
         turn: showing.turn,
         record: showing.record,
         kind: showing.kind,
-        look: if inset_active(&showing) {
-            GlassLook::Base
-        } else {
-            GlassLook::Baseline
-        },
     });
-    if key == stage.key {
+    if key == stage.key && !stage.stale {
         return;
     }
     let Some(hull) = views.hull[1] else {
         return;
     };
     stage.key = key.clone();
+    stage.stale = false;
     stage.hull = Some(hull);
     for entity in &items {
         commands.entity(entity).despawn();
+    }
+    // Every frame dresses the stage's meshes afresh; with none on show they hold no frame's
+    // materials, and so none of the masks.
+    for (entity, mesh, _) in &tank {
+        if mesh.root == ViewRoot::Stage {
+            commands.entity(entity).remove::<(
+                MeshMaterial3d<StandardMaterial>,
+                MeshMaterial3d<GlowMaterial>,
+                MeshMaterial3d<SliceMaterial>,
+                MeshMaterial3d<LookMaterial>,
+            )>();
+        }
     }
     let Some(key) = key else {
         return;
@@ -333,32 +327,18 @@ pub fn rebuild(
     let plan = &library.records[key.record].plan;
     let kind = key.kind;
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
-    let look = key.look;
     let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, MaskLayer)> =
         HashMap::new();
     let hull_mask = looks.add(look::hull_mask(&masks));
 
     // The tank, dressed for the frame.
-    let struck = |mesh: &ViewMesh| {
-        library.records[key.record]
-            .report
-            .plates
-            .iter()
-            .any(|plate| mesh.is(&plate.name))
-    };
     for (entity, mesh, handle) in &tank {
         if mesh.root != ViewRoot::Stage {
             continue;
         }
         let mut e = commands.entity(entity);
-        e.remove::<(
-            MeshMaterial3d<StandardMaterial>,
-            MeshMaterial3d<GlowMaterial>,
-            MeshMaterial3d<SliceMaterial>,
-            MeshMaterial3d<LookMaterial>,
-        )>();
         match kind {
-            CornerKind::Glass | CornerKind::Victim if look != GlassLook::Baseline => {
+            CornerKind::Glass | CornerKind::Victim => {
                 let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
                     let draw = look::hull(mesh.tier, &masks);
                     (looks.add(draw.material), draw.mask)
@@ -376,14 +356,6 @@ pub fn rebuild(
                     StageItem,
                     ChildOf(entity),
                 ));
-            }
-            CornerKind::Glass | CornerKind::Victim => {
-                let material = if struck(mesh) {
-                    stage.ghost.clone()
-                } else {
-                    stage.glass.clone()
-                };
-                e.insert((MeshMaterial3d(material), Visibility::Inherited));
             }
             CornerKind::Slice => {
                 let (normal, point) = stage.plane.unwrap_or((Vec3::Z, Vec3::ZERO));
@@ -435,16 +407,14 @@ pub fn rebuild(
         LookCtx {
             looks: &mut looks,
             masks: &masks,
-            look,
         },
     );
 }
 
-/// The glass look a record is drawn in, and what drawing it needs.
+/// What drawing a record in the base look needs.
 pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
     pub masks: &'a Masks,
-    pub look: GlassLook,
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
@@ -553,27 +523,22 @@ pub fn spawn_glass(
         );
     }
 
-    // Spall cones: the base look's field, or the baseline's nested reach surfaces and a muted outer
-    // one, clipped by the slice plane.
+    // Spall cones: the law's field, or in the slice nested reach surfaces and a muted outer one,
+    // clipped by the slice plane.
     for (index, cone) in plan.cones.iter().enumerate() {
         if matches!(kind, CornerKind::Ricochet) {
             break;
         }
         let mesh = meshes.add(reach_mesh(cone));
-        let styled = match kind {
-            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => {
-                // The field emerges through the round's own exit hole.
-                let cap = 0.5 * plan.calibre;
-                look::field(
-                    look_ctx.look,
-                    cap,
-                    cone.strength,
-                    field::profile(cone),
-                    look_ctx.masks,
-                )
-            }
-            _ => None,
-        };
+        // The field emerges through the round's own exit hole.
+        let styled = (kind != CornerKind::Slice).then(|| {
+            look::field(
+                0.5 * plan.calibre,
+                cone.strength,
+                field::profile(cone),
+                look_ctx.masks,
+            )
+        });
         if let Some(mut material) = styled {
             let mut e = commands.spawn((
                 Mesh3d(mesh.clone()),
@@ -1037,7 +1002,6 @@ pub fn animate(
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
     // Each field's footprint, in world space, where the base look marks it.
     if let Some(hull) = hull
-        && stage.look() == GlassLook::Base
         && matches!(
             kind,
             CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
@@ -2016,7 +1980,7 @@ mod tests {
         staged_on(index, kind, offset, super::super::Surface::Corner)
     }
 
-    /// [`staged`] on `surface`: the corner draws the base look, the world the baseline glass.
+    /// [`staged`] on `surface`: the corner, or the world as the kill cam's lesson draws it.
     fn staged_on(
         index: usize,
         kind: CornerKind,
@@ -2138,99 +2102,145 @@ mod tests {
         })
     }
 
-    /// Every record's spall field as the real [`rebuild`] draws it: on the world, every nested
-    /// shell falls off as 1/r² from the cone's origin, in a cool hue (more blue than red) off the
-    /// state scale, and the outer shell's view-angle glow is at most half the nested shells'
-    /// on-axis sum, so the directions' strengths shape the field; in the corner, the field is the
-    /// law's own density, capped within the round's exit hole, in the same hue, its gain one fixed
-    /// multiple of its cone's strength across every record. At least one record throws a cone.
+    /// Every record's spall field as the real [`rebuild`] draws it. In every frame but the slice,
+    /// the corner's and the kill cam's lesson on the world alike, it is the law's own density,
+    /// capped within the round's exit hole, in a cool hue (more blue than red) off the state scale,
+    /// its gain one fixed multiple of its cone's strength across every record. In the slice, every
+    /// nested shell falls off as 1/r² from the cone's origin in that hue, and the outer shell's
+    /// view-angle glow is at most half the nested shells' on-axis sum, so the directions' strengths
+    /// shape the field. At least one record throws a cone in each.
     #[test]
     fn the_field_is_cool_and_falls_off_from_its_origin() {
         let library = Library::load();
-        let mut fields = 0;
+        let (mut looked, mut sliced) = (0, 0);
         let mut gains: Vec<f32> = Vec::new();
         for (index, record) in library.records.iter().enumerate() {
             let kind = record.plan.kind;
             if record.plan.cones.is_empty() || kind == CornerKind::Ricochet {
                 continue;
             }
-            let (mut app, _) = staged(index, kind, Vec3::X);
-            let world = app.world_mut();
-            let corner: Vec<(usize, Handle<LookMaterial>)> = world
-                .query::<(&ConeShell, &MeshMaterial3d<LookMaterial>)>()
-                .iter(world)
-                .map(|(shell, m)| (shell.cone, m.0.clone()))
-                .collect();
-            let looked = matches!(
-                kind,
-                CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
-            );
-            let want = if looked { record.plan.cones.len() } else { 0 };
-            assert_eq!(corner.len(), want, "{}", record.stem);
-            for (cone, handle) in &corner {
-                let m = world
-                    .resource::<Assets<LookMaterial>>()
-                    .get(handle)
-                    .unwrap();
-                let color = m.params.color.truncate();
-                assert_eq!(
-                    m.params.volume.w,
-                    0.5 * record.plan.calibre,
-                    "{}: the density is capped within the exit hole",
-                    record.stem
-                );
-                gains.push(m.params.color.w / record.plan.cones[*cone].strength);
-                assert!(
-                    color.z > color.x && !on_state_scale(color),
-                    "{}",
-                    record.stem
-                );
-            }
-            let (mut app, _) = staged_on(index, kind, Vec3::X, super::super::Surface::World);
-            let mut shells = app
-                .world_mut()
-                .query::<(&ConeShell, &MeshMaterial3d<GlowMaterial>)>();
-            let world = app.world();
-            let glows = world.resource::<Assets<GlowMaterial>>();
-            for (cone, _) in record.plan.cones.iter().enumerate() {
-                let materials: Vec<(bool, &GlowMaterial)> = shells
+            for (kind, surface) in [
+                (kind, super::super::Surface::Corner),
+                (CornerKind::Glass, super::super::Surface::World),
+            ] {
+                let (mut app, _) = staged_on(index, kind, Vec3::X, surface);
+                let world = app.world_mut();
+                let fields: Vec<(usize, Handle<LookMaterial>)> = world
+                    .query::<(&ConeShell, &MeshMaterial3d<LookMaterial>)>()
                     .iter(world)
-                    .filter(|(shell, _)| shell.cone == cone)
-                    .map(|(shell, m)| (shell.rim, glows.get(&m.0).unwrap()))
+                    .map(|(shell, m)| (shell.cone, m.0.clone()))
                     .collect();
-                assert_eq!(materials.len(), CONE_SHELLS + 1, "{}", record.stem);
-                let mut interior = 0.0;
-                let mut rim = 0.0;
-                for (is_rim, m) in &materials {
-                    assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
+                let slice = kind == CornerKind::Slice;
+                let want = if slice { 0 } else { record.plan.cones.len() };
+                assert_eq!(fields.len(), want, "{} {surface:?}", record.stem);
+                for (cone, handle) in &fields {
+                    let m = world
+                        .resource::<Assets<LookMaterial>>()
+                        .get(handle)
+                        .unwrap();
                     let color = m.params.color.truncate();
-                    assert!(color.z > color.x, "{}: {color} is warm", record.stem);
-                    assert!(
-                        !on_state_scale(color),
-                        "{}: {color} is on the state scale",
+                    assert_eq!(
+                        m.params.volume.w,
+                        0.5 * record.plan.calibre,
+                        "{}: the density is capped within the exit hole",
                         record.stem
                     );
-                    if *is_rim {
-                        rim += m.params.rim.y;
-                    } else {
-                        interior += m.params.rim.x;
-                    }
+                    gains.push(m.params.color.w / record.plan.cones[*cone].strength);
+                    assert!(
+                        color.z > color.x && !on_state_scale(color),
+                        "{}",
+                        record.stem
+                    );
+                    looked += 1;
                 }
-                assert!(
-                    rim <= 0.5 * interior,
-                    "{}: rim {rim} against {interior}",
-                    record.stem
-                );
-                fields += 1;
+                let mut shells = world.query::<(&ConeShell, &MeshMaterial3d<GlowMaterial>)>();
+                let glows = world.resource::<Assets<GlowMaterial>>();
+                for (cone, _) in record.plan.cones.iter().enumerate() {
+                    let materials: Vec<(bool, &GlowMaterial)> = shells
+                        .iter(world)
+                        .filter(|(shell, _)| shell.cone == cone)
+                        .map(|(shell, m)| (shell.rim, glows.get(&m.0).unwrap()))
+                        .collect();
+                    let want = if slice { CONE_SHELLS + 1 } else { 0 };
+                    assert_eq!(materials.len(), want, "{} {surface:?}", record.stem);
+                    if !slice {
+                        continue;
+                    }
+                    let mut interior = 0.0;
+                    let mut rim = 0.0;
+                    for (is_rim, m) in &materials {
+                        assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
+                        let color = m.params.color.truncate();
+                        assert!(color.z > color.x, "{}: {color} is warm", record.stem);
+                        assert!(
+                            !on_state_scale(color),
+                            "{}: {color} is on the state scale",
+                            record.stem
+                        );
+                        if *is_rim {
+                            rim += m.params.rim.y;
+                        } else {
+                            interior += m.params.rim.x;
+                        }
+                    }
+                    assert!(
+                        rim <= 0.5 * interior,
+                        "{}: rim {rim} against {interior}",
+                        record.stem
+                    );
+                    sliced += 1;
+                }
             }
         }
-        assert!(fields > 0, "a record throws a cone");
+        assert!(
+            looked > 0 && sliced > 0,
+            "{looked} law fields, {sliced} sliced"
+        );
         assert!(
             gains
                 .iter()
                 .all(|gain| (gain / gains[0] - 1.0).abs() < 1e-5),
             "the field's gain is not linear in its strength: {gains:?}"
         );
+    }
+
+    /// The see-through hull is the base look wherever it is drawn: in the corner and in the kill
+    /// cam's lesson on the world, every one of the tank's meshes the real [`rebuild`] dresses wears
+    /// a base look material, none the additive glass, and has its copy in a mask.
+    #[test]
+    fn the_lesson_draws_the_base_look() {
+        let library = Library::load();
+        let index = library
+            .records
+            .iter()
+            .position(|record| record.plan.kind == CornerKind::Glass)
+            .expect("a record penetrates");
+        for surface in [super::super::Surface::Corner, super::super::Surface::World] {
+            let (mut app, placed) = staged_on(index, CornerKind::Glass, Vec3::X, surface);
+            let world = app.world_mut();
+            let copies: Vec<(Entity, VisualScope)> = world
+                .query_filtered::<(&ChildOf, &VisualScope), With<StageItem>>()
+                .iter(world)
+                .map(|(parent, scope)| (parent.parent(), *scope))
+                .collect();
+            for (entity, name, _) in &placed {
+                let world = app.world();
+                assert!(
+                    world.get::<MeshMaterial3d<LookMaterial>>(*entity).is_some()
+                        && world.get::<MeshMaterial3d<GlowMaterial>>(*entity).is_none(),
+                    "{surface:?} {name}: not the base look"
+                );
+                assert!(
+                    copies.iter().any(|(parent, scope)| parent == entity
+                        && [
+                            VisualScope::PEN_CAM_HULL_MASK,
+                            VisualScope::PEN_CAM_PART_MASK
+                        ]
+                        .contains(scope)),
+                    "{surface:?} {name}: no mask copy"
+                );
+            }
+        }
     }
 
     /// Every component the real [`rebuild`] draws, in the shooter's glass and outside view and in

@@ -1,15 +1,16 @@
-//! The corner's look ([`GlassLook::Base`]): the whole tank as one hueless grey surface one layer
-//! deep, its components a darker grey one layer deep among themselves, the struck ones on the state
-//! scale, and the spall field as light, drawn as the law defines it, with its footprint outlined on
-//! every surface it met. [`LookMaterial`] (`pen_cam_look.wgsl`) draws
-//! every element; [`hull`], [`component`] and [`field`] choose them, and the stage spawns what they
-//! return. The kill cam's lesson, drawn on the world where the corner's masks do not reach, keeps
-//! the stage's own additive glass ([`GlassLook::Baseline`]).
+//! The base look: the whole tank as one hueless grey surface one layer deep, its components a
+//! darker grey one layer deep among themselves, the struck ones on the state scale, and the spall
+//! field as light, drawn as the law defines it, with its footprint outlined on every surface it
+//! met. It is the tank rendering of every x-ray view: the corner and the kill cam's lesson.
+//! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
+//! [`field`] choose them, and the stage spawns what they return.
 //!
-//! The stacking is cut by two offscreen masks drawn from the corner camera's own pose before it:
-//! the hull mask (each pixel's nearest hull surface: view normal and distance) and the part mask
-//! (each pixel's nearest component surface). A surface draws only where its fragment is its mask's
-//! nearest, and its edges come from that mask.
+//! The stacking is cut by two offscreen masks drawn from the viewing camera's own pose, lens and
+//! size before it: the hull mask (each pixel's nearest hull surface: view normal and distance) and
+//! the part mask (each pixel's nearest component surface). A surface draws only where its fragment
+//! is its mask's nearest, and its edges come from that mask. The masks hold the stage's copies
+//! alone, never the battlefield, so over the world the base surface composites by straight alpha
+//! on whatever the viewer drew behind it, under the world's own depth.
 //!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
@@ -19,13 +20,15 @@ use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, CompareFunction, ShaderType, TextureFormat};
 use bevy::shader::ShaderRef;
+use bevy::window::{PrimaryWindow, WindowRef};
 
-use super::GlassLook;
 use super::material::Blend;
 use super::plan::BoxPlan;
-use super::stage::StageCamera;
+use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
+use super::world::MainCamera;
+use super::{Corner, Surface};
 use crate::render_policy::CameraProfile;
 
 /// The field's brightness per unit of its column density `∫ ds / (r² + ε²)` (m⁻¹) at full level
@@ -229,16 +232,47 @@ impl Material for LookMaterial {
     }
 }
 
-/// The two mask images the mask cameras draw, at the corner image's size.
+/// The two mask images, and the camera they are drawn for. A set exists only while a frame that
+/// draws the base look's hull ([`needs_masks`]) is on show, and belongs to the one camera drawing
+/// the stage then: the corner's inset camera, or the main camera in the kill cam's lesson. The two
+/// never draw at once: [`Corner::showing`] holds one record on one [`Surface`], and a kill run
+/// opens no corner. Every mask camera names its viewer ([`MaskCamera`]); [`own`] makes and
+/// unmakes the set.
 #[derive(Resource, Default)]
 pub struct Masks {
     pub hull: Handle<Image>,
     pub part: Handle<Image>,
-    size: UVec2,
+    owner: Option<MaskOwner>,
 }
 
+/// The camera a mask set is drawn for, at that camera's physical viewport size and scale factor,
+/// and the set's two cameras.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MaskOwner {
+    viewer: Entity,
+    size: UVec2,
+    scale: f32,
+    cameras: [Entity; 2],
+}
+
+impl Masks {
+    /// The camera the masks are drawn for, if a set exists.
+    #[cfg(test)]
+    pub(super) fn viewer(&self) -> Option<Entity> {
+        self.owner.map(|owner| owner.viewer)
+    }
+}
+
+/// A mask camera, drawing its mask from `viewer`'s pose and lens.
 #[derive(Component)]
-pub(super) struct MaskCamera;
+pub(super) struct MaskCamera {
+    pub(super) viewer: Entity,
+}
+
+/// Whether frame `kind` draws the base look's hull, the one element that reads the masks.
+fn needs_masks(kind: CornerKind) -> bool {
+    matches!(kind, CornerKind::Glass | CornerKind::Victim)
+}
 
 fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
     images.add(Image::new_target_texture(
@@ -249,92 +283,163 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
     ))
 }
 
-pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let size = UVec2::new(16, 10);
-    let masks = Masks {
-        hull: mask_image(&mut images, size),
-        part: mask_image(&mut images, size),
-        size,
-    };
-    for (order, image, profile) in [
-        (-3, masks.hull.clone(), CameraProfile::PenCamHullMask),
-        (-2, masks.part.clone(), CameraProfile::PenCamPartMask),
-    ] {
-        commands.spawn((
-            Camera3d::default(),
-            Camera {
-                order,
-                is_active: false,
-                clear_color: ClearColorConfig::Custom(Color::NONE),
-                ..default()
-            },
-            RenderTarget::Image(image.into()),
-            Hdr,
-            Tonemapping::None,
-            DebandDither::Disabled,
-            Msaa::Off,
-            Projection::Perspective(default()),
-            Transform::IDENTITY,
-            profile,
-            MaskCamera,
-        ));
-    }
-    commands.insert_resource(masks);
-}
-
-/// Keep the masks at the corner image's size; a new size rebuilds the stage, whose materials hold
-/// the mask handles.
-pub fn layout(
-    corner_size: Option<Res<super::hud::CornerImages>>,
+/// Give the masks to the camera that draws the stage this frame, at the physical viewport size
+/// and scale factor it renders at this frame ([`viewport_now`]), and take them away when no frame
+/// that needs them is on show: the old set's cameras are despawned and its images removed. A new
+/// viewer, size or scale makes a new set and rebuilds the stage, whose materials hold the images.
+/// The set's cameras draw just before their viewer. Runs after every system that retargets or
+/// resizes a viewer this frame. A viewer whose target cannot be resolved gets no set until it is.
+#[allow(clippy::too_many_arguments)]
+pub fn own(
+    mut commands: Commands,
+    corner: Res<Corner>,
+    inset: Query<Entity, With<StageCamera>>,
+    main: Query<Entity, With<MainCamera>>,
+    cameras: Query<(&Camera, &RenderTarget), Without<MaskCamera>>,
+    windows: Query<&Window>,
+    primary: Query<Entity, With<PrimaryWindow>>,
     mut masks: ResMut<Masks>,
     mut images: ResMut<Assets<Image>>,
-    mut cameras: Query<(&mut RenderTarget, &CameraProfile), With<MaskCamera>>,
-    mut stage: ResMut<super::stage::Stage>,
+    mut stage: ResMut<Stage>,
 ) {
-    let Some(corner_size) = corner_size else {
-        return;
-    };
-    let (size, scale) = corner_size.size_and_scale();
-    if size == masks.size || size.x == 0 {
+    let viewer = corner
+        .showing
+        .filter(|showing| needs_masks(showing.kind))
+        .and_then(|showing| match showing.surface {
+            Surface::Corner => inset.single().ok(),
+            Surface::World => main.single().ok(),
+        });
+    let want = viewer.and_then(|viewer| {
+        let (camera, target) = cameras.get(viewer).ok()?;
+        let (size, scale) = viewport_now(camera, target, &windows, primary.single().ok(), &images)?;
+        Some((viewer, size.max(UVec2::ONE), scale, camera.order))
+    });
+    let have = masks.owner.map(|o| (o.viewer, o.size, o.scale));
+    if want.map(|(viewer, size, scale, _)| (viewer, size, scale)) == have {
         return;
     }
-    masks.size = size;
-    masks.hull = mask_image(&mut images, size);
-    masks.part = mask_image(&mut images, size);
-    for (mut target, profile) in &mut cameras {
-        let handle = match profile {
-            CameraProfile::PenCamHullMask => masks.hull.clone(),
-            _ => masks.part.clone(),
-        };
-        *target = RenderTarget::Image(ImageRenderTarget {
-            handle,
-            scale_factor: scale,
-        });
+    if let Some(old) = masks.owner.take() {
+        for camera in old.cameras {
+            commands.entity(camera).despawn();
+        }
+        images.remove(masks.hull.id());
+        images.remove(masks.part.id());
+        masks.hull = Handle::default();
+        masks.part = Handle::default();
     }
     stage.invalidate();
-}
-
-/// Pose the mask cameras as the corner camera; run them only while the base look shows.
-pub fn sync(
-    stage: Res<super::stage::Stage>,
-    main: Query<(&Camera, &Transform, &Projection), (With<StageCamera>, Without<MaskCamera>)>,
-    mut followers: Query<
-        (&mut Camera, &mut Transform, &mut Projection),
-        (With<MaskCamera>, Without<StageCamera>),
-    >,
-) {
-    let Ok((camera, transform, projection)) = main.single() else {
+    let Some((viewer, size, scale, order)) = want else {
         return;
     };
-    let active = camera.is_active && stage.look() == GlassLook::Base;
-    for (mut follower, mut pose, mut lens) in &mut followers {
-        if follower.is_active != active {
-            follower.is_active = active;
+    masks.hull = mask_image(&mut images, size);
+    masks.part = mask_image(&mut images, size);
+    let mut cameras = [Entity::PLACEHOLDER; 2];
+    for (index, (image, profile)) in [
+        (masks.hull.clone(), CameraProfile::PenCamHullMask),
+        (masks.part.clone(), CameraProfile::PenCamPartMask),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        cameras[index] = commands
+            .spawn((
+                Camera3d::default(),
+                Camera {
+                    order: order - 2 + index as isize,
+                    clear_color: ClearColorConfig::Custom(Color::NONE),
+                    ..default()
+                },
+                RenderTarget::Image(ImageRenderTarget {
+                    handle: image,
+                    scale_factor: scale,
+                }),
+                Hdr,
+                Tonemapping::None,
+                DebandDither::Disabled,
+                Msaa::Off,
+                Projection::Perspective(default()),
+                Transform::IDENTITY,
+                profile,
+                MaskCamera { viewer },
+            ))
+            .id();
+    }
+    masks.owner = Some(MaskOwner {
+        viewer,
+        size,
+        scale,
+        cameras,
+    });
+}
+
+/// The physical viewport size and scale factor `camera` renders at this frame, read from the
+/// window or image `target` names as it stands now, as bevy's camera system will resolve them
+/// later in the frame: a window's physical size and scale factor, an image's size and the
+/// target's scale factor, a viewport clamped to the target. The camera's own cached values lag a
+/// retarget or resize by a frame; they are read only for a texture-view or colourless target.
+fn viewport_now(
+    camera: &Camera,
+    target: &RenderTarget,
+    windows: &Query<&Window>,
+    primary: Option<Entity>,
+    images: &Assets<Image>,
+) -> Option<(UVec2, f32)> {
+    let (size, scale) = match target {
+        RenderTarget::Window(window) => {
+            let entity = match window {
+                WindowRef::Primary => primary?,
+                WindowRef::Entity(entity) => *entity,
+            };
+            let window = windows.get(entity).ok()?;
+            (window.physical_size(), window.resolution.scale_factor())
         }
-        if *pose != *transform {
-            *pose = *transform;
+        RenderTarget::Image(image) => (images.get(&image.handle)?.size(), image.scale_factor),
+        RenderTarget::TextureView(_) | RenderTarget::None { .. } => {
+            return Some((
+                camera.physical_viewport_size()?,
+                camera.target_scaling_factor()?,
+            ));
         }
-        *lens = projection.clone();
+    };
+    let size = camera
+        .viewport
+        .as_ref()
+        .map_or(size, |viewport| viewport.physical_size.min(size));
+    Some((size, scale))
+}
+
+/// Give each mask camera its viewer's lens. Runs before bevy derives the cameras' projection
+/// matrices ([`bevy::camera::CameraUpdateSystems`]), so a mask draws with the lens its viewer has
+/// this frame; bevy then fits the aspect to the mask's own target, the viewer's size. Every
+/// system that writes a viewer's [`Projection`] must run before this one, or the mask draws last
+/// frame's lens.
+pub fn follow_lens(
+    viewers: Query<&Projection, Without<MaskCamera>>,
+    mut followers: Query<(&MaskCamera, &mut Projection)>,
+) {
+    for (follower, mut lens) in &mut followers {
+        if let Ok(projection) = viewers.get(follower.viewer) {
+            *lens = projection.clone();
+        }
+    }
+}
+
+/// Pose each mask camera as its viewer, from the viewer's `GlobalTransform`. Runs after transform
+/// propagation and before the frusta are taken. Every system that sets a viewer's final pose,
+/// its `Transform` before propagation or its `GlobalTransform` after, must run before this one,
+/// or the mask draws last frame's pose.
+pub fn follow_pose(
+    viewers: Query<&GlobalTransform, Without<MaskCamera>>,
+    mut followers: Query<(&MaskCamera, &mut Transform, &mut GlobalTransform)>,
+) {
+    for (follower, mut pose, mut global) in &mut followers {
+        let Ok(viewer) = viewers.get(follower.viewer) else {
+            continue;
+        };
+        if *global != *viewer {
+            *global = *viewer;
+            *pose = viewer.compute_transform();
+        }
     }
 }
 
@@ -401,8 +506,7 @@ pub enum MaskLayer {
     Part,
 }
 
-/// How a hull mesh of tier `tier` is drawn in the base look; the baseline's glass is the stage's
-/// own.
+/// How a hull mesh of tier `tier` is drawn in the base look.
 pub fn hull(tier: Tier, masks: &Masks) -> HullDraw {
     match tier {
         Tier::Component => HullDraw {
@@ -498,22 +602,12 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<LookMat
     condition(b, kind).map(|condition| state(condition, masks))
 }
 
-/// The field in `look` as the law defines it, `None` in the baseline, which draws the stage's own
-/// nested shells: a cone from its origin, density `profile × 1/(r² + ε²)`, cut where its
+/// The field as the law defines it: a cone from its origin, density `profile × 1/(r² + ε²)`, cut where its
 /// directions stopped (the reach surface the mesh it wears is, wound outward), summed along the
 /// eye ray as light. `cap` is the radius ε (m) the density is capped within at the origin,
 /// `strength` the cone's on-axis strength (ref-mm), drawn linearly ([`timeline::field_level`]), and
 /// `profile` its profile law in the mesh's frame ([`super::field::profile`]). Drawn over everything.
-pub fn field(
-    look: GlassLook,
-    cap: f32,
-    strength: f32,
-    profile: Vec4,
-    masks: &Masks,
-) -> Option<LookMaterial> {
-    if look == GlassLook::Baseline {
-        return None;
-    }
+pub fn field(cap: f32, strength: f32, profile: Vec4, masks: &Masks) -> LookMaterial {
     let mut m = LookMaterial::new(
         MODE_VOLUME,
         timeline::FIELD.into(),
@@ -523,7 +617,7 @@ pub fn field(
     );
     m.params.volume.w = cap;
     m.params.profile = profile;
-    Some(m)
+    m
 }
 
 #[cfg(test)]
@@ -591,7 +685,7 @@ mod tests {
         let base = looks.add(base(&masks));
         let component = looks.add(component_base(&masks));
         let fill = looks.add(state(Condition::Damaged(0.5), &masks));
-        let shell = looks.add(field(GlassLook::Base, 0.04, 5.0, Vec4::W, &masks).unwrap());
+        let shell = looks.add(field(0.04, 5.0, Vec4::W, &masks));
         let print = FieldPrint {
             origin: Vec3::ZERO,
             axis: Vec3::NEG_Z,
@@ -640,20 +734,12 @@ mod tests {
         }
     }
 
-    /// The field's brightness is linear in its strength through one fixed gain, and the baseline
-    /// draws its own.
+    /// The field's brightness is linear in its strength through one fixed gain.
     #[test]
     fn the_field_is_linear_in_its_strength() {
         let masks = Masks::default();
-        let gain = |strength: f32| {
-            field(GlassLook::Base, 0.04, strength, Vec4::W, &masks)
-                .unwrap()
-                .params
-                .color
-                .w
-        };
+        let gain = |strength: f32| field(0.04, strength, Vec4::W, &masks).params.color.w;
         assert_eq!(gain(0.0), 0.0);
         assert!((gain(7.0) / gain(1.0) - 7.0).abs() < 1e-5);
-        assert!(field(GlassLook::Baseline, 0.04, 1.0, Vec4::W, &masks).is_none());
     }
 }
