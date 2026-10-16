@@ -3,13 +3,13 @@
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, every spall cone in a cool hue cut where its directions stopped ([`look::field`] in the
 //! corner, nested reach surfaces on the baseline glass), and each struck component's real mesh on
-//! the state scale ([`look::state`]):
+//! the state scale ([`look::component`]):
 //! filled red from the bottom up to the share of its hit points lost, a dead one charcoal and
 //! hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
 //! frame. A cone's front runs from its origin at the shell's own on-screen speed.
-//! Rebuilt when the corner's record or a look setting changes; animated every frame from the
-//! corner's clock alone, so a scrub lands on the same picture.
+//! Rebuilt when the corner's record or frame changes; animated every frame from the corner's clock
+//! alone, so a scrub lands on the same picture.
 //!
 //! Frames: the see-through hull (additive rim-lit glass, the struck plates a neutral ghost, the
 //! components the record names drawn in their own meshes), the plate slice (the tank's own
@@ -181,7 +181,6 @@ pub(super) struct StageKey {
     turn: usize,
     record: usize,
     kind: CornerKind,
-    settings: Settings,
     /// The glass look in force: the base look in the corner, the baseline elsewhere.
     look: GlassLook,
 }
@@ -290,11 +289,10 @@ pub fn spawn(
     ));
 }
 
-/// Rebuild the stage when the corner's record, frame or a look setting changes.
+/// Rebuild the stage when the corner's record or frame changes.
 pub fn rebuild(
     mut commands: Commands,
     corner: Res<Corner>,
-    settings: Res<Settings>,
     library: Res<Library>,
     mut stage: ResMut<Stage>,
     items: Query<Entity, With<StageItem>>,
@@ -312,7 +310,6 @@ pub fn rebuild(
         turn: showing.turn,
         record: showing.record,
         kind: showing.kind,
-        settings: settings.clone(),
         look: if inset_active(&showing) {
             GlassLook::Base
         } else {
@@ -363,8 +360,7 @@ pub fn rebuild(
         match kind {
             CornerKind::Glass | CornerKind::Victim if look != GlassLook::Baseline => {
                 let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
-                    let draw =
-                        look::hull(look, mesh.tier, &masks).expect("the base look draws the hull");
+                    let draw = look::hull(mesh.tier, &masks);
                     (looks.add(draw.material), draw.mask)
                 });
                 let (material, mask) = (entry.0.clone(), entry.1);
@@ -452,11 +448,11 @@ pub struct LookCtx<'a> {
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
-/// components on the state scale. Every element but the tints is spawned under `hull`, an entity whose frame is the
-/// record's (the struck hull's); each tint is a copy of one of `components`, the tank's own meshes
-/// of the components the record names, spawned under that mesh. `clip` is the slice plane (unit
-/// normal toward the eye, a point on it) the cones are cut by. Everything spawned is a
-/// [`StageItem`], hidden until [`animate`] places it.
+/// components on the state scale. Every element but the tints is spawned under `hull`, an entity
+/// whose frame is the record's (the struck hull's); each tint is a copy of one of `components`, the
+/// tank's own meshes of the components the record names, spawned under that mesh. `clip` is the
+/// slice plane (unit normal toward the eye, a point on it) the cones are cut by. Everything spawned
+/// is a [`StageItem`], hidden until [`animate`] places it.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_glass(
     commands: &mut Commands,
@@ -627,11 +623,7 @@ pub fn spawn_glass(
     for component in components {
         let index = component.index;
         let b = &plan.boxes[index];
-        let Some(look::ComponentDraw {
-            mut fill,
-            outline: (color, width),
-        }) = look::component(b, kind, look_ctx.masks)
-        else {
+        let Some(mut fill) = look::component(b, kind, look_ctx.masks) else {
             continue;
         };
         use bevy::camera::primitives::MeshAabb;
@@ -639,7 +631,8 @@ pub fn spawn_glass(
             .get(&component.mesh)
             .and_then(|mesh| mesh.compute_aabb())
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
-        let mut outline = OutlineMaterial::new(color, width, center);
+        let mut outline =
+            OutlineMaterial::new(timeline::STATE_RED.into(), look::STATE_OUTLINE_PX, center);
         fill.set_fade(0.0);
         outline.set_fade(0.0);
         let tint = || {
@@ -663,7 +656,7 @@ pub fn spawn_glass(
 /// outer shell (`rim`) adds only a view-angle edge at [`CONE_RIM_SHARE`] of their on-axis sum. Both
 /// fall off as 1/r² from the origin, in [`timeline::FIELD`]'s cool hue.
 fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
-    let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+    let reach = cone.max_reach();
     let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
     let interior = CONE_GAIN * CONE_PEAK * timeline::field_level(cone.strength);
     let (material, peak) = if rim {
@@ -799,7 +792,7 @@ fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
 pub(super) fn settled(plan: &Plan, kind: CornerKind) -> f32 {
     let speed = travel_speed(plan, kind);
     let cones = plan.cones.iter().enumerate().map(|(index, cone)| {
-        let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+        let reach = cone.max_reach();
         cone_start(plan, kind, index, false) + reach / speed
     });
     let boxes = plan
@@ -913,7 +906,6 @@ pub fn animate(
     mut boxes: Query<
         (
             &BoxTint,
-            Option<&MeshMaterial3d<GlowMaterial>>,
             Option<&MeshMaterial3d<OutlineMaterial>>,
             Option<&MeshMaterial3d<LookMaterial>>,
             &mut Visibility,
@@ -1059,7 +1051,7 @@ pub fn animate(
             .map(|(index, cone)| {
                 let axis = linear * cone.axis;
                 let scale = axis.length();
-                let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+                let reach = cone.max_reach();
                 let front = if reduce {
                     if c >= cone_start(plan, kind, index, true) {
                         reach
@@ -1089,7 +1081,7 @@ pub fn animate(
             .collect();
         look::set_footprints(&mut looks, &prints);
     }
-    for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
+    for (tint, outline, look_material, mut visibility) in &mut boxes {
         let b = &plan.boxes[tint.index];
         let start = box_start(plan, kind, b, reduce);
         let fill = if reduce {
@@ -1097,9 +1089,6 @@ pub fn animate(
         } else {
             timeline::ease_enter(timeline::progress(c, start, timeline::BOX_FILL_S))
         };
-        if let Some(mut m) = glow.and_then(|m| glows.get_mut(&m.0)) {
-            m.set_fade(fill);
-        }
         if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
             m.set_fade(fill);
         }
@@ -1121,7 +1110,7 @@ pub fn animate(
     if settings.axis_line {
         for (index, cone) in plan.cones.iter().enumerate() {
             if c >= cone_start(plan, kind, index, reduce) {
-                let reach = cone.rays.iter().map(|r| r.reach).fold(0.0, f32::max);
+                let reach = cone.max_reach();
                 gizmos.line(
                     cone.origin,
                     cone.origin + cone.axis * reach,
@@ -2078,7 +2067,6 @@ mod tests {
         views.stage = root;
         views.hull[1] = Some(hull);
         app.insert_resource(library)
-            .insert_resource(Settings::default())
             .insert_resource(Corner {
                 showing: Some(super::super::Showing {
                     record: index,

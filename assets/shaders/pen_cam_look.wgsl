@@ -25,11 +25,11 @@
 //                 position, so the entries and exits cancel outside the volume; both terms integrate
 //                 in closed form. Additive, unoccluded.
 //
-// Base and state surfaces carry the spall fields' footprint (`foot.x`: 0 none, 1 outline) in
-// `foot_color`: for each of the fields (`fields.x`, `prints`), a surface point facing the origin,
-// inside the cone, behind its front and within the reach of the field's recorded direction (`rays`)
-// nearest it is inside the footprint. The outline is the band `foot.y` px wide where the angle from
-// the axis crosses the half-angle, at the field's level (its third lane's `z`) of `foot_color.a`.
+// Base and state surfaces carry the spall fields' footprint in `foot_color`: for each of the fields
+// (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
+// front and within the reach of the field's recorded direction (`rays`) nearest it is inside the
+// footprint. The outline is the band `foot.x` px wide where the angle from the axis crosses the
+// half-angle, at the field's level (its third lane's `z`) of `foot_color.a`.
 //
 // Output: straight `rgb, a`; additive (volume) `rgb` with alpha 0.
 
@@ -54,7 +54,7 @@ struct LookParams {
     span: vec4<f32>,
     // rgb: the unfilled remainder's colour.
     rest: vec4<f32>,
-    // x: footprint on (1); y: outline width (px).
+    // x: outline width (px).
     foot: vec4<f32>,
     // rgb: the footprint's colour; a: its opacity at full level.
     foot_color: vec4<f32>,
@@ -123,9 +123,6 @@ fn mask_at(tex: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
 // The footprint's outline at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`):
 // the level of the strongest field whose outline passes there, 0 where none does.
 fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 {
-    if look.foot.x < 0.5 {
-        return 0.0;
-    }
     var mark = 0.0;
     for (var i = 0; i < 4; i = i + 1) {
         if f32(i) >= look.fields.x {
@@ -161,7 +158,7 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 
         // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
         let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
         let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
-        if abs(angle - at.w) < 0.5 * look.foot.y * per_px {
+        if abs(angle - at.w) < 0.5 * look.foot.x * per_px {
             mark = max(mark, look.prints[3 * field + 2].z);
         }
     }

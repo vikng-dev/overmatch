@@ -1,7 +1,7 @@
 // The pen cam's stage material (`src/damage_cam/pen_cam/material.rs`, `GlowMaterial`): one flat
 // colour, an optional view-angle rim, optional vertex colour, an optional clip plane, an optional
-// 1/r² falloff from the mesh's origin and an optional front that holds every vertex within a radius of that origin. Unlit: everything it draws is a
-// diagram over the record.
+// 1/r² falloff from the mesh's origin and an optional front that holds every vertex within a
+// radius of that origin. Unlit: everything it draws is a diagram over the record.
 //
 // Output: additive (`flags.z = 1`) writes `rgb` with alpha 0 into the premultiplied pipeline
 // `AlphaMode::Add` selects, so overlap order never changes the sum; blended (`flags.z = 0`) writes

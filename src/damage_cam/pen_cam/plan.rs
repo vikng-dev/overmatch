@@ -182,6 +182,13 @@ pub struct Cone {
     pub rays: Vec<Ray>,
 }
 
+impl Cone {
+    /// Its longest direction's reach (m); 0 with no directions.
+    pub fn max_reach(&self) -> f32 {
+        self.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max)
+    }
+}
+
 /// One direction of a cone: unit direction, reach (m) and the strength fraction `s(θ)/S` it was
 /// thrown with.
 pub struct Ray {

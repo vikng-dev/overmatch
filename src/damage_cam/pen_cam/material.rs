@@ -19,19 +19,19 @@ pub struct GlowParams {
     pub field: Vec4,
 }
 
-/// How a [`GlowMaterial`] composites.
+/// How a [`GlowMaterial`] or a [`LookMaterial`](super::look::LookMaterial) composites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blend {
     /// Commutative, so it needs no sort order.
     Additive,
     /// Straight alpha.
     Blended,
-    /// Writes depth: what an inverted-hull outline needs in front of it.
+    /// Writes depth: what an inverted-hull outline needs in front of it, and the masks.
     Opaque,
 }
 
-/// One flat colour, optionally rim-lit by view angle, vertex-coloured, clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from
-/// it; both faces drawn.
+/// One flat colour, optionally rim-lit by view angle, vertex-coloured, clipped by a plane, faded
+/// by distance from the mesh's origin or cut off at a radius from it; both faces drawn.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
     #[uniform(0)]
@@ -150,9 +150,8 @@ impl Material for GlowMaterial {
         _key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
-        // A component's tint is a copy of the mesh it covers, at the same depth; the bias (toward
-        // the eye under bevy's reverse Z) settles the tie in the tint's favour, opaque tank
-        // materials included.
+        // Toward the eye under bevy's reverse Z: a glow wins a depth tie with the surface it lies
+        // on.
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             depth.bias.constant = 8;
             depth.bias.slope_scale = 1.0;

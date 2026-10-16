@@ -34,7 +34,7 @@ const FIELD_GAIN: f32 = 1.5;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
-const STATE_OUTLINE_PX: f32 = 2.0;
+pub const STATE_OUTLINE_PX: f32 = 2.0;
 const STATE_CONTRAST: f32 = 0.3;
 const STATE_LINE_PX: f32 = 1.5;
 const STATE_HATCH_PX: f32 = 7.0;
@@ -54,14 +54,14 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 const BASE_COMPONENT_ALPHA: f32 = 0.55;
 const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
 const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
-/// The field footprint's outline width (px) and its opacity at full level, in the field's hue; its
-/// outline needs no fewer directions than the record holds, so [`FOOTPRINT_RAYS`] covers the
-/// shipped shape's.
+/// The field footprint's outline width (px) and its opacity at full level, in the field's hue.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_ALPHA: f32 = 0.9;
-/// The most spall fields a footprint marks, and the most directions of each it reads.
-pub const FOOTPRINT_FIELDS: usize = 4;
-pub const FOOTPRINT_RAYS: usize = 256;
+/// The most spall fields a footprint marks, and the most directions of each it reads; the arrays
+/// of `pen_cam_look.wgsl` hold these counts. [`set_footprints`] drops what lies past them, so every
+/// record's cones and directions must fit them (`every_record_fits_the_footprint`).
+const FOOTPRINT_FIELDS: usize = 4;
+const FOOTPRINT_RAYS: usize = 256;
 /// A surface counts as met by a direction up to this share past its reach, and this far (m): the
 /// record ends a direction on the surface that stopped it.
 const FOOTPRINT_REACH_SLACK: (f32, f32) = (1.03, 0.03);
@@ -174,8 +174,8 @@ impl LookMaterial {
     pub fn set_fill_span(&mut self, up: Vec3, heights: Option<(f32, f32)>) {
         self.params.state = up.extend(self.params.state.w);
         self.params.span = match heights {
-            Some((lo, hi)) => Vec4::new(lo, hi, 1.0, STATE_LINE_PX),
-            None => Vec4::new(0.0, 0.0, 0.0, STATE_LINE_PX),
+            Some((lo, hi)) => Vec4::new(lo, hi, 1.0, self.params.span.w),
+            None => Vec4::new(0.0, 0.0, 0.0, self.params.span.w),
         };
     }
 }
@@ -215,7 +215,7 @@ impl Material for LookMaterial {
         let key = key.bind_group_data;
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             if key.bias {
-                // Toward the eye under bevy's reverse Z, as `GlowMaterial`'s.
+                // Toward the eye under bevy's reverse Z.
                 depth.bias.constant = 8;
                 depth.bias.slope_scale = 1.0;
             }
@@ -379,7 +379,7 @@ pub fn set_footprints(looks: &mut Assets<LookMaterial>, prints: &[FieldPrint]) {
         if mode != MODE_BASE && mode != MODE_STATE {
             continue;
         }
-        material.params.foot = Vec4::new(1.0, FOOTPRINT_LINE_PX, 0.0, 0.0);
+        material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, 0.0, 0.0, 0.0);
         material.params.foot_color = Vec4::new(hue.red, hue.green, hue.blue, FOOTPRINT_ALPHA);
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
@@ -401,19 +401,18 @@ pub enum MaskLayer {
     Part,
 }
 
-/// How a hull mesh of tier `tier` is drawn in `look`; `None` for the baseline, which the stage
-/// draws itself.
-pub fn hull(look: GlassLook, tier: Tier, masks: &Masks) -> Option<HullDraw> {
-    match (look, tier) {
-        (GlassLook::Baseline, _) => None,
-        (GlassLook::Base, Tier::Component) => Some(HullDraw {
+/// How a hull mesh of tier `tier` is drawn in the base look; the baseline's glass is the stage's
+/// own.
+pub fn hull(tier: Tier, masks: &Masks) -> HullDraw {
+    match tier {
+        Tier::Component => HullDraw {
             material: component_base(masks),
             mask: MaskLayer::Part,
-        }),
-        (GlassLook::Base, _) => Some(HullDraw {
+        },
+        _ => HullDraw {
             material: base(masks),
             mask: MaskLayer::Hull,
-        }),
+        },
     }
 }
 
@@ -451,18 +450,11 @@ pub fn hull_mask(masks: &Masks) -> LookMaterial {
     LookMaterial::new(MODE_MASK, LinearRgba::BLACK, 1.0, Blend::Opaque, masks)
 }
 
-/// How a struck component is drawn: its state fill, and an inverted-hull outline of a colour and
-/// width (physical px).
-pub struct ComponentDraw {
-    pub fill: LookMaterial,
-    pub outline: (LinearRgba, f32),
-}
-
 /// Component `b`'s place on the state scale in frame `kind`, `None` where it is not drawn: the
 /// shooter's views (the glass and the outside view) show what this shot did to a component it
 /// took HP from, the share of the HP points it had at the shot; the victim's glass shows its own
 /// tank's state, the share of each pool gone.
-pub fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
+fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
     match kind {
         CornerKind::Glass | CornerKind::Damaged if b.struck() => {
             Condition::of(b.lost, timeline::hp_share(b.lost_hp, b.hp))
@@ -476,7 +468,7 @@ pub fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
 /// red from the bottom up, the rest in the untouched grey, a crisp lighter line between them; a
 /// dead component charcoal under a red hatch. Its frame is set each frame
 /// ([`LookMaterial::set_fill_span`]) and its fade raises the fill.
-pub fn state(condition: Condition, masks: &Masks) -> LookMaterial {
+fn state(condition: Condition, masks: &Masks) -> LookMaterial {
     let (color, hatch) = match condition {
         Condition::Damaged(_) => (timeline::STATE_RED, false),
         Condition::Dead => (timeline::STATE_DEAD, true),
@@ -500,18 +492,10 @@ pub fn state(condition: Condition, masks: &Masks) -> LookMaterial {
     m
 }
 
-/// How component `b` is drawn in frame `kind`, in any look: on the state scale ([`state`]) under a
-/// red outline; `None` where it is not drawn.
-pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<ComponentDraw> {
-    condition(b, kind).map(|condition| draw(condition, masks))
-}
-
-/// How a component in `condition` is drawn.
-fn draw(condition: Condition, masks: &Masks) -> ComponentDraw {
-    ComponentDraw {
-        fill: state(condition, masks),
-        outline: (timeline::STATE_RED.into(), STATE_OUTLINE_PX),
-    }
+/// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]), drawn under a
+/// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn.
+pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<LookMaterial> {
+    condition(b, kind).map(|condition| state(condition, masks))
 }
 
 /// The field in `look` as the law defines it, `None` in the baseline, which draws the stage's own
@@ -547,7 +531,7 @@ mod tests {
     use super::*;
 
     fn base_draw(tier: Tier) -> HullDraw {
-        hull(GlassLook::Base, tier, &Masks::default()).expect("the base draws every tier")
+        hull(tier, &Masks::default())
     }
 
     /// The base look draws every non-component tier with one material in the hull mask, at one
@@ -566,7 +550,6 @@ mod tests {
             );
             assert_eq!(p.mode.x, MODE_BASE);
         }
-        assert!(hull(GlassLook::Baseline, Tier::Armour, &Masks::default()).is_none());
     }
 
     /// Every component mesh draws in the base's family, hueless and HP-blind, one layer deep among
@@ -582,23 +565,21 @@ mod tests {
     }
 
     /// A struck component draws on the state fill: its share as the fill height, red when damaged,
-    /// hatched when dead, under a red outline.
+    /// hatched when dead.
     #[test]
     fn a_struck_component_draws_the_state_scale() {
         let masks = Masks::default();
-        let red = LinearRgba::from(timeline::STATE_RED);
         for condition in [Condition::Damaged(0.05), Condition::Dead] {
-            let ComponentDraw { fill: m, outline } = draw(condition, &masks);
+            let m = state(condition, &masks);
             assert_eq!(m.params.mode.x, MODE_STATE);
             assert_eq!(m.blend, Blend::Opaque);
             assert_eq!(m.params.state.w, condition.fill());
             assert_eq!(m.params.mode.w > 0.5, condition == Condition::Dead);
-            assert_eq!(outline.0, red, "no red outline");
         }
         let mut fill = state(Condition::Damaged(0.4), &masks);
         fill.set_fill_span(Vec3::Y, Some((1.0, 2.0)));
         assert_eq!(fill.params.state, Vec4::new(0.0, 1.0, 0.0, 0.4));
-        assert_eq!(fill.params.span.truncate(), Vec3::new(1.0, 2.0, 1.0));
+        assert_eq!(fill.params.span, Vec4::new(1.0, 2.0, 1.0, STATE_LINE_PX));
     }
 
     /// The footprint outlines the base look's surfaces, hull and components alike, and the state
@@ -626,14 +607,37 @@ mod tests {
         set_footprints(&mut looks, std::slice::from_ref(&print));
         for handle in [&base, &component, &fill] {
             let p = looks.get(handle).unwrap().params;
-            assert_eq!(p.foot.x, 1.0);
+            assert_eq!(p.foot.x, FOOTPRINT_LINE_PX);
             assert_eq!(p.fields.x, 1.0);
             assert_eq!(p.prints[0], Vec4::new(0.0, 0.0, 0.0, 0.5));
             assert_eq!(p.prints[2].y, 2.0, "both directions");
             assert_eq!(p.prints[2].z, 0.25, "the field's level");
             assert!(p.rays[1].w > 1.5, "a direction's reach holds its slack");
         }
-        assert_eq!(looks.get(&shell).unwrap().params.foot.x, 0.0);
+        assert_eq!(looks.get(&shell).unwrap().params.fields.x, 0.0);
+    }
+
+    /// Every record's spall fields fit the footprint whole: no more cones than it marks, no more
+    /// directions in any than it reads.
+    #[test]
+    fn every_record_fits_the_footprint() {
+        for record in &super::super::Library::load().records {
+            let cones = &record.plan.cones;
+            assert!(
+                cones.len() <= FOOTPRINT_FIELDS,
+                "{}: {} cones",
+                record.stem,
+                cones.len()
+            );
+            for cone in cones {
+                assert!(
+                    cone.rays.len() <= FOOTPRINT_RAYS,
+                    "{}: {} directions",
+                    record.stem,
+                    cone.rays.len()
+                );
+            }
+        }
     }
 
     /// The field's brightness is linear in its strength through one fixed gain, and the baseline
