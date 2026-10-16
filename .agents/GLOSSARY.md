@@ -340,11 +340,11 @@ Deflection off a too-steep face without entering — spawns a new path segment a
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Field**:
-The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, spent by the material it crosses, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the material it meets, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of plate fragments thrown from a body exit when a round perforates — dense on its axis, falling to zero at its rim — and the primary crew-killer. Its strength comes from the spend at that exit; its axis and half-angle are defined in the owner-direction record (`.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`, "The dose model").
+The field of fragments thrown from a body exit when a round perforates — even across its angle, each direction stopped by the first solid it meets — and the primary crew-killer. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Fragment cone**:
