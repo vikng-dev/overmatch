@@ -585,12 +585,10 @@ fn spall_law_cost() {
     let best = |scenario: &Scenario, law: &spall_cone::ConeShape| {
         (0..COST_RUNS)
             .map(|_| {
-                let (report, marched, gated) = record_timed(scenario, Some(law));
-                (marched, report.spall.len(), gated)
+                let (report, marched, _) = record_timed(scenario, Some(law));
+                (marched, report.spall.len())
             })
-            .fold((f64::INFINITY, 0, 0), |(t, ..), (s, cones, gated)| {
-                (t.min(s), cones, gated)
-            })
+            .fold((f64::INFINITY, 0), |(t, _), (s, cones)| (t.min(s), cones))
     };
     let one = spall_cone::ConeShape::shipped_at(1);
     let penetrating: Vec<Scenario> = scenarios()
@@ -601,8 +599,8 @@ fn spall_law_cost() {
         let law = spall_cone::ConeShape::shipped_at(directions);
         let (mut extra, mut cones) = (0.0, 0);
         for scenario in &penetrating {
-            let (full, thrown, _) = best(scenario, &law);
-            let (single, ..) = best(scenario, &one);
+            let (full, thrown) = best(scenario, &law);
+            let (single, _) = best(scenario, &one);
             extra += full - single;
             cones += thrown;
         }

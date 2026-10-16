@@ -207,13 +207,19 @@ impl ConeShape {
         })
     }
 
-    /// Parse and validate a shape file; degrees are converted here, once.
+    /// Parse and validate a shape file.
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
+        let directions = file.directions.0;
+        Self::from_file(file, directions)
+    }
+
+    /// Validate `file`'s shape sampled by `directions` strata; degrees are converted here, once.
+    fn from_file(file: ShapeFile, directions: usize) -> Result<Self, String> {
         Self::new(
             file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
             file.axis.0,
-            file.directions.0,
+            directions,
             file.profile.0,
             file.passage.0,
         )
@@ -223,15 +229,9 @@ impl ConeShape {
     /// the throw's cost scales with `N`.
     #[cfg(test)]
     pub(crate) fn shipped_at(directions: usize) -> Self {
-        let file: ShapeFile = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
-        Self::new(
-            file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
-            file.axis.0,
-            directions,
-            file.profile.0,
-            file.passage.0,
-        )
-        .expect("the shipped shape validates at any direction count")
+        let file = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
+        Self::from_file(file, directions)
+            .expect("the shipped shape validates at any direction count")
     }
 
     /// The shipped shape, parsed once. Panics on a malformed file: a broken authored contract is a
