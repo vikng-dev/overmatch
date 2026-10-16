@@ -14,7 +14,7 @@
 //! components the record names drawn in their own meshes), the plate slice (the tank's own
 //! materials, everything on the eye's side of a vertical plane through the chord dissolved away),
 //! and the outside view (the tank as built). In the corner, a glass look other than the baseline
-//! ([`GlassLook`], dev-only) draws the hull, the components and the field as [`look`] chooses.
+//! ([`GlassLook::Base`]) draws the hull, the components and the field as [`look`] chooses.
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
@@ -30,12 +30,12 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
-use super::look::{self, FieldDraw, FieldPrint, HitMark, LookMaterial, MaskLayer, Masks, PartDraw};
+use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, FieldRim, Footprint, GlassLook, Library, Run, Settings};
+use super::{Corner, Footprint, GlassLook, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -76,8 +76,6 @@ const CONE_RIM_SHARE: f32 = 0.3;
 /// The field's density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this fraction of
 /// the cone's longest reach.
 const FIELD_FALLOFF_REACH: f32 = 0.3;
-/// The look test's coloured field shell (dev-only, [`FieldRim`]): its fill as a share of its edge.
-const FIELD_COLOURED_FILL: f32 = 0.35;
 /// The slice's cut face.
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 /// The corner camera's vertical field (deg) in perspective.
@@ -182,7 +180,7 @@ pub(super) struct StageKey {
     record: usize,
     kind: CornerKind,
     settings: Settings,
-    /// The glass look in force: the settings' in the corner, the baseline elsewhere.
+    /// The glass look in force: the base look in the corner, the baseline elsewhere.
     look: GlassLook,
 }
 
@@ -277,7 +275,7 @@ pub fn spawn(
             LightProfile::PenCamKey,
         ));
     }
-    stage.glass = glows.add(glass_material(0));
+    stage.glass = glows.add(GlowMaterial::additive(GLASS.into(), 0.03).with_rim(0.03, 0.5, 3.0));
     stage.ghost = glows.add(GlowMaterial::blended(GLASS.into(), 0.18));
     let shell: Handle<WorldAsset> =
         asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
@@ -288,17 +286,6 @@ pub fn spawn(
         VisualScope::PEN_CAM_STAGE,
         StageShell,
     ));
-}
-
-/// The glass hull, by look-test variant: the specified rim `0.03 + 0.5·(1 − |n·v|)³`, a
-/// stronger rim, or flat.
-fn glass_material(variant: u8) -> GlowMaterial {
-    let glass = GlowMaterial::additive(GLASS.into(), 0.03);
-    match variant {
-        0 => glass.with_rim(0.03, 0.5, 3.0),
-        1 => glass.with_rim(0.02, 0.9, 2.0),
-        _ => glass.with_rim(0.08, 0.0, 1.0),
-    }
 }
 
 /// Rebuild the stage when the corner's record, frame or a look setting changes.
@@ -325,7 +312,7 @@ pub fn rebuild(
         kind: showing.kind,
         settings: settings.clone(),
         look: if inset_active(&showing) {
-            settings.look
+            GlassLook::Base
         } else {
             GlassLook::Baseline
         },
@@ -346,12 +333,9 @@ pub fn rebuild(
     };
     let plan = &library.records[key.record].plan;
     let kind = key.kind;
-    if let Some(mut glass) = glows.get_mut(&stage.glass) {
-        *glass = glass_material(settings.glass);
-    }
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
     let look = key.look;
-    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, Option<MaskLayer>)> =
+    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, MaskLayer)> =
         HashMap::new();
     let hull_mask = looks.add(look::hull_mask(&masks));
 
@@ -377,28 +361,26 @@ pub fn rebuild(
         match kind {
             CornerKind::Glass | CornerKind::Victim if look != GlassLook::Baseline => {
                 let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
-                    let draw = look::hull(look, mesh.tier, &masks)
-                        .expect("every look but the baseline draws the hull");
+                    let draw =
+                        look::hull(look, mesh.tier, &masks).expect("the base look draws the hull");
                     (looks.add(draw.material), draw.mask)
                 });
                 let (material, mask) = (entry.0.clone(), entry.1);
                 e.insert((MeshMaterial3d(material), Visibility::Inherited));
-                if let Some(mask) = mask {
-                    commands.spawn((
-                        Mesh3d(handle.0.clone()),
-                        MeshMaterial3d(hull_mask.clone()),
-                        Transform::IDENTITY,
-                        match mask {
-                            MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
-                            MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
-                        },
-                        StageItem,
-                        ChildOf(entity),
-                    ));
-                }
+                commands.spawn((
+                    Mesh3d(handle.0.clone()),
+                    MeshMaterial3d(hull_mask.clone()),
+                    Transform::IDENTITY,
+                    match mask {
+                        MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
+                        MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
+                    },
+                    StageItem,
+                    ChildOf(entity),
+                ));
             }
             CornerKind::Glass | CornerKind::Victim => {
-                let material = if struck(mesh) && settings.glass != 2 {
+                let material = if struck(mesh) {
                     stage.ghost.clone()
                 } else {
                     stage.glass.clone()
@@ -442,10 +424,6 @@ pub fn rebuild(
             .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
             .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
     );
-    if let (Some(material), Some(camera)) = (look::overlay(look, kind, &masks), stage.camera) {
-        let overlay = look::spawn_overlay(&mut commands, &mut meshes, looks.add(material), camera);
-        commands.entity(overlay).insert(StageItem);
-    }
     spawn_glass(
         &mut commands,
         &mut meshes,
@@ -453,7 +431,6 @@ pub fn rebuild(
         &mut outlines,
         plan,
         kind,
-        &settings,
         hull,
         stage.plane,
         &components,
@@ -486,7 +463,6 @@ pub fn spawn_glass(
     outlines: &mut Assets<OutlineMaterial>,
     plan: &Plan,
     kind: CornerKind,
-    settings: &Settings,
     hull: Entity,
     clip: Option<(Vec3, Vec3)>,
     components: &[ComponentMesh],
@@ -590,11 +566,11 @@ pub fn spawn_glass(
                 let strength = timeline::absolute_dose(cone.strength.max(1e-3));
                 let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
                 let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
-                look::field(look_ctx.look, cone, strength, r0, look_ctx.masks)
+                look::field(look_ctx.look, strength, r0, look_ctx.masks)
             }
             _ => None,
         };
-        if let Some(draw) = styled {
+        if let Some(mut material) = styled {
             let mut e = commands.spawn((
                 Mesh3d(mesh.clone()),
                 Transform::from_translation(cone.origin),
@@ -608,16 +584,8 @@ pub fn spawn_glass(
                 StageItem,
                 ChildOf(hull),
             ));
-            match draw {
-                FieldDraw::Glow(mut material) => {
-                    material.set_fade(0.0);
-                    e.insert(MeshMaterial3d(glows.add(material)));
-                }
-                FieldDraw::Look(mut material) => {
-                    material.set_fade(0.0);
-                    e.insert(MeshMaterial3d(look_ctx.looks.add(*material)));
-                }
-            }
+            material.set_fade(0.0);
+            e.insert(MeshMaterial3d(look_ctx.looks.add(material)));
             continue;
         }
         for shell in 0..=CONE_SHELLS {
@@ -627,7 +595,7 @@ pub fn spawn_glass(
             } else {
                 (shell + 1) as f32 / CONE_SHELLS as f32
             };
-            let (mut material, peak) = field_material(cone, rim, settings.field_rim);
+            let (mut material, peak) = field_material(cone, rim);
             material.set_clip(clip);
             material.set_fade(0.0);
             commands.spawn((
@@ -651,9 +619,23 @@ pub fn spawn_glass(
     for component in components {
         let index = component.index;
         let b = &plan.boxes[index];
-        let draws = look::component(look_ctx.look, b, kind, settings, look_ctx.masks);
-        for (n, draw) in draws.into_iter().enumerate() {
-            let mut e = commands.spawn((
+        let Some(look::ComponentDraw {
+            mut fill,
+            outline: (color, width),
+        }) = look::component(b, kind, look_ctx.masks)
+        else {
+            continue;
+        };
+        use bevy::camera::primitives::MeshAabb;
+        let center = meshes
+            .get(&component.mesh)
+            .and_then(|mesh| mesh.compute_aabb())
+            .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
+        let mut outline = OutlineMaterial::new(color, width, center);
+        fill.set_fade(0.0);
+        outline.set_fade(0.0);
+        let tint = || {
+            (
                 Mesh3d(component.mesh.clone()),
                 Transform::IDENTITY,
                 Visibility::Hidden,
@@ -661,46 +643,10 @@ pub fn spawn_glass(
                 scope,
                 StageItem,
                 ChildOf(component.entity),
-            ));
-            if n == 0 {
-                e.insert(HitMark);
-            }
-            match draw {
-                PartDraw::Look(mut material) => {
-                    material.set_fade(0.0);
-                    e.insert(MeshMaterial3d(look_ctx.looks.add(material)));
-                }
-                PartDraw::Flooded(mut material, color, width) => {
-                    material.set_fade(0.0);
-                    e.insert((
-                        MeshMaterial3d(look_ctx.looks.add(material)),
-                        bevy_mod_outline::OutlineVolume {
-                            visible: true,
-                            width,
-                            colour: color.into(),
-                        },
-                        bevy_mod_outline::OutlineMode::FloodFlat,
-                    ));
-                }
-                PartDraw::Mask(mut material) => {
-                    material.set_fade(0.0);
-                    e.insert((
-                        MeshMaterial3d(look_ctx.looks.add(material)),
-                        VisualScope::PEN_CAM_PART_MASK,
-                    ));
-                }
-                PartDraw::Outline(color, width) => {
-                    use bevy::camera::primitives::MeshAabb;
-                    let center = meshes
-                        .get(&component.mesh)
-                        .and_then(|mesh| mesh.compute_aabb())
-                        .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
-                    let mut material = OutlineMaterial::new(color, width, center);
-                    material.set_fade(0.0);
-                    e.insert(MeshMaterial3d(outlines.add(material)));
-                }
-            }
-        }
+            )
+        };
+        commands.spawn((tint(), MeshMaterial3d(look_ctx.looks.add(fill))));
+        commands.spawn((tint(), MeshMaterial3d(outlines.add(outline))));
     }
 }
 
@@ -708,20 +654,15 @@ pub fn spawn_glass(
 /// each direction's strength in their vertex alpha, so the field's angular profile is theirs; the
 /// outer shell (`rim`) adds only a view-angle edge at [`CONE_RIM_SHARE`] of their on-axis sum. Both
 /// fall off as 1/r² from the origin, in [`timeline::FIELD`]'s cool hue.
-fn field_material(cone: &Cone, rim: bool, style: FieldRim) -> (GlowMaterial, f32) {
+fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
     let strength = timeline::absolute_dose(cone.strength.max(1e-3));
     let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
     let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
     let interior = CONE_GAIN * CONE_PEAK * strength;
     let (material, peak) = if rim {
         let peak = CONE_RIM_SHARE * interior;
-        let (color, base) = match style {
-            FieldRim::Edge => (timeline::FIELD_EDGE, 0.0),
-            // The look test's alternative: the shell filled in the field's hue under the edge.
-            FieldRim::Coloured => (timeline::FIELD, FIELD_COLOURED_FILL * peak),
-        };
         (
-            GlowMaterial::additive(color.into(), 0.0).with_rim(base, peak, 2.5),
+            GlowMaterial::additive(timeline::FIELD_EDGE.into(), 0.0).with_rim(0.0, peak, 2.5),
             peak,
         )
     } else {
@@ -1139,7 +1080,7 @@ pub fn animate(
                 }
             })
             .collect();
-        look::set_footprints(&mut looks, GlassLook::Base, settings.footprint, &prints);
+        look::set_footprints(&mut looks, settings.footprint, &prints);
     }
     for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
         let b = &plan.boxes[tint.index];
@@ -2076,6 +2017,16 @@ mod tests {
         kind: CornerKind,
         offset: Vec3,
     ) -> (App, Vec<(Entity, String, [Vec3; 8])>) {
+        staged_on(index, kind, offset, super::super::Surface::Corner)
+    }
+
+    /// [`staged`] on `surface`: the corner draws the base look, the world the baseline glass.
+    fn staged_on(
+        index: usize,
+        kind: CornerKind,
+        offset: Vec3,
+        surface: super::super::Surface,
+    ) -> (App, Vec<(Entity, String, [Vec3; 8])>) {
         use bevy::camera::primitives::MeshAabb;
         let library = Library::load();
         let record = &library.records[index];
@@ -2130,7 +2081,7 @@ mod tests {
                     opacity: 1.0,
                     scale: 1.0,
                     remaining: 1.0,
-                    surface: super::super::Surface::Corner,
+                    surface,
                 }),
                 fading: None,
             })
@@ -2192,10 +2143,11 @@ mod tests {
         })
     }
 
-    /// Every record's spall field as the real [`rebuild`] draws it: every shell falls off as 1/r²
-    /// from the cone's origin, in a cool hue (more blue than red) off the state scale, and the outer
-    /// shell's view-angle glow is at most half the nested shells' on-axis sum, so the directions'
-    /// strengths shape the field. At least one record throws a cone.
+    /// Every record's spall field as the real [`rebuild`] draws it: on the world, every nested
+    /// shell falls off as 1/r² from the cone's origin, in a cool hue (more blue than red) off the
+    /// state scale, and the outer shell's view-angle glow is at most half the nested shells'
+    /// on-axis sum, so the directions' strengths shape the field; in the corner, the one shell
+    /// falls off in the same hue. At least one record throws a cone.
     #[test]
     fn the_field_is_cool_and_falls_off_from_its_origin() {
         let library = Library::load();
@@ -2206,6 +2158,32 @@ mod tests {
                 continue;
             }
             let (mut app, _) = staged(index, kind, Vec3::X);
+            let world = app.world_mut();
+            let corner: Vec<Handle<LookMaterial>> = world
+                .query::<(&ConeShell, &MeshMaterial3d<LookMaterial>)>()
+                .iter(world)
+                .map(|(_, m)| m.0.clone())
+                .collect();
+            let looked = matches!(
+                kind,
+                CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
+            );
+            let want = if looked { record.plan.cones.len() } else { 0 };
+            assert_eq!(corner.len(), want, "{}", record.stem);
+            for handle in &corner {
+                let m = world
+                    .resource::<Assets<LookMaterial>>()
+                    .get(handle)
+                    .unwrap();
+                let color = m.params.color.truncate();
+                assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
+                assert!(
+                    color.z > color.x && !on_state_scale(color),
+                    "{}",
+                    record.stem
+                );
+            }
+            let (mut app, _) = staged_on(index, kind, Vec3::X, super::super::Surface::World);
             let mut shells = app
                 .world_mut()
                 .query::<(&ConeShell, &MeshMaterial3d<GlowMaterial>)>();

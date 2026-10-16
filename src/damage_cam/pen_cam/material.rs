@@ -1,6 +1,6 @@
 //! The pen cam stage's materials: [`GlowMaterial`], the unlit diagram material every record element
-//! wears (`pen_cam_glow.wgsl`); [`OutlineMaterial`], a component's silhouette as an inverted hull
-//! (`pen_cam_outline.wgsl`), one of the look test's component styles; and [`SliceMaterial`], the
+//! wears (`pen_cam_glow.wgsl`); [`OutlineMaterial`], a struck component's silhouette as an inverted
+//! hull (`pen_cam_outline.wgsl`); and [`SliceMaterial`], the
 //! tank's own materials with the eye's side of the slice plane dissolved away
 //! (`pen_cam_slice.wgsl`).
 
@@ -16,7 +16,6 @@ pub struct GlowParams {
     pub rim: Vec4,
     pub plane: Vec4,
     pub flags: Vec4,
-    pub edge: Vec4,
     pub field: Vec4,
 }
 
@@ -31,8 +30,7 @@ pub enum Blend {
     Opaque,
 }
 
-/// One flat colour, optionally rim-lit by view angle or edged in a second colour, vertex-coloured,
-/// clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from
+/// One flat colour, optionally rim-lit by view angle, vertex-coloured, clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from
 /// it; both faces drawn.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
@@ -53,7 +51,6 @@ impl GlowMaterial {
                 rim: Vec4::new(intensity, 0.0, 1.0, 0.0),
                 plane: Vec4::ZERO,
                 flags: Vec4::new(0.0, 0.0, 1.0, 1.0),
-                edge: Vec4::ZERO,
                 field: NO_FIELD,
             },
             blend: Blend::Additive,
@@ -68,7 +65,6 @@ impl GlowMaterial {
                 rim: Vec4::new(1.0, 0.0, 1.0, 0.0),
                 plane: Vec4::ZERO,
                 flags: Vec4::new(0.0, 0.0, 0.0, 1.0),
-                edge: Vec4::ZERO,
                 field: NO_FIELD,
             },
             blend: Blend::Blended,
@@ -86,15 +82,6 @@ impl GlowMaterial {
     /// Multiply colour by the mesh's vertex colour and intensity by its alpha.
     pub fn with_vertex_color(mut self) -> Self {
         self.params.rim.w = 1.0;
-        self
-    }
-
-    /// Blended or opaque: the rim term `gain · (1 − |n·v|)^power`, clamped to 1, mixes the fill
-    /// toward `color` and its alpha toward 1, so the edge reads over the fill at grazing angles.
-    pub fn with_edge(mut self, color: LinearRgba, gain: f32, power: f32) -> Self {
-        self.params.edge = Vec4::new(color.red, color.green, color.blue, 1.0);
-        self.params.rim.y = gain;
-        self.params.rim.z = power;
         self
     }
 

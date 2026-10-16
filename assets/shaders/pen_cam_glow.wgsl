@@ -1,7 +1,6 @@
 // The pen cam's stage material (`src/damage_cam/pen_cam/material.rs`, `GlowMaterial`): one flat
-// colour, an optional view-angle rim or edge colour, optional vertex colour, an optional clip plane,
-// an optional 1/r² falloff from the mesh's origin and an optional
-// front that holds every vertex within a radius of that origin. Unlit: everything it draws is a
+// colour, an optional view-angle rim, optional vertex colour, an optional clip plane, an optional
+// 1/r² falloff from the mesh's origin and an optional front that holds every vertex within a radius of that origin. Unlit: everything it draws is a
 // diagram over the record.
 //
 // Output: additive (`flags.z = 1`) writes `rgb` with alpha 0 into the premultiplied pipeline
@@ -19,8 +18,6 @@ struct GlowParams {
     plane: vec4<f32>,
     // x: clip on (1) or off (0), y: unused, z: additive (1) or blended (0), w: overall fade.
     flags: vec4<f32>,
-    // rgb: the edge colour the rim term mixes the fill toward; a: edge on (1) or off (0).
-    edge: vec4<f32>,
     // x: front radius (m, world) from the mesh's origin, negative for none; y: falloff reference
     // radius r0 (m), 0 for none.
     field: vec4<f32>,
@@ -65,10 +62,7 @@ fn vertex(vertex: Vertex) -> GlowVertexOutput {
 }
 
 @fragment
-fn fragment(
-    in: GlowVertexOutput,
-    @builtin(front_facing) is_front: bool,
-) -> @location(0) vec4<f32> {
+fn fragment(in: GlowVertexOutput) -> @location(0) vec4<f32> {
     if glow.flags.x > 0.5 && dot(glow.plane.xyz, in.world_position.xyz) > glow.plane.w {
         discard;
     }
@@ -84,14 +78,10 @@ fn fragment(
         let r = max(in.radius, 1e-4);
         intensity = intensity * min(1.0, (glow.field.y / r) * (glow.field.y / r));
     }
-    var alpha = glow.color.a;
+    let alpha = glow.color.a;
     let fade = glow.flags.w;
     if glow.flags.z > 0.5 {
         return vec4(rgb * intensity * fade, 0.0);
-    }
-    if glow.edge.a > 0.5 {
-        let e = clamp(rim, 0.0, 1.0);
-        return vec4(mix(rgb * glow.rim.x, glow.edge.rgb, e), mix(alpha, 1.0, e) * fade);
     }
     return vec4(rgb * intensity, alpha * fade);
 }

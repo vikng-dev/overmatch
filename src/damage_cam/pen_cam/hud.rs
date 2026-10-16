@@ -16,7 +16,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use super::stage::StageCamera;
 use super::timeline::{self, CornerKind};
 use super::world::MainCamera;
-use super::{CornerSetting, DoseScale, Library, PLAYLIST, Run, Settings};
+use super::{CornerSetting, Library, PLAYLIST, Run, Settings};
 use crate::overlay::Overlay;
 
 const INSET_PX: f32 = 16.0;
@@ -348,16 +348,11 @@ pub fn animate(
             CornerSetting::ThroughOnly => "through only",
             CornerSetting::Off => "off",
         };
-        let dose = match settings.dose {
-            DoseScale::Absolute => "absolute",
-            DoseScale::HpShare => "hp share",
-        };
         let line = format!(
-            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  rim {}  \
-             look {}  footprint {}  slice {}{}\n\
+            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  footprint {}  slice {}{}\n\
              1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
-             X dismiss  C hold  V own tank  P setting  F expand  O ortho  G glass  D dose  \
-             J rim  H look  T footprint  L axis  M reduce motion",
+             X dismiss  C hold  V own tank  P setting  F expand  O ortho  T footprint  L axis  \
+             M reduce motion",
             entry.label,
             verdicts.join(", "),
             run.t,
@@ -365,10 +360,6 @@ pub fn animate(
             if run.paused { "  paused" } else { "" },
             if run.auto { "  auto" } else { "" },
             corner_setting,
-            dose,
-            settings.glass,
-            settings.field_rim.label(),
-            settings.look.label(),
             settings.footprint.label(),
             if settings.slice_ortho {
                 "ortho"

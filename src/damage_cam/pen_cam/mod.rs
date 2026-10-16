@@ -13,10 +13,9 @@
 //! hit and a left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays,
 //! `Space` pauses, `←`/`→` scrub, `[`/`]`
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
-//! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
-//! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion; the look test's `J`
-//! switches the field rim ([`FieldRim`]), `H` the glass look ([`GlassLook`]) and `T` the field's
-//! footprint ([`Footprint`]), which captures set through [`Settings::from_env`].
+//! the slice between orthographic and perspective, `L` toggles each spall cone's axis line, `M`
+//! toggles reduce motion, and `T` cycles the field's footprint ([`Footprint`], under evaluation),
+//! which captures set through [`Settings::from_env`].
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -245,32 +244,6 @@ pub enum CornerSetting {
     Off,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum DoseScale {
-    /// The share of its hit points a component lost (the default).
-    HpShare,
-    /// Absolute, log-mapped reference millimetres, one scale for every box.
-    Absolute,
-}
-
-/// The look test's spall field rim (dev-only, `J` or `PEN_CAM_RIM`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FieldRim {
-    /// (E, the default) The outer shell as a near-white edge only.
-    Edge,
-    /// (F) The outer shell filled in the field's hue under the same edge.
-    Coloured,
-}
-
-impl FieldRim {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Edge => "E edge shell",
-            Self::Coloured => "F coloured shell",
-        }
-    }
-}
-
 /// The spall field's footprint on the surfaces it meets, in the base look (dev-only, `T` or
 /// `PEN_CAM_FOOTPRINT`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -296,56 +269,15 @@ impl Footprint {
     }
 }
 
-/// The glass looks (dev-only, `H` or `PEN_CAM_LOOK`): the see-through hull, the components and
-/// the field drawn together in one of eight styles. Each look but the baseline draws the hull one
-/// visible layer deep, or reduced to an outline, before styling it; [`look`] holds them.
+/// How the stage draws the glass: the corner's base look, or, on the world where the corner's masks
+/// do not reach (the kill cam's lesson), the stage's own additive rim glass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GlassLook {
-    /// (L0, the default) Every mesh of the tank as additive rim-lit glass.
+    /// Every mesh of the tank as additive rim-lit glass.
     Baseline,
-    /// (L1) Feature lines of the hull; Gooch-toned components; a ray-marched field.
-    Technical,
-    /// (L2) The armour alone as a one-layer fresnel shell; opaque outlined components.
-    Envelope,
-    /// (L3) Every part at its tier's opacity, one layer deep, cleared over the struck components.
-    Ghost,
-    /// (L4) The hull dithered grey; components outlined at a constant pixel width.
-    Cad,
-    /// (L5) The armour as a cyan scanned hologram; emissive components; an additive field.
-    Hologram,
-    /// (L6) The tank's outer silhouette alone; Gooch-shaded components; a soft field shell.
-    Silhouette,
-    /// (L7) The whole tank as one hueless edged grey surface one layer deep at one opacity, its
-    /// components the state scale's untouched grey one layer deep among themselves; the field as in
-    /// L3.
+    /// The whole tank as one hueless edged grey surface one layer deep at one opacity, its
+    /// components the state scale's untouched grey one layer deep among themselves ([`look`]).
     Base,
-}
-
-impl GlassLook {
-    pub const ALL: [Self; 8] = [
-        Self::Baseline,
-        Self::Technical,
-        Self::Envelope,
-        Self::Ghost,
-        Self::Cad,
-        Self::Hologram,
-        Self::Silhouette,
-        Self::Base,
-    ];
-
-    /// The look's number and name, ASCII.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Baseline => "L0 baseline",
-            Self::Technical => "L1 technical",
-            Self::Envelope => "L2 envelope",
-            Self::Ghost => "L3 ghost",
-            Self::Cad => "L4 CAD",
-            Self::Hologram => "L5 hologram",
-            Self::Silhouette => "L6 silhouette",
-            Self::Base => "L7 base",
-        }
-    }
 }
 
 /// The demo's switches.
@@ -353,11 +285,6 @@ impl GlassLook {
 pub struct Settings {
     pub corner: CornerSetting,
     pub reduce_motion: bool,
-    pub dose: DoseScale,
-    /// 0: the specified rim glass, 1: a stronger rim, 2: flat alpha, for the look test.
-    pub glass: u8,
-    pub field_rim: FieldRim,
-    pub look: GlassLook,
     pub footprint: Footprint,
     pub slice_ortho: bool,
     pub expanded: bool,
@@ -369,10 +296,6 @@ impl Default for Settings {
         Self {
             corner: CornerSetting::All,
             reduce_motion: false,
-            dose: DoseScale::HpShare,
-            glass: 0,
-            field_rim: FieldRim::Edge,
-            look: GlassLook::Baseline,
             footprint: Footprint::Off,
             slice_ortho: true,
             expanded: false,
@@ -382,29 +305,17 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The defaults with the look test's environment applied, for headless captures:
-    /// `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`7`, `PEN_CAM_FOOTPRINT` =
-    /// `outline`, `hatch` or `off`, `PEN_CAM_EXPANDED=1`.
+    /// The defaults with the capture environment applied: `PEN_CAM_FOOTPRINT` = `outline`, `hatch`
+    /// or `off`, `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
         let mut settings = Self::default();
         let var = |name: &str| std::env::var(name).unwrap_or_default().to_ascii_lowercase();
-        if var("PEN_CAM_RIM") == "coloured" {
-            settings.field_rim = FieldRim::Coloured;
-        }
         let footprint = var("PEN_CAM_FOOTPRINT");
         if let Some(style) = Footprint::ALL
             .into_iter()
             .find(|style| style.label() == footprint)
         {
             settings.footprint = style;
-        }
-        if let Some(look) = var("PEN_CAM_LOOK")
-            .trim_start_matches('l')
-            .parse::<usize>()
-            .ok()
-            .and_then(|n| GlassLook::ALL.get(n))
-        {
-            settings.look = *look;
         }
         settings.expanded = var("PEN_CAM_EXPANDED") == "1";
         settings
@@ -659,7 +570,6 @@ pub fn demo_plugin(app: &mut App) {
         MaterialPlugin::<material::OutlineMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
         MaterialPlugin::<look::LookMaterial>::default(),
-        bevy_mod_outline::OutlinePlugin::EXTRUDE_VERTEX,
     ))
     .insert_resource(ClearColor(world::SKY))
     .insert_resource(library)
@@ -792,34 +702,12 @@ fn controls(
     if keys.just_pressed(KeyCode::KeyM) {
         settings.reduce_motion = !settings.reduce_motion;
     }
-    if keys.just_pressed(KeyCode::KeyD) {
-        settings.dose = match settings.dose {
-            DoseScale::HpShare => DoseScale::Absolute,
-            DoseScale::Absolute => DoseScale::HpShare,
-        };
-    }
-    if keys.just_pressed(KeyCode::KeyG) {
-        settings.glass = (settings.glass + 1) % 3;
-    }
     if keys.just_pressed(KeyCode::KeyT) {
         let at = Footprint::ALL
             .iter()
             .position(|style| *style == settings.footprint)
             .unwrap_or(0);
         settings.footprint = Footprint::ALL[(at + 1) % Footprint::ALL.len()];
-    }
-    if keys.just_pressed(KeyCode::KeyJ) {
-        settings.field_rim = match settings.field_rim {
-            FieldRim::Edge => FieldRim::Coloured,
-            FieldRim::Coloured => FieldRim::Edge,
-        };
-    }
-    if keys.just_pressed(KeyCode::KeyH) {
-        let at = GlassLook::ALL
-            .iter()
-            .position(|look| *look == settings.look)
-            .unwrap_or(0);
-        settings.look = GlassLook::ALL[(at + 1) % GlassLook::ALL.len()];
     }
     if keys.just_pressed(KeyCode::KeyO) {
         settings.slice_ortho = !settings.slice_ortho;
