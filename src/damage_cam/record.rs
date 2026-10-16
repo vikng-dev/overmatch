@@ -808,6 +808,9 @@ fn components(
 /// deposit that emptied it. `line` and `field` list the encounter's deposits, `entered` the
 /// `(volume, t, point, mark)` where the line reached a component (WORLD). The HP lost and the
 /// emptying are the shot's own settles from the encounter's first mark on ([`ShotDose::settles`]).
+/// A mark's deposits, its line and its cones, all land before its one settle, so within a mark HP
+/// has no order; the emptying deposit is the first, in path time, whose running total reaches what
+/// the box held at the mark.
 fn outcomes(
     world: &World,
     struck: &StruckTank,
