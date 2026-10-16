@@ -15,6 +15,11 @@
 //   7 march       the analytic cone (`cone`: axis, half-angle) integrated along the eye ray behind
 //                 the proxy's back face, density 1/r^2 from the origin; alpha or additive.
 //   8 soft        a field shell faded where it nears the part mask's surfaces and face-on.
+//   9 base        one hueless surface, drawn only where it is its mask's nearest surface (the hull
+//                 mask, or the part mask with `mode.z = 1`): half-Lambert shading with `shade.y` the
+//                 light's share, opacity `color.a` at a grazing angle falling to `shade.x` of it
+//                 face-on (power `shade.z`), that mask's depth edges in `edge` (rgb, a: opacity),
+//                 and `cone2.x` of the opacity kept over the struck components (`hits`).
 //  10 lines       full screen: depth and normal edges of the hull mask, the depth threshold
 //                 growing with distance.
 //  11 silhouette  full screen: the hull mask's outer edge.
@@ -35,8 +40,8 @@ struct LookParams {
     field: vec4<f32>,
     // xyz: the cone's axis in the mesh's frame; w: its half-angle (rad).
     cone: vec4<f32>,
-    // x: gain (march); y: additive (1) or blended (0); z: dissolve band (m) or reach (march, m);
-    // w: Gooch (1) or flat (0).
+    // x: gain (march) or opacity share kept at a hit (base); y: additive (1) or blended (0);
+    // z: dissolve band (m) or reach (march, m); w: Gooch (1) or flat (0).
     cone2: vec4<f32>,
     // x: mode; y: hit clearing on (1); z: flicker on (1); w: hatch on (1).
     mode: vec4<f32>,
@@ -150,9 +155,10 @@ fn clearing(frag: vec2<f32>) -> f32 {
     return keep;
 }
 
-fn lines(frag: vec2<f32>) -> f32 {
+// A mask's edge at a pixel: 1 at a depth edge, 0.5 at a normal edge alone, 0 elsewhere.
+fn lines(mask: texture_2d<f32>, frag: vec2<f32>) -> f32 {
     let p = vec2<i32>(frag);
-    let c = mask_at(hull_mask, p);
+    let c = mask_at(mask, p);
     var gd = vec2(0.0);
     var gn = vec3(0.0);
     var gnx = vec3(0.0);
@@ -160,7 +166,7 @@ fn lines(frag: vec2<f32>) -> f32 {
     var k = array<f32, 3>(1.0, 2.0, 1.0);
     for (var j = -1; j <= 1; j = j + 1) {
         for (var i = -1; i <= 1; i = i + 1) {
-            let s = mask_at(hull_mask, p + vec2(i, j));
+            let s = mask_at(mask, p + vec2(i, j));
             let wx = f32(i) * k[j + 1];
             let wy = f32(j) * k[i + 1];
             // An empty pixel stands at a far distance, so the silhouette is a depth edge.
@@ -179,7 +185,7 @@ fn lines(frag: vec2<f32>) -> f32 {
     // The depth threshold grows with distance: a crease 1 % of the way back is an edge.
     let depth_edge = length(gd) / max(near, 0.5) > 0.08;
     let normal_edge = length(gn) + length(gnx) > 0.9;
-    return select(0.0, 1.0, depth_edge || normal_edge);
+    return select(select(0.0, 0.5, normal_edge), 1.0, depth_edge);
 }
 
 @fragment
@@ -218,6 +224,32 @@ fn fragment(
             intensity = intensity * clearing(frag);
         }
         return out_color(look.color.rgb, clamp(intensity * look.color.a, 0.0, 1.0) * fade);
+    }
+    if m == 9 {
+        let p = vec2<i32>(frag);
+        var nearest = 0.0;
+        var edge = 0.0;
+        if look.mode.z > 0.5 {
+            nearest = mask_at(part_mask, p).a;
+            edge = lines(part_mask, frag);
+        } else {
+            nearest = mask_at(hull_mask, p).a;
+            edge = lines(hull_mask, frag);
+        }
+        if nearest > 0.0 && dist > nearest * 1.002 + 0.003 {
+            discard;
+        }
+        let toward = select(-n, n, dot(n, v) >= 0.0);
+        let l = normalize(vec3(0.4, 1.0, 0.3));
+        let lambert = 0.5 * (dot(toward, l) + 1.0);
+        var rgb = look.color.rgb * (1.0 - look.shade.y + look.shade.y * lambert);
+        var a = look.color.a * mix(look.shade.x, 1.0, pow(1.0 - facing, look.shade.z));
+        if edge > 0.75 {
+            rgb = look.edge.rgb;
+            a = max(a, look.edge.a);
+        }
+        a = a * mix(look.cone2.x, 1.0, clearing(frag));
+        return out_color(rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 3 {
         if bayer(frag) >= look.color.a {
@@ -291,7 +323,7 @@ fn fragment(
         return out_color(look.color.rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 10 {
-        if lines(frag) < 0.5 {
+        if lines(hull_mask, frag) < 0.5 {
             discard;
         }
         return vec4(look.color.rgb, look.color.a);

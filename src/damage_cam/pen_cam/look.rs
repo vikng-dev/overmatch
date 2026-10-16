@@ -5,7 +5,8 @@
 //!
 //! The stacking every look but the baseline removes is cut by two offscreen masks drawn from the
 //! corner camera's own pose before it: the hull mask (each pixel's nearest hull surface: view
-//! normal and distance) and the part mask (the struck components' colour and distance). The glass
+//! normal and distance) and the part mask (the struck components' colour and distance; in the
+//! base look, every component mesh's distance, so the components are one layer deep too). The glass
 //! draws only where its fragment is the hull mask's nearest surface, so the hull is one layer deep;
 //! the full-screen overlays (feature lines, silhouette) read the hull mask directly, and the soft
 //! field shell fades against the part mask. The CAD look's constant-pixel outline is
@@ -55,7 +56,24 @@ const MARCH_GAIN: f32 = 2.5;
 const DISSOLVE_BAND_M: f32 = 0.35;
 /// The part outline's width (physical px) in the looks that draw it as an inverted hull.
 const OUTLINE_PX: f32 = 3.0;
-/// The most struck components the ghost clears around.
+/// The base look's surface: a hueless grey, its opacity at a grazing angle and the share of that
+/// kept face-on, the fresnel power between them, the light's share of the shading (the rest is
+/// flat), its edge colour and opacity, and the share of its opacity kept over a struck component.
+const BASE_GREY: Color = Color::srgb_u8(0xA4, 0xA4, 0xA4);
+const BASE_ALPHA: f32 = 0.6;
+const BASE_FACE_SHARE: f32 = 0.4;
+const BASE_FRESNEL_POWER: f32 = 2.0;
+const BASE_CONTRAST: f32 = 0.35;
+const BASE_EDGE: Color = Color::srgb_u8(0xE6, 0xE6, 0xE6);
+const BASE_EDGE_ALPHA: f32 = 0.35;
+const BASE_CLEAR_SHARE: f32 = 0.1;
+/// The base look's components: the same surface, darker and fuller, one layer deep among
+/// themselves.
+const BASE_COMPONENT_GREY: Color = Color::srgb_u8(0x7C, 0x7C, 0x7C);
+const BASE_COMPONENT_ALPHA: f32 = 0.55;
+const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
+const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
+/// The most struck components a look clears around.
 const HITS: usize = 8;
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
@@ -108,6 +126,7 @@ const MODE_HIDDEN: f32 = 5.0;
 const MODE_DISSOLVE: f32 = 6.0;
 const MODE_MARCH: f32 = 7.0;
 const MODE_SOFT: f32 = 8.0;
+const MODE_BASE: f32 = 9.0;
 const MODE_LINES: f32 = 10.0;
 const MODE_SILHOUETTE: f32 = 11.0;
 /// A mode the shader draws nothing in.
@@ -403,10 +422,18 @@ pub fn sync(
 }
 
 /// How a hull mesh is drawn in a look: its material (one that draws nothing where the look drops
-/// the tier) and whether the hull mask holds it.
+/// the tier) and the mask that holds it, if any.
 pub struct HullDraw {
     pub material: LookMaterial,
-    pub masked: bool,
+    pub mask: Option<MaskLayer>,
+}
+
+/// The offscreen mask a hull mesh is drawn into, for the nearest-surface test of its own layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MaskLayer {
+    Hull,
+    /// The part mask: in the base look, every component mesh.
+    Part,
 }
 
 /// How a hull mesh of tier `tier` is drawn in `look`; `None` for the baseline, which the stage
@@ -416,14 +443,16 @@ pub fn hull(look: GlassLook, tier: Tier, masks: &Masks) -> Option<HullDraw> {
     let glass = |color: Color, alpha: f32, blend| {
         LookMaterial::new(MODE_GLASS, color.into(), alpha, blend, masks)
     };
-    let draw = |material, masked| Some(HullDraw { material, masked });
+    let draw = |material, mask| Some(HullDraw { material, mask });
     match (look, tier) {
         (GlassLook::Baseline, _) => None,
         // Feature lines: the armour and running gear in the mask, nothing in the picture.
-        (GlassLook::Technical, Tier::Armour | Tier::External) => draw(none(), true),
+        (GlassLook::Technical, Tier::Armour | Tier::External) => {
+            draw(none(), Some(MaskLayer::Hull))
+        }
         (GlassLook::Envelope, Tier::Armour) => draw(
             glass(GLASS_GREY, 1.0, Blend::Additive).with_rim(0.04, 0.6, 2.5),
-            true,
+            Some(MaskLayer::Hull),
         ),
         (GlassLook::Ghost, Tier::Armour | Tier::External | Tier::Component) => {
             let alpha = match tier {
@@ -433,7 +462,7 @@ pub fn hull(look: GlassLook, tier: Tier, masks: &Masks) -> Option<HullDraw> {
             };
             let mut material = glass(GLASS_GREY, alpha, Blend::Blended).with_rim(1.0, 1.5, 3.0);
             material.params.mode.y = 1.0;
-            draw(material, true)
+            draw(material, Some(MaskLayer::Hull))
         }
         (GlassLook::Cad, Tier::Armour | Tier::External) => {
             let material = LookMaterial::new(
@@ -443,19 +472,56 @@ pub fn hull(look: GlassLook, tier: Tier, masks: &Masks) -> Option<HullDraw> {
                 Blend::Opaque,
                 masks,
             );
-            draw(material, false)
+            draw(material, None)
         }
         (GlassLook::Hologram, Tier::Armour) => {
             let mut material = glass(HOLO_CYAN, 1.0, Blend::Additive).with_rim(0.04, 0.6, 2.0);
             material.params.field.w = SCANLINE_M;
-            draw(material, true)
+            draw(material, Some(MaskLayer::Hull))
         }
-        (GlassLook::Silhouette, Tier::Armour | Tier::External | Tier::Detail) => draw(none(), true),
-        _ => draw(none(), false),
+        (GlassLook::Silhouette, Tier::Armour | Tier::External | Tier::Detail) => {
+            draw(none(), Some(MaskLayer::Hull))
+        }
+        (GlassLook::Base, Tier::Armour | Tier::External | Tier::Detail) => {
+            draw(base(masks), Some(MaskLayer::Hull))
+        }
+        (GlassLook::Base, Tier::Component) => draw(component_base(masks), Some(MaskLayer::Part)),
+        _ => draw(none(), None),
     }
 }
 
-/// The hull mask's material.
+/// The base look's one material for every hull part it draws: armour, running gear and detail.
+fn base(masks: &Masks) -> LookMaterial {
+    let edge = LinearRgba::from(BASE_EDGE);
+    let mut material = LookMaterial::new(
+        MODE_BASE,
+        BASE_GREY.into(),
+        BASE_ALPHA,
+        Blend::Blended,
+        masks,
+    );
+    material.params.shade.x = BASE_FACE_SHARE;
+    material.params.shade.y = BASE_CONTRAST;
+    material.params.shade.z = BASE_FRESNEL_POWER;
+    material.params.edge = Vec4::new(edge.red, edge.green, edge.blue, BASE_EDGE_ALPHA);
+    material.params.cone2.x = BASE_CLEAR_SHARE;
+    material.params.mode.y = 1.0;
+    material
+}
+
+/// The base look's material for every component mesh: the hull's surface darkened, tested
+/// against the part mask. A struck component's fill covers it.
+fn component_base(masks: &Masks) -> LookMaterial {
+    let mut material = base(masks);
+    let grey = LinearRgba::from(BASE_COMPONENT_GREY);
+    material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
+    material.params.shade.x = BASE_COMPONENT_FACE_SHARE;
+    material.params.edge.w = BASE_COMPONENT_EDGE_ALPHA;
+    material.params.mode.z = 1.0;
+    material
+}
+
+/// The hull mask's material, drawn into either mask.
 pub fn hull_mask(masks: &Masks) -> LookMaterial {
     LookMaterial::new(MODE_HULL_MASK, LinearRgba::BLACK, 1.0, Blend::Opaque, masks)
 }
@@ -558,7 +624,7 @@ pub fn component(
             PartDraw::Look(fill(ramp)),
             PartDraw::Outline(timeline::VOLUME_EDGE.into(), OUTLINE_PX),
         ],
-        GlassLook::Ghost => {
+        GlassLook::Ghost | GlassLook::Base => {
             let mut hidden = LookMaterial::new(MODE_HIDDEN, ramp, 0.35, Blend::Blended, masks);
             hidden.depth = Depth::Hidden;
             hidden.bias = true;
@@ -611,7 +677,7 @@ pub fn field(
             m.params.color.w = 2.0;
             FieldDraw::Look(m)
         }
-        GlassLook::Ghost => {
+        GlassLook::Ghost | GlassLook::Base => {
             let mut m = LookMaterial::new(
                 MODE_DISSOLVE,
                 hue,
@@ -639,4 +705,53 @@ pub fn field(
             .with_falloff(r0),
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_draw(tier: Tier) -> HullDraw {
+        hull(GlassLook::Base, tier, &Masks::default()).expect("the base draws every tier")
+    }
+
+    /// The base look draws every non-component tier with one material in the hull mask, cleared
+    /// over the struck components.
+    #[test]
+    fn the_base_draws_every_hull_tier_alike() {
+        let first = base_draw(Tier::Armour).material.params;
+        for tier in [Tier::Armour, Tier::External, Tier::Detail] {
+            let draw = base_draw(tier);
+            assert_eq!(draw.mask, Some(MaskLayer::Hull));
+            assert_eq!(draw.material.blend, Blend::Blended);
+            assert!(draw.material.uses_hits());
+            let p = draw.material.params;
+            assert_eq!(
+                (p.mode, p.color, p.edge, p.shade, p.cone2),
+                (
+                    first.mode,
+                    first.color,
+                    first.edge,
+                    first.shade,
+                    first.cone2
+                )
+            );
+            assert_eq!(p.mode.x, MODE_BASE);
+        }
+    }
+
+    /// Every component mesh draws in the base's family, hueless and HP-blind, one layer deep among
+    /// the components and outside the hull's layer.
+    #[test]
+    fn the_base_draws_every_component_grey_in_its_own_layer() {
+        let draw = base_draw(Tier::Component);
+        assert_eq!(draw.mask, Some(MaskLayer::Part));
+        assert_eq!(draw.material.params.mode.x, MODE_BASE);
+        assert!(draw.material.uses_hits());
+        let c = draw.material.params.color;
+        assert!(
+            c.x == c.y && c.y == c.z,
+            "a component's base carries no hue"
+        );
+    }
 }

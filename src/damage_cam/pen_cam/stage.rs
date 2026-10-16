@@ -29,7 +29,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
-use super::look::{self, FieldDraw, HitMark, LookMaterial, Masks, PartDraw};
+use super::look::{self, FieldDraw, HitMark, LookMaterial, MaskLayer, Masks, PartDraw};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
@@ -361,7 +361,7 @@ pub fn rebuild(
     }
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
     let look = key.look;
-    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, bool)> =
+    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, Option<MaskLayer>)> =
         HashMap::new();
     let hull_mask = looks.add(look::hull_mask(&masks));
 
@@ -389,16 +389,19 @@ pub fn rebuild(
                 let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
                     let draw = look::hull(look, mesh.tier, &masks)
                         .expect("every look but the baseline draws the hull");
-                    (looks.add(draw.material), draw.masked)
+                    (looks.add(draw.material), draw.mask)
                 });
-                let (material, masked) = (entry.0.clone(), entry.1);
+                let (material, mask) = (entry.0.clone(), entry.1);
                 e.insert((MeshMaterial3d(material), Visibility::Inherited));
-                if masked {
+                if let Some(mask) = mask {
                     commands.spawn((
                         Mesh3d(handle.0.clone()),
                         MeshMaterial3d(hull_mask.clone()),
                         Transform::IDENTITY,
-                        VisualScope::PEN_CAM_HULL_MASK,
+                        match mask {
+                            MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
+                            MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
+                        },
                         StageItem,
                         ChildOf(entity),
                     ));

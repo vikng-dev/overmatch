@@ -299,7 +299,7 @@ impl FieldRim {
 }
 
 /// The glass looks (dev-only, `H` or `PEN_CAM_LOOK`): the see-through hull, the components and
-/// the field drawn together in one of seven styles. Each look but the baseline draws the hull one
+/// the field drawn together in one of eight styles. Each look but the baseline draws the hull one
 /// visible layer deep, or reduced to an outline, before styling it; [`look`] holds them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GlassLook {
@@ -317,10 +317,14 @@ pub enum GlassLook {
     Hologram,
     /// (L6) The tank's outer silhouette alone; Gooch-shaded components; a soft field shell.
     Silhouette,
+    /// (L7) The whole tank as one hueless grey surface one layer deep, its components a darker
+    /// grey one layer deep among themselves, edged and thinned over the struck components, which
+    /// draw with the field as in L3.
+    Base,
 }
 
 impl GlassLook {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Baseline,
         Self::Technical,
         Self::Envelope,
@@ -328,6 +332,7 @@ impl GlassLook {
         Self::Cad,
         Self::Hologram,
         Self::Silhouette,
+        Self::Base,
     ];
 
     /// The look's number and name, ASCII.
@@ -340,6 +345,7 @@ impl GlassLook {
             Self::Cad => "L4 CAD",
             Self::Hologram => "L5 hologram",
             Self::Silhouette => "L6 silhouette",
+            Self::Base => "L7 base",
         }
     }
 }
@@ -379,7 +385,7 @@ impl Default for Settings {
 
 impl Settings {
     /// The defaults with the look test's environment applied, for headless captures:
-    /// `PEN_CAM_VOLUME` = `a`–`d`, `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`6`,
+    /// `PEN_CAM_VOLUME` = `a`–`d`, `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`7`,
     /// `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
         let mut settings = Self::default();
