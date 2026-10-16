@@ -16,7 +16,8 @@
 //                 mask, or the part mask with `mode.z = 1`): half-Lambert shading with `shade.y` the
 //                 light's share, opacity `color.a` at a grazing angle falling to `shade.x` of it
 //                 face-on (power `shade.z`), and that mask's depth edges in `edge` (rgb, a:
-//                 opacity).
+//                 opacity). Where the surface is not its mask's nearest, only its field footprint
+//                 draws.
 //  10 lines       full screen: depth and normal edges of the hull mask, the depth threshold
 //                 growing with distance.
 //  11 silhouette  full screen: the hull mask's outer edge.
@@ -27,6 +28,13 @@
 //                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
+//
+// Base and state surfaces carry the spall fields' footprint (`foot.x`: 0 none, 1 outline, 2 hatch)
+// in `foot_color`: for each of `foot.y` fields (`prints`), a surface point facing the origin,
+// inside the cone, behind its front and within the reach of the field's recorded direction (`rays`)
+// nearest it is inside the footprint. The outline is the band `foot.z` px wide where the angle
+// from the axis crosses the half-angle; the hatch is diagonal stripes `foot.w` px apart over the
+// inside, `cone2.z` of each in colour.
 //
 // Output: additive (`flags.y = 1`) writes `rgb` with alpha 0 for `AlphaMode::Add`; otherwise
 // straight `rgb, a`.
@@ -44,8 +52,8 @@ struct LookParams {
     field: vec4<f32>,
     // xyz: the cone's axis in the mesh's frame; w: its half-angle (rad).
     cone: vec4<f32>,
-    // x: gain (march); y: additive (1) or blended (0);
-    // z: dissolve band (m) or reach (march, m); w: the hatched share (state).
+    // x: gain (march); y: additive (1) or blended (0); z: dissolve band (m), reach (march, m) or
+    // the footprint's hatched share (base, state); w: the hatched share (state).
     cone2: vec4<f32>,
     // x: mode; y: hit clearing on (1); z: the part mask (base, 1) or the hatch period (state, px);
     // w: hatch on (1).
@@ -59,6 +67,15 @@ struct LookParams {
     span: vec4<f32>,
     // rgb: the unfilled remainder's colour.
     rest: vec4<f32>,
+    // x: footprint style; y: the fields marked; z: outline width (px); w: hatch period (px).
+    foot: vec4<f32>,
+    // rgb: the footprint's colour; a: its opacity.
+    foot_color: vec4<f32>,
+    // Per field, three lanes: origin (world) and half-angle (rad); unit axis (world) and reach
+    // (m); x: how far its front has run (m), negative before it is thrown, y: its directions.
+    prints: array<vec4<f32>, 12>,
+    // Per field, 32 lanes: a recorded direction (world, unit) and its reach (m) with slack.
+    rays: array<vec4<f32>, 128>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
@@ -168,6 +185,57 @@ fn clearing(frag: vec2<f32>) -> f32 {
 }
 
 // A mask's edge at a pixel: 1 at a depth edge, 0.5 at a normal edge alone, 0 elsewhere.
+// The footprint's mark at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`) and
+// pixel `frag`, 1 or 0.
+fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, frag: vec2<f32>) -> f32 {
+    let style = i32(look.foot.x + 0.5);
+    if style == 0 {
+        return 0.0;
+    }
+    for (var i = 0; i < 4; i = i + 1) {
+        if f32(i) >= look.foot.y {
+            break;
+        }
+        let at = look.prints[3 * i];
+        let along = look.prints[3 * i + 1];
+        let d = p - at.xyz;
+        let r = length(d);
+        if r < 1e-4 || r > min(along.w, look.prints[3 * i + 2].x) || dot(n, -d) <= 0.0 {
+            continue;
+        }
+        let dir = d / r;
+        var best = -2.0;
+        var reach = along.w;
+        for (var j = 0; j < 32; j = j + 1) {
+            if f32(j) >= look.prints[3 * i + 2].y {
+                break;
+            }
+            let ray = look.rays[32 * i + j];
+            let k = dot(dir, ray.xyz);
+            if k > best {
+                best = k;
+                reach = ray.w;
+            }
+        }
+        if r > reach {
+            continue;
+        }
+        let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
+        let angle = acos(c);
+        if style == 1 {
+            // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
+            let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
+            let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
+            if abs(angle - at.w) < 0.5 * look.foot.z * per_px {
+                return 1.0;
+            }
+        } else if angle <= at.w && fract((frag.x - frag.y) / look.foot.w) < look.cone2.z {
+            return 1.0;
+        }
+    }
+    return 0.0;
+}
+
 fn lines(mask: texture_2d<f32>, frag: vec2<f32>) -> f32 {
     let p = vec2<i32>(frag);
     let c = mask_at(mask, p);
@@ -217,6 +285,8 @@ fn fragment(
     // The state fill's height, and its change across a pixel, taken in uniform control flow.
     let height = dot(in.world_position.xyz, look.state.xyz);
     let height_px = fwidth(height);
+    let dpx = dpdx(in.world_position.xyz);
+    let dpy = dpdy(in.world_position.xyz);
 
     if m == 0 {
         let vn = normalize((view.view_from_world * vec4(n, 0.0)).xyz);
@@ -251,8 +321,12 @@ fn fragment(
             nearest = mask_at(hull_mask, p).a;
             edge = lines(hull_mask, frag);
         }
+        let mark = footprint(in.world_position.xyz, n, dpx, dpy, frag) * look.foot_color.a;
         if nearest > 0.0 && dist > nearest * 1.002 + 0.003 {
-            discard;
+            if mark <= 0.0 {
+                discard;
+            }
+            return out_color(look.foot_color.rgb, mark * fade);
         }
         let toward = select(-n, n, dot(n, v) >= 0.0);
         let l = normalize(vec3(0.4, 1.0, 0.3));
@@ -263,6 +337,8 @@ fn fragment(
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
+        rgb = mix(rgb, look.foot_color.rgb, mark);
+        a = max(a, mark);
         return out_color(rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 3 {
@@ -293,7 +369,8 @@ fn fragment(
         if partial && abs(height - level) < 0.5 * look.span.w * height_px {
             rgb = look.edge.rgb;
         }
-        return vec4(rgb, 1.0);
+        let mark = footprint(in.world_position.xyz, n, dpx, dpy, frag) * look.foot_color.a;
+        return vec4(mix(rgb, look.foot_color.rgb, mark), 1.0);
     }
     if m == 6 {
         var a = look.color.a * in.color.a * falloff(in.radius);

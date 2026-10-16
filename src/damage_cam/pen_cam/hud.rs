@@ -354,10 +354,10 @@ pub fn animate(
         };
         let line = format!(
             "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  rim {}  \
-             look {}  slice {}{}\n\
+             look {}  footprint {}  slice {}{}\n\
              1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
              X dismiss  C hold  V own tank  P setting  F expand  O ortho  G glass  D dose  \
-             J rim  H look  L axis  M reduce motion",
+             J rim  H look  T footprint  L axis  M reduce motion",
             entry.label,
             verdicts.join(", "),
             run.t,
@@ -369,6 +369,7 @@ pub fn animate(
             settings.glass,
             settings.field_rim.label(),
             settings.look.label(),
+            settings.footprint.label(),
             if settings.slice_ortho {
                 "ortho"
             } else {

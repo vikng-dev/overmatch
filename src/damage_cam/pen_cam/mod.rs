@@ -15,8 +15,8 @@
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
 //! the slice between orthographic and perspective, `G` cycles glass variants, `D` toggles the dose
 //! scale, `L` toggles each spall cone's axis line, `M` toggles reduce motion; the look test's `J`
-//! switches the field rim ([`FieldRim`]) and `H` the glass look ([`GlassLook`]), which captures set
-//! through [`Settings::from_env`].
+//! switches the field rim ([`FieldRim`]), `H` the glass look ([`GlassLook`]) and `T` the field's
+//! footprint ([`Footprint`]), which captures set through [`Settings::from_env`].
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -271,6 +271,31 @@ impl FieldRim {
     }
 }
 
+/// The spall field's footprint on the surfaces it meets, in the base look (dev-only, `T` or
+/// `PEN_CAM_FOOTPRINT`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Footprint {
+    /// (the default) None.
+    Off,
+    /// A line where the cone's boundary crosses each surface.
+    Outline,
+    /// A hatch over each surface inside the cone.
+    Hatch,
+}
+
+impl Footprint {
+    pub const ALL: [Self; 3] = [Self::Off, Self::Outline, Self::Hatch];
+
+    /// The option's name, ASCII.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Outline => "outline",
+            Self::Hatch => "hatch",
+        }
+    }
+}
+
 /// The glass looks (dev-only, `H` or `PEN_CAM_LOOK`): the see-through hull, the components and
 /// the field drawn together in one of eight styles. Each look but the baseline draws the hull one
 /// visible layer deep, or reduced to an outline, before styling it; [`look`] holds them.
@@ -333,6 +358,7 @@ pub struct Settings {
     pub glass: u8,
     pub field_rim: FieldRim,
     pub look: GlassLook,
+    pub footprint: Footprint,
     pub slice_ortho: bool,
     pub expanded: bool,
     pub axis_line: bool,
@@ -347,6 +373,7 @@ impl Default for Settings {
             glass: 0,
             field_rim: FieldRim::Edge,
             look: GlassLook::Baseline,
+            footprint: Footprint::Off,
             slice_ortho: true,
             expanded: false,
             axis_line: false,
@@ -356,13 +383,20 @@ impl Default for Settings {
 
 impl Settings {
     /// The defaults with the look test's environment applied, for headless captures:
-    /// `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`7`,
-    /// `PEN_CAM_EXPANDED=1`.
+    /// `PEN_CAM_RIM` = `edge` or `coloured`, `PEN_CAM_LOOK` = `0`–`7`, `PEN_CAM_FOOTPRINT` =
+    /// `outline`, `hatch` or `off`, `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
         let mut settings = Self::default();
         let var = |name: &str| std::env::var(name).unwrap_or_default().to_ascii_lowercase();
         if var("PEN_CAM_RIM") == "coloured" {
             settings.field_rim = FieldRim::Coloured;
+        }
+        let footprint = var("PEN_CAM_FOOTPRINT");
+        if let Some(style) = Footprint::ALL
+            .into_iter()
+            .find(|style| style.label() == footprint)
+        {
+            settings.footprint = style;
         }
         if let Some(look) = var("PEN_CAM_LOOK")
             .trim_start_matches('l')
@@ -766,6 +800,13 @@ fn controls(
     }
     if keys.just_pressed(KeyCode::KeyG) {
         settings.glass = (settings.glass + 1) % 3;
+    }
+    if keys.just_pressed(KeyCode::KeyT) {
+        let at = Footprint::ALL
+            .iter()
+            .position(|style| *style == settings.footprint)
+            .unwrap_or(0);
+        settings.footprint = Footprint::ALL[(at + 1) % Footprint::ALL.len()];
     }
     if keys.just_pressed(KeyCode::KeyJ) {
         settings.field_rim = match settings.field_rim {

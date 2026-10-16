@@ -30,12 +30,12 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
-use super::look::{self, FieldDraw, HitMark, LookMaterial, MaskLayer, Masks, PartDraw};
+use super::look::{self, FieldDraw, FieldPrint, HitMark, LookMaterial, MaskLayer, Masks, PartDraw};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, FieldRim, GlassLook, Library, Run, Settings};
+use super::{Corner, FieldRim, Footprint, GlassLook, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -1095,6 +1095,52 @@ pub fn animate(
 
     // The state fills rise along the hull's up, the tank's.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
+    // Each field's footprint, in world space, where the base look marks it.
+    if let Some(hull) = hull
+        && stage.look() == GlassLook::Base
+        && settings.footprint != Footprint::Off
+        && matches!(
+            kind,
+            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
+        )
+    {
+        let linear = hull.affine().matrix3;
+        let prints: Vec<FieldPrint> = plan
+            .cones
+            .iter()
+            .enumerate()
+            .map(|(index, cone)| {
+                let axis = linear * cone.axis;
+                let scale = axis.length();
+                let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+                let front = if reduce {
+                    if c >= cone_start(plan, kind, index, true) {
+                        reach
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    front_radius(plan, kind, index, c)
+                };
+                FieldPrint {
+                    origin: hull.transform_point(cone.origin),
+                    axis: axis / scale.max(1e-6),
+                    half_angle: cone.half_angle,
+                    reach: reach * scale,
+                    front: front * scale,
+                    rays: cone
+                        .rays
+                        .iter()
+                        .map(|ray| {
+                            let direction = linear * ray.direction;
+                            (direction / direction.length().max(1e-6), ray.reach * scale)
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        look::set_footprints(&mut looks, GlassLook::Base, settings.footprint, &prints);
+    }
     for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
         let b = &plan.boxes[tint.index];
         let start = box_start(plan, kind, b, reduce);

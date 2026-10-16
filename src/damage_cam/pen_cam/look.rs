@@ -29,7 +29,7 @@ use super::plan::{BoxPlan, Cone};
 use super::stage::StageCamera;
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
-use super::{Corner, DoseScale, GlassLook, Settings};
+use super::{Corner, DoseScale, Footprint, GlassLook, Settings};
 use crate::render_policy::{CameraProfile, VisualScope};
 
 /// Each look's glass colour, linear-converted at use. TUNED, as is every figure below.
@@ -75,11 +75,23 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 const BASE_COMPONENT_ALPHA: f32 = 0.55;
 const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
 const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
+/// The field footprint's outline width and hatch period (px), the hatched share of the period,
+/// and its opacity, in the field's hue.
+const FOOTPRINT_LINE_PX: f32 = 2.0;
+const FOOTPRINT_HATCH_PX: f32 = 5.0;
+const FOOTPRINT_HATCH_SHARE: f32 = 0.4;
+const FOOTPRINT_ALPHA: f32 = 0.9;
+/// The most spall fields a footprint marks, and the most directions of each it reads.
+pub const FOOTPRINT_FIELDS: usize = 4;
+pub const FOOTPRINT_RAYS: usize = 32;
+/// A surface counts as met by a direction up to this share past its reach, and this far (m): the
+/// record ends a direction on the surface that stopped it.
+const FOOTPRINT_REACH_SLACK: (f32, f32) = (1.03, 0.03);
 /// The most struck components a look clears around.
 const HITS: usize = 8;
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
-#[derive(ShaderType, Debug, Clone, Copy, Default)]
+#[derive(ShaderType, Debug, Clone, Copy)]
 pub struct LookParams {
     pub color: Vec4,
     pub edge: Vec4,
@@ -92,6 +104,32 @@ pub struct LookParams {
     pub state: Vec4,
     pub span: Vec4,
     pub rest: Vec4,
+    pub foot: Vec4,
+    pub foot_color: Vec4,
+    pub prints: [Vec4; 3 * FOOTPRINT_FIELDS],
+    pub rays: [Vec4; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+}
+
+impl Default for LookParams {
+    fn default() -> Self {
+        Self {
+            color: Vec4::ZERO,
+            edge: Vec4::ZERO,
+            shade: Vec4::ZERO,
+            field: Vec4::ZERO,
+            cone: Vec4::ZERO,
+            cone2: Vec4::ZERO,
+            mode: Vec4::ZERO,
+            hits: [Vec4::ZERO; HITS],
+            state: Vec4::ZERO,
+            span: Vec4::ZERO,
+            rest: Vec4::ZERO,
+            foot: Vec4::ZERO,
+            foot_color: Vec4::ZERO,
+            prints: [Vec4::ZERO; 3 * FOOTPRINT_FIELDS],
+            rays: [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+        }
+    }
 }
 
 /// What a look element's pipeline tests depth against.
@@ -419,6 +457,62 @@ pub fn sync(
         if material.uses_hits() {
             material.params.hits = marks;
         }
+    }
+}
+
+/// One spall field where a footprint is taken, in world space: its origin, unit axis, half-angle
+/// (rad), reach (m, its longest direction's), how far its front has run (m, negative before it is
+/// thrown) and its recorded directions (unit) with each one's reach (m).
+#[derive(Clone, Debug)]
+pub struct FieldPrint {
+    pub origin: Vec3,
+    pub axis: Vec3,
+    pub half_angle: f32,
+    pub reach: f32,
+    pub front: f32,
+    pub rays: Vec<(Vec3, f32)>,
+}
+
+/// Mark `prints` on every surface the base look draws, the hull's and the components', in
+/// `style`; nothing in any other look or with the footprint off. A surface is marked where it
+/// faces a field's origin, inside its cone, behind its front and no farther than the reach of the
+/// recorded direction nearest it: the field met it there, which says nothing of what stopped.
+pub fn set_footprints(
+    looks: &mut Assets<LookMaterial>,
+    look: GlassLook,
+    style: Footprint,
+    prints: &[FieldPrint],
+) {
+    let style = match (look, style) {
+        (GlassLook::Base, Footprint::Outline) => 1.0,
+        (GlassLook::Base, Footprint::Hatch) => 2.0,
+        _ => 0.0,
+    };
+    let count = prints.len().min(FOOTPRINT_FIELDS);
+    let mut lanes = [Vec4::ZERO; 3 * FOOTPRINT_FIELDS];
+    let mut rays = [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS];
+    let (share, metres) = FOOTPRINT_REACH_SLACK;
+    for (i, print) in prints.iter().take(count).enumerate() {
+        let n = print.rays.len().min(FOOTPRINT_RAYS);
+        lanes[3 * i] = print.origin.extend(print.half_angle);
+        lanes[3 * i + 1] = print.axis.extend(print.reach);
+        lanes[3 * i + 2] = Vec4::new(print.front, n as f32, 0.0, 0.0);
+        for (j, (direction, reach)) in print.rays.iter().take(n).enumerate() {
+            rays[i * FOOTPRINT_RAYS + j] = direction.extend(reach * share + metres);
+        }
+    }
+    let hue = LinearRgba::from(timeline::FIELD);
+    for (_, material) in looks.iter_mut() {
+        let mode = material.params.mode.x;
+        if mode != MODE_BASE && mode != MODE_STATE {
+            continue;
+        }
+        material.params.foot =
+            Vec4::new(style, count as f32, FOOTPRINT_LINE_PX, FOOTPRINT_HATCH_PX);
+        material.params.foot_color = Vec4::new(hue.red, hue.green, hue.blue, FOOTPRINT_ALPHA);
+        material.params.prints = lanes;
+        material.params.rays = rays;
+        material.params.cone2.z = FOOTPRINT_HATCH_SHARE;
     }
 }
 
@@ -821,5 +915,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The footprint marks only the base look's surfaces, hull and components alike, with every
+    /// field's frame and directions; any other look, or the footprint off, marks nothing.
+    #[test]
+    fn the_footprint_marks_only_the_base_looks_surfaces() {
+        let masks = Masks::default();
+        let mut looks = Assets::<LookMaterial>::default();
+        let base = looks.add(base(&masks));
+        let component = looks.add(component_base(&masks));
+        let fill = looks.add(state(Condition::Damaged(0.5), &masks));
+        let glass = looks.add(
+            hull(GlassLook::Ghost, Tier::Armour, &masks)
+                .unwrap()
+                .material,
+        );
+        let print = FieldPrint {
+            origin: Vec3::ZERO,
+            axis: Vec3::NEG_Z,
+            half_angle: 0.5,
+            reach: 2.0,
+            front: 1.0,
+            rays: vec![
+                (Vec3::NEG_Z, 2.0),
+                (Vec3::new(0.0, 0.4, -0.9).normalize(), 1.5),
+            ],
+        };
+        let style = |looks: &Assets<LookMaterial>, handle: &Handle<LookMaterial>| {
+            looks.get(handle).unwrap().params.foot.x
+        };
+        set_footprints(
+            &mut looks,
+            GlassLook::Base,
+            Footprint::Hatch,
+            std::slice::from_ref(&print),
+        );
+        for handle in [&base, &component, &fill] {
+            assert_eq!(style(&looks, handle), 2.0);
+            let p = looks.get(handle).unwrap().params;
+            assert_eq!(p.foot.y, 1.0);
+            assert_eq!(p.prints[0], Vec4::new(0.0, 0.0, 0.0, 0.5));
+            assert_eq!(p.prints[2].y, 2.0, "both directions");
+            assert!(p.rays[1].w > 1.5, "a direction's reach holds its slack");
+        }
+        assert_eq!(style(&looks, &glass), 0.0);
+        set_footprints(
+            &mut looks,
+            GlassLook::Ghost,
+            Footprint::Hatch,
+            std::slice::from_ref(&print),
+        );
+        assert_eq!(style(&looks, &base), 0.0);
+        set_footprints(&mut looks, GlassLook::Base, Footprint::Off, &[print]);
+        assert_eq!(style(&looks, &fill), 0.0);
     }
 }
