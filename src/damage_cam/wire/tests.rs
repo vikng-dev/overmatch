@@ -405,7 +405,7 @@ fn the_shooter_learns_nothing_of_an_unreached_component() {
                 .iter()
                 .any(|dose| dose.volume == component.name)
             {
-                component.hp = component.hp / 2;
+                component.hp /= 2;
                 perturbed_any |= component.count > 1;
             }
         }
