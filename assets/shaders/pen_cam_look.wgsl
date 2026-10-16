@@ -80,11 +80,10 @@ struct LookVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
-    @location(2) color: vec4<f32>,
     // The mesh's origin (world).
-    @location(3) origin: vec3<f32>,
+    @location(2) origin: vec3<f32>,
     // The profile's gradient, world.
-    @location(4) gradient: vec3<f32>,
+    @location(3) gradient: vec3<f32>,
 }
 
 fn mode() -> i32 {
@@ -112,11 +111,6 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #else
     out.world_normal = vec3(0.0, 1.0, 0.0);
-#endif
-#ifdef VERTEX_COLORS
-    out.color = vertex.color;
-#else
-    out.color = vec4(1.0);
 #endif
     return out;
 }
