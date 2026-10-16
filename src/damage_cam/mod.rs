@@ -2,7 +2,7 @@
 //!
 //! The report is plain serde data — no entities, handles or meshes — so any source can fill it (a
 //! hand-authored RON clip, or [`record`] reading a shot the sim resolved) and [`player`] consumes
-//! it unchanged. It is not on the wire.
+//! it unchanged. It does not ride the wire itself: [`wire`] carries it as indices and quanta.
 //!
 //! The record carries no geometry. It holds the shot's inputs (round, origin, shooter, struck
 //! vehicle, every servo's angle), the struck tank's state at the shot (each component's hit points,
@@ -23,6 +23,14 @@ pub mod player;
 pub mod record;
 pub(crate) mod recorder;
 pub mod shapes;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "its consumer, the shot explanation's transport, is not yet built"
+    )
+)]
+pub(crate) mod wire;
 
 use std::collections::BTreeMap;
 use std::path::Path;

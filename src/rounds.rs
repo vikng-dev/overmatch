@@ -209,6 +209,18 @@ impl RoundRegistry {
         self.entry(name).map(|(_, shown)| shown.as_str())
     }
 
+    /// Every round's key, in key order.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its consumer, the shot explanation's transport, is not yet built"
+        )
+    )]
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
+        self.rounds.keys().map(String::as_str)
+    }
+
     fn entry(&self, name: &str) -> Result<&(Round, String), RoundError> {
         self.rounds.get(name).ok_or_else(|| RoundError::Unknown {
             name: name.to_string(),

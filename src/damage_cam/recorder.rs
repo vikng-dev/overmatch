@@ -37,6 +37,7 @@ use bevy::prelude::*;
 
 use super::PenetrationReport;
 use super::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
+use super::wire::TankLife;
 use crate::ballistics::{
     ArmourMark, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying, ShellPath,
     ShotDose, ShotSource, SpallCone, SpallMarks,
@@ -44,10 +45,10 @@ use crate::ballistics::{
 use crate::damage::{
     Ammo, CrewStation, DamageConsequences, KnockoutReason, TankKnockedOut, TankVolumes, VolumeOf,
 };
-use crate::spec::FireMechanism;
+use crate::spec::{FireMechanism, TankSpecHandle};
 use crate::state::{GameplaySet, SimPhase};
 use crate::tank::{Rig, Weapon, rig_world_pose};
-use crate::{ClientReplica, ShotId};
+use crate::{ClientReplica, CombatantId, CombatantLife, ShotClock, ShotId};
 
 /// How far (m) a shell must be outside the union of a struck tank's collider bounds before its
 /// record is finished: DERIVED to cover the tank's travel in a tick (~0.17 m at 11 m/s and 64 Hz)
@@ -55,21 +56,27 @@ use crate::{ClientReplica, ShotId};
 /// still inside.
 const CLEAR_MARGIN: f32 = 0.5;
 
-/// A finished record: the tank the round struck, who fired it, which of the round's encounters with
-/// the tank it is (0 the first), and the report.
+/// A finished record: the tank the round struck and the life of its combatant it is (`None` for a
+/// tank no match spawned), who fired it, which of the round's encounters with the tank it is (0 the
+/// first), the [`ShotClock`] ticks the encounter opened and finished on (0 where no clock runs), the
+/// struck hull's pose (WORLD) when the encounter opened, and the report.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "its consumer is the per-recipient projection, not yet built"
+        reason = "its consumer, the explanation's transport, is not yet built"
     )
 )]
 #[derive(Message)]
 pub(crate) struct RecordedShot {
     pub tank: Entity,
+    pub life: Option<TankLife>,
     pub shooter: Option<ShotSource>,
     pub shot: Option<ShotId>,
     pub encounter: u32,
+    pub contact_tick: u32,
+    pub completion_tick: u32,
+    pub hull: Option<(Vec3, Quat)>,
     pub report: PenetrationReport,
 }
 
@@ -120,6 +127,8 @@ struct Struck {
     tank: Entity,
     /// Which of the round's encounters with the tank, 0 the first.
     encounter: u32,
+    /// The [`ShotClock`] tick it opened on.
+    contact_tick: u32,
     /// The encounter's first mark.
     from: usize,
     /// Its components and their HP when the encounter opened.
@@ -161,6 +170,7 @@ impl ShotRecording {
 #[derive(SystemParam)]
 pub(crate) struct MarchRecorder<'w, 's> {
     recorder: Option<ResMut<'w, ShotRecorder>>,
+    clock: Option<Res<'w, ShotClock>>,
     tanks: Query<'w, 's, &'static TankVolumes>,
 }
 
@@ -191,6 +201,7 @@ impl MarchRecorder<'_, '_> {
             return;
         };
         let owner = |volume: Entity| owners.get(volume).ok().map(VolumeOf::tank);
+        let tick = self.clock.as_ref().map_or(0, |clock| clock.0);
         for (index, mark) in marks.iter().enumerate().skip(marks_from) {
             let mut touched: Vec<Entity> = match mark {
                 ArmourMark::Bounce { struck, .. } => owner(*struck).into_iter().collect(),
@@ -221,6 +232,7 @@ impl MarchRecorder<'_, '_> {
                         recording.struck.push(Struck {
                             tank,
                             encounter,
+                            contact_tick: tick,
                             from: index,
                             boxes,
                             frames: Vec::new(),
@@ -479,6 +491,7 @@ fn recorded(
         .iter()
         .map(|&(mark, frame)| Some((mark, frame?)))
         .collect::<Option<Vec<_>>>()?;
+    let hull = frames.first().map(|(_, frame)| frame.pose());
     let tank = StruckTank::recorded(
         struck.tank,
         struck.from,
@@ -488,11 +501,25 @@ fn recorded(
     );
     let mut report = record::report_from(world, &tank, log, &recording.facts)?;
     report.killed = struck.killed;
+    if report.vehicle.is_none() {
+        report.vehicle = world
+            .get::<TankSpecHandle>(struck.tank)
+            .and_then(|spec| spec.0.path())
+            .map(|path| path.path().to_string_lossy().into_owned());
+    }
+    let life = world
+        .get::<CombatantId>(struck.tank)
+        .zip(world.get::<CombatantLife>(struck.tank))
+        .map(|(&combatant, &life)| TankLife { combatant, life });
     Some(RecordedShot {
         tank: struck.tank,
+        life,
         shooter: recording.source,
         shot: recording.shot,
         encounter: struck.encounter,
+        contact_tick: struck.contact_tick,
+        completion_tick: world.get_resource::<ShotClock>().map_or(0, |clock| clock.0),
+        hull,
         report,
     })
 }

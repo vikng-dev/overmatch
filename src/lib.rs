@@ -65,6 +65,8 @@ mod drive_hud;
 /// certificate and the corridor collector's parallel test are decided in, so neither has a
 /// tolerance.
 mod exact;
+/// The FNV-1a fold the compatibility tags are made with: the protocol's and the shot vocabulary's.
+mod fingerprint;
 /// Fire control: per-weapon superelevation range tables + the player-dialed range. Sits atop
 /// `ballistics`; the aim commit reads it to lob the aim point so the bore elevates for range.
 mod firecontrol;
@@ -558,6 +560,12 @@ pub(crate) enum Layer {
 /// delayed outcomes addressable without depending on either lifetime or mapping.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub(crate) struct CombatantId(pub(crate) u64);
+
+/// Which of its combatant's lives a tank root is: 0 its first spawn, one more each respawn. With the
+/// root's [`CombatantId`] it names one life, so an outcome about a tank that has since respawned is
+/// never read against its next life. Assigned at spawn, never changed.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub(crate) struct CombatantLife(pub(crate) u32);
 
 /// Canonical, net-neutral identity for one shot: `(combatant, weapon, fire_tick)`.
 ///

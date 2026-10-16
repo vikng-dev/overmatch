@@ -33,7 +33,7 @@ pub(crate) use walk::VolumeMaterial;
 mod mechanism;
 
 /// The spall cone's shape data: half-angle, axis rule and the directions it is sampled by.
-mod spall_cone;
+pub(crate) mod spall_cone;
 
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.

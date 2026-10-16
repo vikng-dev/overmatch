@@ -21,6 +21,7 @@ use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
+use crate::fingerprint::{fingerprint_field, fnv1a_64};
 use crate::state::GameplaySet;
 use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
@@ -177,26 +178,6 @@ pub fn protocol_id() -> u64 {
         let digest = crate::map::content_digest(&crate::assets::asset_root());
         fingerprint_field(PROTOCOL_FINGERPRINT, b"map_content", &digest.to_le_bytes())
     })
-}
-
-/// Const-evaluable FNV-1a fold for the compatibility tag; it is not a security primitive.
-const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
-    let mut hash = seed;
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        i += 1;
-    }
-    hash
-}
-
-/// Fold one labeled manifest field, with delimiters around its value.
-const fn fingerprint_field(hash: u64, label: &[u8], value: &[u8]) -> u64 {
-    let after_label = fnv1a_64(hash, label);
-    let after_label_separator = fnv1a_64(after_label, b"\0");
-    let after_value = fnv1a_64(after_label_separator, value);
-    fnv1a_64(after_value, b"\0")
 }
 
 /// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and

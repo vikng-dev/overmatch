@@ -272,15 +272,51 @@ impl ConeShape {
         }
     }
 
-    /// Every direction of a cone about `axis`, with its profile weight `f_k`, in stratum order.
+    /// Every direction of a cone about `axis`, with its profile weight `f_k`, in stratum order: the
+    /// strata placed about `axis` and its [`Self::lateral_axis`].
     pub(crate) fn directions(&self, axis: Dir3) -> impl Iterator<Item = (Dir3, f32)> + '_ {
-        let z = Vec3::from(axis);
+        self.directions_about(axis, Self::lateral_axis(Vec3::from(axis)))
+    }
+
+    /// The first lateral axis of a cone about the unit axis `z`: `z × up`, normalized, `up` the
+    /// frame's `+Y`, or `+X` where `z` lies within ~8° of `±Y`. The second is `z` × this.
+    pub(crate) fn lateral_axis(z: Vec3) -> Vec3 {
         let up = if z.y.abs() > 0.99 { Vec3::X } else { Vec3::Y };
-        let x = z.cross(up).normalize();
+        z.cross(up).normalize()
+    }
+
+    /// Every direction of a cone about `axis` whose first lateral axis is `x` (unit, normal to
+    /// `axis`), with its profile weight `f_k`, in stratum order.
+    pub(crate) fn directions_about(
+        &self,
+        axis: Dir3,
+        x: Vec3,
+    ) -> impl Iterator<Item = (Dir3, f32)> + '_ {
+        let z = Vec3::from(axis);
         let y = z.cross(x);
         self.strata.iter().map(move |stratum| {
             let local = z * stratum.mu + x * stratum.lateral.0 + y * stratum.lateral.1;
             (Dir3::new(local).unwrap_or(axis), stratum.profile)
+        })
+    }
+
+    /// Every direction in the cone's own frame, in stratum order: `cos θ`, the two lateral
+    /// components and the profile weight `f`.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its consumer, the shot explanation's transport, is not yet built"
+        )
+    )]
+    pub(crate) fn strata(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
+        self.strata.iter().map(|stratum| {
+            [
+                stratum.mu,
+                stratum.lateral.0,
+                stratum.lateral.1,
+                stratum.profile,
+            ]
         })
     }
 }

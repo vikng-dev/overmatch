@@ -88,6 +88,30 @@ impl TankAsset {
         Ok(Self { geometry, spec })
     }
 
+    /// The extracted sim artifact.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its consumer, the shot explanation's transport, is not yet built"
+        )
+    )]
+    pub(crate) fn geometry(&self) -> &TankGeometry {
+        &self.geometry
+    }
+
+    /// The tank file.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its consumer, the shot explanation's transport, is not yet built"
+        )
+    )]
+    pub(crate) fn spec(&self) -> &TankSpec {
+        &self.spec
+    }
+
     /// The name a player reads for this vehicle.
     pub fn display_name(&self) -> &str {
         &self.spec.display_name

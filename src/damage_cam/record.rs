@@ -57,12 +57,14 @@ enum VolumeClass {
     Box,
 }
 
-/// A hull frame: world → hull-local.
+/// A hull frame: world → hull-local, and the hull node's pose it inverts.
 #[derive(Clone, Copy)]
 pub(crate) struct HullFrame {
     to_hull: Affine3A,
     /// Rotation only: for directions.
     to_hull_rotation: Quat,
+    /// The hull node's position and rotation (WORLD).
+    pose: (Vec3, Quat),
 }
 
 impl HullFrame {
@@ -71,15 +73,22 @@ impl HullFrame {
         Self {
             to_hull: Affine3A::from_rotation_translation(rotation, position).inverse(),
             to_hull_rotation: rotation.inverse(),
+            pose: (position, rotation),
         }
     }
 
     fn of(global: &GlobalTransform) -> Self {
-        let (_, rotation, _) = global.to_scale_rotation_translation();
+        let (_, rotation, translation) = global.to_scale_rotation_translation();
         Self {
             to_hull: global.affine().inverse(),
             to_hull_rotation: rotation.inverse(),
+            pose: (translation, rotation),
         }
+    }
+
+    /// The hull node's position and rotation (WORLD).
+    pub(crate) fn pose(&self) -> (Vec3, Quat) {
+        self.pose
     }
 }
 

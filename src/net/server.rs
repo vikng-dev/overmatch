@@ -32,7 +32,7 @@ use crate::terrain_grid::spawn_pos;
 // track field is built from (`world::TerrainMap` blocks → `TerrainBlock`), so the two cannot drift.
 use crate::track::oracle::TerrainBlock;
 use crate::world::TerrainMap;
-use crate::{CombatantId, SimPlugin};
+use crate::{CombatantId, CombatantLife, SimPlugin};
 
 const PORT: u16 = 5888;
 
@@ -166,12 +166,14 @@ pub(super) fn netcode_server(hosted: Option<&HostedConfig>) -> NetcodeServer {
 struct PendingClients(Vec<(Entity, PeerId)>);
 
 /// Match-local combatant identities. `next` is never reused; player links retain their id across
-/// respawn and the optional bot retains its one id across its timed respawns.
+/// respawn and the optional bot retains its one id across its timed respawns. `lives` counts each
+/// combatant's spawns, the next [`CombatantLife`] to hand out.
 #[derive(Resource, Default)]
 struct CombatantIds {
     next: u64,
     players: bevy::platform::collections::HashMap<Entity, CombatantId>,
     bot: Option<CombatantId>,
+    lives: bevy::platform::collections::HashMap<CombatantId, u32>,
 }
 
 impl CombatantIds {
@@ -198,6 +200,16 @@ impl CombatantIds {
         let id = self.allocate();
         self.bot = Some(id);
         id
+    }
+
+    /// The life `combatant`'s next spawn is: 0 for its first, one more each time.
+    fn life(&mut self, combatant: CombatantId) -> CombatantLife {
+        let next = self.lives.entry(combatant).or_default();
+        let life = CombatantLife(*next);
+        *next = next
+            .checked_add(1)
+            .expect("combatant-life counter exhausted u32");
+        life
     }
 }
 
@@ -621,6 +633,7 @@ fn spawn_pending_tanks(
         // join onto a hillside no longer starts inside the terrain.
         let spawn_pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
         lane.0 += 1;
+        let combatant = combatants.player(link);
         spawn_player_tank(
             &mut commands,
             content,
@@ -629,7 +642,8 @@ fn spawn_pending_tanks(
             client_id,
             spawn_pos,
             spawn_rot,
-            combatants.player(link),
+            combatant,
+            combatants.life(combatant),
         );
     }
 }
@@ -645,6 +659,7 @@ fn spawn_player_tank(
     spawn_pos: Vec3,
     spawn_rot: Quat,
     combatant: CombatantId,
+    life: CombatantLife,
 ) -> Entity {
     let root = spawn_complete_tank(
         commands,
@@ -655,6 +670,7 @@ fn spawn_player_tank(
                 Name::new("Tank"),
                 NetTank,
                 combatant,
+                life,
                 Transform::default(),
                 // Authority body role and colliders enter the same command flush.
                 RigidBody::Dynamic,
@@ -721,7 +737,9 @@ fn spawn_bot(
     };
     *spawned = true;
     let pos = bot_spawn_pos(height.as_deref());
-    let root = spawn_bot_entity(&mut commands, &assets, content, combatants.bot(), pos);
+    let combatant = combatants.bot();
+    let life = combatants.life(combatant);
+    let root = spawn_bot_entity(&mut commands, &assets, content, combatant, life, pos);
     info!(
         "server: spawned circling bot tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
         pos.x, pos.y, pos.z
@@ -735,6 +753,7 @@ fn spawn_bot_entity(
     assets: &PendingTankAssets,
     content: TankContent<'_>,
     combatant: CombatantId,
+    life: CombatantLife,
     spawn_pos: Vec3,
 ) -> Entity {
     spawn_complete_tank(
@@ -749,6 +768,7 @@ fn spawn_bot_entity(
                 super::protocol::NetBot,
                 NetTank,
                 combatant,
+                life,
                 Transform::default(),
                 RigidBody::Dynamic,
                 Position(spawn_pos),
@@ -797,6 +817,7 @@ fn respawn_dead_bots(
     source: TankSimSource,
     time: Res<Time<Virtual>>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
+    mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
     let now = time.elapsed_secs();
@@ -827,6 +848,7 @@ fn respawn_dead_bots(
             &assets,
             content,
             combatant,
+            combatants.life(combatant),
             bot_spawn_pos(height.as_deref()),
         );
         info!("server: respawned bot as {fresh} (was {root})");
@@ -875,6 +897,7 @@ fn respawn_player_tanks(
     // The world's standing geometry (the scatter's buildings): occupancy an override spawn checks
     // against exactly like a live tank. Absent in bare test worlds.
     map: Option<Res<TerrainMap>>,
+    mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
     // (dead root, owner link, owner client id) for every owned tank that both IS dead and asked to
@@ -969,6 +992,7 @@ fn respawn_player_tanks(
             spawn_pos,
             spawn_rot,
             combatant,
+            combatants.life(combatant),
         );
         info!("server: player {client_id} respawn requested — swept {root}, spawned {fresh}");
     }
@@ -1012,6 +1036,20 @@ mod tests {
     use super::*;
     // The shared spawn rule these tests assert the server composes correctly.
     use crate::terrain_grid::spawn_surface_height;
+
+    /// Each spawn of a combatant is its next life, counted per combatant: a respawn is never the
+    /// life it replaced, and one combatant's spawns do not advance another's.
+    #[test]
+    fn each_spawn_of_a_combatant_is_its_next_life() {
+        let mut world = World::new();
+        let mut ids = CombatantIds::default();
+        let player = ids.player(world.spawn_empty().id());
+        let bot = ids.bot();
+        assert_eq!(ids.life(player), CombatantLife(0));
+        assert_eq!(ids.life(player), CombatantLife(1));
+        assert_eq!(ids.life(bot), CombatantLife(0));
+        assert_eq!(ids.life(player), CombatantLife(2));
+    }
 
     #[test]
     fn combatant_ids_are_nonzero_unique_and_retained_for_respawn() {

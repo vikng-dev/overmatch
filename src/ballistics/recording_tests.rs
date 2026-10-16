@@ -821,3 +821,67 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         "before the line reached the box"
     );
 }
+
+/// A record names the struck tank's life, the [`crate::ShotClock`] ticks its encounter opened and
+/// finished on, and the hull's pose when it opened; a tank no match spawned has no life.
+#[test]
+fn a_record_names_the_struck_life_its_ticks_and_the_hull_pose() {
+    let yaw = 0.5_f32;
+    let mut app = recording_world(false);
+    let (root, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        yaw,
+        Vec3::ZERO,
+        &plated(DEEP, Kind::Crew(DEEP)),
+    );
+    app.world_mut()
+        .entity_mut(root)
+        .insert((crate::CombatantId(9), crate::CombatantLife(2)));
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
+    let first = 500;
+    let mut recorded = Vec::new();
+    for tick in first..first + 8 {
+        app.insert_resource(crate::ShotClock(tick));
+        recorded.extend(run(&mut app, 1));
+    }
+    assert_eq!(recorded.len(), 1);
+    let record = &recorded[0];
+    assert_eq!(
+        record.life,
+        Some(crate::damage_cam::wire::TankLife {
+            combatant: crate::CombatantId(9),
+            life: crate::CombatantLife(2),
+        })
+    );
+    assert!(
+        first <= record.contact_tick
+            && record.contact_tick <= record.completion_tick
+            && record.completion_tick < first + 8,
+        "contact {} completion {}",
+        record.contact_tick,
+        record.completion_tick
+    );
+    let (at, turn) = record.hull.expect("the hull's pose at contact");
+    assert!(at.length() < 1.0e-3, "{at}");
+    assert!(turn.angle_between(Quat::from_rotation_y(yaw)) < 1.0e-3);
+
+    let mut app = recording_world(false);
+    tank(
+        &mut app,
+        Vec3::ZERO,
+        yaw,
+        Vec3::ZERO,
+        &plated(DEEP, Kind::Crew(DEEP)),
+    );
+    settle(&mut app);
+    fire(&mut app, Vec3::new(0.0, 0.0, 30.0), FireMechanism::Single);
+    let recorded = run(&mut app, 8);
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].life, None);
+    assert_eq!(
+        (recorded[0].contact_tick, recorded[0].completion_tick),
+        (0, 0)
+    );
+}
