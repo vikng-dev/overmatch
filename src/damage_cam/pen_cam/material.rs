@@ -19,7 +19,7 @@ pub struct GlowParams {
     pub field: Vec4,
 }
 
-/// How a [`GlowMaterial`] or a [`LookMaterial`](super::look::LookMaterial) composites.
+/// How a [`LookMaterial`](super::look::LookMaterial) composites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blend {
     /// Commutative, so it needs no sort order.
@@ -30,13 +30,13 @@ pub enum Blend {
     Opaque,
 }
 
-/// One flat colour, optionally rim-lit by view angle, vertex-coloured, clipped by a plane, faded
-/// by distance from the mesh's origin or cut off at a radius from it; both faces drawn.
+/// One flat colour added to what lies behind it, optionally rim-lit by view angle, vertex-coloured,
+/// clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from it;
+/// both faces drawn. Additive is commutative, so it needs no sort order.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
     #[uniform(0)]
     pub params: GlowParams,
-    pub blend: Blend,
 }
 
 /// [`GlowParams::field`] with no front (`x < 0`) and no falloff (`y = 0`).
@@ -50,24 +50,9 @@ impl GlowMaterial {
                 color: Vec4::new(color.red, color.green, color.blue, 1.0),
                 rim: Vec4::new(intensity, 0.0, 1.0, 0.0),
                 plane: Vec4::ZERO,
-                flags: Vec4::new(0.0, 0.0, 1.0, 1.0),
-                field: NO_FIELD,
-            },
-            blend: Blend::Additive,
-        }
-    }
-
-    /// A straight-alpha fill of `color` at `alpha`.
-    pub fn blended(color: LinearRgba, alpha: f32) -> Self {
-        Self {
-            params: GlowParams {
-                color: Vec4::new(color.red, color.green, color.blue, alpha),
-                rim: Vec4::new(1.0, 0.0, 1.0, 0.0),
-                plane: Vec4::ZERO,
                 flags: Vec4::new(0.0, 0.0, 0.0, 1.0),
                 field: NO_FIELD,
             },
-            blend: Blend::Blended,
         }
     }
 
@@ -128,11 +113,7 @@ impl Material for GlowMaterial {
     }
 
     fn alpha_mode(&self) -> AlphaMode {
-        match self.blend {
-            Blend::Additive => AlphaMode::Add,
-            Blend::Blended => AlphaMode::Blend,
-            Blend::Opaque => AlphaMode::Opaque,
-        }
+        AlphaMode::Add
     }
 
     fn enable_prepass() -> bool {

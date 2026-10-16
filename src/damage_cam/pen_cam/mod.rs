@@ -39,6 +39,8 @@ mod world;
 
 use std::time::Duration;
 
+use bevy::camera::CameraUpdateSystems;
+use bevy::camera::visibility::VisibilitySystems;
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::input::mouse::AccumulatedMouseMotion;
@@ -241,17 +243,6 @@ pub enum CornerSetting {
     All,
     ThroughOnly,
     Off,
-}
-
-/// How the stage draws the glass: the corner's base look, or, on the world where the corner's masks
-/// do not reach (the kill cam's lesson), the stage's own additive rim glass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum GlassLook {
-    /// Every mesh of the tank as additive rim-lit glass.
-    Baseline,
-    /// The whole tank as one hueless edged grey surface one layer deep at one opacity, its
-    /// components the state scale's untouched grey one layer deep among themselves ([`look`]).
-    Base,
 }
 
 /// The demo's switches.
@@ -542,7 +533,7 @@ pub fn demo_plugin(app: &mut App) {
     .add_systems(Startup, (hold_clock, view::spawn, world::spawn))
     .add_systems(
         Startup,
-        (stage::spawn, hud::spawn, killcam::spawn, look::spawn).after(view::spawn),
+        (stage::spawn, hud::spawn, killcam::spawn).after(view::spawn),
     );
     sequence(app);
     stage::plugin(app);
@@ -568,16 +559,24 @@ pub(super) fn sequence(app: &mut App) {
                 view::pose,
                 killcam::stage,
                 camera_writers(),
+                look::own,
                 stage::rebuild,
                 stage::animate,
                 world::animate,
                 hud::layout,
-                look::layout,
-                look::sync,
                 hud::animate,
                 killcam::hud,
             )
                 .chain(),
+        )
+        .add_systems(
+            PostUpdate,
+            (
+                look::follow_lens.before(CameraUpdateSystems),
+                look::follow_pose
+                    .after(TransformSystems::Propagate)
+                    .before(VisibilitySystems::UpdateFrusta),
+            ),
         );
 }
 

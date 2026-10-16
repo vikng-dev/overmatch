@@ -73,15 +73,6 @@ impl Tier {
     }
 }
 
-impl ViewMesh {
-    /// Whether this mesh belongs to the volume named `name`. A record names a mixed node's
-    /// substance `node/substance#k`; the node part matches.
-    pub fn is(&self, name: &str) -> bool {
-        let node = name.split('/').next().unwrap_or(name);
-        self.names.iter().any(|n| n == node)
-    }
-}
-
 /// A collision proxy: never drawn.
 #[derive(Component)]
 pub struct Proxy;

@@ -61,13 +61,6 @@ pub(super) struct CornerImages {
     turn: Option<usize>,
 }
 
-impl CornerImages {
-    /// The corner image's size (physical px) and scale factor.
-    pub(super) fn size_and_scale(&self) -> (UVec2, f32) {
-        (self.size, self.scale)
-    }
-}
-
 /// One rasterized glyph per frame kind.
 #[derive(Resource)]
 pub(super) struct Glyphs {

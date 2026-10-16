@@ -1387,7 +1387,11 @@ mod tests {
         let run = Run::new(entry, &library, &settings, false);
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::ignore);
-        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()));
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            TransformPlugin,
+        ));
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
@@ -1639,6 +1643,167 @@ mod tests {
         inset(&mut app, Some(false));
         app.update();
         assert!(inset(&mut app, None), "the corner draws in the inset");
+    }
+
+    /// Give `camera` a resolved target of `size` physical pixels at `scale`, as bevy's camera
+    /// system would from its window or image; a headless app has no such system.
+    fn resolve(app: &mut App, camera: Entity, size: UVec2, scale: f32) {
+        let mut entity = app.world_mut().entity_mut(camera);
+        if !entity.contains::<Camera>() {
+            entity.insert(Camera::default());
+        }
+        entity.get_mut::<Camera>().unwrap().computed.target_info =
+            Some(bevy::camera::RenderTargetInfo {
+                physical_size: size,
+                scale_factor: scale,
+            });
+    }
+
+    fn main_camera(app: &mut App) -> Entity {
+        let mut query = app.world_mut().query_filtered::<Entity, With<MainCamera>>();
+        query.single(app.world()).unwrap()
+    }
+
+    /// Every mask camera and the camera it draws for.
+    fn mask_cameras(app: &mut App) -> Vec<(Entity, Entity)> {
+        let mut query = app
+            .world_mut()
+            .query::<(Entity, &super::super::look::MaskCamera)>();
+        query
+            .iter(app.world())
+            .map(|(entity, mask)| (entity, mask.viewer))
+            .collect()
+    }
+
+    /// The mask images' ids and sizes, where they exist.
+    fn mask_images(app: &App) -> [(AssetId<Image>, Option<UVec2>); 2] {
+        let masks = app.world().resource::<super::super::look::Masks>();
+        let images = app.world().resource::<Assets<Image>>();
+        [masks.hull.id(), masks.part.id()].map(|id| (id, images.get(id).map(Image::size)))
+    }
+
+    /// The kill cam's lesson owns the one mask set, drawn for the main camera: two mask cameras
+    /// at its physical viewport size and scale factor, before it, with its lens and, in the same
+    /// frame, its final pose. A new size makes a new set and removes the old images; the lesson's
+    /// end leaves no mask camera, no mask image and no stage mesh in the base look.
+    #[test]
+    fn the_lesson_masks_follow_its_camera_and_go_with_it() {
+        let mut app = demo_app(kill_entry(), Shooting::Spawned);
+        let beats = app.world().resource::<Run>().kill.unwrap().1;
+        let main = main_camera(&mut app);
+        resolve(&mut app, main, UVec2::new(1600, 900), 2.0);
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
+        app.update();
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.5;
+        app.update();
+
+        let follows = |app: &mut App, size: UVec2, scale: f32| {
+            let masks = mask_cameras(app);
+            assert_eq!(masks.len(), 2, "one set");
+            for (_, size_now) in mask_images(app) {
+                assert_eq!(size_now, Some(size));
+            }
+            let world = app.world();
+            assert_eq!(
+                world.resource::<super::super::look::Masks>().viewer(),
+                Some(main)
+            );
+            let pose = *world.get::<GlobalTransform>(main).unwrap();
+            let Projection::Perspective(lens) = world.get::<Projection>(main).unwrap() else {
+                panic!("the main camera is perspective");
+            };
+            let order = world.get::<Camera>(main).unwrap().order;
+            for (mask, viewer) in masks {
+                assert_eq!(viewer, main);
+                assert_eq!(*world.get::<GlobalTransform>(mask).unwrap(), pose);
+                let Projection::Perspective(mask_lens) = world.get::<Projection>(mask).unwrap()
+                else {
+                    panic!("the mask camera is perspective");
+                };
+                assert_eq!(mask_lens.fov, lens.fov);
+                assert!(world.get::<Camera>(mask).unwrap().order < order);
+                let bevy::camera::RenderTarget::Image(target) =
+                    world.get::<bevy::camera::RenderTarget>(mask).unwrap()
+                else {
+                    panic!("the mask camera draws to an image");
+                };
+                assert_eq!(target.scale_factor, scale);
+            }
+            pose
+        };
+        let before = follows(&mut app, UVec2::new(1600, 900), 2.0);
+        app.world_mut().resource_mut::<Run>().t = beats.lesson() + 2.0;
+        app.update();
+        let after = follows(&mut app, UVec2::new(1600, 900), 2.0);
+        assert_ne!(before, after, "the lesson's camera moves");
+
+        let old = mask_images(&app);
+        resolve(&mut app, main, UVec2::new(1280, 720), 1.0);
+        app.update();
+        follows(&mut app, UVec2::new(1280, 720), 1.0);
+        for (id, _) in old {
+            assert!(app.world().resource::<Assets<Image>>().get(id).is_none());
+        }
+
+        let old = mask_images(&app);
+        app.world_mut().resource_mut::<Run>().t = beats.killer() + 1.0;
+        app.update();
+        app.update();
+        assert!(mask_cameras(&mut app).is_empty());
+        assert_eq!(
+            app.world().resource::<super::super::look::Masks>().viewer(),
+            None
+        );
+        for (id, _) in old {
+            assert!(app.world().resource::<Assets<Image>>().get(id).is_none());
+        }
+        let mut dressed = app.world_mut().query_filtered::<(), (
+            With<super::super::view::ViewMesh>,
+            With<MeshMaterial3d<super::super::look::LookMaterial>>,
+        )>();
+        assert_eq!(dressed.iter(app.world()).count(), 0);
+    }
+
+    /// A corner turn that draws the base look's hull owns the one mask set, drawn for the inset
+    /// camera at its target's size; the main camera gets none.
+    #[test]
+    fn a_corner_turn_gives_the_masks_to_the_inset() {
+        let library = library();
+        let settings = Settings::default();
+        let (entry, start) = (0..PLAYLIST.len())
+            .find_map(|entry| {
+                let run = Run::new(entry, &library, &settings, false);
+                run.turns
+                    .iter()
+                    .find(|turn| {
+                        matches!(
+                            run.kind_of(turn.record, &library),
+                            CornerKind::Glass | CornerKind::Victim
+                        )
+                    })
+                    .map(|turn| (entry, turn.start))
+            })
+            .expect("an entry opens the corner on a penetration");
+        let mut app = demo_app(entry, Shooting::Spawned);
+        app.update();
+        let main = main_camera(&mut app);
+        resolve(&mut app, main, UVec2::new(1600, 900), 2.0);
+        let inset = {
+            let mut query = app
+                .world_mut()
+                .query_filtered::<Entity, With<super::super::stage::StageCamera>>();
+            query.single(app.world()).unwrap()
+        };
+        resolve(&mut app, inset, UVec2::new(480, 270), 2.0);
+        app.world_mut().resource_mut::<Run>().t = start + 0.5;
+        app.update();
+        app.update();
+        let masks = mask_cameras(&mut app);
+        assert_eq!(masks.len(), 2);
+        assert!(masks.iter().all(|(_, viewer)| *viewer == inset));
+        for (_, size) in mask_images(&app) {
+            assert_eq!(size, Some(UVec2::new(480, 270)));
+        }
     }
 
     /// Switching to another scenario during the lesson hands the camera back to the world with the

@@ -3,20 +3,19 @@
 // 1/r² falloff from the mesh's origin and an optional front that holds every vertex within a
 // radius of that origin. Unlit: everything it draws is a diagram over the record.
 //
-// Output: additive (`flags.z = 1`) writes `rgb` with alpha 0 into the premultiplied pipeline
-// `AlphaMode::Add` selects, so overlap order never changes the sum; blended (`flags.z = 0`) writes
-// straight `rgb, a` for `AlphaMode::Blend`.
+// Output: `rgb` with alpha 0 into the premultiplied pipeline `AlphaMode::Add` selects, so overlap
+// order never changes the sum.
 
 #import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
 
 struct GlowParams {
-    // rgb: linear colour; a: opacity for the blended output.
+    // rgb: linear colour.
     color: vec4<f32>,
     // x: base intensity, y: rim gain, z: rim power, w: vertex colour weight (0 or 1).
     rim: vec4<f32>,
     // xyz: unit plane normal toward the discarded side, w: normal . point.
     plane: vec4<f32>,
-    // x: clip on (1) or off (0), y: unused, z: additive (1) or blended (0), w: overall fade.
+    // x: clip on (1) or off (0), w: overall fade.
     flags: vec4<f32>,
     // x: front radius (m, world) from the mesh's origin, negative for none; y: falloff reference
     // radius r0 (m), 0 for none.
@@ -78,10 +77,5 @@ fn fragment(in: GlowVertexOutput) -> @location(0) vec4<f32> {
         let r = max(in.radius, 1e-4);
         intensity = intensity * min(1.0, (glow.field.y / r) * (glow.field.y / r));
     }
-    let alpha = glow.color.a;
-    let fade = glow.flags.w;
-    if glow.flags.z > 0.5 {
-        return vec4(rgb * intensity * fade, 0.0);
-    }
-    return vec4(rgb * intensity, alpha * fade);
+    return vec4(rgb * intensity * glow.flags.w, 0.0);
 }
