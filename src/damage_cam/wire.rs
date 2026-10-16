@@ -28,13 +28,13 @@
 //! | time from contact | `i32` µs | 0.5 µs plus half an f32 ulp of the time |
 //! | unit direction | octahedral, two `u16` | [`DIRECTION_BOUND`] (6.5e-5 rad) |
 //! | servo angle | `u16` of a full turn | 0.0028°, read back in (−180°, 180°] |
-//! | hull rotation | quaternion, four `i16` | [`ROTATION_BOUND`] (6.2e-5 rad) |
+//! | hull rotation | quaternion, four `i16`; refused unless unit within [`ROTATION_SLACK`] | [`ROTATION_BOUND`] (6.2e-5 rad) |
 //! | field reach | `u16` mm, `u16::MAX` marking a `u32` in the cone's overflow list | 0.5 mm |
 //! | a ray's end | the cone's origin plus its direction times its reach | [`end_bound`]: 1.4 mm plus 1.8e-4 of the reach |
 //! | doses, strengths, chord, cost, speed, calibre, mass | `f32` | exact |
 //! | HP at the shot, HP lost | `u32` | exact |
 //! | plate factor | cost over chord, derived | four f32 ulps, relative |
-//! | incidence | from the decoded normal and direction | twice [`DIRECTION_BOUND`] |
+//! | incidence | `f32`, the record's own: an f32 `acos` of the decoded directions is off by 0.04° near normal impact (MEASURED) | exact |
 //!
 //! A ray's direction is not carried: it is the cone shape's stratum about the cone's axis, placed by
 //! the cone's roll — the turn about the axis from the shape's own lateral axis
@@ -63,18 +63,18 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |
 //! |---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 1509 | 1477 | 1182 | 1 | 256 | 214 | 1182 |
-//! | s2_stopped_mantlet | 177 | 135 | 0 | 0 | 0 | 0 | – |
-//! | s3_ricochet | 183 | 141 | 0 | 0 | 0 | 0 | – |
-//! | s4_spaced_then_stopped | 1352 | 1310 | 1070 | 2 | 512 | 0 | 535 |
-//! | s5_oblique_through | 1279 | 1239 | 1052 | 1 | 256 | 256 | 1052 |
-//! | s6_overpen | 1169 | 1127 | 934 | 2 | 512 | 0 | 467 |
-//! | s7_engine_shadow | 1239 | 1205 | 984 | 1 | 256 | 211 | 984 |
-//! | s8a_mg_ricochet | 183 | 141 | 0 | 0 | 0 | 0 | – |
-//! | s8b_mg_stopped | 175 | 133 | 0 | 0 | 0 | 0 | – |
-//! | s9_one_box_lost | 1350 | 1318 | 1083 | 1 | 256 | 181 | 1083 |
-//! | s10_gun_barrel_struck | 1545 | 1505 | 1340 | 2 | 512 | 256 | 670 |
-//! | s11_mg_barrel_struck | 177 | 137 | 0 | 0 | 0 | 0 | – |
+//! | s1_through_crew | 1513 | 1481 | 1182 | 1 | 256 | 214 | 1182 |
+//! | s2_stopped_mantlet | 181 | 139 | 0 | 0 | 0 | 0 | – |
+//! | s3_ricochet | 187 | 145 | 0 | 0 | 0 | 0 | – |
+//! | s4_spaced_then_stopped | 1356 | 1314 | 1070 | 2 | 512 | 0 | 535 |
+//! | s5_oblique_through | 1283 | 1243 | 1052 | 1 | 256 | 256 | 1052 |
+//! | s6_overpen | 1173 | 1131 | 934 | 2 | 512 | 0 | 467 |
+//! | s7_engine_shadow | 1243 | 1209 | 984 | 1 | 256 | 211 | 984 |
+//! | s8a_mg_ricochet | 187 | 145 | 0 | 0 | 0 | 0 | – |
+//! | s8b_mg_stopped | 179 | 137 | 0 | 0 | 0 | 0 | – |
+//! | s9_one_box_lost | 1354 | 1322 | 1083 | 1 | 256 | 181 | 1083 |
+//! | s10_gun_barrel_struck | 1549 | 1509 | 1340 | 2 | 512 | 256 | 670 |
+//! | s11_mg_barrel_struck | 181 | 141 | 0 | 0 | 0 | 0 | – |
 //!
 //! The DERIVED estimate `36 + 2 + 2N` per cone (550 B at N = 256) counts a cone's metadata and its
 //! reaches; a cone that reaches no component measures 467–535 B (a reach under 128 mm takes one
@@ -111,6 +111,11 @@ pub(crate) const DIRECTION_BOUND: f32 = 6.5e-5;
 /// of the four components by at most `0.5/32767`, the unit quaternion by at most `δ = 3.05e-5`, and
 /// a rotation's angle is twice the quaternion's arc, so at most `2δ/(1 − δ)`.
 pub(crate) const ROTATION_BOUND: f32 = 6.2e-5;
+
+/// How far from unit length a received quaternion may be. DERIVED: rounding moves the encoded
+/// quaternion's length by at most `√4 · 0.5/32767 = 3.05e-5`; the slack is three times that, and
+/// anything outside it (a zero quaternion among them) is no rotation the encoder wrote.
+pub(crate) const ROTATION_SLACK: f32 = 1.0e-4;
 
 /// The largest angle (rad) a ray's decoded direction may lie from the thrown one: the axis's
 /// [`DIRECTION_BOUND`], again for the roll fitted against the decoded axis, and half the roll's
@@ -531,11 +536,17 @@ impl Rotation {
         Ok(Self(out))
     }
 
-    fn rotation(self) -> Quat {
+    /// The rotation; refused when the four components are not a unit quaternion within
+    /// [`ROTATION_SLACK`].
+    fn rotation(self) -> Result<Quat, CodecError> {
         let at = |index: usize| {
             i16::from_le_bytes([self.0[2 * index], self.0[2 * index + 1]]) as f32 / 32_767.0
         };
-        Quat::from_xyzw(at(0), at(1), at(2), at(3)).normalize()
+        let q = Quat::from_xyzw(at(0), at(1), at(2), at(3));
+        if (q.length() - 1.0).abs() > ROTATION_SLACK {
+            return refuse(format!("{q:?} is not a unit quaternion"));
+        }
+        Ok(q.normalize())
     }
 }
 
@@ -617,6 +628,7 @@ struct WireImpact {
     point: Mm,
     normal: Oct,
     incoming: Oct,
+    incidence_deg: f32,
     verdict: ShotVerdict,
 }
 
@@ -784,10 +796,12 @@ fn shooter_view(record: &Record) -> Record {
 }
 
 impl ShotExplanation {
-    /// The struck hull node's pose (WORLD) at contact.
-    pub(crate) fn hull_pose(&self) -> Option<(Vec3, Quat)> {
+    /// The struck hull node's pose (WORLD) at contact; refused for a rotation the encoder could
+    /// not have written.
+    pub(crate) fn hull_pose(&self) -> Result<Option<(Vec3, Quat)>, CodecError> {
         self.hull
-            .map(|pose| (Vec3::from(pose.at.point()), pose.turn.rotation()))
+            .map(|pose| Ok((Vec3::from(pose.at.point()), pose.turn.rotation()?)))
+            .transpose()
     }
 
     /// The kill cam's lesson is this recipient's.
@@ -796,12 +810,14 @@ impl ShotExplanation {
     }
 
     /// The report this explanation carries, read against `vocabulary`; refused when the vocabulary
-    /// folds another fingerprint or an index is out of it. A shooter's report lists only the
-    /// components the shot reached. The report names no shooter: [`Self::shot`] does.
+    /// folds another fingerprint, an index is out of it, a number is not finite, or the hull pose
+    /// is refused ([`Self::hull_pose`]). A shooter's report lists only the components the shot
+    /// reached. The report names no shooter: [`Self::shot`] does.
     pub(crate) fn decode(
         &self,
         vocabulary: &ShotVocabulary,
     ) -> Result<PenetrationReport, CodecError> {
+        self.hull_pose()?;
         decode(vocabulary, &self.record)
     }
 }
@@ -932,6 +948,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
             point: Mm::of(report.impact.point)?,
             normal: Oct::of(report.impact.normal)?,
             incoming: Oct::of(report.impact.incoming)?,
+            incidence_deg: report.impact.incidence_deg,
             verdict: report.impact.verdict,
         },
         plates,
@@ -1068,7 +1085,38 @@ fn encode_cone(
 
 // --- Decode ---------------------------------------------------------------------------------------
 
+/// Every `f32` of `record` is finite.
+fn finite(record: &Record) -> Result<(), CodecError> {
+    let values = [
+        record.caliber_mm,
+        record.mass_kg,
+        record.speed_mps,
+        record.impact.incidence_deg,
+    ]
+    .into_iter()
+    .chain(
+        record
+            .plates
+            .iter()
+            .flat_map(|plate| [plate.chord_mm, plate.cost_mm]),
+    )
+    .chain(
+        record
+            .cones
+            .iter()
+            .flat_map(|cone| std::iter::once(cone.strength).chain(cone.doses.iter().copied())),
+    )
+    .chain(record.doses.iter().flat_map(|dose| [dose.line, dose.field]));
+    for value in values {
+        if !value.is_finite() {
+            return refuse(format!("a number of the record is {value}"));
+        }
+    }
+    Ok(())
+}
+
 fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationReport, CodecError> {
+    finite(record)?;
     let fingerprint = u64::from_le_bytes(record.vocabulary);
     if fingerprint != vocabulary.fingerprint {
         return refuse(format!(
@@ -1176,8 +1224,6 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             })
         })
         .collect::<Result<_, CodecError>>()?;
-    let normal = record.impact.normal.direction();
-    let incoming = record.impact.incoming.direction();
     Ok(PenetrationReport {
         synthetic: false,
         vehicle: Some(vehicle.file.clone()),
@@ -1194,9 +1240,9 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
         },
         impact: Impact {
             point: record.impact.point.point(),
-            normal: normal.to_array(),
-            incoming: incoming.to_array(),
-            incidence_deg: (-incoming).dot(normal).clamp(-1.0, 1.0).acos().to_degrees(),
+            normal: record.impact.normal.direction().to_array(),
+            incoming: record.impact.incoming.direction().to_array(),
+            incidence_deg: record.impact.incidence_deg,
             verdict: record.impact.verdict,
         },
         plates,

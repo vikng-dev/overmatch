@@ -149,8 +149,9 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     assert_direction(name, d.normal, r.normal);
     assert_direction(name, d.incoming, r.incoming);
     assert_eq!(d.verdict, r.verdict, "{name}");
-    assert!(
-        (d.incidence_deg - r.incidence_deg).abs() <= (2.0 * DIRECTION_BOUND).to_degrees() + 1e-4,
+    assert_eq!(
+        d.incidence_deg.to_bits(),
+        r.incidence_deg.to_bits(),
         "{name}: incidence {} vs {}",
         d.incidence_deg,
         r.incidence_deg
@@ -365,7 +366,10 @@ fn the_quanta_hold_their_bounds() {
         let axis = Vec3::new((i as f32 * 0.37).sin(), (i as f32 * 0.91).cos(), 0.3).normalize();
         for j in 0..100 {
             let q = Quat::from_axis_angle(axis, j as f32 * 0.0634 - 3.1);
-            worst = worst.max(rotation_angle(Rotation::of(q).unwrap().rotation(), q));
+            worst = worst.max(rotation_angle(
+                Rotation::of(q).unwrap().rotation().unwrap(),
+                q,
+            ));
         }
     }
     assert!(worst <= ROTATION_BOUND, "rotation: {worst} rad");
@@ -491,7 +495,7 @@ fn the_hull_pose_rides_the_explanation() {
     let vocabulary = vocabulary(&records);
     let shot = recorded(&records[0].1);
     let built = BuiltExplanation::build(&vocabulary, &shot).unwrap();
-    let (at, turn) = built.full.hull_pose().unwrap();
+    let (at, turn) = built.full.hull_pose().unwrap().unwrap();
     let (want_at, want_turn) = shot.hull.unwrap();
     assert_point("hull", at.to_array(), want_at.to_array());
     assert!(rotation_angle(turn, want_turn) <= ROTATION_BOUND);
@@ -571,5 +575,102 @@ fn encoded_sizes() {
             cones.len()
         );
         assert!(shooter <= victim, "{name}");
+    }
+}
+
+/// A hull rotation the encoder could not have written — the zero quaternion, one of length two,
+/// one just past the slack — is refused by the pose and by the whole decode, never normalized.
+#[test]
+fn a_malformed_hull_rotation_is_refused() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let built = BuiltExplanation::build(&vocabulary, &recorded(&records[0].1)).unwrap();
+    let rotation = |q: [i16; 4]| {
+        let mut bytes = [0; 8];
+        for (index, value) in q.into_iter().enumerate() {
+            bytes[2 * index..2 * index + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        Rotation(bytes)
+    };
+    let past_slack = (32_767.0 * (1.0 + 2.0 * ROTATION_SLACK) / 2f32.sqrt()).round() as i16;
+    for hostile in [
+        rotation([0; 4]),
+        rotation([i16::MAX; 4]),
+        rotation([i16::MIN; 4]),
+        rotation([0, 0, past_slack, past_slack]),
+    ] {
+        let mut explanation = built.full.clone();
+        explanation.hull.as_mut().unwrap().turn = hostile;
+        let bytes = postcard::to_allocvec(&explanation).unwrap();
+        let received: ShotExplanation = postcard::from_bytes(&bytes).unwrap();
+        assert!(received.hull_pose().is_err(), "{hostile:?}");
+        assert!(received.decode(&vocabulary).is_err(), "{hostile:?}");
+    }
+    let mut explanation = built.full.clone();
+    explanation.hull.as_mut().unwrap().turn = rotation([0, 0, 0, i16::MAX]);
+    assert_eq!(explanation.hull_pose().unwrap().unwrap().1, Quat::IDENTITY);
+}
+
+/// A record holding a number that is not finite is refused.
+#[test]
+fn a_non_finite_number_is_refused() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (_, report) = records
+        .iter()
+        .find(|(_, report)| {
+            !report.spall.is_empty() && !report.doses.is_empty() && !report.plates.is_empty()
+        })
+        .expect("a recorded scenario crosses a plate and doses through a cone");
+    let built = BuiltExplanation::build(&vocabulary, &recorded(report)).unwrap();
+    assert!(built.full.decode(&vocabulary).is_ok());
+    let hostile: [fn(&mut Record); 5] = [
+        |record| record.speed_mps = f32::NAN,
+        |record| record.impact.incidence_deg = f32::INFINITY,
+        |record| record.cones[0].strength = f32::NEG_INFINITY,
+        |record| record.doses[0].field = f32::NAN,
+        |record| record.plates[0].cost_mm = f32::NAN,
+    ];
+    for (index, spoil) in hostile.into_iter().enumerate() {
+        let mut explanation = built.full.clone();
+        spoil(&mut explanation.record);
+        assert!(explanation.decode(&vocabulary).is_err(), "spoiler {index}");
+    }
+}
+
+/// Incidence comes back exactly as recorded, near normal impact too, where an `acos` of the decoded
+/// directions would not: a sweep of normals, each struck head-on and up to 1° off it, the record's
+/// incidence computed as the record computes it.
+#[test]
+fn incidence_is_the_records_near_normal_impact() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let report = &records[0].1;
+    let mut normals = vec![Vec3::new(0.059_412_46, -0.542_756_44, 0.837_786_2).normalize()];
+    let count = 400;
+    let golden = std::f32::consts::PI * (3.0 - 5f32.sqrt());
+    for k in 0..count {
+        let y = 1.0 - 2.0 * (k as f32 + 0.5) / count as f32;
+        let r = (1.0 - y * y).sqrt();
+        let phi = golden * k as f32;
+        normals.push(Vec3::new(r * phi.cos(), y, r * phi.sin()));
+    }
+    for normal in normals {
+        let side = normal.any_orthonormal_vector();
+        for off_deg in [0.0f32, 0.001, 0.01, 0.1, 1.0] {
+            let incoming = -(Quat::from_axis_angle(side, off_deg.to_radians()) * normal);
+            let mut report = report.clone();
+            report.impact.normal = normal.to_array();
+            report.impact.incoming = incoming.to_array();
+            report.impact.incidence_deg =
+                (-incoming).dot(normal).clamp(-1.0, 1.0).acos().to_degrees();
+            let built = BuiltExplanation::build(&vocabulary, &recorded(&report)).unwrap();
+            let decoded = built.full.decode(&vocabulary).unwrap();
+            assert_eq!(
+                decoded.impact.incidence_deg.to_bits(),
+                report.impact.incidence_deg.to_bits(),
+                "{normal} {off_deg}°"
+            );
+        }
     }
 }
