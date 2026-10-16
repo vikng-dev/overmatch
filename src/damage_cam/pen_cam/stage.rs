@@ -30,7 +30,7 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::field::reach_mesh;
+use super::field::{self, reach_mesh};
 use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
@@ -568,7 +568,13 @@ pub fn spawn_glass(
             CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => {
                 // The field emerges through the round's own exit hole.
                 let cap = 0.5 * plan.calibre;
-                look::field(look_ctx.look, cap, cone.strength, look_ctx.masks)
+                look::field(
+                    look_ctx.look,
+                    cap,
+                    cone.strength,
+                    field::profile(cone),
+                    look_ctx.masks,
+                )
             }
             _ => None,
         };

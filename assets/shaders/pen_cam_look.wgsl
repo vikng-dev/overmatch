@@ -17,9 +17,12 @@
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //   4 volume      a field as light: the closed reach mesh's surfaces (wound outward), entries
-//                 subtracting and exits adding the column `∫ ds / (r² + ε²)` from the eye (r from the
-//                 origin, ε = `volume.w`), so the sum over a pixel is the density integrated through
-//                 the volume; `color.a` is the gain. Additive, unoccluded.
+//                 subtracting and exits adding the column `∫ p ds / (r² + ε²)` from the eye (r from
+//                 the origin, ε = `volume.w`), so the sum over a pixel is the density integrated
+//                 through the volume; `color.a` is the gain. The profile `p = profile.w + g·x / R`
+//                 (`g` = `profile.xyz` in the mesh's frame, x from the origin, R = √(r² + ε²)) is one
+//                 function of position, so the entries and exits cancel outside the volume; both
+//                 terms integrate in closed form. Additive, unoccluded.
 //
 // Base and state surfaces carry the spall fields' footprint (`foot.x`: 0 none, 1 outline) in
 // `foot_color`: for each of the fields (`fields.x`, `prints`), a surface point facing the origin,
@@ -58,6 +61,8 @@ struct LookParams {
     fields: vec4<f32>,
     // w: the volume's cap ε (m).
     volume: vec4<f32>,
+    // xyz: the profile's gradient `g` (the mesh's frame); w: its constant.
+    profile: vec4<f32>,
     // Four fields of three lanes: origin (world) and half-angle (rad); unit axis (world) and reach
     // (m); x: how far its front has run (m), negative before it is thrown, y: its directions, z: its
     // level in 0..1.
@@ -77,6 +82,8 @@ struct LookVertexOutput {
     @location(2) color: vec4<f32>,
     // The mesh's origin (world).
     @location(3) origin: vec3<f32>,
+    // The profile's gradient, world.
+    @location(4) gradient: vec3<f32>,
 }
 
 fn mode() -> i32 {
@@ -97,6 +104,9 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(local, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
     out.origin = (world_from_local * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    let g = look.profile.xyz;
+    let turned = (world_from_local * vec4(g, 0.0)).xyz;
+    out.gradient = select(vec3(0.0), normalize(turned) * length(g), dot(g, g) > 0.0);
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #else
@@ -282,7 +292,15 @@ fn fragment(in: LookVertexOutput, @builtin(front_facing) is_front: bool) -> @loc
         let c = dot(a, a) + look.volume.w * look.volume.w;
         let h = sqrt(max(c - b * b, 1e-12));
         let column = (atan((dist + b) / h) - atan(b / h)) / h;
-        let signed = select(-column, column, exiting);
+        // ∫ g·x / R³ ds, with t = s + b and R² = t² + h²: [P t / (h² R) − Q / R].
+        let q = dot(in.gradient, along);
+        let p = dot(in.gradient, a) - b * q;
+        let t1 = dist + b;
+        let r0 = sqrt(b * b + h * h);
+        let r1 = sqrt(t1 * t1 + h * h);
+        let lean = p * (t1 / r1 - b / r0) / (h * h) - q * (1.0 / r1 - 1.0 / r0);
+        let density = look.profile.w * column + lean;
+        let signed = select(-density, density, exiting);
         return vec4(look.color.rgb * look.color.a * signed * fade, 0.0);
     }
     discard;

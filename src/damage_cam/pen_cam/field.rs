@@ -9,8 +9,10 @@
 //! to the cone's origin, so a copy scales about it and the stage's material holds a front, and
 //! falls off, by distance from it.
 //!
-//! Vertex colour alpha carries the strength fraction `s(θ)/S` the record gave each direction; the
-//! material turns it into brightness.
+//! Vertex colour alpha carries the strength fraction `s(θ)/S` the record gave each direction, for
+//! the baseline's shells. The look's field reads the same fractions as one law over the cone
+//! ([`profile`]), since its density must be one function of position for the surfaces' entries and
+//! exits to sum to the integral through the volume.
 //!
 //! Every triangle is wound outward (counter-clockwise seen from outside the closed surface): a
 //! surface triangle so its corners' directions turn positively about the origin, which holds
@@ -21,7 +23,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use super::plan::Cone;
+use super::plan::{Cone, Ray};
 
 /// Each Delaunay triangle is cut into `SUBDIVISION²` triangles.
 const SUBDIVISION: usize = 4;
@@ -132,6 +134,34 @@ pub fn reach_mesh(cone: &Cone) -> Mesh {
     mesh
 }
 
+/// The cone's profile as one law of position, `w + g·x̂` (`x̂` the unit direction from the origin,
+/// mesh frame), scaled to a mean of one over the directions: `xyz` is `g`, `w` the constant. Both
+/// shipped profiles are linear in `cos θ` ([`crate::ballistics::spall_cone`]), so the least-squares
+/// line through the record's `(cos θ_k, s_k/S)` is the profile itself. Equal fractions (the flat
+/// profile) give exactly `(0, 0, 0, 1)`: brightness `1/(r² + ε²)`, the flat field's own; so do no
+/// fractions above zero.
+pub fn profile(cone: &Cone) -> Vec4 {
+    const FLAT: Vec4 = Vec4::new(0.0, 0.0, 0.0, 1.0);
+    let n = cone.rays.len() as f32;
+    let first = cone.rays.first().map_or(0.0, |ray| ray.weight);
+    if cone.rays.iter().all(|ray| ray.weight == first) {
+        return FLAT;
+    }
+    let mean_weight = cone.rays.iter().map(|ray| ray.weight).sum::<f32>() / n;
+    if mean_weight <= 0.0 {
+        return FLAT;
+    }
+    let cos = |ray: &Ray| ray.direction.dot(cone.axis);
+    let mean_cos = cone.rays.iter().map(cos).sum::<f32>() / n;
+    let (sxx, sxy) = cone.rays.iter().fold((0.0, 0.0), |(sxx, sxy), ray| {
+        let dx = cos(ray) - mean_cos;
+        (sxx + dx * dx, sxy + dx * (ray.weight - mean_weight))
+    });
+    let slope = if sxx > 0.0 { sxy / sxx } else { 0.0 };
+    let constant = mean_weight - slope * mean_cos;
+    (cone.axis * slope / mean_weight).extend(constant / mean_weight)
+}
+
 /// Delaunay triangles of `points` (Bowyer–Watson), as index triples. Fewer than three points give
 /// none.
 pub fn delaunay(points: &[Vec2]) -> Vec<[usize; 3]> {
@@ -206,7 +236,6 @@ fn hull_edges(triangles: &[[usize; 3]]) -> Vec<(usize, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::plan::Ray;
     use super::*;
 
     /// Golden-spiral points, as the cone's strata place its directions.
@@ -266,6 +295,31 @@ mod tests {
             arc: 0.0,
             rays,
         }
+    }
+
+    /// The profile law reproduces every direction's recorded fraction over the mean, and a flat
+    /// cone draws exactly the uniform density. Fixture weights: linear in `cos θ` from the rim.
+    #[test]
+    fn the_profile_law_reads_the_recorded_fractions() {
+        let mut cone = fixture_cone(|_| 1.0);
+        let cos_alpha = cone.half_angle.cos();
+        for ray in &mut cone.rays {
+            ray.weight = (ray.direction.dot(cone.axis) - cos_alpha) / (1.0 - cos_alpha);
+        }
+        let law = profile(&cone);
+        let mean = cone.rays.iter().map(|ray| ray.weight).sum::<f32>() / cone.rays.len() as f32;
+        for ray in &cone.rays {
+            let drawn = law.w + law.truncate().dot(ray.direction);
+            assert!(
+                (drawn - ray.weight / mean).abs() < 1e-3,
+                "{drawn} vs {}",
+                ray.weight / mean
+            );
+        }
+        for ray in &mut cone.rays {
+            ray.weight = 0.5;
+        }
+        assert_eq!(profile(&cone), Vec4::new(0.0, 0.0, 0.0, 1.0));
     }
 
     /// The surface is closed and wound outward, however short its reaches: every edge is crossed

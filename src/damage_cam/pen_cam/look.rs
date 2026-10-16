@@ -82,6 +82,7 @@ pub struct LookParams {
     pub foot_color: Vec4,
     pub fields: Vec4,
     pub volume: Vec4,
+    pub profile: Vec4,
     pub prints: [Vec4; 3 * FOOTPRINT_FIELDS],
     pub rays: [Vec4; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
 }
@@ -102,6 +103,7 @@ impl Default for LookParams {
             foot_color: Vec4::ZERO,
             fields: Vec4::ZERO,
             volume: Vec4::ZERO,
+            profile: Vec4::ZERO,
             prints: [Vec4::ZERO; 3 * FOOTPRINT_FIELDS],
             rays: [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
         }
@@ -513,12 +515,18 @@ fn draw(condition: Condition, masks: &Masks) -> ComponentDraw {
 }
 
 /// The field in `look` as the law defines it, `None` in the baseline, which draws the stage's own
-/// nested shells: a cone from its origin, density `1/(r² + ε²)` along every direction, cut where its
+/// nested shells: a cone from its origin, density `profile × 1/(r² + ε²)`, cut where its
 /// directions stopped (the reach surface the mesh it wears is, wound outward), summed along the
-/// eye ray as light. `cap` is the radius ε (m) the density is capped within at the origin, and
-/// `strength` the cone's on-axis strength (ref-mm), drawn linearly ([`timeline::field_level`]).
-/// Drawn over everything.
-pub fn field(look: GlassLook, cap: f32, strength: f32, masks: &Masks) -> Option<LookMaterial> {
+/// eye ray as light. `cap` is the radius ε (m) the density is capped within at the origin,
+/// `strength` the cone's on-axis strength (ref-mm), drawn linearly ([`timeline::field_level`]), and
+/// `profile` its profile law in the mesh's frame ([`super::field::profile`]). Drawn over everything.
+pub fn field(
+    look: GlassLook,
+    cap: f32,
+    strength: f32,
+    profile: Vec4,
+    masks: &Masks,
+) -> Option<LookMaterial> {
     if look == GlassLook::Baseline {
         return None;
     }
@@ -530,6 +538,7 @@ pub fn field(look: GlassLook, cap: f32, strength: f32, masks: &Masks) -> Option<
         masks,
     );
     m.params.volume.w = cap;
+    m.params.profile = profile;
     Some(m)
 }
 
@@ -601,7 +610,7 @@ mod tests {
         let base = looks.add(base(&masks));
         let component = looks.add(component_base(&masks));
         let fill = looks.add(state(Condition::Damaged(0.5), &masks));
-        let shell = looks.add(field(GlassLook::Base, 0.04, 5.0, &masks).unwrap());
+        let shell = looks.add(field(GlassLook::Base, 0.04, 5.0, Vec4::W, &masks).unwrap());
         let print = FieldPrint {
             origin: Vec3::ZERO,
             axis: Vec3::NEG_Z,
@@ -633,7 +642,7 @@ mod tests {
     fn the_field_is_linear_in_its_strength() {
         let masks = Masks::default();
         let gain = |strength: f32| {
-            field(GlassLook::Base, 0.04, strength, &masks)
+            field(GlassLook::Base, 0.04, strength, Vec4::W, &masks)
                 .unwrap()
                 .params
                 .color
@@ -641,6 +650,6 @@ mod tests {
         };
         assert_eq!(gain(0.0), 0.0);
         assert!((gain(7.0) / gain(1.0) - 7.0).abs() < 1e-5);
-        assert!(field(GlassLook::Baseline, 0.04, 1.0, &masks).is_none());
+        assert!(field(GlassLook::Baseline, 0.04, 1.0, Vec4::W, &masks).is_none());
     }
 }
