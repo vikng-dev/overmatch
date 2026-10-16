@@ -644,6 +644,8 @@ pub fn run() {
     app.init_resource::<SanctionedShots>();
     // Expiry is sim-time coarse, so a real tick is the right cadence.
     app.add_systems(FixedUpdate, age_sanctioned_shots);
+    // The pen cam's explanations addressed to this player, and whether each impact is drawn.
+    super::shot_explanation::install_client(&mut app);
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks

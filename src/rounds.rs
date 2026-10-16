@@ -210,13 +210,6 @@ impl RoundRegistry {
     }
 
     /// Every round's key, in key order.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its consumer, the shot explanation's transport, is not yet built"
-        )
-    )]
     pub(crate) fn keys(&self) -> impl Iterator<Item = &str> {
         self.rounds.keys().map(String::as_str)
     }

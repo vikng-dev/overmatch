@@ -1243,6 +1243,16 @@ impl TryFrom<Verdict> for TerminalVerdict {
     }
 }
 
+/// A replica drew an authority outcome of its keyed shell `shot`: a bounce the authority resolved on
+/// `tick`, or (`ended`) the flight's end it resolved on `tick`. Raised beside the outcome's
+/// [`Impact`], which names no shot.
+#[derive(Event, Clone, Copy, Debug)]
+pub(crate) struct AuthorityOutcomeDrawn {
+    pub(crate) shot: ShotId,
+    pub(crate) tick: u32,
+    pub(crate) ended: bool,
+}
+
 /// A local shell impact consumed by simulation and view observers.
 #[derive(Event)]
 pub(crate) struct Impact {
@@ -1996,6 +2006,11 @@ fn resolve_held_shell(
                     direction: segment.bounce.direction,
                 },
             });
+            commands.trigger(AuthorityOutcomeDrawn {
+                shot: shot_id,
+                tick: segment.bounce.bounce_tick,
+                ended: false,
+            });
             if index == 0 {
                 crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
                     json!({
@@ -2193,6 +2208,11 @@ fn consume_overdue_sanctioned_outcome(
                         direction: segment.bounce.direction,
                     },
                 });
+                commands.trigger(AuthorityOutcomeDrawn {
+                    shot: shot.0,
+                    tick: segment.bounce.bounce_tick,
+                    ended: false,
+                });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
                 crate::shot_trace::record(
                     shot_trace,
@@ -2279,6 +2299,13 @@ fn finish_at_sanctioned_terminal(
         surface: ImpactSurface::Armor,
         outcome: terminal.verdict.into(),
     });
+    if let Some(shot) = shell.shot {
+        commands.trigger(AuthorityOutcomeDrawn {
+            shot: shot.0,
+            tick: terminal.impact_tick,
+            ended: true,
+        });
+    }
 }
 
 /// Re-anchor a cosmetic shell on the state its authority catch-up ended at, and refresh the readout
@@ -2882,6 +2909,11 @@ fn resolve_replica_armor_contact(
         shell.marks.ricochets.push(bounce.origin);
         // Trace a buffered bounce separately from a shell that never contacted.
         if let Some(shot) = shot {
+            commands.trigger(AuthorityOutcomeDrawn {
+                shot: shot.0,
+                tick: bounce.bounce_tick,
+                ended: false,
+            });
             crate::shot_trace::record(
                 shot_trace,
                 "contact",

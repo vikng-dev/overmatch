@@ -60,17 +60,24 @@ const CLEAR_MARGIN: f32 = 0.5;
 /// tank no match spawned), who fired it, which of the round's encounters with the tank it is (0 the
 /// first), the [`ShotClock`] ticks the encounter opened and finished on (0 where no clock runs), the
 /// struck hull's pose (WORLD) when the encounter opened, and the report.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "its consumer, the explanation's transport, is not yet built"
-    )
-)]
 #[derive(Message)]
 pub(crate) struct RecordedShot {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its local readers, the pen cam's views, are not yet built"
+        )
+    )]
     pub tank: Entity,
     pub life: Option<TankLife>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "its local readers, the pen cam's views, are not yet built"
+        )
+    )]
     pub shooter: Option<ShotSource>,
     pub shot: Option<ShotId>,
     pub encounter: u32,

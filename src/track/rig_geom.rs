@@ -814,6 +814,7 @@ pub(crate) fn tiger_rig() -> RigGeom {
     .expect("the Tiger glb extracts");
     let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
     let blueprint = TankBlueprint {
+        file: crate::tank::TIGER_SPEC_PATH.to_owned(),
         geometry: std::sync::Arc::new(geometry),
         spec: std::sync::Arc::new(spec),
     };

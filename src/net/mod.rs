@@ -36,6 +36,8 @@ mod protocol;
 mod rig;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
 pub(crate) mod server;
+/// The pen cam's explanations: the authority's per-recipient send, the client's store.
+mod shot_explanation;
 /// Real-UDP, loss-injected shot-transport integration tests.
 #[cfg(test)]
 mod shot_loss;

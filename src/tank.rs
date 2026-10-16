@@ -33,7 +33,6 @@ pub use servo::{
 };
 #[cfg(test)]
 pub(crate) use servo::{ServoRest, drive_servos, restore_servo_truth};
-#[cfg(test)]
 pub(crate) use spawn::TIGER_SPEC_PATH;
 #[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;

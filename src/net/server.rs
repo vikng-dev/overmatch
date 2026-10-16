@@ -74,6 +74,7 @@ pub fn run() {
     app.add_plugins(crate::cost::server_plugin);
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
+    super::shot_explanation::install_server(&mut app);
     // Authority must reject input targets not controlled by their sending client.
     app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
     // Lightyear visibility hooks require `ReplicationSender` on each remote link.

@@ -21,13 +21,14 @@ use crate::command::TankCommand;
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
+use crate::damage_cam::wire::ShotExplanation;
 use crate::fingerprint::{fingerprint_field, fnv1a_64};
 use crate::state::GameplaySet;
 use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
 };
 use crate::track::sim::{TankTransmission, TrackDrive, TrackDriveSide};
-use crate::{CombatantId, ShotId};
+use crate::{CombatantId, CombatantLife, ShotId};
 
 // ---------------------------------------------------------------------------
 // Protocol compatibility guard
@@ -145,7 +146,12 @@ use crate::{CombatantId, ShotId};
 /// REV 32 (integer HP): [`VolumeSnapshot`]'s `hp` becomes a `u32` of whole HP points (one point is
 /// 0.1 reference-mm of dose, `ballistics::HP_PER_REFERENCE_MM`), the pools the authority now keeps
 /// as integers. Own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 32;
+///
+/// REV 33 (the pen cam's explanation): `ShotExplanation` rides a new recipient-private
+/// [`ShotExplanationChannel`] to the shooter and the struck tank's player, and `CombatantLife`
+/// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
+/// the one its tank is living. Surface, own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -476,6 +482,12 @@ pub struct OutcomeChannel;
 
 /// Owner-private reliable channel for individual [`DamageConfirm`] facts.
 pub struct DamageChannel;
+
+/// Recipient-private reliable channel for [`ShotExplanation`]s, each projection to its one
+/// recipient. An explanation larger than the link's fragment size travels as fragments, each acked
+/// and resent on its own and reassembled on receipt (lightyear's reliable sender). Unordered: an
+/// explanation is ordered by its shot, encounter and ticks, never by arrival.
+pub struct ShotExplanationChannel;
 
 /// Ordered-reliable client-to-authority lane for spawn-placement requests ([`SetSpawnPoint`]). Its
 /// own lane rather than a shared one: a lost spawn choice must not be repaired by, or delay, grip
@@ -812,6 +824,7 @@ const WIRE_SURFACE: &[&str] = &[
     "NetTank",
     "NetBot",
     "CombatantId",
+    "CombatantLife",
     "ServoAngles",
     "NetCrew",
     "NetTankStatus",
@@ -820,12 +833,14 @@ const WIRE_SURFACE: &[&str] = &[
     "FireChannel|UnorderedUnreliable|ServerToClient",
     "OutcomeChannel|UnorderedReliable|ServerToClient",
     "DamageChannel|UnorderedReliable|ServerToClient",
+    "ShotExplanationChannel|UnorderedReliable|ServerToClient",
     "SpawnChannel|OrderedReliable|ClientToServer",
     "FireVisualBatch",
     "FireEvent",
     "RicochetKeyframe",
     "ImpactConfirm",
     "DamageConfirm",
+    "ShotExplanation",
     "SetSpawnPoint",
     // The input protocol — `InputPlugin::<TankCommand>`:
     "TankCommand",
@@ -840,7 +855,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
+const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -876,7 +891,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x75d3_6e5d_5fe0_f7d1;
+const WIRE_TYPES_HASH: u64 = 0x4d61_44a4_7971_dfbd;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -897,6 +912,9 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<NetBot>().replicate();
     // Immutable spawn identity.
     app.component::<CombatantId>().replicate();
+    // Immutable spawn identity: which of its combatant's lives a root is, so a record of a shot
+    // against an earlier life is never read against this one.
+    app.component::<CombatantLife>().replicate();
     // Plain replication, no interpolation: consumers chase the raw angle through the servo
     // mechanism (see the type).
     app.component::<ServoAngles>().replicate();
@@ -926,6 +944,11 @@ pub(crate) fn plugin(app: &mut App) {
         ..default()
     })
     .add_direction(NetworkDirection::ServerToClient);
+    app.add_channel::<ShotExplanationChannel>(ChannelSettings {
+        mode: ChannelMode::UnorderedReliable(ReliableSettings::default()),
+        ..default()
+    })
+    .add_direction(NetworkDirection::ServerToClient);
     // Spawn placement is a rare, decisive choice: reliable so one click always lands, and ORDERED
     // because the authority keeps only the LAST request per client. Under an unordered lane, rapid
     // clicks A-then-B can be delivered B-then-A and the authority would settle on the stale A —
@@ -951,6 +974,9 @@ pub(crate) fn plugin(app: &mut App) {
     // Damage receipts deliberately contain no entity references: their channel is already
     // owner-private, so mapping a shooter replica would make post-respawn confirmation fragile.
     app.register_message::<DamageConfirm>()
+        .add_direction(NetworkDirection::ServerToClient);
+    // No entity references: an explanation names its shot and struck life by match identity.
+    app.register_message::<ShotExplanation>()
         .add_direction(NetworkDirection::ServerToClient);
     // No entity mapping: the authority keys the spawn override by the sending link, never by a
     // client-named entity.
@@ -1328,9 +1354,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 32: `VolumeSnapshot` carries integer HP points, on the lightyear 0.30.1 wire
-        // dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x7ef9_b3e0_ed90_ff4e;
+        // Pins REV 33: the pen cam's `ShotExplanation` and the replicated `CombatantLife`, on the
+        // lightyear 0.30.1 wire dependency.
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xda2e_94a3_2fa9_54e4;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1547,7 +1573,9 @@ mod tests {
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
     /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
-    /// `TankCommand`/`AimIntent`/`CrewSwap` from `command.rs`, and `CrewStation` from `damage.rs`.
+    /// `TankCommand`/`AimIntent`/`CrewSwap` from `command.rs`, `CrewStation` and `KnockoutReason`
+    /// from `damage.rs`, and the shot explanation's graph from `damage_cam/wire.rs` and
+    /// `damage_cam/mod.rs`.
     /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
     /// earns its own row: postcard encodes the variant as its declaration index, so reordering
     /// variants changes what the bytes mean without touching one character of the type that embeds
@@ -1563,6 +1591,7 @@ mod tests {
         ("src/tank/model.rs", "WeaponGateState"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
+        ("src/lib.rs", "CombatantLife"),
         ("src/net/protocol.rs", "ServoAngles"),
         ("src/net/protocol.rs", "NetCrew"),
         ("src/net/disclosure.rs", "NetTankStatus"),
@@ -1572,6 +1601,7 @@ mod tests {
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
         ("src/net/protocol.rs", "DamageChannel"),
+        ("src/net/protocol.rs", "ShotExplanationChannel"),
         ("src/net/protocol.rs", "SpawnChannel"),
         ("src/net/protocol.rs", "FireVisualBatch"),
         ("src/net/protocol.rs", "FireVisualFact"),
@@ -1582,6 +1612,26 @@ mod tests {
         ("src/ballistics.rs", "Verdict"),
         ("src/net/protocol.rs", "DamageReceipt"),
         ("src/net/protocol.rs", "DamageConfirm"),
+        ("src/damage_cam/wire.rs", "ShotExplanation"),
+        ("src/damage_cam/wire.rs", "TankLife"),
+        ("src/damage_cam/wire.rs", "Audience"),
+        ("src/damage_cam/wire.rs", "Pose"),
+        ("src/damage_cam/wire.rs", "Mm"),
+        ("src/damage_cam/wire.rs", "Rotation"),
+        ("src/damage_cam/wire.rs", "Record"),
+        ("src/damage_cam/wire.rs", "Turn"),
+        ("src/damage_cam/wire.rs", "Oct"),
+        ("src/damage_cam/wire.rs", "WireImpact"),
+        ("src/damage_cam/mod.rs", "ShotVerdict"),
+        ("src/damage_cam/wire.rs", "WirePlate"),
+        ("src/damage_cam/wire.rs", "WireBounce"),
+        ("src/damage_cam/wire.rs", "WireCone"),
+        ("src/damage_cam/wire.rs", "WireHit"),
+        ("src/damage_cam/wire.rs", "WireEnd"),
+        ("src/damage_cam/wire.rs", "WireDose"),
+        ("src/damage_cam/mod.rs", "ConsequenceState"),
+        ("src/damage_cam/wire.rs", "WireComponent"),
+        ("src/damage.rs", "KnockoutReason"),
         ("src/net/protocol.rs", "SetSpawnPoint"),
         ("src/lib.rs", "ShotId"),
         ("src/command.rs", "TankCommand"),
@@ -1607,7 +1657,7 @@ mod tests {
 
     /// Extract a type's DEFINITION from comment-stripped source `stripped`: its preceding attribute
     /// lines (the `#[derive(..)]` that governs its serde), the `struct`/`enum` header, and the body up
-    /// to the closing `}` (or the `;` of a unit struct). Whitespace is then removed entirely, so only a
+    /// to the closing `}` (or the `;` after a tuple struct's fields, or a unit struct's). Whitespace is then removed entirely, so only a
     /// real token change (a field, a variant, a type, a derive) moves the result — a reformat or a doc
     /// edit does not. Walking back over the contiguous non-blank attribute lines stops at the blank the
     /// stripped doc-comment leaves above every wire type (house style: every wire type is documented),
@@ -1624,37 +1674,72 @@ mod tests {
         while start > 0 && !lines[start - 1].trim().is_empty() {
             start -= 1;
         }
-        // Forward from the header: a unit struct ends at the first `;`, else brace-match the body.
+        // Forward from the header: a tuple struct paren-matches its fields to the `;` after them (a
+        // field may hold one, `[u8; 8]`), a unit struct ends at the first `;`, else brace-match the
+        // body.
         let region: String = lines[kw..].join("\n");
         let semi = region.find(';');
         let brace = region.find('{');
-        let end = match (brace, semi) {
-            (Some(b), Some(s)) if s < b => s + 1,
-            (None, Some(s)) => s + 1,
-            (Some(b), _) => {
-                let bytes = region.as_bytes();
-                let mut depth = 0i32;
-                let mut close = None;
-                for (i, &by) in bytes.iter().enumerate().skip(b) {
-                    match by {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                close = Some(i + 1);
-                                break;
-                            }
-                        }
+        let paren = region
+            .find('(')
+            .filter(|&p| p < brace.unwrap_or(usize::MAX) && p < semi.unwrap_or(usize::MAX));
+        let end = if let Some(open) = paren {
+            let mut depth = 0i32;
+            let close = region[open..]
+                .char_indices()
+                .find_map(|(i, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
                         _ => {}
                     }
+                    (depth == 0).then_some(open + i)
+                })
+                .unwrap_or_else(|| panic!("unbalanced parens in `{name}` definition"));
+            region[close..]
+                .find(';')
+                .map(|s| close + s + 1)
+                .unwrap_or_else(|| panic!("no `;` after the fields of `{name}`"))
+        } else {
+            match (brace, semi) {
+                (Some(b), Some(s)) if s < b => s + 1,
+                (None, Some(s)) => s + 1,
+                (Some(b), _) => {
+                    let bytes = region.as_bytes();
+                    let mut depth = 0i32;
+                    let mut close = None;
+                    for (i, &by) in bytes.iter().enumerate().skip(b) {
+                        match by {
+                            b'{' => depth += 1,
+                            b'}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close = Some(i + 1);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    close.unwrap_or_else(|| panic!("unbalanced braces in `{name}` definition"))
                 }
-                close.unwrap_or_else(|| panic!("unbalanced braces in `{name}` definition"))
+                _ => panic!("no terminator (`;` or `{{`) for `{name}` definition"),
             }
-            _ => panic!("no terminator (`;` or `{{`) for `{name}` definition"),
         };
         let attrs = lines[start..kw].join("\n");
         let def = format!("{attrs}\n{}", &region[..end]);
         def.chars().filter(|c| !c.is_whitespace()).collect()
+    }
+
+    /// A tuple struct's definition runs to the `;` after its fields, not to the first `;` inside
+    /// them.
+    #[test]
+    fn a_tuple_struct_definition_spans_its_fields() {
+        let source = "\n#[derive(Serialize)]\nstruct Rotation([u8; 8]);\nstruct Next;\n";
+        assert_eq!(
+            normalized_type_def(source, "Rotation"),
+            "#[derive(Serialize)]structRotation([u8;8]);"
+        );
     }
 
     /// FNV-1a over every own wire type's normalized definition, each terminated by `\n` (so no two

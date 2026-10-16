@@ -105,11 +105,13 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// moves each square coordinate by at most `q/2`, `q = 2/65535`; the octahedron point moves by at
 /// most `q·√1.5` (the third coordinate takes both moves), and that point lies at least `1/√3` from
 /// the origin, so the direction turns by at most `q·√1.5·√3 = 2.12 q`.
+#[cfg(test)]
 pub(crate) const DIRECTION_BOUND: f32 = 6.5e-5;
 
 /// The largest rotation angle (rad) between a rotation and its decode. DERIVED: rounding moves each
 /// of the four components by at most `0.5/32767`, the unit quaternion by at most `δ = 3.05e-5`, and
 /// a rotation's angle is twice the quaternion's arc, so at most `2δ/(1 − δ)`.
+#[cfg(test)]
 pub(crate) const ROTATION_BOUND: f32 = 6.2e-5;
 
 /// How far from unit length a received quaternion may be. DERIVED: rounding moves the encoded
@@ -120,11 +122,13 @@ pub(crate) const ROTATION_SLACK: f32 = 1.0e-4;
 /// The largest angle (rad) a ray's decoded direction may lie from the thrown one: the axis's
 /// [`DIRECTION_BOUND`], again for the roll fitted against the decoded axis, and half the roll's
 /// quantum `π/65536` (a ray at most a right angle off its axis). DERIVED.
+#[cfg(test)]
 const RAY_DIRECTION_BOUND: f32 = 2.0 * DIRECTION_BOUND + std::f32::consts::PI / 65_536.0;
 
 /// The largest distance (m) between a ray's decoded end and the record's, for a ray of reach
 /// `reach` (m): the origin's point bound (0.87 mm), the reach's half millimetre, the direction's
 /// [`RAY_DIRECTION_BOUND`] over the reach, and 10 µm for the record's own f32 rounding. DERIVED.
+#[cfg(test)]
 pub(crate) fn end_bound(reach: f32) -> f32 {
     0.000_87 + 0.000_5 + reach * RAY_DIRECTION_BOUND + 0.000_01
 }
@@ -263,7 +267,7 @@ impl VehicleWords {
 }
 
 /// Every name a pen cam record can hold, by index, and the cone shape its rays were thrown in.
-#[derive(Clone, Debug)]
+#[derive(Resource, Clone, Debug)]
 pub(crate) struct ShotVocabulary {
     /// File-sorted.
     vehicles: Vec<VehicleWords>,
@@ -304,6 +308,7 @@ impl ShotVocabulary {
     }
 
     /// The fingerprint every explanation built against this vocabulary carries.
+    #[cfg(test)]
     pub(crate) fn fingerprint(&self) -> u64 {
         self.fingerprint
     }
@@ -805,6 +810,10 @@ impl ShotExplanation {
     }
 
     /// The kill cam's lesson is this recipient's.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "its reader, the kill cam, is not yet built")
+    )]
     pub(crate) fn lesson(&self) -> bool {
         self.audience == Audience::KilledVictim
     }

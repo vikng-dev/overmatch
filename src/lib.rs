@@ -527,9 +527,10 @@ mod offline_feel_tests {
 #[derive(Resource, Default)]
 pub(crate) struct ClientReplica;
 
-/// Net-neutral current tick published before gameplay. Local network fire uses it to construct a
-/// [`ShotId`] before shell spawn; replica ballistics ages sanctioned outcomes and stamps lifecycle
-/// rows against it; authority/sandbox shells may be unkeyed.
+/// Net-neutral current tick published before gameplay, by the network compositions and
+/// single-player. Local fire uses it to construct a [`ShotId`] before shell spawn; replica
+/// ballistics ages sanctioned outcomes and stamps lifecycle rows against it; sandbox shells, with no
+/// clock, are unkeyed.
 #[derive(Resource, Default)]
 pub(crate) struct ShotClock(pub u32);
 
@@ -626,8 +627,9 @@ impl Plugin for SimPlugin {
             ballistics::sim_plugin,
             damage::plugin,
             shooting::plugin,
-            // The pen cam's records of the authority's main-gun hits; inert on a net client.
-            damage_cam::recorder::plugin,
+            // The pen cam's records of the authority's main-gun hits, inert on a net client, and
+            // the vocabulary both ends explain them in.
+            (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
     }
 }
@@ -839,6 +841,8 @@ impl Plugin for GamePlugin {
             // spawn above lays out the pairs instead of the duel under the same variable.
             lod_showcase::plugin,
             ClientPlugin,
+            // The shot clock, and each pen cam record explained to the player without a hop.
+            damage_cam::delivery::offline_plugin,
             // Passive jitter-trace recorder (frame + tick rows; no net extras in this build). Idle
             // unless `SPIKE_TRACE` is set.
             trace::sp_plugin,

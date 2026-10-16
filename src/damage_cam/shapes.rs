@@ -89,25 +89,13 @@ impl TankAsset {
     }
 
     /// The extracted sim artifact.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its consumer, the shot explanation's transport, is not yet built"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn geometry(&self) -> &TankGeometry {
         &self.geometry
     }
 
     /// The tank file.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its consumer, the shot explanation's transport, is not yet built"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) fn spec(&self) -> &TankSpec {
         &self.spec
     }

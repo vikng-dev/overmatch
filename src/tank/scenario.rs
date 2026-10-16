@@ -8,6 +8,7 @@ use super::spawn::{
 };
 use crate::sight::SightMode;
 use crate::state::{AppState, GameplaySet};
+use crate::{CombatantId, CombatantLife};
 
 pub fn sp_spawn_plugin(app: &mut App) {
     app.add_systems(Startup, load_tank_assets).add_systems(
@@ -165,6 +166,7 @@ fn spawn_tank_when_loaded(
         Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[0]))
             .with_rotation(Quat::from_rotation_z(0.7)),
         "Tiger I (A)",
+        0,
         true,
     );
     spawn_tank(
@@ -173,6 +175,7 @@ fn spawn_tank_when_loaded(
         pending.presentation(),
         Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1])),
         "Tiger I (B)",
+        1,
         false,
     );
     spawn_probe_tanks(&mut commands, content, pending.presentation(), grid, far);
@@ -263,6 +266,7 @@ fn spawn_probe_tanks(
             presentation.clone(),
             Transform::from_translation(crate::terrain_grid::spawn_pos(grid, xz)),
             &format!("Probe Tiger {index}"),
+            DUEL_SPAWN_XZ.len() + index,
             false,
         );
     }
@@ -313,7 +317,10 @@ fn spawn_lod_showcase(
     for line in crate::lod_showcase::legend(&switches, &deviations) {
         info!("{line}");
     }
-    for tank in crate::lod_showcase::layout(&switches) {
+    for (index, tank) in crate::lod_showcase::layout(&switches)
+        .into_iter()
+        .enumerate()
+    {
         let root = spawn_complete_tank(
             commands,
             content,
@@ -323,6 +330,7 @@ fn spawn_lod_showcase(
                     .with_rotation(tank.yaw),
                 Name::new(tank.name),
                 RigidBody::Dynamic,
+                identity(index),
             ),
         );
         if tank.controlled {
@@ -336,20 +344,32 @@ fn spawn_lod_showcase(
     }
 }
 
-/// Spawn one complete dynamic tank for the local duel.
+/// The match identity of the scenario's tank `index` (from 0), in its first life. Single-player
+/// never respawns a tank.
+fn identity(index: usize) -> (CombatantId, CombatantLife) {
+    (CombatantId(index as u64 + 1), CombatantLife(0))
+}
+
+/// Spawn one complete dynamic tank for the local duel, the scenario's tank `index`.
 fn spawn_tank(
     commands: &mut Commands,
     content: TankContent,
     presentation: TankPresentation,
     transform: Transform,
     name: &str,
+    index: usize,
     controlled: bool,
 ) {
     let root = spawn_complete_tank(
         commands,
         content,
         presentation,
-        (transform, Name::new(name.to_string()), RigidBody::Dynamic),
+        (
+            transform,
+            Name::new(name.to_string()),
+            RigidBody::Dynamic,
+            identity(index),
+        ),
     );
     if controlled {
         commands.entity(root).insert(Controlled);
@@ -417,6 +437,7 @@ mod spawn_contract_tests {
 
         let mut app = App::new();
         app.insert_resource(TankBlueprint {
+            file: crate::tank::TIGER_SPEC_PATH.to_owned(),
             geometry: Arc::new(geometry),
             spec: Arc::new(spec),
         })

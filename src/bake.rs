@@ -261,6 +261,8 @@ impl NodeGeometry {
 /// transitional seam recorded in `ARCHITECTURE.md`.
 #[derive(Resource, Clone)]
 pub(crate) struct TankBlueprint {
+    /// The tank file, relative to the asset root: the name a record gives the vehicle.
+    pub file: String,
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
 }
@@ -713,6 +715,7 @@ fn extract_at_startup(mut commands: Commands) {
     );
 
     commands.insert_resource(TankBlueprint {
+        file: crate::tank::TIGER_SPEC_PATH.to_owned(),
         geometry: Arc::new(asset.geometry),
         spec: Arc::new(asset.spec),
     });

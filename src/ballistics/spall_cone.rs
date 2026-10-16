@@ -302,13 +302,6 @@ impl ConeShape {
 
     /// Every direction in the cone's own frame, in stratum order: `cos θ`, the two lateral
     /// components and the profile weight `f`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its consumer, the shot explanation's transport, is not yet built"
-        )
-    )]
     pub(crate) fn strata(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
         self.strata.iter().map(|stratum| {
             [
