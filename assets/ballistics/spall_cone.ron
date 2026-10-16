@@ -28,8 +28,10 @@
     // never how much the cone carries.
     directions: (256, Resolution("sampling of the cone; changes how finely a box's dose is
         resolved, never the emitted total. 256 with the even profile and full shadowing (owner
-        decision 2026-10-17, playtest fork F6), pending the cost decision: one throw MEASURED
-        2026-10-17 by ballistics::pen_cam::spall_law_cost (release, macOS arm64)")),
+        decision 2026-10-17, playtest fork F6), pending the cost decision. One throw under this
+        law MEASURED 2026-10-17 by ballistics::pen_cam::spall_law_cost (release, macOS arm64, best
+        of 9, the 6 cones of the penetrating scenarios): 0.42 ms at N = 24, 0.71 at 64, 1.22 at
+        128, 2.50 at 256")),
 
     // How the strength is spread over the directions. `Flat`: S/2 along every direction.
     // `Linear`: S·(cos θ − cos α)/(1 − cos α), greatest on the axis, zero at the rim, the same
