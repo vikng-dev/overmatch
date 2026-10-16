@@ -471,6 +471,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                         ray.dir,
                         ray.strength,
                         ray.weight,
+                        ConeShape::shipped().passage(),
                     )
                     .unwrap_or_else(|error| panic!("{}: the walk failed: {error:?}", ray.label));
                     let doses = cast.doses;

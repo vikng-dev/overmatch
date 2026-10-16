@@ -1708,7 +1708,7 @@ fn a_probe_past_its_face_ceiling_fails_closed() {
 // ---------------------------------------------------------------------------------------------
 
 use crate::ballistics::ProjectileMarchWorld;
-use crate::ballistics::spall_cone::{AxisRule, ConeShape};
+use crate::ballistics::spall_cone::{AxisRule, ConeShape, Passage, Profile};
 
 /// The colliders a fixture's field walk reads, as the runtime's systems hold them.
 type Colliders<'w, 's> = Query<
@@ -1729,6 +1729,17 @@ fn field_rays(
     rays: Vec<(Vec3, Dir3, f32)>,
     weight: f32,
     exited: Vec<Entity>,
+) -> Vec<FieldRay> {
+    field_rays_under(app, rays, weight, exited, Passage::Partial)
+}
+
+/// [`field_rays`] under `passage`.
+fn field_rays_under(
+    app: &mut App,
+    rays: Vec<(Vec3, Dir3, f32)>,
+    weight: f32,
+    exited: Vec<Entity>,
+    passage: Passage,
 ) -> Vec<FieldRay> {
     app.world_mut()
         .run_system_once(
@@ -1755,6 +1766,7 @@ fn field_rays(
                             dir,
                             strength,
                             weight,
+                            passage,
                         )
                         .expect("a fixture direction walks")
                     })
@@ -1798,7 +1810,14 @@ fn below(app: &mut App, size: Vec3, depth: f32, lateral: f32, factor: f32, hp: b
 /// on-axis strength `strength`, thrown from the origin down `-Y` through every volume of the world
 /// (volumes of no tank: one tank).
 fn field_doses(app: &mut App, boxes: &[Entity], strength: f32, directions: usize) -> Vec<f64> {
-    let shape = ConeShape::new(FIELD_ALPHA, AxisRule::ExitDirection, directions).unwrap();
+    let shape = ConeShape::new(
+        FIELD_ALPHA,
+        AxisRule::ExitDirection,
+        directions,
+        Profile::Linear,
+        Passage::Partial,
+    )
+    .unwrap();
     let rays = shape
         .directions(Dir3::NEG_Y)
         .map(|(dir, profile)| (Vec3::ZERO, dir, strength * profile))
@@ -2112,6 +2131,65 @@ fn a_cone_doses_a_box_only_an_unreached_member_leaves() {
         cone.rays.len()
     );
     assert!(app.world().get::<ComponentHealth>(b).unwrap().current < FIELD_HP);
+}
+
+/// FIRST SOLID: a direction stops where it enters the first volume. A box there takes its whole
+/// `strength × weight` and nothing beyond it is dosed; armour there takes nothing and shadows every
+/// box behind it; the plate the throw leaves stops nothing. Fixture boxes and plates on the `-Y`
+/// axis.
+#[test]
+fn a_first_solid_direction_stops_at_what_it_enters() {
+    let walk = |armour_first: bool| {
+        let (mut app, boxes) = field_world(|app| {
+            let leaving = volume(
+                app,
+                Vec3::new(2.0, 0.2, 2.0),
+                Transform::from_translation(Vec3::new(0.0, 0.05, 0.0)),
+                1.0,
+                None,
+            );
+            if armour_first {
+                below(app, Vec3::new(2.0, 0.1, 2.0), 0.5, 0.0, 1.0, false);
+            }
+            vec![
+                leaving,
+                below(app, Vec3::new(1.0, 0.2, 1.0), 1.0, 0.0, 0.0, true),
+                below(app, Vec3::new(1.0, 0.2, 1.0), 2.0, 0.0, 0.0, true),
+            ]
+        });
+        let ray = field_rays_under(
+            &mut app,
+            vec![(Vec3::ZERO, Dir3::NEG_Y, 3.0)],
+            0.25,
+            vec![boxes[0]],
+            Passage::FirstSolid,
+        )
+        .remove(0);
+        (ray, boxes)
+    };
+    let (ray, boxes) = walk(false);
+    assert_eq!(ray.doses.len(), 1, "{:?}", ray.doses);
+    assert_eq!(ray.doses[0].address, boxes[1]);
+    assert_eq!(
+        ray.doses[0].amount, 0.75,
+        "its whole strength, no attenuation in air"
+    );
+    assert!(
+        (ray.end.y + 0.9).abs() < 1.0e-4,
+        "stopped at the near box's face: {}",
+        ray.end
+    );
+    let (ray, _) = walk(true);
+    assert!(
+        ray.doses.is_empty(),
+        "armour shadows the boxes: {:?}",
+        ray.doses
+    );
+    assert!(
+        (ray.end.y + 0.45).abs() < 1.0e-4,
+        "stopped at the plate: {}",
+        ray.end
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

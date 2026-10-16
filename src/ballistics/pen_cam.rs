@@ -8,6 +8,9 @@
 //! and fails when a checked-in file differs, so a physics change refreshes them deliberately:
 //! `PEN_CAM_BLESS=1 cargo test --lib pen_cam` rewrites them, and the diff is the review.
 //!
+//! A second set, [`COMPARISON_DIR`], records the same scenarios under the spall cone shape its own
+//! `spall_cone.ron` holds ([`spall_cone::SpallLaw`]): the demo draws it beside the shipped law's.
+//!
 //! The class-invariant tests at the end fire at generic fixture plates, not at the bound tank.
 
 use std::time::Duration;
@@ -31,6 +34,9 @@ use std::collections::BTreeMap;
 /// The scenario list and its records, relative to the asset root.
 const SCENARIO_DIR: &str = "dev/pen_cam";
 const SCENARIO_LIST: &str = "scenarios.ron";
+/// The comparison set: the same scenarios recorded under the cone shape its [`LAW_FILE`] holds.
+const COMPARISON_DIR: &str = "dev/pen_cam/simple";
+const LAW_FILE: &str = "spall_cone.ron";
 
 /// Fixed-step length the march is driven at (s), as the goldens drive it.
 const STEP: Duration = Duration::from_millis(16);
@@ -79,6 +85,11 @@ struct Scenario {
 
 /// The probe world posed for `scenario`, with the march driven on [`STEP`] and spent shells kept.
 fn scenario_world(scenario: &Scenario) -> App {
+    scenario_world_under(scenario, None)
+}
+
+/// [`scenario_world`] throwing `law`'s cones in place of the shipped shape's.
+fn scenario_world_under(scenario: &Scenario, law: Option<&spall_cone::ConeShape>) -> App {
     let pose = Transform::from_translation(PROBE_TANK_AT)
         .with_rotation(Quat::from_rotation_y(scenario.hull_yaw_deg.to_radians()));
     let mut app = probe_world_posed(pose).expect("the bound tank builds");
@@ -86,6 +97,9 @@ fn scenario_world(scenario: &Scenario) -> App {
         .insert_resource(RetainSpentShells(true))
         .insert_resource(MgShortCircuit(false))
         .add_systems(Update, integrate_projectiles);
+    if let Some(law) = law {
+        app.insert_resource(spall_cone::SpallLaw(law.clone()));
+    }
     if scenario.turret_yaw_deg != 0.0 || scenario.gun_elevation_deg != 0.0 {
         let tank = app.world().resource::<ProbeTank>().0;
         let rig = app.world().get::<Rig>(tank).expect("the tank has a rig");
@@ -118,7 +132,23 @@ fn scenario_world(scenario: &Scenario) -> App {
 
 /// Fire `scenario` at the bound tank and read back its record.
 fn record_scenario(scenario: &Scenario) -> PenetrationReport {
-    let mut app = scenario_world(scenario);
+    record_scenario_under(scenario, None)
+}
+
+/// [`record_scenario`] under `law`'s cones, the shipped shape's when `None`.
+fn record_scenario_under(
+    scenario: &Scenario,
+    law: Option<&spall_cone::ConeShape>,
+) -> PenetrationReport {
+    record_timed(scenario, law).0
+}
+
+/// [`record_scenario_under`], and the wall time (s) its march steps took.
+fn record_timed(
+    scenario: &Scenario,
+    law: Option<&spall_cone::ConeShape>,
+) -> (PenetrationReport, f64) {
+    let mut app = scenario_world_under(scenario, law);
     let tank = app.world().resource::<ProbeTank>().0;
     let spec = app
         .world()
@@ -154,9 +184,11 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
             Transform::from_translation(origin).looking_to(direction, Vec3::Y),
         ))
         .id();
+    let started = std::time::Instant::now();
     for _ in 0..STEPS {
         app.update();
     }
+    let marched = started.elapsed().as_secs_f64();
     let facts = ShotFacts {
         shooter: Some(Shooter {
             name: FIXTURE_SHOOTER.to_owned(),
@@ -170,8 +202,9 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
         round: weapon.round.clone(),
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
     };
-    record::report(app.world_mut(), &struck, shell, &facts)
-        .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name))
+    let report = record::report(app.world_mut(), &struck, shell, &facts)
+        .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name));
+    (report, marched)
 }
 
 /// A record is stated in the struck hull's frame: one shot fired at the bound tank at two hull
@@ -488,18 +521,41 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
     Ok(spread)
 }
 
+/// The comparison set's cone shape, from its own [`LAW_FILE`].
+fn comparison_law() -> spall_cone::ConeShape {
+    let path = crate::assets::asset_root()
+        .join(COMPARISON_DIR)
+        .join(LAW_FILE);
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    spall_cone::ConeShape::from_ron(&text)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
 /// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
 /// path, and the checked-in record is what the march records today: every discrete fact exact,
 /// every float within [`RECORD_REL_TOLERANCE`] or [`RECORD_ABS_TOLERANCE`]. No record is left
 /// without a scenario.
 #[test]
 fn the_pen_cam_scenarios_are_current() {
-    let dir = crate::assets::asset_root().join(SCENARIO_DIR);
+    check_records(SCENARIO_DIR, None);
+}
+
+/// [`the_pen_cam_scenarios_are_current`] for the comparison set, under its own cone shape.
+#[test]
+fn the_comparison_records_are_current() {
+    check_records(COMPARISON_DIR, Some(&comparison_law()));
+}
+
+/// Every scenario of the list recorded under `law` into `dir`, checked against its file there (or
+/// written, with `PEN_CAM_BLESS`).
+fn check_records(dir: &str, law: Option<&spall_cone::ConeShape>) {
+    let dir = crate::assets::asset_root().join(dir);
     let bless = std::env::var_os("PEN_CAM_BLESS").is_some();
     let list = scenarios();
     let mut stale = Vec::new();
     for scenario in &list {
-        let report = record_scenario(scenario);
+        let report = record_scenario_under(scenario, law);
         assert_eq!(
             report.impact.verdict, scenario.verdict,
             "PHYSICS CHANGED — {} earns a different verdict; diff consciously before re-recording",
@@ -536,7 +592,7 @@ fn the_pen_cam_scenarios_are_current() {
     let mut orphans: Vec<String> = std::fs::read_dir(&dir)
         .expect("the scenario directory exists")
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST)
+        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST && file != LAW_FILE)
         .filter(|file| !list.iter().any(|s| format!("{}.ron", s.name) == *file))
         .collect();
     orphans.sort();
@@ -547,6 +603,57 @@ fn the_pen_cam_scenarios_are_current() {
          `PEN_CAM_BLESS=1 cargo test --lib pen_cam` and review the diff"
     );
 }
+
+/// The server cost of one cone throw under each law (ignored; run it on demand). Each penetrating
+/// scenario's march steps are timed under the shipped shape, the comparison shape, and each of them
+/// cut to one direction; the throw's cost is the difference over the cones thrown, scaled from
+/// `N − 1` to `N` directions. The best of [`COST_RUNS`] runs is taken.
+/// `cargo test --release --lib --features dev_tools pen_cam::spall_law_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, run on demand"]
+fn spall_law_cost() {
+    let shipped = spall_cone::ConeShape::shipped().clone();
+    let comparison = comparison_law();
+    let one = |shape: &spall_cone::ConeShape| {
+        let text = format!(
+            "(half_angle_deg: ({}, Tuned(\"cost probe\")), axis: (RearNormalBisector, Tuned(\"cost \
+             probe\")), directions: (1, Resolution(\"cost probe\")), profile: (Flat, Tuned(\"cost \
+             probe\")), passage: ({:?}, Tuned(\"cost probe\")))",
+            shape.half_angle().to_degrees(),
+            shape.passage()
+        );
+        spall_cone::ConeShape::from_ron(&text).expect("the probe shape parses")
+    };
+    let best = |scenario: &Scenario, law: &spall_cone::ConeShape| {
+        (0..COST_RUNS)
+            .map(|_| {
+                let (report, marched) = record_timed(scenario, Some(law));
+                (marched, report.spall.len())
+            })
+            .fold((f64::INFINITY, 0), |(t, _), (s, cones)| (t.min(s), cones))
+    };
+    for (name, law) in [("shipped", &shipped), ("comparison", &comparison)] {
+        let base = one(law);
+        let (mut extra, mut cones) = (0.0, 0);
+        for scenario in scenarios()
+            .iter()
+            .filter(|s| s.verdict == ShotVerdict::Penetration)
+        {
+            let (full, thrown) = best(scenario, law);
+            let (single, _) = best(scenario, &base);
+            extra += full - single;
+            cones += thrown;
+        }
+        let n = law.directions_count() as f64;
+        println!(
+            "{name}: N = {n}, {cones} cones, {:.3} ms per throw",
+            1000.0 * extra / cones.max(1) as f64 * n / (n - 1.0).max(1.0)
+        );
+    }
+}
+
+/// The runs a cost is the best of.
+const COST_RUNS: usize = 9;
 
 /// Every entity carrying a volume of a node the tank file tags external carries
 /// [`ExternalArmour`], a mixed node's per-substance volumes included, and no other does.

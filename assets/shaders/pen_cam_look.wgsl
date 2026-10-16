@@ -18,15 +18,23 @@
 //                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
+//   4 volume      a field as light: the closed reach mesh's surfaces (wound outward), entries
+//                 subtracting and exits adding the column `∫ ds / (r² + ε²)` from the eye (r from the
+//                 origin, ε = `volume.w`), so the sum over a pixel is the density integrated through
+//                 the volume; `color.a` is the gain. Additive, unoccluded.
 //
 // Base and state surfaces carry the spall fields' footprint (`foot.x`: 0 none, 1 outline, 2 hatch)
-// in `foot_color`: for each of `foot.y` fields (`prints`), a surface point facing the origin,
-// inside the cone, behind its front and within the reach of the field's recorded direction (`rays`)
-// nearest it is inside the footprint. The outline is the band `foot.z` px wide where the angle
-// from the axis crosses the half-angle; the hatch is diagonal stripes `foot.w` px apart over the
-// inside, `hatch.z` of each in colour.
+// in `foot_color`: for each of the side's fields (`fields`, `prints`), a surface point facing the
+// origin, inside the cone, behind its front and within the reach of the field's recorded direction
+// (`rays`) nearest it is inside the footprint. The outline is the band `foot.y` px wide where the
+// angle from the axis crosses the half-angle; the hatch is diagonal stripes `foot.z` px apart over
+// the inside, `hatch.z` of each in colour.
 //
-// Output: straight `rgb, a`.
+// The split corner: a camera whose viewport starts right of the image's origin is the comparison
+// camera; `mode.y` 1 draws on the record's camera alone, 2 on the comparison's, 0 on both. The
+// masks are read at the fragment's position within its viewport.
+//
+// Output: straight `rgb, a`; additive (volume) `rgb` with alpha 0.
 
 #import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
 
@@ -42,7 +50,8 @@ struct LookParams {
     // x: the state hatch's period (px); y: its hatched share; z: the footprint hatch's hatched
     // share; w: the dissolve band (m).
     hatch: vec4<f32>,
-    // x: mode; z: the part mask (base, 1); w: hatch on (state, 1).
+    // x: mode; y: the side (0 both, 1 record, 2 comparison); z: the part mask (base, 1); w: hatch
+    // on (state, 1).
     mode: vec4<f32>,
     // xyz: the fill's up (world, unit); w: the share of the height filled.
     state: vec4<f32>,
@@ -51,15 +60,21 @@ struct LookParams {
     span: vec4<f32>,
     // rgb: the unfilled remainder's colour.
     rest: vec4<f32>,
-    // x: footprint style; y: the fields marked; z: outline width (px); w: hatch period (px).
+    // x: footprint style; y: outline width (px); z: hatch period (px).
     foot: vec4<f32>,
     // rgb: the footprint's colour; a: its opacity.
     foot_color: vec4<f32>,
-    // Per field, three lanes: origin (world) and half-angle (rad); unit axis (world) and reach
-    // (m); x: how far its front has run (m), negative before it is thrown, y: its directions.
-    prints: array<vec4<f32>, 12>,
-    // Per field, 32 lanes: a recorded direction (world, unit) and its reach (m) with slack.
-    rays: array<vec4<f32>, 128>,
+    // x: the record side's fields, y: the comparison side's.
+    fields: vec4<f32>,
+    // w: the volume's cap ε (m).
+    volume: vec4<f32>,
+    // Per side, four fields of three lanes: origin (world) and half-angle (rad); unit axis (world)
+    // and reach (m); x: how far its front has run (m), negative before it is thrown, y: its
+    // directions.
+    prints: array<vec4<f32>, 24>,
+    // Per side, four fields of 256 lanes: a recorded direction (world, unit) and its reach (m)
+    // with slack.
+    rays: array<vec4<f32>, 2048>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
@@ -73,6 +88,7 @@ struct LookVertexOutput {
     @location(2) color: vec4<f32>,
     // Distance (m, world) from the mesh's origin.
     @location(3) radius: f32,
+    @location(4) origin: vec3<f32>,
 }
 
 fn mode() -> i32 {
@@ -92,8 +108,8 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
     }
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(local, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
-    let origin = (world_from_local * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-    out.radius = length(out.world_position.xyz - origin);
+    out.origin = (world_from_local * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+    out.radius = length(out.world_position.xyz - out.origin);
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #else
@@ -125,32 +141,40 @@ fn falloff(r: f32) -> f32 {
     return min(1.0, k * k);
 }
 
+// Whether this fragment is the comparison camera's: its viewport starts right of the origin.
+fn comparison() -> bool {
+    return view.viewport.x > 0.5;
+}
+
 // The footprint's mark at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`) and
-// pixel `frag`, 1 or 0.
+// pixel `frag`, 1 or 0, from this camera's side's fields.
 fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, frag: vec2<f32>) -> f32 {
     let style = i32(look.foot.x + 0.5);
     if style == 0 {
         return 0.0;
     }
+    let side = select(0, 1, comparison());
+    let count = select(look.fields.x, look.fields.y, comparison());
     for (var i = 0; i < 4; i = i + 1) {
-        if f32(i) >= look.foot.y {
+        if f32(i) >= count {
             break;
         }
-        let at = look.prints[3 * i];
-        let along = look.prints[3 * i + 1];
+        let field = side * 4 + i;
+        let at = look.prints[3 * field];
+        let along = look.prints[3 * field + 1];
         let d = p - at.xyz;
         let r = length(d);
-        if r < 1e-4 || r > min(along.w, look.prints[3 * i + 2].x) || dot(n, -d) <= 0.0 {
+        if r < 1e-4 || r > min(along.w, look.prints[3 * field + 2].x) || dot(n, -d) <= 0.0 {
             continue;
         }
         let dir = d / r;
         var best = -2.0;
         var reach = along.w;
-        for (var j = 0; j < 32; j = j + 1) {
-            if f32(j) >= look.prints[3 * i + 2].y {
+        for (var j = 0; j < 256; j = j + 1) {
+            if f32(j) >= look.prints[3 * field + 2].y {
                 break;
             }
-            let ray = look.rays[32 * i + j];
+            let ray = look.rays[256 * field + j];
             let k = dot(dir, ray.xyz);
             if k > best {
                 best = k;
@@ -166,10 +190,10 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>, frag: v
             // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
             let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
             let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
-            if abs(angle - at.w) < 0.5 * look.foot.z * per_px {
+            if abs(angle - at.w) < 0.5 * look.foot.y * per_px {
                 return 1.0;
             }
-        } else if angle <= at.w && fract((frag.x - frag.y) / look.foot.w) < look.hatch.z {
+        } else if angle <= at.w && fract((frag.x - frag.y) / look.foot.z) < look.hatch.z {
             return 1.0;
         }
     }
@@ -210,7 +234,7 @@ fn lines(mask: texture_2d<f32>, frag: vec2<f32>) -> f32 {
 }
 
 @fragment
-fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
+fn fragment(in: LookVertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
     let m = mode();
     let frag = in.position.xy;
     let fade = look.shade.w;
@@ -228,6 +252,12 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let toward = select(-n, n, dot(n, v) >= 0.0);
     let lambert = 0.5 * (dot(toward, normalize(vec3(0.4, 1.0, 0.3))) + 1.0);
     let shading = 1.0 - look.shade.y + look.shade.y * lambert;
+    // Where the masks hold this fragment: its position within its own viewport.
+    let pix = frag - view.viewport.xy;
+    let side = i32(look.mode.y + 0.5);
+    if (side == 1 && comparison()) || (side == 2 && !comparison()) {
+        discard;
+    }
 
     if m == 0 {
         let vn = normalize((view.view_from_world * vec4(n, 0.0)).xyz);
@@ -244,15 +274,15 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         return vec4(look.color.rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 2 {
-        let p = vec2<i32>(frag);
+        let p = vec2<i32>(pix);
         var nearest = 0.0;
         var edge = 0.0;
         if look.mode.z > 0.5 {
             nearest = mask_at(part_mask, p).a;
-            edge = lines(part_mask, frag);
+            edge = lines(part_mask, pix);
         } else {
             nearest = mask_at(hull_mask, p).a;
-            edge = lines(hull_mask, frag);
+            edge = lines(hull_mask, pix);
         }
         let mark = footprint(in.world_position.xyz, n, dpx, dpy, frag) * look.foot_color.a;
         if nearest > 0.0 && dist > nearest * 1.002 + 0.003 {
@@ -293,6 +323,18 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         }
         let mark = footprint(in.world_position.xyz, n, dpx, dpy, frag) * look.foot_color.a;
         return vec4(mix(rgb, look.foot_color.rgb, mark), 1.0);
+    }
+    if m == 4 {
+        // The reach mesh is wound outward, so a back face is where the eye ray leaves it.
+        let along = -v;
+        let exiting = !is_front;
+        let a = view.world_position - in.origin;
+        let b = dot(a, along);
+        let c = dot(a, a) + look.volume.w * look.volume.w;
+        let h = sqrt(max(c - b * b, 1e-12));
+        let column = (atan((dist + b) / h) - atan(b / h)) / h;
+        let signed = select(-column, column, exiting);
+        return vec4(look.color.rgb * look.color.a * signed * fade, 0.0);
     }
     discard;
     return vec4(0.0);

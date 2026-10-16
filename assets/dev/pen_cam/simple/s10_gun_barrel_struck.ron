@@ -1,0 +1,4068 @@
+// s10_gun_barrel_struck: an 88 from the side through the main gun barrel ahead of the hull: no armour crossed, the barrel dosed
+// Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+(
+    synthetic: false,
+    vehicle: Some("tiger_1/tiger_1.tank.ron"),
+    servo_deg: {
+        "Hull_MG_Pitch": 0.0,
+        "Hull_MG_Yaw": 0.0,
+        "Main_Gun_Pitch": 0.0,
+        "Turret_Yaw": 0.0,
+    },
+    round: "88mm_AP",
+    shooter: Some((
+        name: "Fixture Gunner",
+        vehicle: "tiger_1/tiger_1.tank.ron",
+    )),
+    origin: (-4.0, 2.196, -4.0),
+    muzzle: None,
+    projectile: (
+        name: "MainGun",
+        caliber_mm: 88.0,
+        mass_kg: 10.2,
+        speed_mps: 771.09576,
+    ),
+    impact: (
+        point: (-0.07029343, 2.1952024, -4.0),
+        normal: (-0.99737155, -0.071993314, -0.008186746),
+        incoming: (1.0, -0.00020305306, 0.0),
+        incidence_deg: 4.1666393,
+        verdict: Damaged,
+    ),
+    plates: [],
+    ricochets: [],
+    path: [
+        (
+            t: -0.005096263,
+            point: (-4.0, 2.196, -4.0),
+        ),
+        (
+            t: 0.0,
+            point: (-0.07029343, 2.1952024, -4.0),
+        ),
+        (
+            t: 0.000020229723,
+            point: (-0.0552063, 2.195417, -3.9999752),
+        ),
+        (
+            t: 0.00017343275,
+            point: (0.055185318, 2.19699, -3.999794),
+        ),
+        (
+            t: 0.0001950413,
+            point: (0.07021904, 2.1973157, -3.999775),
+        ),
+        (
+            t: 0.01251301,
+            point: (8.335575, 2.376194, -3.9889355),
+        ),
+    ],
+    spall: [
+        (
+            t: 0.000020229723,
+            origin: (-0.0552063, 2.195417, -3.9999752),
+            axis: (0.9997055, 0.024255931, 0.0008193272),
+            half_angle_deg: 25.0,
+            strength: 11.057343,
+            fragments: [
+                (
+                    end: (0.063173294, 2.1982894, -3.997613),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06345558, 2.1956387, -4.002778),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06251335, 2.2033014, -3.9994373),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06317806, 2.193531, -3.996231),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063017845, 2.1994696, -4.006571),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06264496, 2.202302, -3.9935522),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06276798, 2.190415, -4.001992),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062155724, 2.2060142, -4.0039024),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06338215, 2.1950784, -3.9910736),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06330776, 2.1945124, -4.0090322),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061945915, 2.2076125, -3.9955034),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062444687, 2.1879554, -3.996644),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062428474, 2.2039418, -4.0096617),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06284046, 2.2008133, -3.9883642),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062493324, 2.1883283, -4.0068674),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06154251, 2.2106738, -4.0014887),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06270027, 2.1898985, -3.9899387),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06324577, 2.1977339, -4.013339),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061902046, 2.2079458, -3.9901476),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0619545, 2.1842346, -4.0005274),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061717987, 2.209344, -4.0091314),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063435555, 2.1962986, -3.9850397),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06266022, 2.1895947, -4.012353),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060941696, 2.2132497, -3.9965029),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062000275, 2.1845803, -3.9920425),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06252575, 2.2032037, -4.0153294),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062264442, 2.2051945, -3.984891),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061775208, 2.182869, -4.006316),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060569763, 2.214147, -4.0056047),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062734604, 2.190158, -3.9844313),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06320667, 2.1937437, -4.0171185),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060938835, 2.213256, -3.9902248),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06145096, 2.18041, -3.9968147),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06168461, 2.2095966, -4.0145226),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0629673, 2.1998515, -3.9809694),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061962128, 2.1842918, -4.0127974),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05930996, 2.2171903, -3.9997883),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061893463, 2.183773, -3.986743),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06293011, 2.2001343, -4.019848),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061574936, 2.2104268, -3.983841),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060894012, 2.1784163, -4.003484),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060019493, 2.2154775, -4.010742),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0630703, 2.1927104, -3.979535),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0625267, 2.18858, -4.0187616),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059034348, 2.2178555, -3.9925928),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06089878, 2.1784296, -3.9918203),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061940193, 2.2076573, -4.019704),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06231308, 2.204824, -3.9786224),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06118965, 2.17913, -4.011076),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058273315, 2.2196918, -4.0045023),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062062263, 2.185048, -3.9812822),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063425064, 2.195406, -4.023052),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059916496, 2.2157245, -3.9849777),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05958557, 2.175259, -3.9990444),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06023407, 2.2149572, -4.0163727),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06333542, 2.197054, -3.9756403),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061779022, 2.1829038, -4.0184536),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057502747, 2.2215528, -3.9966192),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060806274, 2.1782055, -3.9860945),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062437057, 2.203877, -4.024235),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061551094, 2.2106085, -3.978074),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0593853, 2.1747756, -4.007477),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057868004, 2.2206702, -4.010147),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06247711, 2.1882005, -3.9761438),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06265831, 2.1895833, -4.024416),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057915688, 2.2205553, -3.987977),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05884838, 2.1734805, -3.9935007),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061187744, 2.212656, -4.0220537),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06259155, 2.2027073, -3.9733229),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06045437, 2.1773562, -4.016199),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056456566, 2.2240777, -4.0019054),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061362267, 2.1797328, -3.9800682),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06313801, 2.1985593, -4.0277004),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059615135, 2.2164526, -3.9795713),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058002472, 2.1714382, -4.00249),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05813217, 2.2200336, -4.016307),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06311321, 2.1930332, -3.9717798),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061823845, 2.1832438, -4.023988),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056243896, 2.2245903, -3.9924927),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058745384, 2.1732306, -3.987234),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061826706, 2.2085147, -4.027133),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06173992, 2.2091737, -3.9726868),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05845642, 2.1725335, -4.012183),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055984497, 2.2252173, -4.008093),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061805725, 2.1831017, -3.9743147),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062986374, 2.1920762, -4.029482),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057374, 2.2218637, -3.9828672),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057147026, 2.169373, -3.996441),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059091568, 2.2177176, -4.0225916),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06304455, 2.1992674, -3.9688377),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06030941, 2.1770067, -4.0216103),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05502987, 2.227522, -3.9982367),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05932331, 2.1746259, -3.9806042),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062579155, 2.2028036, -4.0312166),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05988884, 2.2157907, -3.9740868),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056861877, 2.168684, -4.006809),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05615139, 2.2248144, -4.0148325),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062472343, 2.1881661, -3.969244),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062055588, 2.1850042, -4.029315),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05545044, 2.2265077, -3.9876728),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05689907, 2.1687741, -3.9896479),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060756683, 2.213696, -4.028614),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06210518, 2.2064013, -3.9677496),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058023453, 2.1714883, -4.0174),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053949356, 2.228982, -4.0048876),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06061554, 2.1777453, -3.9739666),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06347847, 2.1958094, -4.0339155),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057335854, 2.2219553, -3.9774303),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05578041, 2.1660743, -4.000353),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05700302, 2.2227578, -4.0217752),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06333828, 2.1947465, -3.9652882),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06068802, 2.1779194, -4.0271797),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05328369, 2.2298508, -3.993782),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057318687, 2.1697874, -3.9824257),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061912537, 2.2078648, -4.0336275),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060679436, 2.213883, -3.9686394),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056134224, 2.1669288, -4.011791),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053901672, 2.229045, -4.012143),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061756134, 2.1827269, -3.9679317),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06245327, 2.1880217, -4.0343018),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05509281, 2.2273707, -3.9823456),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05529785, 2.1649098, -3.9930983),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058568954, 2.2189794, -4.0285616),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062623024, 2.202465, -3.9633837),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058054924, 2.171564, -4.0229683),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0517416, 2.2318597, -4.0007906),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058452606, 2.172523, -3.9750986),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062874794, 2.2005568, -4.037223),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057772636, 2.220901, -3.9718122),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.054597855, 2.1636457, -4.0050306),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05499935, 2.2275949, -4.0197735),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062636375, 2.189417, -3.9630327),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061403275, 2.1800451, -4.0327387),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.052145004, 2.2313337, -3.9887238),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055480003, 2.1653495, -3.9853334),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06085491, 2.213459, -4.034809),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061532974, 2.210744, -3.9634905),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055815697, 2.1661587, -4.017273),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.051250458, 2.2325, -4.008442),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06033039, 2.1770563, -3.968009),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06300068, 2.1921782, -4.0387993),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055164337, 2.2271986, -3.9766626),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053278923, 2.1619258, -3.997426),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056381226, 2.2242608, -4.0273123),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06327629, 2.1975088, -3.9597263),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058540344, 2.1727366, -4.028755),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0500803, 2.2340245, -3.9960155),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05637932, 2.1675186, -3.9773598),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06214714, 2.2060814, -4.0395365),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058670998, 2.218731, -3.9661503),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053466797, 2.1621704, -4.0102844),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.051898003, 2.231656, -4.016529),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061861992, 2.1835337, -3.9618902),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061844826, 2.183402, -4.037943),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.051647186, 2.2319827, -3.983179),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053082466, 2.1616697, -3.989255),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05850792, 2.2191262, -4.0344505),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062101364, 2.2064333, -3.9589386),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055908203, 2.1663833, -4.023123),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04906559, 2.2353477, -4.003995),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058033943, 2.171514, -3.969493),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063295364, 2.1973605, -4.0425177),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05566597, 2.225988, -3.9707613),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05157566, 2.1597056, -4.002408),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05377865, 2.2292047, -4.0248537),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06293869, 2.1917071, -3.9573116),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059480667, 2.1750054, -4.0346336),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.048983574, 2.2354546, -3.9906816),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.054096222, 2.1629915, -3.98069),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.061344147, 2.2121816, -4.040781),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060028076, 2.215455, -3.960579),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05296135, 2.1615114, -4.016014),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.049179077, 2.2351995, -4.0124693),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060473442, 2.177402, -3.9620829),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06243229, 2.1878624, -4.0427265),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.051802635, 2.23178, -3.9772396),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.050806046, 2.158702, -3.993925),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056163788, 2.2247853, -4.0329533),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06280041, 2.2011175, -3.9550295),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056422234, 2.167623, -4.029217),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04737854, 2.237546, -3.9989243),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05582714, 2.1661873, -3.9720488),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06250763, 2.2033415, -4.0449677),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05660343, 2.2237244, -3.9647694),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05043125, 2.1582136, -4.007925),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.050507545, 2.233468, -4.0212584),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062101364, 2.1853456, -3.9561234),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.060879707, 2.1783838, -4.0404778),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.048469543, 2.2361245, -3.9848814),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05123043, 2.1592555, -3.984995),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058839798, 2.2183247, -4.040311),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06149578, 2.21103, -3.955371),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05310154, 2.1616945, -4.022147),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.046901703, 2.2381682, -4.007719),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057998657, 2.1714282, -3.963769),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063155174, 2.1933532, -4.0469255),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.052636147, 2.2306943, -3.9709778),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04903221, 2.1563907, -3.9991865),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05315399, 2.2300196, -4.03018),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063360214, 2.1949096, -3.9520245),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05736828, 2.1699076, -4.0354424),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.046216965, 2.2390604, -3.9933271),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.052942276, 2.1614876, -3.9757614),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0616436, 2.2099104, -4.0463657),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.057984352, 2.2203894, -3.9588175),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.049865723, 2.1574774, -4.013899),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04762554, 2.237224, -4.016898),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06099701, 2.178666, -3.9561558),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06179142, 2.182993, -4.045784),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.048563957, 2.2360015, -3.9786892),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.048823357, 2.156118, -3.989953),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056303978, 2.2244463, -4.0386972),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062232018, 2.2054381, -3.9510622),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053917885, 2.1627584, -4.0286245),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.045100212, 2.2405152, -4.0023813),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05561638, 2.1656795, -3.9665127),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06298065, 2.19975, -4.049944),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05418396, 2.2286768, -3.9644585),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.047787666, 2.1547685, -4.0049524),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.049643517, 2.2345943, -4.0263023),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062458992, 2.1880627, -3.9506264),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05876255, 2.1732717, -4.0416822),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04560566, 2.2398567, -3.987279),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04987812, 2.157493, -3.9803562),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05953121, 2.2166557, -4.046153),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.059818268, 2.2159634, -3.9530401),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.049907684, 2.1575308, -4.0202684),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.045179367, 2.2404118, -4.011883),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.058311462, 2.172183, -3.9579306),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06254196, 2.1886954, -4.0504436),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.049298286, 2.2350445, -3.9721642),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.046905518, 2.1536183, -3.9954681),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.053071976, 2.2301254, -4.035756),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.063090324, 2.1989198, -3.9475203),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05525875, 2.1648145, -4.0353374),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04333496, 2.2419815, -3.9965553),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.052304268, 2.160655, -3.970522),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062055588, 2.206777, -4.0516424),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.055870056, 2.2254934, -3.9579782),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.047096252, 2.1538663, -4.011157),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.046531677, 2.2386503, -4.0216856),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06150818, 2.180841, -3.9503803),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0606184, 2.177753, -4.0478163),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04557419, 2.2398982, -3.9808416),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.047273636, 2.1540985, -3.9855728),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.056778908, 2.2233005, -4.044531),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.06158352, 2.2103615, -3.947815),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.050588608, 2.1584191, -4.026989),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04248047, 2.2426372, -4.006256),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05572319, 2.165937, -3.9607754),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.0634222, 2.1953802, -4.054391),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.050714493, 2.2331986, -3.9653587),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04550171, 2.1517887, -4.001466),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.04926014, 2.2350936, -4.031643),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.062927246, 2.1916227, -3.9454222),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.05660343, 2.1680608, -4.041994),
+                    strength: 5.5286713,
+                    hits: [
+                        (
+                            volume: "Main_Gun_Barrel",
+                            damage: 0.021596372,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        (
+            t: 0.0001950413,
+            origin: (0.07021904, 2.1973157, -3.999775),
+            axis: (0.99889755, 0.04681716, -0.003439334),
+            half_angle_deg: 25.0,
+            strength: 10.3884,
+            fragments: [
+                (
+                    end: (0.076560974, 2.1976128, -3.9996758),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07657719, 2.1974711, -3.9999523),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076524734, 2.1978812, -3.999773),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07659531, 2.1973581, -3.9996004),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07654858, 2.1976762, -4.0001554),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07653427, 2.1978278, -3.9994574),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07661533, 2.1971889, -3.9999113),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07650375, 2.1980267, -4.0000124),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07658577, 2.197441, -3.9993238),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07658291, 2.197411, -4.000289),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076496124, 2.1981125, -3.9995613),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07663441, 2.197054, -3.9996204),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07651615, 2.1979156, -4.0003214),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07654667, 2.1977482, -3.999179),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07662773, 2.197075, -4.0001774),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07647228, 2.198277, -3.9998827),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07662392, 2.1971607, -3.999258),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07655811, 2.1975832, -4.000518),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076496124, 2.1981306, -3.9992733),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076660156, 2.1968474, -3.999833),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076478004, 2.1982055, -4.0002937),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07658005, 2.1975064, -3.9990015),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07661629, 2.197144, -4.000474),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076455116, 2.1984177, -3.9996147),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07666111, 2.1968665, -3.9993677),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07651901, 2.197876, -4.0006256),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076517105, 2.1979833, -3.998992),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076667786, 2.1967707, -4.0001516),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076444626, 2.1984677, -4.000106),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07662392, 2.197175, -3.9989595),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076584816, 2.1973696, -4.000724),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07645798, 2.1984181, -3.9992762),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076690674, 2.1966314, -3.999628),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07647419, 2.1982188, -4.0005827),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076556206, 2.1976967, -3.9987822),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665539, 2.1968508, -4.0005054),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0764246, 2.1986413, -3.9997911),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07666969, 2.1968212, -3.999075),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07653904, 2.1977115, -4.000867),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076480865, 2.1982641, -3.9989347),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670307, 2.196515, -3.999998),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07643318, 2.198543, -4.0003843),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076607704, 2.1973138, -3.9986992),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076621056, 2.1970887, -4.000823),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07642269, 2.19868, -3.9993992),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670784, 2.1965156, -3.9993486),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076485634, 2.1981144, -4.00086),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07652187, 2.1979632, -3.9986553),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07669449, 2.196558, -4.0004187),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07640362, 2.1987858, -4.0000496),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07666206, 2.1968927, -3.9987774),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07657051, 2.1974587, -4.0010386),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076441765, 2.1985583, -3.9989882),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076729774, 2.1963234, -3.9997501),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07643509, 2.1985135, -4.0006886),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07657814, 2.197547, -3.998497),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07666302, 2.196773, -4.0008183),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076392174, 2.1988945, -3.9996166),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076711655, 2.1965022, -3.9990282),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07651043, 2.1979117, -4.0011024),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07648182, 2.1982741, -3.9986238),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07673073, 2.1962938, -4.000228),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07639408, 2.1988425, -4.0003595),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07664108, 2.1970673, -3.9985046),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07661152, 2.1971436, -4.001128),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07640362, 2.1988368, -3.9991417),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07674694, 2.1962128, -3.9994335),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076449394, 2.1983838, -4.000989),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07653904, 2.1978498, -3.9983711),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670593, 2.1964517, -4.0007105),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07637024, 2.1990438, -3.9999084),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670212, 2.1965923, -3.9986992),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07654667, 2.197627, -4.0012875),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07643795, 2.1985998, -3.9986925),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676029, 2.1960835, -3.9999475),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07639599, 2.1988049, -4.000696),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07660866, 2.1973314, -3.9982815),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665825, 2.1967921, -4.0011215),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07637024, 2.1990747, -3.9993858),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07675171, 2.1961966, -3.999076),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07647705, 2.1981602, -4.001259),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07649422, 2.198197, -3.998335),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07674694, 2.1961536, -4.0005016),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076358795, 2.1991115, -4.0002527),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07667923, 2.1967835, -3.9983902),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07659149, 2.1972795, -4.0013943),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07639599, 2.1989136, -3.9988585),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07678032, 2.19595, -3.9995975),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07641125, 2.1986709, -4.001034),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07656574, 2.1976657, -3.9981308),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670689, 2.1964307, -4.0010147),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076345444, 2.1992507, -3.9997034),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076743126, 2.1962838, -3.998704),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0765152, 2.197854, -4.0014763),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07644558, 2.1985621, -3.998396),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07678127, 2.1959057, -4.000201),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635975, 2.1990871, -4.0006256),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076643944, 2.1970654, -3.998128),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07664299, 2.1968908, -4.0014086),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635784, 2.1991901, -3.999114),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0767889, 2.195911, -3.9992008),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076438904, 2.198442, -4.0013456),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0765152, 2.198048, -3.9980698),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07675362, 2.1960874, -4.000805),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07632923, 2.199347, -4.000078),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672024, 2.196474, -3.9983482),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076563835, 2.1974802, -4.0016193),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07639694, 2.1989193, -3.998558),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676697, 2.1957417, -3.9998245),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0763731, 2.1989646, -4.001005),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07659912, 2.1974235, -3.9979372),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07669735, 2.196486, -4.00132),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07632637, 2.1994066, -3.9994497),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07678318, 2.1959767, -3.998785),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07647896, 2.1981254, -4.001607),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07646179, 2.1984544, -3.9981089),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076768875, 2.195796, -4.000494),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07632637, 2.1993508, -4.0004873),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668495, 2.196762, -3.9980373),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07661915, 2.1970577, -4.00167),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635307, 2.1992426, -3.9988146),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676029, 2.1956682, -3.9993982),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0763998, 2.1987433, -4.0013638),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07654476, 2.1978369, -3.997837),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0767498, 2.1960926, -4.0011234),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07630539, 2.1995444, -3.9998474),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676315, 2.1961517, -3.9983778),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0765295, 2.1977339, -4.0017977),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07640743, 2.1988578, -3.998252),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07674408, 2.1955857, -4.000101),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07633591, 2.199254, -4.000908),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07663822, 2.1971345, -3.9977942),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076678276, 2.1966114, -4.0016146),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076314926, 2.1995087, -3.999157),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676697, 2.1956954, -3.9989424),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076438904, 2.1984282, -4.0016775),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07648659, 2.1982818, -3.997839),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676029, 2.1957479, -4.0008173),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07629585, 2.1995883, -4.000288),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672882, 2.1964326, -3.9980097),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07658768, 2.1972852, -4.001896),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076355934, 2.1992326, -3.998497),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07673168, 2.195465, -3.999651),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076358795, 2.1990533, -4.001316),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076581, 2.1975713, -3.9976425),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07673836, 2.196167, -4.0014467),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07628727, 2.199697, -3.9995708),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0767889, 2.1958313, -3.9984798),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07648945, 2.1980295, -4.0019236),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076426506, 2.1987314, -3.9979506),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672882, 2.1954832, -4.0004168),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07630062, 2.1995292, -4.0007486),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668114, 2.1968074, -3.9977074),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665157, 2.1968012, -4.0018873),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07631111, 2.199554, -3.9988365),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076732635, 2.1954465, -3.9991627),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07639599, 2.1987514, -4.001686),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07651901, 2.19805, -3.9975958),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07675934, 2.1957622, -4.0011587),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07627106, 2.199792, -4.0000362),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07677364, 2.1960874, -3.9980488),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07654953, 2.1975627, -4.00208),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07636833, 2.1991596, -3.9981718),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670879, 2.1953068, -3.9999495),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076319695, 2.1993608, -4.0012054),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07662392, 2.1972594, -3.9974937),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07671738, 2.1963086, -4.0017614),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076275826, 2.1998005, -3.9992561),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07674885, 2.1955395, -3.9986591),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07644558, 2.1983566, -4.001992),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07645321, 2.1985435, -3.9976645),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076719284, 2.195437, -4.000761),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07626915, 2.1997805, -4.000532),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672882, 2.196453, -3.9976807),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07661629, 2.1970491, -4.0021276),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07631588, 2.1995401, -3.998496),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670307, 2.1952333, -3.9994354),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635212, 2.1990843, -4.001631),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07655811, 2.1977649, -3.997388),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676697, 2.19584, -4.0015106),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07625198, 2.199954, -3.9997387),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07678032, 2.1957479, -3.9981642),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076506615, 2.1978827, -4.0022135),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07638836, 2.1990247, -3.9978495),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07669163, 2.1951985, -4.000286),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07628155, 2.199656, -4.001033),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07667065, 2.196909, -3.9973984),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668781, 2.1965141, -4.002056),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07627201, 2.19985, -3.9989119),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076711655, 2.1952734, -3.9988956),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0763998, 2.1987052, -4.002001),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07648754, 2.1982975, -3.9974022),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07671833, 2.1954503, -4.0011253),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07624245, 2.1999998, -4.0002623),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076776505, 2.1960816, -3.9977179),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07657623, 2.1973486, -4.002328),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07632828, 2.1994658, -3.998148),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076678276, 2.1950626, -3.999754),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07631016, 2.1994157, -4.0015135),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076602936, 2.1974325, -3.9972248),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076758385, 2.1959863, -4.001856),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076239586, 2.2000685, -3.999402),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076737404, 2.1954331, -3.998355),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076459885, 2.1982346, -4.0022907),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07641697, 2.1988282, -3.9975395),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668209, 2.1951442, -4.0006523),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076247215, 2.1999288, -4.000803),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672119, 2.196529, -3.9973621),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665062, 2.1967783, -4.0023193),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076275826, 2.1998415, -3.9985485),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07667923, 2.1950412, -3.9991856),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635307, 2.1990638, -4.0019474),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07652855, 2.1979966, -3.9971724),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672596, 2.1955252, -4.001502),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07622051, 2.200179, -3.9999456),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07677841, 2.1957154, -3.997836),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0765295, 2.1976905, -4.0024776),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07634926, 2.199329, -3.997799),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.0766592, 2.19494, -4.0001106),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07626915, 2.199736, -4.001335),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665253, 2.1970596, -3.9971123),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07672787, 2.1962008, -4.002178),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076233864, 2.2001295, -3.9990358),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07669735, 2.1951437, -3.9986038),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07641029, 2.1986089, -4.002309),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076452255, 2.1985726, -3.9972515),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07667923, 2.195149, -4.0010414),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07621765, 2.20017, -4.0005198),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07677269, 2.1961298, -3.9973898),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076607704, 2.197095, -4.0025425),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07628727, 2.1997724, -3.9981737),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07665157, 2.194851, -3.9995213),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07630634, 2.1994228, -4.001831),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07657623, 2.197647, -3.9969854),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07674122, 2.195664, -4.0018806),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07620621, 2.2003117, -3.9995909),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07673168, 2.1953735, -3.9980326),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07647991, 2.1980667, -4.002572),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07637787, 2.1991305, -3.9974613),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076646805, 2.1948714, -4.000499),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076231, 2.200035, -4.0010977),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07670593, 2.1966553, -3.997058),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668972, 2.1964765, -4.002471),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076236725, 2.2001333, -3.9986477),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07666111, 2.1948872, -3.9989052),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07635975, 2.1989956, -4.002263),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07649517, 2.1982617, -3.996995),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07668495, 2.1952147, -4.001443),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07619381, 2.2003727, -4.000189),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07678318, 2.1957316, -3.9975004),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07655907, 2.1974573, -4.002716),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07630825, 2.1996408, -3.997797),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07663059, 2.1947083, -3.999896),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07626152, 2.1997714, -4.001652),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.076628685, 2.1972547, -3.996849),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+                (
+                    end: (0.07676506, 2.1958675, -4.0022535),
+                    strength: 5.1942,
+                    hits: [],
+                ),
+            ],
+        ),
+    ],
+    end: Left(
+        at: (0.07021904, 2.1973157, -3.999775),
+    ),
+    doses: [
+        (
+            volume: "Main_Gun_Barrel",
+            line: 24.6366,
+            field: 5.5286837,
+            entered: Some((-0.07029343, 2.1952024, -4.0)),
+        ),
+    ],
+    consequences: [
+        (
+            t: 0.0,
+            volume: "Main_Gun_Barrel",
+            state: Lost,
+            function: Some("GunBarrel"),
+        ),
+    ],
+    components: [
+        (
+            name: "Ammo_L_0",
+            role: Ammo,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Ammo_L_1",
+            role: Ammo,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Ammo_R_0",
+            role: Ammo,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Ammo_R_1",
+            role: Ammo,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "BowGunner",
+            role: Crew,
+            count: 3.0,
+            hp: 3.0,
+        ),
+        (
+            name: "Breech",
+            role: Module,
+            count: 8.0,
+            hp: 8.0,
+        ),
+        (
+            name: "Coax_MG_Barrel",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Commander",
+            role: Crew,
+            count: 3.0,
+            hp: 3.0,
+        ),
+        (
+            name: "Driver",
+            role: Crew,
+            count: 3.0,
+            hp: 3.0,
+        ),
+        (
+            name: "Engine",
+            role: Engine,
+            count: 10.0,
+            hp: 10.0,
+        ),
+        (
+            name: "Gunner",
+            role: Crew,
+            count: 3.0,
+            hp: 3.0,
+        ),
+        (
+            name: "Hull_MG_Barrel",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Loader",
+            role: Crew,
+            count: 3.0,
+            hp: 3.0,
+        ),
+        (
+            name: "Main_Gun_Barrel",
+            role: Module,
+            count: 8.0,
+            hp: 8.0,
+        ),
+        (
+            name: "Smoke_Launcher_0",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_1",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_2",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_3",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_4",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Smoke_Launcher_5",
+            role: Module,
+            count: 2.0,
+            hp: 2.0,
+        ),
+        (
+            name: "Transmission",
+            role: Module,
+            count: 10.0,
+            hp: 10.0,
+        ),
+    ],
+)

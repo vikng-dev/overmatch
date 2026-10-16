@@ -28,4 +28,15 @@
     // never how much the cone carries.
     directions: (24, Resolution("sampling of the cone; changes how finely a box's dose is
         resolved, never the emitted total")),
+
+    // How the strength is spread over the directions. `Linear`: S·(cos θ − cos α)/(1 − cos α),
+    // greatest on the axis, zero at the rim. `Flat`: S/2 along every direction, the same total.
+    profile: (Linear, Tuned("design doc §5: a profile falling to zero at the rim, as the measured
+        fragment fluence falls off the debris axis (research/cloud-angle-deep.md)")),
+
+    // How a direction passes through what it meets. `Partial`: spent by chord × factor through
+    // every solid, dosing each box it enters at its strength there. `FirstSolid`: stopped by the
+    // first solid it enters, a box there taking its whole strength, armour none.
+    passage: (Partial, Tuned("design doc §5: fragments spend their energy through what they
+        cross, so a box shadows the boxes behind it")),
 )

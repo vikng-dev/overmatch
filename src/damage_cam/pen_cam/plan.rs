@@ -506,14 +506,25 @@ mod tests {
         PenetrationReport::load(&path).unwrap()
     }
 
+    /// Every record of the scenario set and of the comparison set beside it (`simple/<stem>`).
     fn records() -> Vec<(String, PenetrationReport)> {
-        let dir = crate::assets::asset_root().join("dev/pen_cam");
-        let mut out: Vec<(String, PenetrationReport)> = std::fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|entry| {
-                let path = entry.ok()?.path();
-                let stem = path.file_stem()?.to_str()?.to_owned();
-                (stem != "scenarios").then(|| (stem.clone(), record(&stem)))
+        let root = crate::assets::asset_root().join("dev/pen_cam");
+        let mut out: Vec<(String, PenetrationReport)> = ["", "simple/"]
+            .into_iter()
+            .flat_map(|set| {
+                std::fs::read_dir(root.join(set))
+                    .unwrap()
+                    .filter_map(move |entry| {
+                        let path = entry.ok()?.path();
+                        let stem = path.file_stem()?.to_str()?.to_owned();
+                        let record = path.extension()? == "ron"
+                            && !["scenarios", "spall_cone"].contains(&stem.as_str());
+                        record.then(|| format!("{set}{stem}"))
+                    })
+            })
+            .map(|name| {
+                let report = record(&name);
+                (name, report)
             })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));

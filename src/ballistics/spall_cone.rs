@@ -1,16 +1,24 @@
-//! The spall cone's shape: its half-angle, its axis rule and the directions it is sampled by, read
-//! from `assets/ballistics/spall_cone.ron`. The law the shape serves — strength, profile, shadowing,
+//! The spall cone's shape: its half-angle, its axis rule, the directions it is sampled by, its
+//! profile and how a direction passes through what it meets, read from
+//! `assets/ballistics/spall_cone.ron`. The law the shape serves — strength, profile, shadowing,
 //! dose — is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that
-//! applies it is `throw_spall_cone` in the parent module.
+//! applies it is `throw_spall_cone` in the parent module, and a world may throw another shape
+//! ([`SpallLaw`]).
+//!
+//! # Profiles
+//!
+//! [`Profile::Linear`] is the law of §5: direction `k` carries `S·f_k` with `f_k` below.
+//! [`Profile::Flat`] carries `S/2` along every direction: the same emitted total, spread uniformly
+//! over the cone's solid angle.
 //!
 //! # Directions
 //!
 //! `N` directions in equal-solid-angle strata: direction `k` sits at `μ_k = cos θ_k =
 //! 1 − (1 − cos α)(k + ½)/N`, the stratum's midpoint in `cos θ`, at golden-angle azimuth `φ_k =
-//! k·π(3 − √5)`, and stands for `1/N` of the cone's solid angle. Its profile weight is
+//! k·π(3 − √5)`, and stands for `1/N` of the cone's solid angle. Its linear profile weight is
 //! `f_k = (μ_k − cos α)/(1 − cos α)`, so a cone of on-axis strength `S` sends `S·f_k` along it, and
 //! the emitted total `(1/N) Σ S·f_k` is `S/2` at every `N` (the midpoint rule is exact on a profile
-//! linear in `cos θ`).
+//! linear in `cos θ`); the flat profile's `f_k = ½` emits the same total.
 //!
 //! # Determinism
 //!
@@ -31,6 +39,30 @@ const SPALL_CONE_RON: &str = include_str!("../../assets/ballistics/spall_cone.ro
 /// The golden angle `π(3 − √5)` (rad): the azimuth step between successive directions.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
+/// How a cone's strength is spread over its directions.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Profile {
+    /// `(cos θ − cos α)/(1 − cos α)` of the on-axis strength: greatest on the axis, zero at the rim.
+    Linear,
+    /// Half the on-axis strength along every direction.
+    Flat,
+}
+
+/// How a direction of the cone passes through what it meets.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Passage {
+    /// Spent by `chord × factor` through every solid in turn; each box it enters is dosed at its
+    /// strength there, and it goes on until spent.
+    Partial,
+    /// Stopped by the first solid it enters: a box there takes its whole strength, armour none.
+    FirstSolid,
+}
+
+/// The cone shape a world's march throws, in place of the shipped one: inserted by a world that
+/// records under another law (the pen cam recorder's comparison set).
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct SpallLaw(pub ConeShape);
+
 /// How the cone's axis is chosen at an exit.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AxisRule {
@@ -47,6 +79,8 @@ struct ShapeFile {
     half_angle_deg: Sourced<f64>,
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
+    profile: Sourced<Profile>,
+    passage: Sourced<Passage>,
 }
 
 /// One direction of the cone in the cone's own frame: `cos θ`, the two lateral components
@@ -64,6 +98,7 @@ pub(crate) struct ConeShape {
     /// α (rad).
     half_angle: f32,
     axis: AxisRule,
+    passage: Passage,
     strata: Vec<Stratum>,
 }
 
@@ -75,18 +110,25 @@ const MAX_DIRECTIONS: usize = 65_536;
 /// their mean is within `2^-25` of ½. DERIVED; this is `f32::EPSILON`, four times that.
 const EMISSION_TOLERANCE: f64 = f32::EPSILON as f64;
 
-/// The profile `(cos θ − cos α)/(1 − cos α)` at `mu = cos θ`, zero outside the cone.
-pub(crate) fn profile(mu: f64, cos_alpha: f64) -> f64 {
+/// The linear profile `(cos θ − cos α)/(1 − cos α)` at `mu = cos θ`, zero outside the cone.
+pub(crate) fn linear(mu: f64, cos_alpha: f64) -> f64 {
     ((mu - cos_alpha) / (1.0 - cos_alpha)).max(0.0)
 }
 
 impl ConeShape {
-    /// A shape of half-angle `half_angle` (rad) sampled by `directions` strata. Refuses a half-angle
+    /// A shape of half-angle `half_angle` (rad) sampled by `directions` strata in `profile`, its
+    /// directions passing as `passage`. Refuses a half-angle
     /// outside `(0, π/2]` or a direction count outside `1..=MAX_DIRECTIONS`, and a shape whose
     /// construction is numerically degenerate: a half-angle so small that `cos α` rounds to 1 (the
     /// profile's denominator `1 − cos α` vanishes), any non-finite stratum, or an emitted total
     /// `(1/N) Σ f_k` farther from ½ than [`EMISSION_TOLERANCE`].
-    pub(crate) fn new(half_angle: f64, axis: AxisRule, directions: usize) -> Result<Self, String> {
+    pub(crate) fn new(
+        half_angle: f64,
+        axis: AxisRule,
+        directions: usize,
+        profile: Profile,
+        passage: Passage,
+    ) -> Result<Self, String> {
         if !(half_angle.is_finite()
             && half_angle > 0.0
             && half_angle <= std::f64::consts::FRAC_PI_2)
@@ -120,7 +162,10 @@ impl ConeShape {
                         (sin_theta * libm::cos(phi)) as f32,
                         (sin_theta * libm::sin(phi)) as f32,
                     ),
-                    profile: profile(mu, cos_alpha) as f32,
+                    profile: match profile {
+                        Profile::Linear => linear(mu, cos_alpha) as f32,
+                        Profile::Flat => 0.5,
+                    },
                 }
             })
             .collect::<Vec<Stratum>>();
@@ -151,6 +196,7 @@ impl ConeShape {
         Ok(Self {
             half_angle: half_angle as f32,
             axis,
+            passage,
             strata,
         })
     }
@@ -162,6 +208,8 @@ impl ConeShape {
             file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
             file.axis.0,
             file.directions.0,
+            file.profile.0,
+            file.passage.0,
         )
     }
 
@@ -185,6 +233,11 @@ impl ConeShape {
     /// N.
     pub(crate) fn directions_count(&self) -> usize {
         self.strata.len()
+    }
+
+    /// How each direction passes through what it meets.
+    pub(crate) fn passage(&self) -> Passage {
+        self.passage
     }
 
     /// The cone's axis for an exit whose round leaves along `direction`, through a rear face of
@@ -219,7 +272,14 @@ mod tests {
     const ALPHA: f64 = 0.436;
 
     fn shape(directions: usize) -> ConeShape {
-        ConeShape::new(ALPHA, AxisRule::RearNormalBisector, directions).unwrap()
+        ConeShape::new(
+            ALPHA,
+            AxisRule::RearNormalBisector,
+            directions,
+            Profile::Linear,
+            Passage::Partial,
+        )
+        .unwrap()
     }
 
     /// The shipped file parses and validates.
@@ -234,11 +294,30 @@ mod tests {
     #[test]
     fn a_shape_outside_the_domain_is_refused() {
         for (half_angle, directions) in [(0.0, 24), (-0.1, 24), (f64::NAN, 24), (1.6, 24)] {
-            assert!(ConeShape::new(half_angle, AxisRule::ExitDirection, directions).is_err());
+            assert!(
+                ConeShape::new(
+                    half_angle,
+                    AxisRule::ExitDirection,
+                    directions,
+                    Profile::Linear,
+                    Passage::Partial
+                )
+                .is_err()
+            );
         }
-        assert!(ConeShape::new(ALPHA, AxisRule::ExitDirection, 0).is_err());
+        assert!(
+            ConeShape::new(
+                ALPHA,
+                AxisRule::ExitDirection,
+                0,
+                Profile::Linear,
+                Passage::Partial
+            )
+            .is_err()
+        );
         let text = r#"(half_angle_deg: (25.0, Tuned("fixture")),
             axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
+            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
             range: (6.0, Tuned("fixture")))"#;
         assert!(
             ConeShape::from_ron(text).is_err(),
@@ -250,15 +329,25 @@ mod tests {
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
         let sourced = r#"(half_angle_deg: (25.0, Tuned("fixture")),
-            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")))"#;
+            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
+            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")))"#;
         assert!(ConeShape::from_ron(sourced).is_ok());
         for bare in [
             r#"(half_angle_deg: 25.0, axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")))"#,
+                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+                passage: (Partial, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: ExitDirection,
-                directions: (24, Resolution("fixture")))"#,
+                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+                passage: (Partial, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: 24)"#,
+                directions: 24, profile: (Linear, Tuned("fixture")),
+                passage: (Partial, Tuned("fixture")))"#,
+            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
+                directions: (24, Resolution("fixture")), profile: Flat,
+                passage: (Partial, Tuned("fixture")))"#,
+            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
+                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+                passage: FirstSolid)"#,
         ] {
             let error = ConeShape::from_ron(bare).expect_err(bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
@@ -270,12 +359,26 @@ mod tests {
     /// emits ½ at every direction count.
     #[test]
     fn a_numerically_degenerate_half_angle_is_refused() {
-        let error = ConeShape::new(1.0e-9, AxisRule::ExitDirection, 24).unwrap_err();
+        let error = ConeShape::new(
+            1.0e-9,
+            AxisRule::ExitDirection,
+            24,
+            Profile::Linear,
+            Passage::Partial,
+        )
+        .unwrap_err();
         assert!(error.contains("cos α rounds to 1"), "{error}");
         for half_angle in [1.0e-3, 0.0175, ALPHA, 1.0, std::f64::consts::FRAC_PI_2] {
             for directions in [1, 24, 97, MAX_DIRECTIONS] {
                 assert!(
-                    ConeShape::new(half_angle, AxisRule::ExitDirection, directions).is_ok(),
+                    ConeShape::new(
+                        half_angle,
+                        AxisRule::ExitDirection,
+                        directions,
+                        Profile::Linear,
+                        Passage::Partial
+                    )
+                    .is_ok(),
                     "α = {half_angle} rad, N = {directions}"
                 );
             }
@@ -297,18 +400,36 @@ mod tests {
         }
     }
 
+    /// The flat profile emits the same total as the linear one, `S/2`, spread evenly: every
+    /// direction carries half the on-axis strength.
+    #[test]
+    fn the_flat_profile_emits_the_same_total_evenly() {
+        for directions in [1, 24, 256] {
+            let flat = ConeShape::new(
+                ALPHA,
+                AxisRule::ExitDirection,
+                directions,
+                Profile::Flat,
+                Passage::FirstSolid,
+            )
+            .unwrap();
+            assert_eq!(flat.passage(), Passage::FirstSolid);
+            assert!(flat.directions(Dir3::Z).all(|(_, weight)| weight == 0.5));
+        }
+    }
+
     /// CLASS INVARIANT 5, PROFILE SHAPE: the strength is greatest on the axis, does not grow with
     /// angle, and is zero at and past the rim; every direction lies inside the cone.
     #[test]
     fn the_profile_falls_from_the_axis_to_zero_at_the_rim() {
         let cos_alpha = libm::cos(ALPHA);
-        assert_eq!(profile(1.0, cos_alpha), 1.0);
-        assert_eq!(profile(cos_alpha, cos_alpha), 0.0);
-        assert_eq!(profile(libm::cos(ALPHA * 1.5), cos_alpha), 0.0);
+        assert_eq!(linear(1.0, cos_alpha), 1.0);
+        assert_eq!(linear(cos_alpha, cos_alpha), 0.0);
+        assert_eq!(linear(libm::cos(ALPHA * 1.5), cos_alpha), 0.0);
         let mut last = f64::INFINITY;
         for step in 0..=100 {
             let theta = ALPHA * step as f64 / 100.0;
-            let value = profile(libm::cos(theta), cos_alpha);
+            let value = linear(libm::cos(theta), cos_alpha);
             assert!(value <= last, "non-increasing at θ = {theta}");
             last = value;
         }
@@ -353,7 +474,14 @@ mod tests {
         assert!((to_normal + to_exit - std::f32::consts::FRAC_PI_4).abs() < 1.0e-6);
 
         assert_eq!(shape.axis(None, oblique), oblique);
-        let along = ConeShape::new(ALPHA, AxisRule::ExitDirection, 24).unwrap();
+        let along = ConeShape::new(
+            ALPHA,
+            AxisRule::ExitDirection,
+            24,
+            Profile::Linear,
+            Passage::Partial,
+        )
+        .unwrap();
         assert_eq!(along.axis(Some(normal), oblique), oblique);
     }
 

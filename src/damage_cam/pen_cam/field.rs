@@ -11,6 +11,11 @@
 //!
 //! Vertex colour alpha carries the strength fraction `s(θ)/S` the record gave each direction; the
 //! material turns it into brightness.
+//!
+//! Every triangle is wound outward (counter-clockwise seen from outside the closed surface): a
+//! surface triangle so its corners' directions turn positively about the origin, which holds
+//! however short their reaches, a rim triangle so its normal points away from the axis. So a
+//! fragment's facing tells an eye ray entering the surface from one leaving it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -43,10 +48,13 @@ pub fn reach_mesh(cone: &Cone) -> Mesh {
         (axis * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin()).normalize()
     };
     let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut directions: Vec<Vec3> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
     let mut vertex = |q: Vec2, reach: f32, weight: f32| {
-        positions.push((direction(q) * reach).to_array());
+        let along = direction(q);
+        positions.push((along * reach).to_array());
+        directions.push(along);
         colors.push([1.0, 1.0, 1.0, weight]);
         (positions.len() - 1) as u32
     };
@@ -81,6 +89,7 @@ pub fn reach_mesh(cone: &Cone) -> Mesh {
             }
         }
     }
+    let surface = indices.len();
     // The rim: every hull edge closed back to the origin by a fan.
     for (a, b) in hull_edges(&triangles) {
         let origin = vertex(Vec2::ZERO, 0.0, 0.0);
@@ -95,6 +104,20 @@ pub fn reach_mesh(cone: &Cone) -> Mesh {
                 indices.extend([origin, previous, current]);
             }
             previous = Some(current);
+        }
+    }
+    for (at, triangle) in indices.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let [a, b, c] = [0, 1, 2].map(|k| triangle[k] as usize);
+        let inward = if 3 * at < surface {
+            directions[a].dot(directions[b].cross(directions[c])) < 0.0
+        } else {
+            let point = |i: usize| Vec3::from(positions[i]);
+            let normal = (point(b) - point(a)).cross(point(c) - point(a));
+            let middle = (point(a) + point(b) + point(c)) / 3.0;
+            normal.dot(middle - axis * middle.dot(axis)) < 0.0
+        };
+        if inward {
+            triangle.swap(1, 2);
         }
     }
     let mut mesh = Mesh::new(
@@ -214,6 +237,77 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// A fixture cone of 24 spiral directions, direction `k` reaching `reach(k)`.
+    fn fixture_cone(reach: impl Fn(usize) -> f32) -> Cone {
+        let axis = Vec3::NEG_Z;
+        let (u, v) = axis.any_orthonormal_pair();
+        let half_angle = 25.0_f32.to_radians();
+        let rays = spiral(24)
+            .into_iter()
+            .enumerate()
+            .map(|(k, q)| {
+                let theta = q.length() * half_angle;
+                let phi = q.y.atan2(q.x);
+                Ray {
+                    direction: axis * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin(),
+                    reach: reach(k),
+                    weight: 1.0 - q.length(),
+                }
+            })
+            .collect();
+        Cone {
+            origin: Vec3::ZERO,
+            axis,
+            half_angle,
+            strength: 1.0,
+            arc: 0.0,
+            rays,
+        }
+    }
+
+    /// The surface is closed and wound outward, however short its reaches: every edge is crossed
+    /// once each way, and the volume it encloses, summed from its windings, is positive. Fixture
+    /// reaches include directions stopped at the origin.
+    #[test]
+    fn the_surface_is_closed_and_wound_outward() {
+        for reach in [
+            Box::new(|k: usize| 1.0 + 0.1 * k as f32) as Box<dyn Fn(usize) -> f32>,
+            Box::new(|k: usize| {
+                if k.is_multiple_of(3) {
+                    0.0
+                } else {
+                    0.5 + 0.2 * (k % 5) as f32
+                }
+            }),
+        ] {
+            let mesh = reach_mesh(&fixture_cone(reach));
+            let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+            else {
+                panic!("positions");
+            };
+            let key = |p: [f32; 3]| p.map(|x| (x * 1.0e4).round() as i64);
+            let mut edges = std::collections::HashMap::<([i64; 3], [i64; 3]), i32>::new();
+            let mut volume = 0.0;
+            for triangle in positions.as_chunks::<3>().0 {
+                let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(triangle[k]));
+                volume += a.dot(b.cross(c)) / 6.0;
+                for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+                    let (from, to) = (key(triangle[from]), key(triangle[to]));
+                    if from != to {
+                        *edges.entry((from, to)).or_default() += 1;
+                        *edges.entry((to, from)).or_default() -= 1;
+                    }
+                }
+            }
+            assert!(volume > 0.0, "{volume}");
+            assert!(
+                edges.values().all(|n| *n == 0),
+                "an edge crossed one way only"
+            );
         }
     }
 

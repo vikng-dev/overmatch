@@ -47,6 +47,7 @@ use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
 use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot, overlap_of};
+use super::spall_cone::Passage;
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
@@ -614,6 +615,10 @@ pub(crate) fn field_presence(
 /// not entered them there. It stops where its strength is exhausted, inside the span at
 /// `strength / factor` of it, or where it leaves the last admitted volume.
 ///
+/// Under [`Passage::FirstSolid`] the direction instead stops at the first volume it enters
+/// (`exited` ones aside, while it is still leaving them): a box there takes `strength × weight`,
+/// armour takes nothing, and nothing beyond is reached. The span law below is [`Passage::Partial`]'s.
+///
 /// MONOTONICITY, exactly as it holds. The strength arriving at a point, and the point where it is
 /// exhausted, are computed from the spans before it and the point's own position alone: a presence
 /// boundary that leaves the governing factor unchanged takes no part. So material that leaves the
@@ -638,6 +643,7 @@ pub(crate) fn field_direction(
     dir: Dir3,
     strength: f32,
     weight: f32,
+    passage: Passage,
 ) -> Result<FieldRay, WalkError> {
     let Some((start, walked)) = field_presence(context, within, at, dir)? else {
         return Ok(FieldRay {
@@ -650,6 +656,11 @@ pub(crate) fn field_direction(
         .iter()
         .filter(|layer| layer.end > start)
         .collect();
+    if passage == Passage::FirstSolid {
+        return Ok(first_solid(
+            &layers, start, at, dir, strength, weight, is_box, exited,
+        ));
+    }
     let factor_of =
         |layer: &walk::Layer| overlap_of(layer.present.iter().map(|p| p.material.factor));
     // Strength at the start of the current span.
@@ -704,6 +715,62 @@ pub(crate) fn field_direction(
         end: at + Vec3::from(dir) * (end - start) as f32,
         doses,
     })
+}
+
+/// One direction under [`Passage::FirstSolid`] ([`field_direction`]): stopped where it enters the
+/// first volume of `layers` that is not one of `exited` it is still leaving; that volume, when it
+/// `is_box`, takes `strength × weight`. A direction that enters none ends where the last presence
+/// it crossed ends, as under the partial law.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the direction's walk and its throw, as `field_direction` holds them"
+)]
+fn first_solid(
+    layers: &[&walk::Layer],
+    start: f64,
+    at: Vec3,
+    dir: Dir3,
+    strength: f32,
+    weight: f32,
+    is_box: &dyn Fn(Entity) -> bool,
+    exited: &[Entity],
+) -> FieldRay {
+    let mut leaving: Vec<Entity> = exited.to_vec();
+    let mut end = start;
+    for layer in layers {
+        leaving.retain(|volume| layer.present.iter().any(|p| p.volume == *volume));
+        let met: Vec<Entity> = layer
+            .present
+            .iter()
+            .map(|presence| presence.volume)
+            .filter(|volume| !leaving.contains(volume))
+            .collect();
+        if !met.is_empty() {
+            let at_t = layer.start.max(start);
+            let doses = met
+                .iter()
+                .find(|volume| is_box(**volume))
+                .filter(|_| strength > 0.0)
+                .map(|volume| Dose {
+                    address: *volume,
+                    amount: strength * weight,
+                    source: DoseSource::Field,
+                })
+                .into_iter()
+                .collect();
+            return FieldRay {
+                end: at + Vec3::from(dir) * (at_t - start) as f32,
+                doses,
+            };
+        }
+        if !layer.present.is_empty() {
+            end = layer.end;
+        }
+    }
+    FieldRay {
+        end: at + Vec3::from(dir) * (end - start) as f32,
+        doses: Vec::new(),
+    }
 }
 
 /// The state successive crossings read and advance: where the round is, where it is going, and the

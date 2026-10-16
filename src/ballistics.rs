@@ -1431,6 +1431,8 @@ struct ProjectileMarchWorld<'w, 's> {
     // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
     // fallback world, where the parry terrain cast remains.
     grid: Option<Res<'w, HeightGrid>>,
+    // The cone shape the march throws when a world names one; the shipped shape otherwise.
+    spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
 }
 
 /// The one shell a march phase is resolving: its pose, flight state, and the per-flight record every
@@ -2747,7 +2749,10 @@ fn throw_spall_cone(
     health: &mut Query<&mut ComponentHealth>,
 ) -> f32 {
     let world = context.world;
-    let shape = spall_cone::ConeShape::shipped();
+    let shape = world
+        .spall_law
+        .as_deref()
+        .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
     let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
     let axis = shape.axis(source.face, direction);
@@ -2779,6 +2784,7 @@ fn throw_spall_cone(
             ray_dir,
             thrown,
             weight,
+            shape.passage(),
         );
         let ray = match walked {
             Ok(ray) => ray,

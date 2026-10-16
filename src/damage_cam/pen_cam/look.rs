@@ -10,18 +10,24 @@
 //! (each pixel's nearest component surface). A surface draws only where its fragment is its mask's
 //! nearest, and its edges come from that mask.
 //!
+//! The split corner ([`Side`]) draws the record beside the comparison set's record of the same
+//! shot: the comparison camera has the corner camera's pose and image size and draws into the
+//! right half of an image twice as wide, so the masks serve both, offset by its viewport, and that
+//! offset is how a material tells the two apart. The record's elements draw on the left alone, the
+//! comparison's on the right, and the shared hull on both.
+//!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
 
 use bevy::camera::{Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType, TextureFormat};
+use bevy::render::render_resource::{AsBindGroup, CompareFunction, ShaderType, TextureFormat};
 use bevy::shader::ShaderRef;
 
 use super::material::Blend;
 use super::plan::BoxPlan;
-use super::stage::StageCamera;
+use super::stage::{ComparisonCamera, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Footprint, GlassLook};
@@ -29,6 +35,9 @@ use crate::render_policy::CameraProfile;
 
 /// The dissolving field shell's band (m) behind its front. TUNED, as is every figure below.
 const DISSOLVE_BAND_M: f32 = 0.35;
+/// The volume field's brightness per unit of its column density `∫ ds / (r² + ε²)` (m⁻¹) at full
+/// strength: a display gain.
+const VOLUME_GAIN: f32 = 1.5;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
@@ -53,14 +62,15 @@ const BASE_COMPONENT_ALPHA: f32 = 0.55;
 const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
 const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
 /// The field footprint's outline width and hatch period (px), the hatched share of the period,
-/// and its opacity, in the field's hue.
+/// and its opacity, in the field's hue; its outline needs no fewer directions than the record holds,
+/// so [`FOOTPRINT_RAYS`] covers the comparison law's.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_HATCH_PX: f32 = 5.0;
 const FOOTPRINT_HATCH_SHARE: f32 = 0.4;
 const FOOTPRINT_ALPHA: f32 = 0.9;
 /// The most spall fields a footprint marks, and the most directions of each it reads.
 pub const FOOTPRINT_FIELDS: usize = 4;
-pub const FOOTPRINT_RAYS: usize = 32;
+pub const FOOTPRINT_RAYS: usize = 256;
 /// A surface counts as met by a direction up to this share past its reach, and this far (m): the
 /// record ends a direction on the surface that stopped it.
 const FOOTPRINT_REACH_SLACK: (f32, f32) = (1.03, 0.03);
@@ -79,8 +89,10 @@ pub struct LookParams {
     pub rest: Vec4,
     pub foot: Vec4,
     pub foot_color: Vec4,
-    pub prints: [Vec4; 3 * FOOTPRINT_FIELDS],
-    pub rays: [Vec4; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+    pub fields: Vec4,
+    pub volume: Vec4,
+    pub prints: [Vec4; 2 * 3 * FOOTPRINT_FIELDS],
+    pub rays: [Vec4; 2 * FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
 }
 
 impl Default for LookParams {
@@ -97,8 +109,10 @@ impl Default for LookParams {
             rest: Vec4::ZERO,
             foot: Vec4::ZERO,
             foot_color: Vec4::ZERO,
-            prints: [Vec4::ZERO; 3 * FOOTPRINT_FIELDS],
-            rays: [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+            fields: Vec4::ZERO,
+            volume: Vec4::ZERO,
+            prints: [Vec4::ZERO; 2 * 3 * FOOTPRINT_FIELDS],
+            rays: [Vec4::ZERO; 2 * FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
         }
     }
 }
@@ -106,12 +120,32 @@ impl Default for LookParams {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LookKey {
     bias: bool,
+    unoccluded: bool,
 }
 
 impl From<&LookMaterial> for LookKey {
     fn from(material: &LookMaterial) -> Self {
         Self {
             bias: material.bias,
+            unoccluded: material.params.mode.x == MODE_VOLUME,
+        }
+    }
+}
+
+/// Which half of the split corner a material draws on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The record's: the corner itself, the left half when split.
+    Record,
+    /// The comparison set's: the right half.
+    Comparison,
+}
+
+impl Side {
+    pub fn lane(self) -> f32 {
+        match self {
+            Self::Record => 1.0,
+            Self::Comparison => 2.0,
         }
     }
 }
@@ -120,6 +154,7 @@ const MODE_MASK: f32 = 0.0;
 const MODE_DISSOLVE: f32 = 1.0;
 const MODE_BASE: f32 = 2.0;
 const MODE_STATE: f32 = 3.0;
+const MODE_VOLUME: f32 = 4.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(LookKey)]
@@ -154,6 +189,11 @@ impl LookMaterial {
 
     pub fn set_fade(&mut self, fade: f32) {
         self.params.shade.w = fade;
+    }
+
+    /// Draw on `side` of the split corner alone; a material left unset draws on both.
+    pub fn set_side(&mut self, side: Side) {
+        self.params.mode.y = side.lane();
     }
 
     pub fn set_front(&mut self, radius: Option<f32>) {
@@ -203,12 +243,18 @@ impl Material for LookMaterial {
         key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         descriptor.primitive.cull_mode = None;
-        if let Some(depth) = descriptor.depth_stencil.as_mut()
-            && key.bind_group_data.bias
-        {
-            // Toward the eye under bevy's reverse Z, as `GlowMaterial`'s.
-            depth.bias.constant = 8;
-            depth.bias.slope_scale = 1.0;
+        let key = key.bind_group_data;
+        if let Some(depth) = descriptor.depth_stencil.as_mut() {
+            if key.bias {
+                // Toward the eye under bevy's reverse Z, as `GlowMaterial`'s.
+                depth.bias.constant = 8;
+                depth.bias.slope_scale = 1.0;
+            }
+            if key.unoccluded {
+                // Every entry and exit of the volume must reach the sum, whatever stands in front.
+                depth.depth_compare = Some(CompareFunction::Always);
+                depth.depth_write_enabled = Some(false);
+            }
         }
         Ok(())
     }
@@ -299,22 +345,43 @@ pub fn layout(
     stage.invalidate();
 }
 
-/// Pose the mask cameras as the corner camera, and run them only while the base look shows.
+/// Pose the mask cameras and the comparison camera as the corner camera; run the masks only while
+/// the base look shows, and the comparison camera only while the stage compares.
 pub fn sync(
     stage: Res<super::stage::Stage>,
-    main: Query<(&Camera, &Transform, &Projection), (With<StageCamera>, Without<MaskCamera>)>,
-    mut masks: Query<
-        (&mut Camera, &mut Transform, &mut Projection),
-        (With<MaskCamera>, Without<StageCamera>),
+    main: Query<
+        (&Camera, &Transform, &Projection),
+        (
+            With<StageCamera>,
+            Without<MaskCamera>,
+            Without<ComparisonCamera>,
+        ),
+    >,
+    mut followers: Query<
+        (
+            &mut Camera,
+            &mut Transform,
+            &mut Projection,
+            Has<ComparisonCamera>,
+        ),
+        (
+            Or<(With<MaskCamera>, With<ComparisonCamera>)>,
+            Without<StageCamera>,
+        ),
     >,
 ) {
     let Ok((camera, transform, projection)) = main.single() else {
         return;
     };
-    let active = camera.is_active && stage.look() == GlassLook::Base;
-    for (mut mask, mut pose, mut lens) in &mut masks {
-        if mask.is_active != active {
-            mask.is_active = active;
+    let masks = camera.is_active && stage.look() == GlassLook::Base;
+    for (mut follower, mut pose, mut lens, comparison) in &mut followers {
+        let active = if comparison {
+            masks && stage.comparing()
+        } else {
+            masks
+        };
+        if follower.is_active != active {
+            follower.is_active = active;
         }
         if *pose != *transform {
             *pose = *transform;
@@ -336,27 +403,35 @@ pub struct FieldPrint {
     pub rays: Vec<(Vec3, f32)>,
 }
 
-/// Mark `prints` on every surface the base look draws, the hull's and the components', in
-/// `style`. A surface is marked where it faces a field's origin, inside its cone, behind its front
-/// and no farther than the reach of the recorded direction nearest it: the field met it there,
-/// which says nothing of what stopped.
-pub fn set_footprints(looks: &mut Assets<LookMaterial>, style: Footprint, prints: &[FieldPrint]) {
+/// Mark each side's `prints` (the record's, the comparison's) on every surface the base look draws,
+/// the hull's and the components', in `style`. A surface is marked where it faces a field's origin,
+/// inside its cone, behind its front and no farther than the reach of the recorded direction
+/// nearest it: the field met it there, which says nothing of what stopped.
+pub fn set_footprints(
+    looks: &mut Assets<LookMaterial>,
+    style: Footprint,
+    prints: [&[FieldPrint]; 2],
+) {
     let style = match style {
         Footprint::Off => 0.0,
         Footprint::Outline => 1.0,
         Footprint::Hatch => 2.0,
     };
-    let count = prints.len().min(FOOTPRINT_FIELDS);
-    let mut lanes = [Vec4::ZERO; 3 * FOOTPRINT_FIELDS];
-    let mut rays = [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS];
+    let mut lanes = [Vec4::ZERO; 2 * 3 * FOOTPRINT_FIELDS];
+    let mut rays = [Vec4::ZERO; 2 * FOOTPRINT_FIELDS * FOOTPRINT_RAYS];
     let (share, metres) = FOOTPRINT_REACH_SLACK;
-    for (i, print) in prints.iter().take(count).enumerate() {
-        let n = print.rays.len().min(FOOTPRINT_RAYS);
-        lanes[3 * i] = print.origin.extend(print.half_angle);
-        lanes[3 * i + 1] = print.axis.extend(print.reach);
-        lanes[3 * i + 2] = Vec4::new(print.front, n as f32, 0.0, 0.0);
-        for (j, (direction, reach)) in print.rays.iter().take(n).enumerate() {
-            rays[i * FOOTPRINT_RAYS + j] = direction.extend(reach * share + metres);
+    let counts = prints.map(|side| side.len().min(FOOTPRINT_FIELDS));
+    for (s, side) in prints.iter().enumerate() {
+        for (i, print) in side.iter().take(counts[s]).enumerate() {
+            let n = print.rays.len().min(FOOTPRINT_RAYS);
+            let at = 3 * (s * FOOTPRINT_FIELDS + i);
+            lanes[at] = print.origin.extend(print.half_angle);
+            lanes[at + 1] = print.axis.extend(print.reach);
+            lanes[at + 2] = Vec4::new(print.front, n as f32, 0.0, 0.0);
+            for (j, (direction, reach)) in print.rays.iter().take(n).enumerate() {
+                rays[(s * FOOTPRINT_FIELDS + i) * FOOTPRINT_RAYS + j] =
+                    direction.extend(reach * share + metres);
+            }
         }
     }
     let hue = LinearRgba::from(timeline::FIELD);
@@ -365,9 +440,9 @@ pub fn set_footprints(looks: &mut Assets<LookMaterial>, style: Footprint, prints
         if mode != MODE_BASE && mode != MODE_STATE {
             continue;
         }
-        material.params.foot =
-            Vec4::new(style, count as f32, FOOTPRINT_LINE_PX, FOOTPRINT_HATCH_PX);
+        material.params.foot = Vec4::new(style, FOOTPRINT_LINE_PX, FOOTPRINT_HATCH_PX, 0.0);
         material.params.foot_color = Vec4::new(hue.red, hue.green, hue.blue, FOOTPRINT_ALPHA);
+        material.params.fields = Vec4::new(counts[0] as f32, counts[1] as f32, 0.0, 0.0);
         material.params.prints = lanes;
         material.params.rays = rays;
         material.params.hatch.z = FOOTPRINT_HATCH_SHARE;
@@ -487,10 +562,19 @@ pub fn state(condition: Condition, masks: &Masks) -> LookMaterial {
     m
 }
 
-/// How component `b` is drawn in frame `kind`, in any look: on the state scale ([`state`]) under a
-/// red outline; `None` where it is not drawn.
-pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<ComponentDraw> {
-    condition(b, kind).map(|condition| draw(condition, masks))
+/// How component `b` is drawn in frame `kind` on `side`, in any look: on the state scale
+/// ([`state`]) under a red outline; `None` where it is not drawn.
+pub fn component(
+    b: &BoxPlan,
+    kind: CornerKind,
+    side: Side,
+    masks: &Masks,
+) -> Option<ComponentDraw> {
+    condition(b, kind).map(|condition| {
+        let mut draw = draw(condition, masks);
+        draw.fill.set_side(side);
+        draw
+    })
 }
 
 /// How a component in `condition` is drawn.
@@ -517,7 +601,26 @@ pub fn field(look: GlassLook, strength: f32, r0: f32, masks: &Masks) -> Option<L
     );
     m.params.field.y = r0;
     m.params.hatch.w = DISSOLVE_BAND_M;
+    m.set_side(Side::Record);
     Some(m)
+}
+
+/// The comparison field drawn as its definition: a uniform cone from its origin, density
+/// `1/(r² + ε²)` along every direction, cut where its directions stopped (the reach surface the mesh
+/// it wears is, wound outward), summed along the eye ray as light. `cap` is the radius ε (m) the
+/// density is capped within at the origin, and `strength` its absolute dose in `0..=1`. Drawn over
+/// everything, on the comparison side.
+pub fn volume_field(cap: f32, strength: f32, masks: &Masks) -> LookMaterial {
+    let mut m = LookMaterial::new(
+        MODE_VOLUME,
+        timeline::FIELD.into(),
+        VOLUME_GAIN * (0.4 + 0.6 * strength),
+        Blend::Additive,
+        masks,
+    );
+    m.params.volume.w = cap;
+    m.set_side(Side::Comparison);
+    m
 }
 
 #[cfg(test)]
@@ -567,6 +670,7 @@ mod tests {
         let red = LinearRgba::from(timeline::STATE_RED);
         for condition in [Condition::Damaged(0.05), Condition::Dead] {
             let ComponentDraw { fill: m, outline } = draw(condition, &masks);
+            assert_eq!(m.params.mode.y, 0.0, "no side until the stage names one");
             assert_eq!(m.params.mode.x, MODE_STATE);
             assert_eq!(m.blend, Blend::Opaque);
             assert_eq!(m.params.state.w, condition.fill());
@@ -603,17 +707,21 @@ mod tests {
         let style = |looks: &Assets<LookMaterial>, handle: &Handle<LookMaterial>| {
             looks.get(handle).unwrap().params.foot.x
         };
-        set_footprints(&mut looks, Footprint::Hatch, std::slice::from_ref(&print));
+        set_footprints(
+            &mut looks,
+            Footprint::Hatch,
+            [std::slice::from_ref(&print), &[]],
+        );
         for handle in [&base, &component, &fill] {
             assert_eq!(style(&looks, handle), 2.0);
             let p = looks.get(handle).unwrap().params;
-            assert_eq!(p.foot.y, 1.0);
+            assert_eq!(p.fields.x, 1.0);
             assert_eq!(p.prints[0], Vec4::new(0.0, 0.0, 0.0, 0.5));
             assert_eq!(p.prints[2].y, 2.0, "both directions");
             assert!(p.rays[1].w > 1.5, "a direction's reach holds its slack");
         }
         assert_eq!(style(&looks, &shell), 0.0);
-        set_footprints(&mut looks, Footprint::Off, &[print]);
+        set_footprints(&mut looks, Footprint::Off, [&[print], &[]]);
         assert_eq!(style(&looks, &fill), 0.0);
     }
 }

@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::reach_mesh;
-use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks};
+use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks, Side};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
@@ -102,6 +102,11 @@ const SLICE_MIN_HEIGHT_M: f32 = 1.0;
 #[derive(Component)]
 pub struct StageCamera;
 
+/// The split corner's comparison camera: the stage camera's pose and image size, drawing into the
+/// right half of an image twice as wide ([`look::Side`]).
+#[derive(Component)]
+pub struct ComparisonCamera;
+
 /// The round: one shell model, placed and scaled for the record on show.
 #[derive(Component)]
 pub(super) struct StageShell;
@@ -130,12 +135,16 @@ pub(super) struct ConeShell {
     cone: usize,
     rim: bool,
     peak: f32,
+    /// Of the comparison set's record, not the record's.
+    comparison: bool,
 }
 
 /// A copy of one mesh of component `index` of the plan, over the tank's own, tinted by its dose.
 #[derive(Component)]
 pub(super) struct BoxTint {
     index: usize,
+    /// Of the comparison set's record, not the record's.
+    comparison: bool,
 }
 
 /// One of a tank's own meshes that belongs to a component the record names.
@@ -196,12 +205,20 @@ pub struct Stage {
     camera: Option<Entity>,
     /// The hull the built stage is drawn under: its frame is the record's, its up the tank's.
     hull: Option<Entity>,
+    /// Whether the built stage draws the comparison set's record beside the record's.
+    comparing: bool,
 }
 
 impl Stage {
     /// Rebuild on the next frame.
     pub(super) fn invalidate(&mut self) {
         self.key = None;
+    }
+
+    /// Whether the built stage draws the comparison set's record beside the record's: the corner
+    /// split ([`look::Side`]).
+    pub(super) fn comparing(&self) -> bool {
+        self.comparing
     }
 
     /// The glass look the built stage is drawn in.
@@ -249,7 +266,7 @@ pub fn spawn(
             clear_color: ClearColorConfig::Custom(BACKGROUND),
             ..default()
         },
-        RenderTarget::Image(placeholder.into()),
+        RenderTarget::Image(placeholder.clone().into()),
         Hdr,
         Bloom::NATURAL,
         Projection::Perspective(PerspectiveProjection {
@@ -261,6 +278,25 @@ pub fn spawn(
         StageCamera,
     ));
     stage.camera = Some(camera.id());
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            order: -1,
+            is_active: false,
+            clear_color: ClearColorConfig::Custom(BACKGROUND),
+            ..default()
+        },
+        RenderTarget::Image(placeholder.clone().into()),
+        Hdr,
+        Bloom::NATURAL,
+        Projection::Perspective(PerspectiveProjection {
+            fov: CORNER_FOV_DEG.to_radians(),
+            ..default()
+        }),
+        Transform::IDENTITY,
+        CameraProfile::PenCamInset,
+        ComparisonCamera,
+    ));
     for (illuminance, toward) in [
         (3500.0, Vec3::new(0.4, 1.0, 0.3)),
         (1200.0, Vec3::new(-0.6, 0.3, -0.5)),
@@ -438,8 +474,47 @@ pub fn rebuild(
             looks: &mut looks,
             masks: &masks,
             look,
+            side: Side::Record,
         },
     );
+    // The split corner: the comparison set's record of the same shot, its field and components
+    // alone, beside the record's.
+    let comparison = library.records[key.record]
+        .comparison
+        .as_ref()
+        .filter(|_| settings.split && look == GlassLook::Base)
+        .filter(|_| {
+            matches!(
+                kind,
+                CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
+            )
+        });
+    stage.comparing = comparison.is_some();
+    if let Some(comparison) = comparison {
+        let components = component_meshes(
+            &comparison.plan,
+            tank.iter()
+                .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
+                .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
+        );
+        spawn_glass(
+            &mut commands,
+            &mut meshes,
+            &mut glows,
+            &mut outlines,
+            &comparison.plan,
+            kind,
+            hull,
+            stage.plane,
+            &components,
+            LookCtx {
+                looks: &mut looks,
+                masks: &masks,
+                look,
+                side: Side::Comparison,
+            },
+        );
+    }
 }
 
 /// The glass look a record is drawn in, and what drawing it needs.
@@ -447,6 +522,8 @@ pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
     pub masks: &'a Masks,
     pub look: GlassLook,
+    /// The record's own side, or the comparison set's record of the same shot beside it.
+    pub side: Side,
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
@@ -469,90 +546,93 @@ pub fn spawn_glass(
     look_ctx: LookCtx,
 ) {
     let scope = VisualScope::PEN_CAM_STAGE;
-    // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
-    // trails on past the span behind the shell.
-    let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
-    let line = &plan.line;
-    for i in 1..line.points.len() {
-        let (from, to) = (line.arc[i - 1].max(plan.start_arc), line.arc[i]);
-        if to <= from {
-            continue;
+    // The path draws once, on both halves of a split corner.
+    if look_ctx.side == Side::Record {
+        // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
+        // trails on past the span behind the shell.
+        let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
+        let line = &plan.line;
+        for i in 1..line.points.len() {
+            let (from, to) = (line.arc[i - 1].max(plan.start_arc), line.arc[i]);
+            if to <= from {
+                continue;
+            }
+            // In the slice the trail lies in the cut, so it is dimmed for the band to read through it.
+            let brightness = plan.brightness_at(0.5 * (from + to))
+                * if kind == CornerKind::Slice { 0.45 } else { 1.0 };
+            let mut material = GlowMaterial::additive(LINE.into(), LINE_GLOW * brightness);
+            material.set_fade(0.0);
+            commands.spawn((
+                Mesh3d(cylinder.clone()),
+                MeshMaterial3d(glows.add(material)),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                LineSeg {
+                    from,
+                    to,
+                    brightness,
+                },
+                scope,
+                StageItem,
+                ChildOf(hull),
+            ));
         }
-        // In the slice the trail lies in the cut, so it is dimmed for the band to read through it.
-        let brightness = plan.brightness_at(0.5 * (from + to))
-            * if kind == CornerKind::Slice { 0.45 } else { 1.0 };
-        let mut material = GlowMaterial::additive(LINE.into(), LINE_GLOW * brightness);
-        material.set_fade(0.0);
-        commands.spawn((
-            Mesh3d(cylinder.clone()),
-            MeshMaterial3d(glows.add(material)),
-            Transform::IDENTITY,
-            Visibility::Hidden,
-            LineSeg {
-                from,
-                to,
-                brightness,
-            },
-            scope,
-            StageItem,
-            ChildOf(hull),
-        ));
-    }
 
-    // Rings where the round crossed each plate, and the gouge of a bounce. The stop is the shell's
-    // nose, so it gets no ring.
-    let ring = meshes.add(Torus::new(1.0 - RING_THICKNESS, 1.0 + RING_THICKNESS));
-    let mut mark = |commands: &mut Commands, transform: Transform, at_arc, glow: f32| {
-        let mut material = GlowMaterial::additive(LINE.into(), glow);
-        material.set_fade(0.0);
-        commands.spawn((
-            Mesh3d(ring.clone()),
-            MeshMaterial3d(glows.add(material)),
-            transform,
-            Visibility::Hidden,
-            MarkItem { at_arc },
-            scope,
-            StageItem,
-            ChildOf(hull),
-        ));
-    };
-    let radius = plan.calibre * 0.5;
-    if matches!(
-        kind,
-        CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
-    ) {
-        for crossing in &plan.crossings {
-            let travel = line.direction_at(crossing.entry_arc + 1e-3);
-            let first = (crossing.entry_arc - plan.contact_arc).abs() < 1e-3;
-            let transform = if first {
-                ring_on_face(crossing.entry, plan.impact_normal, travel, radius)
-            } else {
-                ring_across(crossing.entry, travel, radius)
-            };
-            mark(commands, transform, crossing.entry_arc, RING_GLOW);
-            if let Some(exit) = crossing.exit {
-                let exit_arc = line.arc_of(exit);
-                mark(
-                    commands,
-                    ring_across(exit, travel, radius),
-                    exit_arc,
-                    RING_GLOW,
-                );
+        // Rings where the round crossed each plate, and the gouge of a bounce. The stop is the shell's
+        // nose, so it gets no ring.
+        let ring = meshes.add(Torus::new(1.0 - RING_THICKNESS, 1.0 + RING_THICKNESS));
+        let mut mark = |commands: &mut Commands, transform: Transform, at_arc, glow: f32| {
+            let mut material = GlowMaterial::additive(LINE.into(), glow);
+            material.set_fade(0.0);
+            commands.spawn((
+                Mesh3d(ring.clone()),
+                MeshMaterial3d(glows.add(material)),
+                transform,
+                Visibility::Hidden,
+                MarkItem { at_arc },
+                scope,
+                StageItem,
+                ChildOf(hull),
+            ));
+        };
+        let radius = plan.calibre * 0.5;
+        if matches!(
+            kind,
+            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
+        ) {
+            for crossing in &plan.crossings {
+                let travel = line.direction_at(crossing.entry_arc + 1e-3);
+                let first = (crossing.entry_arc - plan.contact_arc).abs() < 1e-3;
+                let transform = if first {
+                    ring_on_face(crossing.entry, plan.impact_normal, travel, radius)
+                } else {
+                    ring_across(crossing.entry, travel, radius)
+                };
+                mark(commands, transform, crossing.entry_arc, RING_GLOW);
+                if let Some(exit) = crossing.exit {
+                    let exit_arc = line.arc_of(exit);
+                    mark(
+                        commands,
+                        ring_across(exit, travel, radius),
+                        exit_arc,
+                        RING_GLOW,
+                    );
+                }
             }
         }
-    }
-    // The Ricochet frame's eye turns about the struck face's normal, square to the plane of both
-    // legs ([`framing`]); a bounce leaves in its plane of incidence, which holds that normal, so
-    // the eye lies in the face's plane and a gouge on the face would read as a flat bar at the apex.
-    if let Some(bounce) = &plan.bounce
-        && kind != CornerKind::Ricochet
-    {
-        mark(
-            commands,
-            ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
-            bounce.arc,
-            RING_GLOW,
-        );
+        // The Ricochet frame's eye turns about the struck face's normal, square to the plane of both
+        // legs ([`framing`]); a bounce leaves in its plane of incidence, which holds that normal, so
+        // the eye lies in the face's plane and a gouge on the face would read as a flat bar at the apex.
+        if let Some(bounce) = &plan.bounce
+            && kind != CornerKind::Ricochet
+        {
+            mark(
+                commands,
+                ring_on_face(bounce.point, bounce.normal, bounce.incoming, radius),
+                bounce.arc,
+                RING_GLOW,
+            );
+        }
     }
 
     // Spall cones: nested reach surfaces and a muted outer one, clipped by the slice plane.
@@ -561,15 +641,25 @@ pub fn spawn_glass(
             break;
         }
         let mesh = meshes.add(reach_mesh(cone));
+        let comparison = look_ctx.side == Side::Comparison;
         let styled = match kind {
             CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => {
                 let strength = timeline::absolute_dose(cone.strength.max(1e-3));
                 let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
                 let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
-                look::field(look_ctx.look, strength, r0, look_ctx.masks)
+                if comparison {
+                    // The field emerges through the round's own exit hole.
+                    let cap = 0.5 * plan.calibre;
+                    Some(look::volume_field(cap, strength, look_ctx.masks))
+                } else {
+                    look::field(look_ctx.look, strength, r0, look_ctx.masks)
+                }
             }
             _ => None,
         };
+        if comparison && styled.is_none() {
+            continue;
+        }
         if let Some(mut material) = styled {
             let mut e = commands.spawn((
                 Mesh3d(mesh.clone()),
@@ -579,6 +669,7 @@ pub fn spawn_glass(
                     cone: index,
                     rim: true,
                     peak: 0.0,
+                    comparison,
                 },
                 scope,
                 StageItem,
@@ -607,6 +698,7 @@ pub fn spawn_glass(
                     cone: index,
                     rim,
                     peak,
+                    comparison,
                 },
                 scope,
                 StageItem,
@@ -622,7 +714,7 @@ pub fn spawn_glass(
         let Some(look::ComponentDraw {
             mut fill,
             outline: (color, width),
-        }) = look::component(b, kind, look_ctx.masks)
+        }) = look::component(b, kind, look_ctx.side, look_ctx.masks)
         else {
             continue;
         };
@@ -632,6 +724,7 @@ pub fn spawn_glass(
             .and_then(|mesh| mesh.compute_aabb())
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
         let mut outline = OutlineMaterial::new(color, width, center);
+        outline.set_side(look_ctx.side.lane());
         fill.set_fade(0.0);
         outline.set_fade(0.0);
         let tint = || {
@@ -639,7 +732,10 @@ pub fn spawn_glass(
                 Mesh3d(component.mesh.clone()),
                 Transform::IDENTITY,
                 Visibility::Hidden,
-                BoxTint { index },
+                BoxTint {
+                    index,
+                    comparison: look_ctx.side == Side::Comparison,
+                },
                 scope,
                 StageItem,
                 ChildOf(component.entity),
@@ -943,6 +1039,13 @@ pub fn animate(
     };
     camera.is_active = inset_active(&showing);
     let plan = &library.records[showing.record].plan;
+    // The comparison set's record of the same shot, which the split corner's comparison items draw.
+    let comparison = library.records[showing.record]
+        .comparison
+        .as_ref()
+        .filter(|_| stage.comparing())
+        .map_or(plan, |comparison| &comparison.plan);
+    let plan_of = |of_comparison: bool| if of_comparison { comparison } else { plan };
     let kind = showing.kind;
     let c = showing.c;
     let reduce = settings.reduce_motion;
@@ -1009,6 +1112,7 @@ pub fn animate(
     }
 
     for (shell, material, look_material, mut visibility) in &mut shells {
+        let plan = plan_of(shell.comparison);
         // Reduce motion fades the whole field in; otherwise its front runs out from the origin.
         let (front, fade) = if reduce {
             (None, fade_from(cone_start(plan, kind, shell.cone, true)))
@@ -1046,43 +1150,51 @@ pub fn animate(
         )
     {
         let linear = hull.affine().matrix3;
-        let prints: Vec<FieldPrint> = plan
-            .cones
-            .iter()
-            .enumerate()
-            .map(|(index, cone)| {
-                let axis = linear * cone.axis;
-                let scale = axis.length();
-                let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
-                let front = if reduce {
-                    if c >= cone_start(plan, kind, index, true) {
-                        reach
+        let prints_of = |plan: &Plan| -> Vec<FieldPrint> {
+            plan.cones
+                .iter()
+                .enumerate()
+                .map(|(index, cone)| {
+                    let axis = linear * cone.axis;
+                    let scale = axis.length();
+                    let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
+                    let front = if reduce {
+                        if c >= cone_start(plan, kind, index, true) {
+                            reach
+                        } else {
+                            -1.0
+                        }
                     } else {
-                        -1.0
+                        front_radius(plan, kind, index, c)
+                    };
+                    FieldPrint {
+                        origin: hull.transform_point(cone.origin),
+                        axis: axis / scale.max(1e-6),
+                        half_angle: cone.half_angle,
+                        reach: reach * scale,
+                        front: front * scale,
+                        rays: cone
+                            .rays
+                            .iter()
+                            .map(|ray| {
+                                let direction = linear * ray.direction;
+                                (direction / direction.length().max(1e-6), ray.reach * scale)
+                            })
+                            .collect(),
                     }
-                } else {
-                    front_radius(plan, kind, index, c)
-                };
-                FieldPrint {
-                    origin: hull.transform_point(cone.origin),
-                    axis: axis / scale.max(1e-6),
-                    half_angle: cone.half_angle,
-                    reach: reach * scale,
-                    front: front * scale,
-                    rays: cone
-                        .rays
-                        .iter()
-                        .map(|ray| {
-                            let direction = linear * ray.direction;
-                            (direction / direction.length().max(1e-6), ray.reach * scale)
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-        look::set_footprints(&mut looks, settings.footprint, &prints);
+                })
+                .collect()
+        };
+        let record = prints_of(plan);
+        let compared = if stage.comparing() {
+            prints_of(comparison)
+        } else {
+            Vec::new()
+        };
+        look::set_footprints(&mut looks, settings.footprint, [&record, &compared]);
     }
     for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
+        let plan = plan_of(tint.comparison);
         let b = &plan.boxes[tint.index];
         let start = box_start(plan, kind, b, reduce);
         let fill = if reduce {

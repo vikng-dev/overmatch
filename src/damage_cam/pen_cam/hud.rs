@@ -13,7 +13,7 @@ use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use super::stage::StageCamera;
+use super::stage::{ComparisonCamera, StageCamera};
 use super::timeline::{self, CornerKind};
 use super::world::MainCamera;
 use super::{CornerSetting, Library, PLAYLIST, Run, Settings};
@@ -45,16 +45,23 @@ pub(super) struct Hairline;
 #[derive(Component)]
 pub(super) struct Glyph;
 
+/// The split corner's right half: the comparison camera's image.
+#[derive(Component)]
+pub(super) struct ComparisonImage;
+
 #[derive(Component)]
 pub(super) struct Reticle;
 
 #[derive(Component)]
 pub(super) struct Label;
 
-/// The two render images, which one the camera draws into, and their physical size.
+/// The two render images, which one the camera draws into, and their physical size; and the split
+/// corner's comparison image, twice as wide, whose right half the comparison camera draws.
 #[derive(Resource)]
 pub(super) struct CornerImages {
     images: [Handle<Image>; 2],
+    comparison: Handle<Image>,
+    split: bool,
     live: usize,
     size: UVec2,
     scale: f32,
@@ -122,6 +129,18 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                     },
                 ));
             }
+            corner.spawn((
+                ComparisonImage,
+                ImageNode::new(blank.clone()),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    width: Val::Percent(50.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                Visibility::Hidden,
+            ));
             corner.spawn((
                 Node {
                     position_type: PositionType::Absolute,
@@ -224,6 +243,8 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         },
     ));
     commands.insert_resource(CornerImages {
+        comparison: blank.clone(),
+        split: false,
         images: [blank.clone(), blank],
         live: 0,
         size: UVec2::ZERO,
@@ -235,13 +256,30 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 
 /// Size the corner from the window's logical width, (re)make its render images at that size in
 /// physical pixels, and point the stage camera at the live one; a replacement swaps them.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the corner's node, its images and both cameras that draw them"
+)]
 pub fn layout(
     settings: Res<Settings>,
     corner: Res<super::Corner>,
+    stage: Res<super::stage::Stage>,
     main: Query<&Camera, With<MainCamera>>,
-    mut stage_camera: Query<&mut RenderTarget, With<StageCamera>>,
+    mut stage_camera: Query<&mut RenderTarget, (With<StageCamera>, Without<ComparisonCamera>)>,
+    mut comparison_camera: Query<
+        (&mut Camera, &mut RenderTarget),
+        (
+            With<ComparisonCamera>,
+            Without<StageCamera>,
+            Without<MainCamera>,
+        ),
+    >,
     mut root: Query<&mut Node, With<CornerRoot>>,
-    mut nodes: Query<(&CornerImage, &mut ImageNode)>,
+    mut nodes: Query<(&CornerImage, &mut ImageNode, &mut Node), Without<CornerRoot>>,
+    mut comparison_node: Query<
+        (&mut ImageNode, &mut Visibility),
+        (With<ComparisonImage>, Without<CornerImage>),
+    >,
     mut target: ResMut<CornerImages>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -264,22 +302,28 @@ pub fn layout(
         node.width = Val::Px(width);
         node.height = Val::Px(height);
     }
-    let size = (Vec2::new(width, height) * scale)
+    // Split, each half holds one image of half the corner's width.
+    let split = stage.comparing();
+    let shown = if split { 0.5 * width } else { width };
+    let size = (Vec2::new(shown, height) * scale)
         .round()
         .as_uvec2()
         .max(UVec2::ONE);
     let mut retarget = false;
-    if size != target.size || scale != target.scale {
-        target.images = [0, 1].map(|_| {
+    if size != target.size || scale != target.scale || split != target.split {
+        let image = |images: &mut Assets<Image>, width: u32| {
             images.add(Image::new_target_texture(
-                size.x,
+                width,
                 size.y,
                 TextureFormat::Rgba8UnormSrgb,
                 None,
             ))
-        });
+        };
+        target.images = [0, 1].map(|_| image(&mut images, size.x));
+        target.comparison = image(&mut images, 2 * size.x);
         target.size = size;
         target.scale = scale;
+        target.split = split;
         retarget = true;
     }
     let turn = corner.showing.map(|showing| showing.turn);
@@ -297,8 +341,34 @@ pub fn layout(
                 scale_factor: scale,
             });
         }
-        for (index, mut node) in &mut nodes {
-            node.image = target.images[index.0].clone();
+        for (index, mut image, mut node) in &mut nodes {
+            image.image = target.images[index.0].clone();
+            node.width = Val::Percent(if split { 50.0 } else { 100.0 });
+        }
+        if let Ok((mut camera, mut render_target)) = comparison_camera.single_mut() {
+            *render_target = RenderTarget::Image(bevy::camera::ImageRenderTarget {
+                handle: target.comparison.clone(),
+                scale_factor: scale,
+            });
+            camera.viewport = Some(bevy::camera::Viewport {
+                physical_position: UVec2::new(size.x, 0),
+                physical_size: size,
+                ..default()
+            });
+        }
+        if let Ok((mut image, mut visibility)) = comparison_node.single_mut() {
+            image.image = target.comparison.clone();
+            image.rect = Some(Rect::new(
+                size.x as f32,
+                0.0,
+                2.0 * size.x as f32,
+                size.y as f32,
+            ));
+            visibility.set_if_neq(if split {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            });
         }
     }
 }
@@ -349,10 +419,10 @@ pub fn animate(
             CornerSetting::Off => "off",
         };
         let line = format!(
-            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  footprint {}  slice {}{}\n\
+            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  footprint {}{}  slice {}{}\n\
              1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
-             X dismiss  C hold  V own tank  P setting  F expand  O ortho  T footprint  L axis  \
-             M reduce motion",
+             X dismiss  C hold  V own tank  P setting  F expand  O ortho  T footprint  S split  \
+             L axis  M reduce motion",
             entry.label,
             verdicts.join(", "),
             run.t,
@@ -361,6 +431,7 @@ pub fn animate(
             if run.auto { "  auto" } else { "" },
             corner_setting,
             settings.footprint.label(),
+            if settings.split { "  split" } else { "" },
             if settings.slice_ortho {
                 "ortho"
             } else {
