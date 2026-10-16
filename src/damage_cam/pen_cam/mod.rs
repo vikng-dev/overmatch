@@ -279,9 +279,10 @@ impl Default for Settings {
 impl Settings {
     /// The defaults with the capture environment applied: `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
-        let mut settings = Self::default();
-        settings.expanded = std::env::var("PEN_CAM_EXPANDED").is_ok_and(|value| value == "1");
-        settings
+        Self {
+            expanded: std::env::var("PEN_CAM_EXPANDED").is_ok_and(|value| value == "1"),
+            ..Self::default()
+        }
     }
 }
 
