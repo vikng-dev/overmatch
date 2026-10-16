@@ -177,34 +177,52 @@ pub fn verdict_color(kind: CornerKind) -> Color {
     }
 }
 
-/// The dose ramp, dark to light; lightness rises monotonically under every simulated vision.
-const DOSE_RAMP: [(u8, u8, u8); 5] = [
-    (0x5A, 0x1E, 0x0E),
-    (0xA8, 0x40, 0x1A),
-    (0xE5, 0x77, 0x2A),
-    (0xFF, 0xC2, 0x7A),
-    (0xFF, 0xF1, 0xDC),
-];
+/// The component state scale, one for every view that draws a component. A component works fully
+/// until it has no hit points left, so damage is a quantity, never a hue: an untouched component is
+/// a hueless grey, a damaged one fills with one red from the bottom up (tank-up) to the share of
+/// its hit points lost, and a dead one is charcoal under a red diagonal hatch, which carries the
+/// state without its colour. TUNED.
+pub const STATE_UNTOUCHED: Color = Color::srgb_u8(0x7C, 0x7C, 0x7C);
+pub const STATE_RED: Color = Color::srgb_u8(0xE0, 0x30, 0x28);
+pub const STATE_DEAD: Color = Color::srgb_u8(0x26, 0x28, 0x2C);
+/// The line a damaged component's fill ends in: lighter than the red and the grey either side.
+pub const STATE_LINE: Color = Color::srgb_u8(0xFF, 0xC8, 0xB8);
 
-/// The ramp at `x` in `0..=1`, linear colour, interpolated between stops in linear space.
-pub fn dose_ramp(x: f32) -> LinearRgba {
-    let x = x.clamp(0.0, 1.0) * (DOSE_RAMP.len() - 1) as f32;
-    let lo = (x.floor() as usize).min(DOSE_RAMP.len() - 2);
-    let t = x - lo as f32;
-    let stop = |i: usize| {
-        let (r, g, b) = DOSE_RAMP[i];
-        LinearRgba::from(Color::srgb_u8(r, g, b))
-    };
-    stop(lo).mix(&stop(lo + 1), t)
+/// A struck component's place on the state scale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Condition {
+    /// Working, the share of its hit points lost in `(0, 1)`.
+    Damaged(f32),
+    Dead,
 }
 
-/// The spall field's hue: a cool teal off the dose ramp and apart from the glass hull's blue-grey,
+impl Condition {
+    /// The condition of a component lost or not, `share` of its hit points gone; `None` when it is
+    /// untouched.
+    pub fn of(lost: bool, share: f32) -> Option<Self> {
+        if lost || share >= 1.0 {
+            Some(Self::Dead)
+        } else if share > 0.0 {
+            Some(Self::Damaged(share))
+        } else {
+            None
+        }
+    }
+
+    /// The share of the component's height its fill reaches.
+    pub fn fill(self) -> f32 {
+        match self {
+            Self::Damaged(share) => share,
+            Self::Dead => 1.0,
+        }
+    }
+}
+
+/// The spall field's hue: a cool teal apart from the state scale and the glass hull's blue-grey,
 /// so a field never reads as damage or as hull.
 pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
 /// The field's edge shell: near-white, a contour with no hue of its own.
 pub const FIELD_EDGE: Color = Color::srgb_u8(0xE6, 0xEE, 0xF5);
-/// A damaged or destroyed component's edge: a chartreuse outside the ramp's hues and the field's.
-pub const VOLUME_EDGE: Color = Color::srgb_u8(0xC4, 0xF2, 0x3A);
 
 /// The absolute dose scale (the alternative): log-mapped reference millimetres, the same for every
 /// box and every cone. [`DOSE_SCALE_MM`] spans the doses the scenario records hold, 0.02 to 40
@@ -346,15 +364,24 @@ mod tests {
         assert_eq!(hp_share(1.0, 0.0), 1.0);
     }
 
-    /// The ramp gets lighter as the dose rises.
+    /// A component is untouched with no share lost, damaged below the whole of it, dead at the
+    /// whole or when lost, and its fill reaches exactly its share.
     #[test]
-    fn the_dose_ramp_rises_in_lightness() {
-        let luminance = |c: LinearRgba| 0.2126 * c.red + 0.7152 * c.green + 0.0722 * c.blue;
-        let mut last = -1.0;
-        for i in 0..=20 {
-            let l = luminance(dose_ramp(i as f32 / 20.0));
-            assert!(l > last, "step {i}");
-            last = l;
-        }
+    fn the_state_scale_fills_by_the_share_lost() {
+        assert_eq!(Condition::of(false, 0.0), None);
+        assert_eq!(Condition::of(false, 0.05), Some(Condition::Damaged(0.05)));
+        assert_eq!(Condition::of(false, 1.0), Some(Condition::Dead));
+        assert_eq!(Condition::of(true, 0.0), Some(Condition::Dead));
+        assert_eq!(Condition::Damaged(0.3).fill(), 0.3);
+        assert_eq!(Condition::Dead.fill(), 1.0);
+        let hue = |c: Color| {
+            let c = c.to_srgba();
+            c.red.max(c.green).max(c.blue) - c.red.min(c.green).min(c.blue)
+        };
+        assert_eq!(
+            hue(STATE_UNTOUCHED),
+            0.0,
+            "an untouched component carries no hue"
+        );
     }
 }

@@ -32,7 +32,7 @@ pub enum Blend {
 }
 
 /// One flat colour, optionally rim-lit by view angle or edged in a second colour, vertex-coloured,
-/// clipped by a plane, hatched, faded by distance from the mesh's origin or cut off at a radius from
+/// clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from
 /// it; both faces drawn.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
@@ -75,14 +75,6 @@ impl GlowMaterial {
         }
     }
 
-    /// An opaque fill of `color`: writes depth.
-    pub fn opaque(color: LinearRgba) -> Self {
-        Self {
-            blend: Blend::Opaque,
-            ..Self::blended(color, 1.0)
-        }
-    }
-
     /// Intensity `base + gain · (1 − |n·v|)^power`: clear face-on, bright at grazing angles.
     pub fn with_rim(mut self, base: f32, gain: f32, power: f32) -> Self {
         self.params.rim.x = base;
@@ -94,11 +86,6 @@ impl GlowMaterial {
     /// Multiply colour by the mesh's vertex colour and intensity by its alpha.
     pub fn with_vertex_color(mut self) -> Self {
         self.params.rim.w = 1.0;
-        self
-    }
-
-    pub fn with_hatch(mut self) -> Self {
-        self.params.flags.y = 1.0;
         self
     }
 

@@ -1,6 +1,6 @@
 // The pen cam's stage material (`src/damage_cam/pen_cam/material.rs`, `GlowMaterial`): one flat
 // colour, an optional view-angle rim or edge colour, optional vertex colour, an optional clip plane,
-// an optional 45° section hatch, an optional 1/r² falloff from the mesh's origin and an optional
+// an optional 1/r² falloff from the mesh's origin and an optional
 // front that holds every vertex within a radius of that origin. Unlit: everything it draws is a
 // diagram over the record.
 //
@@ -17,8 +17,7 @@ struct GlowParams {
     rim: vec4<f32>,
     // xyz: unit plane normal toward the discarded side, w: normal . point.
     plane: vec4<f32>,
-    // x: clip on (1) or off (0), y: hatch on (1) or off (0), z: additive (1) or blended (0),
-    // w: overall fade.
+    // x: clip on (1) or off (0), y: unused, z: additive (1) or blended (0), w: overall fade.
     flags: vec4<f32>,
     // rgb: the edge colour the rim term mixes the fill toward; a: edge on (1) or off (0).
     edge: vec4<f32>,
@@ -86,13 +85,6 @@ fn fragment(
         intensity = intensity * min(1.0, (glow.field.y / r) * (glow.field.y / r));
     }
     var alpha = glow.color.a;
-    if glow.flags.y > 0.5 {
-        // 45° lines of #8A96A3 (linear below), 6 physical pixels apart, a quarter of each period.
-        let stripe = fract((in.position.x + in.position.y) / 6.0);
-        if stripe < 0.25 {
-            rgb = vec3(0.254, 0.305, 0.366);
-        }
-    }
     let fade = glow.flags.w;
     if glow.flags.z > 0.5 {
         return vec4(rgb * intensity * fade, 0.0);

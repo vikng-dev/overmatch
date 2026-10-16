@@ -7,9 +7,6 @@
 //                 shows one layer deep; optional world-space scanlines (`field.w`, period m) and a
 //                 clearing around the struck components' screen positions (`hits`).
 //   3 dither      a screen-stable 4x4 Bayer screen door keeping `color.a` of the pixels. Opaque.
-//   4 fill        flat colour, optionally Gooch-toned (`cone2.w`), edged (`edge`), flickering
-//                 (`mode.z`) or hatched (`mode.w`).
-//   5 hidden      flat colour at `color.a`; its pipeline passes only where something nearer hides it.
 //   6 dissolve    a field shell, its alpha falling as 1/r^2 from the origin, the band behind its
 //                 front (`cone2.z`, m) dissolved by interleaved-gradient noise.
 //   7 march       the analytic cone (`cone`: axis, half-angle) integrated along the eye ray behind
@@ -18,11 +15,18 @@
 //   9 base        one hueless surface, drawn only where it is its mask's nearest surface (the hull
 //                 mask, or the part mask with `mode.z = 1`): half-Lambert shading with `shade.y` the
 //                 light's share, opacity `color.a` at a grazing angle falling to `shade.x` of it
-//                 face-on (power `shade.z`), that mask's depth edges in `edge` (rgb, a: opacity),
-//                 and `cone2.x` of the opacity kept over the struck components (`hits`).
+//                 face-on (power `shade.z`), and that mask's depth edges in `edge` (rgb, a:
+//                 opacity).
 //  10 lines       full screen: depth and normal edges of the hull mask, the depth threshold
 //                 growing with distance.
 //  11 silhouette  full screen: the hull mask's outer edge.
+//  12 state       a component on the state scale, opaque: below its fill level `color` (red, or
+//                 charcoal under an `edge`-coloured diagonal hatch when `mode.w = 1`, period
+//                 `mode.z` px, `cone2.w` of it hatched), above it `rest` (the untouched grey), a
+//                 line of `edge` `span.w` px wide at the level, all half-Lambert shaded with
+//                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
+//                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
+//                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //
 // Output: additive (`flags.y = 1`) writes `rgb` with alpha 0 for `AlphaMode::Add`; otherwise
 // straight `rgb, a`.
@@ -40,13 +44,21 @@ struct LookParams {
     field: vec4<f32>,
     // xyz: the cone's axis in the mesh's frame; w: its half-angle (rad).
     cone: vec4<f32>,
-    // x: gain (march) or opacity share kept at a hit (base); y: additive (1) or blended (0);
-    // z: dissolve band (m) or reach (march, m); w: Gooch (1) or flat (0).
+    // x: gain (march); y: additive (1) or blended (0);
+    // z: dissolve band (m) or reach (march, m); w: the hatched share (state).
     cone2: vec4<f32>,
-    // x: mode; y: hit clearing on (1); z: flicker on (1); w: hatch on (1).
+    // x: mode; y: hit clearing on (1); z: the part mask (base, 1) or the hatch period (state, px);
+    // w: hatch on (1).
     mode: vec4<f32>,
     // xy: a struck component's centre (NDC), z: its radius (NDC height units), w: on (1).
     hits: array<vec4<f32>, 8>,
+    // xyz: the fill's up (world, unit); w: the share of the height filled.
+    state: vec4<f32>,
+    // x, y: the low and high heights along the up (world m); z: heights known (1); w: the fill
+    // line's width (px).
+    span: vec4<f32>,
+    // rgb: the unfilled remainder's colour.
+    rest: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
@@ -83,7 +95,7 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
     }
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(local, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
-    if mode() >= 10 {
+    if mode() == 10 || mode() == 11 {
         // A 2 x 2 quad in its own frame covers the screen.
         out.position = vec4(vertex.position.xy, 0.5, 1.0);
     }
@@ -202,6 +214,9 @@ fn fragment(
     let n = normalize(in.world_normal);
     let facing = abs(dot(n, v));
     let rim = look.shade.y * pow(1.0 - facing, look.shade.z);
+    // The state fill's height, and its change across a pixel, taken in uniform control flow.
+    let height = dot(in.world_position.xyz, look.state.xyz);
+    let height_px = fwidth(height);
 
     if m == 0 {
         let vn = normalize((view.view_from_world * vec4(n, 0.0)).xyz);
@@ -248,7 +263,6 @@ fn fragment(
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
-        a = a * mix(look.cone2.x, 1.0, clearing(frag));
         return out_color(rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 3 {
@@ -257,30 +271,29 @@ fn fragment(
         }
         return vec4(look.color.rgb * (0.75 + 0.25 * facing), 1.0);
     }
-    if m == 4 || m == 5 {
-        var rgb = look.color.rgb;
-        if look.cone2.w > 0.5 {
-            let l = normalize(vec3(0.4, 1.0, 0.3));
-            let t = 0.5 * (dot(select(-n, n, is_front), l) + 1.0);
-            let cool = vec3(0.05, 0.08, 0.30) + 0.25 * rgb;
-            let warm = vec3(0.30, 0.25, 0.0) + 0.6 * rgb;
-            rgb = mix(cool, warm, t);
+    if m == 12 {
+        let filled = look.state.w * fade;
+        var level = -1e9;
+        if look.span.z > 0.5 {
+            level = mix(look.span.x, look.span.y, filled);
+        } else if filled > 0.0 {
+            level = 1e9;
         }
-        if look.edge.a > 0.5 {
-            rgb = mix(rgb, look.edge.rgb, clamp(rim, 0.0, 1.0));
-        }
-        if look.mode.z > 0.5 {
-            let step_t = floor(look.field.z * 14.0);
-            let r = fract(sin(step_t * 12.9898) * 43758.5453);
-            rgb = rgb * select(1.0, 0.35, r > 0.6);
-        }
-        if look.mode.w > 0.5 {
-            let stripe = fract((frag.x + frag.y) / 6.0);
-            if stripe < 0.3 {
-                rgb = rgb * 0.25;
+        var rgb = look.rest.rgb;
+        if height <= level {
+            rgb = look.color.rgb;
+            if look.mode.w > 0.5 && fract((frag.x + frag.y) / look.mode.z) < look.cone2.w {
+                rgb = look.edge.rgb;
             }
         }
-        return out_color(rgb, look.color.a * fade);
+        let toward = select(-n, n, dot(n, v) >= 0.0);
+        let l = normalize(vec3(0.4, 1.0, 0.3));
+        rgb = rgb * (1.0 - look.shade.y + look.shade.y * 0.5 * (dot(toward, l) + 1.0));
+        let partial = look.span.z > 0.5 && filled > 0.0 && filled < 1.0;
+        if partial && abs(height - level) < 0.5 * look.span.w * height_px {
+            rgb = look.edge.rgb;
+        }
+        return vec4(rgb, 1.0);
     }
     if m == 6 {
         var a = look.color.a * in.color.a * falloff(in.radius);

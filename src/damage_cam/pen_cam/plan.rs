@@ -197,6 +197,10 @@ pub struct BoxPlan {
     /// The centre of its real shape's bounds, for framing; `None` when the tank asset has no
     /// component of that name.
     pub center: Option<Vec3>,
+    /// The low and high heights (m, the record frame's up, tank-up) of its real shape; `None` with
+    /// `center`.
+    pub heights: Option<(f32, f32)>,
+    /// Its hit point pool (ref-mm): the dose that disables it whole.
     pub count: f32,
     /// Its hit points at the shot (ref-mm).
     pub hp: f32,
@@ -225,6 +229,18 @@ pub enum Reach {
 impl BoxPlan {
     pub fn dose(&self) -> f32 {
         self.line + self.field
+    }
+
+    /// The share of its whole pool gone once the shot has dosed it, 1 when lost; the victim's own
+    /// view of its tank, prior damage included.
+    pub fn pool_lost(&self) -> f32 {
+        if self.lost {
+            return 1.0;
+        }
+        if self.count <= 0.0 {
+            return 0.0;
+        }
+        (1.0 - (self.hp - self.dose()).max(0.0) / self.count).clamp(0.0, 1.0)
     }
 }
 
@@ -272,7 +288,12 @@ impl Plan {
             .map(|component| {
                 let dose = report.doses.iter().find(|d| d.volume == component.name);
                 let (line_dose, field_dose) = dose.map_or((0.0, 0.0), |d| (d.line, d.field));
-                let center = shapes.get(&component.name).map(|shape| shape.center());
+                let shape = shapes.get(&component.name);
+                let center = shape.map(|shape| shape.center());
+                let heights = shape.map(|shape| {
+                    let (lo, hi) = shape.bounds();
+                    (lo.y, hi.y)
+                });
                 let by_line = (line_dose > 0.0)
                     .then(|| dose.and_then(|d| d.entered))
                     .flatten()
@@ -301,6 +322,7 @@ impl Plan {
                     name: component.name.clone(),
                     role: component.role,
                     center,
+                    heights,
                     count: component.count,
                     hp: component.hp,
                     line: line_dose,

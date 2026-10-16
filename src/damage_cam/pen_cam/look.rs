@@ -27,7 +27,7 @@ use bevy::shader::ShaderRef;
 use super::material::{Blend, GlowMaterial};
 use super::plan::{BoxPlan, Cone};
 use super::stage::StageCamera;
-use super::timeline::{self, CornerKind};
+use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, DoseScale, GlassLook, Settings};
 use crate::render_policy::{CameraProfile, VisualScope};
@@ -38,9 +38,6 @@ const HOLO_CYAN: Color = Color::srgb_u8(0x3C, 0xE6, 0xFF);
 const LINE_GREY: Color = Color::srgb_u8(0x8C, 0x96, 0xA0);
 const SILHOUETTE: Color = Color::srgb_u8(0xD8, 0xE0, 0xE8);
 const DITHER_GREY: Color = Color::srgb_u8(0x6A, 0x72, 0x7C);
-/// The hologram's HP ramp ends: amber at a scratch, red at a destroyed component.
-const HOLO_AMBER: Color = Color::srgb_u8(0xFF, 0xB0, 0x20);
-const HOLO_RED: Color = Color::srgb_u8(0xFF, 0x28, 0x10);
 /// The importance ghost's opacity per tier.
 const GHOST_ARMOUR: f32 = 0.15;
 const GHOST_RUNNING_GEAR: f32 = 0.04;
@@ -54,11 +51,18 @@ const SCANLINE_M: f32 = 0.12;
 const MARCH_GAIN: f32 = 2.5;
 /// The dissolving front's band (m) behind the front.
 const DISSOLVE_BAND_M: f32 = 0.35;
-/// The part outline's width (physical px) in the looks that draw it as an inverted hull.
-const OUTLINE_PX: f32 = 3.0;
+/// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
+/// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
+/// period (px) and the share of it in red.
+const STATE_OUTLINE_PX: f32 = 2.0;
+const STATE_CONTRAST: f32 = 0.3;
+const STATE_LINE_PX: f32 = 1.5;
+const STATE_HATCH_PX: f32 = 7.0;
+const STATE_HATCH_SHARE: f32 = 0.3;
 /// The base look's surface: a hueless grey, its opacity at a grazing angle and the share of that
 /// kept face-on, the fresnel power between them, the light's share of the shading (the rest is
-/// flat), its edge colour and opacity, and the share of its opacity kept over a struck component.
+/// flat), and its edge colour and opacity. It keeps one opacity everywhere: a struck component
+/// shows through it as every other component does.
 const BASE_GREY: Color = Color::srgb_u8(0xA4, 0xA4, 0xA4);
 const BASE_ALPHA: f32 = 0.6;
 const BASE_FACE_SHARE: f32 = 0.4;
@@ -66,10 +70,8 @@ const BASE_FRESNEL_POWER: f32 = 2.0;
 const BASE_CONTRAST: f32 = 0.35;
 const BASE_EDGE: Color = Color::srgb_u8(0xE6, 0xE6, 0xE6);
 const BASE_EDGE_ALPHA: f32 = 0.35;
-const BASE_CLEAR_SHARE: f32 = 0.1;
-/// The base look's components: the same surface, darker and fuller, one layer deep among
-/// themselves.
-const BASE_COMPONENT_GREY: Color = Color::srgb_u8(0x7C, 0x7C, 0x7C);
+/// The base look's components: the state scale's untouched grey, fuller than the hull, one layer
+/// deep among themselves.
 const BASE_COMPONENT_ALPHA: f32 = 0.55;
 const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
 const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
@@ -87,6 +89,9 @@ pub struct LookParams {
     pub cone2: Vec4,
     pub mode: Vec4,
     pub hits: [Vec4; HITS],
+    pub state: Vec4,
+    pub span: Vec4,
+    pub rest: Vec4,
 }
 
 /// What a look element's pipeline tests depth against.
@@ -94,8 +99,6 @@ pub struct LookParams {
 pub enum Depth {
     /// The alpha mode's own test and write.
     Normal,
-    /// Passes only behind something nearer: the hidden part of a mesh. Writes nothing.
-    Hidden,
     /// Always passes and writes nothing: a full-screen overlay.
     Always,
 }
@@ -121,14 +124,13 @@ const MODE_HULL_MASK: f32 = 0.0;
 const MODE_PART_MASK: f32 = 1.0;
 const MODE_GLASS: f32 = 2.0;
 const MODE_DITHER: f32 = 3.0;
-const MODE_FILL: f32 = 4.0;
-const MODE_HIDDEN: f32 = 5.0;
 const MODE_DISSOLVE: f32 = 6.0;
 const MODE_MARCH: f32 = 7.0;
 const MODE_SOFT: f32 = 8.0;
 const MODE_BASE: f32 = 9.0;
 const MODE_LINES: f32 = 10.0;
 const MODE_SILHOUETTE: f32 = 11.0;
+const MODE_STATE: f32 = 12.0;
 /// A mode the shader draws nothing in.
 const MODE_NONE: f32 = 99.0;
 
@@ -175,13 +177,6 @@ impl LookMaterial {
         self
     }
 
-    fn with_edge(mut self, color: LinearRgba, gain: f32, power: f32) -> Self {
-        self.params.edge = Vec4::new(color.red, color.green, color.blue, 1.0);
-        self.params.shade.y = gain;
-        self.params.shade.z = power;
-        self
-    }
-
     fn with_falloff(mut self, r0: f32) -> Self {
         self.params.field.y = r0;
         self
@@ -193,6 +188,16 @@ impl LookMaterial {
 
     pub fn set_front(&mut self, radius: Option<f32>) {
         self.params.field.x = radius.map_or(-1.0, |r| r.max(0.0));
+    }
+
+    /// A state fill's frame: `up` (world, unit) and its component's low and high heights along it
+    /// (world m), `None` where the component has no known shape and its fill covers it whole.
+    pub fn set_fill_span(&mut self, up: Vec3, heights: Option<(f32, f32)>) {
+        self.params.state = up.extend(self.params.state.w);
+        self.params.span = match heights {
+            Some((lo, hi)) => Vec4::new(lo, hi, 1.0, STATE_LINE_PX),
+            None => Vec4::new(0.0, 0.0, 0.0, STATE_LINE_PX),
+        };
     }
 
     fn uses_hits(&self) -> bool {
@@ -241,10 +246,6 @@ impl Material for LookMaterial {
             }
             match key.depth {
                 Depth::Normal => {}
-                Depth::Hidden => {
-                    depth.depth_compare = Some(CompareFunction::Less);
-                    depth.depth_write_enabled = Some(false);
-                }
                 Depth::Always => {
                     depth.depth_compare = Some(CompareFunction::Always);
                     depth.depth_write_enabled = Some(false);
@@ -504,8 +505,6 @@ fn base(masks: &Masks) -> LookMaterial {
     material.params.shade.y = BASE_CONTRAST;
     material.params.shade.z = BASE_FRESNEL_POWER;
     material.params.edge = Vec4::new(edge.red, edge.green, edge.blue, BASE_EDGE_ALPHA);
-    material.params.cone2.x = BASE_CLEAR_SHARE;
-    material.params.mode.y = 1.0;
     material
 }
 
@@ -513,7 +512,7 @@ fn base(masks: &Masks) -> LookMaterial {
 /// against the part mask. A struck component's fill covers it.
 fn component_base(masks: &Masks) -> LookMaterial {
     let mut material = base(masks);
-    let grey = LinearRgba::from(BASE_COMPONENT_GREY);
+    let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
     material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
     material.params.shade.x = BASE_COMPONENT_FACE_SHARE;
     material.params.edge.w = BASE_COMPONENT_EDGE_ALPHA;
@@ -584,8 +583,52 @@ fn share(b: &BoxPlan, settings: &Settings) -> f32 {
     }
 }
 
-/// How component `b` is drawn in `look` and frame `kind`; empty where it is not drawn. The stage
-/// marks the first element [`HitMark`].
+/// Component `b`'s place on the state scale in frame `kind`, `None` where it is not drawn: the
+/// shooter's views (the glass and the outside view) show what this shot did to a component it
+/// dosed, the share of the hit points it had at the shot (or the dev absolute scale); the victim's
+/// glass shows its own tank's state, the share of each pool gone.
+pub fn condition(b: &BoxPlan, kind: CornerKind, settings: &Settings) -> Option<Condition> {
+    match kind {
+        CornerKind::Glass | CornerKind::Damaged if b.dose() > 0.0 => {
+            Condition::of(b.lost, share(b, settings))
+        }
+        CornerKind::Victim => Condition::of(b.lost, b.pool_lost()),
+        _ => None,
+    }
+}
+
+/// The state scale's opaque fill for `condition`: the struck share of the component's height in
+/// red from the bottom up, the rest in the untouched grey, a crisp lighter line between them; a
+/// dead component charcoal under a red hatch. Its frame is set each frame
+/// ([`LookMaterial::set_fill_span`]) and its fade raises the fill.
+pub fn state(condition: Condition, masks: &Masks) -> LookMaterial {
+    let (color, hatch) = match condition {
+        Condition::Damaged(_) => (timeline::STATE_RED, false),
+        Condition::Dead => (timeline::STATE_DEAD, true),
+    };
+    let mut m = LookMaterial::new(MODE_STATE, color.into(), 1.0, Blend::Opaque, masks);
+    m.bias = true;
+    let line = LinearRgba::from(if hatch {
+        timeline::STATE_RED
+    } else {
+        timeline::STATE_LINE
+    });
+    let rest = LinearRgba::from(timeline::STATE_UNTOUCHED);
+    m.params.edge = Vec4::new(line.red, line.green, line.blue, 1.0);
+    m.params.rest = Vec4::new(rest.red, rest.green, rest.blue, 1.0);
+    m.params.shade.y = STATE_CONTRAST;
+    m.params.state.w = condition.fill();
+    m.params.span.w = STATE_LINE_PX;
+    m.params.mode.w = hatch as u8 as f32;
+    m.params.mode.z = STATE_HATCH_PX;
+    m.params.cone2.w = STATE_HATCH_SHARE;
+    m
+}
+
+/// How component `b` is drawn in `look` and frame `kind`; empty where it is not drawn. Every look
+/// draws it on the one state scale ([`state`]) under a red outline; the CAD look's outline is its
+/// jump flood, and the silhouette look adds the part mask's copy. The stage marks the first element
+/// [`HitMark`].
 pub fn component(
     look: GlassLook,
     b: &BoxPlan,
@@ -593,62 +636,37 @@ pub fn component(
     settings: &Settings,
     masks: &Masks,
 ) -> Vec<PartDraw> {
-    if !matches!(kind, CornerKind::Glass | CornerKind::Damaged) || b.dose() <= 0.0 {
-        return Vec::new();
-    }
-    let x = if b.lost { 1.0 } else { share(b, settings) };
-    let ramp = timeline::dose_ramp(x);
-    let fill = |color: LinearRgba| {
-        let mut m = LookMaterial::new(MODE_FILL, color, 1.0, Blend::Opaque, masks);
-        m.bias = true;
-        m
-    };
-    let mask = |color: LinearRgba| {
-        PartDraw::Mask(LookMaterial::new(
-            MODE_PART_MASK,
-            color,
-            1.0,
-            Blend::Opaque,
-            masks,
-        ))
-    };
+    condition(b, kind, settings).map_or_else(Vec::new, |condition| draws(look, condition, masks))
+}
+
+/// The elements a component in `condition` is drawn with in `look`.
+fn draws(look: GlassLook, condition: Condition, masks: &Masks) -> Vec<PartDraw> {
+    let fill = state(condition, masks);
+    let red = LinearRgba::from(timeline::STATE_RED);
     match look {
-        GlassLook::Baseline => Vec::new(),
-        GlassLook::Technical => {
-            let mut m = fill(ramp);
-            m.params.cone2.w = 1.0;
-            m.params.mode.w = b.lost as u8 as f32;
-            vec![PartDraw::Look(m), PartDraw::Outline(LinearRgba::BLACK, 2.0)]
-        }
-        GlassLook::Envelope => vec![
-            PartDraw::Look(fill(ramp)),
-            PartDraw::Outline(timeline::VOLUME_EDGE.into(), OUTLINE_PX),
+        GlassLook::Cad => vec![PartDraw::Flooded(fill, red, CAD_OUTLINE_PX)],
+        GlassLook::Silhouette => vec![
+            PartDraw::Look(fill),
+            PartDraw::Outline(red, STATE_OUTLINE_PX),
+            PartDraw::Mask(LookMaterial::new(
+                MODE_PART_MASK,
+                red,
+                1.0,
+                Blend::Opaque,
+                masks,
+            )),
         ],
-        GlassLook::Ghost | GlassLook::Base => {
-            let mut hidden = LookMaterial::new(MODE_HIDDEN, ramp, 0.35, Blend::Blended, masks);
-            hidden.depth = Depth::Hidden;
-            hidden.bias = true;
-            vec![PartDraw::Look(fill(ramp)), PartDraw::Look(hidden)]
-        }
-        GlassLook::Cad => vec![PartDraw::Flooded(fill(ramp), ramp, CAD_OUTLINE_PX)],
-        GlassLook::Hologram => {
-            let color = LinearRgba::from(HOLO_AMBER).mix(&LinearRgba::from(HOLO_RED), x);
-            let mut m = fill(color).with_edge(color * 4.0, 1.6, 2.0);
-            m.params.mode.z = b.lost as u8 as f32;
-            vec![PartDraw::Look(m)]
-        }
-        GlassLook::Silhouette => {
-            let mut m = fill(ramp);
-            m.params.cone2.w = 1.0;
-            vec![PartDraw::Look(m), mask(ramp)]
-        }
+        _ => vec![
+            PartDraw::Look(fill),
+            PartDraw::Outline(red, STATE_OUTLINE_PX),
+        ],
     }
 }
 
 /// The one surface a cone's field is drawn with in a look, in the stage's material or the look's.
 pub enum FieldDraw {
     Glow(GlowMaterial),
-    Look(LookMaterial),
+    Look(Box<LookMaterial>),
 }
 
 /// How `cone`'s field is drawn in `look`, `None` for the stage's own nested shells. `strength` is
@@ -671,11 +689,11 @@ pub fn field(
     };
     Some(match look {
         GlassLook::Baseline | GlassLook::Envelope => return None,
-        GlassLook::Technical => FieldDraw::Look(march(Blend::Blended)),
+        GlassLook::Technical => FieldDraw::Look(Box::new(march(Blend::Blended))),
         GlassLook::Hologram => {
             let mut m = march(Blend::Additive);
             m.params.color.w = 2.0;
-            FieldDraw::Look(m)
+            FieldDraw::Look(Box::new(m))
         }
         GlassLook::Ghost | GlassLook::Base => {
             let mut m = LookMaterial::new(
@@ -687,14 +705,14 @@ pub fn field(
             )
             .with_falloff(r0);
             m.params.cone2.z = DISSOLVE_BAND_M;
-            FieldDraw::Look(m)
+            FieldDraw::Look(Box::new(m))
         }
         GlassLook::Cad => FieldDraw::Glow(
             GlowMaterial::blended(hue, 0.12 * (0.4 + 0.6 * strength))
                 .with_edge(timeline::FIELD_EDGE.into(), 1.0, 4.0)
                 .with_falloff(r0),
         ),
-        GlassLook::Silhouette => FieldDraw::Look(
+        GlassLook::Silhouette => FieldDraw::Look(Box::new(
             LookMaterial::new(
                 MODE_SOFT,
                 hue,
@@ -703,7 +721,7 @@ pub fn field(
                 masks,
             )
             .with_falloff(r0),
-        ),
+        )),
     })
 }
 
@@ -715,8 +733,8 @@ mod tests {
         hull(GlassLook::Base, tier, &Masks::default()).expect("the base draws every tier")
     }
 
-    /// The base look draws every non-component tier with one material in the hull mask, cleared
-    /// over the struck components.
+    /// The base look draws every non-component tier with one material in the hull mask, at one
+    /// opacity everywhere: no clearing over the struck components.
     #[test]
     fn the_base_draws_every_hull_tier_alike() {
         let first = base_draw(Tier::Armour).material.params;
@@ -724,7 +742,7 @@ mod tests {
             let draw = base_draw(tier);
             assert_eq!(draw.mask, Some(MaskLayer::Hull));
             assert_eq!(draw.material.blend, Blend::Blended);
-            assert!(draw.material.uses_hits());
+            assert!(!draw.material.uses_hits());
             let p = draw.material.params;
             assert_eq!(
                 (p.mode, p.color, p.edge, p.shade, p.cone2),
@@ -747,11 +765,61 @@ mod tests {
         let draw = base_draw(Tier::Component);
         assert_eq!(draw.mask, Some(MaskLayer::Part));
         assert_eq!(draw.material.params.mode.x, MODE_BASE);
-        assert!(draw.material.uses_hits());
+        assert!(!draw.material.uses_hits());
         let c = draw.material.params.color;
         assert!(
             c.x == c.y && c.y == c.z,
             "a component's base carries no hue"
         );
+        let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
+        assert_eq!(c.truncate(), Vec3::new(grey.red, grey.green, grey.blue));
+    }
+
+    /// Every look draws a struck component on the same state fill: its share as the fill height,
+    /// red when damaged, hatched when dead, under a red outline.
+    #[test]
+    fn every_look_draws_the_one_state_scale() {
+        let masks = Masks::default();
+        let red = LinearRgba::from(timeline::STATE_RED);
+        for condition in [Condition::Damaged(0.05), Condition::Dead] {
+            let m = state(condition, &masks);
+            assert_eq!(m.params.mode.x, MODE_STATE);
+            assert_eq!(m.blend, Blend::Opaque);
+            assert_eq!(m.params.state.w, condition.fill());
+            assert_eq!(m.params.mode.w > 0.5, condition == Condition::Dead);
+        }
+        let mut fill = state(Condition::Damaged(0.4), &masks);
+        fill.set_fill_span(Vec3::Y, Some((1.0, 2.0)));
+        assert_eq!(fill.params.state, Vec4::new(0.0, 1.0, 0.0, 0.4));
+        assert_eq!(fill.params.span.truncate(), Vec3::new(1.0, 2.0, 1.0));
+        for look in GlassLook::ALL {
+            let first = |draws: Vec<PartDraw>| match draws.into_iter().next() {
+                Some(PartDraw::Look(m)) | Some(PartDraw::Flooded(m, _, _)) => m.params,
+                _ => panic!("{look:?} draws no fill first"),
+            };
+            let (dead, damaged) = (
+                state(Condition::Dead, &masks),
+                state(Condition::Damaged(0.4), &masks),
+            );
+            for (want, condition) in [(dead, Condition::Dead), (damaged, Condition::Damaged(0.4))] {
+                let draws = draws(look, condition, &masks);
+                let outlined = draws.iter().any(|draw| match draw {
+                    PartDraw::Outline(color, _) | PartDraw::Flooded(_, color, _) => *color == red,
+                    _ => false,
+                });
+                assert!(outlined, "{look:?}: no red outline");
+                let got = first(draws);
+                assert_eq!(
+                    (got.mode, got.color, got.rest, got.state),
+                    (
+                        want.params.mode,
+                        want.params.color,
+                        want.params.rest,
+                        want.params.state
+                    ),
+                    "{look:?}"
+                );
+            }
+        }
     }
 }

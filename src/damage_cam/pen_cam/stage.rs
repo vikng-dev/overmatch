@@ -2,8 +2,9 @@
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, every spall cone as a translucent reach surface in a cool hue whose density falls as 1/r²
-//! from its origin, and each component's real mesh tinted by the share of its hit points it lost,
-//! a destroyed one solid.
+//! from its origin, and each struck component's real mesh on the state scale ([`look::state`]):
+//! filled red from the bottom up to the share of its hit points lost, a dead one charcoal and
+//! hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
 //! frame. A cone's front runs from its origin at the shell's own on-screen speed.
 //! Rebuilt when the corner's record or a look setting changes; animated every frame from the
@@ -34,7 +35,7 @@ use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, Sl
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, DoseScale, FieldRim, GlassLook, Library, Run, Settings, VolumeStyle};
+use super::{Corner, FieldRim, GlassLook, Library, Run, Settings};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -75,22 +76,8 @@ const CONE_RIM_SHARE: f32 = 0.3;
 /// The field's density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this fraction of
 /// the cone's longest reach.
 const FIELD_FALLOFF_REACH: f32 = 0.3;
-/// A damaged component's fill opacity; a destroyed one's fill is opaque.
-const DAMAGED_ALPHA: f32 = 0.45;
-/// A component's edge: the rim term `gain · (1 − |n·v|)^power` mixing its fill toward
-/// [`timeline::VOLUME_EDGE`].
-const EDGE_GAIN: f32 = 1.8;
-const EDGE_POWER: f32 = 2.0;
-/// The look test's alternatives (dev-only, [`VolumeStyle`] and [`FieldRim`]): the outline's width
-/// in physical pixels, the glow style's emission at full fill, the hatch style's softer edge, and
-/// the coloured field shell's fill as a share of its edge.
-const OUTLINE_PX: f32 = 3.0;
-const GLOW_STYLE_GAIN: f32 = 1.6;
-const HATCH_EDGE_GAIN: f32 = 0.8;
-const HATCH_EDGE_POWER: f32 = 3.0;
+/// The look test's coloured field shell (dev-only, [`FieldRim`]): its fill as a share of its edge.
 const FIELD_COLOURED_FILL: f32 = 0.35;
-/// The lost-box fill (victim glass): `#2A2F36` at 70 %.
-const LOST_FILL: Color = Color::srgb_u8(0x2A, 0x2F, 0x36);
 /// The slice's cut face.
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 /// The corner camera's vertical field (deg) in perspective.
@@ -209,6 +196,8 @@ pub struct Stage {
     ghost: Handle<GlowMaterial>,
     slices: HashMap<AssetId<StandardMaterial>, Handle<SliceMaterial>>,
     camera: Option<Entity>,
+    /// The hull the built stage is drawn under: its frame is the record's, its up the tank's.
+    hull: Option<Entity>,
 }
 
 impl Stage {
@@ -348,6 +337,7 @@ pub fn rebuild(
         return;
     };
     stage.key = key.clone();
+    stage.hull = Some(hull);
     for entity in &items {
         commands.entity(entity).despawn();
     }
@@ -467,11 +457,11 @@ pub fn rebuild(
         hull,
         stage.plane,
         &components,
-        Some(LookCtx {
+        LookCtx {
             looks: &mut looks,
             masks: &masks,
             look,
-        }),
+        },
     );
 }
 
@@ -483,7 +473,7 @@ pub struct LookCtx<'a> {
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
-/// dose tints. Every element but the tints is spawned under `hull`, an entity whose frame is the
+/// components on the state scale. Every element but the tints is spawned under `hull`, an entity whose frame is the
 /// record's (the struck hull's); each tint is a copy of one of `components`, the tank's own meshes
 /// of the components the record names, spawned under that mesh. `clip` is the slice plane (unit
 /// normal toward the eye, a point on it) the cones are cut by. Everything spawned is a
@@ -500,7 +490,7 @@ pub fn spawn_glass(
     hull: Entity,
     clip: Option<(Vec3, Vec3)>,
     components: &[ComponentMesh],
-    mut look_ctx: Option<LookCtx>,
+    look_ctx: LookCtx,
 ) {
     let scope = VisualScope::PEN_CAM_STAGE;
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
@@ -595,12 +585,12 @@ pub fn spawn_glass(
             break;
         }
         let mesh = meshes.add(reach_mesh(cone));
-        let styled = match (&look_ctx, kind) {
-            (Some(ctx), CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged) => {
+        let styled = match kind {
+            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged => {
                 let strength = timeline::absolute_dose(cone.strength.max(1e-3));
                 let reach = cone.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max);
                 let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
-                look::field(ctx.look, cone, strength, r0, ctx.masks)
+                look::field(look_ctx.look, cone, strength, r0, look_ctx.masks)
             }
             _ => None,
         };
@@ -625,8 +615,7 @@ pub fn spawn_glass(
                 }
                 FieldDraw::Look(mut material) => {
                     material.set_fade(0.0);
-                    let looks = &mut look_ctx.as_mut().expect("styled by a look").looks;
-                    e.insert(MeshMaterial3d(looks.add(material)));
+                    e.insert(MeshMaterial3d(look_ctx.looks.add(*material)));
                 }
             }
             continue;
@@ -658,85 +647,14 @@ pub fn spawn_glass(
         }
     }
 
-    // Components, in their own meshes: the share of hit points lost where the shot dosed one, a
-    // destroyed one solid; the victim's lost ones in the state tint.
+    // Components, in their own meshes, on the state scale.
     for component in components {
         let index = component.index;
         let b = &plan.boxes[index];
-        if let Some(ctx) = look_ctx.as_mut()
-            && ctx.look != GlassLook::Baseline
-            && matches!(kind, CornerKind::Glass | CornerKind::Damaged)
-        {
-            let draws = look::component(ctx.look, b, kind, settings, ctx.masks);
-            for (n, draw) in draws.into_iter().enumerate() {
-                let mut e = commands.spawn((
-                    Mesh3d(component.mesh.clone()),
-                    Transform::IDENTITY,
-                    Visibility::Hidden,
-                    BoxTint { index },
-                    scope,
-                    StageItem,
-                    ChildOf(component.entity),
-                ));
-                if n == 0 {
-                    e.insert(HitMark);
-                }
-                match draw {
-                    PartDraw::Look(mut material) => {
-                        material.set_fade(0.0);
-                        e.insert(MeshMaterial3d(ctx.looks.add(material)));
-                    }
-                    PartDraw::Flooded(mut material, color, width) => {
-                        material.set_fade(0.0);
-                        e.insert((
-                            MeshMaterial3d(ctx.looks.add(material)),
-                            bevy_mod_outline::OutlineVolume {
-                                visible: true,
-                                width,
-                                colour: color.into(),
-                            },
-                            bevy_mod_outline::OutlineMode::FloodFlat,
-                        ));
-                    }
-                    PartDraw::Mask(mut material) => {
-                        material.set_fade(0.0);
-                        e.insert((
-                            MeshMaterial3d(ctx.looks.add(material)),
-                            VisualScope::PEN_CAM_PART_MASK,
-                        ));
-                    }
-                    PartDraw::Outline(color, width) => {
-                        use bevy::camera::primitives::MeshAabb;
-                        let center = meshes
-                            .get(&component.mesh)
-                            .and_then(|mesh| mesh.compute_aabb())
-                            .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
-                        let mut material = OutlineMaterial::new(color, width, center);
-                        material.set_fade(0.0);
-                        e.insert(MeshMaterial3d(outlines.add(material)));
-                    }
-                }
-            }
-            continue;
-        }
-        let Some(mut material) = component_material(b, kind, settings) else {
-            continue;
-        };
-        material.set_fade(0.0);
-        commands.spawn((
-            Mesh3d(component.mesh.clone()),
-            MeshMaterial3d(glows.add(material)),
-            Transform::IDENTITY,
-            Visibility::Hidden,
-            BoxTint { index },
-            scope,
-            StageItem,
-            ChildOf(component.entity),
-        ));
-        if let Some(outline) = component_outline(b, kind, settings, meshes.get(&component.mesh)) {
-            commands.spawn((
+        let draws = look::component(look_ctx.look, b, kind, settings, look_ctx.masks);
+        for (n, draw) in draws.into_iter().enumerate() {
+            let mut e = commands.spawn((
                 Mesh3d(component.mesh.clone()),
-                MeshMaterial3d(outlines.add(outline)),
                 Transform::IDENTITY,
                 Visibility::Hidden,
                 BoxTint { index },
@@ -744,6 +662,44 @@ pub fn spawn_glass(
                 StageItem,
                 ChildOf(component.entity),
             ));
+            if n == 0 {
+                e.insert(HitMark);
+            }
+            match draw {
+                PartDraw::Look(mut material) => {
+                    material.set_fade(0.0);
+                    e.insert(MeshMaterial3d(look_ctx.looks.add(material)));
+                }
+                PartDraw::Flooded(mut material, color, width) => {
+                    material.set_fade(0.0);
+                    e.insert((
+                        MeshMaterial3d(look_ctx.looks.add(material)),
+                        bevy_mod_outline::OutlineVolume {
+                            visible: true,
+                            width,
+                            colour: color.into(),
+                        },
+                        bevy_mod_outline::OutlineMode::FloodFlat,
+                    ));
+                }
+                PartDraw::Mask(mut material) => {
+                    material.set_fade(0.0);
+                    e.insert((
+                        MeshMaterial3d(look_ctx.looks.add(material)),
+                        VisualScope::PEN_CAM_PART_MASK,
+                    ));
+                }
+                PartDraw::Outline(color, width) => {
+                    use bevy::camera::primitives::MeshAabb;
+                    let center = meshes
+                        .get(&component.mesh)
+                        .and_then(|mesh| mesh.compute_aabb())
+                        .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
+                    let mut material = OutlineMaterial::new(color, width, center);
+                    material.set_fade(0.0);
+                    e.insert(MeshMaterial3d(outlines.add(material)));
+                }
+            }
         }
     }
 }
@@ -776,68 +732,6 @@ fn field_material(cone: &Cone, rim: bool, style: FieldRim) -> (GlowMaterial, f32
         )
     };
     (material.with_falloff(r0), peak)
-}
-
-/// A component's tint in frame `kind`, `None` where it is not drawn: in the glass and the outside
-/// view a dosed component wears the dose ramp at the share of its hit points it lost (or the
-/// absolute scale), a destroyed one the ramp's top, in the look test's [`VolumeStyle`] — by default
-/// a translucent fill, a destroyed one opaque, both edged in [`timeline::VOLUME_EDGE`]. An opaque
-/// fill ignores the fade, so it appears whole when its fill starts. The victim's lost components
-/// wear the state tint.
-fn component_material(b: &BoxPlan, kind: CornerKind, settings: &Settings) -> Option<GlowMaterial> {
-    match kind {
-        CornerKind::Victim if b.lost => {
-            Some(GlowMaterial::blended(LOST_FILL.into(), 0.7).with_hatch())
-        }
-        CornerKind::Glass | CornerKind::Damaged if b.dose() > 0.0 => {
-            let x = match settings.dose {
-                DoseScale::HpShare => timeline::hp_share(b.dose(), b.hp),
-                DoseScale::Absolute => timeline::absolute_dose(b.dose()),
-            };
-            let edge = timeline::VOLUME_EDGE.into();
-            let full = timeline::dose_ramp(1.0);
-            let fill = timeline::dose_ramp(x);
-            Some(match (settings.volume, b.lost) {
-                (VolumeStyle::Rim, true) => {
-                    GlowMaterial::blended(full, 1.0).with_edge(edge, EDGE_GAIN, EDGE_POWER)
-                }
-                (VolumeStyle::Rim, false) => GlowMaterial::blended(fill, DAMAGED_ALPHA)
-                    .with_edge(edge, EDGE_GAIN, EDGE_POWER),
-                // The outline's band shows only around an opaque fill.
-                (VolumeStyle::Outline, true) => GlowMaterial::opaque(full).with_hatch(),
-                (VolumeStyle::Outline, false) => GlowMaterial::opaque(fill),
-                (VolumeStyle::Glow, true) => GlowMaterial::blended(full, 1.0),
-                (VolumeStyle::Glow, false) => {
-                    GlowMaterial::additive(fill, GLOW_STYLE_GAIN * (0.25 + 0.75 * x))
-                }
-                (VolumeStyle::Hatch, true) => GlowMaterial::blended(full, 1.0)
-                    .with_hatch()
-                    .with_edge(edge, HATCH_EDGE_GAIN, HATCH_EDGE_POWER),
-                (VolumeStyle::Hatch, false) => GlowMaterial::blended(fill, DAMAGED_ALPHA)
-                    .with_edge(edge, HATCH_EDGE_GAIN, HATCH_EDGE_POWER),
-            })
-        }
-        _ => None,
-    }
-}
-
-/// The look test's outline (style A) around one of a component's meshes: `None` in any other style
-/// or frame, or for a mesh with no extent.
-fn component_outline(
-    b: &BoxPlan,
-    kind: CornerKind,
-    settings: &Settings,
-    mesh: Option<&Mesh>,
-) -> Option<OutlineMaterial> {
-    use bevy::camera::primitives::MeshAabb;
-    let drawn = matches!(kind, CornerKind::Glass | CornerKind::Damaged) && b.dose() > 0.0;
-    if settings.volume != VolumeStyle::Outline || !drawn {
-        return None;
-    }
-    let center = Vec3::from(mesh?.compute_aabb()?.center);
-    let mut material = OutlineMaterial::new(timeline::VOLUME_EDGE.into(), OUTLINE_PX, center);
-    material.set_fade(0.0);
-    Some(material)
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -1039,9 +933,9 @@ fn inset_active(showing: &super::Showing) -> bool {
 pub fn animate(
     corner: Res<Corner>,
     settings: Res<Settings>,
-    library: Res<Library>,
-    run: Res<Run>,
+    (library, run): (Res<Library>, Res<Run>),
     stage: Res<Stage>,
+    hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
@@ -1199,8 +1093,11 @@ pub fn animate(
         visibility.set_if_neq(Visibility::Inherited);
     }
 
+    // The state fills rise along the hull's up, the tank's.
+    let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
     for (tint, glow, outline, look_material, mut visibility) in &mut boxes {
-        let start = box_start(plan, kind, &plan.boxes[tint.index], reduce);
+        let b = &plan.boxes[tint.index];
+        let start = box_start(plan, kind, b, reduce);
         let fill = if reduce {
             fade_from(start)
         } else {
@@ -1214,6 +1111,11 @@ pub fn animate(
         }
         if let Some(mut m) = look_material.and_then(|m| looks.get_mut(&m.0)) {
             m.set_fade(fill);
+            if let Some(hull) = hull {
+                let up = *hull.up();
+                let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
+                m.set_fill_span(up, b.heights.map(|(lo, hi)| (height(lo), height(hi))));
+            }
         }
         visibility.set_if_neq(if fill > 0.0 {
             Visibility::Inherited
@@ -1508,6 +1410,7 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::material::Blend;
     use super::super::plan::LEG_EPS_M;
     use super::*;
     use crate::damage_cam::RoundEnd;
@@ -2228,17 +2131,23 @@ mod tests {
         assert!(wholly > 0 && cut > 0, "{wholly} wholly beyond, {cut} cut");
     }
 
-    /// Whether `color` (linear) lies on the dose ramp: within a small distance of one of its
-    /// samples.
-    fn on_ramp(color: Vec3) -> bool {
-        (0..=100).any(|i| {
-            let r = timeline::dose_ramp(i as f32 / 100.0);
-            color.distance(Vec3::new(r.red, r.green, r.blue)) < 0.05
+    /// Whether `color` (linear) is within a small distance of one of the state scale's colours.
+    fn on_state_scale(color: Vec3) -> bool {
+        [
+            timeline::STATE_UNTOUCHED,
+            timeline::STATE_RED,
+            timeline::STATE_DEAD,
+            timeline::STATE_LINE,
+        ]
+        .into_iter()
+        .any(|c| {
+            let c = LinearRgba::from(c);
+            color.distance(Vec3::new(c.red, c.green, c.blue)) < 0.05
         })
     }
 
     /// Every record's spall field as the real [`rebuild`] draws it: every shell falls off as 1/r²
-    /// from the cone's origin, in a cool hue (more blue than red) off the dose ramp, and the outer
+    /// from the cone's origin, in a cool hue (more blue than red) off the state scale, and the outer
     /// shell's view-angle glow is at most half the nested shells' on-axis sum, so the directions'
     /// strengths shape the field. At least one record throws a cone.
     #[test]
@@ -2269,7 +2178,11 @@ mod tests {
                     assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
                     let color = m.params.color.truncate();
                     assert!(color.z > color.x, "{}: {color} is warm", record.stem);
-                    assert!(!on_ramp(color), "{}: {color} is on the ramp", record.stem);
+                    assert!(
+                        !on_state_scale(color),
+                        "{}: {color} is on the state scale",
+                        record.stem
+                    );
                     if *is_rim {
                         rim += m.params.rim.y;
                     } else {
@@ -2287,53 +2200,78 @@ mod tests {
         assert!(fields > 0, "a record throws a cone");
     }
 
-    /// Every dosed component in the glass and the outside view, as the real [`rebuild`] draws it: a
-    /// damaged one is filled translucent with the dose ramp at the share of its hit points it lost,
-    /// a destroyed one opaque, both edged; across the records at least one of each, and at least
-    /// one whose share differs from its absolute dose's place on the log scale.
+    /// Every component the real [`rebuild`] draws, in the shooter's glass and outside view and in
+    /// the victim's glass, is on the one state scale under a red outline: a damaged one opaque red
+    /// to the share of its hit points lost (the shooter's: this shot's share of what it had; the
+    /// victim's: the share of its pool gone), over the untouched grey; a dead one charcoal and
+    /// hatched. Across the records at least one of each in each view, and at least one shooter's
+    /// share that differs from its absolute dose's place on the log scale.
     #[test]
     fn a_component_reads_its_share_of_hit_points_lost() {
         let library = Library::load();
-        let (mut damaged, mut destroyed, mut distinct) = (0, 0, 0);
+        let (mut damaged, mut dead, mut distinct) = ([0; 2], [0; 2], 0);
+        let rgb = |c: Color| {
+            let c = LinearRgba::from(c);
+            Vec4::new(c.red, c.green, c.blue, 1.0)
+        };
         for (index, record) in library.records.iter().enumerate() {
-            for kind in [CornerKind::Glass, CornerKind::Damaged] {
+            for kind in [CornerKind::Glass, CornerKind::Damaged, CornerKind::Victim] {
+                let victim = (kind == CornerKind::Victim) as usize;
                 let (mut app, _) = staged(index, kind, Vec3::X);
-                let mut tints = app
-                    .world_mut()
-                    .query::<(&BoxTint, &MeshMaterial3d<GlowMaterial>)>();
-                let world = app.world();
-                let glows = world.resource::<Assets<GlowMaterial>>();
+                let world = app.world_mut();
+                let outlined: Vec<(usize, Vec4)> = world
+                    .query::<(&BoxTint, &MeshMaterial3d<OutlineMaterial>)>()
+                    .iter(world)
+                    .map(|(tint, m)| {
+                        let outlines = world.resource::<Assets<OutlineMaterial>>();
+                        (tint.index, outlines.get(&m.0).unwrap().params.color)
+                    })
+                    .collect();
+                let mut tints = world.query::<(&BoxTint, &MeshMaterial3d<LookMaterial>)>();
+                let looks = world.resource::<Assets<LookMaterial>>();
                 for (tint, material) in tints.iter(world) {
                     let b = &record.plan.boxes[tint.index];
-                    let m = glows.get(&material.0).unwrap();
+                    let m = looks.get(&material.0).unwrap();
                     let name = format!("{} {kind:?} {}", record.stem, b.name);
-                    assert!(b.dose() > 0.0, "{name}");
-                    assert!(m.params.edge.w > 0.5, "{name}: no edge");
-                    if b.lost {
-                        assert_eq!(m.params.color.w, 1.0, "{name}: not solid");
-                        destroyed += 1;
+                    assert!(
+                        outlined.iter().any(|(index, color)| *index == tint.index
+                            && color.truncate() == rgb(timeline::STATE_RED).truncate()),
+                        "{name}: no red outline"
+                    );
+                    assert_eq!(m.blend, Blend::Opaque, "{name}: not opaque");
+                    assert_eq!(m.params.rest, rgb(timeline::STATE_UNTOUCHED), "{name}");
+                    let share = if victim == 1 {
+                        b.pool_lost()
+                    } else {
+                        assert!(b.dose() > 0.0, "{name}: drawn undosed");
+                        timeline::hp_share(b.dose(), b.hp)
+                    };
+                    if b.lost || share >= 1.0 {
+                        assert_eq!(
+                            m.params.color.truncate(),
+                            rgb(timeline::STATE_DEAD).truncate()
+                        );
+                        assert_eq!(m.params.state.w, 1.0, "{name}: a dead fill is whole");
+                        assert!(m.params.mode.w > 0.5, "{name}: dead and unhatched");
+                        dead[victim] += 1;
                         continue;
                     }
-                    let share = timeline::hp_share(b.dose(), b.hp);
-                    let want = timeline::dose_ramp(share);
-                    let got = m.params.color;
-                    assert!(
-                        got.truncate()
-                            .distance(Vec3::new(want.red, want.green, want.blue))
-                            < 1e-5,
-                        "{name}: {got} for share {share}"
+                    assert_eq!(
+                        m.params.color.truncate(),
+                        rgb(timeline::STATE_RED).truncate()
                     );
-                    assert!(got.w < 1.0, "{name}: a damaged fill is translucent");
-                    if (share - timeline::absolute_dose(b.dose())).abs() > 0.05 {
+                    assert_eq!(m.params.state.w, share, "{name}");
+                    assert!(m.params.mode.w < 0.5, "{name}: damaged and hatched");
+                    if victim == 0 && (share - timeline::absolute_dose(b.dose())).abs() > 0.05 {
                         distinct += 1;
                     }
-                    damaged += 1;
+                    damaged[victim] += 1;
                 }
             }
         }
         assert!(
-            damaged > 0 && destroyed > 0 && distinct > 0,
-            "{damaged} damaged, {destroyed} destroyed, {distinct} distinct"
+            damaged.iter().all(|n| *n > 0) && dead.iter().all(|n| *n > 0) && distinct > 0,
+            "{damaged:?} damaged, {dead:?} dead, {distinct} distinct"
         );
     }
 

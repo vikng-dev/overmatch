@@ -353,11 +353,11 @@ pub fn animate(
             DoseScale::HpShare => "hp share",
         };
         let line = format!(
-            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  volume {}  rim {}  \
+            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  dose {}  glass {}  rim {}  \
              look {}  slice {}{}\n\
              1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
              X dismiss  C hold  V own tank  P setting  F expand  O ortho  G glass  D dose  \
-             K volume  J rim  H look  L axis  M reduce motion",
+             J rim  H look  L axis  M reduce motion",
             entry.label,
             verdicts.join(", "),
             run.t,
@@ -367,7 +367,6 @@ pub fn animate(
             corner_setting,
             dose,
             settings.glass,
-            settings.volume.label(),
             settings.field_rim.label(),
             settings.look.label(),
             if settings.slice_ortho {
