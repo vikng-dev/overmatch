@@ -20,6 +20,7 @@ use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, CompareFunction, ShaderType, TextureFormat};
 use bevy::shader::ShaderRef;
+use bevy::window::{PrimaryWindow, WindowRef};
 
 use super::material::Blend;
 use super::plan::BoxPlan;
@@ -281,18 +282,21 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
     ))
 }
 
-/// Give the masks to the camera that draws the stage this frame, at its physical viewport size
-/// and scale factor, and take them away when no frame that needs them is on show: the old set's
-/// cameras are despawned and its images removed. A new viewer, size or scale makes a new set and
-/// rebuilds the stage, whose materials hold the images. The set's cameras draw just before their
-/// viewer. A viewer whose size is not known yet (its target unresolved) gets no set until it is.
+/// Give the masks to the camera that draws the stage this frame, at the physical viewport size
+/// and scale factor it renders at this frame ([`viewport_now`]), and take them away when no frame
+/// that needs them is on show: the old set's cameras are despawned and its images removed. A new
+/// viewer, size or scale makes a new set and rebuilds the stage, whose materials hold the images.
+/// The set's cameras draw just before their viewer. Runs after every system that retargets or
+/// resizes a viewer this frame. A viewer whose target cannot be resolved gets no set until it is.
 #[allow(clippy::too_many_arguments)]
 pub fn own(
     mut commands: Commands,
     corner: Res<Corner>,
     inset: Query<Entity, With<StageCamera>>,
     main: Query<Entity, With<MainCamera>>,
-    cameras: Query<&Camera, Without<MaskCamera>>,
+    cameras: Query<(&Camera, &RenderTarget), Without<MaskCamera>>,
+    windows: Query<&Window>,
+    primary: Query<Entity, With<PrimaryWindow>>,
     mut masks: ResMut<Masks>,
     mut images: ResMut<Assets<Image>>,
     mut stage: ResMut<Stage>,
@@ -305,9 +309,9 @@ pub fn own(
             Surface::World => main.single().ok(),
         });
     let want = viewer.and_then(|viewer| {
-        let camera = cameras.get(viewer).ok()?;
-        let size = camera.physical_viewport_size()?.max(UVec2::ONE);
-        Some((viewer, size, camera.target_scaling_factor()?, camera.order))
+        let (camera, target) = cameras.get(viewer).ok()?;
+        let (size, scale) = viewport_now(camera, target, &windows, primary.single().ok(), &images)?;
+        Some((viewer, size.max(UVec2::ONE), scale, camera.order))
     });
     let have = masks.owner.map(|o| (o.viewer, o.size, o.scale));
     if want.map(|(viewer, size, scale, _)| (viewer, size, scale)) == have {
@@ -367,9 +371,47 @@ pub fn own(
     });
 }
 
+/// The physical viewport size and scale factor `camera` renders at this frame, read from the
+/// window or image `target` names as it stands now, as bevy's camera system will resolve them
+/// later in the frame: a window's physical size and scale factor, an image's size and the
+/// target's scale factor, a viewport clamped to the target. The camera's own cached values lag a
+/// retarget or resize by a frame; they are read only for a texture-view or colourless target.
+fn viewport_now(
+    camera: &Camera,
+    target: &RenderTarget,
+    windows: &Query<&Window>,
+    primary: Option<Entity>,
+    images: &Assets<Image>,
+) -> Option<(UVec2, f32)> {
+    let (size, scale) = match target {
+        RenderTarget::Window(window) => {
+            let entity = match window {
+                WindowRef::Primary => primary?,
+                WindowRef::Entity(entity) => *entity,
+            };
+            let window = windows.get(entity).ok()?;
+            (window.physical_size(), window.resolution.scale_factor())
+        }
+        RenderTarget::Image(image) => (images.get(&image.handle)?.size(), image.scale_factor),
+        RenderTarget::TextureView(_) | RenderTarget::None { .. } => {
+            return Some((
+                camera.physical_viewport_size()?,
+                camera.target_scaling_factor()?,
+            ));
+        }
+    };
+    let size = camera
+        .viewport
+        .as_ref()
+        .map_or(size, |viewport| viewport.physical_size.min(size));
+    Some((size, scale))
+}
+
 /// Give each mask camera its viewer's lens. Runs before bevy derives the cameras' projection
 /// matrices ([`bevy::camera::CameraUpdateSystems`]), so a mask draws with the lens its viewer has
-/// this frame; bevy then fits the aspect to the mask's own target, the viewer's size.
+/// this frame; bevy then fits the aspect to the mask's own target, the viewer's size. Every
+/// system that writes a viewer's [`Projection`] must run before this one, or the mask draws last
+/// frame's lens.
 pub fn follow_lens(
     viewers: Query<&Projection, Without<MaskCamera>>,
     mut followers: Query<(&MaskCamera, &mut Projection)>,
@@ -382,9 +424,9 @@ pub fn follow_lens(
 }
 
 /// Pose each mask camera as its viewer, from the viewer's `GlobalTransform`. Runs after transform
-/// propagation and before the frusta are taken, so the pose it copies is the frame's final one for
-/// every viewer placed before propagation; a writer that places its camera's `GlobalTransform`
-/// after propagation must run before this.
+/// propagation and before the frusta are taken. Every system that sets a viewer's final pose,
+/// its `Transform` before propagation or its `GlobalTransform` after, must run before this one,
+/// or the mask draws last frame's pose.
 pub fn follow_pose(
     viewers: Query<&GlobalTransform, Without<MaskCamera>>,
     mut followers: Query<(&MaskCamera, &mut Transform, &mut GlobalTransform)>,

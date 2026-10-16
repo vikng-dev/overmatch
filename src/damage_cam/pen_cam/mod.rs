@@ -559,11 +559,11 @@ pub(super) fn sequence(app: &mut App) {
                 view::pose,
                 killcam::stage,
                 camera_writers(),
+                hud::layout,
                 look::own,
                 stage::rebuild,
                 stage::animate,
                 world::animate,
-                hud::layout,
                 hud::animate,
                 killcam::hud,
             )

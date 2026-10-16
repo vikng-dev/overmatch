@@ -1645,18 +1645,51 @@ mod tests {
         assert!(inset(&mut app, None), "the corner draws in the inset");
     }
 
-    /// Give `camera` a resolved target of `size` physical pixels at `scale`, as bevy's camera
-    /// system would from its window or image; a headless app has no such system.
-    fn resolve(app: &mut App, camera: Entity, size: UVec2, scale: f32) {
-        let mut entity = app.world_mut().entity_mut(camera);
-        if !entity.contains::<Camera>() {
-            entity.insert(Camera::default());
+    /// Give the main camera the primary window as its target, at `size` physical pixels and
+    /// `scale`, or resize that window. Only the window changes: the camera's cached target values
+    /// stay as a headless app leaves them, unresolved.
+    fn window(app: &mut App, size: UVec2, scale: f32) {
+        let main = main_camera(app);
+        let world = app.world_mut();
+        if !world.entity(main).contains::<Camera>() {
+            world.entity_mut(main).insert(Camera::default());
         }
-        entity.get_mut::<Camera>().unwrap().computed.target_info =
-            Some(bevy::camera::RenderTargetInfo {
-                physical_size: size,
-                scale_factor: scale,
-            });
+        let mut query = world.query_filtered::<&mut Window, With<bevy::window::PrimaryWindow>>();
+        if let Ok(mut window) = query.single_mut(world) {
+            window.resolution.set_physical_resolution(size.x, size.y);
+            window.resolution.set_scale_factor_override(Some(scale));
+        } else {
+            world.spawn((
+                Window {
+                    resolution: bevy::window::WindowResolution::new(size.x, size.y)
+                        .with_scale_factor_override(scale),
+                    ..default()
+                },
+                bevy::window::PrimaryWindow,
+            ));
+        }
+    }
+
+    /// Point `camera` at a new image of `size` physical pixels at `scale`, as the corner's layout
+    /// retargets the inset; the camera's cached target values are left as they were.
+    fn retarget(app: &mut App, camera: Entity, size: UVec2, scale: f32) {
+        let world = app.world_mut();
+        let handle = world
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_target_texture(
+                size.x,
+                size.y,
+                bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                None,
+            ));
+        world
+            .entity_mut(camera)
+            .insert(bevy::camera::RenderTarget::Image(
+                bevy::camera::ImageRenderTarget {
+                    handle,
+                    scale_factor: scale,
+                },
+            ));
     }
 
     fn main_camera(app: &mut App) -> Entity {
@@ -1683,15 +1716,16 @@ mod tests {
     }
 
     /// The kill cam's lesson owns the one mask set, drawn for the main camera: two mask cameras
-    /// at its physical viewport size and scale factor, before it, with its lens and, in the same
-    /// frame, its final pose. A new size makes a new set and removes the old images; the lesson's
-    /// end leaves no mask camera, no mask image and no stage mesh in the base look.
+    /// at its window's physical size and scale factor, before it, with its lens and, in the same
+    /// frame, its final pose. A window resize makes a new set at the new size in the frame it
+    /// happens and removes the old images; the lesson's end leaves no mask camera, no mask image
+    /// and no stage mesh in the base look.
     #[test]
     fn the_lesson_masks_follow_its_camera_and_go_with_it() {
         let mut app = demo_app(kill_entry(), Shooting::Spawned);
         let beats = app.world().resource::<Run>().kill.unwrap().1;
         let main = main_camera(&mut app);
-        resolve(&mut app, main, UVec2::new(1600, 900), 2.0);
+        window(&mut app, UVec2::new(1600, 900), 2.0);
         app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
         app.update();
         app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.5;
@@ -1738,7 +1772,7 @@ mod tests {
         assert_ne!(before, after, "the lesson's camera moves");
 
         let old = mask_images(&app);
-        resolve(&mut app, main, UVec2::new(1280, 720), 1.0);
+        window(&mut app, UVec2::new(1280, 720), 1.0);
         app.update();
         follows(&mut app, UVec2::new(1280, 720), 1.0);
         for (id, _) in old {
@@ -1765,7 +1799,8 @@ mod tests {
     }
 
     /// A corner turn that draws the base look's hull owns the one mask set, drawn for the inset
-    /// camera at its target's size; the main camera gets none.
+    /// camera at its image's size; retargeting the inset to a larger image (the corner expanded)
+    /// makes a new set at that size in the same frame and removes the old images.
     #[test]
     fn a_corner_turn_gives_the_masks_to_the_inset() {
         let library = library();
@@ -1786,23 +1821,32 @@ mod tests {
             .expect("an entry opens the corner on a penetration");
         let mut app = demo_app(entry, Shooting::Spawned);
         app.update();
-        let main = main_camera(&mut app);
-        resolve(&mut app, main, UVec2::new(1600, 900), 2.0);
+        window(&mut app, UVec2::new(1600, 900), 2.0);
         let inset = {
             let mut query = app
                 .world_mut()
                 .query_filtered::<Entity, With<super::super::stage::StageCamera>>();
             query.single(app.world()).unwrap()
         };
-        resolve(&mut app, inset, UVec2::new(480, 270), 2.0);
+        retarget(&mut app, inset, UVec2::new(480, 270), 2.0);
         app.world_mut().resource_mut::<Run>().t = start + 0.5;
         app.update();
+        let owned = |app: &mut App, size: UVec2| {
+            let masks = mask_cameras(app);
+            assert_eq!(masks.len(), 2);
+            assert!(masks.iter().all(|(_, viewer)| *viewer == inset));
+            for (_, now) in mask_images(app) {
+                assert_eq!(now, Some(size));
+            }
+        };
+        owned(&mut app, UVec2::new(480, 270));
+        let old = mask_images(&app);
+        retarget(&mut app, inset, UVec2::new(960, 540), 2.0);
+        app.world_mut().resource_mut::<Run>().t = start + 0.6;
         app.update();
-        let masks = mask_cameras(&mut app);
-        assert_eq!(masks.len(), 2);
-        assert!(masks.iter().all(|(_, viewer)| *viewer == inset));
-        for (_, size) in mask_images(&app) {
-            assert_eq!(size, Some(UVec2::new(480, 270)));
+        owned(&mut app, UVec2::new(960, 540));
+        for (id, _) in old {
+            assert!(app.world().resource::<Assets<Image>>().get(id).is_none());
         }
     }
 
