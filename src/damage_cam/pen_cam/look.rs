@@ -257,6 +257,7 @@ struct MaskOwner {
 
 impl Masks {
     /// The camera the masks are drawn for, if a set exists.
+    #[cfg(test)]
     pub(super) fn viewer(&self) -> Option<Entity> {
         self.owner.map(|owner| owner.viewer)
     }
