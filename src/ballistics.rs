@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use serde_json::json;
 
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
+use crate::damage_cam::recorder::{MarchRecorder, ShotRecorder, ShotRecording};
 use crate::state::{GameplaySet, SimPhase};
 use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, Layer, ShotClock, ShotId};
@@ -68,6 +69,11 @@ mod field_casts;
 /// scenario files the demo plays, checked current.
 #[cfg(test)]
 mod pen_cam;
+
+/// The game's pen cam recorder on the fixed tick: rounds fired at fixture tanks read back as the
+/// records the authority emits.
+#[cfg(test)]
+mod recording_tests;
 
 /// The PRESENTATION half of this module: the shell scene, the tracer streak, and the visibility a
 /// hold draws with. Mounted by the client roots alone ([`view::plugin`]) — the dedicated server
@@ -335,30 +341,45 @@ pub(crate) fn hp_points(dose: f32) -> u32 {
 /// [`Self::settle`] takes what the running total has added since it last ran, so HP falls as the
 /// shot goes and lands on the rounded total when it ends.
 ///
+/// Every figure here is this shot's own, never a difference of pool HP: a march step resolves one
+/// shell whole before the next, so what a shell finds in a pool and takes from it is its own even
+/// where several shells dose one box in a tick.
+///
 /// Invariant: created with the projectile, never attached after replication. See ADR-0014.
 #[derive(Component, Default)]
-pub(crate) struct ShotDose(Vec<BoxTally>);
+pub(crate) struct ShotDose {
+    tallies: Vec<BoxTally>,
+    /// The boxes whose pool this shot took to zero, in the order it emptied them (authority only).
+    emptied: Vec<Entity>,
+}
 
-/// A box's running dose this shot (dose units), the HP points taken for it so far, and the HP its
-/// pool lost to them (the points taken, floored at the pool's zero; authority only).
+/// A box's running dose this shot (dose units), the HP points taken for it so far, the HP its
+/// pool lost to them (the points taken, floored at the pool's zero), and the HP the pool held when
+/// this shot's first settle reached it (authority only).
 struct BoxTally {
     address: Entity,
     units: u64,
     taken: u32,
     lost: u32,
+    found: Option<u32>,
 }
 
 impl ShotDose {
     /// Add `amount` reference-mm to `address`'s dose.
     fn add(&mut self, address: Entity, amount: f32) {
         let units = dose_units(amount);
-        match self.0.iter_mut().find(|entry| entry.address == address) {
+        match self
+            .tallies
+            .iter_mut()
+            .find(|entry| entry.address == address)
+        {
             Some(entry) => entry.units = entry.units.saturating_add(units),
-            None => self.0.push(BoxTally {
+            None => self.tallies.push(BoxTally {
                 address,
                 units,
                 taken: 0,
                 lost: 0,
+                found: None,
             }),
         }
     }
@@ -383,7 +404,12 @@ impl ShotDose {
             return 0;
         }
         let mut removed = 0;
-        for entry in &mut self.0 {
+        for entry in &mut self.tallies {
+            if entry.found.is_none()
+                && let Ok(hp) = health.get(entry.address)
+            {
+                entry.found = Some(hp.current);
+            }
             let due = hp_of_units(entry.units).saturating_sub(entry.taken);
             if due == 0 {
                 continue;
@@ -394,6 +420,9 @@ impl ShotDose {
                 hp.current -= lost;
                 entry.lost += lost;
                 removed += lost;
+                if lost > 0 && hp.current == 0 {
+                    self.emptied.push(entry.address);
+                }
             }
         }
         removed
@@ -403,7 +432,21 @@ impl ShotDose {
     /// with no HP pool or one already empty, and for every box where HP is not deposited (a
     /// replica).
     pub(crate) fn losses(&self) -> impl Iterator<Item = (Entity, u32)> + '_ {
-        self.0.iter().map(|entry| (entry.address, entry.lost))
+        self.tallies.iter().map(|entry| (entry.address, entry.lost))
+    }
+
+    /// The HP `address`'s pool held when this shot first reached it, before any of its own loss;
+    /// `None` for a box it has not reached, one with no HP pool, or on a replica.
+    pub(crate) fn found(&self, address: Entity) -> Option<u32> {
+        self.tallies
+            .iter()
+            .find(|entry| entry.address == address)
+            .and_then(|entry| entry.found)
+    }
+
+    /// The boxes whose pool this shot took to zero, in the order it emptied them.
+    pub(crate) fn emptied(&self) -> &[Entity] {
+        &self.emptied
     }
 }
 
@@ -1260,6 +1303,13 @@ fn on_fire_shell(
     // `ClientReplica` distinguishes the two locally authored roles (`own` vs `auth`).
     replica: Option<Res<ClientReplica>>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
+    // The pen cam recorder, where one runs; it records the authority's main-gun rounds only.
+    recorder: Option<Res<ShotRecorder>>,
+    weapons: Query<(
+        &crate::tank::Weapon,
+        &crate::tank::WeaponIndex,
+        &crate::tank::TankRoot,
+    )>,
     mut commands: Commands,
 ) {
     let now = shot_clock.as_deref().map_or(0, |clock| clock.0);
@@ -1445,31 +1495,41 @@ fn on_fire_shell(
     // Every component the shell is born with is in this ONE spawn transaction — `view`'s dressing
     // observer reads the finished round (Bevy 0.19 writes the whole bundle before any `Add` observer
     // runs), so a late `.insert` here would hand it an incomplete shell. `Option<T>` is not a Bundle,
-    // hence the explicit branches; [`spawn_shell`] folds the tracer fact in so they do not double.
-    let tracer = fire.tracer;
+    // hence the explicit branches; [`spawn_shell`] folds the tracer and the recording in so they do
+    // not multiply.
+    let born = Born {
+        tracer: fire.tracer,
+        recording: (recorder.is_some() && replica.is_none() && ShotRecording::records(&fire)).then(
+            || {
+                let weapon = fire.shooter.and_then(|source| {
+                    weapons
+                        .iter()
+                        .find(|(_, slot, root)| root.0 == source.tank && slot.0 == source.weapon)
+                        .map(|(weapon, ..)| weapon)
+                });
+                ShotRecording::of(&fire, weapon)
+            },
+        ),
+    };
     match (fire.shot, fire.shooter, catch_up_hold) {
         (Some(shot), Some(source), Some(held)) => {
-            spawn_shell(
-                &mut commands,
-                (shell_base, Shot(shot), source, held),
-                tracer,
-            );
+            spawn_shell(&mut commands, (shell_base, Shot(shot), source, held), born);
         }
         (Some(shot), Some(source), None) => {
-            spawn_shell(&mut commands, (shell_base, Shot(shot), source), tracer);
+            spawn_shell(&mut commands, (shell_base, Shot(shot), source), born);
         }
         (Some(shot), None, Some(held)) => {
-            spawn_shell(&mut commands, (shell_base, Shot(shot), held), tracer);
+            spawn_shell(&mut commands, (shell_base, Shot(shot), held), born);
         }
         (Some(shot), None, None) => {
-            spawn_shell(&mut commands, (shell_base, Shot(shot)), tracer);
+            spawn_shell(&mut commands, (shell_base, Shot(shot)), born);
         }
         (None, Some(source), Some(held)) => {
-            spawn_shell(&mut commands, (shell_base, source, held), tracer);
+            spawn_shell(&mut commands, (shell_base, source, held), born);
         }
-        (None, Some(source), None) => spawn_shell(&mut commands, (shell_base, source), tracer),
-        (None, None, Some(held)) => spawn_shell(&mut commands, (shell_base, held), tracer),
-        (None, None, None) => spawn_shell(&mut commands, shell_base, tracer),
+        (None, Some(source), None) => spawn_shell(&mut commands, (shell_base, source), born),
+        (None, None, Some(held)) => spawn_shell(&mut commands, (shell_base, held), born),
+        (None, None, None) => spawn_shell(&mut commands, shell_base, born),
     }
 
     // Lifecycle trace attribution is explicit: a received `FireEvent` can legitimately reconstruct
@@ -1490,16 +1550,25 @@ fn on_fire_shell(
     }
 }
 
-/// Spawn one complete shell, with [`TracerRound`] folded into the SAME bundle when the belt says the
-/// round carries a tracer. Generic over the caller's branch so the eight identity/hold arms above do
-/// not become sixteen — and so the tracer fact is born with the shell rather than inserted after it,
+/// The optional facts a shell is born with besides its identity and hold.
+struct Born {
+    /// The belt says the round carries a tracer.
+    tracer: bool,
+    /// The pen cam recorder records the round.
+    recording: Option<ShotRecording>,
+}
+
+/// Spawn one complete shell, with [`TracerRound`] and its [`ShotRecording`] folded into the SAME
+/// bundle when it has them. Generic over the caller's branch so the eight identity/hold arms above
+/// do not multiply — and so those facts are born with the shell rather than inserted after it,
 /// which is what lets `view`'s `Add` observer read a finished round.
-fn spawn_shell(commands: &mut Commands, shell: impl Bundle, tracer: bool) {
-    if tracer {
-        commands.spawn((shell, TracerRound));
-    } else {
-        commands.spawn(shell);
-    }
+fn spawn_shell(commands: &mut Commands, shell: impl Bundle, born: Born) {
+    match (born.tracer, born.recording) {
+        (true, Some(recording)) => commands.spawn((shell, TracerRound, recording)),
+        (true, None) => commands.spawn((shell, TracerRound)),
+        (false, Some(recording)) => commands.spawn((shell, recording)),
+        (false, None) => commands.spawn(shell),
+    };
 }
 
 /// Optional multiplayer state used by the shared projectile march. Grouping it keeps the march's
@@ -1606,8 +1675,11 @@ fn integrate_projectiles(
         // march ([`not_own_volume`]) — never to deposit anything. `None` for the sandbox's tank-less
         // camera fire, which excludes nothing.
         Option<&ShotSource>,
+        // The pen cam recording of a recorded round (authority main-gun rounds only).
+        Option<&mut ShotRecording>,
     )>,
     world: ProjectileMarchWorld,
+    mut recorder: MarchRecorder,
     // Collider poses + shapes, for the §13 corridor collector: it walks each candidate's geometry
     // itself rather than asking Avian for a nearest hit (see `ballistics::collect`).
     colliders: Query<(
@@ -1666,6 +1738,7 @@ fn integrate_projectiles(
         shot,
         held,
         source,
+        recording,
     ) in &mut projectiles
     {
         let mut shell = MarchingShell {
@@ -1709,6 +1782,7 @@ fn integrate_projectiles(
             continue;
         }
 
+        let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
         let Some(step) = march_shell_step(
             &mut shell,
             &world,
@@ -1725,6 +1799,18 @@ fn integrate_projectiles(
         ) else {
             continue;
         };
+        if deposit {
+            recorder.note(
+                entity,
+                recording,
+                &shell.marks.log,
+                marks_from,
+                shell.dose,
+                emptied_from,
+                &world.owners,
+                &health,
+            );
+        }
 
         // Reorient the shell to its travel direction so the mesh follows the (gravity-curved,
         // ricochet-bent) path instead of holding its launch heading.
@@ -3017,7 +3103,7 @@ mod tests {
             for amount in amounts {
                 shot.add(target, *amount);
             }
-            hp_of_units(shot.0[0].units)
+            hp_of_units(shot.tallies[0].units)
         };
         let shot_sets: [Vec<Vec<f32>>; 4] = [
             vec![cone(0.05), cone(0.1)],

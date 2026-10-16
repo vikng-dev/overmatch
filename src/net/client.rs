@@ -2752,6 +2752,7 @@ mod tests {
     fn weapon(recoil: Option<RecoilSpec>, barrel: Option<Entity>) -> Weapon {
         Weapon {
             name: "MainGun".into(),
+            round: "88mm_AP".into(),
             speed: 800.0,
             caliber: 0.088,
             mass: 10.2,

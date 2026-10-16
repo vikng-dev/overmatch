@@ -1532,6 +1532,7 @@ mod tests {
             GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0)),
             Weapon {
                 name: "test gun".into(),
+                round: "88mm_AP".into(),
                 speed: 755.0,
                 caliber: 0.088,
                 mass: 10.2,

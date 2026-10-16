@@ -279,7 +279,7 @@ pub struct TankKnockedOut {
     pub reason: KnockoutReason,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KnockoutReason {
     CrewLoss,
     Cookoff,

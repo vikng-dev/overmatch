@@ -21,6 +21,7 @@
 pub mod pen_cam;
 pub mod player;
 pub mod record;
+pub(crate) mod recorder;
 pub mod shapes;
 
 use std::collections::BTreeMap;
@@ -166,6 +167,11 @@ pub struct PenetrationReport {
     pub consequences: Vec<Consequence>,
     /// The struck tank's components (crew and module volumes) as they stood at the shot.
     pub components: Vec<ComponentState>,
+    /// The knockout this shot caused: the struck tank died, in the tick of the shot, of a box this
+    /// shot's own deposition emptied (the game's recorder attributes it; it is never read back from
+    /// HP). `None` otherwise, and on a hand-authored clip or a harness record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed: Option<crate::damage::KnockoutReason>,
 }
 
 /// Who fired the shot.

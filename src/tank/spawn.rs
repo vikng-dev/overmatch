@@ -580,6 +580,7 @@ fn insert_weapons(
         });
         let weapon_component = Weapon {
             name: (*weapon_name).clone(),
+            round: weapon.round.clone(),
             speed: round.muzzle_speed,
             caliber: round.body.caliber,
             mass: round.body.mass,

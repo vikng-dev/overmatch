@@ -1,8 +1,17 @@
 //! The sim-side fill: a [`PenetrationReport`] read off a shell the authority marched.
 //!
-//! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's components and their
-//! HP, and every servo's angle, before it; [`report`] reads the shell's armour log ([`crate::ballistics::ArmourMark`]), its
-//! spall cones and the components' HP after it, and states it all in the struck hull's frame.
+//! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's hull frame, its
+//! components and their HP, and every servo's angle, before it; [`report`] reads the shell's armour
+//! log ([`crate::ballistics::ArmourMark`]), its spall cones and its own per-box tally
+//! ([`ShotDose`]) after it, and states it all in the struck hull's frame. In the game the recorder
+//! (`super::recorder`) fills the same [`StruckTank`] from the pose each mark was resolved against
+//! and reads the logs through `report_from`.
+//!
+//! A component's HP at the shot is what the shot found in its pool when it first reached it
+//! ([`ShotDose::found`]), and one it never reached reads the HP the struck tank's capture holds.
+//! What it lost and whether the shot emptied it are the shot's own tally, never a difference of
+//! pool HP, so a shot overlapping another in one tick reads only its own loss.
+//!
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the last
 //! crossing or bounce the log has on the struck tank, and every dose is one the march recorded.
@@ -25,6 +34,7 @@ use super::{
     PathPoint, PathStep, PenetrationReport, Plate, PlateClass, Projectile, Ricochet, Role,
     RoundEnd, Shooter, ShotVerdict, SpallCone,
 };
+use crate::ballistics::SpallCone as ThrownCone;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
     ShellPath, ShotDose, SpallMarks, TRANSIT_K, VolumeCrossing, dose_units, hp_of_units,
@@ -44,76 +54,124 @@ enum VolumeClass {
     Box,
 }
 
-/// One component of the struck tank, as it stood before the shot.
-struct BoxAtShot {
-    entity: Entity,
-    state: ComponentState,
+/// A hull frame: world → hull-local.
+#[derive(Clone, Copy)]
+pub(crate) struct HullFrame {
+    to_hull: Affine3A,
+    /// Rotation only: for directions.
+    to_hull_rotation: Quat,
 }
 
-/// The struck tank before the shot: its hull frame, its servos' angles and its components.
+impl HullFrame {
+    /// The frame of a hull node posed at `position`, `rotation` (WORLD).
+    pub(crate) fn posed(position: Vec3, rotation: Quat) -> Self {
+        Self {
+            to_hull: Affine3A::from_rotation_translation(rotation, position).inverse(),
+            to_hull_rotation: rotation.inverse(),
+        }
+    }
+
+    fn of(global: &GlobalTransform) -> Self {
+        let (_, rotation, _) = global.to_scale_rotation_translation();
+        Self {
+            to_hull: global.affine().inverse(),
+            to_hull_rotation: rotation.inverse(),
+        }
+    }
+}
+
+/// The struck tank at the shot: the hull frame each of the shell's marks was resolved in, its
+/// servos' angles and its components' HP.
 pub struct StruckTank {
     tank: Entity,
-    /// World → hull-local.
-    to_hull: Affine3A,
-    /// World → hull-local, rotation only: for directions.
-    to_hull_rotation: Quat,
+    /// `(first mark, frame)`, ascending: a mark is stated in the last frame that starts at or
+    /// before it, a point read before the first mark in the first frame.
+    frames: Vec<(usize, HullFrame)>,
     /// Every servo's angle (degrees), by node name.
     servo_deg: BTreeMap<String, f32>,
-    boxes: Vec<BoxAtShot>,
+    /// Every component the tank owns and its HP.
+    boxes: Vec<(Entity, u32)>,
 }
 
 impl StruckTank {
-    /// The tank's hull frame, every servo's angle and every component it owns, by name. `None` for
-    /// an entity with no rig.
+    /// The tank's hull frame, every servo's angle and every component it owns, by name, read now
+    /// for a shot about to be marched. `None` for an entity with no rig.
     pub fn capture(world: &mut World, tank: Entity) -> Option<Self> {
         let hull = world.get::<Rig>(tank)?.hull;
-        let (_, hull_rotation, _) = world
-            .get::<GlobalTransform>(hull)?
-            .to_scale_rotation_translation();
-        let to_hull = world.get::<GlobalTransform>(hull)?.affine().inverse();
-        let to_hull_rotation = hull_rotation.inverse();
+        let frame = HullFrame::of(world.get::<GlobalTransform>(hull)?);
         let mut owned = world.query::<(Entity, &VolumeOf, &ComponentHealth)>();
-        let mut boxes: Vec<(Entity, u32)> = owned
+        let boxes = owned
             .iter(world)
             .filter(|(_, owner, _)| owner.tank() == tank)
             .map(|(entity, _, hp)| (entity, hp.current))
             .collect();
-        boxes.sort_by_key(|(entity, _)| name_of(world, *entity));
-        let boxes = boxes
-            .into_iter()
-            .filter_map(|(entity, hp)| {
-                let max = world.get::<ComponentHealth>(entity)?.max;
-                Some(BoxAtShot {
-                    entity,
-                    state: ComponentState {
-                        name: name_of(world, entity),
-                        role: role_of(world, entity),
-                        count: max,
-                        hp,
-                    },
-                })
-            })
-            .collect();
         Some(Self {
             tank,
-            to_hull,
-            to_hull_rotation,
+            frames: vec![(0, frame)],
             servo_deg: servo_angles(world, tank),
             boxes,
         })
     }
 
-    fn point(&self, world: Vec3) -> [f32; 3] {
-        self.to_hull.transform_point3(world).to_array()
+    /// The tank as a recorder saw it: `frames` by first mark, ascending, never empty.
+    pub(crate) fn recorded(
+        tank: Entity,
+        frames: Vec<(usize, HullFrame)>,
+        servo_deg: BTreeMap<String, f32>,
+        boxes: Vec<(Entity, u32)>,
+    ) -> Self {
+        Self {
+            tank,
+            frames,
+            servo_deg,
+            boxes,
+        }
     }
 
-    fn direction(&self, world: Vec3) -> [f32; 3] {
-        (self.to_hull_rotation * world).to_array()
+    fn frame(&self, mark: usize) -> &HullFrame {
+        let at = self
+            .frames
+            .iter()
+            .rposition(|(first, _)| *first <= mark)
+            .unwrap_or(0);
+        &self.frames[at].1
+    }
+
+    /// `world` (a point of mark `mark`, WORLD) in the hull frame.
+    fn point(&self, mark: usize, world: Vec3) -> [f32; 3] {
+        self.frame(mark).to_hull.transform_point3(world).to_array()
+    }
+
+    /// `world` (a direction of mark `mark`, WORLD) in the hull frame.
+    fn direction(&self, mark: usize, world: Vec3) -> [f32; 3] {
+        (self.frame(mark).to_hull_rotation * world).to_array()
+    }
+}
+
+/// One shell's logs as the march left them: its armour log, the cones it threw, its path and its
+/// per-box tally (`None` where the shell carries none).
+pub(crate) struct ShotLog<'a> {
+    pub marks: &'a [ArmourMark],
+    pub cones: &'a [ThrownCone],
+    pub path: &'a [Vec3],
+    pub dose: Option<&'a ShotDose>,
+}
+
+impl<'a> ShotLog<'a> {
+    /// `shell`'s logs, read off its components.
+    pub(crate) fn read(world: &'a World, shell: Entity) -> Option<Self> {
+        Some(Self {
+            marks: &world.get::<PenetrationMarks>(shell)?.log,
+            cones: &world.get::<SpallMarks>(shell)?.cones,
+            path: &world.get::<ShellPath>(shell)?.points,
+            dose: world.get::<ShotDose>(shell),
+        })
     }
 }
 
 /// The shot's facts the march does not carry: who fired, from where, what was fired, and what was
 /// struck.
+#[derive(Default)]
 pub struct ShotFacts {
     pub shooter: Option<Shooter>,
     /// Where the round started (WORLD).
@@ -150,7 +208,7 @@ pub fn muzzle_of(world: &mut World, shooter: Entity, weapon: &str) -> Option<Vec
 /// Every servo of `tank` by node name, at the sim's own angle (degrees): the integrator state its
 /// node is posed from, a replica's [`RemoteServos`] before the authority's [`TankServos`], the
 /// precedence `restore_servo_truth` reads them in.
-fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, f32> {
+pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, f32> {
     let remote = world
         .get::<RemoteServos>(tank)
         .map(|servos| servos.0.clone());
@@ -179,8 +237,18 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
     };
+    steps_of(world, &marks.log, world.get::<ShotDose>(shell), tank)
+}
+
+/// [`path_steps`] over a shell's logs.
+fn steps_of(
+    world: &World,
+    marks: &[ArmourMark],
+    dose: Option<&ShotDose>,
+    tank: Option<Entity>,
+) -> Vec<PathStep> {
     let mut steps = Vec::new();
-    for mark in &marks.log {
+    for mark in marks {
         let step = match mark {
             ArmourMark::Bounce { .. } => Some(PathStep::Bounce),
             ArmourMark::Crossing {
@@ -204,7 +272,7 @@ pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<Pat
             steps.push(step);
         }
     }
-    let dosed = world.get::<ShotDose>(shell).is_some_and(|dose| {
+    let dosed = dose.is_some_and(|dose| {
         dose.losses().any(|(volume, lost)| {
             lost > 0
                 && class_of(world, volume) == VolumeClass::Box
@@ -302,51 +370,49 @@ fn owned_by(world: &World, volume: Entity, tank: Entity) -> bool {
         .is_some_and(|owner| owner.tank() == tank)
 }
 
-/// One timed node of the path, WORLD.
+/// One timed node of the path, WORLD, and the mark whose frame states it.
 struct Node {
     point: Vec3,
     t: f32,
+    mark: usize,
 }
 
-/// The report of `shell`'s flight against `struck`, or `None` when it opens no pen cam
-/// ([`ShotVerdict::of_path`]).
-pub fn report(
-    world: &mut World,
-    struck: &StruckTank,
-    shell: Entity,
-    facts: &ShotFacts,
-) -> Option<PenetrationReport> {
-    let steps = path_steps(world, shell, Some(struck.tank));
-    let verdict = ShotVerdict::of_path(&steps)?;
-    let marks: Vec<ArmourMark> = world.get::<PenetrationMarks>(shell)?.log.clone();
-    let world: &World = world;
-    let cones = &world.get::<SpallMarks>(shell)?.cones;
-    let tail = world.get::<ShellPath>(shell)?.points.clone();
-    let owns = |mark: &ArmourMark| touches(world, mark, struck.tank);
-    let first_touch = marks.iter().position(owns)?;
-    let last_touch = marks.iter().rposition(owns)?;
-
-    // The path's nodes up to the struck tank's last mark, each with the speed of the leg that
-    // reaches it; `contact` is the node of the struck tank's first contact.
-    let mut legs: Vec<(Vec3, f32)> = Vec::new();
-    let mut speed = match marks.first()? {
-        ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
-        ArmourMark::Failed => return None,
-    };
-    legs.push((facts.launch, speed));
-    let mut last = facts.launch;
-    let mut flying = true;
-    let mut contact = 0;
-    let mine = |mark: &ArmourMark| match mark {
+/// `tank`'s share of a crossing `mark`; `None` for any other mark.
+fn share_of(world: &World, mark: &ArmourMark, tank: Entity) -> Option<Share> {
+    match mark {
         ArmourMark::Crossing {
             entrance,
             incoming,
             volumes,
             end,
             ..
-        } => share(world, *entrance, *incoming, volumes, end, Some(struck.tank)),
+        } => share(world, *entrance, *incoming, volumes, end, Some(tank)),
         _ => None,
+    }
+}
+
+/// The path's timed nodes up to the struck tank's last mark `last_touch`, t = 0 at its first
+/// contact, and the round's speed at that contact.
+fn timeline(
+    world: &World,
+    struck: &StruckTank,
+    log: &ShotLog,
+    facts: &ShotFacts,
+    first_touch: usize,
+    last_touch: usize,
+) -> Option<(Vec<Node>, f32)> {
+    let marks = log.marks;
+    // Each node with the speed of the leg that reaches it and the mark whose frame states it;
+    // `contact` is the node of the struck tank's first contact.
+    let mut legs: Vec<(Vec3, f32, usize)> = Vec::new();
+    let mut speed = match marks.first()? {
+        ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
+        ArmourMark::Failed => return None,
     };
+    legs.push((facts.launch, speed, first_touch));
+    let mut last = facts.launch;
+    let mut flying = true;
+    let mut contact = 0;
     for (index, mark) in marks[..=last_touch].iter().enumerate() {
         if index == first_touch {
             contact = legs.len();
@@ -357,7 +423,7 @@ pub fn report(
                 speed_out,
                 ..
             } => {
-                legs.push((*position, speed));
+                legs.push((*position, speed, index));
                 speed = *speed_out;
                 last = *position;
             }
@@ -367,24 +433,24 @@ pub fn report(
                 end,
                 ..
             } => {
-                legs.push((*entrance, *speed_in));
+                legs.push((*entrance, *speed_in, index));
                 // The struck tank's first contact is its own first volume, which an overlapping
                 // tank's volume may precede inside the crossing.
                 if index == first_touch
-                    && let Some(share) = mine(mark)
+                    && let Some(share) = share_of(world, mark, struck.tank)
                     && share.entry.distance(*entrance) > 1.0e-6
                 {
                     contact = legs.len();
-                    legs.push((share.entry, *speed_in));
+                    legs.push((share.entry, *speed_in, index));
                 }
                 match *end {
                     CrossingEnd::Rest { at } => {
-                        legs.push((at, 0.5 * speed_in));
+                        legs.push((at, 0.5 * speed_in, index));
                         last = at;
                         flying = false;
                     }
                     CrossingEnd::Exit { at, speed: out, .. } => {
-                        legs.push((at, 0.5 * (speed_in + out)));
+                        legs.push((at, 0.5 * (speed_in + out), index));
                         speed = out;
                         last = at;
                     }
@@ -394,27 +460,59 @@ pub fn report(
         }
     }
     if flying
-        && let Some(index) = tail.iter().rposition(|point| *point == last)
-        && let Some(next) = tail.get(index + 1)
+        && let Some(index) = log.path.iter().rposition(|point| *point == last)
+        && let Some(next) = log.path.get(index + 1)
     {
-        legs.push((*next, speed));
+        legs.push((*next, speed, last_touch));
     }
     let mut nodes: Vec<Node> = Vec::with_capacity(legs.len());
     let mut t = 0.0;
-    for (index, &(point, speed)) in legs.iter().enumerate() {
+    for (index, &(point, speed, mark)) in legs.iter().enumerate() {
         if index > 0 {
             let length = point.distance(legs[index - 1].0);
             if speed > 0.0 {
                 t += length / speed;
             }
         }
-        nodes.push(Node { point, t });
+        nodes.push(Node { point, t, mark });
     }
     // The struck tank's first contact is t = 0.
     let contact_t = nodes.get(contact)?.t;
     for node in &mut nodes {
         node.t -= contact_t;
     }
+    Some((nodes, legs[contact].1))
+}
+
+/// The report of `shell`'s flight against `struck`, or `None` when it opens no pen cam
+/// ([`ShotVerdict::of_path`]).
+pub fn report(
+    world: &mut World,
+    struck: &StruckTank,
+    shell: Entity,
+    facts: &ShotFacts,
+) -> Option<PenetrationReport> {
+    let world: &World = world;
+    report_from(world, struck, &ShotLog::read(world, shell)?, facts)
+}
+
+/// The report of a shell's flight, read from its logs `log`, against `struck`, or `None` when it
+/// opens no pen cam ([`ShotVerdict::of_path`]).
+pub(crate) fn report_from(
+    world: &World,
+    struck: &StruckTank,
+    log: &ShotLog,
+    facts: &ShotFacts,
+) -> Option<PenetrationReport> {
+    let steps = steps_of(world, log.marks, log.dose, Some(struck.tank));
+    let verdict = ShotVerdict::of_path(&steps)?;
+    let marks = log.marks;
+    let owns = |mark: &ArmourMark| touches(world, mark, struck.tank);
+    let first_touch = marks.iter().position(owns)?;
+    let last_touch = marks.iter().rposition(owns)?;
+
+    let (nodes, contact_speed) = timeline(world, struck, log, facts, first_touch, last_touch)?;
+    let mine = |mark: &ArmourMark| share_of(world, mark, struck.tank);
     let time_at = |point: Vec3| time_on(&nodes, point);
 
     let mut plates = Vec::new();
@@ -422,13 +520,13 @@ pub fn report(
     let mut spall = Vec::new();
     let mut line: Vec<(Entity, f32, f32)> = Vec::new();
     let mut field: Vec<(Entity, f32, f32)> = Vec::new();
-    // Where the line reached each component, with its time.
-    let mut entered: Vec<(Entity, f32, Vec3)> = Vec::new();
+    // Where the line reached each component, with its time and the mark that reached it.
+    let mut entered: Vec<(Entity, f32, Vec3, usize)> = Vec::new();
     let mut end = None;
-    let mut thrown = cones.iter();
+    let mut thrown = log.cones.iter();
     let first = &marks[first_touch];
     let owned = |volume: Entity| owned_by(world, volume, struck.tank);
-    for mark in &marks[..=last_touch] {
+    for (index, mark) in marks[..=last_touch].iter().enumerate() {
         if !owns(mark) {
             // Its cones are another tank's; the cone log stays aligned with the crossings.
             if let ArmourMark::Crossing { cones: count, .. } = mark {
@@ -436,6 +534,8 @@ pub fn report(
             }
             continue;
         }
+        let point = |world: Vec3| struck.point(index, world);
+        let direction = |world: Vec3| struck.direction(index, world);
         match mark {
             ArmourMark::Bounce {
                 position,
@@ -449,18 +549,18 @@ pub fn report(
                 let t = time_at(*position);
                 ricochets.push(Ricochet {
                     t,
-                    point: struck.point(*position),
-                    normal: struck.direction(*normal),
-                    incoming: struck.direction(*incoming),
-                    outgoing: struck.direction(*outgoing),
+                    point: point(*position),
+                    normal: direction(*normal),
+                    incoming: direction(*incoming),
+                    outgoing: direction(*outgoing),
                     volume: name_of(world, *volume),
                 });
                 if class_of(world, *volume) == VolumeClass::Box {
                     line.push((*volume, *shock, t));
-                    entered.push((*volume, t, *position));
+                    entered.push((*volume, t, *position, index));
                 }
                 end = Some(RoundEnd::Left {
-                    at: struck.point(*position),
+                    at: point(*position),
                 });
             }
             ArmourMark::Crossing {
@@ -470,9 +570,7 @@ pub fn report(
                 ..
             } => {
                 end = mine(mark).map(|share| match share.end {
-                    ShareEnd::Left { at } => RoundEnd::Left {
-                        at: struck.point(at),
-                    },
+                    ShareEnd::Left { at } => RoundEnd::Left { at: point(at) },
                     ShareEnd::Rest { volume } => RoundEnd::Rest {
                         volume: volume.map_or_else(String::new, |volume| name_of(world, volume)),
                     },
@@ -482,14 +580,14 @@ pub fn report(
                     let class = class_of(world, crossed.volume);
                     if class == VolumeClass::Box {
                         line.push((crossed.volume, crossed.cost * TRANSIT_K, t));
-                        entered.push((crossed.volume, t, crossed.entry));
+                        entered.push((crossed.volume, t, crossed.entry, index));
                         continue;
                     }
                     plates.push(Plate {
                         name: name_of(world, crossed.volume),
                         t,
-                        entry: struck.point(crossed.entry),
-                        exit: crossed.perforated.then(|| struck.point(crossed.end)),
+                        entry: point(crossed.entry),
+                        exit: crossed.perforated.then(|| point(crossed.end)),
                         chord_mm: crossed.chord * 1000.0,
                         steel_equiv_mm: crossed.cost,
                         cost_mm: crossed.cost,
@@ -517,7 +615,7 @@ pub fn report(
                                 field.push((volume, dose, t));
                             }
                             Fragment {
-                                end: struck.point(ray.end),
+                                end: point(ray.end),
                                 strength: ray.strength,
                                 hits: doses
                                     .map(|&(volume, dose)| FragmentHit {
@@ -530,8 +628,8 @@ pub fn report(
                         .collect();
                     spall.push(SpallCone {
                         t,
-                        origin: struck.point(cone.origin),
-                        axis: struck.direction(Vec3::from(cone.axis)),
+                        origin: point(cone.origin),
+                        axis: direction(Vec3::from(cone.axis)),
                         half_angle_deg: cone.half_angle.to_degrees(),
                         strength: cone.strength,
                         fragments,
@@ -567,7 +665,16 @@ pub fn report(
     let normal = normal.normalize_or_zero();
     let incidence = (-incoming).dot(normal).clamp(-1.0, 1.0).acos();
 
-    let (doses, mut consequences) = outcomes(world, struck, &line, &field, &entered);
+    let components = components(world, struck, log.dose);
+    let (doses, mut consequences) = outcomes(
+        world,
+        struck,
+        &components,
+        log.dose,
+        &line,
+        &field,
+        &entered,
+    );
     consequences.sort_by(|a, b| a.t.total_cmp(&b.t));
     // A crossing lists its volumes by identity; the record lists them in path order.
     plates.sort_by(|a, b| a.t.total_cmp(&b.t));
@@ -578,18 +685,18 @@ pub fn report(
         servo_deg: struck.servo_deg.clone(),
         round: facts.round.clone(),
         shooter: facts.shooter.clone(),
-        origin: struck.point(facts.launch),
-        muzzle: facts.muzzle.map(|muzzle| struck.point(muzzle)),
+        origin: struck.point(first_touch, facts.launch),
+        muzzle: facts.muzzle.map(|muzzle| struck.point(first_touch, muzzle)),
         projectile: Projectile {
             name: facts.projectile.clone(),
             caliber_mm: facts.caliber_mm,
             mass_kg: facts.mass_kg,
-            speed_mps: legs.get(contact).map_or(0.0, |(_, speed)| *speed),
+            speed_mps: contact_speed,
         },
         impact: Impact {
-            point: struck.point(impact_point),
-            normal: struck.direction(normal),
-            incoming: struck.direction(incoming),
+            point: struck.point(first_touch, impact_point),
+            normal: struck.direction(first_touch, normal),
+            incoming: struck.direction(first_touch, incoming),
             incidence_deg: incidence.to_degrees(),
             verdict,
         },
@@ -599,37 +706,64 @@ pub fn report(
             .iter()
             .map(|node| PathPoint {
                 t: node.t,
-                point: struck.point(node.point),
+                point: struck.point(node.mark, node.point),
             })
             .collect(),
         spall,
         end: end?,
         doses,
         consequences,
-        components: struck
-            .boxes
-            .iter()
-            .map(|at_shot| at_shot.state.clone())
-            .collect(),
+        components: components.into_iter().map(|(_, state)| state).collect(),
+        killed: None,
     })
 }
 
-/// Each component's dose from the shot and, for one the shot disabled, its consequence, timed at the
+/// The struck tank's components by name, each at its HP at the shot: what the shot found in its
+/// pool where it reached it ([`ShotDose::found`]), the tank's captured HP elsewhere.
+fn components(
+    world: &World,
+    struck: &StruckTank,
+    dose: Option<&ShotDose>,
+) -> Vec<(Entity, ComponentState)> {
+    let mut components: Vec<(Entity, ComponentState)> = struck
+        .boxes
+        .iter()
+        .filter_map(|&(entity, captured)| {
+            let max = world.get::<ComponentHealth>(entity)?.max;
+            Some((
+                entity,
+                ComponentState {
+                    name: name_of(world, entity),
+                    role: role_of(world, entity),
+                    count: max,
+                    hp: dose.and_then(|dose| dose.found(entity)).unwrap_or(captured),
+                },
+            ))
+        })
+        .collect();
+    components.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    components
+}
+
+/// Each component's dose from the shot and, for one the shot emptied, its consequence, timed at the
 /// deposit that emptied it. `line` and `field` list `(volume, dose, t)` deposits, `entered` the
-/// `(volume, t, point)` where the line reached a component (WORLD).
+/// `(volume, t, point, mark)` where the line reached a component (WORLD). The HP lost and the
+/// emptying are the shot's own tally's ([`ShotDose`]).
 fn outcomes(
     world: &World,
     struck: &StruckTank,
+    components: &[(Entity, ComponentState)],
+    dose: Option<&ShotDose>,
     line: &[(Entity, f32, f32)],
     field: &[(Entity, f32, f32)],
-    entered: &[(Entity, f32, Vec3)],
+    entered: &[(Entity, f32, Vec3, usize)],
 ) -> (Vec<BoxDose>, Vec<Consequence>) {
     let mut doses = Vec::new();
     let mut consequences = Vec::new();
-    for at_shot in &struck.boxes {
+    for (entity, state) in components {
         let of = |list: &[(Entity, f32, f32)]| -> Vec<(f32, f32)> {
             list.iter()
-                .filter(|(volume, ..)| *volume == at_shot.entity)
+                .filter(|(volume, ..)| volume == entity)
                 .map(|&(_, dose, t)| (t, dose))
                 .collect()
         };
@@ -639,21 +773,23 @@ fn outcomes(
         }
         let first_entry = entered
             .iter()
-            .filter(|(volume, ..)| *volume == at_shot.entity)
+            .filter(|(volume, ..)| volume == entity)
             .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|&(_, _, point)| struck.point(point));
-        let hp = at_shot.state.hp;
-        let after = world
-            .get::<ComponentHealth>(at_shot.entity)
-            .map_or(hp, |hp| hp.current);
+            .map(|&(_, _, point, mark)| struck.point(mark, point));
+        let lost = dose.map_or(0, |dose| {
+            dose.losses()
+                .find(|(volume, _)| volume == entity)
+                .map_or(0, |(_, lost)| lost)
+        });
         doses.push(BoxDose {
-            volume: at_shot.state.name.clone(),
+            volume: state.name.clone(),
             line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
             field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            lost: hp.saturating_sub(after),
+            lost,
             entered: first_entry,
         });
-        if hp > 0 && after == 0 {
+        if dose.is_some_and(|dose| dose.emptied().contains(entity)) {
+            let hp = state.hp;
             let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
             landed.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut total = 0;
@@ -667,14 +803,14 @@ fn outcomes(
                 .map_or(0.0, |(t, _)| *t);
             consequences.push(Consequence {
                 t,
-                volume: at_shot.state.name.clone(),
-                state: if world.get::<Ammo>(at_shot.entity).is_some() {
+                volume: state.name.clone(),
+                state: if world.get::<Ammo>(*entity).is_some() {
                     ConsequenceState::Cookoff
                 } else {
                     ConsequenceState::Lost
                 },
                 function: world
-                    .get::<FunctionRole>(at_shot.entity)
+                    .get::<FunctionRole>(*entity)
                     .map(|function| format!("{function:?}")),
             });
         }

@@ -53,7 +53,8 @@ mod cost;
 mod crew_ui;
 pub(crate) mod damage;
 /// The damage cam: the `PenetrationReport` record and its clip player, mounted by
-/// `bin/damage_cam_demo`. Not part of `GamePlugin`.
+/// `bin/damage_cam_demo`; the player is not part of `GamePlugin`. Its recorder runs in
+/// [`SimPlugin`] on the authority.
 pub mod damage_cam;
 #[cfg(feature = "dev_tools")]
 mod debug;
@@ -617,6 +618,8 @@ impl Plugin for SimPlugin {
             ballistics::sim_plugin,
             damage::plugin,
             shooting::plugin,
+            // The pen cam's records of the authority's main-gun hits; inert on a net client.
+            damage_cam::recorder::plugin,
         ));
     }
 }

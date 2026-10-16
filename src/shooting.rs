@@ -557,6 +557,7 @@ mod tests {
             ChildOf(root),
             Weapon {
                 name: "MG".into(),
+                round: "7.9mm_AP".into(),
                 speed: 755.0,
                 caliber: 0.0079,
                 mass: 0.0118,
@@ -601,6 +602,7 @@ mod tests {
             ChildOf(root),
             Weapon {
                 name: "88 mm".into(),
+                round: "88mm_AP".into(),
                 speed: 810.0,
                 caliber: 0.088,
                 mass: 10.2,

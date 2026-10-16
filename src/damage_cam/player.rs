@@ -1885,6 +1885,7 @@ mod tests {
             doses: vec![],
             consequences: vec![],
             components: vec![],
+            killed: None,
         }
     }
 

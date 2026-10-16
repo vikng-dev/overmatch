@@ -60,6 +60,8 @@ pub struct GunBarrel;
 pub struct Weapon {
     /// Logical authored name, distinct from the muzzle node name.
     pub name: String,
+    /// The round it fires: its key in the round registry.
+    pub round: String,
     pub speed: f32,
     pub caliber: f32,
     pub mass: f32,
