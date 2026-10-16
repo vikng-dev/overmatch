@@ -59,6 +59,7 @@ fn recorded(report: &PenetrationReport) -> RecordedShot {
         encounter: 0,
         contact_tick: 1201,
         completion_tick: 1203,
+        outcome: Some(0),
         hull: Some((
             Vec3::new(12.3456, 0.8, -40.25),
             Quat::from_rotation_y(0.7) * Quat::from_rotation_x(0.05),

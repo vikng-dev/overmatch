@@ -331,6 +331,19 @@ fn a_path_through_two_tanks_records_each() {
             assert_eq!(at_shot(&shot.report, name), DEEP, "{name}");
         }
     }
+    let outcome = |tank| {
+        recorded
+            .iter()
+            .find(|shot| shot.tank == tank)
+            .unwrap()
+            .outcome
+    };
+    assert_eq!(
+        outcome(near),
+        Some(0),
+        "the first crossing is the end a replica draws"
+    );
+    assert_eq!(outcome(far), None, "past it, no replica draws an impact");
 }
 
 /// Despawn every recorded shell that has struck armour, in the tick it struck.
@@ -601,6 +614,13 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
         weapon: 0,
         fire_tick: 1,
     };
+    let sanctioned = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ends = sanctioned.clone();
+    app.add_observer(move |end: On<ShellTerminal>| ends.lock().unwrap().push(end.after_bounces));
+    let bounces = sanctioned.clone();
+    app.add_observer(move |bounce: On<ShellRicochet>| {
+        bounces.lock().unwrap().push(bounce.sequence);
+    });
     let graze = 15.0_f32.to_radians();
     fire_along(
         &mut app,
@@ -624,6 +644,19 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
         "two encounters with the struck tank"
     );
     assert!(encounters.iter().all(|record| record.shot == Some(shot)));
+    assert_eq!(
+        *sanctioned.lock().unwrap(),
+        vec![0],
+        "the authority sanctions the first crossing as the end, and nothing after it"
+    );
+    assert_eq!(
+        encounters
+            .iter()
+            .map(|record| record.outcome)
+            .collect::<Vec<_>>(),
+        vec![Some(0), None],
+        "the first encounter is drawn at the sanctioned end; the return, past it, is not drawn"
+    );
     let (first, second) = (&encounters[0].report, &encounters[1].report);
 
     // The shot's own tally: the cookoff then empties every pool, so the pools' drop is not the

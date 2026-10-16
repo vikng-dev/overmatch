@@ -38,7 +38,9 @@ pub(super) fn install_client(app: &mut App) {
 
 /// Build each finished record once and send each projection to the link controlling its
 /// combatant's tank, where that link is connected. A bot's combatant has no link and is sent
-/// nothing.
+/// nothing. No life is checked: a record finished after its tank respawned is sent to the same
+/// player as history, and its struck life keeps it out of the new life's live view
+/// ([`ShotExplanations::live`]).
 fn send_shot_explanations(
     mut records: MessageReader<RecordedShot>,
     vocabulary: Option<Res<ShotVocabulary>>,
@@ -104,7 +106,7 @@ fn receive_shot_explanations(
 }
 
 fn note_outcome_drawn(drawn: On<AuthorityOutcomeDrawn>, mut store: ResMut<ShotExplanations>) {
-    store.drew(drawn.shot, drawn.tick, drawn.ended);
+    store.drew(drawn.shot, drawn.ordinal);
 }
 
 /// A new connection is a new match: its shots are not the last one's.

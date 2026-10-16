@@ -11,7 +11,7 @@
 //! client has drawn its world impact ([`ImpactPresence::Presented`]) or has waited
 //! [`IMPACT_TIMEOUT_S`] for it ([`ImpactPresence::TimedOut`]). Opening a view is the view's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 
@@ -25,13 +25,18 @@ use crate::state::GameplaySet;
 use crate::tank::Controlled;
 use crate::{CombatantId, ShotClock, ShotId, WeaponClock};
 
-/// How many explanations a recipient keeps, and how many shots' drawn outcomes. DERIVED: a
-/// recipient receives the shots it fires and the shots that strike it, at most every combatant's
-/// main-gun rate, 30 combatants (the lobby the volley probes run, `net::shot_loss`) at one round per
-/// 3.0 s (the Tiger's reload, fixture data) = 10 shots/s, read for as long as the longest view that
-/// reads them, the kill cam's ≈ 9.7 s (its phases summed, `pen_cam::killcam`): ≈ 100, to the next
-/// power of two. A faster-firing vehicle or a longer view re-derives it.
+/// How many explanations a recipient keeps, and how many drawn outcomes. TUNED: [`READ_WINDOW_S`]
+/// of explanations arriving at 12.8 a second. A recipient receives one explanation per encounter of
+/// every recorded round it fires and of every one that strikes it, so its load is data: the
+/// combatants that can strike it and itself, × each one's recorded-round rate (one over its
+/// weapon's single-fire reload), × the encounters a round can make (a perforating round meets more
+/// than one tank, or one tank again). A load above RETAINED / [`READ_WINDOW_S`] evicts explanations
+/// a view may still read; the store counts those and logs the first.
 pub(crate) const RETAINED: usize = 128;
+
+/// How long after its arrival an explanation may still be read, virtual seconds. TUNED: the
+/// longest view that reads one, the kill cam (its phases in `pen_cam::killcam`), rounded up.
+pub(crate) const READ_WINDOW_S: f64 = 10.0;
 
 /// How long an explanation waits for its world impact to be drawn before it is released undrawn,
 /// seconds of virtual time from its arrival. TUNED: the impact draws at the interpolation cursor,
@@ -67,8 +72,8 @@ fn build_vocabulary(blueprint: Res<TankBlueprint>, mut commands: Commands) {
 pub(crate) enum ImpactPresence {
     /// Not yet drawn; a view waits.
     Pending,
-    /// Drawn: this client has drawn an authority outcome of the shot at or after the encounter's
-    /// contact tick, or the shot's end.
+    /// Drawn: this client has drawn the shot's authority outcome that is this encounter's impact
+    /// ([`ShotExplanation::outcome`]); offline, the authority drew it.
     Presented,
     /// Not drawn within [`IMPACT_TIMEOUT_S`] of arrival: released undrawn, for good. A view that
     /// must show the shot (the kill cam) shows it; one that rides on the impact (the corner) may
@@ -113,21 +118,6 @@ fn shot_key(shot: ShotId) -> ShotKey {
     (shot.fire_tick, shot.combatant.0, shot.weapon)
 }
 
-/// The outcomes of one shot this client has drawn.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Drawn {
-    /// The latest authority tick of a drawn bounce or end.
-    tick: u32,
-    /// The shot's end is drawn.
-    ended: bool,
-}
-
-impl Drawn {
-    fn covers(&self, contact_tick: u32) -> bool {
-        self.ended || self.tick >= contact_tick
-    }
-}
-
 /// One received explanation and the report it decodes to.
 #[derive(Clone, Debug)]
 pub(crate) struct StoredExplanation {
@@ -155,25 +145,53 @@ pub(crate) enum Receipt {
     Refused,
 }
 
-/// This recipient's explanations, at most [`RETAINED`], and the shots whose outcomes it has drawn.
+/// This recipient's explanations, at most [`RETAINED`], and the outcomes it has drawn, at most
+/// [`RETAINED`], each a shot and its outcome's ordinal.
 #[derive(Resource, Default)]
 pub(crate) struct ShotExplanations {
     stored: BTreeMap<ExplanationKey, StoredExplanation>,
-    drawn: BTreeMap<ShotKey, Drawn>,
+    drawn: BTreeSet<(ShotKey, u32)>,
     /// The highest key retention dropped; nothing at or below it is stored again.
     evicted: Option<ExplanationKey>,
+    /// Explanations retention dropped within [`READ_WINDOW_S`] of their arrival.
+    evicted_early: u64,
     refused: u64,
 }
 
 impl ShotExplanations {
-    /// Store `explanation`, decoded against `vocabulary`, arrived at `now_s` (virtual seconds). A
-    /// duplicate, or an explanation at or below the last one retention dropped, changes nothing.
-    /// One that does not decode is refused: counted, and the first refusal logged.
+    /// Store `explanation`, decoded against `vocabulary`, arrived at `now_s` (virtual seconds),
+    /// presented once this client draws its impact. A duplicate, or an explanation at or below the
+    /// last one retention dropped, changes nothing. One that does not decode is refused: counted,
+    /// and the first refusal logged.
     pub(crate) fn receive(
         &mut self,
         explanation: ShotExplanation,
         vocabulary: &ShotVocabulary,
         now_s: f64,
+    ) -> Receipt {
+        let drawn = explanation
+            .outcome
+            .is_some_and(|ordinal| self.drawn.contains(&(shot_key(explanation.shot), ordinal)));
+        self.admit(explanation, vocabulary, now_s, drawn)
+    }
+
+    /// [`Self::receive`] an explanation whose impact is already drawn: the authority's own, which
+    /// draws every impact of its shells.
+    pub(crate) fn receive_drawn(
+        &mut self,
+        explanation: ShotExplanation,
+        vocabulary: &ShotVocabulary,
+        now_s: f64,
+    ) -> Receipt {
+        self.admit(explanation, vocabulary, now_s, true)
+    }
+
+    fn admit(
+        &mut self,
+        explanation: ShotExplanation,
+        vocabulary: &ShotVocabulary,
+        now_s: f64,
+        drawn: bool,
     ) -> Receipt {
         let key = ExplanationKey::of(&explanation);
         if self.stored.contains_key(&key) || self.evicted.is_some_and(|floor| key <= floor) {
@@ -186,11 +204,7 @@ impl ShotExplanations {
                 return Receipt::Refused;
             }
         };
-        let presence = if self
-            .drawn
-            .get(&key.shot())
-            .is_some_and(|drawn| drawn.covers(explanation.contact_tick))
-        {
+        let presence = if drawn {
             ImpactPresence::Presented
         } else {
             ImpactPresence::Pending
@@ -205,11 +219,29 @@ impl ShotExplanations {
             },
         );
         while self.stored.len() > RETAINED {
-            if let Some((evicted, _)) = self.stored.pop_first() {
+            if let Some((evicted, stored)) = self.stored.pop_first() {
                 self.evicted = self.evicted.max(Some(evicted));
+                if now_s - stored.arrived_s < READ_WINDOW_S {
+                    self.evict_early();
+                }
             }
         }
-        Receipt::Stored
+        if self.stored.contains_key(&key) {
+            Receipt::Stored
+        } else {
+            Receipt::Ignored
+        }
+    }
+
+    /// Count an explanation dropped while a view may still read it; log the first.
+    fn evict_early(&mut self) {
+        if self.evicted_early == 0 {
+            warn!(
+                "pen cam: an explanation was dropped within {READ_WINDOW_S} s of its arrival, \
+                 more than {RETAINED} arriving in that window; further drops are counted"
+            );
+        }
+        self.evicted_early += 1;
     }
 
     /// Count a refusal; log the first.
@@ -222,21 +254,19 @@ impl ShotExplanations {
         self.refused += 1;
     }
 
-    /// This client drew an authority outcome of `shot` on `tick`: a bounce, or (`ended`) the end
-    /// of its flight. Every waiting explanation of the shot it covers is presented.
-    pub(crate) fn drew(&mut self, shot: ShotId, tick: u32, ended: bool) {
+    /// This client drew `shot`'s authority outcome `ordinal`: the waiting explanation whose impact
+    /// it is, if one has arrived, is presented; one arriving later is stored presented. Another
+    /// encounter of the shot waits for its own outcome.
+    pub(crate) fn drew(&mut self, shot: ShotId, ordinal: u32) {
         let key = shot_key(shot);
-        let drawn = self.drawn.entry(key).or_default();
-        drawn.tick = drawn.tick.max(tick);
-        drawn.ended |= ended;
-        let drawn = *drawn;
+        self.drawn.insert((key, ordinal));
         while self.drawn.len() > RETAINED {
             self.drawn.pop_first();
         }
         for stored in self.stored.values_mut() {
             if stored.presence == ImpactPresence::Pending
+                && stored.explanation.outcome == Some(ordinal)
                 && ExplanationKey::of(&stored.explanation).shot() == key
-                && drawn.covers(stored.explanation.contact_tick)
             {
                 stored.presence = ImpactPresence::Presented;
             }
@@ -335,9 +365,8 @@ fn publish_offline_shot_clock(weapon: Res<WeaponClock>, mut shot: ResMut<ShotClo
     shot.0 = weapon.0;
 }
 
-/// Build each record once and store the projection addressed to the player's combatant. The
-/// authority's own shell drew each outcome on its tick, so the shot is drawn through the record's
-/// completion.
+/// Build each record once and store the projection addressed to the player's combatant, its impact
+/// drawn: the authority's own shell drew every impact on its tick, past a perforation too.
 pub(crate) fn deliver_offline(
     mut records: MessageReader<RecordedShot>,
     vocabulary: Option<Res<ShotVocabulary>>,
@@ -365,8 +394,7 @@ pub(crate) fn deliver_offline(
             if !player.iter().any(|&player| player == combatant) {
                 continue;
             }
-            store.drew(explanation.shot, explanation.completion_tick, false);
-            store.receive(explanation, &vocabulary, now);
+            store.receive_drawn(explanation, &vocabulary, now);
         }
     }
 }

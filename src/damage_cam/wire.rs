@@ -589,6 +589,10 @@ pub(crate) struct ShotExplanation {
     /// on.
     pub contact_tick: u32,
     pub completion_tick: u32,
+    /// The ordinal of the shot's sanctioned outcome a client draws as this encounter's impact: a
+    /// bounce's sequence, or the end's count of bounces before it. `None` where no client draws it
+    /// (the shot ended, for a client, at an earlier tank).
+    pub outcome: Option<u32>,
     pub audience: Audience,
     /// The struck hull node's pose (WORLD) at contact.
     hull: Option<Pose>,
@@ -750,6 +754,7 @@ impl BuiltExplanation {
                 struck,
                 contact_tick: recorded.contact_tick,
                 completion_tick: recorded.completion_tick,
+                outcome: recorded.outcome,
                 audience: Audience::Victim,
                 hull,
                 record: encode(vocabulary, &recorded.report)?,

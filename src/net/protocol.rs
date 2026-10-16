@@ -891,7 +891,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x4d61_44a4_7971_dfbd;
+const WIRE_TYPES_HASH: u64 = 0xa0e3_ba93_4a49_58a4;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1356,7 +1356,7 @@ mod tests {
         );
         // Pins REV 33: the pen cam's `ShotExplanation` and the replicated `CombatantLife`, on the
         // lightyear 0.30.1 wire dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xda2e_94a3_2fa9_54e4;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xa75f_7de0_8dc6_0d59;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -1644,13 +1644,21 @@ mod tests {
     /// followed by the exact name and a non-identifier boundary, so `VolumeSnapshot` never matches
     /// `VolumeSnapshotSource`.
     fn is_def_line(line: &str, name: &str) -> bool {
-        ["struct ", "enum "].iter().any(|kw| {
+        header_end(line, name).is_some()
+    }
+
+    /// The byte offset in `line` just past `struct name` / `enum name`, where the type's generics,
+    /// fields or body begin: anything before it (a `pub(crate)`) is not the definition's.
+    fn header_end(line: &str, name: &str) -> Option<usize> {
+        ["struct ", "enum "].iter().find_map(|kw| {
             let needle = format!("{kw}{name}");
-            line.find(&needle).is_some_and(|idx| {
-                line[idx + needle.len()..]
+            line.find(&needle).and_then(|idx| {
+                let end = idx + needle.len();
+                line[end..]
                     .chars()
                     .next()
                     .is_none_or(|c| !c.is_alphanumeric() && c != '_')
+                    .then_some(end)
             })
         })
     }
@@ -1674,14 +1682,15 @@ mod tests {
         while start > 0 && !lines[start - 1].trim().is_empty() {
             start -= 1;
         }
-        // Forward from the header: a tuple struct paren-matches its fields to the `;` after them (a
-        // field may hold one, `[u8; 8]`), a unit struct ends at the first `;`, else brace-match the
-        // body.
+        // Forward from the type's name: a tuple struct paren-matches its fields to the `;` after
+        // them (a field may hold one, `[u8; 8]`), a unit struct ends at the first `;`, else
+        // brace-match the body.
         let region: String = lines[kw..].join("\n");
-        let semi = region.find(';');
-        let brace = region.find('{');
-        let paren = region
-            .find('(')
+        let body = header_end(lines[kw], name).expect("the header line names the type");
+        let after = |c: char| region[body..].find(c).map(|i| body + i);
+        let semi = after(';');
+        let brace = after('{');
+        let paren = after('(')
             .filter(|&p| p < brace.unwrap_or(usize::MAX) && p < semi.unwrap_or(usize::MAX));
         let end = if let Some(open) = paren {
             let mut depth = 0i32;
@@ -1732,14 +1741,39 @@ mod tests {
     }
 
     /// A tuple struct's definition runs to the `;` after its fields, not to the first `;` inside
-    /// them.
+    /// them, and a restricted visibility's parens are not its fields: each definition ends where
+    /// its own fields or body do, never in the next item.
     #[test]
     fn a_tuple_struct_definition_spans_its_fields() {
-        let source = "\n#[derive(Serialize)]\nstruct Rotation([u8; 8]);\nstruct Next;\n";
-        assert_eq!(
-            normalized_type_def(source, "Rotation"),
-            "#[derive(Serialize)]structRotation([u8;8]);"
-        );
+        for (source, name, def) in [
+            (
+                "\n#[derive(Serialize)]\nstruct Rotation([u8; 8]);\nstruct Next;\n",
+                "Rotation",
+                "#[derive(Serialize)]structRotation([u8;8]);",
+            ),
+            (
+                "\n#[derive(Serialize)]\npub(crate) struct X([u8; 8]);\nstruct Next;\n",
+                "X",
+                "#[derive(Serialize)]pub(crate)structX([u8;8]);",
+            ),
+            (
+                "\n#[derive(Serialize)]\npub(crate) struct Unit;\nfn next(a: u8) {}\n",
+                "Unit",
+                "#[derive(Serialize)]pub(crate)structUnit;",
+            ),
+            (
+                "\n#[derive(Serialize)]\npub(super) struct Id(pub u32);\nstruct Next { a: u8 }\n",
+                "Id",
+                "#[derive(Serialize)]pub(super)structId(pubu32);",
+            ),
+            (
+                "\n#[derive(Serialize)]\npub(crate) struct Braced {\n    a: [u8; 2],\n}\nstruct Next(u8);\n",
+                "Braced",
+                "#[derive(Serialize)]pub(crate)structBraced{a:[u8;2],}",
+            ),
+        ] {
+            assert_eq!(normalized_type_def(source, name), def, "{name}");
+        }
     }
 
     /// FNV-1a over every own wire type's normalized definition, each terminated by `\n` (so no two

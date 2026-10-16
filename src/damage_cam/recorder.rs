@@ -59,7 +59,8 @@ const CLEAR_MARGIN: f32 = 0.5;
 /// A finished record: the tank the round struck and the life of its combatant it is (`None` for a
 /// tank no match spawned), who fired it, which of the round's encounters with the tank it is (0 the
 /// first), the [`ShotClock`] ticks the encounter opened and finished on (0 where no clock runs), the
-/// struck hull's pose (WORLD) when the encounter opened, and the report.
+/// authority outcome a replica draws as the encounter's impact ([`sanctioned_outcome`]), the struck
+/// hull's pose (WORLD) when the encounter opened, and the report.
 #[derive(Message)]
 pub(crate) struct RecordedShot {
     #[cfg_attr(
@@ -83,6 +84,7 @@ pub(crate) struct RecordedShot {
     pub encounter: u32,
     pub contact_tick: u32,
     pub completion_tick: u32,
+    pub outcome: Option<u32>,
     pub hull: Option<(Vec3, Quat)>,
     pub report: PenetrationReport,
 }
@@ -526,9 +528,34 @@ fn recorded(
         encounter: struck.encounter,
         contact_tick: struck.contact_tick,
         completion_tick: world.get_resource::<ShotClock>().map_or(0, |clock| clock.0),
+        outcome: sanctioned_outcome(log.marks, struck.from),
         hull,
         report,
     })
+}
+
+/// The ordinal, among a shot's sanctioned outcomes, of the one a replica draws as the impact of the
+/// encounter whose first mark is `marks[from]`: bounces take 0, 1, … in order
+/// ([`ShellRicochet::sequence`]) and the end takes the count of bounces before it
+/// ([`ShellTerminal::after_bounces`]). The authority sanctions each bounce before its first crossing
+/// and that crossing as the end, nothing after it, so an encounter opened past the first crossing
+/// (the round perforated one tank and went on into another, or back into the same one) has none:
+/// no replica draws its impact.
+///
+/// [`ShellRicochet::sequence`]: crate::ballistics::ShellRicochet
+/// [`ShellTerminal::after_bounces`]: crate::ballistics::ShellTerminal
+fn sanctioned_outcome(marks: &[ArmourMark], from: usize) -> Option<u32> {
+    let before = marks.get(..from)?;
+    if !before
+        .iter()
+        .all(|mark| matches!(mark, ArmourMark::Bounce { .. }))
+    {
+        return None;
+    }
+    match marks.get(from)? {
+        ArmourMark::Bounce { .. } | ArmourMark::Crossing { .. } => u32::try_from(from).ok(),
+        ArmourMark::Failed => None,
+    }
 }
 
 /// Whether `point` (WORLD) is clear of `tank`'s colliders by [`CLEAR_MARGIN`]; a tank with none

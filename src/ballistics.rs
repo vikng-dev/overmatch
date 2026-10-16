@@ -1243,14 +1243,14 @@ impl TryFrom<Verdict> for TerminalVerdict {
     }
 }
 
-/// A replica drew an authority outcome of its keyed shell `shot`: a bounce the authority resolved on
-/// `tick`, or (`ended`) the flight's end it resolved on `tick`. Raised beside the outcome's
-/// [`Impact`], which names no shot.
+/// A replica drew the authority outcome `ordinal` of its keyed shell `shot`: its bounce of that
+/// [`ShellRicochet::sequence`], or its end, whose ordinal is its [`ShellTerminal::after_bounces`].
+/// The ordinals of one shot's outcomes are distinct, so each names the one impact it drew. Raised
+/// beside the outcome's [`Impact`], which names no shot.
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct AuthorityOutcomeDrawn {
     pub(crate) shot: ShotId,
-    pub(crate) tick: u32,
-    pub(crate) ended: bool,
+    pub(crate) ordinal: u32,
 }
 
 /// A local shell impact consumed by simulation and view observers.
@@ -2008,8 +2008,7 @@ fn resolve_held_shell(
             });
             commands.trigger(AuthorityOutcomeDrawn {
                 shot: shot_id,
-                tick: segment.bounce.bounce_tick,
-                ended: false,
+                ordinal: segment.bounce.sequence,
             });
             if index == 0 {
                 crate::shot_trace::record(shot_trace, "hold", now, shot_id, || {
@@ -2210,8 +2209,7 @@ fn consume_overdue_sanctioned_outcome(
                 });
                 commands.trigger(AuthorityOutcomeDrawn {
                     shot: shot.0,
-                    tick: segment.bounce.bounce_tick,
-                    ended: false,
+                    ordinal: segment.bounce.sequence,
                 });
                 let late = elapsed_ticks(present, segment.bounce.bounce_tick).unwrap_or_default();
                 crate::shot_trace::record(
@@ -2302,8 +2300,7 @@ fn finish_at_sanctioned_terminal(
     if let Some(shot) = shell.shot {
         commands.trigger(AuthorityOutcomeDrawn {
             shot: shot.0,
-            tick: terminal.impact_tick,
-            ended: true,
+            ordinal: terminal.after_bounces,
         });
     }
 }
@@ -2911,8 +2908,7 @@ fn resolve_replica_armor_contact(
         if let Some(shot) = shot {
             commands.trigger(AuthorityOutcomeDrawn {
                 shot: shot.0,
-                tick: bounce.bounce_tick,
-                ended: false,
+                ordinal: bounce.sequence,
             });
             crate::shot_trace::record(
                 shot_trace,
