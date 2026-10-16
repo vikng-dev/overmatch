@@ -166,7 +166,6 @@ impl Material for GlowMaterial {
 pub struct OutlineParams {
     pub color: Vec4,
     pub center: Vec4,
-    pub side: Vec4,
 }
 
 /// A mesh's silhouette as an inverted hull: the mesh pushed out on screen from its centre by a
@@ -186,19 +185,12 @@ impl OutlineMaterial {
             params: OutlineParams {
                 color: Vec4::new(color.red, color.green, color.blue, 1.0),
                 center: center.extend(width_px),
-                side: Vec4::ZERO,
             },
         }
     }
 
     pub fn set_fade(&mut self, fade: f32) {
         self.params.color.w = fade;
-    }
-
-    /// Draw on one side of the split corner alone: 1 the record's camera, 2 the comparison's (the
-    /// look material's lane, [`super::look::Side`]).
-    pub fn set_side(&mut self, lane: f32) {
-        self.params.side.x = lane;
     }
 }
 

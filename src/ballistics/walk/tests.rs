@@ -2428,6 +2428,49 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
     }
 }
 
+/// κ: a body's strength is `spend × (v_exit / v_entry)²` scaled by the factor of its last layer
+/// before the exit over the reference: unscaled to the bit where that layer is the reference, in
+/// proportion for any other, and a softer layer the body began with does not lower it. Fixture
+/// stacks, 50 mm plates head-on; 800 is a fixture factor.
+#[test]
+fn the_strength_scales_by_the_exit_layers_factor_over_the_reference() {
+    let rha = SubstanceId::fixture(REFERENCE_FACTOR);
+    let mild = SubstanceId::fixture(800.0);
+    let strength_of = |cone: &SpallSource| {
+        let ratio = cone.exit_speed / cone.entry_speed;
+        (cone.spend * ratio * ratio, cone.strength())
+    };
+    for (substance, factor) in [(rha, REFERENCE_FACTOR), (mild, 800.0)] {
+        let table = substance_table(&[(1, substance, factor)]);
+        let cones = spall_through(&table, &[Slab::at(1, 0, 0.5, -AXIS, 0.05)]);
+        let [cone] = cones.as_slice() else {
+            panic!("one cone: {cones:?}");
+        };
+        assert_eq!(cone.rear_factor, factor);
+        let (bare, strength) = strength_of(cone);
+        assert!(bare > 0.0);
+        if factor == REFERENCE_FACTOR {
+            assert_eq!(strength.to_bits(), bare.to_bits(), "κ = 1 keeps the bits");
+        } else {
+            assert!((strength / bare - factor / REFERENCE_FACTOR).abs() < 1.0e-6);
+        }
+    }
+    let table = substance_table(&[(1, mild, 800.0), (2, rha, REFERENCE_FACTOR)]);
+    let cones = spall_through(
+        &table,
+        &[
+            Slab::at(1, 0, 0.5, -AXIS, 0.05),
+            Slab::at(2, 1, 0.55, -AXIS, 0.05),
+        ],
+    );
+    let [cone] = cones.as_slice() else {
+        panic!("a step up continues the body: {cones:?}");
+    };
+    assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
+    let (bare, strength) = strength_of(cone);
+    assert_eq!(strength.to_bits(), bare.to_bits());
+}
+
 /// Only a step into softer material or air throws; a step into harder or equal material continues
 /// the body, so the cone at the next softer step carries the spend of everything since the last
 /// throw. Fixture stacks, 50 mm plates in contact, head-on.

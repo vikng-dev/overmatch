@@ -13,10 +13,8 @@
 //! hit and a left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays,
 //! `Space` pauses, `←`/`→` scrub, `[`/`]`
 //! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
-//! the slice between orthographic and perspective, `L` toggles each spall cone's axis line, `M`
-//! toggles reduce motion, `T` cycles the field's footprint ([`Footprint`], under evaluation) and `S`
-//! splits the corner between the record's field law and the comparison set's (`assets/dev/pen_cam/
-//! simple/`), which captures set through [`Settings::from_env`].
+//! the slice between orthographic and perspective, `L` toggles each spall cone's axis line and `M`
+//! toggles reduce motion; captures set the expanded corner through [`Settings::from_env`].
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -54,8 +52,6 @@ use super::{PenetrationReport, ShotVerdict};
 
 /// The records, relative to the asset root.
 const RECORD_DIR: &str = "dev/pen_cam";
-/// The same scenarios recorded under the comparison field law (`ballistics::pen_cam`), by stem.
-const COMPARISON_DIR: &str = "dev/pen_cam/simple";
 
 /// One scenario of the demo: the records it fires, each at its offset (s) from the first.
 pub struct Entry {
@@ -173,14 +169,6 @@ pub struct Record {
     pub knockout: Option<crate::damage::KnockoutReason>,
     /// Who fired it, as the victim's copy names them.
     pub killer: killcam::Killer,
-    /// The same shot recorded under the comparison field law, where that set holds it.
-    pub comparison: Option<Comparison>,
-}
-
-/// A record of the comparison set: the same shot, its spall cones thrown under another law.
-pub struct Comparison {
-    pub report: PenetrationReport,
-    pub plan: Plan,
 }
 
 impl Library {
@@ -227,22 +215,12 @@ impl Library {
                 let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
                 let knockout = killcam::knockout(&report);
                 let killer = killcam::Killer::of(report.shooter.as_ref(), &report.round);
-                let path = crate::assets::asset_root()
-                    .join(COMPARISON_DIR)
-                    .join(format!("{stem}.ron"));
-                let comparison = path.exists().then(|| {
-                    let report = PenetrationReport::load(&path)
-                        .unwrap_or_else(|err| panic!("pen cam comparison record: {err}"));
-                    let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
-                    Comparison { report, plan }
-                });
                 Record {
                     stem,
                     report,
                     plan,
                     knockout,
                     killer,
-                    comparison,
                 }
             })
             .collect();
@@ -265,31 +243,6 @@ pub enum CornerSetting {
     Off,
 }
 
-/// The spall field's footprint on the surfaces it meets, in the base look (dev-only, `T` or
-/// `PEN_CAM_FOOTPRINT`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Footprint {
-    /// (the default) None.
-    Off,
-    /// A line where the cone's boundary crosses each surface.
-    Outline,
-    /// A hatch over each surface inside the cone.
-    Hatch,
-}
-
-impl Footprint {
-    pub const ALL: [Self; 3] = [Self::Off, Self::Outline, Self::Hatch];
-
-    /// The option's name, ASCII.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Outline => "outline",
-            Self::Hatch => "hatch",
-        }
-    }
-}
-
 /// How the stage draws the glass: the corner's base look, or, on the world where the corner's masks
 /// do not reach (the kill cam's lesson), the stage's own additive rim glass.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -306,9 +259,6 @@ pub enum GlassLook {
 pub struct Settings {
     pub corner: CornerSetting,
     pub reduce_motion: bool,
-    pub footprint: Footprint,
-    /// The corner split: the record's field law on the left, the comparison set's on the right.
-    pub split: bool,
     pub slice_ortho: bool,
     pub expanded: bool,
     pub axis_line: bool,
@@ -319,8 +269,6 @@ impl Default for Settings {
         Self {
             corner: CornerSetting::All,
             reduce_motion: false,
-            footprint: Footprint::Off,
-            split: false,
             slice_ortho: true,
             expanded: false,
             axis_line: false,
@@ -329,20 +277,10 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The defaults with the capture environment applied: `PEN_CAM_FOOTPRINT` = `outline`, `hatch`
-    /// or `off`, `PEN_CAM_EXPANDED=1`, `PEN_CAM_SPLIT=1`.
+    /// The defaults with the capture environment applied: `PEN_CAM_EXPANDED=1`.
     fn from_env() -> Self {
         let mut settings = Self::default();
-        let var = |name: &str| std::env::var(name).unwrap_or_default().to_ascii_lowercase();
-        let footprint = var("PEN_CAM_FOOTPRINT");
-        if let Some(style) = Footprint::ALL
-            .into_iter()
-            .find(|style| style.label() == footprint)
-        {
-            settings.footprint = style;
-        }
-        settings.expanded = var("PEN_CAM_EXPANDED") == "1";
-        settings.split = var("PEN_CAM_SPLIT") == "1";
+        settings.expanded = std::env::var("PEN_CAM_EXPANDED").is_ok_and(|value| value == "1");
         settings
     }
 }
@@ -726,16 +664,6 @@ fn controls(
     }
     if keys.just_pressed(KeyCode::KeyM) {
         settings.reduce_motion = !settings.reduce_motion;
-    }
-    if keys.just_pressed(KeyCode::KeyS) {
-        settings.split = !settings.split;
-    }
-    if keys.just_pressed(KeyCode::KeyT) {
-        let at = Footprint::ALL
-            .iter()
-            .position(|style| *style == settings.footprint)
-            .unwrap_or(0);
-        settings.footprint = Footprint::ALL[(at + 1) % Footprint::ALL.len()];
     }
     if keys.just_pressed(KeyCode::KeyO) {
         settings.slice_ortho = !settings.slice_ortho;

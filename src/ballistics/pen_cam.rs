@@ -8,9 +8,6 @@
 //! and fails when a checked-in file differs, so a physics change refreshes them deliberately:
 //! `PEN_CAM_BLESS=1 cargo test --lib pen_cam` rewrites them, and the diff is the review.
 //!
-//! A second set, [`COMPARISON_DIR`], records the same scenarios under the spall cone shape its own
-//! `spall_cone.ron` holds ([`spall_cone::SpallLaw`]): the demo draws it beside the shipped law's.
-//!
 //! The class-invariant tests at the end fire at generic fixture plates, not at the bound tank.
 
 use std::time::Duration;
@@ -34,9 +31,6 @@ use std::collections::BTreeMap;
 /// The scenario list and its records, relative to the asset root.
 const SCENARIO_DIR: &str = "dev/pen_cam";
 const SCENARIO_LIST: &str = "scenarios.ron";
-/// The comparison set: the same scenarios recorded under the cone shape its [`LAW_FILE`] holds.
-const COMPARISON_DIR: &str = "dev/pen_cam/simple";
-const LAW_FILE: &str = "spall_cone.ron";
 
 /// Fixed-step length the march is driven at (s), as the goldens drive it.
 const STEP: Duration = Duration::from_millis(16);
@@ -132,22 +126,16 @@ fn scenario_world_under(scenario: &Scenario, law: Option<&spall_cone::ConeShape>
 
 /// Fire `scenario` at the bound tank and read back its record.
 fn record_scenario(scenario: &Scenario) -> PenetrationReport {
-    record_scenario_under(scenario, None)
+    record_timed(scenario, None).0
 }
 
-/// [`record_scenario`] under `law`'s cones, the shipped shape's when `None`.
-fn record_scenario_under(
-    scenario: &Scenario,
-    law: Option<&spall_cone::ConeShape>,
-) -> PenetrationReport {
-    record_timed(scenario, law).0
-}
-
-/// [`record_scenario_under`], and the wall time (s) its march steps took.
+/// [`record_scenario`] under `law`'s cones (the shipped shape's when `None`), the wall time (s) its
+/// march steps took, and the cones its body exits did not throw, below the HP quantum
+/// ([`SpallMarks::gated`]).
 fn record_timed(
     scenario: &Scenario,
     law: Option<&spall_cone::ConeShape>,
-) -> (PenetrationReport, f64) {
+) -> (PenetrationReport, f64, usize) {
     let mut app = scenario_world_under(scenario, law);
     let tank = app.world().resource::<ProbeTank>().0;
     let spec = app
@@ -202,9 +190,13 @@ fn record_timed(
         round: weapon.round.clone(),
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
     };
+    let gated = app
+        .world()
+        .get::<SpallMarks>(shell)
+        .map_or(0, |marks| marks.gated);
     let report = record::report(app.world_mut(), &struck, shell, &facts)
         .unwrap_or_else(|| panic!("{}: the shot opens no pen cam", scenario.name));
-    (report, marched)
+    (report, marched, gated)
 }
 
 /// A record is stated in the struck hull's frame: one shot fired at the bound tank at two hull
@@ -521,41 +513,18 @@ fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
     Ok(spread)
 }
 
-/// The comparison set's cone shape, from its own [`LAW_FILE`].
-fn comparison_law() -> spall_cone::ConeShape {
-    let path = crate::assets::asset_root()
-        .join(COMPARISON_DIR)
-        .join(LAW_FILE);
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    spall_cone::ConeShape::from_ron(&text)
-        .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
-}
-
 /// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
 /// path, and the checked-in record is what the march records today: every discrete fact exact,
 /// every float within [`RECORD_REL_TOLERANCE`] or [`RECORD_ABS_TOLERANCE`]. No record is left
 /// without a scenario.
 #[test]
 fn the_pen_cam_scenarios_are_current() {
-    check_records(SCENARIO_DIR, None);
-}
-
-/// [`the_pen_cam_scenarios_are_current`] for the comparison set, under its own cone shape.
-#[test]
-fn the_comparison_records_are_current() {
-    check_records(COMPARISON_DIR, Some(&comparison_law()));
-}
-
-/// Every scenario of the list recorded under `law` into `dir`, checked against its file there (or
-/// written, with `PEN_CAM_BLESS`).
-fn check_records(dir: &str, law: Option<&spall_cone::ConeShape>) {
-    let dir = crate::assets::asset_root().join(dir);
+    let dir = crate::assets::asset_root().join(SCENARIO_DIR);
     let bless = std::env::var_os("PEN_CAM_BLESS").is_some();
     let list = scenarios();
     let mut stale = Vec::new();
     for scenario in &list {
-        let report = record_scenario_under(scenario, law);
+        let report = record_scenario(scenario);
         assert_eq!(
             report.impact.verdict, scenario.verdict,
             "PHYSICS CHANGED — {} earns a different verdict; diff consciously before re-recording",
@@ -592,7 +561,7 @@ fn check_records(dir: &str, law: Option<&spall_cone::ConeShape>) {
     let mut orphans: Vec<String> = std::fs::read_dir(&dir)
         .expect("the scenario directory exists")
         .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST && file != LAW_FILE)
+        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST)
         .filter(|file| !list.iter().any(|s| format!("{}.ron", s.name) == *file))
         .collect();
     orphans.sort();
@@ -604,53 +573,59 @@ fn check_records(dir: &str, law: Option<&spall_cone::ConeShape>) {
     );
 }
 
-/// The server cost of one cone throw under each law (ignored; run it on demand). Each penetrating
-/// scenario's march steps are timed under the shipped shape, the comparison shape, and each of them
-/// cut to one direction; the throw's cost is the difference over the cones thrown, scaled from
-/// `N − 1` to `N` directions. The best of [`COST_RUNS`] runs is taken.
+/// The server cost of one cone throw under the shipped law at each of [`COST_DIRECTIONS`]
+/// (ignored; run it on demand), and the cones the HP quantum kept from being thrown. Each
+/// penetrating scenario's march steps are timed under the shipped shape at `N` directions and at
+/// one; the throw's cost is the difference over the cones thrown, scaled from `N − 1` to `N`
+/// directions. The best of [`COST_RUNS`] runs is taken.
 /// `cargo test --release --lib --features dev_tools pen_cam::spall_law_cost -- --ignored --nocapture`
 #[test]
 #[ignore = "a measurement, run on demand"]
 fn spall_law_cost() {
-    let shipped = spall_cone::ConeShape::shipped().clone();
-    let comparison = comparison_law();
-    let one = |shape: &spall_cone::ConeShape| {
-        let text = format!(
-            "(half_angle_deg: ({}, Tuned(\"cost probe\")), axis: (RearNormalBisector, Tuned(\"cost \
-             probe\")), directions: (1, Resolution(\"cost probe\")), profile: (Flat, Tuned(\"cost \
-             probe\")), passage: ({:?}, Tuned(\"cost probe\")))",
-            shape.half_angle().to_degrees(),
-            shape.passage()
-        );
-        spall_cone::ConeShape::from_ron(&text).expect("the probe shape parses")
-    };
     let best = |scenario: &Scenario, law: &spall_cone::ConeShape| {
         (0..COST_RUNS)
             .map(|_| {
-                let (report, marched) = record_timed(scenario, Some(law));
-                (marched, report.spall.len())
+                let (report, marched, gated) = record_timed(scenario, Some(law));
+                (marched, report.spall.len(), gated)
             })
-            .fold((f64::INFINITY, 0), |(t, _), (s, cones)| (t.min(s), cones))
+            .fold((f64::INFINITY, 0, 0), |(t, ..), (s, cones, gated)| {
+                (t.min(s), cones, gated)
+            })
     };
-    for (name, law) in [("shipped", &shipped), ("comparison", &comparison)] {
-        let base = one(law);
+    let one = spall_cone::ConeShape::shipped_at(1);
+    let penetrating: Vec<Scenario> = scenarios()
+        .into_iter()
+        .filter(|s| s.verdict == ShotVerdict::Penetration)
+        .collect();
+    for directions in COST_DIRECTIONS {
+        let law = spall_cone::ConeShape::shipped_at(directions);
         let (mut extra, mut cones) = (0.0, 0);
-        for scenario in scenarios()
-            .iter()
-            .filter(|s| s.verdict == ShotVerdict::Penetration)
-        {
-            let (full, thrown) = best(scenario, law);
-            let (single, _) = best(scenario, &base);
+        for scenario in &penetrating {
+            let (full, thrown, _) = best(scenario, &law);
+            let (single, ..) = best(scenario, &one);
             extra += full - single;
             cones += thrown;
         }
-        let n = law.directions_count() as f64;
+        let n = directions as f64;
         println!(
-            "{name}: N = {n}, {cones} cones, {:.3} ms per throw",
+            "N = {directions}: {cones} cones, {:.3} ms per throw",
             1000.0 * extra / cones.max(1) as f64 * n / (n - 1.0).max(1.0)
         );
     }
+    let (mut thrown, mut gated) = (0, 0);
+    for scenario in &scenarios() {
+        let (report, _, kept) = record_timed(scenario, None);
+        thrown += report.spall.len();
+        gated += kept;
+    }
+    println!(
+        "across {} scenarios: {thrown} cones thrown, {gated} below the HP quantum not thrown",
+        scenarios().len()
+    );
 }
+
+/// The direction counts the throw's cost is measured at.
+const COST_DIRECTIONS: [usize; 4] = [24, 64, 128, 256];
 
 /// The runs a cost is the best of.
 const COST_RUNS: usize = 9;
@@ -716,9 +691,9 @@ enum Kind {
     Main,
     External,
     /// A box with this HP pool, of a soft substance.
-    Box(f32),
+    Box(u32),
     /// A box with this HP pool, of steel: an exposed component a round can glance off.
-    SteelBox(f32),
+    SteelBox(u32),
 }
 
 /// Reference-mm per metre: steel, and the box's soft substance. Fixture data.
@@ -926,7 +901,7 @@ fn perforating_a_skirt_and_stopping_in_the_hull_is_a_non_pen() {
 #[test]
 fn a_round_stopped_inside_a_component_rests_in_it() {
     let report = fixture_shot(
-        &[plate("component", THICK, 0.0, Kind::SteelBox(1000.0))],
+        &[plate("component", THICK, 0.0, Kind::SteelBox(10_000))],
         LINE_FROM,
     );
     assert_eq!(
@@ -987,7 +962,7 @@ fn a_penetration_with_no_dose_is_a_penetration() {
                 "box",
                 Vec3::splat(0.5),
                 Vec3::new(3.0, 2.0, -1.0),
-                Kind::Box(3.0),
+                Kind::Box(30),
             ),
         ],
         LINE_FROM,
@@ -995,8 +970,8 @@ fn a_penetration_with_no_dose_is_a_penetration() {
     assert_eq!(report.impact.verdict, ShotVerdict::Penetration);
     assert!(report.doses.is_empty(), "{:?}", report.doses);
     assert_eq!(report.components.len(), 1, "the box is recorded");
-    assert_eq!(report.components[0].count, 3.0);
-    assert_eq!(report.components[0].hp, 3.0, "whole at the shot");
+    assert_eq!(report.components[0].count, 30);
+    assert_eq!(report.components[0].hp, 30, "whole at the shot");
 }
 
 /// A box on the line takes the line's dose and the spall cone's, and the record names both.
@@ -1009,7 +984,7 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
                 "box",
                 Vec3::splat(0.5),
                 Vec3::new(0.0, 2.0, -1.0),
-                Kind::Box(1000.0),
+                Kind::Box(10_000),
             ),
         ],
         LINE_FROM,
@@ -1044,7 +1019,7 @@ fn an_exposed_component_dosed_with_no_armour_crossed_is_damaged() {
             "box",
             Vec3::splat(0.5),
             Vec3::new(0.0, 2.0, 0.0),
-            Kind::Box(1000.0),
+            Kind::Box(10_000),
         )],
         LINE_FROM,
     );
@@ -1063,7 +1038,7 @@ fn a_component_clipped_then_stopped_in_armour_is_damaged() {
                 "barrel",
                 Vec3::splat(0.2),
                 Vec3::new(0.0, 2.0, 0.5),
-                Kind::Box(1000.0),
+                Kind::Box(10_000),
             ),
             plate("mantlet", THICK, 0.0, Kind::Main),
         ],
@@ -1086,7 +1061,7 @@ fn a_bounce_that_shocks_a_component_is_damaged_not_a_ricochet() {
         -75.0_f32.to_radians().cos(),
     );
     let report = fixture_shot_along(
-        &[plate("component", 0.10, 0.0, Kind::SteelBox(1000.0))],
+        &[plate("component", 0.10, 0.0, Kind::SteelBox(10_000))],
         Vec3::new(-1.0, 2.0, 0.6),
         graze,
     );

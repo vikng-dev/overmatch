@@ -200,12 +200,15 @@ pub struct BoxPlan {
     /// The low and high heights (m, the record frame's up, tank-up) of its real shape; `None` with
     /// `center`.
     pub heights: Option<(f32, f32)>,
-    /// Its hit point pool (ref-mm): the dose that disables it whole.
-    pub count: f32,
-    /// Its hit points at the shot (ref-mm).
-    pub hp: f32,
+    /// Its HP pool (HP points): the points that disable it whole.
+    pub count: u32,
+    /// Its HP points at the shot.
+    pub hp: u32,
+    /// The line's and the fields' dose to it (ref-mm).
     pub line: f32,
     pub field: f32,
+    /// The HP points the shot took from it.
+    pub lost_hp: u32,
     /// When the picture reaches it: the arc where the record has the line enter it, else the first
     /// cone that dosed it, else (a synthetic clip that names neither) the contact.
     pub reached_at: Option<Reach>,
@@ -231,16 +234,22 @@ impl BoxPlan {
         self.line + self.field
     }
 
+    /// The shot took HP from it: what the shooter's views draw on the state scale.
+    pub fn struck(&self) -> bool {
+        self.lost_hp > 0
+    }
+
     /// The share of its whole pool gone once the shot has dosed it, 1 when lost; the victim's own
     /// view of its tank, prior damage included.
     pub fn pool_lost(&self) -> f32 {
         if self.lost {
             return 1.0;
         }
-        if self.count <= 0.0 {
+        if self.count == 0 {
             return 0.0;
         }
-        (1.0 - (self.hp - self.dose()).max(0.0) / self.count).clamp(0.0, 1.0)
+        let left = self.hp.saturating_sub(self.lost_hp);
+        (1.0 - left as f32 / self.count as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -287,7 +296,8 @@ impl Plan {
             .iter()
             .map(|component| {
                 let dose = report.doses.iter().find(|d| d.volume == component.name);
-                let (line_dose, field_dose) = dose.map_or((0.0, 0.0), |d| (d.line, d.field));
+                let (line_dose, field_dose, lost_hp) =
+                    dose.map_or((0.0, 0.0, 0), |d| (d.line, d.field, d.lost));
                 let shape = shapes.get(&component.name);
                 let center = shape.map(|shape| shape.center());
                 let heights = shape.map(|shape| {
@@ -317,7 +327,7 @@ impl Plan {
                 });
                 let reached_at = (line_dose + field_dose > 0.0)
                     .then(|| by_line.or(by_cone).unwrap_or(Reach::Line(contact_arc)));
-                let lost_before = component.count > 0.0 && component.hp <= 0.0;
+                let lost_before = component.count > 0 && component.hp == 0;
                 BoxPlan {
                     name: component.name.clone(),
                     role: component.role,
@@ -327,6 +337,7 @@ impl Plan {
                     hp: component.hp,
                     line: line_dose,
                     field: field_dose,
+                    lost_hp,
                     reached_at,
                     lost: lost_before
                         || report.consequences.iter().any(|c| {
@@ -506,25 +517,15 @@ mod tests {
         PenetrationReport::load(&path).unwrap()
     }
 
-    /// Every record of the scenario set and of the comparison set beside it (`simple/<stem>`).
     fn records() -> Vec<(String, PenetrationReport)> {
-        let root = crate::assets::asset_root().join("dev/pen_cam");
-        let mut out: Vec<(String, PenetrationReport)> = ["", "simple/"]
-            .into_iter()
-            .flat_map(|set| {
-                std::fs::read_dir(root.join(set))
-                    .unwrap()
-                    .filter_map(move |entry| {
-                        let path = entry.ok()?.path();
-                        let stem = path.file_stem()?.to_str()?.to_owned();
-                        let record = path.extension()? == "ron"
-                            && !["scenarios", "spall_cone"].contains(&stem.as_str());
-                        record.then(|| format!("{set}{stem}"))
-                    })
-            })
-            .map(|name| {
-                let report = record(&name);
-                (name, report)
+        let dir = crate::assets::asset_root().join("dev/pen_cam");
+        let mut out: Vec<(String, PenetrationReport)> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                let stem = path.file_stem()?.to_str()?.to_owned();
+                (path.extension()? == "ron" && stem != "scenarios")
+                    .then(|| (stem.clone(), record(&stem)))
             })
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));

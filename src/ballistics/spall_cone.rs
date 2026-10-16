@@ -5,11 +5,12 @@
 //! applies it is `throw_spall_cone` in the parent module, and a world may throw another shape
 //! ([`SpallLaw`]).
 //!
-//! # Profiles
+//! # Profiles and passages
 //!
-//! [`Profile::Linear`] is the law of §5: direction `k` carries `S·f_k` with `f_k` below.
-//! [`Profile::Flat`] carries `S/2` along every direction: the same emitted total, spread uniformly
-//! over the cone's solid angle.
+//! The shipped law is [`Profile::Flat`] and [`Passage::FirstSolid`] (design doc §5); the others are
+//! kept as data-selectable dials (playtest fork F6). [`Profile::Flat`] carries `S/2` along every
+//! direction; [`Profile::Linear`] carries `S·f_k` with `f_k` below, the same emitted total
+//! weighted toward the axis.
 //!
 //! # Directions
 //!
@@ -36,6 +37,11 @@ use crate::provenance::Sourced;
 /// data, synchronously).
 const SPALL_CONE_RON: &str = include_str!("../../assets/ballistics/spall_cone.ron");
 
+/// The share of the on-axis strength `S` a cone emits in total, `(1/N) Σ f_k`, for every profile:
+/// the midpoint rule's exact value on the linear profile, and the flat profile's weight. Every
+/// shape is validated against it at parse.
+pub(crate) const EMITTED_SHARE: f32 = 0.5;
+
 /// The golden angle `π(3 − √5)` (rad): the azimuth step between successive directions.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
@@ -59,7 +65,7 @@ pub(crate) enum Passage {
 }
 
 /// The cone shape a world's march throws, in place of the shipped one: inserted by a world that
-/// records under another law (the pen cam recorder's comparison set).
+/// measures another shape (the throw-cost probe, `pen_cam::spall_law_cost`).
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct SpallLaw(pub ConeShape);
 
@@ -164,7 +170,7 @@ impl ConeShape {
                     ),
                     profile: match profile {
                         Profile::Linear => linear(mu, cos_alpha) as f32,
-                        Profile::Flat => 0.5,
+                        Profile::Flat => EMITTED_SHARE,
                     },
                 }
             })
@@ -187,7 +193,7 @@ impl ConeShape {
             .sum::<f64>()
             / n;
         // Every stratum is finite (checked above), so the total is.
-        if (emitted - 0.5).abs() > EMISSION_TOLERANCE {
+        if (emitted - EMITTED_SHARE as f64).abs() > EMISSION_TOLERANCE {
             return Err(format!(
                 "the cone emits {emitted} of its on-axis strength, not ½, at half-angle {}°",
                 half_angle.to_degrees()
@@ -211,6 +217,21 @@ impl ConeShape {
             file.profile.0,
             file.passage.0,
         )
+    }
+
+    /// The shipped shape sampled by `directions` strata in place of its own count: a probe of how
+    /// the throw's cost scales with `N`.
+    #[cfg(test)]
+    pub(crate) fn shipped_at(directions: usize) -> Self {
+        let file: ShapeFile = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
+        Self::new(
+            file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
+            file.axis.0,
+            directions,
+            file.profile.0,
+            file.passage.0,
+        )
+        .expect("the shipped shape validates at any direction count")
     }
 
     /// The shipped shape, parsed once. Panics on a malformed file: a broken authored contract is a

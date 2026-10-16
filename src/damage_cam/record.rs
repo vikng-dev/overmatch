@@ -27,7 +27,7 @@ use super::{
 };
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing,
+    ShellPath, SpallMarks, TRANSIT_K, VolumeCrossing, hp_points,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -73,7 +73,7 @@ impl StruckTank {
         let to_hull = world.get::<GlobalTransform>(hull)?.affine().inverse();
         let to_hull_rotation = hull_rotation.inverse();
         let mut owned = world.query::<(Entity, &VolumeOf, &ComponentHealth)>();
-        let mut boxes: Vec<(Entity, f32)> = owned
+        let mut boxes: Vec<(Entity, u32)> = owned
             .iter(world)
             .filter(|(_, owner, _)| owner.tank() == tank)
             .map(|(entity, _, hp)| (entity, hp.current))
@@ -661,17 +661,18 @@ fn outcomes(
             .filter(|(volume, ..)| *volume == at_shot.entity)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|&(_, _, point)| struck.point(point));
-        doses.push(BoxDose {
-            volume: at_shot.state.name.clone(),
-            line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
-            entered: first_entry,
-        });
         let hp = at_shot.state.hp;
         let after = world
             .get::<ComponentHealth>(at_shot.entity)
             .map_or(hp, |hp| hp.current);
-        if hp > 0.0 && after <= 0.0 {
+        doses.push(BoxDose {
+            volume: at_shot.state.name.clone(),
+            line: from_line.iter().fold(0.0, |sum, (_, dose)| sum + dose),
+            field: from_field.iter().fold(0.0, |sum, (_, dose)| sum + dose),
+            lost: hp.saturating_sub(after),
+            entered: first_entry,
+        });
+        if hp > 0 && after == 0 {
             let mut landed: Vec<(f32, f32)> = from_line.into_iter().chain(from_field).collect();
             landed.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut total = 0.0;
@@ -679,7 +680,7 @@ fn outcomes(
                 .iter()
                 .find(|(_, dose)| {
                     total += dose;
-                    total >= hp
+                    hp_points(total) >= hp
                 })
                 .or(landed.last())
                 .map_or(0.0, |(t, _)| *t);

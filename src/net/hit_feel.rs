@@ -18,10 +18,6 @@ use crate::ui_font::UiFonts;
 use super::protocol::{DamageReceipt, NetCrew, health_bearing_volumes};
 
 // --- Feel dials (all in ONE place) -----------------------------------------------------------
-/// A per-volume health drop smaller than this (in HP) is treated as noise, not a hit — guards against
-/// any float churn in the replicated snapshot re-triggering a cue.
-const HIT_EPS_HP: f32 = 0.01;
-
 /// Damage-flash and marker retention per 60 Hz frame.
 const CUE_RETAIN: f32 = 0.86;
 /// Below this intensity the flash/marker is fully hidden (and its resource pinned to 0).
@@ -52,7 +48,7 @@ pub(super) struct LocalHitConfirmed {
 /// Remembered health and occupant identity. Occupant changes distinguish crew moves from damage.
 #[derive(Clone, Copy, PartialEq)]
 struct SlotMemory {
-    hp: f32,
+    hp: u32,
     occupant: Option<CrewStation>,
 }
 
@@ -152,7 +148,7 @@ fn detect_health_drops(
 
         if is_own {
             flash.0 = 1.0;
-            info!("hit-feel: OWN tank hit — worst drop {drop_hp:.1} hp → damage flash");
+            info!("hit-feel: OWN tank hit — worst drop {drop_hp} hp → damage flash");
         }
     }
 }
@@ -192,22 +188,22 @@ pub(super) fn mount_test_marker_boundary(app: &mut App) {
 }
 
 /// Scan two same-length slot snapshots for the single largest per-volume DROP, returning its index and
-/// magnitude — or `None` if nothing fell by more than [`HIT_EPS_HP`] (an all-increase snapshot, a
+/// magnitude — or `None` if nothing fell (an all-increase snapshot, a
 /// respawn's health reset, raises nothing). A slot whose OCCUPANT changed between snapshots is skipped:
 /// the HP delta there is a personnel move (a crew swap transposing two seats' HP), not damage — this is
 /// what stops a swap completion from firing a false hit cue. Pure, so the detection core is
 /// unit-testable without the live authoritative hit the spawn-point harness cannot produce. A length
 /// mismatch is the caller's to screen (it means the rig is mid-spawn); here mismatched tails are simply
 /// not compared.
-fn worst_drop(prev: &[SlotMemory], now: &[SlotMemory]) -> Option<(usize, f32)> {
-    let mut worst: Option<(usize, f32)> = None;
+fn worst_drop(prev: &[SlotMemory], now: &[SlotMemory]) -> Option<(usize, u32)> {
+    let mut worst: Option<(usize, u32)> = None;
     for (i, (before, after)) in prev.iter().zip(now).enumerate() {
         // Occupancy changed → the HP delta is a body moving between seats, not a hit.
         if before.occupant != after.occupant {
             continue;
         }
-        let drop = before.hp - after.hp;
-        if drop > HIT_EPS_HP && worst.is_none_or(|(_, w)| drop > w) {
+        let drop = before.hp.saturating_sub(after.hp);
+        if drop > 0 && worst.is_none_or(|(_, w)| drop > w) {
             worst = Some((i, drop));
         }
     }
@@ -289,14 +285,14 @@ mod tests {
 
     /// Build a snapshot of module slots (no occupant) with the given HP — the fixture for the plain
     /// HP-diff tests, where occupancy never changes so only the HP delta matters.
-    fn modules(hp: &[f32]) -> Vec<SlotMemory> {
+    fn modules(hp: &[u32]) -> Vec<SlotMemory> {
         hp.iter()
             .map(|&hp| SlotMemory { hp, occupant: None })
             .collect()
     }
 
     /// A crew seat slot with a known occupant, for the swap tests.
-    fn seat(hp: f32, occupant: CrewStation) -> SlotMemory {
+    fn seat(hp: u32, occupant: CrewStation) -> SlotMemory {
         SlotMemory {
             hp,
             occupant: Some(occupant),
@@ -331,10 +327,7 @@ mod tests {
     #[test]
     fn no_change_is_no_hit() {
         assert_eq!(
-            worst_drop(
-                &modules(&[100.0, 50.0, 25.0]),
-                &modules(&[100.0, 50.0, 25.0])
-            ),
+            worst_drop(&modules(&[100, 50, 25]), &modules(&[100, 50, 25])),
             None
         );
     }
@@ -342,32 +335,22 @@ mod tests {
     #[test]
     fn an_increase_raises_nothing() {
         // A respawn resets health UP; that must not read as a hit.
-        assert_eq!(
-            worst_drop(&modules(&[0.0, 10.0]), &modules(&[100.0, 100.0])),
-            None
-        );
+        assert_eq!(worst_drop(&modules(&[0, 10]), &modules(&[100, 100])), None);
     }
 
     #[test]
     fn picks_the_largest_drop_and_its_index() {
         // Volume 0 chips by 5, volume 2 by 40 — the worst is volume 2. Volume 1 rose and is
         // ignored.
-        let (index, drop) = worst_drop(
-            &modules(&[100.0, 30.0, 80.0]),
-            &modules(&[95.0, 60.0, 40.0]),
-        )
-        .unwrap();
+        let (index, drop) = worst_drop(&modules(&[100, 30, 80]), &modules(&[95, 60, 40])).unwrap();
         assert_eq!(index, 2);
-        assert!((drop - 40.0).abs() < 1e-4);
+        assert_eq!(drop, 40);
     }
 
     #[test]
-    fn a_sub_epsilon_chip_is_noise() {
-        // Below HIT_EPS_HP: replication float churn, not a hit.
-        assert_eq!(
-            worst_drop(&modules(&[100.0]), &modules(&[100.0 - HIT_EPS_HP / 2.0])),
-            None
-        );
+    fn a_one_point_chip_is_a_hit() {
+        // HP is whole points: the smallest drop there is, one point, is a hit.
+        assert_eq!(worst_drop(&modules(&[100]), &modules(&[99])), Some((0, 1)));
     }
 
     #[test]
@@ -375,14 +358,8 @@ mod tests {
         // Snapshot A: the gunner seat is alive+full, the loader seat is dead (0). Snapshot B, the tick
         // a backfill swap COMPLETES: the live body moved, so the seats' HP transpose AND their `home`s
         // swap with them. The full→0 seat is a personnel move, not an own-damage cue.
-        let a = [
-            seat(100.0, CrewStation::Gunner),
-            seat(0.0, CrewStation::Loader),
-        ];
-        let b = [
-            seat(0.0, CrewStation::Loader),
-            seat(100.0, CrewStation::Gunner),
-        ];
+        let a = [seat(100, CrewStation::Gunner), seat(0, CrewStation::Loader)];
+        let b = [seat(0, CrewStation::Loader), seat(100, CrewStation::Gunner)];
         assert_eq!(
             worst_drop(&a, &b),
             None,
@@ -393,10 +370,10 @@ mod tests {
     #[test]
     fn a_genuine_drop_with_unchanged_occupant_still_registers() {
         // Same occupant in the seat, HP fell: real damage, still a hit.
-        let a = [seat(100.0, CrewStation::Gunner)];
-        let b = [seat(40.0, CrewStation::Gunner)];
+        let a = [seat(100, CrewStation::Gunner)];
+        let b = [seat(40, CrewStation::Gunner)];
         let (index, drop) = worst_drop(&a, &b).unwrap();
         assert_eq!(index, 0);
-        assert!((drop - 60.0).abs() < 1e-4);
+        assert_eq!(drop, 60);
     }
 }

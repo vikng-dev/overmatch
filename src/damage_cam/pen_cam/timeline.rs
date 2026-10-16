@@ -224,27 +224,25 @@ pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
 /// The field's edge shell: near-white, a contour with no hue of its own.
 pub const FIELD_EDGE: Color = Color::srgb_u8(0xE6, 0xEE, 0xF5);
 
-/// The absolute dose scale (the alternative): log-mapped reference millimetres, the same for every
-/// box and every cone. [`DOSE_SCALE_MM`] spans the doses the scenario records hold, 0.02 to 40
-/// ref-mm (MEASURED from `assets/dev/pen_cam/`), with headroom.
-pub const DOSE_SCALE_MM: (f32, f32) = (0.02, 60.0);
+/// The cone strength (ref-mm) a spall field is drawn at full level: the one display gain of the
+/// field's brightness and its footprint's opacity, both linear in the strength. TUNED: a steel
+/// plate's exit at the demo's ranges.
+pub const FIELD_FULL_MM: f32 = 10.0;
 
-pub fn absolute_dose(dose_mm: f32) -> f32 {
-    if dose_mm <= 0.0 {
-        return 0.0;
-    }
-    let (lo, hi) = DOSE_SCALE_MM;
-    ((dose_mm.ln() - lo.ln()) / (hi.ln() - lo.ln())).clamp(0.0, 1.0)
+/// A field's display level, linear in its cone's on-axis strength `strength_mm` (ref-mm): 1 at
+/// [`FIELD_FULL_MM`], unbounded above, 0 for none.
+pub fn field_level(strength_mm: f32) -> f32 {
+    strength_mm.max(0.0) / FIELD_FULL_MM
 }
 
-/// The default: the share of its hit points a component lost, the dose over the hit points it had
-/// at the shot, clamped at 1 — full exactly when the shot disabled it. A component with none left
-/// at the shot reads full.
-pub fn hp_share(dose_mm: f32, hp: f32) -> f32 {
-    if hp <= 0.0 {
+/// The share of its HP points a component lost to the shot, of the points it had at the shot,
+/// clamped at 1 — full exactly when the shot disabled it. A component with none left at the shot
+/// reads full.
+pub fn hp_share(lost: u32, hp: u32) -> f32 {
+    if hp == 0 {
         return 1.0;
     }
-    (dose_mm.max(0.0) / hp).clamp(0.0, 1.0)
+    (lost as f32 / hp as f32).min(1.0)
 }
 
 #[cfg(test)]
@@ -353,15 +351,11 @@ mod tests {
     }
 
     #[test]
-    fn dose_scales_are_monotonic_and_bounded() {
-        assert_eq!(absolute_dose(0.0), 0.0);
-        assert!(absolute_dose(0.1) < absolute_dose(1.0));
-        assert!(absolute_dose(1.0) < absolute_dose(10.0));
-        assert_eq!(absolute_dose(1.0e6), 1.0);
-        assert_eq!(hp_share(1.0, 3.0), 1.0 / 3.0);
-        assert_eq!(hp_share(9.0, 3.0), 1.0);
-        assert_eq!(hp_share(0.0, 3.0), 0.0);
-        assert_eq!(hp_share(1.0, 0.0), 1.0);
+    fn the_hp_share_is_the_points_lost_of_the_points_held() {
+        assert_eq!(hp_share(10, 30), 1.0 / 3.0);
+        assert_eq!(hp_share(90, 30), 1.0);
+        assert_eq!(hp_share(0, 30), 0.0);
+        assert_eq!(hp_share(10, 0), 1.0);
     }
 
     /// A component is untouched with no share lost, damaged below the whole of it, dead at the

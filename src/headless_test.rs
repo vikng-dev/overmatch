@@ -3212,7 +3212,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     );
     let aim = (lo + hi) * 0.5;
 
-    let total_hp = |app: &mut App| -> f32 {
+    let total_hp = |app: &mut App| -> u32 {
         let world = app.world_mut();
         world
             .query::<&ComponentHealth>()
@@ -3221,7 +3221,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
             .sum()
     };
     let before = total_hp(&mut app);
-    assert!(before > 0.0, "the target carries no HP pools to lower");
+    assert!(before > 0, "the target carries no HP pools to lower");
 
     // Above the shooter's own hull, so the round leaves its own geometry the way a bore round does.
     let origin = shooter_pos + Vec3::Y * 1.2;

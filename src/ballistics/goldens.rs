@@ -58,7 +58,7 @@ fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
 }
 
 #[derive(Resource, Default)]
-struct DamageLog(Vec<f32>);
+struct DamageLog(Vec<u32>);
 
 fn capture_damage(damage: On<ShellDamage>, mut log: ResMut<DamageLog>) {
     log.0.push(damage.amount);
@@ -102,17 +102,20 @@ fn world_at(local: Vec3) -> Vec3 {
 /// One golden's whole outcome.
 struct Outcome {
     impacts: Vec<Captured>,
-    damage: Vec<f32>,
-    /// Health left in each named volume, after.
-    health: Vec<(String, f32)>,
+    damage: Vec<u32>,
+    /// Health left in each named volume after, and its pool.
+    health: Vec<(String, u32, u32)>,
     /// Shells still in flight when the fixture stopped.
     survivors: usize,
     /// Ricochet points the shell recorded along its whole flight.
     ricochets: usize,
     /// Volume crossings (entry→exit) the shell recorded along its whole flight, in march order.
     crossings: Vec<(Vec3, Vec3)>,
-    /// Where each spall cone was thrown from — one per body exit the round reached.
+    /// Where each spall cone was thrown from — one per body exit the round reached above the HP
+    /// quantum.
     spall_origins: Vec<Vec3>,
+    /// Body exits the round reached whose cone was below the HP quantum ([`SpallMarks::gated`]).
+    gated: usize,
 }
 
 /// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed)`) at a tank-local origin
@@ -181,6 +184,7 @@ fn fire(
     let mut ricochets = 0;
     let mut crossings: Vec<(Vec3, Vec3)> = Vec::new();
     let mut spall_origins: Vec<Vec3> = Vec::new();
+    let mut gated = 0;
     for _ in 0..8 {
         app.update();
         for marks in app
@@ -201,13 +205,14 @@ fn fire(
             if marks.cones.len() > spall_origins.len() {
                 spall_origins = marks.cones.iter().map(|cone| cone.origin).collect();
             }
+            gated = gated.max(marks.gated);
         }
     }
     let health = app
         .world_mut()
         .query::<(&Name, &ComponentHealth)>()
         .iter(app.world())
-        .map(|(name, hp)| (name.as_str().to_owned(), hp.current))
+        .map(|(name, hp)| (name.as_str().to_owned(), hp.current, hp.max))
         .collect();
     let survivors = app
         .world_mut()
@@ -222,15 +227,21 @@ fn fire(
         ricochets,
         crossings,
         spall_origins,
+        gated,
     }
 }
 
 impl Outcome {
-    fn health_of(&self, volume: &str) -> f32 {
+    fn health_of(&self, volume: &str) -> u32 {
+        self.pool_of(volume).0
+    }
+
+    /// `(current, max)` of the named volume's HP pool.
+    fn pool_of(&self, volume: &str) -> (u32, u32) {
         self.health
             .iter()
-            .find(|(name, _)| name == volume)
-            .map(|(_, hp)| *hp)
+            .find(|(name, ..)| name == volume)
+            .map(|(_, current, max)| (*current, *max))
             .unwrap_or_else(|| panic!("no volume named `{volume}` in the bound tank"))
     }
 }
@@ -326,9 +337,9 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
         .query::<(&CrewStation, &ComponentHealth)>()
         .iter(app.world())
         .find(|(station, _)| **station == CrewStation::Driver)
-        .map(|(_, hp)| hp.current)
+        .map(|(_, hp)| (hp.current, hp.max))
         .expect("the bound tank has a driver");
-    assert_eq!(before, 3.0, "the driver starts at his authored hp");
+    assert_eq!(before.0, before.1, "the driver starts at his authored hp");
 
     let capability = muzzle_capability(eighty_eight());
     let front = front_plate_cost(&mut app);
@@ -373,9 +384,10 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     );
     assert_eq!(
         out.health_of("Driver"),
-        0.0,
-        "PHYSICS CHANGED — diff consciously. A 3 hp crewman crossed by an 88 is dead outright; he \
-         started at {before}"
+        0,
+        "PHYSICS CHANGED — diff consciously. A crewman crossed by an 88 is dead outright; he \
+         started at {}",
+        before.0
     );
     assert_eq!(
         out.damage.len(),
@@ -425,7 +437,7 @@ fn the_mg_burst_dies_in_the_driver_plate_and_leaves_him_untouched() {
     );
     assert_eq!(
         out.health_of("Driver"),
-        3.0,
+        out.pool_of("Driver").1,
         "PHYSICS CHANGED — diff consciously. A 7.92 mm round stopped by 101 mm of plate cannot \
          cost the driver a single hit point"
     );
@@ -479,9 +491,11 @@ fn a_rear_shot_soaks_in_the_engine_block() {
     );
     assert_eq!(
         out.health_of("Engine"),
-        0.0,
+        0,
         "PHYSICS CHANGED — diff consciously. A metre of engine block at factor 150 is 150 \
-         reference-mm of transit damage against a 10 hp pool — the block is destroyed outright"
+         reference-mm of transit damage, more than the engine's pool of {} hp — the block is \
+         destroyed outright",
+        out.pool_of("Engine").1
     );
     assert!(
         !out.damage.is_empty(),
@@ -572,10 +586,11 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
 /// clamp was bounded. That golden pins the whole outcome tuple; this one pins the two facts the
 /// defect destroyed, so a regression names itself.
 ///
-/// FIXTURE CHARACTERISATION: three spall cones and no survivor are this asset's geometry against
-/// the 88's law capability, not an invariant; the exit face and its cone are. Every body exit the
-/// round reaches throws (design doc §5): on this line the front plate's and two inside the hull, in
-/// path order, before the round stops in the rear plate, which throws nothing.
+/// FIXTURE CHARACTERISATION: three body exits, one cone and no survivor are this asset's geometry
+/// against the 88's law capability, not an invariant; the exit face and its cone are. Every body
+/// exit the round reaches throws a cone above the HP quantum (design doc §5): on this line the front
+/// plate's, in path order before two inside the hull whose soft material keeps theirs below it, and
+/// the round stops in the rear plate, which throws nothing.
 ///
 /// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
 /// whether the exit face came back or the spall model moved, not which number to re-bake.
@@ -629,11 +644,11 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
          face: expected {exit:?}, got {spall:?}"
     );
     assert_eq!(
-        out.spall_origins.len(),
-        3,
+        (out.spall_origins.len(), out.gated),
+        (1, 2),
         "PHYSICS CHANGED — diff consciously. Fixture characterisation: the round reaches three \
-         body exits on this line — the front plate's and two inside the hull — and stops in the \
-         rear plate: {:?}",
+         body exits on this line — the front plate's, which throws, and two soft ones inside the \
+         hull below the HP quantum — and stops in the rear plate: {:?}",
         out.spall_origins
     );
     assert!(

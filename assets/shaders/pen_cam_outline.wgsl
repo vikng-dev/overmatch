@@ -12,9 +12,6 @@ struct OutlineParams {
     color: vec4<f32>,
     // xyz: the centre the band is pushed out from, in the mesh's own frame; w: width (physical px).
     center: vec4<f32>,
-    // x: the split corner's side it draws on: 0 both, 1 the record's camera, 2 the comparison's,
-    // whose viewport starts right of the image's origin.
-    side: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> outline: OutlineParams;
@@ -38,9 +35,7 @@ fn vertex(vertex: Vertex) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fragment() -> @location(0) vec4<f32> {
-    let comparison = view.viewport.x > 0.5;
-    let side = i32(outline.side.x + 0.5);
-    if outline.color.a < 0.5 || (side == 1 && comparison) || (side == 2 && !comparison) {
+    if outline.color.a < 0.5 {
         discard;
     }
     return vec4(outline.color.rgb, 1.0);

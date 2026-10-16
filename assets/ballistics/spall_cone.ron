@@ -26,17 +26,23 @@
     // N, the number of directions the cone is sampled by, in equal-solid-angle strata of weight
     // 1/N. The emitted total is S/2 at every N, so N changes how finely a box's dose is resolved,
     // never how much the cone carries.
-    directions: (24, Resolution("sampling of the cone; changes how finely a box's dose is
-        resolved, never the emitted total")),
+    directions: (256, Resolution("sampling of the cone; changes how finely a box's dose is
+        resolved, never the emitted total. 256 with the even profile and full shadowing (owner
+        decision 2026-10-17, playtest fork F6), pending the cost decision: one throw MEASURED
+        2026-10-17 by ballistics::pen_cam::spall_law_cost (release, macOS arm64)")),
 
-    // How the strength is spread over the directions. `Linear`: S·(cos θ − cos α)/(1 − cos α),
-    // greatest on the axis, zero at the rim. `Flat`: S/2 along every direction, the same total.
-    profile: (Linear, Tuned("design doc §5: a profile falling to zero at the rim, as the measured
-        fragment fluence falls off the debris axis (research/cloud-angle-deep.md)")),
+    // How the strength is spread over the directions. `Flat`: S/2 along every direction.
+    // `Linear`: S·(cos θ − cos α)/(1 − cos α), greatest on the axis, zero at the rim, the same
+    // total.
+    profile: (Flat, Tuned("owner decision 2026-10-17 (playtest fork F6): the player controls the
+        shell and learns the cone's shape; a fade across the angle is nuance outside his control.
+        Linear, the measured fall-off of fragment fluence off the debris axis
+        (research/cloud-angle-deep.md), is kept as the dial")),
 
-    // How a direction passes through what it meets. `Partial`: spent by chord × factor through
-    // every solid, dosing each box it enters at its strength there. `FirstSolid`: stopped by the
-    // first solid it enters, a box there taking its whole strength, armour none.
-    passage: (Partial, Tuned("design doc §5: fragments spend their energy through what they
-        cross, so a box shadows the boxes behind it")),
+    // How a direction passes through what it meets. `FirstSolid`: stopped by the first solid it
+    // enters, a box there taking its whole strength, armour none. `Partial`: spent by chord × factor
+    // through every solid, dosing each box it enters at its strength there.
+    passage: (FirstSolid, Tuned("owner decision 2026-10-17 (playtest fork F6): full shadowing, so
+        a box shields what lies behind it whatever its material; Partial, graded by material, is
+        kept as the dial")),
 )

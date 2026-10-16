@@ -140,7 +140,11 @@ use crate::{CombatantId, ShotId};
 /// (`Through` / `Stopped` / `Ricochet` / `Struck`), so a peer can tell a round that stopped in the
 /// plate from one that went through, and a deflection from a stop that resolved no crossing. New
 /// embedded enum: own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 31;
+///
+/// REV 32 (integer HP): [`VolumeSnapshot`]'s `hp` becomes a `u32` of whole HP points (one point is
+/// 0.1 reference-mm of dose, `ballistics::HP_PER_REFERENCE_MM`), the pools the authority now keeps
+/// as integers. Own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 32;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -266,8 +270,8 @@ pub struct CrewSnapshot {
 /// One health-bearing volume and, for crew seats, its occupant facts.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct VolumeSnapshot {
-    /// The volume's live `ComponentHealth.current`.
-    pub hp: f32,
+    /// The volume's live `ComponentHealth.current`, in whole HP points.
+    pub hp: u32,
     /// The occupant facts for a crew seat; `None` for a module or ammo volume.
     pub crew: Option<CrewSnapshot>,
 }
@@ -541,10 +545,7 @@ fn publish_net_crew(
                 .iter()
                 .map(|&v| {
                     let Ok(src) = sources.get(v) else {
-                        return VolumeSnapshot {
-                            hp: 0.0,
-                            crew: None,
-                        };
+                        return VolumeSnapshot { hp: 0, crew: None };
                     };
                     VolumeSnapshot {
                         hp: src.health.current,
@@ -894,7 +895,7 @@ const WIRE_SURFACE_HASH: u64 = 0x4f29_9972_452a_9155;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf0bf_c3ef_9a90_e904;
+const WIRE_TYPES_HASH: u64 = 0x75d3_6e5d_5fe0_f7d1;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1346,9 +1347,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 31: `ImpactConfirm` carries a four-way `Verdict`, on the lightyear 0.30.1 wire
+        // Pins REV 32: `VolumeSnapshot` carries integer HP points, on the lightyear 0.30.1 wire
         // dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x4d85_af40_b6af_0c81;
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0x7ef9_b3e0_ed90_ff4e;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",
@@ -2270,7 +2271,7 @@ mod tests {
         use crate::ballistics::ComponentHealth;
         use crate::damage::{Crewman, Dead, VolumeOf};
 
-        const FULL: f32 = 100.0;
+        const FULL: u32 = 1000;
 
         let mut world = World::new();
 
@@ -2290,7 +2291,7 @@ mod tests {
                             }),
                         },
                         VolumeSnapshot {
-                            hp: 0.0,
+                            hp: 0,
                             crew: Some(CrewSnapshot {
                                 home: CrewStation::Loader,
                                 dead: true,
@@ -2330,7 +2331,7 @@ mod tests {
                     home: CrewStation::Gunner,
                 },
                 ComponentHealth {
-                    current: 0.0,
+                    current: 0,
                     max: FULL,
                 },
                 Dead,

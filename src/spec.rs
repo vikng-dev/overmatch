@@ -56,7 +56,7 @@ struct VolumeEntry {
     #[serde(default)]
     external: bool,
     #[serde(default, deserialize_with = "present")]
-    hp: Option<f32>,
+    hp: Option<u32>,
     #[serde(default)]
     crew: Option<CrewStation>,
     #[serde(default)]
@@ -66,8 +66,8 @@ struct VolumeEntry {
 }
 
 /// A field authored as a bare value, absent when not authored.
-fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f32>, D::Error> {
-    f32::deserialize(deserializer).map(Some)
+fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
+    u32::deserialize(deserializer).map(Some)
 }
 
 const EXTERNAL_WITH_FACETS: &str = "an external armour volume carries no component facet (hp, \
@@ -102,9 +102,10 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
 /// model" survives — a plate's resistance is now a property of what it is made of, stated once.
 #[derive(Clone)]
 pub struct ComponentSpec {
-    /// HP pool. Depleting it is what "damaged" means for this component; the consequences of
-    /// reaching zero come from the facets below.
-    pub hp: f32,
+    /// HP pool, in whole HP points (`ballistics::HP_PER_REFERENCE_MM`: one point is 0.1
+    /// reference-mm of dose). Depleting it is what "damaged" means for this component; the
+    /// consequences of reaching zero come from the facets below.
+    pub hp: u32,
     /// Crew station served by this volume.
     pub crew: Option<CrewStation>,
     /// Ammunition volume: HP depletion cooks off and kills all crew.
@@ -930,18 +931,13 @@ impl TankSpec {
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
     pub fn validate(&self) -> Result<(), BevyError> {
-        // Components: an HP pool that is not a positive number is a component that is dead on
-        // arrival (0) or can never be depleted (NaN compares false against every threshold).
+        // Components: an HP pool of zero is a component that is dead on arrival.
         for (node, volume) in &self.volumes {
             let Some(volume) = volume.component() else {
                 continue;
             };
-            if !volume.hp.is_finite() || volume.hp <= 0.0 {
-                return Err(format!(
-                    "component `{node}`: hp must be finite and > 0 (got {})",
-                    volume.hp
-                )
-                .into());
+            if volume.hp == 0 {
+                return Err(format!("component `{node}`: hp must be > 0 (got 0)").into());
             }
         }
         // The two explicit node-list declarations that replaced the name scans. Both are required
@@ -1521,8 +1517,8 @@ TankSpec(
         "Turret_Yaw": (role: Yaw, max_speed: 30.0, accel: 60.0, travel: Continuous, requires: [Gunner]),
     },
     volumes: {
-        "Gunner": (hp: 3.0, crew: Gunner),
-        "Breech": (hp: 8.0, function: Breech),
+        "Gunner": (hp: 30, crew: Gunner),
+        "Breech": (hp: 80, function: Breech),
     },
     colliders: ["Hull_Collider"],
     roadwheels: [
@@ -1581,13 +1577,13 @@ TankSpec(
             parse("(external: true)"),
             Ok(VolumeSpec::External)
         ));
-        let component = parse("(hp: 3.0, crew: Driver)").expect("a component parses");
+        let component = parse("(hp: 30, crew: Driver)").expect("a component parses");
         let component = component.component().expect("it is a component");
-        assert_eq!(component.hp, 3.0);
+        assert_eq!(component.hp, 30);
         assert_eq!(component.crew, Some(CrewStation::Driver));
-        assert!(parse("(hp: 2.0, external: false)").is_ok());
+        assert!(parse("(hp: 20, external: false)").is_ok());
         for refused in [
-            "(external: true, hp: 2.0)",
+            "(external: true, hp: 20)",
             "(external: true, ammo: true)",
             "(external: true, crew: Driver)",
             "(external: true, function: Engine)",

@@ -432,7 +432,7 @@ fn tick_swaps(
 fn place_occupant(
     commands: &mut Commands,
     seat: Entity,
-    (crewman, current, max, dead): (Crewman, f32, f32, bool),
+    (crewman, current, max, dead): (Crewman, u32, u32, bool),
 ) {
     let mut e = commands.entity(seat);
     e.insert((crewman, ComponentHealth { current, max }));
@@ -499,7 +499,7 @@ pub fn part_qualities(
             *q = q.max(competence(home, *role));
         }
         if let (Some(func), Some(hp)) = (facets.function, facets.health)
-            && hp.current > 0.0
+            && hp.current > 0
         {
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
             *q = q.max(1.0);
@@ -596,7 +596,7 @@ fn process_cookoffs(
     mut commands: Commands,
 ) {
     for (ammo_entity, hp, owner) in &ammo {
-        if hp.current > 0.0 {
+        if hp.current > 0 {
             continue;
         }
         commands.entity(ammo_entity).insert(CookedOff);
@@ -605,7 +605,7 @@ fn process_cookoffs(
         });
         for (crew_owner, mut crew_hp) in &mut crew {
             if crew_owner.tank() == owner.tank() {
-                crew_hp.current = 0.0;
+                crew_hp.current = 0;
             }
         }
     }
@@ -681,7 +681,7 @@ fn kill_crew(
     mut commands: Commands,
 ) {
     for (entity, hp) in &crew {
-        if hp.current <= 0.0 {
+        if hp.current == 0 {
             commands.entity(entity).insert(Dead);
         }
     }

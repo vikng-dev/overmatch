@@ -128,7 +128,7 @@ pub fn knockout(report: &PenetrationReport) -> Option<KnockoutReason> {
         .collect();
     let living = crew
         .iter()
-        .filter(|component| component.hp > 0.0 && !lost(&component.name))
+        .filter(|component| component.hp > 0 && !lost(&component.name))
         .count();
     let cooked = report
         .consequences
@@ -990,7 +990,7 @@ mod tests {
                 .any(|c| c.state == ConsequenceState::Cookoff);
             let crew_left = report.components.iter().any(|c| {
                 c.role == Role::Crew
-                    && c.hp > 0.0
+                    && c.hp > 0
                     && !report
                         .consequences
                         .iter()
@@ -1208,7 +1208,7 @@ mod tests {
 
     /// A report with `crew` crew volumes at the given hit points, `lost` of them lost by the shot,
     /// and a cookoff or not; every other field from a recorded fixture.
-    fn crew_report(crew: &[f32], lost: &[usize], cooked: bool) -> PenetrationReport {
+    fn crew_report(crew: &[u32], lost: &[usize], cooked: bool) -> PenetrationReport {
         let mut report = library().records[0].report.clone();
         report.components = crew
             .iter()
@@ -1216,7 +1216,7 @@ mod tests {
             .map(|(index, &hp)| crate::damage_cam::ComponentState {
                 name: format!("Crew{index}"),
                 role: Role::Crew,
-                count: 3.0,
+                count: 30,
                 hp,
             })
             .collect();
@@ -1245,24 +1245,19 @@ mod tests {
     /// knocks out whatever the crew.
     #[test]
     fn crew_loss_counts_prior_losses_and_the_final_casualty() {
-        let cases: [(&[f32], &[usize], bool, Option<KnockoutReason>); 7] = [
+        let cases: [(&[u32], &[usize], bool, Option<KnockoutReason>); 7] = [
             // The shot kills the last of them.
-            (&[3.0, 3.0], &[0, 1], false, Some(KnockoutReason::CrewLoss)),
+            (&[30, 30], &[0, 1], false, Some(KnockoutReason::CrewLoss)),
             // One survives the shot.
-            (&[3.0, 3.0], &[0], false, None),
+            (&[30, 30], &[0], false, None),
             // Earlier hits left one; the shot kills him.
-            (
-                &[0.0, 0.0, 3.0],
-                &[2],
-                false,
-                Some(KnockoutReason::CrewLoss),
-            ),
+            (&[0, 0, 30], &[2], false, Some(KnockoutReason::CrewLoss)),
             // Earlier hits left one; the shot misses him.
-            (&[0.0, 0.0, 3.0], &[0], false, None),
+            (&[0, 0, 30], &[0], false, None),
             // No crew volumes: crew loss cannot be read.
             (&[], &[], false, None),
             // A cookoff, whatever the crew.
-            (&[3.0, 3.0], &[], true, Some(KnockoutReason::Cookoff)),
+            (&[30, 30], &[], true, Some(KnockoutReason::Cookoff)),
             (&[], &[], true, Some(KnockoutReason::Cookoff)),
         ];
         for (crew, lost, cooked, want) in cases {

@@ -290,13 +290,16 @@ pub struct FragmentHit {
 }
 
 /// One box's dose from the shot (reference-mm): the line's, a bounce's shock included, and the
-/// spall cones'.
+/// spall cones'; and the HP points it lost, the sum of the two rounded once
+/// ([`crate::ballistics::hp_points`]) and capped at the HP it had.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].
     pub volume: String,
     pub line: f32,
     pub field: f32,
+    /// HP points the shot took from it.
+    pub lost: u32,
     /// Where the line first reached it: its entry, or the face it bounced off. `None` when only a
     /// spall cone did.
     #[serde(default)]
@@ -326,10 +329,10 @@ pub enum ConsequenceState {
 pub struct ComponentState {
     pub name: String,
     pub role: Role,
-    /// The dose that disables it (reference-mm): its HP pool.
-    pub count: f32,
-    /// Its hit points at the shot (reference-mm); zero for a part already lost.
-    pub hp: f32,
+    /// Its HP pool, in whole HP points: the points that disable it.
+    pub count: u32,
+    /// Its HP points at the shot; zero for a part already lost.
+    pub hp: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]

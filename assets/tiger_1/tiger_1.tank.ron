@@ -243,35 +243,37 @@ TankSpec(
     // facet, EngineBlock with no entry).
     volumes: {
         // --- Modules (hp = integrity; the substance carries resistance, independently) ---
-        "Engine":           (hp: 10.0, function: Engine),
-        "Transmission":     (hp: 10.0, function: Transmission),
-        "Breech":           (hp:  8.0, function: Breech),
-        "Main_Gun_Barrel":  (hp:  8.0, function: GunBarrel),
+        // hp is in whole HP points, one point per 0.1 reference-mm of dose
+        // (ballistics::HP_PER_REFERENCE_MM).
+        "Engine":           (hp: 100, function: Engine),
+        "Transmission":     (hp: 100, function: Transmission),
+        "Breech":           (hp:  80, function: Breech),
+        "Main_Gun_Barrel":  (hp:  80, function: GunBarrel),
         // Each MG barrel serves its own weapon's barrel function, which that weapon's fire gate
-        // names, as the main gun's does. 2.0 hp is TUNED: a thin barrel, the smoke launchers' value.
-        "Coax_MG_Barrel":   (hp:  2.0, function: CoaxMgBarrel),
-        "Hull_MG_Barrel":   (hp:  2.0, function: BowMgBarrel),
+        // names, as the main gun's does. 20 hp is TUNED: a thin barrel, the smoke launchers' value.
+        "Coax_MG_Barrel":   (hp:  20, function: CoaxMgBarrel),
+        "Hull_MG_Barrel":   (hp:  20, function: BowMgBarrel),
         // --- Crew ---
-        "Commander":        (hp: 3.0, crew: Commander),
-        "Gunner":           (hp: 3.0, crew: Gunner),
-        "Loader":           (hp: 3.0, crew: Loader),
-        "Driver":           (hp: 3.0, crew: Driver),
-        "BowGunner":        (hp: 3.0, crew: BowGunner),
+        "Commander":        (hp:  30, crew: Commander),
+        "Gunner":           (hp:  30, crew: Gunner),
+        "Loader":           (hp:  30, crew: Loader),
+        "Driver":           (hp:  30, crew: Driver),
+        "BowGunner":        (hp:  30, crew: BowGunner),
         // --- Ammunition (ammo: true means cookoff when dead) ---
-        "Ammo_L_0":         (hp: 2.0, ammo: true),
-        "Ammo_L_1":         (hp: 2.0, ammo: true),
-        "Ammo_R_0":         (hp: 2.0, ammo: true),
-        "Ammo_R_1":         (hp: 2.0, ammo: true),
+        "Ammo_L_0":         (hp:  20, ammo: true),
+        "Ammo_L_1":         (hp:  20, ammo: true),
+        "Ammo_R_0":         (hp:  20, ammo: true),
+        "Ammo_R_1":         (hp:  20, ammo: true),
         // --- Smoke launchers: damageable, deliberately INERT. They carry an hp pool so the round
         // that shears one off is recorded, and no `function`, because nothing fires them yet. The
         // facet is the seam the smoke-discharger work binds to; until then losing one costs the
-        // vehicle nothing. 2.0 hp = the ammo pool's value: a thin external fitting, not structure.
-        "Smoke_Launcher_0": (hp: 2.0),
-        "Smoke_Launcher_1": (hp: 2.0),
-        "Smoke_Launcher_2": (hp: 2.0),
-        "Smoke_Launcher_3": (hp: 2.0),
-        "Smoke_Launcher_4": (hp: 2.0),
-        "Smoke_Launcher_5": (hp: 2.0),
+        // vehicle nothing. 20 hp = the ammo pool's value: a thin external fitting, not structure.
+        "Smoke_Launcher_0": (hp:  20),
+        "Smoke_Launcher_1": (hp:  20),
+        "Smoke_Launcher_2": (hp:  20),
+        "Smoke_Launcher_3": (hp:  20),
+        "Smoke_Launcher_4": (hp:  20),
+        "Smoke_Launcher_5": (hp:  20),
         // --- External armour: the running gear outside the hull sides. It resists like any armour;
         // perforating it is not a penetration of the tank (the pen cam's shot verdict). The track
         // links wear no substance and are not volumes; the Tiger carries no skirts.

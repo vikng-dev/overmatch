@@ -55,7 +55,7 @@ use super::walk::{
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
     ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
-    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_doses, apply_hit_impulse, hit_ancestor,
+    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_hit_impulse, hit_ancestor,
     throw_spall_cone,
 };
 
@@ -1571,9 +1571,10 @@ pub(super) fn volume_table(
 /// Transit doses, a bounce's shock, the impulses and the events all come out of the
 /// [`Decision`]. Spall does NOT: the decision carries each spall source, but the cone's directions
 /// and what each one enters are resolved here, against the live world ([`throw_spall_cone`]), into
-/// addressed doses applied through the same [`apply_doses`] as the line's. So the §13.6 gate, which
+/// addressed doses added to the same [`super::ShotDose`] as the line's. So the §13.6 gate, which
 /// observes the decisions and applies none of this, reads every transit dose and every bounce the
-/// runtime acts on, and no field dose.
+/// runtime acts on, and no field dose. HP falls once the decision's doses are all added
+/// ([`super::ShotDose::settle`]).
 pub(crate) fn apply(
     decision: &Decision,
     shell: &mut MarchingShell,
@@ -1582,46 +1583,34 @@ pub(crate) fn apply(
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> f32 {
+) -> u32 {
     match decision {
-        Decision::Clear { .. } => 0.0,
-        Decision::Bounce(bounce) => apply_bounce(
-            bounce,
-            shell,
-            context,
-            terminal_emitted,
-            health,
-            bodies,
-            commands,
-        ),
+        Decision::Clear { .. } => return 0,
+        Decision::Bounce(bounce) => {
+            apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
+        }
         Decision::Bite(bite) => apply_bite(
             bite,
             shell,
             context,
             terminal_emitted,
-            health,
+            &|volume| health.contains(volume),
             bodies,
             commands,
         ),
     }
+    shell.dose.settle(health, context.deposit)
 }
 
 fn apply_bounce(
     bounce: &Bounce,
     shell: &mut MarchingShell,
-    context: &ResolveContext<'_, '_, '_>,
     terminal_emitted: &mut bool,
-    health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> f32 {
-    let mut damage = 0.0;
-    if context.deposit
-        && let Ok(mut hp) = health.get_mut(bounce.struck)
-    {
-        let before = hp.current;
-        hp.current = (before - bounce.shock).max(0.0);
-        damage += before - hp.current;
+) {
+    if bounce.shock > 0.0 {
+        shell.dose.add(bounce.struck, bounce.shock);
     }
     if let Some(owner) = bounce.owner {
         apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);
@@ -1658,7 +1647,6 @@ fn apply_bounce(
             sequence: (shell.marks.ricochets.len() - 1) as u32,
         });
     }
-    damage
 }
 
 fn apply_bite(
@@ -1666,13 +1654,13 @@ fn apply_bite(
     shell: &mut MarchingShell,
     context: &ResolveContext<'_, '_, '_>,
     terminal_emitted: &mut bool,
-    health: &mut Query<&mut ComponentHealth>,
+    is_box: &dyn Fn(Entity) -> bool,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> f32 {
+) {
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
     // (§13.2's damage law — no ownership, no priority, no argmax).
-    let mut damage = apply_doses(&bite.deposits, health, context.deposit);
+    shell.dose.add_all(&bite.deposits);
 
     let (verdict, position, terminal_at) = match &bite.end {
         BiteEnd::Embedded { at, impulse } => {
@@ -1703,9 +1691,13 @@ fn apply_bite(
             (TerminalVerdict::Through, bite.entrance, bite.entrance)
         }
     };
-    // Every exit the round reached throws, whether it then stopped or went on.
+    // Every exit the round reached throws, whether it then stopped or went on, unless its cone is
+    // below the HP quantum.
+    let mut cones = 0;
     for source in &bite.spall {
-        damage += throw_spall_cone(shell.spall, source, bite.owner, context, health);
+        if throw_spall_cone(shell.spall, shell.dose, source, bite.owner, context, is_box) {
+            cones += 1;
+        }
     }
     shell.marks.log.push(ArmourMark::Crossing {
         entrance: bite.entrance,
@@ -1721,7 +1713,7 @@ fn apply_bite(
                 speed: *speed,
             },
         },
-        cones: bite.spall.len(),
+        cones,
     });
 
     commands.trigger(Impact {
@@ -1744,5 +1736,4 @@ fn apply_bite(
             after_bounces: shell.marks.ricochets.len() as u32,
         });
     }
-    damage
 }

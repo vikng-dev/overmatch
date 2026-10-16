@@ -132,12 +132,12 @@ fn update_component_hp_labels(
                 node.left = Val::Px(screen.x + 8.0);
                 node.top = Val::Px(screen.y - 8.0);
                 *text = Text::new(format!(
-                    "{}\n{:.1}/{:.0} hp",
+                    "{}\n{}/{} hp",
                     volume_label(crew, ammo, function, name),
                     hp.current,
                     hp.max
                 ));
-                *color = TextColor(if hp.current <= 0.0 {
+                *color = TextColor(if hp.current == 0 {
                     Color::srgb(1.0, 0.3, 0.2)
                 } else {
                     Color::srgb(1.0, 0.8, 0.3)

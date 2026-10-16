@@ -52,7 +52,7 @@ const OBSERVER_CLIENT_ID: u64 = 2;
 /// Fixed, match-local test identity inserted synchronously with the server-side shooter spawn.
 const SHOOTER_COMBATANT: CombatantId = CombatantId(1);
 /// Non-default owner-private snapshots prove the disclosure filter, rather than mere component setup.
-const OWNER_SNAPSHOT_HP: f32 = 73.0;
+const OWNER_SNAPSHOT_HP: u32 = 73;
 const OWNER_BELT: u32 = 17;
 
 /// Shots fired by the scripted run.
@@ -711,8 +711,8 @@ fn spawn_plate(app: &mut App) {
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every
         // shot generate one real authority-side `ShellDamage` while preserving the same bounce geometry.
         ComponentHealth {
-            current: 10_000.0,
-            max: 10_000.0,
+            current: 100_000,
+            max: 100_000,
         },
     ));
 }

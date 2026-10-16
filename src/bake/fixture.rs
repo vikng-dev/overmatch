@@ -180,7 +180,7 @@ pub(super) fn spec_with(
         .join(", ");
     let volumes = volumes
         .iter()
-        .map(|node| format!("\"{node}\": (hp: 1.0)"))
+        .map(|node| format!("\"{node}\": (hp: 10)"))
         .collect::<Vec<_>>()
         .join(", ");
     format!(

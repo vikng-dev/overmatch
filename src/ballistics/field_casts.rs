@@ -25,16 +25,16 @@
 //! record digests every penetration event, every cone (origin, axis, half-angle; its source's spend,
 //! entry and exit speeds and strength `S`, each as raw bits, so a source parameter that moves no
 //! direction's end and no HP still moves the record; and each direction's end and whether it
-//! dosed), and every named box's HP after the shot.
+//! dosed), and every named box's HP points after the shot.
 //!
 //! Each ray goes through two paths:
 //!
 //! 1. the ordered presence a direction is walked over ([`resolve::field_presence`]), with no
 //!    strength: the progress of the ray's origin, then every layer as its `[start, end)` and the
 //!    volumes present over it (stable identity and factor);
-//! 2. [`resolve::field_direction`] itself, through the probe tank's volumes, dosing every box after
-//!    all boxes are reset to [`BOX_RESET_HP`]; the remaining HP of each touched box and the ray's
-//!    end are recorded, and each box's dose (`reset - remaining`) accumulates in f32 in ray order.
+//! 2. [`resolve::field_direction`] itself, through the probe tank's volumes under the shipped
+//!    passage: the ray's end and every dose it addresses (box and amount, in reference-mm) are
+//!    recorded, and each box's dose accumulates in f32 in ray order.
 //!
 //! # Digest
 //!
@@ -67,7 +67,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x4b88_579f_171f_bc70;
+const PINNED_TOTAL: u64 = 0x0a2d_c734_39cc_b85b;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -90,10 +90,6 @@ const SHOTS: [(&str, Vec3, Vec3); 6] = [
 
 /// Fixture on-axis strength (reference-mm) of every ray: fixture data.
 const STRENGTH: f32 = 30.0;
-
-/// HP every box is reset to before each ray. Fixture value above the most one ray can dose in one
-/// crossing ([`STRENGTH`]), so a single hit's dose is not clamped away.
-const BOX_RESET_HP: f32 = 40.0;
 
 /// 64-bit FNV-1a over bytes. Stable by definition: offset basis `0xcbf29ce484222325`, prime
 /// `0x100000001b3`.
@@ -393,7 +389,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                   children: Query<&Children>,
                   names: Query<&Name>,
                   labelled: Query<(Entity, &Name), With<ComponentHealth>>,
-                  mut health: Query<&mut ComponentHealth>| {
+                  health: Query<&ComponentHealth>| {
                 let context = resolve::ResolveContext {
                     world: &world,
                     colliders: &colliders,
@@ -455,13 +451,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                         }
                     }
 
-                    // 2. The sim's field walk, into freshly reset boxes.
-                    for (_, entity) in &boxes {
-                        health
-                            .get_mut(*entity)
-                            .expect("a laid-out box has health")
-                            .current = BOX_RESET_HP;
-                    }
+                    // 2. The sim's field walk and the doses it addresses.
                     let cast = resolve::field_direction(
                         &context,
                         &within,
@@ -474,22 +464,17 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                         ConeShape::shipped().passage(),
                     )
                     .unwrap_or_else(|error| panic!("{}: the walk failed: {error:?}", ray.label));
-                    let doses = cast.doses;
-                    let dealt = apply_doses(&doses, &mut health, true);
                     output.push_str(" end ");
                     bits3(&mut output, cast.end);
-                    let _ = write!(output, " deposited {} dealt ", !doses.is_empty());
-                    bits(&mut output, dealt);
-                    for (i, (name, entity)) in boxes.iter().enumerate() {
-                        let left = health
-                            .get(*entity)
-                            .expect("a laid-out box has health")
-                            .current;
-                        if left != BOX_RESET_HP {
-                            let _ = write!(output, " {name}=");
-                            bits(&mut output, left);
-                            dose[i] += BOX_RESET_HP - left;
-                        }
+                    let _ = write!(output, " deposited {}", !cast.doses.is_empty());
+                    for hit in &cast.doses {
+                        let Some(i) = boxes.iter().position(|(_, entity)| *entity == hit.address)
+                        else {
+                            continue;
+                        };
+                        let _ = write!(output, " {}=", boxes[i].0);
+                        bits(&mut output, hit.amount);
+                        dose[i] += hit.amount;
                     }
                     records.push(Record {
                         label: ray.label.clone(),
@@ -569,16 +554,15 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         }
         output.push(';');
     }
-    let mut health: Vec<(String, f32)> = app
+    let mut health: Vec<(String, u32)> = app
         .world_mut()
         .query::<(&Name, &ComponentHealth)>()
         .iter(app.world())
         .map(|(name, hp)| (name.as_str().to_owned(), hp.current))
         .collect();
-    health.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    health.sort();
     for (name, current) in health {
-        let _ = write!(output, " {name}=");
-        bits(&mut output, current);
+        let _ = write!(output, " {name}={current}");
     }
     Record {
         label: format!("shot/{label}"),

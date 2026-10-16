@@ -287,35 +287,83 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
 pub(crate) const TRANSIT_K: f32 = 1.0;
 
-/// Apply `doses` in order, each to its box's HP pool floored at zero, and return the HP removed. A
-/// box with no HP pool takes nothing. Only authority writes HP (`deposit`).
-fn apply_doses(
-    doses: &[mechanism::Dose],
-    health: &mut Query<&mut ComponentHealth>,
-    deposit: bool,
-) -> f32 {
-    let mut removed = 0.0;
-    if !deposit {
-        return removed;
-    }
-    for dose in doses {
-        if let Ok(mut hp) = health.get_mut(dose.address) {
-            let before = hp.current;
-            hp.current = dosed(before, dose);
-            removed += before - hp.current;
-        }
-    }
-    removed
+/// HP points per reference-mm of dose: one HP point is 0.1 reference-mm, the quantum a box's dose
+/// from one shot is rounded to (design doc §6). RESOLUTION: the unit every component's `hp` in the
+/// tank data is authored in, and the quantum below which a spall cone is not thrown; it is a unit,
+/// not a balance value, so changing it rescales every authored pool with it.
+pub(crate) const HP_PER_REFERENCE_MM: f32 = 10.0;
+
+/// The whole HP points a dose of `dose` reference-mm converts to: `dose × HP_PER_REFERENCE_MM`
+/// rounded to nearest, ties away from zero (IEEE `roundToIntegralTiesToAway`, no transcendental),
+/// so it is the same on every target. A negative or NaN dose converts to none.
+pub(crate) fn hp_points(dose: f32) -> u32 {
+    (dose * HP_PER_REFERENCE_MM).round() as u32
 }
 
-/// An HP pool at `current` after `dose`, floored at zero. In f32: a dose below the pool's
-/// resolution leaves it unchanged. A field dose is already in the count unit and is never scaled.
-fn dosed(current: f32, dose: &mechanism::Dose) -> f32 {
-    let amount = match dose.source {
-        mechanism::DoseSource::Line { .. } => dose.amount * TRANSIT_K,
-        mechanism::DoseSource::Field => dose.amount,
-    };
-    (current - amount).max(0.0)
+/// One shot's dose to each box it has reached (reference-mm), and the HP points already taken for
+/// it. A box loses `hp_points(total)` over the shot, its total from the line, a bounce's shock and
+/// every spall cone summed first: rounded once per box per shot, never per direction or per source.
+/// [`Self::settle`] takes what the running total has added since it last ran, so HP falls as the
+/// shot goes and lands on the rounded total when it ends.
+///
+/// Invariant: created with the projectile, never attached after replication. See ADR-0014.
+#[derive(Component, Default)]
+pub(crate) struct ShotDose(Vec<BoxTally>);
+
+/// A box's running dose this shot and the HP points taken for it so far.
+struct BoxTally {
+    address: Entity,
+    dose: f32,
+    taken: u32,
+}
+
+impl ShotDose {
+    /// Add `amount` reference-mm to `address`'s dose, in the order the march resolves it.
+    fn add(&mut self, address: Entity, amount: f32) {
+        match self.0.iter_mut().find(|entry| entry.address == address) {
+            Some(entry) => entry.dose += amount,
+            None => self.0.push(BoxTally {
+                address,
+                dose: amount,
+                taken: 0,
+            }),
+        }
+    }
+
+    /// Add every dose of `doses`, a line dose scaled by [`TRANSIT_K`]; a field dose is already in
+    /// the count unit.
+    fn add_all(&mut self, doses: &[mechanism::Dose]) {
+        for dose in doses {
+            let amount = match dose.source {
+                mechanism::DoseSource::Line { .. } => dose.amount * TRANSIT_K,
+                mechanism::DoseSource::Field => dose.amount,
+            };
+            self.add(dose.address, amount);
+        }
+    }
+
+    /// Take from each box's HP pool the points its rounded total has gained since the last settle,
+    /// floored at zero, and return the HP removed. A box with no HP pool takes nothing. Only
+    /// authority writes HP (`deposit`).
+    fn settle(&mut self, health: &mut Query<&mut ComponentHealth>, deposit: bool) -> u32 {
+        if !deposit {
+            return 0;
+        }
+        let mut removed = 0;
+        for entry in &mut self.0 {
+            let due = hp_points(entry.dose).saturating_sub(entry.taken);
+            if due == 0 {
+                continue;
+            }
+            entry.taken += due;
+            if let Ok(mut hp) = health.get_mut(entry.address) {
+                let lost = due.min(hp.current);
+                hp.current -= lost;
+                removed += lost;
+            }
+        }
+        removed
+    }
 }
 
 /// Mirror a travel direction about a surface normal — the specular deflection of a ricochet.
@@ -623,7 +671,7 @@ pub(crate) struct ShellTerminal {
 #[derive(Event)]
 pub(crate) struct ShellDamage {
     pub shot: ShotId,
-    pub amount: f32,
+    pub amount: u32,
 }
 
 /// Trigger-agnostic shell spawn seam used by guns and sandbox tools.
@@ -654,6 +702,7 @@ pub struct FireShell {
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
 #[derive(Component)]
+#[require(ShotDose)]
 pub(crate) struct Projectile {
     velocity: Vec3,
     /// The round's mechanism, bound at spawn from its fire data and the substance registry
@@ -807,14 +856,15 @@ pub struct ExternalArmour;
 #[derive(Component)]
 pub struct ComponentVolume;
 
-/// A component's HP pool (crew/module/ammo), in reference-mm. The main penetrator transiting
-/// deposits what it spent crossing it, and each spall cone direction entering it its strength at
-/// entry / N (design §§5–6). `current` clamps at 0; the *consequences* of reaching 0 (cookoff, crew
-/// death, knock-out) are later increments (§§7–8).
+/// A component's HP pool (crew/module/ammo), in whole HP points ([`HP_PER_REFERENCE_MM`]). A shot
+/// takes from it its dose rounded once per box per shot ([`ShotDose`]): what the main penetrator
+/// spent crossing it, a bounce's shock, and each spall cone direction entering it (design §§5–6).
+/// `current` stops at 0; the *consequences* of reaching 0 (cookoff, crew death, knock-out) are later
+/// increments (§§7–8).
 #[derive(Component)]
 pub struct ComponentHealth {
-    pub current: f32,
-    pub max: f32,
+    pub current: u32,
+    pub max: u32,
 }
 
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
@@ -938,6 +988,8 @@ pub struct SpallCone {
 #[derive(Component, Default)]
 pub struct SpallMarks {
     pub cones: Vec<SpallCone>,
+    /// Body exits reached whose cone was below the HP quantum and not thrown.
+    pub gated: usize,
 }
 
 /// Live per-shell readout for the sandbox's info layer — current speed (m/s) and remaining
@@ -1431,7 +1483,8 @@ struct ProjectileMarchWorld<'w, 's> {
     // the exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
     // fallback world, where the parry terrain cast remains.
     grid: Option<Res<'w, HeightGrid>>,
-    // The cone shape the march throws when a world names one; the shipped shape otherwise.
+    // The cone shape the march throws when a world names one (the cost probe); the shipped shape
+    // otherwise.
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
 }
 
@@ -1449,6 +1502,7 @@ struct MarchingShell<'a, 'w> {
     marks: &'a mut Mut<'w, PenetrationMarks>,
     readout: &'a mut Mut<'w, ShellReadout>,
     spall: &'a mut Mut<'w, SpallMarks>,
+    dose: &'a mut Mut<'w, ShotDose>,
     /// The shell's network identity, when it has one. `None` for SP and sandbox shells.
     shot: Option<&'a Shot>,
     /// The tank that fired this shell, read ONLY to exclude its own volumes from the march.
@@ -1469,7 +1523,7 @@ struct MarchStep {
     /// which despawns.
     holding: bool,
     /// HP the authority actually removed this step, across every crossing and every spall fragment.
-    damage_dealt: f32,
+    damage_dealt: u32,
 }
 
 /// What a replica shell does at an armor contact its own march found (see
@@ -1500,6 +1554,7 @@ fn integrate_projectiles(
         &mut PenetrationMarks,
         &mut ShellReadout,
         &mut SpallMarks,
+        &mut ShotDose,
         // OBSERVER-only, both `Option`: `Shot` is the shell's network identity (keyframe-eligible when
         // present), `Held` marks a shell frozen at armor waiting for its sanctioned bounce keyframe.
         Option<&Shot>,
@@ -1566,6 +1621,7 @@ fn integrate_projectiles(
         mut marks,
         mut readout,
         mut spall,
+        mut dose,
         shot,
         held,
         source,
@@ -1580,6 +1636,7 @@ fn integrate_projectiles(
             marks: &mut marks,
             readout: &mut readout,
             spall: &mut spall,
+            dose: &mut dose,
             shot,
             source,
         };
@@ -1637,7 +1694,7 @@ fn integrate_projectiles(
         // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
         // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
         if deposit
-            && step.damage_dealt > 0.0
+            && step.damage_dealt > 0
             && !damage_report.0
             && let Some(shot) = shot
         {
@@ -2139,7 +2196,7 @@ fn march_shell_step(
     let shot = shell.shot;
     // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
-    let mut damage_dealt = 0.0;
+    let mut damage_dealt = 0;
     // SHOOTER SELF-EXCLUSION (see [`not_own_volume`]): this round is transparent to the tank that
     // fired it, for every cast below. Identical on the authority and on a replica — the one place
     // both ends must agree about the shooter's own geometry, or the server's damage model and the
@@ -2731,29 +2788,35 @@ fn resolve_replica_armor_contact(
     ReplicaArmorContact::Stopped
 }
 
-/// Throw the spall cone of one body exit, appending it to the shell's record (design doc §5).
+/// Throw the spall cone of one body exit, appending it to the shell's record and its doses to the
+/// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
-/// Strength `S = spend × (v_exit / v_entry)²` ([`walk::SpallSource::strength`]); direction `k` of the
-/// shipped shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the cone. Each
-/// direction is walked through the volumes of `tank`, the struck tank, alone
-/// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing,
-/// and the cone logs its first error.
-///
-/// Returns the HP the authority actually removed; a replica resolves the identical geometry and the
-/// identical trace, and deposits nothing.
+/// Strength `S` is [`walk::SpallSource::strength`]. A cone whose whole emission `S/2` converts to
+/// no HP point ([`hp_points`]) is not thrown: no direction is walked and nothing is recorded. `S/2`
+/// is the most one box can take from it, since every direction doses a box at most once and the
+/// shape's weights emit half the on-axis strength ([`spall_cone::EMITTED_SHARE`]). Otherwise
+/// direction `k` of the shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the
+/// cone, walked through the volumes of `tank`, the struck tank, alone
+/// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing, and
+/// the cone logs its first error.
 fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
+    dose: &mut Mut<ShotDose>,
     source: &walk::SpallSource,
     tank: Option<Entity>,
     context: &resolve::ResolveContext<'_, '_, '_>,
-    health: &mut Query<&mut ComponentHealth>,
-) -> f32 {
+    is_box: &dyn Fn(Entity) -> bool,
+) -> bool {
     let world = context.world;
     let shape = world
         .spall_law
         .as_deref()
         .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
+    if hp_points(strength * spall_cone::EMITTED_SHARE) == 0 {
+        spall.gated += 1;
+        return false;
+    }
     let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
     let axis = shape.axis(source.face, direction);
     let weight = 1.0 / shape.directions_count() as f32;
@@ -2761,7 +2824,6 @@ fn throw_spall_cone(
         hit_ancestor(collider, &world.volumes, &world.parents)
             .is_some_and(|(node, _)| world.owners.get(node).ok().map(VolumeOf::tank) == tank)
     };
-    let mut damage_dealt = 0.0;
     let mut cone = SpallCone {
         origin: source.position,
         axis,
@@ -2778,7 +2840,7 @@ fn throw_spall_cone(
         let walked = resolve::field_direction(
             context,
             &within,
-            &|volume| health.contains(volume),
+            is_box,
             &source.exited,
             source.position,
             ray_dir,
@@ -2796,7 +2858,7 @@ fn throw_spall_cone(
                 }
             }
         };
-        damage_dealt += apply_doses(&ray.doses, health, context.deposit);
+        dose.add_all(&ray.doses);
         cone.rays.push(SpallRay {
             end: ray.end,
             deposited: !ray.doses.is_empty(),
@@ -2816,7 +2878,7 @@ fn throw_spall_cone(
         );
     }
     spall.cones.push(cone);
-    damage_dealt
+    true
 }
 
 /// Apply a crossing's momentum share to the struck body. The declared `Forces` query keeps this
@@ -2839,6 +2901,67 @@ fn on_impact(impact: On<Impact>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dose converts to the nearest whole HP point, ties away from zero; none for a negative or
+    /// NaN dose.
+    #[test]
+    fn a_dose_converts_to_the_nearest_hp_point() {
+        assert_eq!(hp_points(0.0), 0);
+        assert_eq!(hp_points(0.04), 0);
+        assert_eq!(
+            hp_points(0.25),
+            3,
+            "2.5 points, a tie, round away from zero"
+        );
+        assert_eq!(hp_points(3.0), 30);
+        assert_eq!(hp_points(-1.0), 0);
+        assert_eq!(hp_points(f32::NAN), 0);
+    }
+
+    /// A box loses its shot's dose rounded once on its total: doses each below half a point add up
+    /// before they are rounded, a settle mid-shot takes only what the rounded total has gained
+    /// since the last, and the pool stops at zero. Fixture doses (reference-mm).
+    #[test]
+    fn a_shots_dose_is_rounded_once_per_box() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let target = world
+            .spawn(ComponentHealth {
+                current: 30,
+                max: 30,
+            })
+            .id();
+        world.spawn(ShotDose::default());
+        let dose = |world: &mut World, amounts: &[f32]| -> u32 {
+            let amounts = amounts.to_vec();
+            world
+                .run_system_once(
+                    move |mut shot: Query<&mut ShotDose>,
+                          mut health: Query<&mut ComponentHealth>| {
+                        let mut shot = shot.single_mut().unwrap();
+                        for amount in &amounts {
+                            shot.add(target, *amount);
+                        }
+                        shot.settle(&mut health, true)
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            dose(&mut world, &[0.04; 10]),
+            4,
+            "ten 0.4-point doses take 4 points"
+        );
+        assert_eq!(
+            dose(&mut world, &[0.03]),
+            0,
+            "4.3 points rounds to the 4 taken"
+        );
+        assert_eq!(dose(&mut world, &[0.03]), 1, "4.6 points rounds to 5");
+        assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 25);
+        assert_eq!(dose(&mut world, &[100.0]), 25, "the pool stops at zero");
+        assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 0);
+    }
 
     /// Rounds the capability-law invariants are swept over. Fixture data, not a spec: the laws
     /// below hold for any round.
@@ -3199,7 +3322,7 @@ mod march_tests {
     }
 
     #[derive(Resource, Default)]
-    struct DamageLog(Vec<(ShotId, f32)>);
+    struct DamageLog(Vec<(ShotId, u32)>);
 
     fn capture_damage(damage: On<ShellDamage>, mut log: ResMut<DamageLog>) {
         log.0.push((damage.shot, damage.amount));
@@ -3496,7 +3619,7 @@ mod march_tests {
         app.init_resource::<DamageLog>()
             .add_observer(capture_damage);
 
-        let spawn_component = |app: &mut App, z: f32, current: f32| {
+        let spawn_component = |app: &mut App, z: f32, current: u32| {
             app.world_mut()
                 .spawn((
                     Transform::from_translation(Vec3::new(0.0, 2.0, z)),
@@ -3507,16 +3630,13 @@ mod march_tests {
                         material: walk::VolumeMaterial::fixture(1.0),
                         substance: "RHA".to_string(),
                     },
-                    ComponentHealth {
-                        current,
-                        max: 100.0,
-                    },
+                    ComponentHealth { current, max: 1000 },
                 ))
                 .id()
         };
-        let spent = spawn_component(&mut app, -20.0, 0.0);
-        let first_live = spawn_component(&mut app, -40.0, 100.0);
-        let second_live = spawn_component(&mut app, -60.0, 100.0);
+        let spent = spawn_component(&mut app, -20.0, 0);
+        let first_live = spawn_component(&mut app, -40.0, 1000);
+        let second_live = spawn_component(&mut app, -60.0, 1000);
         for _ in 0..8 {
             app.update();
         }
@@ -3561,13 +3681,13 @@ mod march_tests {
             app.update();
         }
         let health = |entity| app.world().get::<ComponentHealth>(entity).unwrap().current;
-        assert_eq!(health(spent), 0.0, "zero HP cannot produce a fake decrease");
+        assert_eq!(health(spent), 0, "zero HP cannot produce a fake decrease");
         assert!(
-            health(first_live) < 100.0,
+            health(first_live) < 1000,
             "the first live component took damage"
         );
         assert!(
-            health(second_live) < 100.0,
+            health(second_live) < 1000,
             "the penetrator kept damaging later geometry"
         );
         assert_eq!(
@@ -3576,7 +3696,7 @@ mod march_tests {
             "one damaging shot produces one discrete confirmation across all later deposits"
         );
         assert_eq!(app.world().resource::<DamageLog>().0[0].0, shot);
-        assert!(app.world().resource::<DamageLog>().0[0].1 > 0.0);
+        assert!(app.world().resource::<DamageLog>().0[0].1 > 0);
     }
 
     /// Regression: a clean perforation emits one penetrating armor impact at the entry face.

@@ -76,7 +76,7 @@ use super::mechanism::{
     Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
     overlap_factor,
 };
-use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
+use crate::substances::{REFERENCE_FACTOR, SubstanceError, SubstanceId, SubstanceRegistry};
 
 #[cfg(test)]
 mod tests;
@@ -1614,6 +1614,9 @@ pub struct ExitMember {
     /// The volumes this sample's exit leaves, in entity order: present in the body's last layer on
     /// this ray and absent from the next (every one of them at a genuine exit).
     pub exited: Vec<Entity>,
+    /// The factor of the body's last layer on this ray, the one the exit leaves: the body's highest,
+    /// since a body never steps down in factor.
+    pub rear_factor: f32,
 }
 
 /// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
@@ -1661,6 +1664,9 @@ pub struct SpallSource {
     /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
     /// summed over the reached members.
     pub spend: f32,
+    /// `f_rear`: the factor of the body's last layer before the exit, the highest over the reached
+    /// members ([`ExitMember::rear_factor`]).
+    pub rear_factor: f32,
     /// The round's speed (m/s) where the earliest member entered the body.
     pub entry_speed: f32,
     /// The round's speed (m/s) where the latest reached member left it.
@@ -1670,13 +1676,17 @@ pub struct SpallSource {
 }
 
 impl SpallSource {
-    /// The cone's on-axis strength `S = spend × (v_exit / v_entry)²` (reference-mm): the spend at the
-    /// exit, scaled by the fraction of the round's kinetic energy left across the body. Zero for a
-    /// round that entered at rest.
+    /// The cone's on-axis strength `S = spend × κ × (v_exit / v_entry)²` (reference-mm), `κ =
+    /// f_rear / f_ref` ([`Self::rear_factor`] over [`REFERENCE_FACTOR`]): the spend at the exit,
+    /// scaled by how competent the exit material's debris is against the reference steel and by the
+    /// fraction of the round's kinetic energy left across the body. κ is exactly 1 for a body whose
+    /// last layer is the reference, so its strength is `spend × ratio²` to the bit. Zero for a round
+    /// that entered at rest.
     pub fn strength(&self) -> f32 {
         if self.entry_speed > 0.0 {
             let ratio = self.exit_speed / self.entry_speed;
-            self.spend * ratio * ratio
+            let kappa = self.rear_factor / REFERENCE_FACTOR;
+            self.spend * kappa * ratio * ratio
         } else {
             0.0
         }
@@ -2219,6 +2229,7 @@ fn build_event(
         let base = corridor.origin + corridor.samples[sample].offset;
         let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
         let mut member = |substances: Vec<SubstanceId>,
+                          rear_factor: f32,
                           start: f64,
                           end: f64,
                           face: Option<Vec3>,
@@ -2237,6 +2248,7 @@ fn build_event(
                     position: base + corridor.axis * end as f32,
                     face,
                     exited,
+                    rear_factor,
                 });
             *ordinal += 1;
         };
@@ -2272,7 +2284,7 @@ fn build_event(
                             .into_iter()
                             .filter(|volume| !volumes.contains(volume))
                             .collect();
-                        member(held, start, end, None, left);
+                        member(held, before, start, end, None, left);
                         (substances, factor, from, to, volumes)
                     }
                     Some((mut held, _, start, _, _)) => {
@@ -2287,7 +2299,7 @@ fn build_event(
             if let Some((held, factor, start, end, last)) = body
                 && factor > 0.0
             {
-                member(held, start, end, Some(extent.exit_normal), last);
+                member(held, factor, start, end, Some(extent.exit_normal), last);
             }
         }
         if saw_exit {
@@ -3052,6 +3064,10 @@ fn spall_sources<M: Mechanism>(
             substances: exit.substances.clone(),
             exited: exited.into_iter().collect(),
             spend: spend as f32,
+            rear_factor: reached
+                .iter()
+                .map(|member| member.rear_factor)
+                .fold(0.0, f32::max),
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
             coverage: (count as f64 / disc as f64) as f32,
