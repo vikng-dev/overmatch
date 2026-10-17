@@ -22,22 +22,27 @@ margin. 80/10 ms is the standard condition we quote. ADR-0032's DERIVED "~10 tic
 <120 m" is one claim expressed three ways and corresponds to ≈100 ms one-way — a point we do not
 ship at.
 
-## Pen cam explanations wait for the impact, never the reverse
+## Pen cam explanations: 0 of 284 arrived after their impact was drawn
 
-MEASURED 2026-10-18 (`scripts/shot/run-pencam-latency.sh`, two clients 8 m apart, main gun + held
-MGs, 200 s per point, 284 explanations). Server impact → explanation stored (wire) and → released
-to a view (open), p50 / max:
+MEASURED 2026-10-18 under `SPIKE_SHOT_TRACE` (the delivery's trace rows — server `xsend`, `link`;
+client `xrx`, `xpres`, `xdraw` — are registered only when it is set; every row but `meta` carries
+the wall clock `us`). `scripts/shot/run-pencam-latency.sh`: two clients 8 m apart, main gun + held
+MGs, 200 s per condition, four conditions, 284 main-gun explanations; the MG sends none. Server
+impact → explanation stored (wire) and → the cam able to open (open: the client's draw of the
+impact, or the arrival if drawn first), shooter and victim ranges, ms:
 
-| latency / jitter | wire | open | TimedOut |
-|---|---|---|---|
-| 0 / 0 ms | 7–8 / 17 ms | 46–52 / 116 ms | 0 |
-| 60 / 10 ms | 72–77 / 93 ms | 115–120 / 144 ms | 0 |
-| 120 / 30 ms | 130–144 / 212 ms | 193–316 / 408 ms | 0 |
+| latency / jitter | wire p50 | wire p90 | wire max | open p50 | open p90 | open max | TimedOut |
+|---|---|---|---|---|---|---|---|
+| 0 / 0 | 7–8 | 11–15 | 17 | 46–52 | 63–68 | 115 | 0 of 74 |
+| 60 / 10 | 72–77 | 79–86 | 93 | 115–119 | 136–137 | 143 | 0 of 70 |
+| 120 / 30, seed 1 | 130–140 | 155–160 | 177 | 192–315 | 257–330 | 349 | 0 of 72 |
+| 120 / 30, seed 2 | 133–144 | 151–170 | 212 | 231–314 | 341–392 | 406 | 0 of 68 |
 
-No explanation ever arrived after its impact was drawn. The release waits for the
-interpolation-delayed impact draw, so `open` follows each client's interpolation delay. At
-120/30 that delay differs between the two clients by 110–140 ms, cause undiagnosed. The run,
-its per-client split and what it leaves unmeasured:
+The cam waits for the interpolation-delayed impact draw, so `open` follows each client's
+interpolation delay. At 120/30 that delay differs between the two clients by 110–140 ms; INFERRED,
+not measured: most likely one client's arrival estimator absorbed a post-stall batch, a harness
+artefact. The
+runs, the per-client split and what they leave unmeasured:
 `.agents/scratch/damage-cam-2026-10-08/slice9-latency-2026-10-18.md`.
 
 ## `jitter_margin` 1.0 → 4.0 costs what it buys

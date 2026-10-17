@@ -60,8 +60,9 @@ done
 grep -q "listening" "$OUT/server.log"
 
 # One scripted client: $1 trace/log name, $2 hull-local aim point, $3 first primary tick, $4 run
-# ticks. The aim is fixture data: the other tank's engine bay (1.2 m up, 2.2 m rearward of its
-# origin, as the offline target-fires scenario lays it), so a round costs a component, not the tank.
+# ticks. The aims are fixture data: a's at b's engine bay (1.2 m up, 2.2 m rearward of its origin,
+# as the offline target-fires scenario lays it), b's at a's front hull, so a round costs a
+# component, not the tank.
 client() {
   env -u SPIKE_SIM_VISIBLE OVERMATCH_MUTE=1 \
     SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_SERVER=127.0.0.1:5888 \
@@ -76,7 +77,9 @@ client() {
 # Lane assignment is connect-order: the first client to CONNECT takes lane 0, and each aim assumes
 # its lane. The second client starts only once the server logged the first connection. A cold
 # Metal shader cache (the first run after a rebuild) can stall a client past keepalive and burn a
-# lane on reconnect; the analyzer refuses such a run, and a rerun is warm.
+# lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (more
+# connects than clients, or a disconnect before the last send) and exits non-zero, which this
+# script, its last command, returns; a rerun is warm.
 # DERIVED: the first client runs 128 ticks longer so it outlives the later-started second; their
 # primaries are 128 ticks (half an interval) apart so the two main guns do not fire together.
 client a "8,1.2,2.2" 320 "$((TICKS + 128))" &

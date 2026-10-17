@@ -228,10 +228,100 @@ fn each_explanation_reaches_only_its_recipient() {
     }
 }
 
-/// The delivery trace logs each explanation once on arrival with its presence then, and once more
-/// when it leaves pending, drawn or timed out; one stored drawn is never logged again.
+/// Every system and observer name the app registers in `Update`, `FixedUpdate` and as an observer.
+fn registered_names(app: &mut App) -> Vec<String> {
+    let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
+    let mut names: Vec<String> = [schedules.get(Update), schedules.get(FixedUpdate)]
+        .into_iter()
+        .flatten()
+        .flat_map(|schedule| {
+            schedule
+                .graph()
+                .systems
+                .iter()
+                .map(|(_, system, _)| system.name().to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let world = app.world_mut();
+    names.extend(
+        world
+            .query::<&bevy::ecs::observer::Observer>()
+            .iter(world)
+            .map(|observer| observer.system_name().to_string()),
+    );
+    names
+}
+
+fn mounted(armed: Option<&std::path::Path>) -> Vec<String> {
+    let mut app = App::new();
+    if let Some(path) = armed {
+        app.insert_resource(ShotTrace::for_test(path));
+    }
+    install_client(&mut app);
+    install_server(&mut app);
+    registered_names(&mut app)
+}
+
+fn trace_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "overmatch-{name}-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+/// Unarmed, the delivery mounts register no trace system and no trace observer: tracing off costs
+/// the shipping schedule nothing. The armed mount is the control that the probe sees them.
 #[test]
-fn the_trace_logs_each_arrival_and_release_once() {
+fn an_unarmed_mount_registers_no_delivery_trace() {
+    let off = mounted(None);
+    for real in [
+        "receive_shot_explanations",
+        "expire_explanations",
+        "note_outcome_drawn",
+        "send_shot_explanations",
+    ] {
+        assert!(
+            off.iter().any(|name| name.ends_with(real)),
+            "the probe must see the delivery's own `{real}`: {off:?}",
+        );
+    }
+    assert!(
+        !off.iter().any(|name| name.contains("trace")),
+        "an unarmed mount registered a trace system or observer: {off:?}",
+    );
+
+    let path = trace_path("pencam-mount");
+    let on = mounted(Some(&path));
+    std::fs::remove_file(&path).unwrap();
+    for traced in [
+        "trace_presence",
+        "trace_outcome_drawn",
+        "send_traced_shot_explanations",
+        "trace_link_up",
+        "trace_link_down",
+    ] {
+        assert!(
+            on.iter().any(|name| name.ends_with(traced)),
+            "control: the armed mount must register `{traced}`: {on:?}",
+        );
+    }
+    assert!(
+        !on.iter()
+            .any(|name| name.ends_with("::send_shot_explanations")),
+        "the armed mount sends through the traced sender alone: {on:?}",
+    );
+}
+
+/// Armed by the trace resource at install, the client logs each authority outcome it draws
+/// (`xdraw`), each explanation once on arrival with its presence then (`xrx`), and once more when
+/// it leaves pending, drawn or timed out (`xpres`); one stored drawn is never logged again.
+#[test]
+fn an_armed_client_logs_each_draw_arrival_and_release_once() {
     let report = report("s1_through_crew");
     let vocabulary = vocabulary(&report);
     let struck = TankLife {
@@ -245,33 +335,30 @@ fn the_trace_logs_each_arrival_and_release_once() {
         built.projections().swap_remove(0).1
     };
     let (waiting, drawn, already) = (victim(1200), victim(1400), victim(1600));
-    let path = std::env::temp_dir().join(format!(
-        "overmatch-pencam-trace-{}-{}.jsonl",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let draw = |explanation: &ShotExplanation| AuthorityOutcomeDrawn {
+        shot: explanation.shot,
+        ordinal: explanation.outcome.unwrap(),
+    };
+    let path = trace_path("pencam-trace");
     {
         let mut app = App::new();
         app.init_resource::<Time<Virtual>>()
             .init_resource::<LocalTimeline>()
-            .init_resource::<ShotExplanations>()
-            .insert_resource(ShotTrace::for_test(&path))
-            .add_systems(Update, trace_presence);
+            .insert_resource(ShotTrace::for_test(&path));
+        install_client(&mut app);
+        app.world_mut().trigger(draw(&already));
         let mut store = app.world_mut().resource_mut::<ShotExplanations>();
-        store.drew(already.shot, already.outcome.unwrap());
         store.receive(waiting, &vocabulary, 0.0);
         store.receive(drawn.clone(), &vocabulary, 0.0);
         store.receive(already, &vocabulary, 0.0);
         app.update();
-        let mut store = app.world_mut().resource_mut::<ShotExplanations>();
-        store.drew(drawn.shot, drawn.outcome.unwrap());
+        app.world_mut().trigger(draw(&drawn));
         app.update();
         app.world_mut()
-            .resource_mut::<ShotExplanations>()
-            .expire(crate::damage_cam::delivery::IMPACT_TIMEOUT_S);
+            .resource_mut::<Time<Virtual>>()
+            .advance_by(Duration::from_secs_f64(
+                crate::damage_cam::delivery::IMPACT_TIMEOUT_S,
+            ));
         app.update();
         app.update();
     }
@@ -279,16 +366,15 @@ fn the_trace_logs_each_arrival_and_release_once() {
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .filter(|row| row["k"] != "meta")
         .map(|row| {
             assert!(
                 row["us"].as_u64().unwrap() > 0,
-                "every row carries the wall clock"
+                "every delivery row carries the wall clock"
             );
             (
                 row["k"].as_str().unwrap().to_owned(),
                 u32::try_from(row["ft"].as_u64().unwrap()).unwrap(),
-                row["pres"].as_str().unwrap().to_owned(),
+                row["pres"].as_str().unwrap_or_default().to_owned(),
             )
         })
         .collect();
@@ -297,9 +383,11 @@ fn the_trace_logs_each_arrival_and_release_once() {
     assert_eq!(
         rows,
         [
+            row("xdraw", 1600, ""),
             row("xrx", 1200, "pending"),
             row("xrx", 1400, "pending"),
             row("xrx", 1600, "presented"),
+            row("xdraw", 1400, ""),
             row("xpres", 1400, "presented"),
             row("xpres", 1200, "timed_out"),
         ]

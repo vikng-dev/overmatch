@@ -1,10 +1,10 @@
 //! Optional passive shot-lifecycle JSONL recorder (`SPIKE_SHOT_TRACE=<path>`).
 //!
 //! Rows join by the stable [`ShotId`] fields `(c, w, ft)`; role-qualified paths isolate concurrent
-//! compositions. `send` records transport admission, not delivery acknowledgement. Every row carries
-//! `us`, the wall clock in microseconds since the Unix epoch when it was written: the one clock a
-//! server and its clients on the same machine share, so cross-process intervals are read from it,
-//! never from the ticks, whose timelines differ by the prediction lead. See
+//! compositions. `send` records transport admission, not delivery acknowledgement. Every row but
+//! `meta` carries `us`, the wall clock in microseconds since the Unix epoch when it was written: the
+//! one clock a server and its clients on the same machine share, so cross-process intervals are read
+//! from it, never from the ticks, whose timelines differ by the prediction lead. See
 //! [`scripts/shot/analyze.py`](../../scripts/shot/analyze.py) for field-level checks.
 
 use bevy::prelude::*;
@@ -16,7 +16,8 @@ use crate::trace::{JsonlSink, role_path};
 
 /// The open shot-lifecycle sink. Present iff `SPIKE_SHOT_TRACE` was set at startup ([`install`]
 /// inserts it and reports whether it did), so the recorder's own systems are registered only in an
-/// armed run and every call site elsewhere reads it as an `Option`.
+/// armed run. A call site elsewhere either reads it as an `Option` or is registered only when it
+/// exists at install (`net::shot_explanation`).
 #[derive(Resource)]
 pub(crate) struct ShotTrace {
     sink: JsonlSink,

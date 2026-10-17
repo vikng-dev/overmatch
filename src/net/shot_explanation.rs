@@ -8,14 +8,17 @@
 //! tank now, so a record of a killed tank still reaches its player after the respawn.
 //!
 //! Under `SPIKE_SHOT_TRACE` both ends log the delivery to the shot-lifecycle trace: the server each
-//! projection it sends (`xsend`), a client each explanation it stores (`xrx`, with its presence on
-//! arrival), each later presence change (`xpres`) and each authority outcome it draws (`xdraw`).
-//! `scripts/shot/pencam_latency.py` joins them.
+//! projection it sends (`xsend`) and each client link that connects or ends (`link`), a client
+//! each explanation it stores (`xrx`, with its presence on arrival), each later presence change
+//! (`xpres`) and each authority outcome it draws (`xdraw`). These systems and observers are
+//! registered only when the trace resource exists at install, so an unarmed run carries none of
+//! them. `scripts/shot/pencam_latency.py` joins the rows.
 
 use std::collections::{BTreeSet, HashMap};
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use lightyear::prelude::server::Server;
+use lightyear::prelude::server::{ClientOf, Server};
 use lightyear::prelude::*;
 use serde_json::json;
 
@@ -32,8 +35,17 @@ use crate::shot_trace::ShotTrace;
 use crate::state::GameplaySet;
 
 pub(super) fn install_server(app: &mut App) {
-    app.add_message::<RecordedShot>()
-        .add_systems(FixedUpdate, send_shot_explanations.after(GameplaySet));
+    app.add_message::<RecordedShot>();
+    if app.world().contains_resource::<ShotTrace>() {
+        app.add_systems(
+            FixedUpdate,
+            send_traced_shot_explanations.after(GameplaySet),
+        )
+        .add_observer(trace_link_up)
+        .add_observer(trace_link_down);
+    } else {
+        app.add_systems(FixedUpdate, send_shot_explanations.after(GameplaySet));
+    }
 }
 
 pub(super) fn install_client(app: &mut App) {
@@ -43,74 +55,120 @@ pub(super) fn install_client(app: &mut App) {
         .add_observer(note_outcome_drawn)
         .add_systems(
             Update,
-            (
-                receive_shot_explanations,
-                expire_explanations,
-                trace_presence.run_if(resource_exists::<ShotTrace>),
-            )
-                .chain(),
+            (receive_shot_explanations, expire_explanations).chain(),
         );
+    if app.world().contains_resource::<ShotTrace>() {
+        app.add_observer(trace_outcome_drawn)
+            .add_systems(Update, trace_presence.after(expire_explanations));
+    }
 }
 
-/// Build each finished record once and send each projection to the link controlling its
-/// combatant's tank, where that link is connected. A bot's combatant has no link and is sent
-/// nothing. No life is checked: a record finished after its tank respawned is sent to the same
-/// player as history, and its struck life keeps it out of the new life's live view
-/// ([`ShotExplanations::live`]).
-fn send_shot_explanations(
-    mut records: MessageReader<RecordedShot>,
-    vocabulary: Option<Res<ShotVocabulary>>,
-    servers: Query<&Server>,
-    tanks: Query<(&CombatantId, &ControlledBy), With<NetTank>>,
-    mut sender: ServerMultiMessageSender,
-    mut trace: Option<ResMut<ShotTrace>>,
-) {
-    if records.is_empty() {
-        return;
-    }
-    let (Some(vocabulary), Ok(server)) = (vocabulary, servers.single()) else {
-        warn_once!("server: a shot was recorded with no shot vocabulary or no server to send it");
-        records.clear();
-        return;
-    };
-    let links: HashMap<CombatantId, Entity> = tanks
-        .iter()
-        .map(|(&combatant, controlled)| (combatant, controlled.owner))
-        .collect();
-    for recorded in records.read() {
-        let built = match BuiltExplanation::build(&vocabulary, recorded) {
-            Ok(built) => built,
-            Err(error) => {
-                warn!("server: a recorded shot was not explained: {error}");
-                continue;
-            }
-        };
-        for (combatant, explanation) in built.projections() {
-            let Some(&link) = links.get(&combatant) else {
-                continue;
-            };
-            if !server.collection().contains(&link) {
-                continue;
-            }
-            if let Err(err) = sender
-                .send_to_entities::<ShotExplanation, ShotExplanationChannel>(&explanation, [link])
-            {
-                error!("server: a shot explanation could not enter transport: {err}");
-                continue;
-            }
-            crate::shot_trace::record(
-                &mut trace,
-                "xsend",
-                explanation.completion_tick,
-                explanation.shot,
-                || {
-                    let mut row = explanation_fields(&explanation);
-                    row["to"] = combatant.0.into();
-                    row
-                },
+/// What sending explanations reads and writes, shared by the plain and the traced sender.
+#[derive(SystemParam)]
+struct ExplanationSend<'w, 's> {
+    records: MessageReader<'w, 's, RecordedShot>,
+    vocabulary: Option<Res<'w, ShotVocabulary>>,
+    servers: Query<'w, 's, &'static Server>,
+    tanks: Query<'w, 's, (&'static CombatantId, &'static ControlledBy), With<NetTank>>,
+    sender: ServerMultiMessageSender<'w, 's>,
+}
+
+impl ExplanationSend<'_, '_> {
+    /// Build each finished record once and send each projection to the link controlling its
+    /// combatant's tank, where that link is connected, calling `on_sent` for each one that entered
+    /// transport. A bot's combatant has no link and is sent nothing. No life is checked: a record
+    /// finished after its tank respawned is sent to the same player as history, and its struck life
+    /// keeps it out of the new life's live view ([`ShotExplanations::live`]).
+    fn send(&mut self, mut on_sent: impl FnMut(CombatantId, &ShotExplanation)) {
+        if self.records.is_empty() {
+            return;
+        }
+        let (Some(vocabulary), Ok(server)) = (self.vocabulary.as_deref(), self.servers.single())
+        else {
+            warn_once!(
+                "server: a shot was recorded with no shot vocabulary or no server to send it"
             );
+            self.records.clear();
+            return;
+        };
+        let links: HashMap<CombatantId, Entity> = self
+            .tanks
+            .iter()
+            .map(|(&combatant, controlled)| (combatant, controlled.owner))
+            .collect();
+        for recorded in self.records.read() {
+            let built = match BuiltExplanation::build(vocabulary, recorded) {
+                Ok(built) => built,
+                Err(error) => {
+                    warn!("server: a recorded shot was not explained: {error}");
+                    continue;
+                }
+            };
+            for (combatant, explanation) in built.projections() {
+                let Some(&link) = links.get(&combatant) else {
+                    continue;
+                };
+                if !server.collection().contains(&link) {
+                    continue;
+                }
+                if let Err(err) = self
+                    .sender
+                    .send_to_entities::<ShotExplanation, ShotExplanationChannel>(
+                        &explanation,
+                        [link],
+                    )
+                {
+                    error!("server: a shot explanation could not enter transport: {err}");
+                    continue;
+                }
+                on_sent(combatant, &explanation);
+            }
         }
     }
+}
+
+fn send_shot_explanations(mut send: ExplanationSend) {
+    send.send(|_, _| {});
+}
+
+fn send_traced_shot_explanations(mut send: ExplanationSend, mut trace: ResMut<ShotTrace>) {
+    send.send(|combatant, explanation| {
+        let mut row = explanation_fields(explanation);
+        row["to"] = combatant.0.into();
+        trace.row("xsend", explanation.completion_tick, explanation.shot, row);
+    });
+}
+
+/// A client link connected (`up`) or ended (`down`). `scripts/shot/pencam_latency.py` reads these
+/// rows for the run's precondition: each client connects once and stays connected.
+fn trace_link_up(
+    add: On<Add, Connected>,
+    links: Query<(), With<ClientOf>>,
+    timeline: Res<LocalTimeline>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    if links.contains(add.entity) {
+        trace_link(&mut trace, &timeline, add.entity, "up");
+    }
+}
+
+fn trace_link_down(
+    remove: On<Remove, Connected>,
+    links: Query<(), With<ClientOf>>,
+    timeline: Res<LocalTimeline>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    if links.contains(remove.entity) {
+        trace_link(&mut trace, &timeline, remove.entity, "down");
+    }
+}
+
+fn trace_link(trace: &mut ShotTrace, timeline: &LocalTimeline, link: Entity, event: &str) {
+    trace.global_row(
+        "link",
+        timeline.tick().0,
+        json!({ "ev": event, "link": link.to_bits() }),
+    );
 }
 
 /// Drain every arrived explanation into the store. `Update`: lightyear clears an undrained
@@ -134,19 +192,21 @@ fn receive_shot_explanations(
     }
 }
 
-fn note_outcome_drawn(
-    drawn: On<AuthorityOutcomeDrawn>,
-    mut store: ResMut<ShotExplanations>,
-    timeline: Res<LocalTimeline>,
-    mut trace: Option<ResMut<ShotTrace>>,
-) {
+fn note_outcome_drawn(drawn: On<AuthorityOutcomeDrawn>, mut store: ResMut<ShotExplanations>) {
     store.drew(drawn.shot, drawn.ordinal);
-    crate::shot_trace::record(
-        &mut trace,
+}
+
+/// The instant an explanation's impact can present: its authority outcome drawn (`xdraw`).
+fn trace_outcome_drawn(
+    drawn: On<AuthorityOutcomeDrawn>,
+    timeline: Res<LocalTimeline>,
+    mut trace: ResMut<ShotTrace>,
+) {
+    trace.row(
         "xdraw",
         timeline.tick().0,
         drawn.shot,
-        || json!({ "o": drawn.ordinal }),
+        json!({ "o": drawn.ordinal }),
     );
 }
 
@@ -158,7 +218,7 @@ fn trace_presence(
     store: Res<ShotExplanations>,
     time: Res<Time<Virtual>>,
     timeline: Res<LocalTimeline>,
-    mut trace: Option<ResMut<ShotTrace>>,
+    mut trace: ResMut<ShotTrace>,
     mut seen: Local<BTreeSet<ExplanationKey>>,
     mut pending: Local<BTreeSet<ExplanationKey>>,
 ) {
@@ -175,12 +235,10 @@ fn trace_presence(
         } else {
             continue;
         };
-        crate::shot_trace::record(&mut trace, kind, tick, stored.explanation.shot, || {
-            let mut row = explanation_fields(&stored.explanation);
-            row["pres"] = presence_name(stored.presence).into();
-            row["vs"] = now.into();
-            row
-        });
+        let mut row = explanation_fields(&stored.explanation);
+        row["pres"] = presence_name(stored.presence).into();
+        row["vs"] = now.into();
+        trace.row(kind, tick, stored.explanation.shot, row);
     }
     match store.iter().next() {
         Some((&oldest, _)) => {

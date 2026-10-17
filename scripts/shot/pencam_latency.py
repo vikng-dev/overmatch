@@ -8,18 +8,21 @@ Rows (src/net/shot_explanation.rs, src/net/shot_transport.rs, src/shot_trace.rs)
   server  kf / cf   an authority outcome resolved: a bounce (`seq`) or the end (`ab`, bounces
                     before it); the ordinal an explanation's `o` names
   server  xsend     one projection entered transport, to combatant `to`
+  server  link      a client link connected (`ev` up) or ended (`ev` down)
   server  fire      a round fired (`cal`, metres: main gun at or above MAIN_GUN_MIN_CALIBER)
   client  xrx       an explanation stored, with its presence on arrival (`pres`)
   client  xpres     a stored explanation left pending: `presented` or `timed_out`
   client  xdraw     the client drew authority outcome `o` of a shot
 
-Every row carries `us`, the wall clock in microseconds; server and clients run on one machine, so
-cross-process intervals are differences of `us`. Per explanation a client stored:
+Every row but `meta` carries `us`, the wall clock in microseconds; server and clients run on one
+machine, so cross-process intervals are differences of `us`. Per explanation a client stored:
 
   wire    server impact (the kf/cf row of its outcome) -> arrival (xrx)
   hold    of which: server impact -> send (the record finishing on the authority)
   draw    arrival -> the client's own draw of the outcome (negative: drawn before it arrived)
-  open    server impact -> released to a view (arrival if presented on arrival, else the xpres row)
+  open    server impact -> the cam able to open: arrival if presented on arrival, the draw (xdraw)
+          if presented later, the timeout's xpres row if timed out (expiry and that row run in one
+          pass, so only a timeout reads xpres; a draw lands between passes)
 
 Each curve is reported per weapon and role (`main/shooter`), and again per client trace
 (`main/shooter/a`), since a client's interpolation delay sets its `draw`.
@@ -27,9 +30,15 @@ Each curve is reported per weapon and role (`main/shooter`), and again per clien
 An explanation with no outcome (`o` null: the round reached this tank past its first crossing) has
 no impact any client draws; it is counted apart and never presented.
 
+The run is valid only if each client connected once and stayed connected while explanations were
+sent: a reconnect takes a new spawn lane, and the scripted aims assume the first ones. The analyzer
+exits non-zero, naming the reason, on more `link` ups than clients or any `link` down before the
+last xsend. A server trace without `link` rows predates them: `--server-log` then counts the
+server log's connects instead, and disconnects are reported unverified.
+
 Usage:
     uv run scripts/shot/pencam_latency.py --server S.server.jsonl --client A.client.jsonl
-        --client B.client.jsonl [--label TEXT] [--json OUT]
+        --client B.client.jsonl [--server-log S.log] [--label TEXT] [--json OUT]
 """
 
 from __future__ import annotations
@@ -188,12 +197,18 @@ def analyze(server_path: Path, client_paths: list[Path]) -> dict:
             if r["pres"] == "presented":
                 count("presented_on_arrival")
                 opened = r["us"]
-            elif (later := released.get(key)) is not None:
-                count(later["pres"])
-                opened = later["us"]
-            else:
+            elif (later := released.get(key)) is None:
                 count("unreleased")
                 continue
+            elif later["pres"] == "timed_out":
+                count("timed_out")
+                opened = later["us"]
+            elif draw is None:
+                count("presented_undrawn")
+                continue
+            else:
+                count("presented")
+                opened = draw
             if impact is not None:
                 add("open", impact, opened)
 
@@ -207,14 +222,43 @@ def analyze(server_path: Path, client_paths: list[Path]) -> dict:
             "curves": {name: curve(v, tick_ms) for name, v in samples[group].items()},
         }
     lost = [list(key) for key in sends if key not in received]
+    links = [r for r in srows if r["k"] == "link"]
     return {
         "tick_hz": hz,
+        "links": {
+            "up": sum(r["ev"] == "up" for r in links),
+            "down_before_last_send": sum(
+                r["ev"] == "down" and r["us"] < max((x["us"] for x in sends.values()), default=0)
+                for r in links
+            ),
+        }
+        if links
+        else None,
         "fires": dict(fires),
         "sent": {f"{w}/{aud}": n for (w, aud), n in sorted(sent_by.items())},
         "sent_not_stored": lost,
         "clients": clients,
         "groups": groups,
     }
+
+
+def connect_failures(result: dict, clients: int, server_log: Path | None) -> list[str]:
+    """Why the run's connects invalidate it; empty when each client connected once and stayed."""
+    links = result["links"]
+    if links is None:
+        if server_log is None:
+            return ["the server trace has no `link` rows and no --server-log was given"]
+        connects = server_log.read_text(errors="replace").count("client connected")
+        result["links"] = {"up": connects, "down_before_last_send": None}
+        print(f"  legacy trace: {connects} connects in {server_log}; disconnects unverified")
+    failures = []
+    if result["links"]["up"] != clients:
+        failures.append(f"{result['links']['up']} client connects for {clients} clients")
+    if result["links"]["down_before_last_send"]:
+        failures.append(
+            f"{result['links']['down_before_last_send']} client disconnects before the last send"
+        )
+    return failures
 
 
 def report(result: dict, label: str) -> None:
@@ -243,18 +287,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--client", type=Path, action="append", required=True)
+    parser.add_argument("--server-log", type=Path)
     parser.add_argument("--label", default="")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     result = analyze(args.server, args.client)
     report(result, args.label)
+    failures = connect_failures(result, len(args.client), args.server_log)
+    if sum(c["explanations"] for c in result["clients"]) == 0:
+        failures.append("no explanation was stored: the run measured nothing")
     if args.json:
         args.json.write_text(json.dumps(result, indent=2))
-    stored = sum(c["explanations"] for c in result["clients"])
-    if stored == 0:
-        print("\nno explanation was stored: the run measured nothing", file=sys.stderr)
-        return 1
-    return 0
+    for failure in failures:
+        print(f"\nINVALID RUN: {failure}", file=sys.stderr)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
