@@ -170,6 +170,29 @@ converting stored → derived anywhere under `src/net/` or `src/track/`, check w
 component is replicated. If it is, this is a design change, not a simplification — stop and
 report.**
 
+### A2b. Types that let an invalid state exist
+
+A type whose values include states the code never means is a defect while every current path
+still avoids them: the compiler cannot reject the next path that reaches one. Six shapes, each
+with its fix. The lints in §1 cannot see any of them; this is the judgement half of the gate.
+
+- A struct of `Option` fields read as a state machine (`a.is_some() && b.is_none()` means
+  "phase 2") → one `enum` whose variants carry only the data that phase has. Kill the plausible
+  default: a `Default` that names a state the game never starts in is the same defect.
+- A per-frame `.clone()` taken to satisfy the borrow checker → restructure the access (split the
+  borrow, `std::mem::take` the field, compute the derived value first). The clone is the symptom.
+- A `String` or bare integer used as an identity, or an `f32` whose unit lives in a comment → a
+  newtype; derive `Ord`/`Hash` only where the ordering or equality means something in the domain.
+- `Result<_, String>` on a sim-path function → an error `enum` the caller can match. A string
+  error is a log line, not a type.
+- A function whose eight or more parameters are the fields of one thing → that thing, as an
+  argument struct or a `SystemParam` bundle. §1 enforces the count; this item is the judgement
+  about which parameters are one thing and which `#[expect]` reason is honest.
+- A `bool` parameter that selects a behaviour at the call site → a two-variant `enum` named for
+  the choice.
+
+Each is a behaviour-preserving rewrite and stays one (§C2). Report the shape by name.
+
 ### A3. Duplicated knowledge
 
 Not duplicated *text* — duplicated **knowledge**: two places that must change together, with
