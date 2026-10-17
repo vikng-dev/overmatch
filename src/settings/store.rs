@@ -431,9 +431,9 @@ pub(super) fn reset() -> bool {
 mod tests {
     use super::*;
     use crate::settings::{
-        DebugPanel, DisplaySelection, FrameCap, MsaaLevel, PenCamCorner, PixelBudget, ReduceMotion,
-        RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent,
-        VictimGlassPeek, VsyncMode, WindowModeSetting,
+        DebugPanel, DisplaySelection, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget,
+        ReduceMotion, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
+        UiScalePercent, VictimGlassPeek, VsyncMode, WindowModeSetting,
     };
 
     /// The env override wins on every platform — the hook a test or a packaged run needs so it
@@ -779,6 +779,7 @@ mod tests {
                 debug_panel: DebugPanel::Off,
                 pen_cam_corner: PenCamCorner::ThroughOnly,
                 victim_glass_peek: VictimGlassPeek::Off,
+                kill_cam: KillCam::Off,
                 reduce_motion: ReduceMotion::On,
             },
             // The FAST rung — the value the retired bool field could not carry, i.e. the whole
@@ -1006,6 +1007,7 @@ mod tests {
             debug_panel: DebugPanel::Off,
             pen_cam_corner: PenCamCorner::Off,
             victim_glass_peek: VictimGlassPeek::Off,
+            kill_cam: KillCam::Off,
             reduce_motion: ReduceMotion::On,
         };
         assert!(save(&wanted), "the save must land");

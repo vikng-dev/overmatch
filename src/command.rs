@@ -143,6 +143,12 @@ pub struct Bindings {
     /// Held: the pen cam's victim glass, the player's own tank, in the corner slot. A view, not a
     /// command: it never reaches [`TankCommand`].
     pub own_tank_glass: ButtonBinding,
+    /// The kill cam, while the player's own tank is knocked out: skip to the death screen, hold
+    /// the clock while down, replay from the death screen. Views, not commands: none reaches
+    /// [`TankCommand`]. The replay key shares `fire_secondary`'s, which reads only a live tank.
+    pub kill_cam_skip: ButtonBinding,
+    pub kill_cam_hold: ButtonBinding,
+    pub kill_cam_replay: ButtonBinding,
 }
 
 /// A [-1, 1] axis from a key pair.
@@ -205,6 +211,10 @@ impl Default for Bindings {
             fire_secondary: ButtonBinding::Key(KeyCode::Space),
             // TUNED: the pen cam demo's own-tank key.
             own_tank_glass: ButtonBinding::Key(KeyCode::KeyV),
+            // TUNED: the pen cam demo's kill cam keys.
+            kill_cam_skip: ButtonBinding::Key(KeyCode::KeyX),
+            kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
+            kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
         }
     }
 }

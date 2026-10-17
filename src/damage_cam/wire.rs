@@ -815,10 +815,6 @@ impl ShotExplanation {
     }
 
     /// The kill cam's lesson is this recipient's.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "its reader, the kill cam, is not yet built")
-    )]
     pub(crate) fn lesson(&self) -> bool {
         self.audience == Audience::KilledVictim
     }

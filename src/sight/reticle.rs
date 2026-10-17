@@ -15,7 +15,8 @@ use bevy::shader::ShaderRef;
 
 use crate::aim::CommittedAim;
 use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
-use crate::damage::ControlledTank;
+use crate::damage::{ControlledTank, TankKnockedOut};
+use crate::damage_cam::pen_cam::game::KillCamGate;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
@@ -716,9 +717,14 @@ fn update_intent_reticle(
 /// above all, but also the menu / connect screen) owns the scrim — whole-crew death shows "YOU DIED",
 /// not this black. In single-player the `Overlays` resource is absent (`Option` is `None`) and this
 /// system sets the node's visibility itself, standalone as before: crewman down → black + prompt.
+///
+/// Where the kill cam is mounted ([`KillCamGate`]), a knocked-out tank's view is the kill cam's and
+/// then its death screen's: no black.
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
+    kill_cam: Option<Res<KillCamGate>>,
+    knocked_out: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
     views: Query<&TankViews, With<Controlled>>,
     overlays: Option<ResMut<Overlays>>,
     mut overlay_vis: Query<&mut Visibility, With<ViewDeathOverlay>>,
@@ -733,7 +739,9 @@ fn update_view_death_overlay(
 
     // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
     // controlled tank existing (no station to be dead without one).
-    let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
+    let kill_cam_owns = kill_cam.is_some() && !knocked_out.is_empty();
+    let crewman_down =
+        has_controlled && !kill_cam_owns && !view_available(&controlled, &views, active_view);
 
     // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-declared
     // set (suppressed under any higher overlay). We must not also write `Visibility` here — that would

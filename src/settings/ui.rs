@@ -56,7 +56,7 @@ use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
 use super::{
-    DebugPanel, FrameCap, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
+    DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
     RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution,
     UiScalePercent, VictimGlassPeek, VsyncMode, WindowModeSetting,
 };
@@ -121,6 +121,8 @@ enum Row {
     PenCamCorner,
     /// See `settings::VictimGlassPeek`.
     VictimGlassPeek,
+    /// See `settings::KillCam`.
+    KillCam,
     /// See `settings::ReduceMotion`.
     ReduceMotion,
 }
@@ -133,7 +135,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 15] = [
+    const ORDER: [Row; 16] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -148,6 +150,7 @@ impl Row {
         Row::DebugPanel,
         Row::PenCamCorner,
         Row::VictimGlassPeek,
+        Row::KillCam,
         Row::ReduceMotion,
     ];
 
@@ -170,6 +173,7 @@ impl Row {
             Row::DebugPanel => "DEBUG PANEL",
             Row::PenCamCorner => "PEN CAM CORNER",
             Row::VictimGlassPeek => "VICTIM GLASS PEEK",
+            Row::KillCam => "KILL CAM",
             Row::ReduceMotion => "REDUCE MOTION",
         }
     }
@@ -245,6 +249,10 @@ impl Row {
             Row::VictimGlassPeek => {
                 "Briefly shows your own tank in the inset when a round crosses its armour or \
                  costs it something. The hold key works either way."
+            }
+            Row::KillCam => {
+                "When a recorded shot knocks you out, shows what it did before the death screen. \
+                 OFF goes straight to the death screen."
             }
             Row::ReduceMotion => "Holds the pen cam's camera still and shortens its animations.",
         }
@@ -324,6 +332,7 @@ impl Row {
             Row::DebugPanel => settings.debug_panel.label().to_string(),
             Row::PenCamCorner => settings.pen_cam_corner.label().to_string(),
             Row::VictimGlassPeek => settings.victim_glass_peek.label().to_string(),
+            Row::KillCam => settings.kill_cam.label().to_string(),
             Row::ReduceMotion => settings.reduce_motion.label().to_string(),
         }
     }
@@ -384,6 +393,9 @@ impl Row {
             Row::VictimGlassPeek => {
                 settings.victim_glass_peek =
                     step_in(&VictimGlassPeek::ORDER, settings.victim_glass_peek, delta);
+            }
+            Row::KillCam => {
+                settings.kill_cam = step_in(&KillCam::ORDER, settings.kill_cam, delta);
             }
             Row::ReduceMotion => {
                 settings.reduce_motion =

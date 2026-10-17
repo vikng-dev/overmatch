@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
+use crate::damage_cam::pen_cam::game::{GameDeathScreen, KillCamGate};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
@@ -45,7 +46,8 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::death_screen");
-    app.init_match_resource::<AwaitingRespawn>()
+    app.init_resource::<GameDeathScreen>()
+        .init_match_resource::<AwaitingRespawn>()
         .add_systems(OnEnter(Flow::InMatch), spawn_death_status_line)
         .add_systems(
             Update,
@@ -67,9 +69,12 @@ pub fn plugin(app: &mut App) {
 }
 
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
-/// death only for a controlled tank carrying `TankKnockedOut`.
+/// death only for a controlled tank carrying `TankKnockedOut`, once the kill cam lets it
+/// ([`KillCamGate::holds_death_screen`]).
+#[allow(clippy::too_many_arguments)]
 fn toggle_death_screen(
     time: Res<Time>,
+    gate: Option<Res<KillCamGate>>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
     overlay: Query<(Entity, &DeathScreenNode)>,
@@ -92,7 +97,7 @@ fn toggle_death_screen(
 
     let desired = if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
-    } else if !dead_own.is_empty() {
+    } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
         Some(DeathScreenNode::Died)
     } else {
         None
@@ -129,14 +134,18 @@ fn toggle_death_screen(
 /// overlay stays on `press R`. The `overlay::input_blocked` re-check below closes the ONE remaining
 /// gap the cursor gate can't: the frame a menu opens in the SAME tick R is pressed, before the cursor
 /// owner has released the cursor — refusing the latch there is what prevents a phantom `RESPAWNING…`.
+///
+/// Inert while the knockout is younger than the kill cam's input dead-zone
+/// ([`KillCamGate::settling`]), so a key held through the hit does not respawn.
 fn request_respawn(
     time: Res<Time>,
+    gate: Option<Res<KillCamGate>>,
     keys: Res<ButtonInput<KeyCode>>,
     overlays: Res<Overlays>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
-    if !keys.just_pressed(RESPAWN_KEY) {
+    if !keys.just_pressed(RESPAWN_KEY) || gate.is_some_and(|gate| gate.settling) {
         return;
     }
     // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or

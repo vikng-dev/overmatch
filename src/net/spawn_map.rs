@@ -14,6 +14,7 @@ use bevy::window::PrimaryWindow;
 use lightyear::prelude::*;
 
 use super::protocol::{SetSpawnPoint, SpawnChannel};
+use crate::damage_cam::pen_cam::game::KillCamGate;
 use crate::flow::{InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, OverlayNode, Overlays};
 use crate::tank::Controlled;
@@ -142,10 +143,13 @@ pub fn plugin(app: &mut App) {
 /// make the map impossible to close.
 fn toggle_spawn_map(
     keys: Res<ButtonInput<KeyCode>>,
+    gate: Option<Res<KillCamGate>>,
     mut map: ResMut<SpawnMap>,
     mut overlays: ResMut<Overlays>,
 ) {
-    if keys.just_pressed(SPAWN_MAP_KEY) {
+    // Not in the kill cam's input dead-zone after a knockout ([`KillCamGate::settling`]).
+    let settling = gate.is_some_and(|gate| gate.settling);
+    if keys.just_pressed(SPAWN_MAP_KEY) && !(settling && !map.open) {
         // CLOSING is unconditional; OPENING requires that nothing latched outranks the map
         // ([`overlay::may_open`]). Without that gate, `M` pressed under the menu or the connect
         // screen latched a map the one-scrim rule immediately hid — invisible, yet input-blocking,

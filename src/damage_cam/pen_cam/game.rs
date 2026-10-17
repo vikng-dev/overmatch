@@ -39,9 +39,11 @@
 //!   either setting, or a [`CloseCorner`] (the network client's disconnect). Every one goes at
 //!   once ([`Rig::teardown`]): the cameras, lights, stage view, UI and the images they own.
 //!
-//! No input reaches the corner; the hold key only opens the glass.
+//! No input reaches the corner; the hold key only opens the glass. While the player's tank is
+//! knocked out the slot holds nothing and its rig is the kill cam's ([`killcam`]).
 
 mod glass;
+mod killcam;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -52,6 +54,7 @@ use bevy::world_serialization::WorldAsset;
 
 pub(crate) use self::glass::GlassHold;
 use self::glass::{LiveState, LiveVolume};
+pub(crate) use self::killcam::{GameDeathScreen, KillCamGate};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look::{MaskCamera, Masks};
 use super::plan::Plan;
@@ -92,12 +95,14 @@ fn wire(app: &mut App) {
             Update,
             (
                 drive,
+                killcam::drive.after(crate::state::PlayerInputSet),
                 (view::prepare_stage, view::pose_stage, super::present())
                     .chain()
                     .run_if(resource_exists::<StageView>),
             )
                 .chain(),
         );
+    killcam::wire(app);
 }
 
 /// What one turn shows.
@@ -280,7 +285,9 @@ pub(crate) struct Rig<'w, 's> {
     corner: ResMut<'w, Corner>,
     exhibits: ResMut<'w, Exhibits>,
     masks: ResMut<'w, Masks>,
-    entities: Query<'w, 's, Entity, (With<CornerRig>, Without<MaskCamera>)>,
+    entities:
+        Query<'w, 's, (Entity, Option<&'static ChildOf>), (With<CornerRig>, Without<MaskCamera>)>,
+    rigged: Query<'w, 's, (), With<CornerRig>>,
 }
 
 impl Rig<'_, '_> {
@@ -312,11 +319,14 @@ impl Rig<'_, '_> {
         }
     }
 
-    /// Despawn every entity of the corner and drop every image and resource it holds.
+    /// Despawn every entity of the corner and drop every image and resource it holds. One under
+    /// another of the corner's goes with it.
     fn teardown(&mut self, state: &mut Slot) {
         self.masks.release(&mut self.commands, &mut self.images);
-        for entity in &self.entities {
-            self.commands.entity(entity).despawn();
+        for (entity, parent) in &self.entities {
+            if parent.is_none_or(|parent| !self.rigged.contains(parent.parent())) {
+                self.commands.entity(entity).despawn();
+            }
         }
         self.commands.remove_resource::<StageView>();
         self.commands.remove_resource::<CornerImages>();
@@ -773,11 +783,11 @@ mod tests {
     use crate::damage_cam::wire::{BuiltExplanation, ShotVocabulary};
 
     /// The test's frame step (s), a 30 Hz frame: fixture data.
-    const STEP_S: f32 = 1.0 / 30.0;
+    pub(super) const STEP_S: f32 = 1.0 / 30.0;
 
     /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
     /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
-    fn corner_app(settings: Settings) -> (App, Entity) {
+    pub(super) fn corner_app(settings: Settings) -> (App, Entity) {
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::ignore);
         app.add_plugins((
@@ -827,7 +837,7 @@ mod tests {
     }
 
     /// A stage view of tank file `vehicle` standing in for its glb.
-    fn stage_of(app: &mut App, vehicle: &str) {
+    pub(super) fn stage_of(app: &mut App, vehicle: &str) {
         let vehicle = vehicle.to_owned();
         let path = crate::assets::asset_root().join(&vehicle);
         let spec: TankSpec =
@@ -933,7 +943,11 @@ mod tests {
     }
 
     /// Store `explanation` with its impact drawn.
-    fn receive(app: &mut App, explanation: ShotExplanation, vocabulary: &ShotVocabulary) {
+    pub(super) fn receive(
+        app: &mut App,
+        explanation: ShotExplanation,
+        vocabulary: &ShotVocabulary,
+    ) {
         let now = app.world().resource::<Time>().elapsed_secs_f64();
         app.world_mut()
             .resource_mut::<ShotExplanations>()
@@ -942,13 +956,13 @@ mod tests {
 
     /// Whether bevy's shared image, the one `ImagePlugin` keeps at `Handle::default()` for
     /// untextured UI, is still stored.
-    fn default_image_kept(app: &App) -> bool {
+    pub(super) fn default_image_kept(app: &App) -> bool {
         app.world()
             .resource::<Assets<Image>>()
             .contains(&Handle::<Image>::default())
     }
 
-    fn step(app: &mut App) {
+    pub(super) fn step(app: &mut App) {
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs_f32(STEP_S));
@@ -956,7 +970,7 @@ mod tests {
     }
 
     /// The corner's entities, inset cameras and every entity but the resources', in that order.
-    fn census(app: &mut App) -> (usize, usize, usize) {
+    pub(super) fn census(app: &mut App) -> (usize, usize, usize) {
         let world = app.world_mut();
         let rig = world
             .query_filtered::<(), With<CornerRig>>()

@@ -21,6 +21,7 @@ use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactMarker};
 use crate::camera::CameraFollow;
+use crate::damage::TankKnockedOut;
 use crate::tank::{Controlled, Tank};
 use crate::track::sim::TrackContacts;
 
@@ -118,7 +119,8 @@ struct XRay(bool);
 fn toggle_xray(
     keys: Res<ButtonInput<KeyCode>>,
     mut xray: ResMut<XRay>,
-    tank: Single<Entity, (With<Tank>, With<Controlled>)>,
+    // Not while knocked out: X is then the kill cam's skip.
+    tank: Single<Entity, (With<Tank>, With<Controlled>, Without<TankKnockedOut>)>,
     children: Query<&Children>,
     mesh_mats: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
