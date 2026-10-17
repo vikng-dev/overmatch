@@ -1,5 +1,5 @@
 use super::super::tests::{
-    STEP_S, census, corner_app, default_image_kept, receive, stage_of, step,
+    STEP_S, census, corner_app_with, default_image_kept, receive, stage_of, step,
 };
 use bevy::camera::visibility::RenderLayers;
 
@@ -17,7 +17,7 @@ const RECORD: &str = "s1_through_crew";
 /// beat plays.
 const MUZZLE_M: [f32; 3] = [400.0, 1.8, 300.0];
 
-/// The player's tank in [`corner_app`] is the [`SHOOTER`] combatant: here it is the one struck.
+/// The player's tank in [`corner_app`](super::super::tests::corner_app) is the [`SHOOTER`] combatant: here it is the one struck.
 fn player_life(life: u32) -> TankLife {
     TankLife {
         combatant: SHOOTER,
@@ -52,9 +52,15 @@ fn shot(
     (victim, shooter, vocabulary, report)
 }
 
-/// The kill cam's app: [`corner_app`] with the default keys and the player's camera.
+/// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with the default keys and
+/// the player's camera.
 fn app(settings: Settings) -> (App, Entity, Entity) {
-    let (mut app, player) = corner_app(settings);
+    app_with(settings, |_| {})
+}
+
+/// [`app`] with `mount` run before the app finishes.
+fn app_with(settings: Settings, mount: impl FnOnce(&mut App)) -> (App, Entity, Entity) {
+    let (mut app, player) = corner_app_with(settings, mount);
     app.insert_resource(Bindings::default())
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>();
@@ -346,6 +352,8 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
                     ..default()
                 });
                 step(&mut app);
+                assert!(victim(&app).run.is_some(), "{case} at {at:?}: marked");
+                step(&mut app);
                 assert!(victim(&app).run.is_none(), "{case} at {at:?}");
                 let mut player = app.world_mut().entity_mut(player);
                 player.remove::<(TankKnockedOut, TankCommand)>();
@@ -412,7 +420,7 @@ fn composed() -> (App, Entity, Entity) {
         hud: Handle::default(),
         body: Handle::default(),
     });
-    crate::net::death_screen::mount_bare(&mut app);
+    crate::net::mount_death_screen(&mut app);
     crate::net::spawn_map::mount_bare(&mut app);
     app.world_mut()
         .resource_mut::<Overlays>()
@@ -425,15 +433,24 @@ fn composed() -> (App, Entity, Entity) {
 }
 
 /// The death screen, the respawn key and the map read the gate of the frame they run in: from the
-/// knockout's own frame no "YOU DIED" while the cam waits, and R or M pressed every frame is taken
-/// on the first press at the dead-zone's end and on none before it.
+/// knockout's own frame no "YOU DIED" while the cam plays, and R or M pressed every frame is taken
+/// on the first press at the dead-zone's end and on none before it. The frame it is taken the run
+/// and the gate stand; the next, the run, the camera and the gate end together under the death
+/// screen.
 #[test]
 fn the_gate_is_read_on_the_frame_it_is_written() {
     for key in [KeyCode::KeyR, KeyCode::KeyM] {
         let (mut app, player, _) = composed();
+        let (explanation, _, vocabulary, report) = shot(STRUCK, player_life(0), true);
+        receive(&mut app, explanation, &vocabulary);
         knock_out(&mut app, player);
+        let mut staged = false;
         loop {
             press(&mut app, key);
+            if !staged {
+                stage_of(&mut app, report.vehicle.as_deref().unwrap());
+                staged = true;
+            }
             let zero = victim(&app).dead.expect("dead from the knockout's frame").1;
             let now = app.world().resource::<Time>().elapsed_secs_f64();
             let since = (now - zero) as f32;
@@ -443,19 +460,28 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
                 _ => overlays.contains(Overlay::SpawnMap),
             };
             assert_eq!(taken, since >= HIT_S, "{key:?} at {since} s");
+            assert!(victim(&app).run.is_some(), "{key:?} at {since} s");
+            assert!(gate(&app).holds_death_screen, "{key:?} at {since} s");
             if taken {
                 break;
             }
             assert!(!overlays.contains(Overlay::Death), "{key:?} at {since} s");
             assert!(
-                !crate::net::death_screen::shows_died(app.world_mut()),
+                !crate::net::shows_died(app.world_mut()),
                 "{key:?} at {since} s"
             );
         }
-        // Given way: "RESPAWNING…" on R; on M, the death screen under the map.
         step(&mut app);
+        assert!(victim(&app).run.is_none(), "{key:?}");
+        assert!(!captive(&app), "{key:?}");
+        assert!(!gate(&app).holds_death_screen, "{key:?}");
+        assert!(
+            app.world().resource::<Overlays>().contains(Overlay::Death),
+            "{key:?}: the scrim under the card and the replay"
+        );
+        // "RESPAWNING…" on R; on M, "YOU DIED" under the map.
         assert_eq!(
-            crate::net::death_screen::shows_died(app.world_mut()),
+            crate::net::shows_died(app.world_mut()),
             key == KeyCode::KeyM,
             "{key:?}"
         );
@@ -487,33 +513,162 @@ fn each_beats_channels_resolve_on_its_first_frame() {
     }
 }
 
-/// Space is the dead tank's replay and the live tank's secondary trigger, never both.
-#[test]
-fn space_replays_for_a_dead_tank_and_fires_for_a_live_one() {
-    let gather = |app: &mut App, player: Entity| {
-        crate::command::client_plugin(app);
-        app.init_resource::<crate::firecontrol::Ranging>();
+/// The player's device on its real systems beside the kill cam: the gather, the sight toggle and
+/// the third-person aim commit. Mounted before the app finishes ([`app_with`]); [`device`] gives
+/// them their world.
+fn mount_device(app: &mut App) {
+    bevy::state::app::StatesPlugin.build(app);
+    crate::flow::in_match_plugin(app);
+    crate::command::client_plugin(app);
+    // The reticle's optic mask material loads its shader.
+    app.init_asset::<bevy::shader::Shader>();
+    crate::sight::plugin(app);
+    crate::aim::client_plugin(app);
+}
+
+/// The world of [`mount_device`]'s systems: their resources, a window and the player's camera to
+/// pick through, and a player tank whose views are all open (empty requirements: fixture data).
+fn device(app: &mut App, player: Entity, camera: Entity) {
+    app.init_resource::<crate::firecontrol::Ranging>()
+        .init_resource::<avian3d::collider_tree::ColliderTrees>()
+        .init_resource::<bevy::input::mouse::AccumulatedMouseMotion>();
+    let world = app.world_mut();
+    world.spawn(Window::default());
+    let [hull, turret, gun, muzzle] =
+        std::array::from_fn(|_| world.spawn((Transform::IDENTITY, ChildOf(player))).id());
+    world.spawn(crate::damage::VolumeOf(player));
+    let open = || crate::tank::ViewConfig {
+        fov: 0.8,
+        requires: Vec::new(),
+    };
+    world.entity_mut(player).insert((
+        crate::tank::Rig {
+            hull,
+            turret,
+            gun,
+            muzzle,
+        },
+        TankViews(
+            [(ViewKind::Gunner, open()), (ViewKind::Commander, open())]
+                .into_iter()
+                .collect(),
+        ),
+        TankCommand::default(),
+        Transform::IDENTITY,
+        avian3d::prelude::Position::default(),
+        avian3d::prelude::Rotation::default(),
+    ));
+    world.entity_mut(camera).insert((
+        Camera {
+            computed: bevy::camera::ComputedCameraValues {
+                clip_from_view: Mat4::perspective_infinite_reverse_rh(0.9, 16.0 / 9.0, 0.1),
+                target_info: Some(bevy::camera::RenderTargetInfo {
+                    physical_size: UVec2::new(1280, 720),
+                    scale_factor: 1.0,
+                }),
+                ..default()
+            },
+            ..default()
+        },
+        Transform::from_xyz(0.0, 3.0, 10.0),
+    ));
+}
+
+/// Every drive, fire and view key down for `frames` frames, the view key pressed anew on each.
+fn hold_all(app: &mut App, frames: usize, each: impl Fn(&App)) {
+    for _ in 0..frames {
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::ShiftLeft);
+        for key in [
+            KeyCode::KeyW,
+            KeyCode::KeyD,
+            KeyCode::Space,
+            KeyCode::ShiftLeft,
+        ] {
+            keys.press(key);
+        }
         app.world_mut()
-            .entity_mut(player)
-            .insert(TankCommand::default());
-    };
-    let fires = |app: &App, player: Entity| {
-        app.world()
-            .get::<TankCommand>(player)
-            .unwrap()
-            .fire_secondary
-    };
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        step(app);
+        each(app);
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+    }
+}
 
-    let (mut app, player, _) = killed(-1.0);
-    gather(&mut app, player);
-    assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
-    press(&mut app, KeyCode::Space);
-    assert_eq!(beat(&app), Some(Beat::Lesson), "replayed");
-    assert!(!fires(&app, player), "a knocked-out tank does not fire");
+fn let_go(app: &mut App) {
+    app.world_mut()
+        .resource_mut::<ButtonInput<KeyCode>>()
+        .reset_all();
+    app.world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .reset_all();
+}
 
-    let (mut app, player, _) = self::app(Settings::default());
-    gather(&mut app, player);
-    press(&mut app, KeyCode::Space);
-    assert!(fires(&app, player), "a live tank fires");
-    assert!(victim(&app).run.is_none() && victim(&app).dead.is_none());
+/// From the knockout fact to a live tank the death flow owns the device, whichever key replays:
+/// drive, fire, aim and the view key held through the run and the death screen give no command
+/// and no view change, and the replay key replays. Alive before and after, the same keys drive,
+/// fire, aim and switch the view, from the first frame of the new life.
+#[test]
+fn the_death_flow_owns_the_device() {
+    for replay in [
+        ButtonBinding::Key(KeyCode::Space),
+        ButtonBinding::Mouse(MouseButton::Left),
+    ] {
+        let (mut app, player, camera) = app_with(Settings::default(), mount_device);
+        app.world_mut().resource_mut::<Bindings>().kill_cam_replay = replay;
+        device(&mut app, player, camera);
+        let command = |app: &App| *app.world().get::<TankCommand>(player).unwrap();
+        let mode = |app: &App| *app.world().resource::<SightMode>();
+
+        hold_all(&mut app, 1, |_| {});
+        let alive = command(&app);
+        assert_eq!((alive.throttle, alive.steer), (1.0, 1.0), "{replay:?}");
+        assert!(alive.fire_primary && alive.fire_secondary, "{replay:?}");
+        assert!(alive.aim.is_some(), "{replay:?}: aimed");
+        assert_eq!(
+            mode(&app),
+            SightMode::Gunner,
+            "{replay:?}: the view switched"
+        );
+        hold_all(&mut app, 1, |_| {});
+        assert_eq!(mode(&app), SightMode::ThirdPerson, "{replay:?}");
+
+        // Down with every control held from the knockout's frame: the death flow lets go of them,
+        // and a fresh aim would show.
+        app.world_mut().get_mut::<TankCommand>(player).unwrap().aim = None;
+        let (mut app, ..) = killed_in((app, player, camera), -1.0);
+        let silent = |app: &App| {
+            let dead = command(app);
+            assert_eq!((dead.throttle, dead.steer), (0.0, 0.0), "{replay:?}");
+            assert!(!dead.fire_primary && !dead.fire_secondary, "{replay:?}");
+            assert_eq!(dead.aim, None, "{replay:?}: no aim taken");
+            assert_eq!(
+                mode(app),
+                SightMode::ThirdPerson,
+                "{replay:?}: no view change"
+            );
+        };
+        hold_all(&mut app, 8, silent);
+        let_go(&mut app);
+        assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+        hold_all(&mut app, 8, silent);
+        assert_eq!(beat(&app), Some(Beat::Lesson), "{replay:?}: replayed");
+
+        let mut tank = app.world_mut().entity_mut(player);
+        tank.remove::<TankKnockedOut>();
+        tank.insert(CombatantLife(1));
+        hold_all(&mut app, 1, |_| {});
+        let alive = command(&app);
+        assert_eq!(
+            alive.throttle, 1.0,
+            "{replay:?}: the new life's first frame drives"
+        );
+        assert!(alive.fire_secondary, "{replay:?}");
+    }
 }

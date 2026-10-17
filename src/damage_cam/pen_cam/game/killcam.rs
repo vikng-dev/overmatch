@@ -23,11 +23,13 @@
 //!   map likewise ([`KillCamGate::settling`]): skip ends the run at the death screen, hold freezes the
 //!   presentation clock (the orbit drifts on), replay plays the held record again from the lesson.
 //!   Respawn and the map are never blocked after the dead-zone: either ends the run.
-//! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], before every reader of the
-//!   [`KillCamGate`] it writes: the overlay declarers and toggles (`overlay::OverlaySet`) and the
-//!   device readers ([`PlayerInputSet`]), so the death screen, respawn and the map read the gate of
-//!   the frame they run in. [`give_way`] runs after both: a respawn or a map opened this frame ends
-//!   the run there, and the gate follows on the next frame's drive.
+//! * **The device.** The death flow owns the player's device from the knockout fact to a live
+//!   tank ([`DeviceOwner`], taken and handed back by [`claim_device`] before the device is read).
+//! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], before `overlay::OverlaySet::
+//!   Declare` and so before every reader of the [`KillCamGate`] it writes: the death screen there,
+//!   then the map's toggle and the respawn key, both after `OverlaySet::Toggle`. They read the gate
+//!   of the frame they run in. [`give_way`] runs after them and marks a respawn or a map taken; the
+//!   next frame's drive ends the run, so the camera, the gate and the HUD turn together.
 //! * **Teardown.** A new life, no tank, a disconnect ([`super::CloseCorner`]), the spawn map, a
 //!   change of the kill cam or reduce-motion setting: the run ends, the camera is handed back on
 //!   the third-person profile and the stage goes with the slot's [`super::Rig::teardown`]. The
@@ -58,7 +60,7 @@ use crate::bake::TankBlueprint;
 use crate::camera::{
     CameraCaptive, CaptiveCameraPlaced, OrbitCamera, TurretPivot, orbit_body, orbit_pivot, view_fov,
 };
-use crate::command::{Bindings, ButtonBinding, TankCommand};
+use crate::command::{Bindings, ButtonBinding, DeviceOwner, TankCommand, TankDeviceSet};
 use crate::damage::TankKnockedOut;
 use crate::damage_cam::delivery::{ImpactPresence, ShotExplanations, StoredExplanation};
 use crate::damage_cam::wire::TankLife;
@@ -67,7 +69,6 @@ use crate::render_policy::CameraProfile;
 use crate::settings::{KillCam as KillCamSetting, ReduceMotion, Settings};
 use crate::sight::SightMode;
 use crate::spec::{TankSpecHandle, ViewKind};
-use crate::state::PlayerInputSet;
 use crate::tank::{Controlled, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
@@ -92,8 +93,8 @@ pub(crate) struct KillCamGate {
     pub(crate) settling: bool,
 }
 
-/// The kill cam's [`drive`]: before the readers of the [`KillCamGate`] it writes, the overlay
-/// declarers and toggles (`overlay::OverlaySet`) and the device readers ([`PlayerInputSet`]).
+/// The kill cam's [`drive`]: before `overlay::OverlaySet::Declare`, where the first reader of the
+/// [`KillCamGate`] it writes runs; the others run after `OverlaySet::Toggle`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct KillCamGateSet;
 
@@ -170,6 +171,9 @@ pub(crate) struct Victim {
     by: Option<(KillCamSetting, ReduceMotion)>,
     /// The kill cam's UI exists.
     ui: bool,
+    /// A respawn or the spawn map was taken ([`give_way`]): the next drive ends the run and the
+    /// wait for one.
+    yielded: bool,
 }
 
 impl Victim {
@@ -194,16 +198,44 @@ pub(super) fn wire(app: &mut App) {
     app.init_resource::<Victim>()
         .init_resource::<KillCamGate>()
         .init_resource::<CameraCaptive>()
-        .configure_sets(
-            Update,
-            KillCamGateSet
-                .before(OverlaySet::Declare)
-                .before(OverlaySet::Toggle)
-                .before(PlayerInputSet),
-        )
+        .init_resource::<DeviceOwner>()
+        .configure_sets(Update, KillCamGateSet.before(OverlaySet::Declare))
         .add_observer(disconnect)
+        .add_systems(
+            RunFixedMainLoop,
+            claim_device
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .before(TankDeviceSet),
+        )
         .add_systems(PostUpdate, place.in_set(CaptiveCameraPlaced))
-        .add_systems(Update, hud.after(give_way));
+        .add_systems(Update, hud.after(drive));
+}
+
+/// Take the player's device for the death flow from the replicated knockout fact of the controlled
+/// tank, letting go of its held controls, and hand it back once a live tank is controlled or none
+/// is ([`DeviceOwner`]). Before [`TankDeviceSet`] in the frame.
+fn claim_device(
+    mut owner: ResMut<DeviceOwner>,
+    own: Query<Has<TankKnockedOut>, With<Controlled>>,
+    mut commands: Query<&mut TankCommand, With<Controlled>>,
+) {
+    let want = if own.iter().any(|knocked_out| knocked_out) {
+        DeviceOwner::DeathFlow
+    } else {
+        DeviceOwner::Tank
+    };
+    if *owner == want {
+        return;
+    }
+    *owner = want;
+    if want == DeviceOwner::DeathFlow {
+        for mut command in &mut commands {
+            command.throttle = 0.0;
+            command.steer = 0.0;
+            command.fire_primary = false;
+            command.fire_secondary = false;
+        }
+    }
 }
 
 /// Hand the camera back on the third-person profile, the lesson's mask owner gone, if the kill cam
@@ -233,10 +265,12 @@ fn disconnect(
     mut victim: ResMut<Victim>,
     mut captive: ResMut<CameraCaptive>,
     mut gate: ResMut<KillCamGate>,
+    mut owner: ResMut<DeviceOwner>,
     mut commands: Commands,
     camera: Query<(Entity, &CameraProfile), With<PlayerView>>,
     ui: Query<Entity, With<KillCamUi>>,
 ) {
+    *owner = DeviceOwner::Tank;
     victim.run = None;
     victim.dead = None;
     release(&mut captive, &mut commands, camera.single().ok());
@@ -370,6 +404,7 @@ pub(super) fn drive(
     // Whose death this is.
     if dead_life != victim.dead.map(|(life, _)| life) {
         end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
+        victim.yielded = false;
         match dead_life {
             Some(life) => {
                 // Back on a life whose record is in hand (a reconnect): the death screen, the
@@ -407,6 +442,12 @@ pub(super) fn drive(
     }
     let since = (now - zero) as f32;
     let settled = since >= HIT_S;
+
+    // A respawn or the map taken last frame ([`give_way`]): the run and the wait for one end here.
+    if std::mem::take(&mut victim.yielded) {
+        end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
+        victim.resolved = true;
+    }
 
     // The killing record, once in hand.
     if victim.record.is_none()
@@ -635,32 +676,21 @@ pub(super) fn drive(
     };
 }
 
-/// The game's respawn or spawn map, taken while dead, ends the run and the wait for one: the death
-/// screen. After the respawn key ([`PlayerInputSet`]) and the map's toggle (`OverlaySet::Toggle`).
+/// Mark the game's respawn or spawn map, taken while dead: the next frame's [`drive`] ends the run
+/// and the wait for one at the death screen. After the respawn key
+/// ([`PlayerInputSet`](crate::state::PlayerInputSet)) and the map's toggle (`OverlaySet::Toggle`).
 pub(super) fn give_way(
     overlays: Option<Res<Overlays>>,
     own: Query<&TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut victim: ResMut<Victim>,
-    mut captive: ResMut<CameraCaptive>,
-    mut slot: ResMut<Slot>,
-    mut rig: SlotRig,
-    camera: Query<(Entity, &CameraProfile), With<PlayerView>>,
 ) {
     let respawning = own.iter().any(|command| command.respawn);
     let map = overlays
         .as_deref()
         .is_some_and(|overlays| overlays.contains(Overlay::SpawnMap));
-    if victim.dead.is_none() || !(respawning || map) {
-        return;
+    if victim.dead.is_some() && (respawning || map) {
+        victim.yielded = true;
     }
-    end_run(
-        &mut victim,
-        &mut captive,
-        &mut rig,
-        &mut slot,
-        camera.single().ok(),
-    );
-    victim.resolved = true;
 }
 
 /// End the run: the camera handed back and the stage gone.

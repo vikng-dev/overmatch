@@ -6,7 +6,8 @@
 //! dead only at 0 living crew. Capability effectiveness is per-capability (§7b): a capability scores
 //! in [0, 1] from its requirement groups against the live world — living crew and intact modules
 //! supply quality, combined `min` across groups. The requirements are per-tank RON data.
-//! `TankKnockedOut` survives as a *label only* — it never gates gameplay. Cookoff still kills all
+//! `TankKnockedOut` survives as a *label only* — it never gates sim capability (on the client it
+//! hands the player's device to the death flow: `command::DeviceOwner`). Cookoff still kills all
 //! crew and launches the turret; that hook triggers off `CookedOff` directly.
 
 use avian3d::prelude::{
@@ -271,9 +272,10 @@ pub struct Dead;
 #[derive(Component)]
 pub struct CookedOff;
 
-/// Latched tank death label (not a gameplay gate — design §1a-A). Latches at 0 living crew or on
-/// cookoff. Read by HUD/scoring; no system gates drive/fire on this. Normal play never removes it;
-/// sandbox reset may.
+/// Latched tank death label (not a capability gate — design §1a-A). Latches at 0 living crew or on
+/// cookoff. Read by HUD/scoring and the client's death flow (which owns the player's device while
+/// it stands: `command::DeviceOwner`); no sim system gates drive/fire on this. Normal play never
+/// removes it; sandbox reset may.
 #[derive(Component)]
 pub struct TankKnockedOut {
     pub reason: KnockoutReason,

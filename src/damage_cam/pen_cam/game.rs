@@ -791,6 +791,14 @@ mod tests {
     /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
     /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
     pub(super) fn corner_app(settings: Settings) -> (App, Entity) {
+        corner_app_with(settings, |_| {})
+    }
+
+    /// [`corner_app`] with `mount` run among its plugins, before the app finishes.
+    pub(super) fn corner_app_with(
+        settings: Settings,
+        mount: impl FnOnce(&mut App),
+    ) -> (App, Entity) {
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::ignore);
         app.add_plugins((
@@ -798,6 +806,7 @@ mod tests {
             AssetPlugin::default(),
             TransformPlugin,
         ));
+        mount(&mut app);
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

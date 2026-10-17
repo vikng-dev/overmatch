@@ -6,7 +6,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::damage::{CrewStation, TankKnockedOut};
+use crate::damage::CrewStation;
 use crate::firecontrol::Ranging;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::Controlled;
@@ -145,11 +145,38 @@ pub struct Bindings {
     pub own_tank_glass: ButtonBinding,
     /// The kill cam, while the player's own tank is knocked out: skip to the death screen, hold
     /// the clock while down, replay from the death screen. Views, not commands: none reaches
-    /// [`TankCommand`]. The replay key shares `fire_secondary`'s, which [`gather_commands`] reads
-    /// for a live tank only.
+    /// [`TankCommand`]. Read only while the death flow owns the device ([`DeviceOwner`]), so they
+    /// may share a key with a tank binding.
     pub kill_cam_skip: ButtonBinding,
     pub kill_cam_hold: ButtonBinding,
     pub kill_cam_replay: ButtonBinding,
+}
+
+/// Who the player's device speaks for.
+///
+/// While the death flow (the death screen and the kill cam) is active for the controlled tank it
+/// owns the device: [`TankDeviceSet`] stands aside, so no drive, aim, fire or sight command is
+/// taken from the device for that tank, and the respawn, map and kill cam keys are the death
+/// flow's alone. The death flow takes the device from the replicated knockout fact of the
+/// controlled tank, before the device is read in the frame, letting go of the dead tank's held
+/// controls; it hands the device back on the first frame a live tank is controlled, or none is (a
+/// respawn, a disconnect). Not a capability gate: the sim never reads it.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DeviceOwner {
+    #[default]
+    Tank,
+    DeathFlow,
+}
+
+/// The systems that turn the player's device into the controlled tank's commands and view: the
+/// gather, the range dial, the aim commits and the sight toggle. They run only while the tank owns
+/// the device ([`DeviceOwner`]).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TankDeviceSet;
+
+/// Whether the controlled tank owns the player's device ([`DeviceOwner`]).
+fn tank_owns_device(owner: Option<Res<DeviceOwner>>) -> bool {
+    owner.is_none_or(|owner| *owner == DeviceOwner::Tank)
 }
 
 /// A [-1, 1] axis from a key pair.
@@ -165,7 +192,7 @@ impl AxisKeys {
 }
 
 /// One bindable button — keyboard or mouse, so "fire" can live on either.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum ButtonBinding {
     Key(KeyCode),
     Mouse(MouseButton),
@@ -243,6 +270,9 @@ pub fn core_plugin(app: &mut App) {
 /// (mounted by the sim side).
 pub fn client_plugin(app: &mut App) {
     app.init_resource::<Bindings>()
+        .init_resource::<DeviceOwner>()
+        .configure_sets(RunFixedMainLoop, TankDeviceSet.run_if(tank_owns_device))
+        .configure_sets(Update, TankDeviceSet.run_if(tank_owns_device))
         // Once per render frame, before the fixed loop runs its 0..N sim ticks — so every tick
         // this frame sees the same, freshest command, and edge inputs latch here without being
         // missed or doubled by the fixed clock.
@@ -251,6 +281,7 @@ pub fn client_plugin(app: &mut App) {
             gather_commands
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(PlayerInputSet)
+                .in_set(TankDeviceSet)
                 .in_set(GameplaySet),
         );
 }
@@ -285,6 +316,7 @@ pub fn offline_auto_fire_plugin(app: &mut App) {
             .after(gather_commands)
             .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
             .in_set(PlayerInputSet)
+            .in_set(TankDeviceSet)
             .in_set(GameplaySet),
     );
 }
@@ -337,23 +369,20 @@ fn auto_fire(
 /// Translate devices through the bindings into the controlled tank's command. The only place in
 /// the sim path that reads a device. `pub(crate)` so the other `BeforeFixedMainLoop` command
 /// writers (`firecontrol::adjust_range`, `sight::drive_gunner_aim`) can pin an explicit order
-/// against it — both share the `Ranging`/`TankCommand` it touches.
-///
-/// A knocked-out tank's secondary trigger is not read: its key is the kill cam's replay
-/// ([`Bindings::kill_cam_replay`]) while the tank is dead.
+/// against it — both share the `Ranging`/`TankCommand` it touches. In [`TankDeviceSet`].
 pub(crate) fn gather_commands(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Res<Bindings>,
     ranging: Res<Ranging>,
-    mut tanks: Query<(&mut TankCommand, Has<TankKnockedOut>), With<Controlled>>,
+    mut tanks: Query<&mut TankCommand, With<Controlled>>,
 ) {
-    for (mut command, knocked_out) in &mut tanks {
+    for mut command in &mut tanks {
         command.throttle = bindings.throttle.value(&keys);
         command.steer = bindings.steer.value(&keys);
         // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
         command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
-        command.fire_secondary = !knocked_out && bindings.fire_secondary.pressed(&keys, &mouse);
+        command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
         // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
         // command carries its absolute value. `aim` is written by the per-view commit systems.
         command.range = ranging.range;
