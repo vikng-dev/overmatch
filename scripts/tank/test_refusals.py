@@ -90,6 +90,7 @@ COVERAGE = {
     "L2.SPEC": (CONTRACT, "an_unreadable_sheet_or_an_unresolved_reference_is_refused"),
     "L2.DOCUMENT": (CONTRACT, "a_primitive_the_sim_cannot_read_is_refused"),
     "L2.ROLE_COHERENCE": (CONTRACT, "a_node_that_cannot_play_its_declared_role_is_refused"),
+    "L2.WITNESS_ROLE": (CONTRACT, "crew_and_witness_substance_come_together_or_not_at_all"),
     "L2.PRIMITIVE_FORM": (CONTRACT, "a_primitive_the_sim_cannot_read_is_refused"),
     "L2.UNIT_SCALE": (CONTRACT, "a_scaled_node_the_sim_composes_through_is_refused"),
     "L2.CERTIFIED_RANGE": (CONTRACT, "a_coordinate_outside_the_certified_range_is_refused"),
