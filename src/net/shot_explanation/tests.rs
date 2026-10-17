@@ -227,3 +227,81 @@ fn each_explanation_reaches_only_its_recipient() {
         assert_eq!(client.world().resource::<ShotExplanations>().refused(), 0);
     }
 }
+
+/// The delivery trace logs each explanation once on arrival with its presence then, and once more
+/// when it leaves pending, drawn or timed out; one stored drawn is never logged again.
+#[test]
+fn the_trace_logs_each_arrival_and_release_once() {
+    let report = report("s1_through_crew");
+    let vocabulary = vocabulary(&report);
+    let struck = TankLife {
+        combatant: STRUCK,
+        life: CombatantLife(0),
+    };
+    let victim = |fire_tick| {
+        let built =
+            BuiltExplanation::build(&vocabulary, &recorded(&report, SHOOTER, fire_tick, struck))
+                .unwrap();
+        built.projections().swap_remove(0).1
+    };
+    let (waiting, drawn, already) = (victim(1200), victim(1400), victim(1600));
+    let path = std::env::temp_dir().join(format!(
+        "overmatch-pencam-trace-{}-{}.jsonl",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    {
+        let mut app = App::new();
+        app.init_resource::<Time<Virtual>>()
+            .init_resource::<LocalTimeline>()
+            .init_resource::<ShotExplanations>()
+            .insert_resource(ShotTrace::for_test(&path))
+            .add_systems(Update, trace_presence);
+        let mut store = app.world_mut().resource_mut::<ShotExplanations>();
+        store.drew(already.shot, already.outcome.unwrap());
+        store.receive(waiting.clone(), &vocabulary, 0.0);
+        store.receive(drawn.clone(), &vocabulary, 0.0);
+        store.receive(already.clone(), &vocabulary, 0.0);
+        app.update();
+        let mut store = app.world_mut().resource_mut::<ShotExplanations>();
+        store.drew(drawn.shot, drawn.outcome.unwrap());
+        app.update();
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .expire(crate::damage_cam::delivery::IMPACT_TIMEOUT_S);
+        app.update();
+        app.update();
+    }
+    let rows: Vec<(String, u32, String)> = std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|row| row["k"] != "meta")
+        .map(|row| {
+            assert!(
+                row["us"].as_u64().unwrap() > 0,
+                "every row carries the wall clock"
+            );
+            (
+                row["k"].as_str().unwrap().to_owned(),
+                u32::try_from(row["ft"].as_u64().unwrap()).unwrap(),
+                row["pres"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    std::fs::remove_file(&path).unwrap();
+    let row = |k: &str, ft: u32, pres: &str| (k.to_owned(), ft, pres.to_owned());
+    assert_eq!(
+        rows,
+        [
+            row("xrx", 1200, "pending"),
+            row("xrx", 1400, "pending"),
+            row("xrx", 1600, "presented"),
+            row("xpres", 1400, "presented"),
+            row("xpres", 1200, "timed_out"),
+        ]
+    );
+}

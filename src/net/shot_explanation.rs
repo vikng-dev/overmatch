@@ -6,20 +6,29 @@
 //!
 //! A recipient is resolved by combatant, not by tank life: the link that controls the combatant's
 //! tank now, so a record of a killed tank still reaches its player after the respawn.
+//!
+//! Under `SPIKE_SHOT_TRACE` both ends log the delivery to the shot-lifecycle trace: the server each
+//! projection it sends (`xsend`), a client each explanation it stores (`xrx`, with its presence on
+//! arrival), each later presence change (`xpres`) and each authority outcome it draws (`xdraw`).
+//! `scripts/shot/pencam_latency.py` joins them.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use bevy::prelude::*;
 use lightyear::prelude::server::Server;
 use lightyear::prelude::*;
+use serde_json::json;
 
 use super::protocol::{NetTank, ShotExplanationChannel};
 use crate::CombatantId;
 use crate::ballistics::AuthorityOutcomeDrawn;
-use crate::damage_cam::delivery::{ShotExplanations, expire_explanations};
+use crate::damage_cam::delivery::{
+    ExplanationKey, ImpactPresence, ShotExplanations, expire_explanations,
+};
 use crate::damage_cam::pen_cam::game::CloseCorner;
 use crate::damage_cam::recorder::RecordedShot;
-use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary};
+use crate::damage_cam::wire::{Audience, BuiltExplanation, ShotExplanation, ShotVocabulary};
+use crate::shot_trace::ShotTrace;
 use crate::state::GameplaySet;
 
 pub(super) fn install_server(app: &mut App) {
@@ -34,7 +43,12 @@ pub(super) fn install_client(app: &mut App) {
         .add_observer(note_outcome_drawn)
         .add_systems(
             Update,
-            (receive_shot_explanations, expire_explanations).chain(),
+            (
+                receive_shot_explanations,
+                expire_explanations,
+                trace_presence.run_if(resource_exists::<ShotTrace>),
+            )
+                .chain(),
         );
 }
 
@@ -49,6 +63,7 @@ fn send_shot_explanations(
     servers: Query<&Server>,
     tanks: Query<(&CombatantId, &ControlledBy), With<NetTank>>,
     mut sender: ServerMultiMessageSender,
+    mut trace: Option<ResMut<ShotTrace>>,
 ) {
     if records.is_empty() {
         return;
@@ -81,7 +96,19 @@ fn send_shot_explanations(
                 .send_to_entities::<ShotExplanation, ShotExplanationChannel>(&explanation, [link])
             {
                 error!("server: a shot explanation could not enter transport: {err}");
+                continue;
             }
+            crate::shot_trace::record(
+                &mut trace,
+                "xsend",
+                explanation.completion_tick,
+                explanation.shot,
+                || {
+                    let mut row = explanation_fields(&explanation);
+                    row["to"] = combatant.0.into();
+                    row
+                },
+            );
         }
     }
 }
@@ -107,8 +134,91 @@ fn receive_shot_explanations(
     }
 }
 
-fn note_outcome_drawn(drawn: On<AuthorityOutcomeDrawn>, mut store: ResMut<ShotExplanations>) {
+fn note_outcome_drawn(
+    drawn: On<AuthorityOutcomeDrawn>,
+    mut store: ResMut<ShotExplanations>,
+    timeline: Res<LocalTimeline>,
+    mut trace: Option<ResMut<ShotTrace>>,
+) {
     store.drew(drawn.shot, drawn.ordinal);
+    crate::shot_trace::record(
+        &mut trace,
+        "xdraw",
+        timeline.tick().0,
+        drawn.shot,
+        || json!({ "o": drawn.ordinal }),
+    );
+}
+
+/// Trace each stored explanation on the frame it is first seen in the store (`xrx`: its arrival,
+/// since this runs after the drain) and on the frame it leaves [`ImpactPresence::Pending`]
+/// (`xpres`). `seen` and `pending` hold only keys at or above the store's oldest, which retention
+/// never readmits below.
+fn trace_presence(
+    store: Res<ShotExplanations>,
+    time: Res<Time<Virtual>>,
+    timeline: Res<LocalTimeline>,
+    mut trace: Option<ResMut<ShotTrace>>,
+    mut seen: Local<BTreeSet<ExplanationKey>>,
+    mut pending: Local<BTreeSet<ExplanationKey>>,
+) {
+    let now = time.elapsed_secs_f64();
+    let tick = timeline.tick().0;
+    for (key, stored) in store.iter() {
+        let kind = if seen.insert(*key) {
+            if stored.presence == ImpactPresence::Pending {
+                pending.insert(*key);
+            }
+            "xrx"
+        } else if stored.presence != ImpactPresence::Pending && pending.remove(key) {
+            "xpres"
+        } else {
+            continue;
+        };
+        crate::shot_trace::record(&mut trace, kind, tick, stored.explanation.shot, || {
+            let mut row = explanation_fields(&stored.explanation);
+            row["pres"] = presence_name(stored.presence).into();
+            row["vs"] = now.into();
+            row
+        });
+    }
+    match store.iter().next() {
+        Some((&oldest, _)) => {
+            seen.retain(|key| *key >= oldest);
+            pending.retain(|key| *key >= oldest);
+        }
+        None => {
+            seen.clear();
+            pending.clear();
+        }
+    }
+}
+
+/// An explanation's identity beyond its shot, for the trace: the struck life, the encounter, the
+/// outcome a client draws as its impact, the authority's contact and completion ticks, and the
+/// audience.
+fn explanation_fields(explanation: &ShotExplanation) -> serde_json::Value {
+    json!({
+        "sc": explanation.struck.combatant.0,
+        "sl": explanation.struck.life.0,
+        "en": explanation.encounter,
+        "o": explanation.outcome,
+        "ct": explanation.contact_tick,
+        "cpt": explanation.completion_tick,
+        "aud": match explanation.audience {
+            Audience::Shooter => "shooter",
+            Audience::Victim => "victim",
+            Audience::KilledVictim => "killed_victim",
+        },
+    })
+}
+
+fn presence_name(presence: ImpactPresence) -> &'static str {
+    match presence {
+        ImpactPresence::Pending => "pending",
+        ImpactPresence::Presented => "presented",
+        ImpactPresence::TimedOut => "timed_out",
+    }
 }
 
 /// A new connection is a new match: its shots are not the last one's.

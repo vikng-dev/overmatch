@@ -1,7 +1,10 @@
 //! Optional passive shot-lifecycle JSONL recorder (`SPIKE_SHOT_TRACE=<path>`).
 //!
 //! Rows join by the stable [`ShotId`] fields `(c, w, ft)`; role-qualified paths isolate concurrent
-//! compositions. `send` records transport admission, not delivery acknowledgement. See
+//! compositions. `send` records transport admission, not delivery acknowledgement. Every row carries
+//! `us`, the wall clock in microseconds since the Unix epoch when it was written: the one clock a
+//! server and its clients on the same machine share, so cross-process intervals are read from it,
+//! never from the ticks, whose timelines differ by the prediction lead. See
 //! [`scripts/shot/analyze.py`](../../scripts/shot/analyze.py) for field-level checks.
 
 use bevy::prelude::*;
@@ -29,6 +32,7 @@ impl ShotTrace {
         let mut row = json!({
             "k": kind,
             "t": tick,
+            "us": wall_us(),
             "c": shot.combatant.0,
             "w": shot.weapon,
             "ft": shot.fire_tick,
@@ -39,7 +43,7 @@ impl ShotTrace {
 
     /// Append a non-shot-scoped row such as one authority tick's transport accounting.
     pub(crate) fn global_row(&mut self, kind: &'static str, tick: u32, extra: Value) {
-        let mut row = json!({ "k": kind, "t": tick });
+        let mut row = json!({ "k": kind, "t": tick, "us": wall_us() });
         merge_extra(&mut row, extra);
         self.sink.write(&row);
     }
@@ -51,6 +55,15 @@ impl ShotTrace {
             role: "client",
         }
     }
+}
+
+/// Microseconds since the Unix epoch; 0 for a clock set before it.
+fn wall_us() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_micros()).unwrap_or(u64::MAX)
+        })
 }
 
 fn merge_extra(row: &mut Value, extra: Value) {

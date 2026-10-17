@@ -13,7 +13,8 @@
 //! | `SPIKE_COMBAT_STEER_TICK` | tick; `0` | Tick at which combat steering engages. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
-//! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat primary-fire interval; zero disables clicks. |
+//! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Combat and stationary primary-fire interval; zero disables clicks. |
+//! | `SPIKE_FIRE_PRIMARY` | flag; off | Stationary: click the primary trigger every interval from `SPIKE_FIRE_TICK`. |
 //! | `SPIKE_FIRE_RELEASE_TICK` | tick; off | Release the scripted secondary trigger at this tick (default: hold to the end). |
 //! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
 //! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
@@ -123,6 +124,10 @@ pub(crate) struct SimulateInput {
     /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
     /// Overrides the drive script (throttle/steer forced to 0). Aim held constant at `aim_point`.
     fire_secondary: bool,
+    /// `SPIKE_FIRE_PRIMARY`: the stationary workload of `fire_secondary`, clicking the primary
+    /// trigger as the combat script does (every `fire_interval` from `fire_tick`); with
+    /// `fire_secondary` too, both weapons fire.
+    fire_primary: bool,
     /// `SPIKE_FIRE_RELEASE_TICK`: the tick the scripted secondary trigger goes false. `None` holds
     /// it to the end of the run — the only shape the MG-cost workload ever needed. A capture that
     /// must observe the RELEASE edge (presentation stopping on the local tick) sets it.
@@ -163,6 +168,7 @@ impl Default for SimulateInput {
             combat_steer: env_parse("SPIKE_COMBAT_STEER").unwrap_or(0.0),
             combat_steer_tick: env_parse("SPIKE_COMBAT_STEER_TICK").unwrap_or(0),
             fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
+            fire_primary: env_flag("SPIKE_FIRE_PRIMARY", false),
             fire_release_tick: env_parse("SPIKE_FIRE_RELEASE_TICK"),
             aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
             range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
@@ -180,6 +186,14 @@ impl SimulateInput {
         // starts, and comfortably inside the cost recorder's own 6 s warmup.
         const FIRE_WARMUP: u32 = 192;
         t > FIRE_WARMUP && self.fire_release_tick.is_none_or(|release| t < release)
+    }
+
+    /// Whether the scripted primary trigger is clicked on tick `t`: every `fire_interval` ticks
+    /// from `fire_tick`, never when the interval is zero.
+    fn clicking_primary(&self, t: u32) -> bool {
+        self.fire_interval != 0
+            && t >= self.fire_tick
+            && (t - self.fire_tick).is_multiple_of(self.fire_interval)
     }
 }
 
@@ -230,24 +244,23 @@ pub(crate) fn buffer_input(
             Some(AimIntent::HullLocal(sim.aim_point))
         };
         state.0.range = sim.range;
-        state.0.fire_primary = sim.fire_interval != 0
-            && t >= sim.fire_tick
-            && (t - sim.fire_tick).is_multiple_of(sim.fire_interval);
+        state.0.fire_primary = sim.clicking_primary(t);
         state.0.fire_secondary = sim.fire_secondary && sim.holding_secondary(t);
         return;
     }
-    // MG-cost workload (`SPIKE_FIRE_SECONDARY`): stay stationary and hold the secondary trigger over
-    // `holding_secondary`'s window. Stationary + constant aim means the ONLY delta from the
-    // `SPIKE_SIM_IDLE` baseline is the machine-gun fire, so the per-tick cost recorder's
-    // idle-vs-fire difference is exactly the MG march + shell spawn/despawn cost. Returns early —
-    // this overrides the drive script.
-    if sim.fire_secondary {
+    // Stationary fire workloads: hold the secondary trigger over `holding_secondary`'s window
+    // (`SPIKE_FIRE_SECONDARY`, the MG-cost workload) and click the primary on the combat cadence
+    // (`SPIKE_FIRE_PRIMARY`). Stationary + constant aim means the ONLY delta from the
+    // `SPIKE_SIM_IDLE` baseline is the fire, so the per-tick cost recorder's idle-vs-fire
+    // difference is exactly the march + shell spawn/despawn cost. Returns early — this overrides
+    // the drive script.
+    if sim.fire_secondary || sim.fire_primary {
         state.0.throttle = 0.0;
         state.0.steer = 0.0;
         state.0.aim = Some(AimIntent::HullLocal(sim.aim_point));
         state.0.range = sim.range;
-        state.0.fire_primary = false;
-        state.0.fire_secondary = sim.holding_secondary(t);
+        state.0.fire_primary = sim.fire_primary && sim.clicking_primary(t);
+        state.0.fire_secondary = sim.fire_secondary && sim.holding_secondary(t);
         return;
     }
     // The default script, exercising the real sim: 2 s idle (rig binds, the hull settles onto the
