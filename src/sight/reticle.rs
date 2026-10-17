@@ -8,6 +8,7 @@
 //! The interface is [`plugin`] (mount the whole layer) plus [`Toast`], the one widget the input half
 //! needs to raise ("X unavailable" on a refused view switch).
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -15,7 +16,8 @@ use bevy::shader::ShaderRef;
 
 use crate::aim::CommittedAim;
 use crate::camera::{GUNNER_FOV_FALLBACK, GunnerCameraPlaced, view_fov};
-use crate::damage::ControlledTank;
+use crate::damage::{ControlledTank, TankKnockedOut};
+use crate::damage_cam::pen_cam::game::KillCamGate;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
@@ -712,6 +714,20 @@ fn update_intent_reticle(
     }
 }
 
+/// Whether the kill cam owns the controlled tank's view: the kill cam is mounted ([`KillCamGate`])
+/// and the controlled tank is knocked out.
+#[derive(SystemParam)]
+struct KillCamView<'w, 's> {
+    gate: Option<Res<'w, KillCamGate>>,
+    knocked_out: Query<'w, 's, (), (With<Controlled>, With<TankKnockedOut>)>,
+}
+
+impl KillCamView<'_, '_> {
+    fn owns(&self) -> bool {
+        self.gate.is_some() && !self.knocked_out.is_empty()
+    }
+}
+
 /// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
 /// the player to press Lshift to switch to the other view if its crewman is alive; if both are
 /// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
@@ -724,9 +740,13 @@ fn update_intent_reticle(
 /// above all, but also the menu / connect screen) owns the scrim — whole-crew death shows "YOU DIED",
 /// not this black. In single-player the `Overlays` resource is absent (`Option` is `None`) and this
 /// system sets the node's visibility itself, standalone as before: crewman down → black + prompt.
+///
+/// Where the kill cam is mounted ([`KillCamGate`]), a knocked-out tank's view is the kill cam's and
+/// then its death screen's: no black.
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
+    kill_cam: KillCamView,
     views: Query<&TankViews, With<Controlled>>,
     overlays: Option<ResMut<Overlays>>,
     mut overlay_vis: Query<&mut Visibility, With<ViewDeathOverlay>>,
@@ -741,7 +761,8 @@ fn update_view_death_overlay(
 
     // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
     // controlled tank existing (no station to be dead without one).
-    let crewman_down = has_controlled && !view_available(&controlled, &views, active_view);
+    let crewman_down =
+        has_controlled && !kill_cam.owns() && !view_available(&controlled, &views, active_view);
 
     // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-declared
     // set (suppressed under any higher overlay). We must not also write `Visibility` here — that would

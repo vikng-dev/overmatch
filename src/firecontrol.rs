@@ -18,7 +18,7 @@ use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
 use crate::ballistics::{drag_k, freeflight_step};
-use crate::command::gather_commands;
+use crate::command::{TankDeviceSet, gather_commands};
 use crate::flow::MatchResourceExt;
 use crate::sight::in_gunner;
 use crate::state::{GameplaySet, PlayerInputSet};
@@ -179,6 +179,7 @@ pub fn client_plugin(app: &mut App) {
                 .before(gather_commands)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(PlayerInputSet)
+                .in_set(TankDeviceSet)
                 .in_set(GameplaySet),
         );
 }

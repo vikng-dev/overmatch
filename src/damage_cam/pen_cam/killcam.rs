@@ -66,7 +66,7 @@ const LESSON_SLOPE: f32 = 0.5;
 /// staging choice; in play it is wherever the player was looking.
 const PLAYER_PITCH_DEG: f32 = 12.0;
 /// The killer card's enter, and the prompts' strength before and at the death screen.
-const CARD_ENTER_S: f32 = 0.18;
+pub(super) const CARD_ENTER_S: f32 = 0.18;
 const PROMPT_DIM: f32 = 0.6;
 /// The card's accent bar.
 const ACCENT_PX: f32 = 3.0;
@@ -90,8 +90,17 @@ impl Killer {
     /// round's display name and muzzle speed from the registry. A tank file that does not read or
     /// a round the registry lacks leaves that part unknown.
     pub fn of(shooter: Option<&Shooter>, round: &str) -> Self {
-        let vehicle = shooter.and_then(|shooter| {
-            let path = crate::assets::asset_root().join(&shooter.vehicle);
+        Self {
+            player: shooter.map(|shooter| shooter.name.clone()),
+            ..Self::of_vehicle(shooter.map(|shooter| shooter.vehicle.as_str()), round)
+        }
+    }
+
+    /// The killer with no name, fired from the tank file `vehicle` (relative to the asset root),
+    /// read as [`Self::of`] reads it.
+    pub fn of_vehicle(vehicle: Option<&str>, round: &str) -> Self {
+        let vehicle = vehicle.and_then(|vehicle| {
+            let path = crate::assets::asset_root().join(vehicle);
             let spec = std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
                 .and_then(|text| ron::de::from_str::<TankSpec>(&text).map_err(|e| e.to_string()));
@@ -106,7 +115,7 @@ impl Killer {
             .inspect_err(|e| warn!("kill cam: the round {round}: {e}"))
             .ok();
         Self {
-            player: shooter.map(|shooter| shooter.name.clone()),
+            player: None,
             vehicle,
             round,
         }
@@ -327,7 +336,21 @@ impl Rig {
         death: Quat,
         reduce: bool,
     ) -> (Vec3, Quat) {
-        let drift = |t: f32| Self::drift(beats, t, reduce);
+        self.orbit_drifting(beats, t, t, hit, death, reduce)
+    }
+
+    /// [`Self::orbit`] with the lesson's drift taken at `drift_t` rather than `t`: a held clock's
+    /// orbit keeps drifting.
+    pub fn orbit_drifting(
+        &self,
+        beats: Beats,
+        t: f32,
+        drift_t: f32,
+        hit: Quat,
+        death: Quat,
+        reduce: bool,
+    ) -> (Vec3, Quat) {
+        let drift = |at: f32| Self::drift(beats, at + drift_t - t, reduce);
         match beats.beat(t) {
             Beat::Hit => (self.victim_pivot, hit),
             Beat::Lesson => {
@@ -455,27 +478,41 @@ pub(super) struct DeathTint;
 
 /// A text row's place in its block.
 #[derive(Component)]
-pub(super) struct Index(usize);
+pub(super) struct Index(pub(super) usize);
 
 /// The respawn stand-in: after `R`, the death panel reads this for [`RESPAWN_S`], then the run
 /// starts a fresh life.
 pub const RESPAWNING: &str = "RESPAWNING";
 pub const RESPAWN_S: f32 = 0.8;
 
+/// A text style of the kill cam's UI.
+fn text(font: &Handle<Font>, px: f32, color: Color) -> (TextFont, TextColor) {
+    (
+        TextFont {
+            font: font.clone().into(),
+            font_size: FontSize::Px(px),
+            ..default()
+        },
+        TextColor(color),
+    )
+}
+
 pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
-    let text = |font: &Handle<Font>, px: f32, color: Color| {
-        (
-            TextFont {
-                font: font.clone().into(),
-                font_size: FontSize::Px(px),
-                ..default()
-            },
-            TextColor(color),
-        )
-    };
-    // The death tint: the whole screen, on the bottom UI rung so it washes the world alone.
-    commands.spawn((crate::overlay::death_tint(), Visibility::Hidden, DeathTint));
-    // The killer card, lower left: clear of the shooter the look centres in beat 3.
+    spawn_death_tint(&mut commands);
+    spawn_card(&mut commands, &fonts);
+    spawn_death_panel(&mut commands, &fonts);
+    spawn_prompt(&mut commands, &fonts, "R  RESPAWN");
+}
+
+/// The death tint: the whole screen, on the bottom UI rung so it washes the world alone; hidden.
+pub(super) fn spawn_death_tint(commands: &mut Commands) -> Entity {
+    commands
+        .spawn((crate::overlay::death_tint(), Visibility::Hidden, DeathTint))
+        .id()
+}
+
+/// The killer card, lower left, hidden: clear of the shooter the look centres in beat 3.
+pub(super) fn spawn_card(commands: &mut Commands, fonts: &UiFonts) -> Entity {
     commands
         .spawn((
             Node {
@@ -525,8 +562,12 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                     card.spawn((Text::new(""), text(font, px, color), CardText, Index(index)));
                 }
             });
-        });
-    // The death panel, centre, over the live world.
+        })
+        .id()
+}
+
+/// The death panel, centre, over the live world, hidden.
+pub(super) fn spawn_death_panel(commands: &mut Commands, fonts: &UiFonts) -> Entity {
     commands
         .spawn((
             Node {
@@ -554,8 +595,12 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
                 DeathText,
                 Index(1),
             ));
-        });
-    // The respawn prompt, bottom-centre.
+        })
+        .id()
+}
+
+/// A prompt reading `label`, bottom-centre, hidden.
+pub(super) fn spawn_prompt(commands: &mut Commands, fonts: &UiFonts, label: &str) -> Entity {
     commands
         .spawn((
             Node {
@@ -569,12 +614,9 @@ pub fn spawn(mut commands: Commands, fonts: Res<UiFonts>) {
             Visibility::Hidden,
         ))
         .with_children(|root| {
-            root.spawn((
-                Text::new("R  RESPAWN"),
-                text(&fonts.hud, 20.0, TEXT),
-                Prompt,
-            ));
-        });
+            root.spawn((Text::new(label), text(&fonts.hud, 20.0, TEXT), Prompt));
+        })
+        .id()
 }
 
 /// Whether the kill cam owns the main camera: a kill run whose rig is staged. Until the victim's

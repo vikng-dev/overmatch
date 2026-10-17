@@ -4,7 +4,7 @@
 
 use bevy::prelude::*;
 
-use crate::command::{CrewSwap, TankCommand};
+use crate::command::{CrewSwap, TankCommand, TankDeviceSet};
 use crate::damage::{
     Capability, CrewStation, Crewman, Dead, PendingSwap, TankCapabilities, TankKnockedOut,
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
@@ -43,7 +43,12 @@ pub fn plugin(app: &mut App) {
         .add_systems(OnEnter(Flow::InMatch), (spawn_crew_bar, spawn_status_panel))
         .add_systems(
             Update,
-            (crew_swap_input, update_crew_bar, update_status_panel).in_set(InMatchSystems),
+            (
+                crew_swap_input.in_set(TankDeviceSet),
+                update_crew_bar,
+                update_status_panel,
+            )
+                .in_set(InMatchSystems),
         );
 }
 
@@ -250,7 +255,7 @@ fn update_status_panel(
 /// `1`–`5` crew-bar input for the controlled tank: tap a seat to select it as the swap source, tap
 /// a second to command the swap; re-tapping the source (or any seat while a swap is mid-flight)
 /// cancels. Selection is client-side state; only the resolved [`CrewSwap`] intent goes on the
-/// command — the sim starts (and validates) the actual swap.
+/// command — the sim starts (and validates) the actual swap. In [`TankDeviceSet`].
 fn crew_swap_input(
     keys: Res<ButtonInput<KeyCode>>,
     mut select: ResMut<CrewSelect>,

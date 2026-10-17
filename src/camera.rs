@@ -5,9 +5,33 @@
 //! player's — zoom only changes the orbit radius, which slides along the view axis and never moves
 //! the aim point. [`free_fly_transform`] is the shared pure transform kernel behind the dev
 //! sandboxes' distinct ECS adapters.
+//!
+//! # Who writes the player's camera, and when (`PostUpdate`)
+//!
+//! One writer of the [`PlayerView`] camera's pose, lens and profile at a time:
+//!
+//! * the player's own: [`orbit_look`] then `orbit_camera` ([`OrbitCameraSet`]) in third person,
+//!   `gunner_camera` ([`GunnerCameraPlaced`]) in the optic;
+//! * a captor, while [`CameraCaptive`] holds (the kill cam's lesson and killer beats): its writer
+//!   runs in [`CaptiveCameraPlaced`] and all three of the player's stand aside.
+//!
+//! Every writer's edges, which anything copying the camera (the pen cam's mask cameras) relies on:
+//!
+//! * a pose written as `Transform` runs after `PhysicsSystems::Writeback` (it reads the tank's
+//!   pose) and before `TransformSystems::Propagate`; the gunner's, written as `GlobalTransform`
+//!   after propagation, runs before `VisibilitySystems::UpdateFrusta`;
+//! * every lens (`Projection`) writer runs before `CameraUpdateSystems`, where bevy derives the
+//!   projection matrices;
+//! * a profile ([`CameraProfile`](crate::render_policy::CameraProfile)) is resolved into
+//!   `RenderLayers` after [`CaptiveCameraPlaced`] (`render_policy`), so a captor's profile draws on
+//!   the frame it is set.
+//!
+//! The copiers order after all three sets: `look::follow_lens` before `CameraUpdateSystems`,
+//! `look::follow_pose` before `UpdateFrusta`.
 
 use avian3d::prelude::{PhysicsSystems, SpatialQuery};
-use bevy::camera::Hdr;
+use bevy::camera::visibility::VisibilitySystems;
+use bevy::camera::{CameraUpdateSystems, Hdr};
 use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::math::Affine3A;
@@ -81,10 +105,35 @@ pub(crate) fn free_fly_transform(
 /// Zoom state on the camera entity. Scroll sets `target_zoom`; `zoom` eases toward it for a
 /// smooth dolly. 0 = out (far), 1 = in (near).
 #[derive(Component)]
-struct OrbitCamera {
+pub(crate) struct OrbitCamera {
     zoom: f32,
     target_zoom: f32,
 }
+
+impl OrbitCamera {
+    /// The orbit radius the player's zoom sets: the distance `orbit_camera` places the body from
+    /// [`orbit_pivot`] before the ground pulls it in.
+    pub(crate) fn radius(&self) -> f32 {
+        ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * self.zoom
+    }
+}
+
+/// Whether a captor holds the player's camera: while it does, the orbit look, the orbit placement
+/// and the gunner placement do not run, and the captor's writer in [`CaptiveCameraPlaced`] is the
+/// camera's one writer of pose, lens and profile. A captor that lets go leaves the camera as it
+/// placed it, and the player's writers resume from that pose.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CameraCaptive(pub(crate) bool);
+
+/// Whether the player's own writers own the camera ([`CameraCaptive`]).
+fn camera_free(captive: Option<Res<CameraCaptive>>) -> bool {
+    captive.is_none_or(|captive| !captive.0)
+}
+
+/// A captor's placement of the player's camera: after the physics writeback, before transform
+/// propagation and before bevy derives the projections ([`CameraCaptive`]).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CaptiveCameraPlaced;
 
 /// Debug switch that freezes the orbit camera's follow transform.
 #[derive(Resource)]
@@ -107,7 +156,20 @@ pub struct OrbitCameraSet;
 /// (one-frame-stale) `GlobalTransform`. Computed once from the sim skeleton's local-transform
 /// chain — spawn-complete data, available the first frame (`None` only before any tank exists).
 #[derive(Resource, Default)]
-struct TurretPivot(Option<Vec3>);
+pub(crate) struct TurretPivot(Option<Vec3>);
+
+impl TurretPivot {
+    /// The offset, once a controlled tank has supplied it.
+    pub(crate) fn offset(&self) -> Option<Vec3> {
+        self.0
+    }
+
+    /// A pivot at `offset`, for a test without a tank's skeleton.
+    #[cfg(test)]
+    pub(crate) fn at(offset: Vec3) -> Self {
+        Self(Some(offset))
+    }
+}
 
 /// Height of the orbit pivot above the turret ring.
 pub(crate) const PIVOT_LIFT: f32 = 2.5;
@@ -138,24 +200,36 @@ pub(crate) fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec
 pub fn plugin(app: &mut App) {
     app.insert_resource(CameraFollow(true))
         .init_resource::<TurretPivot>()
+        .init_resource::<CameraCaptive>()
+        .configure_sets(
+            PostUpdate,
+            CaptiveCameraPlaced
+                .after(PhysicsSystems::Writeback)
+                .before(TransformSystems::Propagate)
+                .before(CameraUpdateSystems),
+        )
         .add_systems(Startup, spawn_camera)
         .add_systems(Update, capture_turret_pivot)
         .add_systems(
             PostUpdate,
             // Ordering invariant: read the writeback pose, then let propagation derive camera and
             // tank globals from that same frame's transforms.
+            // It writes the lens too, so it precedes bevy's projection update.
             orbit_camera
                 .run_if(in_third_person)
+                .run_if(camera_free)
                 .in_set(GameplaySet)
                 .in_set(OrbitCameraSet)
                 .after(PhysicsSystems::Writeback)
-                .before(TransformSystems::Propagate),
+                .before(TransformSystems::Propagate)
+                .before(CameraUpdateSystems),
         )
         .add_systems(
             PostUpdate,
             // Input rotation is gated separately; placement must consume this frame's rotation.
             orbit_look
                 .run_if(in_third_person)
+                .run_if(camera_free)
                 .in_set(GameplaySet)
                 .in_set(PlayerInputSet)
                 .before(orbit_camera)
@@ -165,12 +239,16 @@ pub fn plugin(app: &mut App) {
             PostUpdate,
             // The one gunner-view camera. It reads the gun's *propagated* pose after propagation and
             // writes its own `GlobalTransform` (no extra propagation pass); HUD markers order after
-            // `GunnerCameraPlaced` to reproject through this same pose.
+            // `GunnerCameraPlaced` to reproject through this same pose. Its final pose precedes the
+            // frusta and its lens the projection update.
             gunner_camera
                 .run_if(in_gunner)
+                .run_if(camera_free)
                 .in_set(GameplaySet)
                 .in_set(GunnerCameraPlaced)
-                .after(TransformSystems::Propagate),
+                .after(TransformSystems::Propagate)
+                .before(CameraUpdateSystems)
+                .before(VisibilitySystems::UpdateFrusta),
         )
         .add_systems(
             Update,
@@ -370,7 +448,7 @@ fn orbit_camera(
     // camera sits on the line through the pivot along its view axis; the ground ray pulls it in
     // near terrain.
     let pivot_point = orbit_pivot(tank_transform, turret_local);
-    let distance = ORBIT_FAR + (ORBIT_NEAR - ORBIT_FAR) * orbit.zoom;
+    let distance = orbit.radius();
     transform.translation = orbit_body(pivot_point, transform.forward(), distance, |ray, max| {
         ground_distance(&spatial, ray, max)
     });

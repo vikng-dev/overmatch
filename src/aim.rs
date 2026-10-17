@@ -22,7 +22,7 @@ use bevy::prelude::*;
 
 use crate::Layer;
 use crate::camera::GunnerCameraPlaced;
-use crate::command::{AimIntent, TankCommand};
+use crate::command::{AimIntent, TankCommand, TankDeviceSet};
 use crate::damage::{ControlledTank, VolumeOf, hit_ancestor};
 use crate::firecontrol::{RangeTable, lob};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
@@ -210,6 +210,7 @@ pub fn client_plugin(app: &mut App) {
                 .before(SightToggled)
                 .in_set(AimCommit)
                 .in_set(PlayerInputSet)
+                .in_set(TankDeviceSet)
                 .in_set(GameplaySet),
         )
         // Presentation, not input: no `PlayerInputSet`, so the dot answers the view it is in even

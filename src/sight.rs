@@ -13,7 +13,7 @@ use bevy::prelude::*;
 
 use crate::aim::{AimCommit, CommittedAim, MAX_RANGE, aim_distance};
 use crate::camera::{GUNNER_FOV_FALLBACK, view_fov};
-use crate::command::{AimIntent, TankCommand, gather_commands};
+use crate::command::{AimIntent, TankCommand, TankDeviceSet, gather_commands};
 use crate::damage::{ControlledTank, VolumeOf};
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::flow::MatchResourceExt;
@@ -43,7 +43,7 @@ fn view_available(
 }
 
 /// Which view the player is in. Default is the third-person commander view.
-#[derive(Resource, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum SightMode {
     #[default]
     ThirdPerson,
@@ -159,6 +159,7 @@ pub fn plugin(app: &mut App) {
             // and range readout are presentation and keep updating with the cursor free.
             toggle_sight
                 .in_set(PlayerInputSet)
+                .in_set(TankDeviceSet)
                 .in_set(SightToggled)
                 .in_set(GameplaySet),
         )
@@ -191,6 +192,7 @@ pub fn plugin(app: &mut App) {
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(AimCommit)
                 .in_set(PlayerInputSet)
+                .in_set(TankDeviceSet)
                 .in_set(GameplaySet),
         )
         // Declare the two view facts `render_policy` resolves: whose body the camera is riding, and

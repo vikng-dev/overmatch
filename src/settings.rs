@@ -895,6 +895,32 @@ impl VictimGlassPeek {
     }
 }
 
+/// Whether the player's own knockout by a recorded shot plays the kill cam before the death screen.
+/// Off, the death screen comes at once, the killer card still naming what the record names. Read by
+/// `damage_cam::pen_cam::game::killcam`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum KillCam {
+    #[default]
+    On,
+    Off,
+}
+
+impl KillCam {
+    pub(crate) const ORDER: [KillCam; 2] = [KillCam::On, KillCam::Off];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            KillCam::On => "ON",
+            KillCam::Off => "OFF",
+        }
+    }
+
+    pub(crate) const fn on(self) -> bool {
+        matches!(self, KillCam::On)
+    }
+}
+
 /// Whether the pen cam's views hold their camera still and land their events with short fades
 /// instead of travelling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -1617,6 +1643,9 @@ pub(crate) struct Settings {
     /// See [`VictimGlassPeek`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) victim_glass_peek: VictimGlassPeek,
+    /// See [`KillCam`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) kill_cam: KillCam,
     /// See [`ReduceMotion`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) reduce_motion: ReduceMotion,
@@ -1641,6 +1670,7 @@ impl Default for Settings {
             debug_panel: DebugPanel::default(),
             pen_cam_corner: PenCamCorner::default(),
             victim_glass_peek: VictimGlassPeek::default(),
+            kill_cam: KillCam::default(),
             reduce_motion: ReduceMotion::default(),
         }
     }
@@ -4609,6 +4639,8 @@ mod tests {
         assert!(is_default(&settings.debug_panel));
         assert!(is_default(&settings.pen_cam_corner));
         assert!(is_default(&settings.victim_glass_peek));
+        assert!(is_default(&settings.kill_cam));
+        assert!(settings.kill_cam.on(), "the kill cam plays by default");
         assert!(is_default(&settings.reduce_motion));
         assert!(
             settings.debug_panel.shown(),

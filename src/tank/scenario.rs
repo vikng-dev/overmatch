@@ -72,27 +72,51 @@ fn target_fires_enabled() -> bool {
     crate::env_flag("OVERMATCH_TARGET_FIRES", false)
 }
 
+/// Is this process running the target-kills scenario (`OVERMATCH_TARGET_KILLS=1`, with
+/// [`target_ahead`])? See [`offline_target_fires_plugin`].
+fn target_kills_enabled() -> bool {
+    crate::env_flag("OVERMATCH_TARGET_KILLS", false)
+}
+
 /// Dev-only, offline, under [`target_ahead`]: `OVERMATCH_TARGET_FIRES=1` turns the player's tank
 /// broadside to the parked target and has the target fire its main gun into the player's flank on
 /// [`TARGET_FIRE_AT_S`], for captures of the player's own tank struck (the pen cam's victim glass).
 /// From spawn the target lays its gun on the player's hull at [`TARGET_FIRE_AIM_LOCAL_M`]; at each
 /// scheduled time it pulls the trigger once.
 ///
+/// `OVERMATCH_TARGET_KILLS=1` (taking precedence over it) sets the same broadside, but the target
+/// lays its gun on the player's ammunition stowage nearest it and fires every
+/// [`TARGET_KILL_EVERY_S`] from [`TARGET_KILL_FROM_S`] until the player's tank is knocked out, for
+/// captures of the kill cam. The knockout is logged with its `Time<Real>` second.
+///
 /// Mounted only by the offline composition (`run_offline`), as `command::offline_auto_fire_plugin`
 /// is: that root has no netcode, so the commands it writes never leave the process.
 #[cfg(feature = "dev_tools")]
 pub fn offline_target_fires_plugin(app: &mut App) {
-    if !(target_ahead() && target_fires_enabled()) {
+    if !target_ahead() {
         return;
     }
-    info!("target fires: armed, main gun at {TARGET_FIRE_AT_S:?} s (Time<Real>)");
-    app.add_systems(
-        RunFixedMainLoop,
-        target_fires
-            .after(crate::command::gather_commands)
-            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
-            .in_set(GameplaySet),
-    );
+    if target_kills_enabled() {
+        info!(
+            "target kills: armed, main gun from {TARGET_KILL_FROM_S} s every {TARGET_KILL_EVERY_S} s (Time<Real>)"
+        );
+        app.add_systems(
+            RunFixedMainLoop,
+            target_kills
+                .after(crate::command::gather_commands)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(GameplaySet),
+        );
+    } else if target_fires_enabled() {
+        info!("target fires: armed, main gun at {TARGET_FIRE_AT_S:?} s (Time<Real>)");
+        app.add_systems(
+            RunFixedMainLoop,
+            target_fires
+                .after(crate::command::gather_commands)
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .in_set(GameplaySet),
+        );
+    }
 }
 
 /// When the target-fires scenario's target pulls its trigger, `Time<Real>` seconds (TUNED: the
@@ -112,6 +136,81 @@ const TARGET_FIRE_AIM_LOCAL_M: Vec3 = Vec3::new(0.0, TARGET_AIM_RISE_M, 2.2);
 /// round.
 #[cfg(feature = "dev_tools")]
 const TARGET_FIRE_LATCH_S: f32 = 0.5;
+
+/// When the target-kills scenario's target first pulls its trigger, and how often after,
+/// `Time<Real>` seconds (TUNED: once the turret has traversed and the tanks have settled; longer
+/// than a reload, so each pull fires).
+#[cfg(feature = "dev_tools")]
+const TARGET_KILL_FROM_S: f32 = 25.0;
+#[cfg(feature = "dev_tools")]
+const TARGET_KILL_EVERY_S: f32 = 10.0;
+
+/// The target-kills scenario: the target's gun on the centre of the player's ammunition volume
+/// nearest it (the union of its colliders' bounds), a pull every [`TARGET_KILL_EVERY_S`] until the
+/// player's tank is knocked out.
+#[cfg(feature = "dev_tools")]
+fn target_kills(
+    time: Res<Time<Real>>,
+    player: Query<
+        (
+            &GlobalTransform,
+            Option<&crate::damage::TankVolumes>,
+            Has<crate::damage::TankKnockedOut>,
+        ),
+        (With<Tank>, With<Controlled>),
+    >,
+    ammo: Query<(), With<crate::damage::Ammo>>,
+    children: Query<&Children>,
+    bounds: Query<&avian3d::prelude::ColliderAabb>,
+    mut targets: Query<
+        (&GlobalTransform, &mut crate::command::TankCommand),
+        (With<Tank>, Without<Controlled>),
+    >,
+    mut logged: Local<bool>,
+) {
+    let Ok((player, volumes, knocked_out)) = player.single() else {
+        return;
+    };
+    let t = time.elapsed_secs();
+    if knocked_out {
+        if !*logged {
+            *logged = true;
+            info!("target kills: the player's tank is knocked out at {t:.2} s (Time<Real>)");
+        }
+        return;
+    }
+    let centres: Vec<Vec3> = volumes
+        .into_iter()
+        .flat_map(|volumes| volumes.iter())
+        .filter(|&volume| ammo.contains(volume))
+        .filter_map(|volume| {
+            let (min, max) = std::iter::once(volume)
+                .chain(children.iter_descendants(volume))
+                .filter_map(|entity| bounds.get(entity).ok())
+                .filter(|aabb| aabb.min.cmple(aabb.max).all())
+                .fold(None, |union: Option<(Vec3, Vec3)>, aabb| {
+                    let (min, max) = (aabb.min, aabb.max);
+                    Some(union.map_or((min, max), |(a, b)| (a.min(min), b.max(max))))
+                })?;
+            Some((min + max) * 0.5)
+        })
+        .collect();
+    let since = t - TARGET_KILL_FROM_S;
+    let pull = since >= 0.0 && since % TARGET_KILL_EVERY_S < TARGET_FIRE_LATCH_S;
+    for (target, mut command) in &mut targets {
+        let from = target.translation();
+        let at = centres
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                a.distance_squared(from)
+                    .total_cmp(&b.distance_squared(from))
+            })
+            .unwrap_or_else(|| player.transform_point(TARGET_FIRE_AIM_LOCAL_M));
+        command.aim = Some(crate::command::AimIntent::World(at));
+        command.fire_primary |= pull;
+    }
+}
 
 #[cfg(feature = "dev_tools")]
 fn target_fires(
@@ -280,7 +379,7 @@ fn spawn_tank_when_loaded(
     let target = target_ahead();
     let far = probe_far() || target;
     let duel = duel_spawn_xz(far);
-    let (a_turn, b_turn) = if target && target_fires_enabled() {
+    let (a_turn, b_turn) = if target && (target_fires_enabled() || target_kills_enabled()) {
         // Both broadside, A's flank to B's gun ([`offline_target_fires_plugin`]).
         (
             Quat::from_rotation_y(FRAC_PI_2),

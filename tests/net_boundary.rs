@@ -41,6 +41,10 @@ const NET_AWARE_FILES: &[&str] = &[
     // The world-anchored nameplate prefixes `[BOT]` from the replicated `net::protocol::NetBot`
     // marker. View layer, not sim.
     "src/hud.rs",
+    // Test code: the kill cam's composed schedule mounts the network client's death screen and spawn
+    // map, the readers of its gate, to prove the gate is written before them in the frame. The kill
+    // cam itself names no netcode.
+    "src/damage_cam/pen_cam/game/killcam/tests.rs",
 ];
 
 /// The tokens that constitute naming the netcode layer from outside it: the dependency itself,

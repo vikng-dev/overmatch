@@ -46,7 +46,7 @@ use bevy::prelude::*;
 pub use self::demo::demo_plugin;
 use self::plan::Plan;
 use self::timeline::CornerKind;
-use crate::camera::{GunnerCameraPlaced, OrbitCameraSet};
+use crate::camera::{CaptiveCameraPlaced, GunnerCameraPlaced, OrbitCameraSet};
 
 /// The corner as it stands this frame.
 #[derive(Resource, Default, Clone, PartialEq)]
@@ -149,8 +149,10 @@ pub(super) fn materials(app: &mut App) {
 /// so they run after every writer of either. The corner's viewer, the inset camera, is written
 /// only by [`stage::animate`] in `Update`, which every `PostUpdate` system follows. The kill cam's
 /// viewer is the battlefield camera: in the demo its writers run in `Update`; in the game the
-/// orbit camera writes its pose and lens in [`OrbitCameraSet`] and the gunner camera its global
-/// pose and lens in [`GunnerCameraPlaced`], after propagation, so both edges are named here.
+/// orbit camera writes its pose and lens in [`OrbitCameraSet`], the gunner camera its global pose
+/// and lens in [`GunnerCameraPlaced`] after propagation, and the kill cam its captive pose, lens
+/// and profile in [`CaptiveCameraPlaced`], so all three edges are named here (`crate::camera`
+/// states the writers' own).
 pub(super) fn presentation(app: &mut App) {
     app.init_resource::<Corner>()
         .init_resource::<Exhibits>()
@@ -162,11 +164,13 @@ pub(super) fn presentation(app: &mut App) {
                 look::follow_lens
                     .after(OrbitCameraSet)
                     .after(GunnerCameraPlaced)
+                    .after(CaptiveCameraPlaced)
                     .before(CameraUpdateSystems),
                 look::follow_pose
                     .after(TransformSystems::Propagate)
                     .after(OrbitCameraSet)
                     .after(GunnerCameraPlaced)
+                    .after(CaptiveCameraPlaced)
                     .before(VisibilitySystems::UpdateFrusta),
             ),
         );

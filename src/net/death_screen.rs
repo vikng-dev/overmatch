@@ -2,10 +2,13 @@
 //!
 //! Life state comes from public `NetTankStatus`; private crew state must not drive an observer's UI.
 
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
+use crate::damage_cam::pen_cam::game::{GameDeathScreen, KillCamGate};
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
@@ -45,35 +48,59 @@ fn respawn_timed_out(awaiting: &AwaitingRespawn, has_live: bool, now: f64) -> bo
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::death_screen");
-    app.init_match_resource::<AwaitingRespawn>()
+    app.init_resource::<GameDeathScreen>()
+        .init_match_resource::<AwaitingRespawn>()
         .add_systems(OnEnter(Flow::InMatch), spawn_death_status_line)
-        .add_systems(
-            Update,
-            (
-                // All overlay reconcilers must read the same declared state. This is a state-driven
-                // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
-                toggle_death_screen.in_set(overlay::OverlaySet::Declare),
-                // Re-check the reconciled overlay input gate before latching a respawn edge — after
-                // `Toggle`, so a menu or spawn map opened this frame already counts.
-                request_respawn
-                    .in_set(PlayerInputSet)
-                    .after(overlay::OverlaySet::Toggle),
-                // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
-                // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
-                apply_death_status_line.after(overlay::OverlaySet::Toggle),
-            )
-                .in_set(InMatchSystems),
-        );
+        .add_systems(Update, systems().in_set(InMatchSystems));
+}
+
+/// The death screen's `Update` systems, placed among the overlay sets. Both read the kill cam's
+/// [`KillCamGate`], written before them (`KillCamGateSet`).
+fn systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        // All overlay reconcilers must read the same declared state. This is a state-driven
+        // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
+        toggle_death_screen.in_set(overlay::OverlaySet::Declare),
+        // Re-check the reconciled overlay input gate before latching a respawn edge — after
+        // `Toggle`, so a menu or spawn map opened this frame already counts.
+        request_respawn
+            .in_set(PlayerInputSet)
+            .after(overlay::OverlaySet::Toggle),
+        // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
+        // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
+        apply_death_status_line.after(overlay::OverlaySet::Toggle),
+    )
+        .into_configs()
+}
+
+/// The death screen's resources and `Update` systems without the match flow, for a composed
+/// schedule under test.
+#[cfg(test)]
+pub(crate) fn mount_bare(app: &mut App) {
+    app.init_resource::<GameDeathScreen>()
+        .init_resource::<AwaitingRespawn>()
+        .add_systems(Update, systems());
+}
+
+/// Whether the death screen shows "YOU DIED" (not "RESPAWNING…").
+#[cfg(test)]
+pub(crate) fn shows_died(world: &mut World) -> bool {
+    world
+        .query::<&DeathScreenNode>()
+        .iter(world)
+        .any(|node| *node == DeathScreenNode::Died)
 }
 
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
-/// death only for a controlled tank carrying `TankKnockedOut`.
+/// death only for a controlled tank carrying `TankKnockedOut`, once the kill cam lets it
+/// ([`KillCamGate::holds_death_screen`]).
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning the clock, two controlled-tank states, the overlay, the respawn wait, the overlay registry and fonts"
+    reason = "a system spanning the clock, the kill cam gate, two controlled-tank states, the overlay, the respawn wait, the overlay registry and fonts"
 )]
 fn toggle_death_screen(
     time: Res<Time>,
+    gate: Option<Res<KillCamGate>>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
     overlay: Query<(Entity, &DeathScreenNode)>,
@@ -96,7 +123,7 @@ fn toggle_death_screen(
 
     let desired = if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
-    } else if !dead_own.is_empty() {
+    } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
         Some(DeathScreenNode::Died)
     } else {
         None
@@ -120,8 +147,9 @@ fn toggle_death_screen(
 }
 
 /// Latch the respawn edge on the player's own dead tank when the respawn key is pressed. Writes the
-/// edge onto the `Controlled` tank's `TankCommand`; `net::client::feed_action_state` copies it into
-/// the networked `ActionState` next tick, the wire carries it, and the server validates it against the
+/// edge onto the `Controlled` tank's `TankCommand`; the next frame's `command::DeviceCommand` takes
+/// it, `net::client::feed_action_state` files it into the networked `ActionState` on that frame's
+/// first tick, the wire carries it, and the server validates it against the
 /// tank's own death before honoring it. Scoped `With<TankKnockedOut>` so the key does nothing while
 /// alive (there is no overlay up then either). `just_pressed` is one press = one edge; `consume_edges`
 /// (and, under starvation, the input bridge's `clear_edges`) drops it after one tick, so a held key
@@ -133,14 +161,18 @@ fn toggle_death_screen(
 /// overlay stays on `press R`. The `overlay::input_blocked` re-check below closes the ONE remaining
 /// gap the cursor gate can't: the frame a menu opens in the SAME tick R is pressed, before the cursor
 /// owner has released the cursor — refusing the latch there is what prevents a phantom `RESPAWNING…`.
+///
+/// Inert while the knockout is younger than the kill cam's input dead-zone
+/// ([`KillCamGate::settling`]), so a key held through the hit does not respawn.
 fn request_respawn(
     time: Res<Time>,
+    gate: Option<Res<KillCamGate>>,
     keys: Res<ButtonInput<KeyCode>>,
     overlays: Res<Overlays>,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
-    if !keys.just_pressed(RESPAWN_KEY) {
+    if !keys.just_pressed(RESPAWN_KEY) || gate.is_some_and(|gate| gate.settling) {
         return;
     }
     // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or
