@@ -297,13 +297,6 @@ impl ShotExplanations {
 
     /// The explanations of shots that struck `life`, in tick order: what a live view of that
     /// tank reads. A record of the combatant's earlier life is never among them.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its readers, the pen cam's views, are not yet built"
-        )
-    )]
     pub(crate) fn live(&self, life: TankLife) -> impl Iterator<Item = &StoredExplanation> {
         self.stored
             .values()

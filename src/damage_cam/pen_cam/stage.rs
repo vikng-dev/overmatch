@@ -788,10 +788,11 @@ pub(super) fn settled(plan: &Plan, kind: CornerKind) -> f32 {
 
 /// Whether the shell is drawn at corner time `c`: from the travel window on, until a round the
 /// record has leave the tank runs off the end of its recorded path. Under reduce motion a round
-/// that left is never drawn, since it would stand parked in the air at the span's end.
+/// that left is never drawn, since it would stand parked in the air at the span's end. A plan
+/// with no line ([`Plan::bare`]) draws no shell.
 fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
     let (from, _) = kind.line_window();
-    if c < from {
+    if c < from || plan.line.points.len() < 2 {
         return false;
     }
     if !plan.left() {

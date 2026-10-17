@@ -76,11 +76,11 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
 /// between is a geometric blend of the two bearings — no damping and no spring, so the view is
 /// instantaneous, stateless, and cannot overshoot.
 ///
-/// Cycle the ladder live with `V`.
+/// Cycle the ladder live with `B`.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 pub struct GunnerBlend(pub f32);
 
-/// The `V` hotkey's rungs, gun-end first. The endpoints are the two cameras this knob collapsed;
+/// The `B` hotkey's rungs, gun-end first. The endpoints are the two cameras this knob collapsed;
 /// the interior is the playtest hypothesis.
 pub(crate) const GUNNER_BLEND_LADDER: [f32; 6] = [0.0, 0.35, 0.5, 0.65, 0.8, 1.0];
 
@@ -162,7 +162,7 @@ pub fn plugin(app: &mut App) {
                 .in_set(SightToggled)
                 .in_set(GameplaySet),
         )
-        // Playtest knob: cycle where the optic camera rides between gun and intent (`V`). The
+        // Playtest knob: cycle where the optic camera rides between gun and intent (`B`). The
         // camera reads it fresh every frame and holds no state, so a change needs no reseed.
         .add_systems(
             Update,
@@ -605,7 +605,8 @@ pub(crate) fn drive_gunner_aim(
     }
 }
 
-/// Live playtest knob: step [`GunnerBlend`] along its ladder with `V` and name the value on-screen.
+/// Live playtest knob: step [`GunnerBlend`] along its ladder with `B` and name the value on-screen.
+/// (`V` is the pen cam's own-tank glass, `command::Bindings::own_tank_glass`.)
 ///
 /// The blend only *matters* in gunner view, but cycling is allowed from anywhere so a playtester can
 /// pre-pick; the toast is the feedback. The camera reads the resource fresh each frame and keeps no
@@ -615,7 +616,7 @@ fn cycle_gunner_blend(
     mut blend: ResMut<GunnerBlend>,
     mut toast: ResMut<Toast>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyV) {
+    if !keys.just_pressed(KeyCode::KeyB) {
         return;
     }
     *blend = blend.next();
@@ -795,7 +796,7 @@ mod tests {
         );
     }
 
-    /// The `V` walk is a cycle: it visits every rung once and returns to where it started, so a
+    /// The `B` walk is a cycle: it visits every rung once and returns to where it started, so a
     /// playtester can step in one direction and land back where they began without hunting. Both
     /// endpoints are on it — `0` welded to the gun's sight line, `1` holding the intent — and so is
     /// the `0.35` the ladder was extended down to.

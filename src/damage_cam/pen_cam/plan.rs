@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use super::timeline::CornerKind;
 use crate::damage_cam::shapes::TankShapes;
 use crate::damage_cam::{
-    ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, ShotVerdict, SpallCone,
+    ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, SpallCone,
 };
 
 /// The line is drawn from this far (m) before first contact. TUNED: a diagram choice.
@@ -40,7 +40,6 @@ pub const LINE_FLOOR: f32 = 0.35;
 
 /// The record, prepared for drawing.
 pub struct Plan {
-    pub verdict: ShotVerdict,
     pub kind: CornerKind,
     /// Calibre (m): the shell's diameter and the scale of the trail, the rings and the framing.
     pub calibre: f32,
@@ -359,7 +358,6 @@ impl Plan {
             .collect();
         let normal = Vec3::from(report.impact.normal).normalize_or(Vec3::NEG_Z);
         Self {
-            verdict,
             kind: CornerKind::of(verdict),
             calibre,
             start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
@@ -376,6 +374,33 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             line,
+        }
+    }
+
+    /// The victim glass with no record: `boxes` over the tank `shapes` poses, and no round — no
+    /// line, crossing, bounce or cone.
+    pub fn bare(shapes: &TankShapes, boxes: Vec<BoxPlan>) -> Self {
+        Self {
+            kind: CornerKind::Victim,
+            calibre: 0.0,
+            line: Polyline {
+                points: Vec::new(),
+                arc: Vec::new(),
+                energy: Vec::new(),
+            },
+            start_arc: 0.0,
+            contact_arc: 0.0,
+            end_arc: 0.0,
+            left_at: None,
+            crossings: Vec::new(),
+            impact_point: Vec3::ZERO,
+            impact_normal: Vec3::NEG_Z,
+            incidence: 0.0,
+            bounce: None,
+            stop: None,
+            cones: Vec::new(),
+            boxes,
+            tank_bounds: shapes.bounds(),
         }
     }
 

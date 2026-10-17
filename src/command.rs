@@ -140,6 +140,9 @@ pub struct Bindings {
     pub steer: AxisKeys,
     pub fire_primary: ButtonBinding,
     pub fire_secondary: ButtonBinding,
+    /// Held: the pen cam's victim glass, the player's own tank, in the corner slot. A view, not a
+    /// command: it never reaches [`TankCommand`].
+    pub own_tank_glass: ButtonBinding,
 }
 
 /// A [-1, 1] axis from a key pair.
@@ -162,7 +165,11 @@ pub enum ButtonBinding {
 }
 
 impl ButtonBinding {
-    fn pressed(&self, keys: &ButtonInput<KeyCode>, mouse: &ButtonInput<MouseButton>) -> bool {
+    pub(crate) fn pressed(
+        &self,
+        keys: &ButtonInput<KeyCode>,
+        mouse: &ButtonInput<MouseButton>,
+    ) -> bool {
         match *self {
             Self::Key(key) => keys.pressed(key),
             Self::Mouse(button) => mouse.pressed(button),
@@ -196,6 +203,8 @@ impl Default for Bindings {
             },
             fire_primary: ButtonBinding::Mouse(MouseButton::Left),
             fire_secondary: ButtonBinding::Key(KeyCode::Space),
+            // TUNED: the pen cam demo's own-tank key.
+            own_tank_glass: ButtonBinding::Key(KeyCode::KeyV),
         }
     }
 }

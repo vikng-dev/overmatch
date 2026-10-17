@@ -8,8 +8,10 @@
 //! timeline and corner HUD under it) draws whatever a driver puts in [`Corner`]: a record on show,
 //! its frame and its clock. Two drivers write it:
 //!
-//! * [`game`], the shooter's corner in play: each explanation of the local player's own hit, once
-//!   its world impact is drawn, by the delivery store's rule.
+//! * [`game`], the corner slot in play: the shooter's corner, each explanation of the local
+//!   player's own hit once its world impact is drawn, by the delivery store's rule; and the victim
+//!   glass, the player's own tank under the latest record that struck it, held by its key or
+//!   peeking when a round tells something.
 //! * [`demo`], the design bench over the recorded scenarios in `assets/dev/pen_cam/`: its own
 //!   battlefield, virtual-time control, keys and the kill cam's lesson.
 //!

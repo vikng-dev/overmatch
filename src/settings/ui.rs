@@ -58,7 +58,7 @@ use super::displays::DisplayLadder;
 use super::{
     DebugPanel, FrameCap, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
     RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution,
-    UiScalePercent, VsyncMode, WindowModeSetting,
+    UiScalePercent, VictimGlassPeek, VsyncMode, WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -119,6 +119,8 @@ enum Row {
     DebugPanel,
     /// Which of the player's hits open the pen cam's corner — see `settings::PenCamCorner`.
     PenCamCorner,
+    /// See `settings::VictimGlassPeek`.
+    VictimGlassPeek,
     /// See `settings::ReduceMotion`.
     ReduceMotion,
 }
@@ -131,7 +133,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 14] = [
+    const ORDER: [Row; 15] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -145,6 +147,7 @@ impl Row {
         Row::UiScale,
         Row::DebugPanel,
         Row::PenCamCorner,
+        Row::VictimGlassPeek,
         Row::ReduceMotion,
     ];
 
@@ -166,6 +169,7 @@ impl Row {
             Row::UiScale => "UI SCALE",
             Row::DebugPanel => "DEBUG PANEL",
             Row::PenCamCorner => "PEN CAM CORNER",
+            Row::VictimGlassPeek => "VICTIM GLASS PEEK",
             Row::ReduceMotion => "REDUCE MOTION",
         }
     }
@@ -237,6 +241,10 @@ impl Row {
             Row::PenCamCorner => {
                 "Which of your hits open the inset that shows what the round did: \
                  all, penetrations only, or none."
+            }
+            Row::VictimGlassPeek => {
+                "Briefly shows your own tank in the inset when a round crosses its armour or \
+                 costs it something. The hold key works either way."
             }
             Row::ReduceMotion => "Holds the pen cam's camera still and shortens its animations.",
         }
@@ -315,6 +323,7 @@ impl Row {
             Row::UiScale => settings.ui_scale.label(),
             Row::DebugPanel => settings.debug_panel.label().to_string(),
             Row::PenCamCorner => settings.pen_cam_corner.label().to_string(),
+            Row::VictimGlassPeek => settings.victim_glass_peek.label().to_string(),
             Row::ReduceMotion => settings.reduce_motion.label().to_string(),
         }
     }
@@ -371,6 +380,10 @@ impl Row {
             Row::PenCamCorner => {
                 settings.pen_cam_corner =
                     step_in(&PenCamCorner::ORDER, settings.pen_cam_corner, delta);
+            }
+            Row::VictimGlassPeek => {
+                settings.victim_glass_peek =
+                    step_in(&VictimGlassPeek::ORDER, settings.victim_glass_peek, delta);
             }
             Row::ReduceMotion => {
                 settings.reduce_motion =

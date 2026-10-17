@@ -66,6 +66,73 @@ fn aim_camera_at_target(
 /// aim on the hull side above the running gear rather than into the wheels.
 const TARGET_AIM_RISE_M: f32 = 1.2;
 
+/// Is this process running the target-fires scenario (`OVERMATCH_TARGET_FIRES=1`, with
+/// [`target_ahead`])? See [`offline_target_fires_plugin`].
+fn target_fires_enabled() -> bool {
+    crate::env_flag("OVERMATCH_TARGET_FIRES", false)
+}
+
+/// Dev-only, offline, under [`target_ahead`]: `OVERMATCH_TARGET_FIRES=1` turns the player's tank
+/// broadside to the parked target and has the target fire its main gun into the player's flank on
+/// [`TARGET_FIRE_AT_S`], for captures of the player's own tank struck (the pen cam's victim glass).
+/// From spawn the target lays its gun on the player's hull at [`TARGET_FIRE_AIM_LOCAL_M`]; at each
+/// scheduled time it pulls the trigger once.
+///
+/// Mounted only by the offline composition (`run_offline`), as `command::offline_auto_fire_plugin`
+/// is: that root has no netcode, so the commands it writes never leave the process.
+#[cfg(feature = "dev_tools")]
+pub fn offline_target_fires_plugin(app: &mut App) {
+    if !(target_ahead() && target_fires_enabled()) {
+        return;
+    }
+    info!("target fires: armed, main gun at {TARGET_FIRE_AT_S:?} s (Time<Real>)");
+    app.add_systems(
+        RunFixedMainLoop,
+        target_fires
+            .after(crate::command::gather_commands)
+            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+            .in_set(GameplaySet),
+    );
+}
+
+/// When the target-fires scenario's target pulls its trigger, `Time<Real>` seconds (TUNED: the
+/// first after its turret has traversed onto the player and the tanks have settled, the rest a
+/// reload apart and more).
+#[cfg(feature = "dev_tools")]
+const TARGET_FIRE_AT_S: [f32; 3] = [25.0, 40.0, 55.0];
+
+/// Where on the player's hull the target lays its gun, in the hull's frame, m: fixture data,
+/// [`TARGET_AIM_RISE_M`] up and toward the rear (+Z, the hull faces −Z), over the engine bay
+/// rather than the fighting compartment, so a round costs the tank a component without
+/// knocking it out at once.
+#[cfg(feature = "dev_tools")]
+const TARGET_FIRE_AIM_LOCAL_M: Vec3 = Vec3::new(0.0, TARGET_AIM_RISE_M, 2.2);
+
+/// How long each scheduled trigger pull stays latched, s: shorter than any reload, so it fires one
+/// round.
+#[cfg(feature = "dev_tools")]
+const TARGET_FIRE_LATCH_S: f32 = 0.5;
+
+#[cfg(feature = "dev_tools")]
+fn target_fires(
+    time: Res<Time<Real>>,
+    player: Query<&GlobalTransform, (With<Tank>, With<Controlled>)>,
+    mut targets: Query<&mut crate::command::TankCommand, (With<Tank>, Without<Controlled>)>,
+) {
+    let Ok(player) = player.single() else {
+        return;
+    };
+    let t = time.elapsed_secs();
+    let pull = TARGET_FIRE_AT_S
+        .iter()
+        .any(|&at| (at..at + TARGET_FIRE_LATCH_S).contains(&t));
+    let aim = crate::command::AimIntent::World(player.transform_point(TARGET_FIRE_AIM_LOCAL_M));
+    for mut command in &mut targets {
+        command.aim = Some(aim);
+        command.fire_primary |= pull;
+    }
+}
+
 /// Install the local duel's possession switch.
 pub fn client_plugin(app: &mut App) {
     // Control systems in GameplaySet must see the new owner in the same frame.
@@ -209,7 +276,13 @@ fn spawn_tank_when_loaded(
     let target = target_ahead();
     let far = probe_far() || target;
     let duel = duel_spawn_xz(far);
-    let (a_turn, b_turn) = if target {
+    let (a_turn, b_turn) = if target && target_fires_enabled() {
+        // Both broadside, A's flank to B's gun ([`offline_target_fires_plugin`]).
+        (
+            Quat::from_rotation_y(FRAC_PI_2),
+            Quat::from_rotation_y(FRAC_PI_2),
+        )
+    } else if target {
         // A faces its own −Z, down the line to B; B stands broadside across it.
         (Quat::IDENTITY, Quat::from_rotation_y(FRAC_PI_2))
     } else {

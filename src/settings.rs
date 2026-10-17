@@ -869,6 +869,32 @@ impl PenCamCorner {
     }
 }
 
+/// Whether the pen cam's victim glass peeks on its own when a round that crossed a plate or cost
+/// the player's tank something strikes it. The hold key opens the glass either way. Read by
+/// `damage_cam::pen_cam::game`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum VictimGlassPeek {
+    #[default]
+    On,
+    Off,
+}
+
+impl VictimGlassPeek {
+    pub(crate) const ORDER: [VictimGlassPeek; 2] = [VictimGlassPeek::On, VictimGlassPeek::Off];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            VictimGlassPeek::On => "ON",
+            VictimGlassPeek::Off => "OFF",
+        }
+    }
+
+    pub(crate) const fn on(self) -> bool {
+        matches!(self, VictimGlassPeek::On)
+    }
+}
+
 /// Whether the pen cam's views hold their camera still and land their events with short fades
 /// instead of travelling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
@@ -1588,6 +1614,9 @@ pub(crate) struct Settings {
     /// Which of the player's hits open the pen cam's corner — see [`PenCamCorner`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) pen_cam_corner: PenCamCorner,
+    /// See [`VictimGlassPeek`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) victim_glass_peek: VictimGlassPeek,
     /// See [`ReduceMotion`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) reduce_motion: ReduceMotion,
@@ -1611,6 +1640,7 @@ impl Default for Settings {
             ui_scale: UiScalePercent::default(),
             debug_panel: DebugPanel::default(),
             pen_cam_corner: PenCamCorner::default(),
+            victim_glass_peek: VictimGlassPeek::default(),
             reduce_motion: ReduceMotion::default(),
         }
     }
@@ -4570,6 +4600,7 @@ mod tests {
         assert!(is_default(&settings.ui_scale));
         assert!(is_default(&settings.debug_panel));
         assert!(is_default(&settings.pen_cam_corner));
+        assert!(is_default(&settings.victim_glass_peek));
         assert!(is_default(&settings.reduce_motion));
         assert!(
             settings.debug_panel.shown(),

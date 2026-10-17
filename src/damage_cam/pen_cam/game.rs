@@ -1,31 +1,45 @@
-//! The shooter's corner in play: each explanation of the local player's own hit on another tank
-//! opens the corner in the frame for its verdict ([`CornerKind::of`]), plays it on the game clock
-//! and closes it.
+//! The corner slot in play, and its two surfaces: the shooter's corner, each explanation of the
+//! local player's own hit on another tank in the frame for its verdict ([`CornerKind::of`]), and
+//! the victim glass, the player's own tank as it stands ([`glass`]). One owner, one slot: never two
+//! surfaces at once.
 //!
-//! * **What opens.** An explanation in the player's store ([`ShotExplanations`]) whose audience is
-//!   [`Audience::Shooter`], fired by the player's combatant at another, once its world impact is
-//!   drawn ([`ImpactPresence::Presented`]), and admitted by the player's corner setting
-//!   ([`PenCamCorner::opens`]). One released undrawn ([`ImpactPresence::TimedOut`]) is skipped:
-//!   the corner rides on the impact the player saw. Each explanation is considered once.
-//! * **When.** [`timeline::OPEN_LATENCY_S`] after it is presented, by the replacement rule
-//!   ([`Lineup`]): the newest record replaces the one on show once that one has shown
-//!   [`timeline::MIN_SHOWN_S`]; one arriving sooner waits, and only the latest waiting is kept. A
-//!   replacement keeps the frame open and crossfades ([`timeline::turn_presence`]). Never two
-//!   corners. The timings are the UX spec's, TUNED.
+//! * **What opens the corner.** An explanation in the player's store ([`ShotExplanations`]) whose
+//!   audience is [`Audience::Shooter`], fired by the player's combatant at another, admitted by
+//!   the player's corner setting ([`PenCamCorner::opens`]).
+//! * **What peeks the glass.** A victim projection of a shot on the player's current life, from
+//!   any shooter, that tells something ([`glass::tells`]: a plate crossed, HP points lost, a
+//!   consequence), admitted by [`VictimGlassPeek`]. It runs [`CornerKind::Victim`]'s turn.
+//! * **When.** Either opens once its world impact is drawn ([`ImpactPresence::Presented`]); one
+//!   released undrawn ([`ImpactPresence::TimedOut`]) is skipped, as the slot rides on the impact
+//!   the player saw. Each explanation is considered once. It opens [`timeline::OPEN_LATENCY_S`]
+//!   later by the replacement rule ([`Lineup`]): the newest event replaces the one on show, of
+//!   either surface, once that one has shown [`timeline::MIN_SHOWN_S`]; one arriving sooner waits,
+//!   and only the latest waiting is kept. A replacement keeps the frame open and crossfades
+//!   ([`timeline::turn_presence`]); a replaced turn never resumes. The timings are the UX spec's,
+//!   TUNED.
 //! * **Which is newer.** The encounter's first contact, then its record's completion, identity
 //!   breaking ties ([`Recency`]); never arrival, as the store's channel is unordered. One older
-//!   than any the corner has admitted since it last held nothing, or than any the setting admits
-//!   that still waits on its impact, is dropped; of several presented together only the newest
-//!   opens.
-//! * **What it draws.** The struck tank's stage view, of the tank file the record names, and the
-//!   record's plan over the same tank asset the demo stages ([`TankAsset`]); a component the
-//!   shooter's projection does not list is drawn as the base layout, untinted.
-//! * **Teardown.** The corner's entities exist from a record's arrival until the corner closes
-//!   with nothing queued, a new life of the player's tank or no tank, the setting turning
-//!   [`PenCamCorner::Off`], or a [`CloseCorner`] (the network client's disconnect). Every one goes
-//!   at once ([`Rig::teardown`]): the cameras, lights, stage view, UI and the images they own.
+//!   than any the slot has admitted since it last held nothing, or than any admitted one still
+//!   waiting on its impact, is dropped; of several presented together only the newest opens.
+//! * **The hold.** While the own-tank key is down ([`GlassHold`],
+//!   `command::Bindings::own_tank_glass`) the glass holds the slot, with or without a record and
+//!   whatever the settings: it crossfades over a turn on show, which never resumes, and the
+//!   slot admits nothing presented while it holds. Released, it closes over
+//!   [`timeline::CLOSE_S`]. A teardown other than its own close is final for the press holding
+//!   it: the key opens the glass again only once let go. TUNED.
+//! * **What it draws.** The corner: the struck tank's stage view, of the tank file the record
+//!   names, under the record's plan over the same tank asset the demo stages ([`TankAsset`]); a
+//!   component the shooter's projection does not list is the base layout, untinted. The glass: the
+//!   player's own tank file ([`TankSpecHandle`]) under [`glass::plan`], rebuilt whenever the latest
+//!   record or the tank's live state changes.
+//! * **Teardown.** The slot's entities exist from an arrival or a hold until the slot closes with
+//!   nothing queued or held, a new life of the player's tank, its knockout or no tank, a change of
+//!   either setting, or a [`CloseCorner`] (the network client's disconnect). Every one goes at
+//!   once ([`Rig::teardown`]): the cameras, lights, stage view, UI and the images they own.
 //!
-//! No input reaches the corner.
+//! No input reaches the corner; the hold key only opens the glass.
+
+mod glass;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -34,6 +48,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
+pub(crate) use self::glass::GlassHold;
+use self::glass::{LiveState, LiveVolume};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look::{MaskCamera, Masks};
 use super::plan::Plan;
@@ -42,29 +58,33 @@ use super::timeline::{self, CornerKind, Lineup};
 use super::view::{self, StageView};
 use super::{Corner, CornerRig, Exhibit, Exhibits, Knobs, Showing, Surface};
 use crate::bake::TankBlueprint;
+use crate::damage::{TankKnockedOut, TankVolumes};
+use crate::damage_cam::PenetrationReport;
 use crate::damage_cam::delivery::{ExplanationKey, ImpactPresence, ShotExplanations};
 use crate::damage_cam::shapes::TankAsset;
 use crate::damage_cam::wire::{Audience, ShotExplanation, TankLife};
-use crate::settings::{PenCamCorner, Settings};
-use crate::spec::TankSpec;
+use crate::settings::{PenCamCorner, Settings, VictimGlassPeek};
+use crate::spec::{TankSpec, TankSpecHandle};
 use crate::tank::Controlled;
 use crate::{CombatantId, CombatantLife};
 
-/// The shooter's corner on a client composition: the stage's materials and [`wire`].
+/// The corner slot on a client composition: the stage's materials, the own-tank key and [`wire`].
 pub fn plugin(app: &mut App) {
     super::materials(app);
     wire(app);
+    app.add_systems(Update, glass::read_hold.before(drive));
 }
 
-/// Close the corner now and drop everything it holds.
+/// Close the slot now and drop everything it holds.
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct CloseCorner;
 
-/// The corner's state and systems, without the materials (a headless test registers their assets
-/// alone).
+/// The slot's state and systems, without the materials and the key (a headless test registers the
+/// materials' assets alone and sets [`GlassHold`] itself).
 fn wire(app: &mut App) {
     super::presentation(app);
-    app.init_resource::<ShooterCorner>()
+    app.init_resource::<Slot>()
+        .init_resource::<GlassHold>()
         .add_observer(close)
         .add_systems(
             Update,
@@ -78,16 +98,25 @@ fn wire(app: &mut App) {
         );
 }
 
-/// One record queued for the corner.
+/// What one turn shows.
+#[derive(Clone)]
+enum Content {
+    /// The shooter's corner: one explanation's exhibit.
+    Corner(Exhibit),
+    /// The victim glass, built from the latest record and the live state while it shows.
+    Glass,
+}
+
+/// One event queued for the slot.
 #[derive(Clone)]
 struct Queued {
     serial: usize,
     kind: CornerKind,
     vehicle: String,
-    exhibit: Exhibit,
+    content: Content,
 }
 
-/// The turn on show: its record's serial and frame, and when it started on the corner's clock.
+/// The turn on show: its serial and frame, and when it started on the slot's clock.
 #[derive(Clone, Copy)]
 struct Turn {
     serial: usize,
@@ -95,6 +124,26 @@ struct Turn {
     start: f32,
     /// Whether it replaced a turn still open when it started.
     replacing: bool,
+}
+
+/// The own-tank key's hold of the glass.
+#[derive(Clone, Copy)]
+struct Hold {
+    serial: usize,
+    /// When it first showed, on the slot's clock; `None` while its stage view is not placed.
+    start: Option<f32>,
+    /// Whether it crossfaded over a turn on show.
+    replacing: bool,
+    /// When the key let go: it closes [`timeline::CLOSE_S`] later.
+    released: Option<f32>,
+}
+
+/// What the glass's exhibit is built from; a change rebuilds it.
+#[derive(Clone, PartialEq)]
+struct GlassSource {
+    turn: usize,
+    record: Option<ExplanationKey>,
+    live: LiveState,
 }
 
 /// An explanation's place in time for replacement: its encounter's first contact, then its
@@ -117,30 +166,38 @@ impl Recency {
     }
 }
 
-/// What the corner holds between frames.
+/// What the slot holds between frames.
 #[derive(Resource, Default)]
-pub(crate) struct ShooterCorner {
-    /// The player's tank life the corner serves.
+pub(crate) struct Slot {
+    /// The player's tank life the slot serves.
     life: Option<TankLife>,
+    /// The settings it admits by.
+    admits: Option<(PenCamCorner, VictimGlassPeek)>,
     /// Every stored explanation already considered.
     seen: BTreeSet<ExplanationKey>,
     lineup: Lineup<Queued>,
-    /// The newest explanation admitted to the lineup since the corner last held nothing.
+    /// The newest explanation admitted to the lineup since the slot last held nothing.
     newest: Option<Recency>,
     serials: usize,
     turn: Option<Turn>,
-    /// Virtual seconds at the corner's clock zero, while it holds anything.
+    hold: Option<Hold>,
+    /// Whether the key held down through the slot's last forced close: that press opens nothing
+    /// more, so a respawn, a knockout or a disconnect closes the glass for good.
+    spent: bool,
+    /// What the glass on show was built from.
+    glass: Option<GlassSource>,
+    /// Virtual seconds at the slot's clock zero, while it holds anything.
     epoch: Option<f64>,
     /// Whether the inset camera, its lights and the corner's UI exist.
     rigged: bool,
     /// Each tank file's asset, read once.
     tanks: HashMap<String, Arc<TankAsset>>,
-    /// Each staged tank file's view assets, held loaded until the corner is closed by a
+    /// Each staged tank file's view assets, held loaded until the slot is closed by a
     /// [`CloseCorner`].
     loaded: HashMap<String, (Handle<WorldAsset>, Handle<TankSpec>)>,
 }
 
-impl ShooterCorner {
+impl Slot {
     /// The tank file `vehicle`'s asset: the blueprint's when it names that file, else read from
     /// disk. `None`, warned once, when it cannot be read.
     fn tank(&mut self, vehicle: &str, blueprint: Option<&TankBlueprint>) -> Option<Arc<TankAsset>> {
@@ -162,11 +219,28 @@ impl ShooterCorner {
         Some(tank)
     }
 
-    /// Drop every queued and shown record and the corner's clock.
+    /// Hold `vehicle`'s view assets loaded, so a stage view of it can spawn by the time the slot
+    /// opens.
+    fn preload(&mut self, asset_server: &AssetServer, vehicle: &str) {
+        if !self.loaded.contains_key(vehicle) {
+            let assets = StageView::load(asset_server, vehicle);
+            self.loaded.insert(vehicle.to_owned(), assets);
+        }
+    }
+
+    /// Seconds on the slot's clock, starting it at zero if it is stopped.
+    fn clock(&mut self, time: &Time) -> f32 {
+        let epoch = *self.epoch.get_or_insert(time.elapsed_secs_f64());
+        (time.elapsed_secs_f64() - epoch) as f32
+    }
+
+    /// Drop every queued, shown and held turn and the slot's clock.
     fn reset(&mut self) {
         self.lineup.clear();
         self.newest = None;
         self.turn = None;
+        self.hold = None;
+        self.glass = None;
         self.epoch = None;
     }
 
@@ -174,6 +248,7 @@ impl ShooterCorner {
     /// their impact included.
     fn forget(&mut self, store: Option<&ShotExplanations>) {
         self.reset();
+        self.spent = true;
         self.seen = store
             .map(|store| store.iter().map(|(key, _)| *key).collect())
             .unwrap_or_default();
@@ -197,7 +272,7 @@ pub(crate) struct Rig<'w, 's> {
 impl Rig<'_, '_> {
     /// The inset, its lights and the corner's UI, and the stage view of `vehicle`, spawning what
     /// is missing. Whether the stage view is placed.
-    fn ready(&mut self, state: &mut ShooterCorner, vehicle: &str) -> bool {
+    fn ready(&mut self, state: &mut Slot, vehicle: &str) -> bool {
         if !state.rigged {
             *self.stage = Stage::default();
             stage::spawn_inset(
@@ -224,7 +299,7 @@ impl Rig<'_, '_> {
     }
 
     /// Despawn every entity of the corner and drop every image and resource it holds.
-    fn teardown(&mut self, state: &mut ShooterCorner) {
+    fn teardown(&mut self, state: &mut Slot) {
         self.masks.release(&mut self.commands, &mut self.images);
         for entity in &self.entities {
             self.commands.entity(entity).despawn();
@@ -239,14 +314,95 @@ impl Rig<'_, '_> {
     }
 
     /// Whether anything of the corner exists.
-    fn exists(&self, state: &ShooterCorner) -> bool {
+    fn exists(&self, state: &Slot) -> bool {
         state.rigged || self.view.is_some()
+    }
+
+    /// The glass's exhibit for `turn`, of `vehicle` under `record` over `live`, rebuilt only when
+    /// one of them changed.
+    fn glass(
+        &mut self,
+        state: &mut Slot,
+        turn: usize,
+        record: Option<(ExplanationKey, &PenetrationReport)>,
+        live: LiveState,
+        vehicle: &str,
+        blueprint: Option<&TankBlueprint>,
+    ) {
+        let source = GlassSource {
+            turn,
+            record: record.map(|(key, _)| key),
+            live,
+        };
+        if state.glass.as_ref() == Some(&source) {
+            return;
+        }
+        let Some(tank) = state.tank(vehicle, blueprint) else {
+            self.exhibits.0.clear();
+            return;
+        };
+        let report = record.map(|(_, report)| report);
+        let servo_deg = report
+            .map(|report| report.servo_deg.clone())
+            .unwrap_or_default();
+        let plan = glass::plan(report, &source.live, &tank.shapes(&servo_deg));
+        self.exhibits.0 = vec![Exhibit {
+            plan: Arc::new(plan),
+            servo_deg,
+        }];
+        if state.glass.as_ref().is_some_and(|shown| shown.turn == turn) {
+            // The same turn keeps the same stage key: only this rebuilds it.
+            self.stage.invalidate();
+        }
+        state.glass = Some(source);
+    }
+}
+
+/// The player's tank: who it is this life, its file and its components' live state.
+#[derive(SystemParam)]
+struct Player<'w, 's> {
+    tank: Query<
+        'w,
+        's,
+        (
+            &'static CombatantId,
+            &'static CombatantLife,
+            Option<&'static TankVolumes>,
+            Option<&'static TankSpecHandle>,
+            Has<TankKnockedOut>,
+        ),
+        With<Controlled>,
+    >,
+    volumes: Query<'w, 's, LiveVolume>,
+}
+
+impl Player<'_, '_> {
+    /// The tank's life, while it has one and is not knocked out.
+    fn life(&self) -> Option<TankLife> {
+        let (&combatant, &life, _, _, knocked_out) = self.tank.single().ok()?;
+        (!knocked_out).then_some(TankLife { combatant, life })
+    }
+
+    /// The tank's file, as a record names it.
+    fn vehicle(&self) -> Option<String> {
+        let (_, _, _, spec, _) = self.tank.single().ok()?;
+        let path = spec?.0.path()?;
+        Some(path.path().to_string_lossy().into_owned())
+    }
+
+    fn live(&self) -> LiveState {
+        self.tank
+            .single()
+            .ok()
+            .and_then(|(_, _, volumes, _, _)| volumes)
+            .map(|volumes| LiveState::read(volumes, &self.volumes))
+            .unwrap_or_default()
     }
 }
 
 fn close(
     _close: On<CloseCorner>,
-    mut state: ResMut<ShooterCorner>,
+    mut state: ResMut<Slot>,
     store: Option<Res<ShotExplanations>>,
     mut rig: Rig,
 ) {
@@ -255,16 +411,18 @@ fn close(
     state.loaded.clear();
 }
 
-/// Queue each newly presented shooter explanation, run the replacement rule on the corner's clock,
-/// keep the rig for what is on show and write the corner.
+/// Queue each newly presented explanation the slot admits, hold the glass while the key is down,
+/// run the replacement rule on the slot's clock, keep the rig for what is on show and write the
+/// corner.
 #[allow(clippy::too_many_arguments)]
 fn drive(
     time: Res<Time>,
-    mut state: ResMut<ShooterCorner>,
+    mut state: ResMut<Slot>,
     store: Option<Res<ShotExplanations>>,
     settings: Option<Res<Settings>>,
     blueprint: Option<Res<TankBlueprint>>,
-    player: Query<(&CombatantId, &CombatantLife), With<Controlled>>,
+    hold: Res<GlassHold>,
+    player: Player,
     mut knobs: ResMut<Knobs>,
     mut rig: Rig,
 ) {
@@ -274,86 +432,195 @@ fn drive(
         knobs.reduce_motion = reduce_motion;
     }
     let store = store.as_deref();
-    let life = player
-        .single()
-        .ok()
-        .map(|(&combatant, &life)| TankLife { combatant, life });
-    if life != state.life || settings.pen_cam_corner == PenCamCorner::Off {
+    let blueprint = blueprint.as_deref();
+    let life = player.life();
+    let admits = (settings.pen_cam_corner, settings.victim_glass_peek);
+    if life != state.life || Some(admits) != state.admits {
         if rig.exists(&state) {
             rig.teardown(&mut state);
         }
         state.forget(store);
         state.life = life;
+        state.admits = Some(admits);
     }
-    let (Some(me), Some(store)) = (state.life, store) else {
+    if !hold.0 {
+        state.spent = false;
+    }
+    let Some(me) = state.life else {
         return;
     };
+    let held_down = hold.0 && !state.spent;
+    let latest = store.and_then(|store| glass::latest(store, me));
+    let own = player
+        .vehicle()
+        .or_else(|| latest.and_then(|(_, stored)| stored.report.vehicle.clone()))
+        .or_else(|| blueprint.map(|blueprint| blueprint.file.clone()));
+    if let Some(own) = &own {
+        state.preload(&rig.asset_server, own);
+    }
+    let holding = held_down || state.hold.is_some_and(|held| held.released.is_none());
 
-    let stored: BTreeSet<ExplanationKey> = store.iter().map(|(key, _)| *key).collect();
-    state.seen.retain(|key| stored.contains(key));
-    // Every newly presented explanation the corner admits, and the floor no admission may fall
-    // below: the newest admitted since the corner last held nothing, or still waiting on its
-    // impact.
+    // Every newly presented explanation the slot admits, and the floor no admission may fall
+    // below: the newest admitted since the slot last held nothing, or still waiting on its impact.
     let mut presented = Vec::new();
     let mut floor = state.newest;
-    for (key, entry) in store.iter() {
-        if state.seen.contains(key) {
-            continue;
-        }
-        let explanation = &entry.explanation;
-        let mine = explanation.audience == Audience::Shooter
-            && explanation.shot.combatant == me.combatant
-            && explanation.struck.combatant != me.combatant;
-        let Some(vehicle) = entry.report.vehicle.as_deref().filter(|_| mine) else {
-            state.seen.insert(*key);
-            continue;
-        };
-        if !state.loaded.contains_key(vehicle) {
-            // Loaded while the impact is still to draw, so the stage view can spawn by the time
-            // the corner opens.
-            let assets = StageView::load(&rig.asset_server, vehicle);
-            state.loaded.insert(vehicle.to_owned(), assets);
-        }
-        let admitted = settings.pen_cam_corner.opens(entry.report.impact.verdict);
-        let recency = Recency::of(*key, explanation);
-        match entry.presence {
-            ImpactPresence::Pending => {
-                if admitted {
-                    floor = floor.max(Some(recency));
-                }
+    if let Some(store) = store {
+        let stored: BTreeSet<ExplanationKey> = store.iter().map(|(key, _)| *key).collect();
+        state.seen.retain(|key| stored.contains(key));
+        for (key, entry) in store.iter() {
+            if state.seen.contains(key) {
                 continue;
             }
-            ImpactPresence::TimedOut => {}
-            ImpactPresence::Presented if admitted => presented.push((recency, entry, vehicle)),
-            ImpactPresence::Presented => {}
+            let explanation = &entry.explanation;
+            let fired = explanation.audience == Audience::Shooter
+                && explanation.shot.combatant == me.combatant
+                && explanation.struck.combatant != me.combatant;
+            let candidate = if fired {
+                entry.report.vehicle.clone().map(|vehicle| {
+                    let admitted = settings.pen_cam_corner.opens(entry.report.impact.verdict);
+                    (vehicle, admitted, false)
+                })
+            } else if glass::struck(entry, me) {
+                own.clone().map(|vehicle| {
+                    let admitted = settings.victim_glass_peek.on() && glass::tells(&entry.report);
+                    (vehicle, admitted, true)
+                })
+            } else {
+                None
+            };
+            let Some((vehicle, admitted, peek)) = candidate else {
+                state.seen.insert(*key);
+                continue;
+            };
+            // Loaded while the impact is still to draw.
+            state.preload(&rig.asset_server, &vehicle);
+            let recency = Recency::of(*key, explanation);
+            match entry.presence {
+                ImpactPresence::Pending => {
+                    if admitted {
+                        floor = floor.max(Some(recency));
+                    }
+                    continue;
+                }
+                ImpactPresence::TimedOut => {}
+                ImpactPresence::Presented if admitted && !holding => {
+                    presented.push((recency, entry, vehicle, peek));
+                }
+                ImpactPresence::Presented => {}
+            }
+            state.seen.insert(*key);
         }
-        state.seen.insert(*key);
     }
     // Newest first: of explanations presented together only the newest opens.
     presented.sort_by_key(|a| std::cmp::Reverse(a.0));
-    for (recency, entry, vehicle) in presented {
+    for (recency, entry, vehicle, peek) in presented {
         if floor.is_some_and(|floor| recency < floor) {
             continue;
         }
-        let Some(tank) = state.tank(vehicle, blueprint.as_deref()) else {
-            continue;
+        let (kind, content) = if peek {
+            (CornerKind::Victim, Content::Glass)
+        } else {
+            let Some(tank) = state.tank(&vehicle, blueprint) else {
+                continue;
+            };
+            let plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
+            let exhibit = Exhibit {
+                servo_deg: entry.report.servo_deg.clone(),
+                plan: Arc::new(plan),
+            };
+            (exhibit.plan.kind, Content::Corner(exhibit))
         };
-        let plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
-        let epoch = *state.epoch.get_or_insert(time.elapsed_secs_f64());
-        let now = (time.elapsed_secs_f64() - epoch) as f32;
+        let now = state.clock(&time);
         state.serials += 1;
         state.newest = Some(recency);
         floor = Some(recency);
         let queued = Queued {
             serial: state.serials,
-            kind: plan.kind,
-            vehicle: vehicle.to_owned(),
-            exhibit: Exhibit {
-                plan: Arc::new(plan),
-                servo_deg: entry.report.servo_deg.clone(),
-            },
+            kind,
+            vehicle,
+            content,
         };
         state.lineup.arrive(queued, now + timeline::OPEN_LATENCY_S);
+    }
+
+    let record = latest.map(|(key, stored)| (key, &stored.report));
+    if held_down || state.hold.is_some() {
+        let now = state.clock(&time);
+        match &mut state.hold {
+            Some(held) if held_down => held.released = None,
+            Some(held) => {
+                held.released.get_or_insert(now);
+            }
+            None => {
+                state.lineup.clear();
+                state.turn = None;
+                state.serials += 1;
+                state.hold = Some(Hold {
+                    serial: state.serials,
+                    start: None,
+                    replacing: false,
+                    released: None,
+                });
+            }
+        }
+        let Some(mut held) = state.hold else {
+            return;
+        };
+        if let Some(released) = held.released
+            && (held.start.is_none() || now - released >= timeline::CLOSE_S)
+        {
+            rig.teardown(&mut state);
+            state.reset();
+            return;
+        }
+        let Some(vehicle) = own.as_deref() else {
+            warn_once!("pen cam: the glass has no tank file for the player's tank");
+            rig.corner.set_if_neq(Corner::default());
+            return;
+        };
+        if !rig.ready(&mut state, vehicle) {
+            // The stage cannot draw yet: the hold waits for it.
+            rig.corner.set_if_neq(Corner::default());
+            return;
+        }
+        let start = match held.start {
+            Some(start) => start,
+            None => {
+                held.replacing = rig.corner.showing.is_some();
+                held.start = Some(now);
+                now
+            }
+        };
+        state.hold = Some(held);
+        rig.glass(
+            &mut state,
+            held.serial,
+            record,
+            player.live(),
+            vehicle,
+            blueprint,
+        );
+        let c = now - start;
+        let (mut opacity, scale, fading) =
+            timeline::turn_presence(c, f32::INFINITY, held.replacing);
+        if let Some(released) = held.released {
+            opacity *=
+                1.0 - timeline::ease_exit(timeline::progress(now, released, timeline::CLOSE_S));
+        }
+        rig.corner.set_if_neq(Corner {
+            showing: Some(Showing {
+                record: 0,
+                turn: held.serial,
+                kind: CornerKind::Victim,
+                c: c.min(CornerKind::Victim.hold_from()),
+                opacity,
+                scale,
+                remaining: 1.0,
+                surface: Surface::Corner,
+            }),
+            fading,
+        });
+        return;
     }
 
     let Some(epoch) = state.epoch else {
@@ -402,14 +669,26 @@ fn drive(
         },
     };
     if state.turn.is_none_or(|shown| shown.serial != turn.serial) {
-        rig.exhibits.0 = vec![queued.exhibit.clone()];
+        if let Content::Corner(exhibit) = &queued.content {
+            rig.exhibits.0 = vec![exhibit.clone()];
+        }
         debug!(
-            "pen cam: the corner shows {:?} at {:.2} s",
+            "pen cam: the slot shows {:?} at {:.2} s",
             turn.kind,
             time.elapsed_secs_f64()
         );
     }
     state.turn = Some(turn);
+    if let Content::Glass = queued.content {
+        rig.glass(
+            &mut state,
+            turn.serial,
+            record,
+            player.live(),
+            &queued.vehicle,
+            blueprint,
+        );
+    }
     let duration = turn.kind.duration();
     let c = now - turn.start;
     let (opacity, scale, fading) = timeline::turn_presence(c, duration, turn.replacing);
@@ -426,6 +705,36 @@ fn drive(
         }),
         fading,
     });
+}
+
+/// Dev-only, offline: `OVERMATCH_GLASS_HOLD=<from>-<to>` holds the victim glass from `from` to `to`
+/// app seconds (`Time` as `Update` sees it), as the own-tank key would, for captures of the hold.
+/// Mounted only by the offline composition.
+#[cfg(feature = "dev_tools")]
+pub(crate) fn scripted_hold_plugin(app: &mut App) {
+    let Ok(window) = std::env::var("OVERMATCH_GLASS_HOLD") else {
+        return;
+    };
+    let Some((from, to)) = window.split_once('-').and_then(|(from, to)| {
+        Some((
+            from.trim().parse::<f32>().ok()?,
+            to.trim().parse::<f32>().ok()?,
+        ))
+    }) else {
+        warn!("OVERMATCH_GLASS_HOLD={window}: expected <from>-<to> seconds");
+        return;
+    };
+    info!("pen cam: the victim glass is held from {from} s to {to} s (OVERMATCH_GLASS_HOLD)");
+    app.add_systems(
+        Update,
+        (move |time: Res<Time>, mut hold: ResMut<GlassHold>| {
+            if (from..to).contains(&time.elapsed_secs()) {
+                hold.0 = true;
+            }
+        })
+        .after(glass::read_hold)
+        .before(drive),
+    );
 }
 
 #[cfg(test)]
@@ -483,10 +792,18 @@ mod tests {
 
     /// A stage view of `report`'s tank file standing in for its glb: the root and the hull node.
     fn stage_ready(app: &mut App, report: &PenetrationReport) {
-        let vehicle = report
-            .vehicle
-            .clone()
-            .expect("the record names its tank file");
+        stage_of(
+            app,
+            report
+                .vehicle
+                .as_deref()
+                .expect("the record names its tank file"),
+        );
+    }
+
+    /// A stage view of tank file `vehicle` standing in for its glb.
+    fn stage_of(app: &mut App, vehicle: &str) {
+        let vehicle = vehicle.to_owned();
         let path = crate::assets::asset_root().join(&vehicle);
         let spec: TankSpec =
             ron::de::from_str(&std::fs::read_to_string(path).expect("the tank file"))
@@ -539,13 +856,45 @@ mod tests {
         ShotVocabulary,
         PenetrationReport,
     ) {
+        hit(name, SHOOTER, fire_tick, struck, contact_tick, outcome)
+    }
+
+    /// `name`'s record of another tank's round fired on `fire_tick` striking the player's first
+    /// life (the [`SHOOTER`] combatant) a tick later: the shooter's projection, the player's, and
+    /// the vocabulary.
+    fn incoming(
+        name: &str,
+        fire_tick: u32,
+    ) -> (
+        ShotExplanation,
+        ShotExplanation,
+        ShotVocabulary,
+        PenetrationReport,
+    ) {
+        hit(name, STRUCK, fire_tick, SHOOTER, fire_tick + 1, 0)
+    }
+
+    /// [`encounter`] by `shooter`'s round.
+    fn hit(
+        name: &str,
+        shooter: CombatantId,
+        fire_tick: u32,
+        struck: CombatantId,
+        contact_tick: u32,
+        outcome: u32,
+    ) -> (
+        ShotExplanation,
+        ShotExplanation,
+        ShotVocabulary,
+        PenetrationReport,
+    ) {
         let report = report(name);
         let vocabulary = vocabulary(&report);
         let struck = TankLife {
             combatant: struck,
             life: CombatantLife(0),
         };
-        let mut recorded = recorded(&report, SHOOTER, fire_tick, struck);
+        let mut recorded = recorded(&report, shooter, fire_tick, struck);
         recorded.contact_tick = contact_tick;
         recorded.completion_tick = contact_tick + 2;
         recorded.outcome = Some(outcome);
@@ -605,6 +954,10 @@ mod tests {
         for _ in 0..(seconds / STEP_S).ceil() as usize {
             step(app);
             assert!(census(app).1 <= 1, "never two corners");
+            assert!(
+                app.world().resource::<Exhibits>().0.len() <= 1,
+                "never two surfaces"
+            );
             if let Some(showing) = app.world().resource::<Corner>().showing {
                 assert_eq!(showing.surface, Surface::Corner);
                 if shown.last() != Some(&(showing.turn, showing.kind)) {
@@ -661,9 +1014,10 @@ mod tests {
         let (mut app, _) = corner_app(off);
         let (shooter, _, vocabulary, report) = explained("s1_through_crew", 1200);
         stage_ready(&mut app, &report);
+        let staged = census(&mut app);
         receive(&mut app, shooter, &vocabulary);
         assert!(run(&mut app, 2.0).is_empty());
-        assert_eq!(census(&mut app).0, 0);
+        assert_eq!(census(&mut app), staged, "nothing spawned");
 
         let through = Settings {
             pen_cam_corner: PenCamCorner::ThroughOnly,
@@ -679,18 +1033,19 @@ mod tests {
         assert_eq!(kinds, [CornerKind::Glass]);
     }
 
-    /// A victim's projection opens nothing, whether the player is the struck tank or names its
-    /// shooter.
+    /// A victim's projection never opens the shooter's corner: the struck player's peeks the
+    /// glass, and one of another tank's life opens nothing.
     #[test]
     fn the_victims_projection_never_opens_the_corner() {
-        for combatant in [STRUCK, SHOOTER] {
+        for (combatant, expected) in [(STRUCK, &[CornerKind::Victim][..]), (SHOOTER, &[][..])] {
             let (mut app, player) = corner_app(Settings::default());
             app.world_mut().entity_mut(player).insert(combatant);
             app.update();
             let (_, victim, vocabulary, report) = explained("s1_through_crew", 1200);
             stage_ready(&mut app, &report);
             receive(&mut app, victim, &vocabulary);
-            assert!(run(&mut app, 2.0).is_empty());
+            let kinds: Vec<CornerKind> = run(&mut app, 4.0).into_iter().map(|(_, k)| k).collect();
+            assert_eq!(kinds, expected, "{combatant:?}");
         }
     }
 
@@ -920,5 +1275,387 @@ mod tests {
         receive(&mut app, later, &later_vocabulary);
         let kinds: Vec<CornerKind> = run(&mut app, 6.0).into_iter().map(|(_, k)| k).collect();
         assert_eq!(kinds, [CornerKind::Glass], "arriving together");
+    }
+
+    /// The player's tank file: fixture data, the file the fixtures' records name.
+    const OWN: &str = "tiger_1/tiger_1.tank.ron";
+
+    /// [`corner_app`] with the player's tank file and, as volumes of the player's tank, every
+    /// component of the fixture `s9_one_box_lost`'s tank at its full pool.
+    fn glass_app(settings: Settings) -> (App, Entity) {
+        let (mut app, player) = corner_app(settings);
+        let spec = app.world().resource::<AssetServer>().load::<TankSpec>(OWN);
+        app.world_mut()
+            .entity_mut(player)
+            .insert(TankSpecHandle(spec));
+        for component in report("s9_one_box_lost").components {
+            app.world_mut().spawn((
+                Name::new(component.name),
+                crate::ballistics::ComponentHealth {
+                    current: component.count,
+                    max: component.count,
+                },
+                crate::damage::VolumeOf(player),
+            ));
+        }
+        app.update();
+        (app, player)
+    }
+
+    fn hold(app: &mut App, held: bool) {
+        app.world_mut().resource_mut::<GlassHold>().0 = held;
+    }
+
+    fn showing(app: &App) -> Option<Showing> {
+        app.world().resource::<Corner>().showing
+    }
+
+    /// The exhibit on show's plan.
+    fn exhibit(app: &App) -> Arc<Plan> {
+        app.world().resource::<Exhibits>().0[0].plan.clone()
+    }
+
+    /// `run`'s frames, without the turns.
+    fn kinds(app: &mut App, seconds: f32) -> Vec<CornerKind> {
+        run(app, seconds)
+            .into_iter()
+            .map(|(_, kind)| kind)
+            .collect()
+    }
+
+    fn me() -> TankLife {
+        TankLife {
+            combatant: SHOOTER,
+            life: CombatantLife(0),
+        }
+    }
+
+    /// The glass on show tints by the tank's live state as it changes, in the same turn.
+    #[test]
+    fn the_glass_tints_by_the_live_state_as_it_changes() {
+        let (mut app, _) = glass_app(Settings::default());
+        stage_of(&mut app, OWN);
+        hold(&mut app, true);
+        assert_eq!(kinds(&mut app, 0.5), [CornerKind::Victim]);
+        let pools = |app: &App| -> Vec<(String, u32, u32, bool)> {
+            exhibit(app)
+                .boxes
+                .iter()
+                .map(|b| (b.name.clone(), b.count, b.hp, b.lost))
+                .collect()
+        };
+        let before = pools(&app);
+        assert!(!before.is_empty());
+        assert!(
+            before
+                .iter()
+                .all(|(_, count, hp, lost)| hp == count && !lost)
+        );
+        let turn = showing(&app).unwrap().turn;
+        let world = app.world_mut();
+        let mut volumes = world.query::<&mut crate::ballistics::ComponentHealth>();
+        let mut health = volumes
+            .iter_mut(world)
+            .find(|health| health.max > 1)
+            .expect("fixture data: a component with a pool to lose points of");
+        health.current -= 1;
+        step(&mut app);
+        let after = pools(&app);
+        assert_ne!(before, after, "the live loss reaches the glass");
+        assert_eq!(showing(&app).unwrap().turn, turn, "in the same turn");
+    }
+
+    /// The glass peeks for its turn only for a record that tells something, once its impact is
+    /// drawn; a clean ricochet and a record released undrawn never peek.
+    #[test]
+    fn the_peek_opens_only_for_a_telling_record_once_presented() {
+        let (mut app, _) = glass_app(Settings::default());
+        stage_of(&mut app, OWN);
+        let (_, ricochet, ricochet_vocabulary, _) = incoming("s3_ricochet", 1200);
+        receive(&mut app, ricochet, &ricochet_vocabulary);
+        assert!(
+            app.world()
+                .resource::<ShotExplanations>()
+                .iter()
+                .all(|(_, stored)| !glass::tells(&stored.report)),
+            "fixture data: the ricochet tells nothing"
+        );
+        assert!(kinds(&mut app, 4.0).is_empty(), "a clean ricochet");
+
+        let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1300);
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        app.world_mut().resource_mut::<ShotExplanations>().receive(
+            crossing.clone(),
+            &vocabulary,
+            now,
+        );
+        assert!(
+            kinds(&mut app, 2.0).is_empty(),
+            "the impact is still to draw"
+        );
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .drew(crossing.shot, crossing.outcome.unwrap());
+        let mut frames = 0;
+        for _ in 0..(4.0 / STEP_S) as usize {
+            step(&mut app);
+            if let Some(showing) = showing(&app) {
+                assert_eq!(showing.kind, CornerKind::Victim);
+                frames += 1;
+            }
+        }
+        let shown_s = frames as f32 * STEP_S;
+        assert!(
+            (shown_s - CornerKind::Victim.duration()).abs() <= 2.0 * STEP_S,
+            "the peek shows {shown_s} s"
+        );
+        assert_eq!(census(&mut app).0, 0, "and closes");
+
+        let (_, lost, lost_vocabulary, _) = incoming("s9_one_box_lost", 1400);
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        let mut store = app.world_mut().resource_mut::<ShotExplanations>();
+        store.receive(lost, &lost_vocabulary, now);
+        store.expire(now + crate::damage_cam::delivery::IMPACT_TIMEOUT_S);
+        assert!(kinds(&mut app, 4.0).is_empty(), "released undrawn");
+    }
+
+    /// Of the player's records, a ricochet that tells nothing is the latest only while none that
+    /// tells is stored; a newer one never displaces a crossing, and the glass draws the crossing's
+    /// path.
+    #[test]
+    fn a_ricochet_never_displaces_a_crossing_as_latest() {
+        let (mut app, _) = glass_app(Settings::default());
+        let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+        let (_, ricochet, ricochet_vocabulary, _) = incoming("s3_ricochet", 1300);
+        let latest = |app: &App| {
+            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+        };
+        receive(&mut app, ricochet.clone(), &ricochet_vocabulary);
+        assert_eq!(latest(&app), Some(ExplanationKey::of(&ricochet)));
+        receive(&mut app, crossing.clone(), &vocabulary);
+        assert!(ricochet.contact_tick > crossing.contact_tick);
+        assert_eq!(latest(&app), Some(ExplanationKey::of(&crossing)));
+        run(&mut app, 4.0);
+        stage_of(&mut app, OWN);
+        hold(&mut app, true);
+        run(&mut app, 0.5);
+        let plan = exhibit(&app);
+        assert_eq!(plan.kind, CornerKind::Victim);
+        assert!(!plan.crossings.is_empty(), "the crossing's path");
+    }
+
+    /// The hold opens the glass with no record: the base look, no path, held open for as long as
+    /// the key is down; let go, it closes and leaves nothing.
+    #[test]
+    fn the_hold_opens_the_glass_with_no_record() {
+        let (mut app, _) = glass_app(Settings::default());
+        let (_, _, entities) = census(&mut app);
+        stage_of(&mut app, OWN);
+        hold(&mut app, true);
+        assert_eq!(kinds(&mut app, 10.0), [CornerKind::Victim]);
+        let now = showing(&app).unwrap();
+        assert_eq!(now.opacity, 1.0);
+        assert_eq!(now.remaining, 1.0);
+        assert!(now.c <= CornerKind::Victim.hold_from());
+        let plan = exhibit(&app);
+        assert!(plan.line.points.len() < 2, "no path");
+        assert!(plan.cones.is_empty());
+        hold(&mut app, false);
+        run(&mut app, timeline::CLOSE_S + 3.0 * STEP_S);
+        assert!(showing(&app).is_none());
+        assert_eq!(census(&mut app), (0, 0, entities));
+        assert!(default_image_kept(&app));
+    }
+
+    /// The hold takes the slot from a corner on show by the crossfade; a peek presented while it
+    /// holds never takes it, and the corner never resumes once the hold lets go.
+    #[test]
+    fn the_hold_beats_a_showing_corner() {
+        let (mut app, _) = glass_app(Settings::default());
+        stage_of(&mut app, OWN);
+        let (shooter, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        receive(&mut app, shooter, &vocabulary);
+        let mut shown = kinds(&mut app, 1.0);
+        assert_eq!(shown, [CornerKind::Glass]);
+        hold(&mut app, true);
+        step(&mut app);
+        assert_eq!(showing(&app).unwrap().kind, CornerKind::Victim, "at once");
+        assert!(
+            app.world().resource::<Corner>().fading.is_some(),
+            "crossfaded"
+        );
+        let turn = showing(&app).unwrap().turn;
+        let (_, crossing, crossing_vocabulary, _) = incoming("s1_through_crew", 1300);
+        receive(&mut app, crossing, &crossing_vocabulary);
+        let held = run(&mut app, 2.0);
+        assert!(
+            held.iter().all(|&(t, _)| t == turn),
+            "the hold keeps the slot"
+        );
+        hold(&mut app, false);
+        shown.extend(kinds(&mut app, 6.0));
+        shown.dedup();
+        assert_eq!(shown, [CornerKind::Glass, CornerKind::Victim]);
+        assert_eq!(census(&mut app).0, 0);
+    }
+
+    /// Between the corner and the peek the newer event takes the slot by the crossfade, either way
+    /// round; an older one arriving later never shows.
+    #[test]
+    fn the_newer_event_takes_the_slot_between_peek_and_corner() {
+        for (peek_tick, corner_tick, peek_first, expected) in [
+            (
+                1300,
+                1200,
+                false,
+                &[CornerKind::Glass, CornerKind::Victim][..],
+            ),
+            (
+                1200,
+                1300,
+                true,
+                &[CornerKind::Victim, CornerKind::Glass][..],
+            ),
+            (1300, 1200, true, &[CornerKind::Victim][..]),
+            (1200, 1300, false, &[CornerKind::Glass][..]),
+        ] {
+            let (mut app, _) = glass_app(Settings::default());
+            stage_of(&mut app, OWN);
+            let (shooter, _, shooter_vocabulary, _) = explained("s1_through_crew", corner_tick);
+            let (_, victim, victim_vocabulary, _) = incoming("s1_through_crew", peek_tick);
+            let mut arrivals = [(shooter, shooter_vocabulary), (victim, victim_vocabulary)];
+            if peek_first {
+                arrivals.reverse();
+            }
+            let mut shown = Vec::new();
+            let mut faded = false;
+            for (explanation, vocabulary) in arrivals {
+                receive(&mut app, explanation, &vocabulary);
+                for _ in 0..(1.0 / STEP_S) as usize {
+                    shown.extend(run(&mut app, STEP_S));
+                    faded |= app.world().resource::<Corner>().fading.is_some();
+                }
+            }
+            shown.extend(run(&mut app, 6.0));
+            shown.dedup();
+            let kinds: Vec<CornerKind> = shown.iter().map(|(_, kind)| *kind).collect();
+            let case = (peek_tick, corner_tick, peek_first);
+            assert_eq!(kinds, expected, "{case:?}");
+            assert_eq!(
+                faded,
+                expected.len() == 2,
+                "{case:?}: the replacement crossfades"
+            );
+        }
+    }
+
+    /// The Shooter projection never opens the glass, whether the player fired it or was struck
+    /// by it.
+    #[test]
+    fn the_shooter_projection_never_opens_the_glass() {
+        for (combatant, corner) in [
+            (SHOOTER, PenCamCorner::All),
+            (SHOOTER, PenCamCorner::Off),
+            (STRUCK, PenCamCorner::All),
+        ] {
+            let settings = Settings {
+                pen_cam_corner: corner,
+                ..Settings::default()
+            };
+            let (mut app, player) = glass_app(settings);
+            app.world_mut().entity_mut(player).insert(combatant);
+            app.update();
+            stage_of(&mut app, OWN);
+            let (shooter, _, vocabulary, _) = explained("s1_through_crew", 1200);
+            receive(&mut app, shooter, &vocabulary);
+            let shown = kinds(&mut app, 5.0);
+            assert!(
+                !shown.contains(&CornerKind::Victim),
+                "{combatant:?}, {corner:?}: {shown:?}"
+            );
+        }
+    }
+
+    /// With the peek off a telling record peeks nothing, and the hold still opens the glass, as it
+    /// does with the corner off.
+    #[test]
+    fn the_hold_works_with_the_peek_off() {
+        for settings in [
+            Settings {
+                victim_glass_peek: VictimGlassPeek::Off,
+                ..Settings::default()
+            },
+            Settings {
+                pen_cam_corner: PenCamCorner::Off,
+                victim_glass_peek: VictimGlassPeek::Off,
+                ..Settings::default()
+            },
+        ] {
+            let (mut app, _) = glass_app(settings);
+            stage_of(&mut app, OWN);
+            let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+            receive(&mut app, crossing, &vocabulary);
+            assert!(kinds(&mut app, 4.0).is_empty(), "no peek");
+            hold(&mut app, true);
+            assert_eq!(kinds(&mut app, 1.0), [CornerKind::Victim]);
+            assert!(
+                !exhibit(&app).crossings.is_empty(),
+                "under the latest record"
+            );
+        }
+    }
+
+    /// The own tank's knockout, a new life, no tank and a disconnect each close the glass, held
+    /// or peeking, and leave nothing of it; the press that held it opens nothing more.
+    #[test]
+    fn knockout_respawn_and_disconnect_close_the_glass_with_no_leaks() {
+        for ending in 0..4 {
+            for held in [true, false] {
+                let (mut app, player) = glass_app(Settings::default());
+                let (_, _, entities) = census(&mut app);
+                let images = app.world().resource::<Assets<Image>>().len();
+                stage_of(&mut app, OWN);
+                if held {
+                    hold(&mut app, true);
+                } else {
+                    let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+                    receive(&mut app, crossing, &vocabulary);
+                }
+                assert_eq!(kinds(&mut app, 1.0), [CornerKind::Victim]);
+                assert!(census(&mut app).0 > 0);
+                let entities = match ending {
+                    0 => {
+                        app.world_mut().entity_mut(player).insert(TankKnockedOut {
+                            reason: crate::damage::KnockoutReason::CrewLoss,
+                        });
+                        entities
+                    }
+                    1 => {
+                        app.world_mut().entity_mut(player).insert(CombatantLife(1));
+                        entities
+                    }
+                    2 => {
+                        app.world_mut().despawn(player);
+                        entities - 1
+                    }
+                    _ => {
+                        app.world_mut().trigger(CloseCorner);
+                        entities
+                    }
+                };
+                for _ in 0..3 {
+                    step(&mut app);
+                }
+                let case = (ending, held);
+                assert!(showing(&app).is_none(), "{case:?}");
+                assert_eq!(census(&mut app), (0, 0, entities), "{case:?}");
+                assert_eq!(app.world().resource::<Assets<Image>>().len(), images);
+                assert!(!app.world().contains_resource::<StageView>());
+                assert!(!app.world().contains_resource::<CornerImages>());
+                assert!(!app.world().contains_resource::<Glyphs>());
+                assert!(default_image_kept(&app));
+                assert!(kinds(&mut app, 2.0).is_empty(), "{case:?}: nothing reopens");
+            }
+        }
     }
 }
