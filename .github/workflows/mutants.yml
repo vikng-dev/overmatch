@@ -1,0 +1,89 @@
+name: Mutants
+
+# Mutation testing ON DEMAND: an instrument for reading where the suite is blind, never a gate. Its
+# own workflow, so CI's `workflow_dispatch` (the pre-release asset re-cut) never starts a mutation
+# run and the `check` context never waits on one. A red run means cargo-mutants found missed or
+# timed-out mutants; `mutants.out/` (uploaded either way) lists them.
+
+on:
+  workflow_dispatch:
+    inputs:
+      path:
+        description: "A module file or directory under src/ (a directory ends in /)"
+        type: string
+        default: src/ballistics/
+      timeout:
+        description: "Minutes the mutation run may take before it is stopped"
+        type: number
+        default: 120
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    runs-on: ubuntu-24.04
+    # The budget is the mutation STEP's (`inputs.timeout`), so a stopped run still uploads its
+    # report; the job keeps the hosted runner's 360-minute ceiling.
+    timeout-minutes: 360
+    steps:
+      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
+      # `.lfsconfig` and still hits GitHub — so pull after checkout.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: Git LFS pull (R2)
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
+          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      # The `tests` lane's profile and targets, so a dispatch off a warm cache skips the dep graph.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: codegen
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      # `-f` takes a glob, and a directory matches nothing until it ends in `**`. The lib suite only
+      # (`--lib` on every cargo call, so each mutant builds one test binary), minus the two lanes
+      # the `tests` job skips too: the isolated UDP probe and the field-cast measurement.
+      - name: cargo mutants
+        timeout-minutes: ${{ fromJSON(inputs.timeout) }}
+        env:
+          MUTANTS_PATH: ${{ inputs.path }}
+        run: |
+          set -euo pipefail
+          case "${MUTANTS_PATH}" in
+            */) glob="${MUTANTS_PATH}**" ;;
+            *) glob="${MUTANTS_PATH}" ;;
+          esac
+          if ! cargo mutants --list -f "${glob}" | grep -q .; then
+            echo "::error::No mutants under '${MUTANTS_PATH}' (glob '${glob}')"
+            exit 1
+          fi
+          cargo mutants --in-place -f "${glob}" --cargo-arg=--lib -- -- \
+            --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
+            --skip ballistics::field_casts::
+
+      - name: Mutation report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out
+          path: mutants.out
+          if-no-files-found: warn
