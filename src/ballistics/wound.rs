@@ -169,10 +169,11 @@ fn presence(
 }
 
 /// The round's line through every witness `admit` keeps, along `legs` in order: per witness, the
-/// disc-mean chord summed over the legs (each leg's chord the mean over all its samples, a sample
-/// that misses counting zero), its dose `chord × wound` reference-mm, the axis points where the
-/// line first entered it and where it last left it or the legs end, and whether every sample that
-/// entered it on the last leg that met it came out within that leg. In order of first entry.
+/// disc-mean chord summed over the legs (each leg's chord the mean over all its samples, each
+/// sample read along its own stretch, a sample that misses counting zero), its dose `chord × wound`
+/// reference-mm, the axis points where the line first entered it and where it last left it or the
+/// legs end (each sample's point projected onto its leg's axis), and whether every sample that
+/// entered it on the last leg that met it came out within its own stretch. In order of first entry.
 ///
 /// With them, the axis of the first leg that met a witness (`None` when none did).
 ///
@@ -187,27 +188,40 @@ pub(crate) fn line(
     let mut out: Vec<VolumeCrossing> = Vec::new();
     let mut incoming = None;
     for leg in legs {
-        if leg.length <= 0.0 || leg.offsets.is_empty() {
+        let longest = leg
+            .samples
+            .iter()
+            .map(|(_, length)| *length)
+            .fold(0.0, f32::max);
+        if longest <= 0.0 {
             continue;
         }
         let axis = Vec3::from(leg.axis);
+        // Every sample's stretch lies within its offset's length of the axis from `from` for the
+        // longest stretch.
         let reach = leg
-            .offsets
+            .samples
             .iter()
-            .map(|offset| offset.length())
+            .map(|(offset, _)| offset.length())
             .fold(0.0, f32::max);
-        let near = candidates(context, admit, leg.from, axis, leg.length, reach);
+        let near = candidates(context, admit, leg.from, axis, longest, reach);
         if near.is_empty() {
             continue;
         }
-        // Per witness: summed chord over the samples, first entry, last exit, all samples left.
+        // Per witness: summed chord over the samples, first entry and last exit along the axis,
+        // all samples left.
         let mut met: Vec<(Entity, f64, f64, f64, bool)> = Vec::new();
-        for offset in &leg.offsets {
-            for found in spans(context, &near, leg.from + *offset, axis, leg.length)? {
+        for &(offset, length) in &leg.samples {
+            if length <= 0.0 {
+                continue;
+            }
+            let along = offset.dot(axis) as f64;
+            for found in spans(context, &near, leg.from + offset, axis, length)? {
                 let chord: f64 = found.spans.iter().map(|(a, b)| b - a).sum();
-                let entry = found.spans[0].0;
-                let exit = found.spans[found.spans.len() - 1].1;
-                let left = exit < leg.length as f64;
+                let entry = along + found.spans[0].0;
+                let last = found.spans[found.spans.len() - 1].1;
+                let exit = along + last;
+                let left = last < length as f64;
                 match met.iter_mut().find(|m| m.0 == found.witness) {
                     Some(m) => {
                         m.1 += chord;
@@ -224,7 +238,7 @@ pub(crate) fn line(
         }
         incoming.get_or_insert(leg.axis);
         met.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)));
-        let samples = leg.offsets.len() as f64;
+        let samples = leg.samples.len() as f64;
         for (witness, chord, entry, exit, left) in met {
             let chord = (chord / samples) as f32;
             let entry = leg.from + axis * entry as f32;

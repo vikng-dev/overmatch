@@ -1,7 +1,8 @@
-//! The crew-outcome sweep (ADR-0040): random main-gun hits on the bound tank under the witness law
-//! and under the law it replaced, counted per crewman as dead, wounded and untouched, and per hit
-//! as a tank killed (living crew < 2); and, over the same hits, the crew outcomes that change with
-//! the spall cone's direction count. A measurement, run on demand:
+//! The crew-outcome sweep (ADR-0040): main-gun hits on the bound tank under the witness law and
+//! under the law it replaced, counted per crewman as dead, wounded and untouched, and per hit as a
+//! tank knocked out under each [`Rule`]; over the same random hits, the crew outcomes that change
+//! with the spall cone's direction count; and aimed shots fired in sequence at one tank until it is
+//! knocked out, as shots and perforations to the kill. A measurement, run on demand:
 //!
 //! `cargo test --release --lib crew_sweep -- --ignored --nocapture`
 //!
@@ -10,8 +11,10 @@
 //! kept when its line meets one of them, so the kept hits are uniform over that silhouette:
 //! [`Aim::Random`] the whole tank's (its hard volumes), [`Aim::Crew`] the union of the crew boxes'
 //! (an aimed shot). The tank stands at its spawn pose, turret and gun at rest; the round is the weapon
-//! on the primary trigger's, at its muzzle speed, with its own wound rate. Every hit meets a whole
-//! crew: hit points are restored between hits.
+//! on the primary trigger's, at its muzzle speed, with its own wound rate. Every single hit meets a
+//! whole crew: hit points are restored between hits. A sequence restores them only between trials,
+//! each shot's bearing drawn from [`BEARINGS`]. An ammunition volume left at zero hit points has
+//! cooked off.
 //!
 //! The replaced law is rebuilt in the same world: every witness volume becomes a hard volume of
 //! [`REPLACED_FLESH_FACTOR`] on the armour layer, walked, charged, thrown from and shadowed by as
@@ -40,6 +43,15 @@ const PER_BEARING: usize = 64;
 
 /// The draw's seed: fixture data.
 const SEED: u64 = 0x5eed_c0de_0039;
+
+/// The sequential draw's seed: fixture data.
+const SEQUENCE_SEED: u64 = 0x5eed_c0de_5e05;
+
+/// Sequences fired, each at a fresh tank: fixture data.
+const TRIALS: usize = 128;
+
+/// Shots a sequence gives up after when the tank is still not knocked out: fixture data.
+const SHOT_CAP: usize = 60;
 
 /// The resistance factor (reference-mm per metre) crew wore as a hard substance: the `Flesh`
 /// entry of `materials.ron` before ADR-0040 (TUNED there, a low ballistic-gelatin equivalence).
@@ -71,6 +83,26 @@ impl Outcome {
     }
 }
 
+/// When a tank is knocked out (playtest fork F2).
+#[derive(Clone, Copy, Debug)]
+enum Rule {
+    /// The shipped rule, [`crate::damage::knockout_from_counts`]: cook-off, or no crew living.
+    ZeroCrew,
+    /// The kept alternative: cook-off, or fewer than two crew living.
+    UnderTwo,
+}
+
+impl Rule {
+    const ALL: [Rule; 2] = [Rule::ZeroCrew, Rule::UnderTwo];
+
+    fn label(self) -> &'static str {
+        match self {
+            Rule::ZeroCrew => "zero crew (F2 A, shipped)",
+            Rule::UnderTwo => "crew < 2 (F2 B)",
+        }
+    }
+}
+
 /// One hit as the crew came out of it.
 #[derive(Clone)]
 struct Hit {
@@ -78,16 +110,29 @@ struct Hit {
     crew: Vec<(CrewStation, Outcome)>,
     /// The shot's verdict on the tank was a penetration.
     penetrated: bool,
+    /// An ammunition volume stands at zero hit points.
+    cooked: bool,
 }
 
 impl Hit {
-    /// Fewer than two crew living.
-    fn killed(&self) -> bool {
+    fn living(&self) -> usize {
         self.crew
             .iter()
             .filter(|(_, o)| *o != Outcome::Dead)
             .count()
-            < 2
+    }
+
+    /// The tank is knocked out under `rule`.
+    fn knocked_out(&self, rule: Rule) -> bool {
+        match rule {
+            Rule::ZeroCrew => crate::damage::knockout_from_counts(
+                self.crew.len() as u32,
+                self.living() as u32,
+                self.cooked,
+            )
+            .is_some(),
+            Rule::UnderTwo => self.cooked || self.living() < 2,
+        }
     }
 }
 
@@ -105,9 +150,9 @@ fn per_crewman(outcomes: &[Hit]) -> BTreeMap<CrewStation, [usize; 3]> {
     rows
 }
 
-/// The hits that left the tank killed.
-fn killed(outcomes: &[Hit]) -> usize {
-    outcomes.iter().filter(|hit| hit.killed()).count()
+/// The hits that left the tank knocked out under `rule`.
+fn killed(outcomes: &[Hit], rule: Rule) -> usize {
+    outcomes.iter().filter(|hit| hit.knocked_out(rule)).count()
 }
 
 /// splitmix64: a deterministic stream, so a rerun draws the same hits.
@@ -185,35 +230,49 @@ enum Aim {
     Crew,
 }
 
-/// The kept hits, `(bearing, origin, direction)`, drawn in `app` (a witness-law world).
-fn draw_hits(app: &mut App, aim: Aim) -> Vec<(f32, Vec3, Vec3)> {
-    let (aimed, layer) = match aim {
-        Aim::Random => (world_bounds::<BallisticSurfaces>(app), crate::Layer::Armor),
-        Aim::Crew => (world_bounds::<WitnessSurface>(app), crate::Layer::Witness),
-    };
-    let (lo, hi) = aimed;
-    // The standoff clears the whole tank, whatever is aimed at.
-    let (tank_lo, tank_hi) = world_bounds::<BallisticSurfaces>(app);
-    let centre = (lo + hi) / 2.0;
-    let corners: Vec<Vec3> = (0..8)
-        .map(|i| {
-            Vec3::new(
-                if i & 1 == 0 { lo.x } else { hi.x },
-                if i & 2 == 0 { lo.y } else { hi.y },
-                if i & 4 == 0 { lo.z } else { hi.z },
-            ) - centre
-        })
-        .collect();
-    let standoff = (tank_hi - tank_lo).length() + 5.0;
-    let mut state = SEED;
-    let mut hits = Vec::new();
-    for bearing in BEARINGS {
+/// Draws shots uniform over an [`Aim`]'s silhouette from a bearing.
+struct Aimer {
+    centre: Vec3,
+    /// The aimed bounds' corners, about `centre`.
+    corners: Vec<Vec3>,
+    /// The distance a shot starts from `centre`, clear of the whole tank.
+    standoff: f32,
+    layer: crate::Layer,
+}
+
+impl Aimer {
+    fn new(app: &mut App, aim: Aim) -> Self {
+        let ((lo, hi), layer) = match aim {
+            Aim::Random => (world_bounds::<BallisticSurfaces>(app), crate::Layer::Armor),
+            Aim::Crew => (world_bounds::<WitnessSurface>(app), crate::Layer::Witness),
+        };
+        let (tank_lo, tank_hi) = world_bounds::<BallisticSurfaces>(app);
+        let centre = (lo + hi) / 2.0;
+        let corners = (0..8)
+            .map(|i| {
+                Vec3::new(
+                    if i & 1 == 0 { lo.x } else { hi.x },
+                    if i & 2 == 0 { lo.y } else { hi.y },
+                    if i & 4 == 0 { lo.z } else { hi.z },
+                ) - centre
+            })
+            .collect();
+        Self {
+            centre,
+            corners,
+            standoff: (tank_hi - tank_lo).length() + 5.0,
+            layer,
+        }
+    }
+
+    /// A shot `(origin, direction)` from `bearing` (degrees) whose line meets the aimed colliders.
+    fn draw(&self, app: &mut App, bearing: f32, state: &mut u64) -> (Vec3, Vec3) {
         let b = bearing.to_radians();
         // The tank's front is -Z: a shot from bearing 0 travels +Z.
         let direction = Vec3::new(-b.sin(), 0.0, b.cos());
         let across = Vec3::Y.cross(direction).normalize();
         let span = |axis: Vec3| {
-            corners
+            self.corners
                 .iter()
                 .map(|corner| corner.dot(axis))
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(a, b), x| {
@@ -222,11 +281,11 @@ fn draw_hits(app: &mut App, aim: Aim) -> Vec<(f32, Vec3, Vec3)> {
         };
         let ((u0, u1), (v0, v1)) = (span(across), span(Vec3::Y));
         let dir = Dir3::new(direction).expect("a unit bearing");
-        let mut kept = 0;
-        while kept < PER_BEARING {
-            let u = u0 + (u1 - u0) * unit(&mut state);
-            let v = v0 + (v1 - v0) * unit(&mut state);
-            let origin = centre + across * u + Vec3::Y * v - direction * standoff;
+        let (standoff, layer) = (self.standoff, self.layer);
+        loop {
+            let u = u0 + (u1 - u0) * unit(state);
+            let v = v0 + (v1 - v0) * unit(state);
+            let origin = self.centre + across * u + Vec3::Y * v - direction * standoff;
             let struck = app
                 .world_mut()
                 .run_system_once(move |spatial: SpatialQuery| {
@@ -242,9 +301,21 @@ fn draw_hits(app: &mut App, aim: Aim) -> Vec<(f32, Vec3, Vec3)> {
                 })
                 .expect("the ray query runs");
             if struck {
-                hits.push((bearing, origin, direction));
-                kept += 1;
+                return (origin, direction);
             }
+        }
+    }
+}
+
+/// The kept hits, `(origin, direction)`, [`PER_BEARING`] per bearing in [`BEARINGS`] order, drawn
+/// in `app` (a witness-law world).
+fn draw_hits(app: &mut App, aim: Aim) -> Vec<(Vec3, Vec3)> {
+    let aimer = Aimer::new(app, aim);
+    let mut state = SEED;
+    let mut hits = Vec::new();
+    for bearing in BEARINGS {
+        for _ in 0..PER_BEARING {
+            hits.push(aimer.draw(app, bearing, &mut state));
         }
     }
     hits
@@ -262,72 +333,176 @@ fn world_bounds<C: Component>(app: &mut App) -> (Vec3, Vec3) {
     (lo, hi)
 }
 
-/// Fire the main gun along each hit in `app`, each at a whole crew, and read what the crew came
-/// out as.
-fn fire_hits(app: &mut App, hits: &[(f32, Vec3, Vec3)]) -> Outcomes {
-    let spec = app
-        .world()
-        .resource::<crate::bake::TankBlueprint>()
-        .spec
-        .clone();
-    let weapon = spec
-        .weapons
+/// The main gun's round, ready to fire.
+fn main_round(app: &App) -> crate::rounds::Round {
+    let spec = &app.world().resource::<crate::bake::TankBlueprint>().spec;
+    spec.weapons
         .values()
         .find(|weapon| weapon.trigger == Trigger::Primary)
-        .expect("the tank has a weapon on the primary trigger");
-    let round = weapon
+        .expect("the tank has a weapon on the primary trigger")
         .resolved_round()
-        .expect("the main gun's round resolves");
+        .expect("the main gun's round resolves")
+}
+
+/// Restore every hit point in `app`: a fresh tank.
+fn restore(app: &mut App) {
+    let world = app.world_mut();
+    for mut health in world.query::<&mut ComponentHealth>().iter_mut(world) {
+        health.current = health.max;
+    }
+}
+
+/// Fire `round` from `origin` along `direction` in `app` and read the tank as it is after.
+fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction: Vec3) -> Hit {
     let tank = app.world().resource::<super::fuzz::ProbeTank>().0;
-    let mut out = Vec::with_capacity(hits.len());
-    for &(_, origin, direction) in hits {
-        let world = app.world_mut();
-        for mut health in world.query::<&mut ComponentHealth>().iter_mut(world) {
-            health.current = health.max;
+    let (mut projectile, readout) =
+        march_tests::fixture_round(round.body, direction * round.muzzle_speed);
+    projectile.wound = round.wound;
+    let shell = app
+        .world_mut()
+        .spawn((
+            projectile,
+            readout,
+            DamageReport::default(),
+            TerminalReport::default(),
+            ShellPath {
+                points: vec![origin],
+                segment_starts: Vec::new(),
+            },
+            PenetrationMarks::default(),
+            SpallMarks::default(),
+            Transform::from_translation(origin).looking_to(direction, Vec3::Y),
+        ))
+        .id();
+    for _ in 0..STEPS {
+        app.update();
+    }
+    let world = app.world_mut();
+    let mut crew: Vec<(CrewStation, Outcome)> = world
+        .query::<(&CrewStation, &ComponentHealth)>()
+        .iter(world)
+        .map(|(station, health)| {
+            let outcome = match health.current {
+                0 => Outcome::Dead,
+                current if current < health.max => Outcome::Wounded,
+                _ => Outcome::Untouched,
+            };
+            (*station, outcome)
+        })
+        .collect();
+    crew.sort_by_key(|(station, _)| *station);
+    let cooked = world
+        .query_filtered::<&ComponentHealth, With<crate::damage::Ammo>>()
+        .iter(world)
+        .any(|health| health.current == 0);
+    let verdict = ShotVerdict::of_path(&record::path_steps(world, shell, Some(tank)));
+    world.despawn(shell);
+    Hit {
+        crew,
+        penetrated: verdict == Some(ShotVerdict::Penetration),
+        cooked,
+    }
+}
+
+/// Fire the main gun along each hit in `app`, each at a fresh tank, and read what the crew came out
+/// as.
+fn fire_hits(app: &mut App, hits: &[(Vec3, Vec3)]) -> Outcomes {
+    let round = main_round(app);
+    hits.iter()
+        .map(|&(origin, direction)| {
+            restore(app);
+            fire_one(app, &round, origin, direction)
+        })
+        .collect()
+}
+
+/// One sequence's end under one rule, when the tank was first knocked out.
+#[derive(Clone, Copy)]
+struct Kill {
+    shots: usize,
+    /// The perforations among `shots`.
+    perforations: usize,
+    /// The knockout was a cook-off.
+    cooked: bool,
+}
+
+/// A sequence's [`Kill`], `None` past [`SHOT_CAP`].
+type ToKill = Option<Kill>;
+
+/// [`TRIALS`] sequences of aimed shots in `app`, each at a fresh tank, damage retained shot to shot
+/// until it is knocked out under every [`Rule`]: per sequence, the kill under each rule.
+fn sequences(app: &mut App) -> Vec<[ToKill; 2]> {
+    let round = main_round(app);
+    let aimer = Aimer::new(app, Aim::Crew);
+    let mut state = SEQUENCE_SEED;
+    let mut out = Vec::with_capacity(TRIALS);
+    for _ in 0..TRIALS {
+        restore(app);
+        let mut kills: [ToKill; 2] = [None; 2];
+        let mut perforations = 0;
+        for shot in 1..=SHOT_CAP {
+            let bearing = BEARINGS[(next(&mut state) % BEARINGS.len() as u64) as usize];
+            let (origin, direction) = aimer.draw(app, bearing, &mut state);
+            let hit = fire_one(app, &round, origin, direction);
+            perforations += usize::from(hit.penetrated);
+            for (kill, rule) in kills.iter_mut().zip(Rule::ALL) {
+                if kill.is_none() && hit.knocked_out(rule) {
+                    *kill = Some(Kill {
+                        shots: shot,
+                        perforations,
+                        cooked: hit.cooked,
+                    });
+                }
+            }
+            if kills.iter().all(Option::is_some) {
+                break;
+            }
         }
-        let (mut projectile, readout) =
-            march_tests::fixture_round(round.body, direction * round.muzzle_speed);
-        projectile.wound = round.wound;
-        let shell = world
-            .spawn((
-                projectile,
-                readout,
-                DamageReport::default(),
-                TerminalReport::default(),
-                ShellPath {
-                    points: vec![origin],
-                    segment_starts: Vec::new(),
-                },
-                PenetrationMarks::default(),
-                SpallMarks::default(),
-                Transform::from_translation(origin).looking_to(direction, Vec3::Y),
-            ))
-            .id();
-        for _ in 0..STEPS {
-            app.update();
-        }
-        let world = app.world_mut();
-        let mut crew: Vec<(CrewStation, Outcome)> = world
-            .query::<(&CrewStation, &ComponentHealth)>()
-            .iter(world)
-            .map(|(station, health)| {
-                let outcome = match health.current {
-                    0 => Outcome::Dead,
-                    current if current < health.max => Outcome::Wounded,
-                    _ => Outcome::Untouched,
-                };
-                (*station, outcome)
-            })
-            .collect();
-        crew.sort_by_key(|(station, _)| *station);
-        let verdict = ShotVerdict::of_path(&record::path_steps(world, shell, Some(tank)));
-        world.despawn(shell);
-        out.push(Hit {
-            crew,
-            penetrated: verdict == Some(ShotVerdict::Penetration),
-        });
+        out.push(kills);
     }
     out
+}
+
+/// Each rule's shots-to-kill and perforations-to-kill, as counts per value.
+fn print_sequences(label: &str, runs: &[[ToKill; 2]]) {
+    println!("\n{label}: {} trials, cap {SHOT_CAP} shots", runs.len());
+    for (i, rule) in Rule::ALL.into_iter().enumerate() {
+        let ends: Vec<Kill> = runs.iter().filter_map(|run| run[i]).collect();
+        let histogram = |pick: fn(&Kill) -> usize| {
+            let mut counts = BTreeMap::<usize, usize>::new();
+            for end in &ends {
+                *counts.entry(pick(end)).or_default() += 1;
+            }
+            counts
+        };
+        let mean = |pick: fn(&Kill) -> usize| {
+            ends.iter().map(pick).sum::<usize>() as f64 / ends.len().max(1) as f64
+        };
+        let median = |pick: fn(&Kill) -> usize| {
+            let mut values: Vec<usize> = ends.iter().map(pick).collect();
+            values.sort_unstable();
+            values.get(values.len() / 2).copied().unwrap_or(0)
+        };
+        println!(
+            "  {}: knocked out in {}/{}, {} by cook-off",
+            rule.label(),
+            ends.len(),
+            runs.len(),
+            ends.iter().filter(|kill| kill.cooked).count()
+        );
+        println!(
+            "    shots to kill: mean {:.2}, median {}, {:?}",
+            mean(|kill| kill.shots),
+            median(|kill| kill.shots),
+            histogram(|kill| kill.shots)
+        );
+        println!(
+            "    perforations to kill: mean {:.2}, median {}, {:?}",
+            mean(|kill| kill.perforations),
+            median(|kill| kill.perforations),
+            histogram(|kill| kill.perforations)
+        );
+    }
 }
 
 /// One law's row block: per crewman dead / wounded / untouched, all crew, tanks killed per hit.
@@ -352,7 +527,6 @@ fn print_law(label: &str, outcomes: &Outcomes) {
         "all crew", total[0], total[1], total[2]
     );
     let hits = outcomes.len();
-    let k = killed(outcomes);
     let penetrating: Vec<Hit> = outcomes
         .iter()
         .filter(|hit| hit.penetrated)
@@ -364,17 +538,24 @@ fn print_law(label: &str, outcomes: &Outcomes) {
         .filter(|hit| hit.crew.iter().any(|(_, o)| *o != Outcome::Untouched))
         .count();
     println!(
-        "  tanks killed (crew < 2): {k}/{hits} = {:.3} per hit; crew dead per hit {:.3}",
-        k as f64 / hits as f64,
-        total[0] as f64 / hits as f64
+        "  crew dead per hit {:.3}; cooked off {}",
+        total[0] as f64 / hits as f64,
+        outcomes.iter().filter(|hit| hit.cooked).count()
     );
+    for rule in Rule::ALL {
+        let k = killed(outcomes, rule);
+        println!(
+            "  tanks killed, {}: {k}/{hits} = {:.3} per hit, {:.3} per penetration",
+            rule.label(),
+            k as f64 / hits as f64,
+            killed(&penetrating, rule) as f64 / penetrating.len().max(1) as f64
+        );
+    }
     println!(
-        "  penetrations {}/{hits}; per penetration: crew dead {:.3}, a crewman touched {:.3}, \
-         tank killed {:.3}",
+        "  penetrations {}/{hits}; per penetration: crew dead {:.3}, a crewman touched {:.3}",
         penetrating.len(),
         dead_pen as f64 / penetrating.len().max(1) as f64,
-        touched_pen as f64 / penetrating.len().max(1) as f64,
-        killed(&penetrating) as f64 / penetrating.len().max(1) as f64
+        touched_pen as f64 / penetrating.len().max(1) as f64
     );
     let mut spread = [0usize; 4];
     for hit in &penetrating {
@@ -403,7 +584,11 @@ fn print_flips(label: &str, a: &Outcomes, b: &Outcomes) {
                     .or_default() += 1;
             }
         }
-        tank += usize::from(x.killed() != y.killed());
+        tank += usize::from(
+            Rule::ALL
+                .iter()
+                .any(|&r| x.knocked_out(r) != y.knocked_out(r)),
+        );
     }
     let mut total = 0;
     for (station, row) in &flips {
@@ -411,16 +596,21 @@ fn print_flips(label: &str, a: &Outcomes, b: &Outcomes) {
         total += sum;
         println!("  {:<12} {sum:>4}  {row:?}", station.label());
     }
-    println!("  all crew     {total:>4}; tank-killed verdict flipped on {tank} hits");
+    println!("  all crew     {total:>4}; a tank-killed verdict flipped on {tank} hits");
 }
 
 /// The sweep, random then aimed: a table per law, and for random hits the flips between direction
-/// counts.
+/// counts; then the aimed sequences under the witness law.
 #[test]
 #[ignore = "a measurement, run on demand"]
 fn crew_outcome_sweep() {
     sweep(Aim::Random);
     sweep(Aim::Crew);
+    let shipped = spall_cone::ConeShape::shipped().directions_count();
+    print_sequences(
+        &format!("aimed sequences, witness law, N = {shipped} (shipped), seed {SEQUENCE_SEED:#x}"),
+        &sequences(&mut sweep_world(None)),
+    );
 }
 
 /// One aim's sweep, printed.
@@ -479,13 +669,15 @@ fn sweep(aim: Aim) {
             &finer,
         );
     }
-    println!("\nper bearing (witness law, N = {shipped}): crew dead per hit, tanks killed");
+    println!(
+        "\nper bearing (witness law, N = {shipped}): crew dead per hit, tanks killed (zero crew)"
+    );
     for (bearing, chunk) in BEARINGS.iter().zip(new.chunks(PER_BEARING)) {
         let dead: usize = per_crewman(chunk).values().map(|row| row[0]).sum();
         println!(
             "  {bearing:>5}°  {:.2}  {}  penetrations {}",
             dead as f64 / chunk.len() as f64,
-            killed(chunk),
+            killed(chunk, Rule::ZeroCrew),
             chunk.iter().filter(|hit| hit.penetrated).count()
         );
     }

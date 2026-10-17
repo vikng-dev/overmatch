@@ -866,10 +866,34 @@ pub(super) fn fixture_fire(
     struck: usize,
     round: impl FnOnce(&mut Projectile),
 ) -> FixtureFired {
+    fixture_fire_with(
+        volumes,
+        from,
+        direction * 800.0,
+        struck,
+        FIXTURE_88,
+        round,
+        |_| {},
+    )
+}
+
+/// [`fixture_fire`] of a round of `body` fired at `velocity`, its flight state edited by `round`,
+/// into the fixture world as `setup` leaves it.
+pub(super) fn fixture_fire_with(
+    volumes: &[(FixtureVolume, usize, Quat)],
+    from: Vec3,
+    velocity: Vec3,
+    struck: usize,
+    body: RoundBody,
+    round: impl FnOnce(&mut Projectile),
+    setup: impl FnOnce(&mut App),
+) -> FixtureFired {
     let (mut app, tanks) = fixture_tanks(volumes);
+    setup(&mut app);
+    let direction = velocity.normalize();
     let tank = tanks[struck];
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
-    let (mut projectile, readout) = fixture_round(FIXTURE_88, direction * 800.0);
+    let (mut projectile, readout) = fixture_round(body, velocity);
     round(&mut projectile);
     let shell = app
         .world_mut()
@@ -896,8 +920,8 @@ pub(super) fn fixture_fire(
         launch: from,
         muzzle: None,
         projectile: "fixture".to_owned(),
-        caliber_mm: FIXTURE_88.caliber * 1000.0,
-        mass_kg: FIXTURE_88.mass,
+        caliber_mm: body.caliber * 1000.0,
+        mass_kg: body.mass,
         round: "fixture".to_owned(),
         vehicle: None,
     };

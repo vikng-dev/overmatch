@@ -3127,7 +3127,8 @@ fn resolve_replica_armor_contact(
 /// direction `k` of the shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the
 /// cone, walked through the volumes of `tank`, the struck tank, alone
 /// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing, and
-/// the cone logs its first error.
+/// the cone logs its first error. A direction whose witness pass alone fails keeps its hard doses
+/// and reach and doses no witness; the cone logs that once too.
 fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
     dose: &mut Mut<ShotDose>,
@@ -3165,6 +3166,7 @@ fn throw_spall_cone(
         rays: Vec::with_capacity(shape.directions_count()),
     };
     let mut failed: Option<(usize, walk::WalkError)> = None;
+    let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
     for (ray_dir, profile) in shape.directions(axis) {
         let thrown = strength * profile;
         let walked = resolve::field_direction(
@@ -3185,9 +3187,13 @@ fn throw_spall_cone(
                 resolve::FieldRay {
                     end: source.position,
                     doses: Vec::new(),
+                    witness_error: None,
                 }
             }
         };
+        if let Some(error) = ray.witness_error.clone() {
+            unwitnessed = Some(unwitnessed.map_or((1, error), |(count, first)| (count + 1, first)));
+        }
         dose.add_all(&ray.doses);
         cone.rays.push(SpallRay {
             end: ray.end,
@@ -3205,6 +3211,14 @@ fn throw_spall_cone(
             origin = ?source.position,
             ?error,
             "ballistics: {count} spall cone direction(s) could not be walked; each doses nothing"
+        );
+    }
+    if let Some((count, error)) = unwitnessed {
+        error!(
+            origin = ?source.position,
+            ?error,
+            "ballistics: the witness pass failed on {count} spall cone direction(s); each doses no \
+             witness and keeps its hard doses and reach"
         );
     }
     spall.cones.push(cone);

@@ -474,11 +474,15 @@ pub(crate) fn certified(
 /// One direction of a field, walked ([`field_direction`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FieldRay {
-    /// Where the direction ended: inside the volume that exhausted it, or where it left the last
-    /// volume of the struck tank it crossed (its throw point, if it crossed none).
+    /// Where the direction ended: inside the hard volume that exhausted or stopped it, or where it
+    /// left the last hard volume of the struck tank it crossed. One that meets no hard volume ahead
+    /// ends at the struck tank's horizon ([`horizon`]). Witness-independent.
     pub end: Vec3,
     /// The doses it addressed, in entry order.
     pub doses: Vec<Dose>,
+    /// The witness pass's failure along this direction: `end` and the hard doses stand, and no
+    /// witness is dosed by it.
+    pub witness_error: Option<WalkError>,
 }
 
 /// The ordered presence along one direction of a field thrown from the world point `at`: the
@@ -625,7 +629,13 @@ pub(crate) fn field_presence(
 /// that left the last hard body goes on — takes the strength arriving at its first presence times
 /// `weight`, once, by the same arithmetic as a hard box at the same point (a witness holding `at`
 /// is entered there). `end` and every hard dose are what they would be with no witness present.
-/// The doses are in entry order, a hard box before a witness entered at the same point.
+/// The doses are in entry order, a hard box before a witness entered at the same point. A witness
+/// pass that fails doses no witness and leaves `end` and the hard doses as they are
+/// ([`FieldRay::witness_error`]).
+///
+/// A direction that enters no hard volume (`exited` ones it is leaving aside) is never exhausted
+/// and ends at the struck tank's [`horizon`], so its reach does not depend on what witnesses lie
+/// along it.
 ///
 /// MONOTONICITY, exactly as it holds. The strength arriving at a point, and the point where it is
 /// exhausted, are computed from the spans before it and the point's own position alone: a presence
@@ -653,8 +663,8 @@ pub(crate) fn field_direction(
     weight: f32,
     passage: Passage,
 ) -> Result<FieldRay, WalkError> {
-    let (end, mut doses, profile) = match field_presence(context, within, at, dir)? {
-        None => (at, Vec::new(), Profile::air(strength, 0.0)),
+    let (mut end, mut doses, profile, met) = match field_presence(context, within, at, dir)? {
+        None => (at, Vec::new(), Profile::air(strength, 0.0), false),
         Some((start, walked)) => {
             let layers: Vec<&walk::Layer> = walked
                 .layers
@@ -668,30 +678,76 @@ pub(crate) fn field_direction(
             }
         }
     };
+    if !met && !profile.reach.is_finite() {
+        end = horizon(context, within, at, dir);
+    }
     let reach = if profile.reach.is_finite() {
         (profile.reach - profile.start) as f32
     } else {
         MAX_CORRIDOR
     };
-    for (witness, t) in super::wound::entries(context, within, at, dir, reach)? {
-        let t = profile.start + t;
-        let arriving = profile.at(t);
-        if t < profile.reach && arriving > 0.0 && is_box(witness) {
-            doses.push((
-                t,
-                Dose {
-                    address: witness,
-                    amount: (arriving * weight as f64) as f32,
-                    source: DoseSource::Field,
-                },
-            ));
+    let witness_error = match super::wound::entries(context, within, at, dir, reach) {
+        Ok(entered) => {
+            for (witness, t) in entered {
+                let t = profile.start + t;
+                let arriving = profile.at(t);
+                if t < profile.reach && arriving > 0.0 && is_box(witness) {
+                    doses.push((
+                        t,
+                        Dose {
+                            address: witness,
+                            amount: (arriving * weight as f64) as f32,
+                            source: DoseSource::Field,
+                        },
+                    ));
+                }
+            }
+            None
         }
-    }
+        Err(error) => Some(error),
+    };
     doses.sort_by(|a, b| a.0.total_cmp(&b.0));
     Ok(FieldRay {
         end,
         doses: doses.into_iter().map(|(_, dose)| dose).collect(),
+        witness_error,
     })
+}
+
+/// The struck tank's horizon along a field direction thrown from `at`: where the line leaves the
+/// union of the bounds of every hard collider `within` admits within [`MAX_CORRIDOR`] of `at`;
+/// `at` itself where there is none or the union lies behind it. Witnesses take no part.
+fn horizon(
+    context: &ResolveContext<'_, '_, '_>,
+    within: &dyn Fn(Entity) -> bool,
+    at: Vec3,
+    dir: Dir3,
+) -> Vec3 {
+    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for (_, primitive) in candidates(context, within, at, Vec3::from(dir), 0.0, MAX_CORRIDOR) {
+        if let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) {
+            let bounds = collider.aabb(position.0, *rotation);
+            lo = lo.min(bounds.min);
+            hi = hi.max(bounds.max);
+        }
+    }
+    let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
+    for i in 0..3 {
+        if dir[i] == 0.0 {
+            if at[i] < lo[i] || at[i] > hi[i] {
+                return at;
+            }
+        } else {
+            let (a, b) = ((lo[i] - at[i]) / dir[i], (hi[i] - at[i]) / dir[i]);
+            enter = enter.max(a.min(b));
+            leave = leave.min(a.max(b));
+        }
+    }
+    if enter <= leave && leave.is_finite() && leave > 0.0 {
+        at + Vec3::from(dir) * leave
+    } else {
+        at
+    }
 }
 
 /// One field direction's strength along its walk, which starts `start` behind its throw point:
@@ -734,7 +790,7 @@ impl Profile {
 }
 
 /// One direction under [`Passage::Partial`] ([`field_direction`]): its end, its hard doses with
-/// their entry points, and its [`Profile`].
+/// their entry points, its [`Profile`], and whether it entered any volume.
 #[expect(
     clippy::too_many_arguments,
     reason = "the direction's walk and its throw, as `field_direction` holds them"
@@ -748,8 +804,9 @@ fn partial(
     weight: f32,
     is_box: &dyn Fn(Entity) -> bool,
     exited: &[Entity],
-) -> (Vec3, Vec<(f64, Dose)>, Profile) {
+) -> (Vec3, Vec<(f64, Dose)>, Profile, bool) {
     let mut profile = Profile::air(strength, start);
+    let mut met = false;
     let factor_of =
         |layer: &walk::Layer| overlap_of(layer.present.iter().map(|p| p.material.factor));
     // Strength at the start of the current span.
@@ -778,6 +835,7 @@ fn partial(
                 let volume = presence.volume;
                 let entered = !previous.iter().any(|before| before.volume == volume)
                     && !(index == 0 && exited.contains(&volume));
+                met |= entered;
                 if entered
                     && arriving > 0.0
                     && is_box(volume)
@@ -806,13 +864,19 @@ fn partial(
         strength -= cost;
         first = last + 1;
     }
-    (at + Vec3::from(dir) * (end - start) as f32, doses, profile)
+    (
+        at + Vec3::from(dir) * (end - start) as f32,
+        doses,
+        profile,
+        met,
+    )
 }
 
 /// One direction under [`Passage::FirstSolid`] ([`field_direction`]): stopped where it enters the
 /// first hard volume of `layers` that is not one of `exited` it is still leaving; that volume, when it
 /// `is_box`, takes `strength × weight`. A direction that enters none ends where the last presence
-/// it crossed ends, as under the partial law. Its [`Profile`] is constant up to that stop.
+/// it crossed ends, as under the partial law. Its [`Profile`] is constant up to that stop; the
+/// flag is whether it entered a volume.
 #[expect(
     clippy::too_many_arguments,
     reason = "the direction's walk and its throw, as `field_direction` holds them"
@@ -826,7 +890,7 @@ fn first_solid(
     weight: f32,
     is_box: &dyn Fn(Entity) -> bool,
     exited: &[Entity],
-) -> (Vec3, Vec<(f64, Dose)>, Profile) {
+) -> (Vec3, Vec<(f64, Dose)>, Profile, bool) {
     let mut profile = Profile::air(strength, start);
     let mut leaving: Vec<Entity> = exited.to_vec();
     let mut end = start;
@@ -857,7 +921,12 @@ fn first_solid(
                 .into_iter()
                 .collect();
             profile.reach = at_t;
-            return (at + Vec3::from(dir) * (at_t - start) as f32, doses, profile);
+            return (
+                at + Vec3::from(dir) * (at_t - start) as f32,
+                doses,
+                profile,
+                true,
+            );
         }
         if !layer.present.is_empty() {
             end = layer.end;
@@ -867,6 +936,7 @@ fn first_solid(
         at + Vec3::from(dir) * (end - start) as f32,
         Vec::new(),
         profile,
+        false,
     )
 }
 
@@ -1113,30 +1183,67 @@ impl Decision {
     }
 }
 
-/// One straight stretch of the round's flight (WORLD): the axis start, the direction, the metres
-/// flown, and each disc sample's offset from the axis square to it, in canonical sample order.
+/// One straight stretch of the round's flight (WORLD): the axis start, the direction, and each disc
+/// sample's own stretch along it in canonical sample order — `(offset, length)`, the sample flying
+/// `length` m from `from + offset`. An offset keeps its along-axis part: at an oblique handoff each
+/// sample starts and stops where the walk's own ray for it does, not on a plane square to the axis.
 #[derive(Clone, Debug)]
 pub(crate) struct Leg {
     pub from: Vec3,
     pub axis: Dir3,
-    pub length: f32,
-    pub offsets: Vec<Vec3>,
+    pub samples: Vec<(Vec3, f32)>,
 }
 
 impl Leg {
-    /// A leg along `axis` from `from` for `length` m, sampled at `offsets` with any along-axis part
-    /// removed, so every sample's stretch spans the same `[0, length]` of the axis.
+    /// Every sample flying `length` m from its own start, `from + offsets[i]`.
     pub(crate) fn new(from: Vec3, axis: Dir3, length: f32, offsets: &[Vec3]) -> Self {
-        let along = Vec3::from(axis);
         Leg {
             from,
             axis,
-            length: length.max(0.0),
-            offsets: offsets
+            samples: offsets
                 .iter()
-                .map(|offset| *offset - along * offset.dot(along))
+                .map(|offset| (*offset, length.max(0.0)))
                 .collect(),
         }
+    }
+
+    /// Each sample flying from its own start, `from + offsets[i]`, to `ends[i]` (index-aligned): the
+    /// metres along `axis` between them, none for an end behind its start.
+    pub(crate) fn ending_at(from: Vec3, axis: Dir3, offsets: &[Vec3], ends: &[Vec3]) -> Self {
+        Leg {
+            from,
+            axis,
+            samples: offsets
+                .iter()
+                .zip(ends)
+                .map(|(offset, end)| (*offset, (*end - from - *offset).dot(*axis).max(0.0)))
+                .collect(),
+        }
+    }
+
+    /// Each sample flying from its own start, `from + offsets[i]`, to where its line meets the plane
+    /// through `point` square to `normal`; the whole leg at `length` when `axis` does not run into
+    /// that plane.
+    fn to_plane(
+        from: Vec3,
+        axis: Dir3,
+        length: f32,
+        offsets: &[Vec3],
+        point: Vec3,
+        normal: Vec3,
+    ) -> Self {
+        let denominator = axis.dot(normal);
+        if denominator >= 0.0 {
+            return Leg::new(from, axis, length, offsets);
+        }
+        let ends: Vec<Vec3> = offsets
+            .iter()
+            .map(|offset| {
+                let start = from + *offset;
+                start + *axis * ((point - start).dot(normal) / denominator)
+            })
+            .collect();
+        Leg::ending_at(from, axis, offsets, &ends)
     }
 }
 
@@ -1348,6 +1455,16 @@ pub(crate) fn decide(
             let out = Dir3::new(direction).unwrap_or(dir);
             let bled = speed * speed_scale;
             let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
+            // Each sample's way in ends on the mean entrance surface, as a transit's handoff does.
+            let mut way_in = Leg::to_plane(
+                from,
+                dir,
+                approach,
+                &entrance.offsets,
+                read.position,
+                read.normal,
+            );
+            way_in.from = anchor + from;
             Ok(Decision::Bounce(Bounce {
                 position,
                 normal: read.normal,
@@ -1362,7 +1479,7 @@ pub(crate) fn decide(
                 impulse: body.mass * (v_in - Vec3::from(out) * bled),
                 travel: approach + MARCH_EPS,
                 resume: position + read.normal * radius + out * MARCH_EPS,
-                approach: Leg::new(anchor + from, dir, approach, &entrance.offsets),
+                approach: way_in,
             }))
         }
         Begin::Transit(request) => {
@@ -1429,6 +1546,14 @@ fn bite(
     // The APPROACH: the flight's position to the axis handoff, along the way in. The transit's own
     // `t` then measures the rest, along the bend.
     let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
+    // Each sample's way in ends at its own handoff, where its transit ray starts.
+    let handoffs: Vec<Vec3> = transit
+        .offsets
+        .iter()
+        .map(|offset| transit.origin + *offset)
+        .collect();
+    let mut way_in = Leg::ending_at(from, incoming, entrance_offsets, &handoffs);
+    way_in.from = world(from);
     let entrance = world(plan.entrance.position);
     let rest = match plan.outcome {
         Outcome::Embedded { t, .. } => Some(t as f64),
@@ -1487,7 +1612,7 @@ fn bite(
         travel: approach + flown,
         end,
         legs: [
-            Leg::new(world(from), incoming, approach, entrance_offsets),
+            way_in,
             Leg::new(world(transit.origin), bent, flown, &transit.offsets),
         ],
     }

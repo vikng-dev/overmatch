@@ -4,11 +4,13 @@
 
 use bevy::prelude::*;
 
+use crate::ballistics::march_tests::{FIXTURE_88, FIXTURE_MG};
 use crate::ballistics::pen_cam::{
-    FixtureFired, FixtureVolume, Kind, LINE_FROM, THICK, THIN, fixture_fire, plate,
+    FixtureFired, FixtureVolume, Kind, LINE_FROM, THICK, THIN, fixture_fire, fixture_fire_with,
+    plate,
 };
-use crate::ballistics::{ArmourMark, VolumeCrossing};
-use crate::damage_cam::BoxDose;
+use crate::ballistics::{ArmourMark, CrossingEnd, RoundBody, VolumeCrossing, spall_cone};
+use crate::damage_cam::{BoxDose, RoundEnd, ShotVerdict};
 
 /// Fire the fixture 88 down the head-on line at `volumes`, all one tank's, with its wound rate set
 /// to `wound`.
@@ -245,4 +247,401 @@ fn the_wound_rate_is_round_data_only() {
     );
     let (da, db) = (dose(&a, "crewman").unwrap(), dose(&b, "crewman").unwrap());
     assert!(da.line > db.line, "{da:?} vs {db:?}");
+}
+
+/// Fire a round of `body` at `speed` (m/s) down the head-on line at `volumes`, each turned by its
+/// own rotation and all one tank's, with its wound rate set to `wound`, into the fixture world as
+/// `setup` leaves it.
+fn fire_turned(
+    volumes: &[(FixtureVolume, Quat)],
+    body: RoundBody,
+    speed: f32,
+    wound: f32,
+    setup: impl FnOnce(&mut App),
+) -> FixtureFired {
+    let owned: Vec<(FixtureVolume, usize, Quat)> = volumes
+        .iter()
+        .map(|&(volume, turn)| (volume, 0, turn))
+        .collect();
+    fixture_fire_with(
+        &owned,
+        LINE_FROM,
+        Vec3::NEG_Z * speed,
+        0,
+        body,
+        |projectile| projectile.wound = wound,
+        setup,
+    )
+}
+
+/// [`fire_turned`] with every volume square to the line.
+fn fire_square(
+    volumes: &[FixtureVolume],
+    body: RoundBody,
+    speed: f32,
+    wound: f32,
+    setup: impl FnOnce(&mut App),
+) -> FixtureFired {
+    let square: Vec<(FixtureVolume, Quat)> = volumes
+        .iter()
+        .map(|&volume| (volume, Quat::IDENTITY))
+        .collect();
+    fire_turned(&square, body, speed, wound, setup)
+}
+
+/// The fixture 88's muzzle speed (m/s), as [`fire`] fires it: fixture data.
+const SPEED_88: f32 = 800.0;
+
+/// The fixture MG round's speed (m/s) and wound rate (reference-mm per metre): fixture data.
+const SPEED_MG: f32 = 750.0;
+const WOUND_MG: f32 = 10.0;
+
+/// Where the march logged the witness pass's crossings of `name` relative to its hard marks: the
+/// index of each [`ArmourMark::Wound`] that met it, and the index of the last hard mark.
+fn wound_marks(fired: &FixtureFired, name: &str) -> (Vec<usize>, Option<usize>) {
+    let met = fired
+        .log
+        .iter()
+        .enumerate()
+        .filter_map(|(index, mark)| match mark {
+            ArmourMark::Wound { volumes, .. } => volumes
+                .iter()
+                .any(|crossed| fired.names.get(&crossed.volume).map(String::as_str) == Some(name))
+                .then_some(index),
+            _ => None,
+        })
+        .collect();
+    let hard = fired
+        .log
+        .iter()
+        .rposition(|mark| !matches!(mark, ArmourMark::Wound { .. }));
+    (met, hard)
+}
+
+/// A witness the round meets in open air, past every hard body, is dosed and settled by the leg
+/// that flies through it: the line dose is recorded and the HP is taken.
+#[test]
+fn a_leg_into_open_air_doses_and_settles_its_witness() {
+    let volumes = [
+        plate("front", THIN, 0.0, Kind::Main),
+        crewman(Kind::Witness(DEEP)),
+    ];
+    let fired = fire(&volumes, WOUND);
+    let (met, hard) = wound_marks(&fired, "crewman");
+    let hard = hard.expect("the plate is crossed");
+    assert!(
+        met.iter().any(|&index| index > hard),
+        "a leg past the hard world met the witness: {met:?} after {hard}"
+    );
+    let crewman_dose = dose(&fired, "crewman").expect("the witness is dosed");
+    assert!(
+        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        "{crewman_dose:?}"
+    );
+}
+
+/// An automatic round with a wound rate wounds a witness in the open, no armour on the line: the
+/// witness is no face to strike or bounce off, so the march logs no hard mark at all, only the
+/// line's dose at the round's own rate.
+#[test]
+fn an_automatic_round_wounds_a_witness_in_the_open() {
+    let fired = fire_square(
+        &[crewman(Kind::Witness(DEEP))],
+        FIXTURE_MG,
+        SPEED_MG,
+        WOUND_MG,
+        |_| {},
+    );
+    assert!(
+        fired
+            .log
+            .iter()
+            .all(|mark| matches!(mark, ArmourMark::Wound { .. })),
+        "a witness is never struck or crossed as a hard body: {:?}",
+        fired.log
+    );
+    let crossed = wounds(&fired, "crewman");
+    assert!(!crossed.is_empty(), "the line met the witness");
+    let chord: f32 = crossed.iter().map(|crossed| crossed.chord).sum();
+    // Head-on through a 0.6 m cube (fixture geometry): f32 rounding only.
+    assert!((chord - 0.6).abs() < 1.0e-4, "{chord}");
+    for crossing in &crossed {
+        assert_eq!(
+            crossing.cost,
+            crossing.chord * WOUND_MG,
+            "the round's own rate"
+        );
+    }
+    let crewman_dose = dose(&fired, "crewman").expect("the witness is dosed");
+    assert!(
+        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        "{crewman_dose:?}"
+    );
+}
+
+/// A witness the round meets with no hard body anywhere on its flight still has an explanation:
+/// the record opens on the witness's damage, with the line's deposit, where the line entered it,
+/// the path timed from that entry, and the round's end where it left.
+#[test]
+fn a_witness_struck_alone_has_a_report() {
+    let fired = fire_square(
+        &[crewman(Kind::Witness(DEEP))],
+        FIXTURE_88,
+        SPEED_88,
+        WOUND,
+        |_| {},
+    );
+    let report = &fired.report;
+    assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
+    let crewman_dose = dose(&fired, "crewman").expect("the witness's deposit is recorded");
+    assert!(
+        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        "{crewman_dose:?}"
+    );
+    // The crewman's faces along the line: z = -0.9 in, z = -1.5 out (fixture geometry).
+    let entered = crewman_dose.entered.expect("the line's entry is recorded");
+    assert!((entered[2] + 0.9).abs() < 1.0e-3, "{entered:?}");
+    let contact = report
+        .path
+        .iter()
+        .find(|node| node.t == 0.0)
+        .expect("the path is timed from first contact");
+    assert!((contact.point[2] + 0.9).abs() < 1.0e-3, "{contact:?}");
+    assert!(
+        report.path.windows(2).all(|pair| pair[0].t <= pair[1].t),
+        "{:?}",
+        report.path
+    );
+    match &report.end {
+        RoundEnd::Left { at } => assert!((at[2] + 1.5).abs() < 1.0e-3, "{at:?}"),
+        end => panic!("the round flies on past the witness: {end:?}"),
+    }
+}
+
+/// The wall case: a cone born inside a witness (a crewman pressed against the plate's inner face)
+/// doses it from the cone's origin, every direction its full thrown share.
+#[test]
+fn a_cone_born_inside_a_witness_doses_it_from_its_origin() {
+    // The crewman overlaps the plate by 0.1 m, so the plate's exit lies inside it (fixture
+    // geometry).
+    let pressed = cube(
+        "crewman",
+        0.6,
+        Vec3::new(0.0, 2.0, -THIN / 2.0 - 0.3 + 0.1),
+        Kind::Witness(DEEP),
+    );
+    let fired = fire(
+        &[
+            plate("front", THIN, 0.0, Kind::Main),
+            pressed,
+            plate("rear", THICK, -3.0, Kind::Main),
+        ],
+        WOUND,
+    );
+    assert_eq!(
+        fired.report.spall.len(),
+        1,
+        "the front plate's exit throws one cone"
+    );
+    let cone = &fired.report.spall[0];
+    let weight = 1.0 / cone.fragments.len() as f32;
+    for fragment in &cone.fragments {
+        let hit = fragment
+            .hits
+            .iter()
+            .find(|hit| hit.volume == "crewman")
+            .expect("every direction enters the witness at its origin");
+        assert_eq!(
+            hit.damage,
+            (fragment.strength as f64 * weight as f64) as f32,
+            "the direction's whole share"
+        );
+    }
+}
+
+/// Under the partial passage a witness is dosed at the strength that reaches it: each direction
+/// doses it exactly what it doses a hard box in its place, and one that spent strength in a hard
+/// box first doses the witness behind with less than it dosed that box.
+#[test]
+fn under_partial_passage_a_witness_takes_the_strength_left_at_its_entry() {
+    let partial = spall_cone::ConeShape::shipped().with_passage(spall_cone::Passage::Partial);
+    let fire_as = |kind: Kind| {
+        fire_square(
+            &[
+                plate("front", THIN, 0.0, Kind::Main),
+                // Off the shell's line to one side, so the cone reaches the crewman both through
+                // it and past it (fixture geometry).
+                cube("module", 0.4, Vec3::new(0.25, 2.0, -0.6), Kind::Box(DEEP)),
+                crewman(kind),
+                plate("rear", THICK, -3.0, Kind::Main),
+            ],
+            FIXTURE_88,
+            SPEED_88,
+            WOUND,
+            |app| {
+                app.insert_resource(spall_cone::SpallLaw(partial.clone()));
+            },
+        )
+    };
+    let cone_doses = |fired: &FixtureFired| -> Vec<(Option<f32>, Option<f32>)> {
+        fired.report.spall[0]
+            .fragments
+            .iter()
+            .map(|fragment| {
+                let find = |name: &str| {
+                    fragment
+                        .hits
+                        .iter()
+                        .find(|hit| hit.volume == name)
+                        .map(|hit| hit.damage)
+                };
+                (find("crewman"), find("module"))
+            })
+            .collect()
+    };
+    let witnessed = cone_doses(&fire_as(Kind::Witness(DEEP)));
+    assert_eq!(
+        witnessed,
+        cone_doses(&fire_as(Kind::Box(DEEP))),
+        "(crewman, module) per direction"
+    );
+    let (mut behind, mut clear) = (0, 0);
+    for (crewman, module) in witnessed {
+        match (crewman, module) {
+            (Some(crewman), Some(module)) => {
+                behind += 1;
+                assert!(
+                    crewman < module,
+                    "{crewman} vs {module}: spent in the module"
+                );
+            }
+            (Some(_), None) => clear += 1,
+            _ => {}
+        }
+    }
+    assert!(
+        behind > 0 && clear > 0,
+        "the fixture reaches the crewman both through the module and past it: {behind}, {clear}"
+    );
+}
+
+/// A witness whose own pass fails (one too large for any corridor, fixture geometry) leaves the
+/// hard world whole: every hard dose, every spall direction's reach and the shell's path as with
+/// no witness at all, and the witness dosed by nothing.
+#[test]
+fn a_failed_witness_pass_keeps_the_hard_world() {
+    let giant = cube(
+        "giant",
+        60.0,
+        Vec3::new(0.0, 2.0, -1.5),
+        Kind::Witness(DEEP),
+    );
+    let alone = fire(&hard_fixture(&[]), WOUND);
+    let with = fire(&hard_fixture(&[giant]), WOUND);
+    assert_eq!(
+        hard_world(&with, &["giant"]),
+        hard_world(&alone, &["giant"])
+    );
+    assert!(dose(&with, "giant").is_none(), "{:?}", dose(&with, "giant"));
+    assert!(
+        dose(&with, "module").is_some_and(|dose| dose.field > 0.0),
+        "the hard world's own doses stand"
+    );
+}
+
+/// A spall direction with no hard body ahead ends at the struck tank's horizon, never at its throw
+/// point, and its reach is the same with a witness on it as without.
+#[test]
+fn a_direction_with_no_hard_body_ahead_reaches_the_horizon() {
+    // A side wall off the line: some directions end on it, the rest meet nothing (fixture
+    // geometry).
+    let wall = (
+        "wall",
+        Vec3::new(0.05, 3.0, 3.0),
+        Vec3::new(2.5, 2.0, -1.5),
+        Kind::Main,
+    );
+    let front = plate("front", THIN, 0.0, Kind::Main);
+    let alone = fire(&[front, wall], WOUND);
+    let with = fire(&[front, wall, crewman(Kind::Witness(DEEP))], WOUND);
+    // The spall and the hard log; the record's path and end go on through a witness the shell
+    // meets after its last hard body.
+    let spall = |fired: &FixtureFired| {
+        let mut spall = fired.report.spall.clone();
+        for fragment in spall.iter_mut().flat_map(|cone| &mut cone.fragments) {
+            fragment.hits.retain(|hit| hit.volume != "crewman");
+        }
+        let log: Vec<&ArmourMark> = fired
+            .log
+            .iter()
+            .filter(|mark| !matches!(mark, ArmourMark::Wound { .. }))
+            .collect();
+        format!("{spall:?}\n{log:?}")
+    };
+    assert_eq!(spall(&with), spall(&alone));
+    assert!(
+        dose(&with, "crewman").is_some_and(|dose| dose.field > 0.0),
+        "the field reaches the witness"
+    );
+    let cone = &alone.report.spall[0];
+    let origin = Vec3::from(cone.origin);
+    // The union of the plate's and the wall's bounds lies at least 1.5 m ahead of the plate's exit
+    // in every forward direction (DERIVED from the fixture geometry).
+    for fragment in &cone.fragments {
+        let reach = Vec3::from(fragment.end).distance(origin);
+        assert!(reach > 1.0, "{reach} from {origin}");
+    }
+}
+
+/// At an oblique bend, each disc sample's line runs to its own handoff and on from there: a thin
+/// witness lying flush in front of a sloped plate is crossed whole by every sample on the way in
+/// and never again on the way through, so its disc-mean chord is its depth over the cosine of the
+/// slope (DERIVED), whatever the samples' spread along the line.
+#[test]
+fn a_witness_beside_an_oblique_bend_is_read_along_each_samples_own_path() {
+    let slope = 40.0_f32.to_radians();
+    let turn = Quat::from_rotation_x(slope);
+    let normal = turn * Vec3::Z;
+    let (plate_depth, depth, gap) = (0.02, 0.02, 0.001);
+    let centre = Vec3::new(0.0, 2.0, 0.0);
+    let sloped = (
+        "front",
+        Vec3::new(3.0, 3.0, plate_depth),
+        centre,
+        Kind::Main,
+    );
+    let film = (
+        "film",
+        Vec3::new(3.0, 3.0, depth),
+        centre + normal * (plate_depth / 2.0 + gap + depth / 2.0),
+        Kind::Witness(DEEP),
+    );
+    let fired = fire_turned(
+        &[(sloped, turn), (film, turn)],
+        FIXTURE_88,
+        SPEED_88,
+        WOUND,
+        |_| {},
+    );
+    // The crossing's axis leaves its entrance off the incoming line by more than 0.8° (fixture
+    // threshold).
+    let bent = fired.log.iter().any(|mark| match mark {
+        ArmourMark::Crossing {
+            entrance,
+            incoming,
+            end: CrossingEnd::Exit { at, .. },
+            ..
+        } => (*at - *entrance).normalize().dot(*incoming) < 0.9999,
+        _ => false,
+    });
+    assert!(bent, "the plate bends the round: the fixture tests a bend");
+    let chord: f32 = wounds(&fired, "film")
+        .iter()
+        .map(|crossed| crossed.chord)
+        .sum();
+    let expected = depth / slope.cos();
+    assert!(
+        (chord - expected).abs() < 1.0e-4,
+        "{chord} vs {expected} (DERIVED)"
+    );
 }

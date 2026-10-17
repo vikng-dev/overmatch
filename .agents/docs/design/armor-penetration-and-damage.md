@@ -311,7 +311,9 @@ point (ties away from zero, IEEE `roundToIntegralTiesToAway`, no transcendental)
 direction and never per source; the pool stops at zero. HP falls as the shot is resolved, each
 step taking what the rounded running total has gained, so it lands on the rounded total when the
 shot ends. HP replicates as whole points.
-This is *local function state*, not a global health bar — the kill condition is still crew < 2.
+This is *local function state*, not a global health bar. A tank is knocked out at zero living
+crew, a cook-off taking precedence (`knockout_from_counts`, `src/damage.rs`); crew < 2 is the
+kept alternative, playtest fork F2.
 
 - **Crew are witnesses** (low HP) — the kill currency; a graze or a faceful of cone wounds, a clean
   main-gun transit kills (10 cm of chord at 30 reference-mm/m is 30 HP, DERIVED). (HP, not binary,

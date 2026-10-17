@@ -52,7 +52,7 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
   count.
 - A crewman exit throws no cone, and a fragment's reach surface in the pen cam ends only on hard
   bodies.
-- Crew consequences are unchanged (stations, backfill, crew < 2). They remain the place for
+- Crew consequences are unchanged (stations, backfill, the knockout rule of playtest fork F2). They remain the place for
   crew-only ideas such as wounded-not-dead.
 
 ## Rejected

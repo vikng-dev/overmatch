@@ -263,6 +263,15 @@ impl ConeShape {
         self.passage
     }
 
+    /// This shape under `passage` instead.
+    #[cfg(test)]
+    pub(crate) fn with_passage(&self, passage: Passage) -> Self {
+        Self {
+            passage,
+            ..self.clone()
+        }
+    }
+
     /// The cone's axis for an exit whose round leaves along `direction`, through a rear face of
     /// outward normal `face` (`None` at an internal step).
     pub(crate) fn axis(&self, face: Option<Vec3>, direction: Dir3) -> Dir3 {
