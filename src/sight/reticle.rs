@@ -388,6 +388,10 @@ fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>
 /// (`aim::update_bore_indicator`): the sim chain steps at tick rate and the graticule would stutter
 /// against the rendered view. Reprojected after the gunner camera has placed itself this frame, so
 /// mark and view share one pose.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and two UI elements"
+)]
 fn update_ranging_reticle(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
@@ -608,6 +612,10 @@ fn optic_glass(
 /// Reads the same VIEW gun node and the same [`sight_line`] the graticule and the optic camera do,
 /// after the camera has placed itself this frame — the mask, the zero mark and the view are one
 /// pose, so the glass cannot drift against the marks inside it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and the mask material"
+)]
 fn update_optic_mask(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,

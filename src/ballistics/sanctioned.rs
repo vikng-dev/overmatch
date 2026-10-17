@@ -228,6 +228,10 @@ fn reserve_sanctioned_catch_up_work(
 /// INVARIANT: outcome ingress may retain early or out-of-order facts, but this is the sole path to
 /// [`fast_forward_shell`] for a sanctioned chain; every segment reserves bounded work before it can
 /// allocate or integrate.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the chain's shot and cursor, the clock, the buffer and the fallback flight's state and law: no subset recurs together"
+)]
 pub(super) fn catch_up_sanctioned_chain(
     shot: ShotId,
     consumed: usize,

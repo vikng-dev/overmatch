@@ -402,6 +402,10 @@ impl LiveServos<'_, '_> {
 /// [`resume_commit`] alone owns zero-input identity; mechanical travel is applied before the
 /// circular [`optic_margin`] clamp; and intent remains absolute inside both bounds rather than
 /// following the current servo lay.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning optic input, the controlled tank and its servos, ranging and aim-ray geometry"
+)]
 pub(crate) fn drive_gunner_aim(
     motion: Res<AccumulatedMouseMotion>,
     spatial: SpatialQuery,

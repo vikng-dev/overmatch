@@ -27,7 +27,8 @@ use crate::view::PlayerView;
 
 mod state_hash;
 
-use state_hash::hash_tank_state_with_elements;
+pub(crate) use state_hash::TankState;
+use state_hash::hash_tank_state;
 #[cfg(test)]
 pub(crate) use state_hash::{CanonicalTankStateDigest, canonical_tank_state_digest};
 
@@ -243,6 +244,10 @@ fn frame_row_cap() -> usize {
 /// The net extras (`net`, `conf`) read connection state that only a real MP client mounts; every
 /// one is accessed OPTIONALLY, so the same system runs unchanged in the single-player composition
 /// (where those resources/components are simply absent at runtime) and emits an SP-shaped row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a per-frame trace spanning the writer, two clocks, roots, camera, net frame and confirmed history"
+)]
 fn record_frame(
     mut trace: ResMut<TraceWriter>,
     real: Res<Time<Real>>,
@@ -492,19 +497,19 @@ fn record_tick(
             .map(|servos| servos.0.as_slice())
             .or_else(|| servos.map(|servos| servos.states.as_slice()))
             .unwrap_or(&[]);
-        let hash = hash_tank_state_with_elements(
-            position.0,
-            rotation.0,
-            linvel.0,
-            angvel.0,
+        let hash = hash_tank_state(&TankState {
+            position: position.0,
+            rotation: rotation.0,
+            linvel: linvel.0,
+            angvel: angvel.0,
             drive,
             grip,
             elements,
             transmission,
             weapon_gate,
-            servo_states,
+            servos: servo_states,
             sim,
-        );
+        });
         // Remote clients intentionally receive no exact element field. Null makes that disclosure
         // boundary explicit so the analyzer omits private-state and combined equality for the pair.
         let disclosed_element_hash = own.then_some(hash.elm);

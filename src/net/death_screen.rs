@@ -68,6 +68,10 @@ pub fn plugin(app: &mut App) {
 
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
 /// death only for a controlled tank carrying `TankKnockedOut`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the clock, two controlled-tank states, the overlay, the respawn wait, the overlay registry and fonts"
+)]
 fn toggle_death_screen(
     time: Res<Time>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,

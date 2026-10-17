@@ -19,7 +19,10 @@ mod view;
 #[cfg(test)]
 pub use model::WeaponState;
 pub(crate) use model::rig_world_pose;
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "the model's facade list; each target and feature set reaches a different subset"
+)]
 pub use model::{
     Controlled, EngineSound, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, Weapon, WeaponGate, WeaponGateState, WeaponIndex,

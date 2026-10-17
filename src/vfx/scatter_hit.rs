@@ -26,9 +26,7 @@ use crate::ballistics::Projectile;
 use crate::scatter::ScatterProxy;
 use crate::view::PlayerView;
 
-use super::ViewRng;
-use super::billboard::{BillboardRing, VfxBillboardMaterial};
-use super::impact::{GroundMarkRing, ImpactAssets, spawn_terrain_read};
+use super::impact::{ImpactKit, spawn_terrain_read};
 
 /// Minimum distance (m) into a frame's segment for a hit to count as an ENTRY — the march's own
 /// 1 mm boundary nudge. A hit nearer than this began at or inside the surface, which is the
@@ -67,21 +65,12 @@ struct ScatterProbe {
 /// Every shell entity is covered, whichever peer authored it: shells are not replicated — a remote
 /// player's round is reconstructed locally as its own `Projectile` (`net::client`), so predicted and
 /// remote fire both pass through this one query.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one view system, one effect call"
-)]
 fn read_scatter_crossings(
     mut shells: Query<(Entity, &Transform, &Projectile, Option<&mut ScatterProbe>)>,
     proxies: Query<(), With<ScatterProxy>>,
     spatial: SpatialQuery,
-    assets: Res<ImpactAssets>,
-    mut materials: ResMut<Assets<VfxBillboardMaterial>>,
-    mut ring: ResMut<BillboardRing>,
-    mut ground_ring: ResMut<GroundMarkRing>,
-    mut rng: ResMut<ViewRng>,
+    mut kit: ImpactKit,
     camera: Query<&GlobalTransform, With<PlayerView>>,
-    mut commands: Commands,
 ) {
     let is_proxy = |entity: Entity| proxies.contains(entity);
     let filter = SpatialQueryFilter::from_mask(Layer::Terrain);
@@ -92,7 +81,7 @@ fn read_scatter_crossings(
             // First sight of this shell: no segment yet, so nothing to cross. A reconstructed
             // shell's catch-up flight is spent before the entity exists here, so its crossings are
             // behind the probe and never read.
-            commands.entity(shell).insert(ScatterProbe {
+            kit.commands.entity(shell).insert(ScatterProbe {
                 previous: current,
                 inside: None,
             });
@@ -125,18 +114,7 @@ fn read_scatter_crossings(
         let to_camera = camera
             .map(|cam| cam.translation() - position)
             .unwrap_or(Vec3::Z);
-        spawn_terrain_read(
-            position,
-            normal,
-            to_camera,
-            projectile.caliber(),
-            &assets,
-            &mut materials,
-            &mut ring,
-            &mut ground_ring,
-            &mut rng,
-            &mut commands,
-        );
+        spawn_terrain_read(position, normal, to_camera, projectile.caliber(), &mut kit);
     }
 }
 
@@ -151,7 +129,9 @@ mod tests {
 
     use super::*;
 
-    use crate::vfx::billboard::Billboard;
+    use crate::vfx::ViewRng;
+    use crate::vfx::billboard::{Billboard, BillboardRing, VfxBillboardMaterial};
+    use crate::vfx::impact::{GroundMarkRing, ImpactAssets};
 
     /// An MG-belt round: below the big-caliber threshold, so the compact read.
     const MG_CALIBER: f32 = 0.0079;

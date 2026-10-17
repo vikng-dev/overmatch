@@ -187,6 +187,10 @@ impl MarchRecorder<'_, '_> {
     /// After `shell`'s march step: log the pools its tally `dose` emptied from `emptied_from` on,
     /// and note each tank its marks from `marks_from` on touch in its `recording`, in the tank's
     /// open encounter or a new one.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one march step's evidence: the shell, its recording, the mark and dose cursors, and the ownership and health reads"
+    )]
     pub(crate) fn note(
         &mut self,
         shell: Entity,

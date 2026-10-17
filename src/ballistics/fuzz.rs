@@ -929,7 +929,7 @@ impl Pass<'_, '_, '_> {
                 ..*hit
             })
             .collect();
-        let mut doubled = corridor.clone();
+        let mut doubled = corridor;
         doubled.hits.extend(copies);
 
         out.duplication_checks += 1;
@@ -1086,6 +1086,10 @@ fn tank_bounds(
 }
 
 /// The pass itself: generate, probe, assert, cluster.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the fuzz pass spans its job, output, probe tank, march world, colliders, bounds and name lookups"
+)]
 fn run_fuzz(
     job: Res<FuzzJob>,
     mut output: ResMut<FuzzOutput>,
@@ -1451,6 +1455,10 @@ struct ReplayJob {
 #[derive(Resource, Default)]
 struct ReplayOutput(String);
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the replay pass spans its job, output, probe tank, march world, colliders, bounds and name lookups"
+)]
 fn run_replay(
     job: Res<ReplayJob>,
     mut output: ResMut<ReplayOutput>,

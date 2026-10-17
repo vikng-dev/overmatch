@@ -492,6 +492,10 @@ pub(super) fn install(
 /// cannot change mid-session; a respawn gap must not revert the margins). The rebuild reuses the
 /// installed `InputDelayConfig` by value and assigns in place — no insert, so lightyear's
 /// input-delay recompute observer never runs and the delay stays byte-identical.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning margin mode, sync base, tick, arrival delay, the own tank's role, the timeline config and three locals"
+)]
 fn derive_input_margins(
     mode: Res<InputMarginMode>,
     base: Res<InputSyncBase>,

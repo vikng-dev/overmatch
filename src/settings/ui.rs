@@ -1113,6 +1113,10 @@ fn keyboard_input(
 /// The grab is the one moment the live track rect is read, because it is the rect the player just
 /// aimed at. Everything after maps through the frozen copy — see [`ActiveDrag`], and
 /// [`track_fraction`] for why the cursor has to be the PHYSICAL one to match it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an observer spanning arrows, tracks, window, capabilities, ladder, selection, drag, settings and save"
+)]
 fn page_pressed(
     mut press: On<Pointer<Press>>,
     arrows: Query<&ArrowGlyph>,
@@ -1180,6 +1184,10 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 /// A node's own `inverse_scale_factor` could NOT stand in — it folds in `UiScale` too
 /// (`bevy_ui::update` builds it as `target_scaling_factor * ui_scale`), so it converts to CSS
 /// pixels, not to the window-logical pixels a pointer reports.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning page visibility, buttons, window, hovered rows, capabilities, ladder, selection, drag, settings and save"
+)]
 fn mouse_input(
     visible: Res<SettingsPageVisible>,
     buttons: Res<ButtonInput<MouseButton>>,
@@ -1376,6 +1384,10 @@ fn scroll_rows(
 /// Rebuild every value, the selection highlight, the slider fills, the enabled/disabled colours and
 /// the footer hint. Runs only while the page is up; the visibility write itself is `set_if_neq`, so
 /// a closed page costs one comparison per frame.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one query per disjoint page element plus the settings model, kept disjoint by their `Without` filters"
+)]
 fn refresh_page(
     visible: Res<SettingsPageVisible>,
     settings: Res<Settings>,

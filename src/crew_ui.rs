@@ -134,6 +134,10 @@ fn weapon_status(
 /// Render the controlled tank's vitals card: crew alive/total, Drive + Gunner-sight effectiveness,
 /// and each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`). A pure view over the
 /// controlled tank's local components.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a view over the controlled tank's crew, weapons, gates and clocks, writing one panel"
+)]
 fn update_status_panel(
     tank: Query<
         (

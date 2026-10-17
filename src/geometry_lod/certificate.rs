@@ -41,7 +41,10 @@ use crate::view::ViewProfile;
 pub(crate) struct Certificate {
     /// Staleness of the trio against the current `.blend` + `.tank.ron`. Recorded, not enforced
     /// here: the source is untracked by policy and absent from a shipped install.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "parsed so `deny_unknown_fields` accepts the certificate; nothing reads it"
+    )]
     pub(crate) blend_digest: String,
     /// sha256 of `<id>.glb`.
     pub(crate) view_glb_sha: String,

@@ -456,6 +456,10 @@ struct MgSmokeCadence(u32);
 
 /// Spawn one transient muzzle light into the shared ring — the 88's and the MGs' common machinery;
 /// peak/range/lifetime/radius are the caller's scale knobs, `shadows` the lever-resolved decision.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one light: the sinks, then each argument a separate dimension of the light"
+)]
 fn spawn_muzzle_light(
     commands: &mut Commands,
     ring: &mut MuzzleLightRing,
@@ -500,6 +504,10 @@ fn spawn_muzzle_light(
 /// ground-dust cloud a low barrel lifts, all view entities hung off the `FireShell` geometry
 /// (origin + bore direction).
 /// MG-calibre rounds pass through untouched — their dressing is slice B, on this same machinery.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dresses a main-gun shot: assets, materials, two rings, shadows, rng, camera and terrain"
+)]
 fn on_main_gun_fire(
     fire: On<FireShell>,
     assets: Res<MuzzleVfxAssets>,
@@ -755,7 +763,10 @@ fn dust_ground_y(grid: Option<&crate::terrain_grid::HeightGrid>, muzzle: Vec3) -
 /// muzzle and pushed outward, each along an azimuth pulled toward the bore's by
 /// [`GROUND_DUST_BORE_BIAS`]. Sizes, offsets and push speeds scale linearly with `caliber` against
 /// [`GROUND_DUST_CALIBER`]; the puffs ride the smoke's Blend pipeline and the shared billboard ring.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one dust cloud: its pose, ground height and caliber, and the billboard sinks"
+)]
 fn spawn_ground_dust(
     muzzle: Vec3,
     dir: Vec3,
@@ -820,6 +831,10 @@ fn spawn_ground_dust(
 /// Everything per-shot randomized (flame frame, roll, size) — at 750 rpm identical repeated
 /// flashes strobe. Main-gun-calibre rounds pass through untouched (their dressing is
 /// [`on_main_gun_fire`]); staleness and distance LOD gates are the 88's exactly.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dresses an MG shot: assets, materials, two rings, smoke cadence, shadows, rng and camera"
+)]
 fn on_mg_fire(
     fire: On<FireShell>,
     assets: Res<MuzzleVfxAssets>,

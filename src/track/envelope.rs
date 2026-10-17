@@ -92,6 +92,10 @@ pub(crate) struct EnvelopeSide<'a> {
 /// `engage_depth`/`face_offset`/`probe_reach` must be EXACTLY what the live
 /// [`ForceParams`]/[`SideInput`] will carry, `count` the material link count — the whole
 /// point is that the calibration pass and the live law are the same computation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the envelope law's inputs: the geometry, the weight and the ride targets are independent scalars"
+)]
 pub(crate) fn calibrate(
     sides: &[EnvelopeSide<'_>; 2],
     count: usize,

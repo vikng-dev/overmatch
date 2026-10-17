@@ -303,7 +303,10 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
 /// viewer, size or scale makes a new set and rebuilds the stage, whose materials hold the images.
 /// The set's cameras draw just before their viewer. Runs after every system that retargets or
 /// resizes a viewer this frame. A viewer whose target cannot be resolved gets no set until it is.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the corner, three camera roles, the window, the masks and their images, and the stage"
+)]
 pub fn own(
     mut commands: Commands,
     corner: Res<Corner>,

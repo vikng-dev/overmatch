@@ -228,6 +228,10 @@ pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
 
 /// Admit the local duel after presentation preloading, then construct both roots completely. This
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "admission spans the loader, assets, sim source, terrain, certificate, view profile and app state"
+)]
 fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,

@@ -1367,6 +1367,10 @@ pub fn sim_plugin(app: &mut App) {
 ///
 /// Invariant: each skipped chord is checked. Terrain may end locally; a keyed replica armor contact
 /// becomes a [`Held`] stop until an authority outcome arrives. Replica ballistics never decides armor.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an observer spanning the fixed clock, catch-up geometry, the net clock and role, two recorders and the firing weapon"
+)]
 fn on_fire_shell(
     fire: On<FireShell>,
     // The FIXED timestep, NOT `Res<Time>`: this observer can fire from `Update` (the net client
@@ -1775,6 +1779,10 @@ enum ReplicaArmorContact {
     Holding,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the march system: shells, march world, colliders, bodies, health, net state, two recorders and a cost sink"
+)]
 fn integrate_projectiles(
     mut projectiles: Query<(
         Entity,
@@ -1877,30 +1885,21 @@ fn integrate_projectiles(
             source,
         };
 
+        let mut tick = MarchTick {
+            sanctioned,
+            present,
+            now,
+            dt,
+            deposit,
+            shot_trace: &mut shot_trace,
+            commands: &mut commands,
+        };
         if let Some(mut held) = held {
-            resolve_held_shell(
-                &mut shell,
-                &mut held,
-                sanctioned,
-                present,
-                now,
-                dt,
-                &mut shot_trace,
-                &mut commands,
-            );
+            resolve_held_shell(&mut shell, &mut held, &mut tick);
             continue;
         }
 
-        if consume_overdue_sanctioned_outcome(
-            &mut shell,
-            deposit,
-            sanctioned,
-            present,
-            dt,
-            now,
-            &mut shot_trace,
-            &mut commands,
-        ) {
+        if consume_overdue_sanctioned_outcome(&mut shell, &mut tick) {
             continue;
         }
 
@@ -1911,13 +1910,8 @@ fn integrate_projectiles(
             &colliders,
             &mut health,
             &mut bodies,
-            sanctioned,
-            deposit,
             shortcircuit.0,
-            dt,
-            now,
-            &mut shot_trace,
-            &mut commands,
+            &mut tick,
         ) else {
             continue;
         };
@@ -1998,6 +1992,20 @@ fn integrate_projectiles(
     }
 }
 
+/// One tick's march context, shared by every shell the march resolves that tick: the sanctioned
+/// outcome buffer, the published tick `present` (absent on SP / sandbox) and the row stamp `now`,
+/// the step `dt`, the authority role `deposit` (not a replica: only then does a hit mutate health),
+/// and the two sinks every resolution writes to.
+struct MarchTick<'a, 't, 'w, 's> {
+    sanctioned: Option<&'a SanctionedShots>,
+    present: Option<u32>,
+    now: u32,
+    dt: f32,
+    deposit: bool,
+    shot_trace: &'a mut Option<ResMut<'t, crate::shot_trace::ShotTrace>>,
+    commands: &'a mut Commands<'w, 's>,
+}
+
 /// Resolve a shell frozen at armor waiting for the authority's verdict on that contact.
 ///
 /// NET-CLIENT HOLD: a `Shot`-carrying shell — an observer's replica OR the shooter's own predicted
@@ -2010,16 +2018,15 @@ fn integrate_projectiles(
 /// contact instead).
 ///
 /// The shell is fully resolved for this tick either way: the caller never marches it.
-fn resolve_held_shell(
-    shell: &mut MarchingShell,
-    held: &mut Mut<Held>,
-    sanctioned: Option<&SanctionedShots>,
-    present: Option<u32>,
-    now: u32,
-    dt: f32,
-    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
-) {
+fn resolve_held_shell(shell: &mut MarchingShell, held: &mut Mut<Held>, tick: &mut MarchTick) {
+    let MarchTick {
+        sanctioned,
+        present,
+        now,
+        dt,
+        ..
+    } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
     let entity = shell.entity;
     let shot = shell.shot;
     // The bounce we are waiting on (the next unconsumed ordinal for this shot), if it arrived.
@@ -2213,17 +2220,17 @@ fn resolve_held_shell(
 /// Returns `true` when the shell was resolved (re-seeded, finalized, or despawned) and must not
 /// march this tick.
 #[must_use]
-fn consume_overdue_sanctioned_outcome(
-    shell: &mut MarchingShell,
-    // Authority = not a replica. The authority resolves shots for real and never consumes.
-    deposit: bool,
-    sanctioned: Option<&SanctionedShots>,
-    present: Option<u32>,
-    dt: f32,
-    now: u32,
-    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
-) -> bool {
+fn consume_overdue_sanctioned_outcome(shell: &mut MarchingShell, tick: &mut MarchTick) -> bool {
+    let MarchTick {
+        sanctioned,
+        present,
+        now,
+        dt,
+        deposit,
+        ..
+    } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
+    // The authority resolves shots for real and never consumes.
     if deposit {
         return false;
     }
@@ -2487,17 +2494,19 @@ fn march_shell_step(
     )>,
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
-    sanctioned: Option<&SanctionedShots>,
-    // Authority = not a replica: only then does a hit actually mutate health here.
-    deposit: bool,
     // EXPERIMENTAL cost-attribution A/B arm (`SPIKE_MG_SHORTCIRCUIT`, default off — see
     // [`MgShortCircuit`]).
     shortcircuit: bool,
-    dt: f32,
-    now: u32,
-    shot_trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
-    commands: &mut Commands,
+    tick: &mut MarchTick,
 ) -> Option<MarchStep> {
+    let MarchTick {
+        sanctioned,
+        now,
+        dt,
+        deposit,
+        ..
+    } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
     let shot = shell.shot;
     // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.

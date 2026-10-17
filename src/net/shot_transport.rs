@@ -868,6 +868,10 @@ fn fact_sequence(fact: &FireVisualFact) -> Option<u32> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one trace row: each argument is a separate column of the send record"
+)]
 fn record_send(
     trace: &mut Option<ResMut<crate::shot_trace::ShotTrace>>,
     now: Tick,

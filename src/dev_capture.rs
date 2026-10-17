@@ -172,6 +172,10 @@ fn hide_window(app: &mut App) {
     app.add_systems(Startup, crate::platform::revoke_macos_activation);
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a dev capture spanning time, its state, images, cameras, gizmo config, sight mode and exit"
+)]
 fn capture(
     mut commands: Commands,
     time: Res<Time>,

@@ -608,7 +608,7 @@ fn a_malformed_hull_rotation_is_refused() {
         assert!(received.hull_pose().is_err(), "{hostile:?}");
         assert!(received.decode(&vocabulary).is_err(), "{hostile:?}");
     }
-    let mut explanation = built.full.clone();
+    let mut explanation = built.full;
     explanation.hull.as_mut().unwrap().turn = rotation([0, 0, 0, i16::MAX]);
     assert_eq!(explanation.hull_pose().unwrap().unwrap().1, Quat::IDENTITY);
 }

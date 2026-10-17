@@ -96,6 +96,10 @@ fn sync_link_pool(
 /// the articulation and scroll show up as the track itself. Written in HULL-LOCAL space because the
 /// links are children of the hull: the hull's own transform (physics-interpolated) then carries
 /// them, so a link can never lag or lead the tank it is bolted to by a frame.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a view layer spanning the template, pool, belts, phase, rig, viz flags and a station buffer"
+)]
 fn place_links(
     template: Res<LinkTemplate>,
     pool: Res<LinkPool>,

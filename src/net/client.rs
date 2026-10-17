@@ -10,6 +10,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowMode};
 use lightyear::interpolation::timeline::InterpolationTimeline;
@@ -1373,7 +1374,6 @@ fn log_local_tank_role(
 }
 
 /// Opt-in ownership trace. Only the local tank may carry `Controlled` and `InputMarker`.
-#[expect(clippy::type_complexity, reason = "one-off diagnostic marker snapshot")]
 fn log_tank_ownership(
     tanks: Query<
         (
@@ -1573,6 +1573,27 @@ fn reset_shot_receive_state(
     *sanctioned = default();
 }
 
+/// The four public fire-fact channels [`receive_fire_events`] drains.
+#[derive(SystemParam)]
+pub(super) struct FireInbox<'w, 's> {
+    batch_receivers: Query<'w, 's, &'static mut MessageReceiver<FireVisualBatch>>,
+    fire_receivers: Query<'w, 's, &'static mut MessageReceiver<FireEvent>>,
+    keyframe_receivers: Query<'w, 's, &'static mut MessageReceiver<RicochetKeyframe>>,
+    confirm_receivers: Query<'w, 's, &'static mut MessageReceiver<ImpactConfirm>>,
+}
+
+/// The client's fire-presentation books that [`receive_fire_events`] writes: recoil kicks owed to
+/// the fixed clock, the shot dedup cache, announcements held for the interpolation cursor, fire
+/// visuals awaiting their shooter root, and the sanctioned-outcome buffer.
+#[derive(SystemParam)]
+pub(super) struct FireLedgers<'w> {
+    pending: ResMut<'w, PendingRecoilKicks>,
+    seen: ResMut<'w, SeenShots>,
+    held: ResMut<'w, HeldFireEvents>,
+    pending_fires: ResMut<'w, PendingFireEvents>,
+    sanctioned: ResMut<'w, SanctionedShots>,
+}
+
 /// Drain public fire, keyframe, and terminal facts.
 ///
 /// New fires are validated and held for the interpolation cursor ([`HeldFireEvents`]); the release
@@ -1586,10 +1607,7 @@ fn reset_shot_receive_state(
 /// can run no fixed steps. Draining in `FixedUpdate` would lose arrivals on such a frame. Only the
 /// `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
-    mut batch_receivers: Query<&mut MessageReceiver<FireVisualBatch>>,
-    mut fire_receivers: Query<&mut MessageReceiver<FireEvent>>,
-    mut keyframe_receivers: Query<&mut MessageReceiver<RicochetKeyframe>>,
-    mut confirm_receivers: Query<&mut MessageReceiver<ImpactConfirm>>,
+    inbox: FireInbox,
     // Fire's display/recoil entity must resolve before a cosmetic shell can be created.
     tanks: Query<(Entity, &CombatantId), With<NetTank>>,
     // Fast-forward remote shells to this client's current tick.
@@ -1598,11 +1616,7 @@ pub(super) fn receive_fire_events(
     // fire tick against. Synced-only — a pre-sync client has no interpolated motion to fuse with,
     // so its events present at arrival.
     cursor: Option<Res<InterpolationTimeline>>,
-    mut pending: ResMut<PendingRecoilKicks>,
-    mut seen: ResMut<SeenShots>,
-    mut held: ResMut<HeldFireEvents>,
-    mut pending_fires: ResMut<PendingFireEvents>,
-    mut sanctioned: ResMut<SanctionedShots>,
+    ledgers: FireLedgers,
     // Nested: the optional lifecycle recorder for wire arrivals/dedup results, the impulse
     // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
     // the tick the shooter's hull surged), and the own-fire ledger + counters for swallowing a
@@ -1616,6 +1630,19 @@ pub(super) fn receive_fire_events(
     ),
     mut commands: Commands,
 ) {
+    let FireInbox {
+        mut batch_receivers,
+        mut fire_receivers,
+        mut keyframe_receivers,
+        mut confirm_receivers,
+    } = inbox;
+    let FireLedgers {
+        mut pending,
+        mut seen,
+        mut held,
+        mut pending_fires,
+        mut sanctioned,
+    } = ledgers;
     let now = timeline.tick();
     let cursor = cursor
         .filter(|timeline| timeline.is_synced())

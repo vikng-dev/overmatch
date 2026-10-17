@@ -380,7 +380,6 @@ pub(super) fn present_shot_at_age(
 }
 
 /// Arm the own tank once the server stream owns its gate.
-#[expect(clippy::type_complexity, reason = "one arming predicate, spelled out")]
 fn arm_own_fire_presentation(
     tanks: Query<
         (Entity, &WeaponGate),

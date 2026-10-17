@@ -1950,6 +1950,10 @@ pub(crate) struct CaptureWindowPinned;
 
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one writer of every rendering knob: each parameter is one knob's world target"
+)]
 fn apply_settings(
     settings: Res<Settings>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
@@ -2428,6 +2432,10 @@ impl RoundTrip {
 ///
 /// The target is resolved through `bevy_winit`'s OWN `select_monitor`, so this comparison cannot
 /// drift from the monitor `changed_windows` would actually pick.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the window, settings, the save channel, both monitor sources, placement and a local"
+)]
 fn observe_window_placement(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,

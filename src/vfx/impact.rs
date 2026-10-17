@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface, TRACER_MAX_CALIBER};
@@ -491,6 +492,18 @@ pub(super) fn setup_impact_assets(
     });
 }
 
+/// What every impact read spawns into: its assets, the billboard material store, the shared
+/// billboard and ground-mark rings, the view RNG and `Commands`.
+#[derive(SystemParam)]
+pub(super) struct ImpactKit<'w, 's> {
+    assets: Res<'w, ImpactAssets>,
+    materials: ResMut<'w, Assets<VfxBillboardMaterial>>,
+    ring: ResMut<'w, BillboardRing>,
+    ground_ring: ResMut<'w, GroundMarkRing>,
+    rng: ResMut<'w, ViewRng>,
+    pub(super) commands: Commands<'w, 's>,
+}
+
 /// Drop the layered read at each shell impact — branching on BOTH the round's physical caliber and
 /// the `surface` it struck. At/above [`TRACER_MAX_CALIBER`] the 88 lands either the big terrain
 /// splash ([`spawn_terrain_read`]) or the armor read ([`spawn_big_armor`]); below it, the MG's compact
@@ -499,13 +512,8 @@ pub(super) fn setup_impact_assets(
 /// RNG, so the small path's RNG sequence is unchanged and the surface pick costs no RNG.
 fn spawn_impact_read(
     impact: On<Impact>,
-    assets: Res<ImpactAssets>,
-    mut materials: ResMut<Assets<VfxBillboardMaterial>>,
-    mut ring: ResMut<BillboardRing>,
-    mut ground_ring: ResMut<GroundMarkRing>,
-    mut rng: ResMut<ViewRng>,
+    mut kit: ImpactKit,
     camera: Query<&GlobalTransform, With<PlayerView>>,
-    mut commands: Commands,
 ) {
     let normal = impact.normal.try_normalize().unwrap_or(Vec3::Y);
     let to_camera = camera
@@ -513,42 +521,19 @@ fn spawn_impact_read(
         .map(|cam| cam.translation() - impact.position)
         .unwrap_or(Vec3::Z);
     match impact.surface {
-        ImpactSurface::Terrain => spawn_terrain_read(
-            impact.position,
-            normal,
-            to_camera,
-            impact.caliber,
-            &assets,
-            &mut materials,
-            &mut ring,
-            &mut ground_ring,
-            &mut rng,
-            &mut commands,
-        ),
+        ImpactSurface::Terrain => {
+            spawn_terrain_read(impact.position, normal, to_camera, impact.caliber, &mut kit)
+        }
         ImpactSurface::Armor => {
             if impact.caliber >= TRACER_MAX_CALIBER {
-                spawn_big_armor(
-                    impact.position,
-                    normal,
-                    to_camera,
-                    impact.outcome,
-                    &assets,
-                    &mut materials,
-                    &mut ring,
-                    &mut rng,
-                    &mut commands,
-                );
+                spawn_big_armor(impact.position, normal, to_camera, impact.outcome, &mut kit);
             } else {
                 spawn_small_impact(
                     impact.position,
                     normal,
                     to_camera,
                     ImpactSurface::Armor,
-                    &assets,
-                    &mut materials,
-                    &mut ring,
-                    &mut rng,
-                    &mut commands,
+                    &mut kit,
                 );
             }
         }
@@ -559,43 +544,17 @@ fn spawn_impact_read(
 /// [`TRACER_MAX_CALIBER`], the MG's compact dust-ping-spark read below it. `normal` must be unit;
 /// `to_camera` need not be. Shared with [`super::scatter_hit`], whose crossings are terrain-class
 /// surfaces and so take this exact dispatch rather than a read of their own.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_terrain_read(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
     caliber: f32,
-    assets: &ImpactAssets,
-    materials: &mut Assets<VfxBillboardMaterial>,
-    ring: &mut BillboardRing,
-    ground_ring: &mut GroundMarkRing,
-    rng: &mut ViewRng,
-    commands: &mut Commands,
+    kit: &mut ImpactKit,
 ) {
     if caliber >= TRACER_MAX_CALIBER {
-        spawn_big_splash(
-            position,
-            normal,
-            to_camera,
-            assets,
-            materials,
-            ring,
-            ground_ring,
-            rng,
-            commands,
-        );
+        spawn_big_splash(position, normal, to_camera, kit);
     } else {
-        spawn_small_impact(
-            position,
-            normal,
-            to_camera,
-            ImpactSurface::Terrain,
-            assets,
-            materials,
-            ring,
-            rng,
-            commands,
-        );
+        spawn_small_impact(position, normal, to_camera, ImpactSurface::Terrain, kit);
     }
 }
 
@@ -605,18 +564,21 @@ pub(super) fn spawn_terrain_read(
 /// at the target. On ARMOR the billow's LUT swaps from the earthy dust palette to the neutral gray
 /// `spall_lut` (the honest minimum recolor — a small round on steel throws gray spall, not dirt); the
 /// swap draws NO RNG, so the byte-identical terrain read (and its pinned RNG order) is untouched.
-#[allow(clippy::too_many_arguments)]
 fn spawn_small_impact(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
     surface: ImpactSurface,
-    assets: &ImpactAssets,
-    materials: &mut Assets<VfxBillboardMaterial>,
-    ring: &mut BillboardRing,
-    rng: &mut ViewRng,
-    commands: &mut Commands,
+    kit: &mut ImpactKit,
 ) {
+    let ImpactKit {
+        assets,
+        materials,
+        ring,
+        rng,
+        commands,
+        ..
+    } = kit;
     // The billow material: the earthy dust palette on terrain, the gray spall palette on armor. Only
     // the LUT differs — same params, same atlas, same Blend pipeline — and choosing it draws no RNG,
     // so the small read's RNG sequence (the pinned draw order) is identical on both surfaces.
@@ -725,18 +687,15 @@ fn spawn_small_impact(
 /// The 88 terrain SPLASH (caliber ≥ TRACER_MAX_CALIBER): the layered large-caliber soil-strike read.
 /// Contact flash → dirt ejecta → tall dirt plume → ground shock ring → lingering cloud on the shared
 /// ring, plus one flat ground scar in its own ring. Physical scale (module doc), not screen-relative.
-#[allow(clippy::too_many_arguments)]
-fn spawn_big_splash(
-    position: Vec3,
-    normal: Vec3,
-    to_camera: Vec3,
-    assets: &ImpactAssets,
-    materials: &mut Assets<VfxBillboardMaterial>,
-    ring: &mut BillboardRing,
-    ground_ring: &mut GroundMarkRing,
-    rng: &mut ViewRng,
-    commands: &mut Commands,
-) {
+fn spawn_big_splash(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut ImpactKit) {
+    let ImpactKit {
+        assets,
+        materials,
+        ring,
+        ground_ring,
+        rng,
+        commands,
+    } = kit;
     let (tan_a, tan_b) = normal.any_orthonormal_pair();
 
     // --- Contact flash: one big additive bloom at the strike, gone in a frame or two.
@@ -934,18 +893,21 @@ fn spawn_big_splash(
 /// flame lick is appended ONLY when `verdict.entered()` (the round bit into the steel). When `deflection` is
 /// present (a ricochet) the spark fan leans toward the bounce direction; otherwise it splays off the
 /// surface normal. Physical read (module doc), not screen-relative.
-#[allow(clippy::too_many_arguments)]
 fn spawn_big_armor(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,
     outcome: ImpactOutcome,
-    assets: &ImpactAssets,
-    materials: &mut Assets<VfxBillboardMaterial>,
-    ring: &mut BillboardRing,
-    rng: &mut ViewRng,
-    commands: &mut Commands,
+    kit: &mut ImpactKit,
 ) {
+    let ImpactKit {
+        assets,
+        materials,
+        ring,
+        rng,
+        commands,
+        ..
+    } = kit;
     // The spark fan's axis: straight off the surface normal, or leaned toward the deflected outgoing
     // direction on a ricochet (a bounce throws its sparks the way it kicked off).
     let axis = match outcome.deflection().and_then(|d| d.try_normalize()) {

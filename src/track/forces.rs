@@ -432,6 +432,10 @@ pub fn governor_belt(
 /// (transmission-design.md §2 scheduling) for EVERY architecture; that seam's `Governor` arm
 /// is this exact tail, bit-identical (pinned by
 /// `transmission::tests::governor_adapter_matches_legacy_belt`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one side's tick: input, state, pose, clock, params, oracle, velocity field and grip elements"
+)]
 pub fn step_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -461,6 +465,10 @@ pub fn step_side<O: TerrainOracle>(
 /// plus `true` iff the station geometry was live — the same condition under which
 /// `step_side` integrates at all (a degenerate loop returns untouched state, verbatim the
 /// old early-return).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one side's contact pass: input, state, pose, clock, params, oracle, velocity field and grip elements"
+)]
 pub fn contact_side<O: TerrainOracle>(
     input: &SideInput,
     state: SideState,
@@ -616,6 +624,10 @@ fn contact_frame(
 /// columns whose damped support load clipped to zero while elastic penetration remains — the
 /// pad is still ON the ground (a separating/noisy tick), and element strain must survive it.
 /// Station order — deterministic, fixed bound (`count * 3`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one side's contact columns: input, stations, wraps, pose, params, oracle, velocity field, belt speed and mode"
+)]
 fn collect_column_contacts<O: TerrainOracle>(
     input: &SideInput,
     stations: &[Vec2],

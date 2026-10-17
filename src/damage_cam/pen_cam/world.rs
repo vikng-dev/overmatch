@@ -194,6 +194,10 @@ pub fn place_camera(
 
 /// Place the ground, and each shot's tracer, flash and mark at the run's clock; the tracer is
 /// culled near the main camera's final eye, wherever its writer put it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one query per disjoint world element plus the run, library, views and glow store"
+)]
 pub fn animate(
     run: Res<Run>,
     library: Res<Library>,

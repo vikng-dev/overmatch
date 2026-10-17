@@ -324,6 +324,10 @@ pub(crate) fn orbit_body(
     back_ray.get_point(ground(back_ray, distance))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the player camera, the controlled tank and its views, the pivot, scroll input, follow settings and time"
+)]
 fn orbit_camera(
     camera: Single<(&mut Transform, &mut OrbitCamera, &mut Projection), With<PlayerView>>,
     spatial: SpatialQuery,
@@ -466,6 +470,10 @@ pub(crate) fn blended_look(
 /// Up stays the gun node's own +Y — hull-up carried through the yaw-then-pitch chain rather than
 /// world up, so a hull-mounted sight rolls *with* the tank on a side-slope instead of drifting off
 /// the bore — and the sight line is orthonormal to it by construction.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the player camera, the controlled rig's gun and hull, the committed aim, the blend and the range tables"
+)]
 fn gunner_camera(
     camera: Single<(&mut Transform, &mut GlobalTransform, &mut Projection), With<PlayerView>>,
     controlled: Query<(Entity, &Rig), With<Controlled>>,

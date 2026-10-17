@@ -472,8 +472,11 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let previous = std::env::var("SPIKE_AUTO_FIRE").ok();
-            // SAFETY: the lease makes this body single-threaded with respect to the variable, and
-            // `Drop` restores it.
+            // SAFETY: test-only. The lease serializes every test that writes this variable, and
+            // reads through `std::env` take std's environment lock, so no Rust-side access races
+            // this write. A reader outside `std::env` on another test thread (libc, DNS resolution)
+            // is not excluded: `set_var`'s contract says no multi-threaded program can rule that
+            // out on Unix, and this harness accepts it.
             unsafe { std::env::set_var("SPIKE_AUTO_FIRE", "1") };
             Self {
                 previous,
@@ -485,7 +488,8 @@ mod tests {
     #[cfg(feature = "dev_tools")]
     impl Drop for ArmedEnv {
         fn drop(&mut self) {
-            // SAFETY: as above.
+            // SAFETY: as for the write in `new`, whose lease is still held here: a struct's fields
+            // drop after its `Drop` body.
             unsafe {
                 match self.previous.take() {
                     Some(value) => std::env::set_var("SPIKE_AUTO_FIRE", value),
