@@ -22,6 +22,24 @@ margin. 80/10 ms is the standard condition we quote. ADR-0032's DERIVED "~10 tic
 <120 m" is one claim expressed three ways and corresponds to ≈100 ms one-way — a point we do not
 ship at.
 
+## Pen cam explanations wait for the impact, never the reverse
+
+MEASURED 2026-10-18 (`scripts/shot/run-pencam-latency.sh`, two clients 8 m apart, main gun + held
+MGs, 200 s per point, 284 explanations). Server impact → explanation stored (wire) and → released
+to a view (open), p50 / max:
+
+| latency / jitter | wire | open | TimedOut |
+|---|---|---|---|
+| 0 / 0 ms | 7–8 / 17 ms | 46–52 / 116 ms | 0 |
+| 60 / 10 ms | 72–77 / 93 ms | 115–120 / 144 ms | 0 |
+| 120 / 30 ms | 130–144 / 212 ms | 193–316 / 408 ms | 0 |
+
+No explanation ever arrived after its impact was drawn. The release waits for the
+interpolation-delayed impact draw, so `open` follows each client's interpolation delay. At
+120/30 that delay differs between the two clients by 110–140 ms, cause undiagnosed. The run,
+its per-client split and what it leaves unmeasured:
+`.agents/scratch/damage-cam-2026-10-08/slice9-latency-2026-10-18.md`.
+
 ## `jitter_margin` 1.0 → 4.0 costs what it buys
 
 Margin = `jitter × jitter_multiple + tick_duration × jitter_margin` (lightyear_sync 0.28

@@ -262,9 +262,9 @@ fn the_trace_logs_each_arrival_and_release_once() {
             .add_systems(Update, trace_presence);
         let mut store = app.world_mut().resource_mut::<ShotExplanations>();
         store.drew(already.shot, already.outcome.unwrap());
-        store.receive(waiting.clone(), &vocabulary, 0.0);
+        store.receive(waiting, &vocabulary, 0.0);
         store.receive(drawn.clone(), &vocabulary, 0.0);
-        store.receive(already.clone(), &vocabulary, 0.0);
+        store.receive(already, &vocabulary, 0.0);
         app.update();
         let mut store = app.world_mut().resource_mut::<ShotExplanations>();
         store.drew(drawn.shot, drawn.outcome.unwrap());
