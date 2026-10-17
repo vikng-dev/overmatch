@@ -348,7 +348,7 @@ The field of fragments thrown from a body exit when a round perforates — even 
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Witness**:
-A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. It is wounded by what the hard world sent through it — the shell's disc-mean chord times the round's **wound rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0039; law: design doc §6.
+A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. It is wounded by what the hard world sent through it — the shell's disc-mean chord times the round's **wound rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0040; law: design doc §6.
 _Avoid_: soft armour, flesh factor (a witness has no factor)
 
 **Wound rate**:

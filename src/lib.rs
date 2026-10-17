@@ -552,7 +552,7 @@ pub(crate) enum Layer {
     /// Ballistic volumes (armor plates + modules): what the penetration march raycasts against,
     /// distinct from `Vehicle` (the dynamic collision proxy). "Same geometry, two layers" (ADR-0008).
     Armor,
-    /// Witness volumes (crew, ADR-0039): never cast against, never in the armour walk; read only
+    /// Witness volumes (crew, ADR-0040): never cast against, never in the armour walk; read only
     /// by the witness pass (`ballistics::wound`).
     Witness,
 }

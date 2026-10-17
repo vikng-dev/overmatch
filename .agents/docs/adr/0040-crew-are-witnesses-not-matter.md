@@ -1,4 +1,4 @@
-# 0039 — Crew are witnesses, not matter
+# 0040 — Crew are witnesses, not matter
 
 Status: ACCEPTED 2026-10-17 by the owner. `PROTOCOL_REV` stays 33 while unreleased.
 

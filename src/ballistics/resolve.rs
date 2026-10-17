@@ -619,7 +619,7 @@ pub(crate) fn field_presence(
 /// (`exited` ones aside, while it is still leaving them): a box there takes `strength × weight`,
 /// armour takes nothing, and nothing beyond is reached. The span law below is [`Passage::Partial`]'s.
 ///
-/// Every volume above is hard: a witness (ADR-0039) is never a layer of the presence, so it neither
+/// Every volume above is hard: a witness (ADR-0040) is never a layer of the presence, so it neither
 /// spends, nor stops, nor shadows. Each witness `within` admits that the direction's line enters
 /// short of where it stopped — exhausted, or under `FirstSolid` at the first hard body; a direction
 /// that left the last hard body goes on — takes the strength arriving at its first presence times
@@ -1604,7 +1604,7 @@ pub(super) fn candidates(
         |entity| {
             // Ancestry IS the armour test: only a collider under a `BallisticVolume` node resolves,
             // which is the same rule the march has always used to tell armour from terrain; a
-            // witness's collider never does (ADR-0039).
+            // witness's collider never does (ADR-0040).
             if let Some((node, _)) = context.world.armour(entity)
                 && not_own(entity)
             {

@@ -16,7 +16,7 @@
 //! # Two kinds of substance
 //!
 //! A [`Substance`] is [`Substance::Hard`] or [`Substance::Witness`], and the kind decides which law
-//! a volume of it answers to (ADR-0039). Hard matter is a layer of the §13 walk: it resists the
+//! a volume of it answers to (ADR-0040). Hard matter is a layer of the §13 walk: it resists the
 //! shell, is charged the shell's spend and shadows the spall field. A witness has no resistance —
 //! not a zero one, none — so nothing can hand it to the walk; it is wounded by what the hard world
 //! sent through it (`ballistics::wound`). Crew are the witnesses.

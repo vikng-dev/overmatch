@@ -324,7 +324,7 @@ const DRIVER_LINE_DIR: Vec3 = Vec3::Z;
 ///
 /// The reference shot of the whole model: a main-gun round meets the sloped front plate head on,
 /// perforates it, kills the driver behind it and stops in the rear plate. The crew it crosses are
-/// witnesses (ADR-0039): no impact, no bounce and no bend of the flight, only a wound.
+/// witnesses (ADR-0040): no impact, no bounce and no bend of the flight, only a wound.
 ///
 /// DERIVED: the front plate is perforated because the law's muzzle capability exceeds its cost (both
 /// read from fixture data, asserted below). FIXTURE CHARACTERISATION: the count of plates read and
@@ -381,7 +381,7 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     assert_eq!(
         out.ricochets, 0,
         "PHYSICS CHANGED — diff consciously. Nothing on a head-on line deflects an 88, and a \
-         crewman is no surface to deflect it at all (ADR-0039)"
+         crewman is no surface to deflect it at all (ADR-0040)"
     );
     assert_eq!(
         out.health_of("Driver"),
@@ -591,7 +591,7 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
 /// against the 88's law capability, not an invariant; the exit face and its cone are. Every body
 /// exit the round reaches throws a cone above the HP quantum (design doc §5): on this line only the
 /// front plate's, since the crew the round crosses inside the hull are witnesses with no exit to
-/// throw from (ADR-0039), and the round stops in the rear plate, which throws nothing.
+/// throw from (ADR-0040), and the round stops in the rear plate, which throws nothing.
 ///
 /// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
 /// whether the exit face came back or the spall model moved, not which number to re-bake.

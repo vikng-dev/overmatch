@@ -5,7 +5,7 @@
 // datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
 // the model, §13.7: substance is authored per-plate, paint is a runtime livery).
 //
-// Every entry is one of two KINDS (ADR-0039). `Hard(..)` is matter: a layer of the §13 walk that
+// Every entry is one of two KINDS (ADR-0040). `Hard(..)` is matter: a layer of the §13 walk that
 // resists the shell, is charged its spend and shadows the spall field. `Witness` is not matter: it
 // states no resistance (none, not zero), never enters the walk, and is wounded by what the hard
 // world sends through it — the shell's line at the ROUND's wound rate (`rounds.ron`), each spall

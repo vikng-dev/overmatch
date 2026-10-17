@@ -649,7 +649,7 @@ fn insert_weapons(
 /// by construction, so each is a volume of exactly one substance, and the walk (which already tracks
 /// presence per primitive) sees two honest volumes instead of one averaged lie.
 ///
-/// A witness node (ADR-0039) carries `WitnessVolume` instead of `BallisticVolume`, and its colliders
+/// A witness node (ADR-0040) carries `WitnessVolume` instead of `BallisticVolume`, and its colliders
 /// `WitnessSurface` on [`Layer::Witness`]: no walk reads it, and the witness pass finds it by that
 /// marker. It is never split — L2.WITNESS_ROLE certifies a witness node one substance and crew.
 ///

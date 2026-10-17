@@ -1,4 +1,4 @@
-//! The crew-outcome sweep (ADR-0039): random main-gun hits on the bound tank under the witness law
+//! The crew-outcome sweep (ADR-0040): random main-gun hits on the bound tank under the witness law
 //! and under the law it replaced, counted per crewman as dead, wounded and untouched, and per hit
 //! as a tank killed (living crew < 2); and, over the same hits, the crew outcomes that change with
 //! the spall cone's direction count. A measurement, run on demand:
@@ -6,9 +6,10 @@
 //! `cargo test --release --lib crew_sweep -- --ignored --nocapture`
 //!
 //! The hits are [`PER_BEARING`] per bearing of [`BEARINGS`], each a horizontal shot aimed
-//! uniformly at random over the rectangle the tank's colliders span across the line of fire and
-//! kept when its line meets a hard volume of the tank, so the kept hits are uniform over the struck
-//! silhouette. The tank stands at its spawn pose, turret and gun at rest; the round is the weapon
+//! uniformly at random over the rectangle an [`Aim`]'s colliders span across the line of fire and
+//! kept when its line meets one of them, so the kept hits are uniform over that silhouette:
+//! [`Aim::Random`] the whole tank's (its hard volumes), [`Aim::Crew`] the union of the crew boxes'
+//! (an aimed shot). The tank stands at its spawn pose, turret and gun at rest; the round is the weapon
 //! on the primary trigger's, at its muzzle speed, with its own wound rate. Every hit meets a whole
 //! crew: hit points are restored between hits.
 //!
@@ -41,7 +42,7 @@ const PER_BEARING: usize = 64;
 const SEED: u64 = 0x5eed_c0de_0039;
 
 /// The resistance factor (reference-mm per metre) crew wore as a hard substance: the `Flesh`
-/// entry of `materials.ron` before ADR-0039 (TUNED there, a low ballistic-gelatin equivalence).
+/// entry of `materials.ron` before ADR-0040 (TUNED there, a low ballistic-gelatin equivalence).
 const REPLACED_FLESH_FACTOR: f32 = 10.0;
 
 /// The direction counts the witness law is fired at besides the shipped one, to show the
@@ -175,17 +176,24 @@ fn replace_witnesses(app: &mut App) {
     }
 }
 
+/// What a hit is aimed at: the silhouette it is uniform over.
+#[derive(Clone, Copy, Debug)]
+enum Aim {
+    /// The whole tank: every hard volume.
+    Random,
+    /// The union of the crew boxes: the witness volumes.
+    Crew,
+}
+
 /// The kept hits, `(bearing, origin, direction)`, drawn in `app` (a witness-law world).
-fn draw_hits(app: &mut App) -> Vec<(f32, Vec3, Vec3)> {
-    let world = app.world_mut();
-    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for aabb in world
-        .query_filtered::<&ColliderAabb, With<BallisticSurfaces>>()
-        .iter(world)
-    {
-        lo = lo.min(aabb.min);
-        hi = hi.max(aabb.max);
-    }
+fn draw_hits(app: &mut App, aim: Aim) -> Vec<(f32, Vec3, Vec3)> {
+    let (aimed, layer) = match aim {
+        Aim::Random => (world_bounds::<BallisticSurfaces>(app), crate::Layer::Armor),
+        Aim::Crew => (world_bounds::<WitnessSurface>(app), crate::Layer::Witness),
+    };
+    let (lo, hi) = aimed;
+    // The standoff clears the whole tank, whatever is aimed at.
+    let (tank_lo, tank_hi) = world_bounds::<BallisticSurfaces>(app);
     let centre = (lo + hi) / 2.0;
     let corners: Vec<Vec3> = (0..8)
         .map(|i| {
@@ -196,7 +204,7 @@ fn draw_hits(app: &mut App) -> Vec<(f32, Vec3, Vec3)> {
             ) - centre
         })
         .collect();
-    let standoff = (hi - lo).length() + 5.0;
+    let standoff = (tank_hi - tank_lo).length() + 5.0;
     let mut state = SEED;
     let mut hits = Vec::new();
     for bearing in BEARINGS {
@@ -228,7 +236,7 @@ fn draw_hits(app: &mut App) -> Vec<(f32, Vec3, Vec3)> {
                             dir,
                             2.0 * standoff,
                             true,
-                            &SpatialQueryFilter::from_mask(crate::Layer::Armor),
+                            &SpatialQueryFilter::from_mask(layer),
                         )
                         .is_some()
                 })
@@ -240,6 +248,18 @@ fn draw_hits(app: &mut App) -> Vec<(f32, Vec3, Vec3)> {
         }
     }
     hits
+}
+
+/// The world bounds of every collider carrying `C`: `(min, max)`.
+fn world_bounds<C: Component>(app: &mut App) -> (Vec3, Vec3) {
+    let world = app.world_mut();
+    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for aabb in world.query_filtered::<&ColliderAabb, With<C>>().iter(world) {
+        lo = lo.min(aabb.min);
+        hi = hi.max(aabb.max);
+    }
+    assert!(lo.x <= hi.x, "no collider to aim at");
+    (lo, hi)
 }
 
 /// Fire the main gun along each hit in `app`, each at a whole crew, and read what the crew came
@@ -356,6 +376,15 @@ fn print_law(label: &str, outcomes: &Outcomes) {
         touched_pen as f64 / penetrating.len().max(1) as f64,
         killed(&penetrating) as f64 / penetrating.len().max(1) as f64
     );
+    let mut spread = [0usize; 4];
+    for hit in &penetrating {
+        let dead = hit.crew.iter().filter(|(_, o)| *o == Outcome::Dead).count();
+        spread[dead.min(3)] += 1;
+    }
+    println!(
+        "  crew killed per penetration: 0: {}, 1: {}, 2: {}, 3+: {}",
+        spread[0], spread[1], spread[2], spread[3]
+    );
 }
 
 /// Per crewman, the hits whose outcome differs between `a` and `b` (same hits), by transition.
@@ -385,36 +414,46 @@ fn print_flips(label: &str, a: &Outcomes, b: &Outcomes) {
     println!("  all crew     {total:>4}; tank-killed verdict flipped on {tank} hits");
 }
 
-/// The sweep, printed as a table per law and the flips between direction counts.
+/// The sweep, random then aimed: a table per law, and for random hits the flips between direction
+/// counts.
 #[test]
 #[ignore = "a measurement, run on demand"]
 fn crew_outcome_sweep() {
+    sweep(Aim::Random);
+    sweep(Aim::Crew);
+}
+
+/// One aim's sweep, printed.
+fn sweep(aim: Aim) {
     let shipped = spall_cone::ConeShape::shipped().directions_count();
     let mut witness = sweep_world(None);
-    let hits = draw_hits(&mut witness);
+    let hits = draw_hits(&mut witness, aim);
     println!(
-        "{} hits: {PER_BEARING} per bearing at {BEARINGS:?} degrees, seed {SEED:#x}, tank at \
-         {PROBE_TANK_AT}",
+        "\n===== {aim:?}: {} hits, {PER_BEARING} per bearing at {BEARINGS:?} degrees, seed \
+         {SEED:#x}, tank at {PROBE_TANK_AT}",
         hits.len()
     );
     let new = fire_hits(&mut witness, &hits);
-    let mut replaced_at = |directions: usize| {
+    let replaced_at = |directions: usize| {
         let mut app = sweep_world(Some(directions));
         replace_witnesses(&mut app);
         fire_hits(&mut app, &hits)
     };
     let old = replaced_at(REPLACED_DIRECTIONS);
-    // The rebuild checked against the record the replaced law wrote: the first scenario's doses.
-    let check = super::pen_cam::record_first_edited(
-        Some(&spall_cone::ConeShape::shipped_at(REPLACED_DIRECTIONS)),
-        replace_witnesses,
-    );
-    println!("\nreplaced law, N = {REPLACED_DIRECTIONS}: the first pen cam scenario's doses");
-    for dose in &check.doses {
-        println!(
-            "  {:<14} line {:<12} field {:<12} lost {}",
-            dose.volume, dose.line, dose.field, dose.lost
+    if matches!(aim, Aim::Random) {
+        // The rebuild checked against the record the replaced law wrote: the first scenario's
+        // doses.
+        let check = super::pen_cam::record_first_edited(
+            Some(&spall_cone::ConeShape::shipped_at(REPLACED_DIRECTIONS)),
+            replace_witnesses,
         );
+        println!("\nreplaced law, N = {REPLACED_DIRECTIONS}: the first pen cam scenario's doses");
+        for dose in &check.doses {
+            println!(
+                "  {:<14} line {:<12} field {:<12} lost {}",
+                dose.volume, dose.line, dose.field, dose.lost
+            );
+        }
     }
     let old_shipped = replaced_at(shipped);
     print_law(
@@ -428,6 +467,9 @@ fn crew_outcome_sweep() {
         &old_shipped,
     );
     print_law(&format!("witness law, N = {shipped} (shipped)"), &new);
+    if matches!(aim, Aim::Crew) {
+        return;
+    }
     for directions in RESOLUTIONS {
         let finer = fire_hits(&mut sweep_world(Some(directions)), &hits);
         print_law(&format!("witness law, N = {directions}"), &finer);

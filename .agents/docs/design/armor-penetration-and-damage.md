@@ -293,7 +293,7 @@ authored as integers in the tank data. One point is 0.1 reference-mm of dose
 cone doses it by the strength reaching it (§5); the **main penetrator transiting** a hard module
 deposits what it spent crossing it; a bounce jars the face it struck.
 
-**Witnesses** (ADR-0039) are dosed by a law of their own. A witness substance has no resistance and
+**Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and
 is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
 resolved the shot, each witness box takes:
 

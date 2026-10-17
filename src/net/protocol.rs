@@ -151,7 +151,7 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// [`ShotExplanationChannel`] to the shooter and the struck tank's player, and `CombatantLife`
 /// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
 /// the one its tank is living. Surface, own-type graph and REV move. REV 33 has not shipped, so
-/// the round's `wound` rate (ADR-0039) joins `FireEvent` under it, the REV-19 precedent: a
+/// the round's `wound` rate (ADR-0040) joins `FireEvent` under it, the REV-19 precedent: a
 /// replica builds the round the authority fired from the event alone. Own-type graph moves.
 pub const PROTOCOL_REV: u32 = 33;
 
@@ -306,7 +306,7 @@ pub struct FireEvent {
     pub caliber: f32,
     pub mass: f32,
     pub nose_factor: f32,
-    /// Reference-mm of dose per metre of chord through a witness (ADR-0039).
+    /// Reference-mm of dose per metre of chord through a witness (ADR-0040).
     pub wound: f32,
     pub mechanism: crate::spec::FireMechanism,
     /// Authoritative tracer selection.

@@ -1,4 +1,4 @@
-//! Class invariants of the witness pass (ADR-0039) on generic fixtures: fixture plates and boxes,
+//! Class invariants of the witness pass (ADR-0040) on generic fixtures: fixture plates and boxes,
 //! never a tank's own volumes. Each invariant is checked against its mutant, the same volume as
 //! a soft hard box (a layer of the walk), which it must tell apart.
 

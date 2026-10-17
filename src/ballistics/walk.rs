@@ -214,7 +214,7 @@ impl FaceHit {
 
 /// What a volume is made of, as the walk and the mechanisms read it: the substance's identity and
 /// its declared resistance, reference-mm per metre of chord (`crate::substances::HardSubstance::factor`).
-/// Hard matter only: a witness (ADR-0039) states no resistance and is never a walk volume.
+/// Hard matter only: a witness (ADR-0040) states no resistance and is never a walk volume.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct VolumeMaterial {
     pub substance: SubstanceId,
@@ -1483,7 +1483,7 @@ fn entity_presence(
     Ok(out)
 }
 
-/// One witness's presence along one sample ray (ADR-0039): the union of its shells' intervals,
+/// One witness's presence along one sample ray (ADR-0040): the union of its shells' intervals,
 /// disjoint and ordered. A witness has no factor, so nothing here integrates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WitnessSpans {

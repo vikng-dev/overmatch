@@ -1,4 +1,4 @@
-//! The witness pass (ADR-0039): what the hard world sent through each witness volume.
+//! The witness pass (ADR-0040): what the hard world sent through each witness volume.
 //!
 //! A witness ([`super::WitnessVolume`]) is no layer of the walk, so nothing here feeds back into
 //! the hard world: the round's state, every field direction's strength and reach are decided

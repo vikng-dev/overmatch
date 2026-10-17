@@ -713,7 +713,7 @@ pub(super) enum Kind {
     Box(u32),
     /// A box with this HP pool, of steel: an exposed component a round can glance off.
     SteelBox(u32),
-    /// A witness (ADR-0039) with this HP pool: no layer of the walk.
+    /// A witness (ADR-0040) with this HP pool: no layer of the walk.
     Witness(u32),
 }
 

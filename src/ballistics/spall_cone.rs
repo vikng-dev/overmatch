@@ -55,7 +55,7 @@ pub(crate) enum Profile {
 }
 
 /// How a direction of the cone passes through the hard bodies it meets. Under either, a witness
-/// (ADR-0039) is dosed at the strength entering it and neither spends nor stops the direction.
+/// (ADR-0040) is dosed at the strength entering it and neither spends nor stops the direction.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Passage {
     /// Spent by `chord × factor` through every hard body in turn; each box it enters is dosed at

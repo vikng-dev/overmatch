@@ -54,7 +54,7 @@ static L2_WITNESS_ROLE: Check = Check {
     stage: Stage::Consumer,
     severity: Severity::Error,
     law: "a volume declared crew wears only witness substances, and a witness substance is worn \
-          only by a volume declared crew (ADR-0039)",
+          only by a volume declared crew (ADR-0040)",
 };
 static L2_PRIMITIVE_FORM: Check = Check {
     id: "L2.PRIMITIVE_FORM",
@@ -186,7 +186,7 @@ pub(crate) struct PrimitiveSubstance {
     /// The substance's identity in the registry it was resolved against.
     pub id: crate::substances::SubstanceId,
     /// Hard matter with its §13.2 field value (reference-mm per metre of chord), or a witness
-    /// (ADR-0039), which states none.
+    /// (ADR-0040), which states none.
     pub matter: crate::substances::Matter,
 }
 
@@ -1138,7 +1138,7 @@ pub(crate) fn extract_tank_geometry(
     Ok(geometry)
 }
 
-/// The two classes stay apart (ADR-0039): a crew volume is a witness, and only a crew volume is.
+/// The two classes stay apart (ADR-0040): a crew volume is a witness, and only a crew volume is.
 ///
 /// A crew box wearing a hard substance would resist the shell and shadow the field as matter; a
 /// witness substance on anything else would be a volume no law wounds and no walk sees. Both are

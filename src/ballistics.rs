@@ -39,7 +39,7 @@ pub(crate) mod spall_cone;
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
 
-/// The witness pass (ADR-0039): the round's line and the field's directions intersected with the
+/// The witness pass (ADR-0040): the round's line and the field's directions intersected with the
 /// witness volumes the hard world never sees.
 mod wound;
 
@@ -820,7 +820,7 @@ pub struct FireShell {
     pub mass: f32,
     /// Nose factor (dimensionless, `0 < N ≤ 1`), read by the capability law.
     pub nose_factor: f32,
-    /// Wound rate: reference-mm of dose per metre of chord through a witness (ADR-0039).
+    /// Wound rate: reference-mm of dose per metre of chord through a witness (ADR-0040).
     pub wound: f32,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
@@ -844,7 +844,7 @@ pub(crate) struct Projectile {
     /// The round's mechanism, bound at spawn from its fire data and the substance registry
     /// ([`mechanism::SolidShot::bind`]) — data, never an asset.
     round: mechanism::SolidShot,
-    /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0039).
+    /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
@@ -966,7 +966,7 @@ pub struct BallisticVolume {
     pub substance: String,
 }
 
-/// A witness volume (ADR-0039): a crew box. Not matter — it is no layer of the armour walk, never
+/// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
 /// resists the shell, never shadows a spall direction and never throws one. It is wounded by what
 /// the hard world sends through it ([`wound`]). Its colliders carry [`WitnessSurface`] and sit on
 /// [`crate::Layer::Witness`]; it carries a [`ComponentHealth`] pool like any box.
@@ -1080,7 +1080,7 @@ pub enum ArmourMark {
     },
     /// A walk that failed closed: the round stopped at contact with no crossing resolved.
     Failed,
-    /// The round's line through witness volumes (ADR-0039) along the legs it flew since the last
+    /// The round's line through witness volumes (ADR-0040) along the legs it flew since the last
     /// mark, logged before the mark of the decision whose legs they are: each witness's disc-mean
     /// chord and its dose `chord × wound` as `cost`. No event of the flight; it moves nothing.
     Wound {
@@ -1692,7 +1692,7 @@ struct ProjectileMarchWorld<'w, 's> {
     // The cone shape the march throws when a world names one (the cost probe); the shipped shape
     // otherwise.
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
-    // Witness volumes (ADR-0039) and their colliders: read by the witness pass, excluded from every
+    // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
@@ -1701,7 +1701,7 @@ struct ProjectileMarchWorld<'w, 's> {
 impl ProjectileMarchWorld<'_, '_> {
     /// The armour volume a collider belongs to: its nearest [`BallisticVolume`] ancestor. `None`
     /// for terrain and for a witness's collider, whatever node a witness is parented under — a
-    /// witness is never a layer of the walk (ADR-0039).
+    /// witness is never a layer of the walk (ADR-0040).
     fn armour(&self, collider: Entity) -> Option<(Entity, &BallisticVolume)> {
         if self.witness_surfaces.contains(collider) {
             return None;
@@ -2428,7 +2428,7 @@ fn resume_from_catch_up(
     shell.readout.capability = capability(shell.projectile.body(), caught_up.velocity.length());
 }
 
-/// AUTHORITY: the witness pass over `legs` (ADR-0039, [`wound::line`]), through the witnesses
+/// AUTHORITY: the witness pass over `legs` (ADR-0040, [`wound::line`]), through the witnesses
 /// `admit` keeps. Doses each witness the line put a chord into, logs one [`ArmourMark::Wound`] and
 /// settles it at its own index; returns the HP removed. A replica takes nothing.
 ///

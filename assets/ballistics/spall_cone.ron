@@ -44,7 +44,7 @@
     // How a direction passes through the hard bodies it meets. `FirstSolid`: stopped by the first
     // hard body it enters, a box there taking its whole strength, armour none. `Partial`: spent by
     // chord × factor through every hard body, dosing each box it enters at its strength there.
-    // Under either, a crew witness is dosed and stops nothing (ADR-0039).
+    // Under either, a crew witness is dosed and stops nothing (ADR-0040).
     passage: (FirstSolid, Tuned("owner decision 2026-10-17 (playtest fork F6): full shadowing, so
         a hard box shields what lies behind it whatever its material; Partial, graded by material,
         is kept as the dial")),

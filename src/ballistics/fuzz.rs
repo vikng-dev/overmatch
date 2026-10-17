@@ -634,7 +634,7 @@ fn prefix_cost(spans: &[Span], t: f64) -> f64 {
 pub(super) struct Drive {
     /// Every crossing decided, in order.
     pub decisions: Vec<Decision>,
-    /// Every witness (ADR-0039) the round's line put a positive chord into, in flight order (with
+    /// Every witness (ADR-0040) the round's line put a positive chord into, in flight order (with
     /// repeats): the witness pass over the decisions' legs and the open flight after the last.
     pub wounded: Vec<Entity>,
 }
