@@ -2,6 +2,7 @@
 //! bystander.
 
 use core::time::Duration;
+use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use lightyear::connection::client_of::ClientOf;
@@ -228,18 +229,18 @@ fn each_explanation_reaches_only_its_recipient() {
     }
 }
 
-/// Every system and observer name the app registers in `Update`, `FixedUpdate` and as an observer.
-fn registered_names(app: &mut App) -> Vec<String> {
+/// Every system the app registers, in any schedule, as `<schedule> <name>`, and every observer as
+/// `observer <name>`.
+fn registered(app: &mut App) -> BTreeSet<String> {
     let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
-    let mut names: Vec<String> = [schedules.get(Update), schedules.get(FixedUpdate)]
-        .into_iter()
-        .flatten()
-        .flat_map(|schedule| {
+    let mut names: BTreeSet<String> = schedules
+        .iter()
+        .flat_map(|(label, schedule)| {
             schedule
                 .graph()
                 .systems
                 .iter()
-                .map(|(_, system, _)| system.name().to_string())
+                .map(|(_, system, _)| format!("{label:?} {}", system.name()))
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -248,19 +249,19 @@ fn registered_names(app: &mut App) -> Vec<String> {
         world
             .query::<&bevy::ecs::observer::Observer>()
             .iter(world)
-            .map(|observer| observer.system_name().to_string()),
+            .map(|observer| format!("observer {}", observer.system_name())),
     );
     names
 }
 
-fn mounted(armed: Option<&std::path::Path>) -> Vec<String> {
+fn mounted(armed: Option<&std::path::Path>) -> BTreeSet<String> {
     let mut app = App::new();
     if let Some(path) = armed {
         app.insert_resource(ShotTrace::for_test(path));
     }
     install_client(&mut app);
     install_server(&mut app);
-    registered_names(&mut app)
+    registered(&mut app)
 }
 
 fn trace_path(name: &str) -> std::path::PathBuf {
@@ -274,46 +275,33 @@ fn trace_path(name: &str) -> std::path::PathBuf {
     ))
 }
 
-/// Unarmed, the delivery mounts register no trace system and no trace observer: tracing off costs
-/// the shipping schedule nothing. The armed mount is the control that the probe sees them.
+/// Unarmed, the delivery mounts register no trace system and no trace observer in any schedule:
+/// tracing off costs the shipping schedule nothing. Arming changes exactly the five trace entries
+/// and the sender swap, whatever they are named, so an unarmed closure or a system in another
+/// schedule cannot slip through.
 #[test]
 fn an_unarmed_mount_registers_no_delivery_trace() {
     let off = mounted(None);
-    for real in [
-        "receive_shot_explanations",
-        "expire_explanations",
-        "note_outcome_drawn",
-        "send_shot_explanations",
-    ] {
-        assert!(
-            off.iter().any(|name| name.ends_with(real)),
-            "the probe must see the delivery's own `{real}`: {off:?}",
-        );
-    }
-    assert!(
-        !off.iter().any(|name| name.contains("trace")),
-        "an unarmed mount registered a trace system or observer: {off:?}",
-    );
-
     let path = trace_path("pencam-mount");
     let on = mounted(Some(&path));
     std::fs::remove_file(&path).unwrap();
-    for traced in [
-        "trace_presence",
-        "trace_outcome_drawn",
-        "send_traced_shot_explanations",
-        "trace_link_up",
-        "trace_link_down",
-    ] {
-        assert!(
-            on.iter().any(|name| name.ends_with(traced)),
-            "control: the armed mount must register `{traced}`: {on:?}",
-        );
-    }
-    assert!(
-        !on.iter()
-            .any(|name| name.ends_with("::send_shot_explanations")),
-        "the armed mount sends through the traced sender alone: {on:?}",
+    let module = module_path!().trim_end_matches("::tests");
+    let entry = |owner: &str, name: &str| format!("{owner} {module}::{name}");
+    assert_eq!(
+        on.difference(&off).cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            entry("Update", "trace_presence"),
+            entry("FixedUpdate", "send_traced_shot_explanations"),
+            entry("observer", "trace_outcome_drawn"),
+            entry("observer", "trace_link_up"),
+            entry("observer", "trace_link_down"),
+        ]),
+        "arming must add exactly the delivery trace",
+    );
+    assert_eq!(
+        off.difference(&on).cloned().collect::<BTreeSet<_>>(),
+        BTreeSet::from([entry("FixedUpdate", "send_shot_explanations")]),
+        "arming must drop exactly the untraced sender",
     );
 }
 

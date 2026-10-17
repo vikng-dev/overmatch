@@ -38,19 +38,20 @@ def server_rows(*links: tuple[str, int]) -> list[dict]:
     ]
 
 
-def client_rows(arrival: str, released: str | None) -> list[dict]:
+def client_rows(arrival: str, released: str | None, draws: tuple[int, ...]) -> list[dict]:
+    """An explanation arriving at 40 ms, drawn at each of `draws` (us), released at 75 ms."""
     rows = [{"k": "xrx", "t": 120, "us": 40_000, **SHOT, **WHO, "pres": arrival}]
-    rows.append({"k": "xdraw", "t": 130, "us": 60_000, **SHOT, "o": 0})
+    rows.extend({"k": "xdraw", "t": 130, "us": us, **SHOT, "o": 0} for us in draws)
     if released is not None:
         rows.append({"k": "xpres", "t": 131, "us": 75_000, **SHOT, **WHO, "pres": released})
     return rows
 
 
 class OpenTests(unittest.TestCase):
-    def open_ms(self, arrival: str, released: str | None) -> dict:
+    def open_ms(self, arrival: str, released: str | None, *draws: int) -> dict:
         with tempfile.TemporaryDirectory() as d:
             server = write(Path(d), "s.jsonl", server_rows(("up", 0)))
-            client = write(Path(d), "a.jsonl", client_rows(arrival, released))
+            client = write(Path(d), "a.jsonl", client_rows(arrival, released, draws or (60_000,)))
             return analyze(server, [client])["groups"]["main/victim"]
 
     def test_a_later_presentation_opens_at_the_draw_not_the_polling_pass(self) -> None:
@@ -64,15 +65,22 @@ class OpenTests(unittest.TestCase):
         self.assertEqual(group["counts"]["timed_out"], 1)
 
     def test_presented_on_arrival_opens_at_the_arrival(self) -> None:
-        group = self.open_ms("presented", None)
+        # Drawn before it arrived: a negative draw interval, and the cam opens on arrival.
+        group = self.open_ms("presented", None, 20_000)
+        self.assertEqual(group["curves"]["draw"]["p50_ms"], -20.0)
         self.assertEqual(group["curves"]["open"]["p50_ms"], 30.0)
+
+    def test_a_forgotten_draw_before_the_arrival_never_opens_it(self) -> None:
+        # Drawn, forgotten, then drawn again after the arrival: the later draw opens it.
+        group = self.open_ms("pending", "presented", 20_000, 60_000)
+        self.assertEqual(group["curves"]["open"]["p50_ms"], 50.0)
 
 
 class ConnectTests(unittest.TestCase):
     def failures(self, *links: tuple[str, int], log: str | None = None) -> list[str]:
         with tempfile.TemporaryDirectory() as d:
             server = write(Path(d), "s.jsonl", server_rows(*links))
-            client = write(Path(d), "a.jsonl", client_rows("pending", "presented"))
+            client = write(Path(d), "a.jsonl", client_rows("pending", "presented", (60_000,)))
             server_log = None
             if log is not None:
                 server_log = Path(d) / "server.log"

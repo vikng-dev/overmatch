@@ -20,9 +20,10 @@ machine, so cross-process intervals are differences of `us`. Per explanation a c
   wire    server impact (the kf/cf row of its outcome) -> arrival (xrx)
   hold    of which: server impact -> send (the record finishing on the authority)
   draw    arrival -> the client's own draw of the outcome (negative: drawn before it arrived)
-  open    server impact -> the cam able to open: arrival if presented on arrival, the draw (xdraw)
-          if presented later, the timeout's xpres row if timed out (expiry and that row run in one
-          pass, so only a timeout reads xpres; a draw lands between passes)
+  open    server impact -> the cam able to open: arrival if presented on arrival, the first draw
+          (xdraw) at or after the arrival if presented later, the timeout's xpres row if timed out
+          (expiry and that row run in one pass, so only a timeout reads xpres; a draw lands between
+          passes)
 
 Each curve is reported per weapon and role (`main/shooter`), and again per client trace
 (`main/shooter/a`), since a client's interpolation delay sets its `draw`.
@@ -30,11 +31,15 @@ Each curve is reported per weapon and role (`main/shooter`), and again per clien
 An explanation with no outcome (`o` null: the round reached this tank past its first crossing) has
 no impact any client draws; it is counted apart and never presented.
 
-The run is valid only if each client connected once and stayed connected while explanations were
-sent: a reconnect takes a new spawn lane, and the scripted aims assume the first ones. The analyzer
-exits non-zero, naming the reason, on more `link` ups than clients or any `link` down before the
-last xsend. A server trace without `link` rows predates them: `--server-log` then counts the
-server log's connects instead, and disconnects are reported unverified.
+The run is valid only if each client connected exactly once: a reconnect takes a new spawn lane,
+and the scripted aims assume the first ones. The analyzer exits non-zero, naming the reason, on a
+`link` up count other than one per client; that is the operative check. A `link` down before the
+last xsend is a second witness: a down despawns that client's tank, the other client's only
+target, so sends stop, and the predicate can fire only after a reconnect the count already caught.
+A permanent mid-run drop with no reconnect therefore passes as valid with a smaller sample; a
+client that crashes fails the runner (`set -e`). A server trace without `link` rows predates them:
+`--server-log` then counts the server log's connects instead, and disconnects are reported
+unverified.
 
 Usage:
     uv run scripts/shot/pencam_latency.py --server S.server.jsonl --client A.client.jsonl
@@ -44,6 +49,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import sys
@@ -148,11 +154,13 @@ def analyze(server_path: Path, client_paths: list[Path]) -> dict:
         _, crows = load(path)
         arrivals = [r for r in crows if r["k"] == "xrx"]
         released = {explanation(r): r for r in crows if r["k"] == "xpres"}
-        drawn_us: dict[tuple, int] = {}
+        # Every draw of one outcome, in order. The client remembers at most RETAINED drawn outcomes
+        # (src/damage_cam/delivery.rs), so a draw forgotten before its explanation arrived can be
+        # followed by a duplicate draw that presents it; only a draw at or after the arrival opens.
+        drawn_us: dict[tuple, list[int]] = defaultdict(list)
         for r in crows:
             if r["k"] == "xdraw":
-                key = (*shot(r), r["o"])
-                drawn_us[key] = min(drawn_us.get(key, r["us"]), r["us"])
+                bisect.insort(drawn_us[(*shot(r), r["o"])], r["us"])
         shooters = sorted({r["c"] for r in arrivals if r["aud"] == "shooter"})
         clients.append({"trace": str(path), "explanations": len(arrivals), "as_shooter": shooters})
         name = path.name.split(".")[0]
@@ -189,11 +197,13 @@ def analyze(server_path: Path, client_paths: list[Path]) -> dict:
                     add("hold", impact, send["us"])
             if send is not None:
                 add("transit", send["us"], r["us"])
-            draw = drawn_us.get((*shot(r), r["o"]))
-            if draw is None:
+            draws = drawn_us.get((*shot(r), r["o"]), [])
+            if not draws:
                 count("never_drawn")
             else:
-                add("draw", r["us"], draw)
+                add("draw", r["us"], draws[0])
+            after = bisect.bisect_left(draws, r["us"])
+            draw = draws[after] if after < len(draws) else None
             if r["pres"] == "presented":
                 count("presented_on_arrival")
                 opened = r["us"]

@@ -39,10 +39,10 @@ impact, or the arrival if drawn first), shooter and victim ranges, ms:
 | 120 / 30, seed 2 | 133–144 | 151–170 | 212 | 231–314 | 341–392 | 406 | 0 of 68 |
 
 The cam waits for the interpolation-delayed impact draw, so `open` follows each client's
-interpolation delay. At 120/30 that delay differs between the two clients by 110–140 ms; INFERRED,
-not measured: most likely one client's arrival estimator absorbed a post-stall batch, a harness
-artefact. The
-runs, the per-client split and what they leave unmeasured:
+interpolation delay. At 120/30 one client draws impacts 108–151 ms later than the other (DERIVED:
+the difference of the two clients' draw p50 in the same role, both roles, both seeds). INFERRED,
+not measured: most likely that client's arrival estimator absorbed a post-stall batch, a harness
+artefact. The runs, the per-client split and what they leave unmeasured:
 `.agents/scratch/damage-cam-2026-10-08/slice9-latency-2026-10-18.md`.
 
 ## `jitter_margin` 1.0 → 4.0 costs what it buys

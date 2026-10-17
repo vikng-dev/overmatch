@@ -8,8 +8,7 @@ is not here: it needs a visible window.
 
 - **No explanation timed out.** 284 stored across four runs, 0 `TimedOut`, 0 sent-but-lost.
   Slowest open 406 ms against `IMPACT_TIMEOUT_S` = 1000 ms.
-- **The explanation always beats the drawn impact.** 0 of 284 arrived already `Presented`. Each
-  one waited 7–288 ms for the client to draw its impact. The cam is gated by the impact draw, not
+- **0 of 284 arrived after its draw.** None arrived already `Presented`. Each one waited 7–288 ms for the client to draw its impact. The cam is gated by the impact draw, not
   by the explanation.
 - **Wire latency is the link and nothing else.** The authority sends the record 0.3 ms (p50)
   after it resolves the impact. Transit is the conditioned one-way latency plus under a frame.
@@ -34,8 +33,8 @@ is not here: it needs a visible window.
 - **Metrics.**
   - **wire** = server impact → `xrx`.
   - **draw** = `xrx` → own `xdraw`. Negative would mean the impact was drawn first.
-  - **open** = server impact → the cam able to open: `xrx` if presented on arrival, `xdraw` if
-    presented later, `xpres` only if timed out (expiry and that row run in one pass; a draw lands
+  - **open** = server impact → the cam able to open: `xrx` if presented on arrival, the first
+    `xdraw` at or after the arrival if presented later, `xpres` only if timed out (expiry and that row run in one pass; a draw lands
     between passes).
   - Ticks = ms / 15.625 (DERIVED, 64 Hz).
 - **Workload.**
@@ -50,10 +49,13 @@ is not here: it needs a visible window.
 - **Launch rules.** Every process ran with `OVERMATCH_MUTE=1`. The clients ran under
   `SPIKE_SIM_WINDOWED=1` without `SPIKE_SIM_VISIBLE`: hidden window, macOS activation revoked
   (`net/client.rs` ~264). `OVERMATCH_CAPTURE` itself is ignored in scripted mode.
-- **Validity.** Each client must connect once and stay connected while explanations are sent:
-  a reconnect takes a new spawn lane, and the aims assume the first ones. The analyzer exits
-  non-zero with a named reason on more connects than clients or a disconnect before the last
-  `xsend`, and the runner returns that exit. These four runs predate the `link` rows; their
+- **Validity.** Each client must connect exactly once: a reconnect takes a new spawn lane, and
+  the aims assume the first ones. The analyzer exits non-zero with a named reason on a connect
+  count other than one per client, and the runner returns that exit. A disconnect before the last
+  `xsend` is a second witness only: a disconnect despawns that client's tank, the other's only
+  target, so sends stop, and it can precede a send only after a reconnect the count already
+  caught. A permanent mid-run drop with no reconnect therefore passes as valid with a smaller
+  sample; a crashed client fails the runner (`set -e`). These four runs predate the `link` rows; their
   re-analysis counted the server log's connects instead (2 per run, MEASURED). Disconnects in
   them are unverified by the tool.
 
@@ -107,7 +109,9 @@ Split by client, the role difference disappears and a client difference remains:
 | seed 2 | b | shooter | 29 | 231 (14.8) | 382 (24.4) / 393 (25.2) |
 | seed 2 | b | victim | 5 | 234 (15.0) | 378 (24.2) / 391 (25.0) |
 
-On the same link, client b draws impacts 110–140 ms later than client a, in both seeds.
+On the same link, client b draws impacts later than client a in both seeds: DERIVED, client b's
+draw p50 minus client a's in the same role, 108 ms (shooter) and 139 ms (victim) at seed 1, 151 ms
+and 141 ms at seed 2.
 
 The trace shows the mechanism. A client presents the shell when its interpolation cursor reaches
 the fire tick. When the fire fact arrives, client a's cursor is ~2–4 ticks behind that tick and

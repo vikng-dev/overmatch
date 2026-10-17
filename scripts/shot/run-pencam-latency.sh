@@ -77,9 +77,9 @@ client() {
 # Lane assignment is connect-order: the first client to CONNECT takes lane 0, and each aim assumes
 # its lane. The second client starts only once the server logged the first connection. A cold
 # Metal shader cache (the first run after a rebuild) can stall a client past keepalive and burn a
-# lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (more
-# connects than clients, or a disconnect before the last send) and exits non-zero, which this
-# script, its last command, returns; a rerun is warm.
+# lane on reconnect. The analyzer refuses such a run from the server trace's `link` rows (a
+# connect count other than one per client) and exits non-zero, which this script, its last
+# command, returns; a rerun is warm.
 # DERIVED: the first client runs 128 ticks longer so it outlives the later-started second; their
 # primaries are 128 ticks (half an interval) apart so the two main guns do not fire together.
 client a "8,1.2,2.2" 320 "$((TICKS + 128))" &
