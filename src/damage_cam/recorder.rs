@@ -214,7 +214,7 @@ impl MarchRecorder<'_, '_> {
         for (index, mark) in marks.iter().enumerate().skip(marks_from) {
             let mut touched: Vec<Entity> = match mark {
                 ArmourMark::Bounce { struck, .. } => owner(*struck).into_iter().collect(),
-                ArmourMark::Crossing { volumes, .. } => volumes
+                ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => volumes
                     .iter()
                     .filter_map(|crossed| owner(crossed.volume))
                     .collect(),
@@ -548,13 +548,23 @@ fn sanctioned_outcome(marks: &[ArmourMark], from: usize) -> Option<u32> {
     let before = marks.get(..from)?;
     if !before
         .iter()
-        .all(|mark| matches!(mark, ArmourMark::Bounce { .. }))
+        .all(|mark| matches!(mark, ArmourMark::Bounce { .. } | ArmourMark::Wound { .. }))
     {
         return None;
     }
-    match marks.get(from)? {
-        ArmourMark::Bounce { .. } | ArmourMark::Crossing { .. } => u32::try_from(from).ok(),
-        ArmourMark::Failed => None,
+    // A wound mark is no outcome the authority sends: the ordinal counts bounces, and the outcome
+    // drawn is the encounter's first hard mark.
+    let ordinal = before
+        .iter()
+        .filter(|mark| matches!(mark, ArmourMark::Bounce { .. }))
+        .count();
+    match marks
+        .get(from..)?
+        .iter()
+        .find(|mark| !matches!(mark, ArmourMark::Wound { .. }))?
+    {
+        ArmourMark::Bounce { .. } | ArmourMark::Crossing { .. } => u32::try_from(ordinal).ok(),
+        ArmourMark::Failed | ArmourMark::Wound { .. } => None,
     }
 }
 

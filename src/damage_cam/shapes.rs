@@ -430,7 +430,7 @@ mod tests {
             substance: Some(PrimitiveSubstance {
                 name: "fixture".to_owned(),
                 id: crate::substances::SubstanceId::fixture(1.0),
-                factor: 1.0,
+                matter: crate::substances::Matter::Hard { factor: 1.0 },
             }),
             certificate: None,
         });

@@ -13,7 +13,15 @@
 //! means it is ordinary art. Membership and resistance therefore come from one lookup and cannot
 //! disagree.
 //!
-//! # What an entry states
+//! # Two kinds of substance
+//!
+//! A [`Substance`] is [`Substance::Hard`] or [`Substance::Witness`], and the kind decides which law
+//! a volume of it answers to (ADR-0039). Hard matter is a layer of the §13 walk: it resists the
+//! shell, is charged the shell's spend and shadows the spall field. A witness has no resistance —
+//! not a zero one, none — so nothing can hand it to the walk; it is wounded by what the hard world
+//! sent through it (`ballistics::wound`). Crew are the witnesses.
+//!
+//! # What a hard entry states
 //!
 //! - [`MaterialFacts`]: density, flow strength, Young's modulus and Poisson's ratio, for a substance
 //!   that is a structural metal with a sourced row. `None` where no fact is known — never a guess.
@@ -132,18 +140,27 @@ impl SubstanceId {
     }
 }
 
-/// One substance's entry.
+/// One substance's entry: matter the walk resists with, or a witness the walk never sees.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Substance {
+pub enum Substance {
+    /// A layer of the walk.
+    Hard(HardSubstance),
+    /// Wounded by what passes through it. No resistance, no facts, no livery.
+    Witness,
+}
+
+/// A hard substance's entry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HardSubstance {
     pub resistance: Resistance,
-    /// Whether the runtime livery composes onto this substance — exterior steels yes,
-    /// interior/organic substances no. View-layer data; the walk never reads it.
+    /// Whether the runtime livery composes onto this substance — exterior steels yes, interior
+    /// substances no. View-layer data; the walk never reads it.
     pub paintable: bool,
     /// The substance's material facts, or `None` where none are sourced.
     pub facts: Option<MaterialFacts>,
 }
 
-impl Substance {
+impl HardSubstance {
     /// Reference-mm per metre of chord: [`REFERENCE_FACTOR`] for the reference, the declared value
     /// otherwise.
     pub fn factor(&self) -> f32 {
@@ -154,15 +171,49 @@ impl Substance {
     }
 }
 
-/// One entry as authored: every number with its provenance ([`crate::provenance`]). `paintable` is
-/// a livery flag, not a number, and carries none; the reference's resistance is the unit's
-/// definition and carries none either.
+impl Substance {
+    /// The hard entry, or `None` for a witness.
+    pub fn hard(&self) -> Option<&HardSubstance> {
+        match self {
+            Self::Hard(hard) => Some(hard),
+            Self::Witness => None,
+        }
+    }
+
+    /// The kind as a ballistic primitive carries it.
+    pub fn matter(&self) -> Matter {
+        match self {
+            Self::Hard(hard) => Matter::Hard {
+                factor: hard.factor(),
+            },
+            Self::Witness => Matter::Witness,
+        }
+    }
+}
+
+/// A substance's kind as a ballistic primitive carries it, resolved once at the bake: the factor
+/// the walk reads for hard matter, nothing for a witness.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Matter {
+    /// The §13.2 field value: reference-mm per metre of chord.
+    Hard {
+        factor: f32,
+    },
+    Witness,
+}
+
+/// One entry as authored: `Hard(..)` with every number carrying its provenance
+/// ([`crate::provenance`]), or a bare `Witness`. `paintable` is a livery flag, not a number, and
+/// carries none; the reference's resistance is the unit's definition and carries none either.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SubstanceFile {
-    resistance: ResistanceFile,
-    paintable: bool,
-    facts: Option<FactsFile>,
+enum SubstanceFile {
+    Hard {
+        resistance: ResistanceFile,
+        paintable: bool,
+        facts: Option<FactsFile>,
+    },
+    Witness,
 }
 
 #[derive(Deserialize)]
@@ -182,18 +233,25 @@ struct FactsFile {
 
 impl From<SubstanceFile> for Substance {
     fn from(file: SubstanceFile) -> Self {
-        Self {
-            resistance: match file.resistance {
-                ResistanceFile::Reference => Resistance::Reference,
-                ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
-            },
-            paintable: file.paintable,
-            facts: file.facts.map(|facts| MaterialFacts {
-                density: facts.density.0,
-                flow_strength: facts.flow_strength.0,
-                youngs_modulus: facts.youngs_modulus.0,
-                poisson_ratio: facts.poisson_ratio.0,
+        match file {
+            SubstanceFile::Hard {
+                resistance,
+                paintable,
+                facts,
+            } => Self::Hard(HardSubstance {
+                resistance: match resistance {
+                    ResistanceFile::Reference => Resistance::Reference,
+                    ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
+                },
+                paintable,
+                facts: facts.map(|facts| MaterialFacts {
+                    density: facts.density.0,
+                    flow_strength: facts.flow_strength.0,
+                    youngs_modulus: facts.youngs_modulus.0,
+                    poisson_ratio: facts.poisson_ratio.0,
+                }),
             }),
+            SubstanceFile::Witness => Self::Witness,
         }
     }
 }
@@ -260,8 +318,15 @@ impl<'de> Deserialize<'de> for SubstanceMap {
     }
 }
 
-/// One entry's own validity, with `-0.0` canonicalized.
+/// One entry's own validity, with `-0.0` canonicalized. A witness states nothing to check.
 fn checked(name: &str, substance: Substance) -> Result<Substance, String> {
+    match substance {
+        Substance::Hard(hard) => checked_hard(name, hard).map(Substance::Hard),
+        Substance::Witness => Ok(Substance::Witness),
+    }
+}
+
+fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, String> {
     if let Some(facts) = &substance.facts {
         facts.validate().map_err(|reason| {
             format!("substance {name:?} has unusable material facts: {reason}")
@@ -297,7 +362,7 @@ fn checked(name: &str, substance: Substance) -> Result<Substance, String> {
             Resistance::Effective(if factor == 0.0 { 0.0 } else { factor })
         }
     };
-    Ok(Substance {
+    Ok(HardSubstance {
         resistance,
         ..substance
     })
@@ -315,6 +380,8 @@ pub enum SubstanceError {
     /// full vocabulary, because the usual cause is a Blender-side rename and the fix is to read off
     /// which spelling the file actually has.
     Unknown { name: String, known: Vec<String> },
+    /// A hard-world lookup named a witness, which carries no resistance to read.
+    Witness { name: String },
 }
 
 impl std::fmt::Display for SubstanceError {
@@ -329,6 +396,11 @@ impl std::fmt::Display for SubstanceError {
                  name; either the .blend link drifted or the entry was never authored.",
                 known.join(", ")
             ),
+            Self::Witness { name } => write!(
+                f,
+                "substance {name:?} is a witness: it states no resistance and is never a layer of \
+                 the walk"
+            ),
         }
     }
 }
@@ -341,7 +413,11 @@ impl SubstanceRegistry {
         let substances = file.substances.0;
         let references: Vec<&String> = substances
             .iter()
-            .filter(|(_, substance)| substance.resistance == Resistance::Reference)
+            .filter(|(_, substance)| {
+                substance
+                    .hard()
+                    .is_some_and(|hard| hard.resistance == Resistance::Reference)
+            })
             .map(|(name, _)| name)
             .collect();
         let reference = match references.as_slice() {
@@ -400,6 +476,16 @@ impl SubstanceRegistry {
         })
     }
 
+    /// The hard substance named `name` — hard error on an unknown name or a witness.
+    pub fn hard(&self, name: &str) -> Result<HardSubstance, SubstanceError> {
+        self.get(name)?
+            .hard()
+            .copied()
+            .ok_or_else(|| SubstanceError::Witness {
+                name: name.to_string(),
+            })
+    }
+
     /// The identity of the substance named `name` in this registry — hard error on an unknown name.
     pub fn id(&self, name: &str) -> Result<SubstanceId, SubstanceError> {
         self.get(name)?;
@@ -414,8 +500,9 @@ impl SubstanceRegistry {
     /// The reference steel's material facts — the force law's reference constants.
     pub fn reference_facts(&self) -> MaterialFacts {
         self.substances[&self.reference]
-            .facts
-            .expect("the reference states its facts, checked at parse")
+            .hard()
+            .and_then(|reference| reference.facts)
+            .expect("the reference is hard and states its facts, checked at parse")
     }
 }
 
@@ -436,11 +523,14 @@ mod tests {
         "Flesh",
     ];
 
+    /// The expected entries that are witnesses; every other is hard.
+    const WITNESSES: [&str; 1] = ["Flesh"];
+
     /// A minimal valid registry around one extra entry, for the refusal tests.
     fn with(extra: &str) -> String {
         format!(
             r#"(substances: {{
-                "Ref": (resistance: Reference, paintable: true, facts: Some((
+                "Ref": Hard(resistance: Reference, paintable: true, facts: Some((
                         density: (7850.0, Tuned("fixture")),
                         flow_strength: (1.0e9, Tuned("fixture")),
                         youngs_modulus: (205.0e9, Tuned("fixture")),
@@ -463,11 +553,42 @@ mod tests {
             let substance = registry
                 .get(name)
                 .unwrap_or_else(|err| panic!("{name} must be in the registry: {err}"));
-            assert!(
-                substance.factor() > 0.0,
-                "{name} must resist something (factor > 0)"
-            );
+            match substance {
+                Substance::Hard(hard) => assert!(
+                    hard.factor() > 0.0,
+                    "{name} must resist something (factor > 0)"
+                ),
+                Substance::Witness => assert!(
+                    WITNESSES.contains(&name),
+                    "{name} is a witness the library does not expect"
+                ),
+            }
         }
+        for name in WITNESSES {
+            assert_eq!(registry.get(name).unwrap(), Substance::Witness, "{name}");
+        }
+    }
+
+    /// A witness is a bare `Witness`: it states no resistance, so a resistance on one does not parse,
+    /// and it can be neither the reference nor counted as one.
+    #[test]
+    fn a_witness_carries_no_resistance() {
+        let registry = SubstanceRegistry::from_ron(&with(r#""Crew": Witness,"#))
+            .expect("a bare witness parses");
+        assert_eq!(registry.get("Crew").unwrap(), Substance::Witness);
+        assert_eq!(registry.get("Crew").unwrap().matter(), Matter::Witness);
+        assert!(registry.get("Crew").unwrap().hard().is_none());
+        for refused in [
+            r#""Crew": Witness(resistance: Effective((10.0, Tuned("fixture")))),"#,
+            r#""Crew": Witness(paintable: false),"#,
+        ] {
+            let err = SubstanceRegistry::from_ron(&with(refused))
+                .expect_err("a witness stating a field must not parse");
+            assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+        }
+        let only = SubstanceRegistry::from_ron(r#"(substances: { "Crew": Witness })"#)
+            .expect_err("a witness is no reference");
+        assert!(matches!(only, SubstanceError::Reference(_)), "{only}");
     }
 
     /// The reference is the steel the reference-mm is a millimetre of, and its facts are the ones
@@ -476,7 +597,7 @@ mod tests {
     #[test]
     fn the_shipped_reference_is_rha_at_the_thousand_reference_mm_identity() {
         let registry = SubstanceRegistry::shipped();
-        let rha = registry.get("RHA").unwrap();
+        let rha = *registry.get("RHA").unwrap().hard().unwrap();
         assert_eq!(rha.resistance, Resistance::Reference);
         assert_eq!(rha.factor(), REFERENCE_FACTOR);
         assert_eq!(
@@ -509,7 +630,7 @@ mod tests {
     #[test]
     fn an_unknown_field_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Steel": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None, hardness: 3.0),"#,
+            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None, hardness: 3.0),"#,
         ))
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
@@ -519,9 +640,9 @@ mod tests {
     #[test]
     fn a_number_without_provenance_fails_the_parse() {
         let bare_factor =
-            with(r#""Cast": (resistance: Effective(900.0), paintable: true, facts: None),"#);
+            with(r#""Cast": Hard(resistance: Effective(900.0), paintable: true, facts: None),"#);
         let bare_fact = with(
-            r#""Mild": (resistance: Effective((800.0, Tuned("fixture"))), paintable: true,
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), paintable: true,
                 facts: Some((density: 7900.0, flow_strength: (0.4e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")), poisson_ratio: (0.29, Tuned("fixture"))))),"#,
         );
@@ -537,8 +658,8 @@ mod tests {
     #[test]
     fn a_duplicated_substance_name_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Cast": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None),
-               "Cast": (resistance: Effective((10.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None),
+               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect_err("a duplicate key must not silently overwrite");
         assert!(err.to_string().contains("Cast"), "{err}");
@@ -549,7 +670,7 @@ mod tests {
     #[test]
     fn a_negative_factor_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Rubber": (resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
@@ -561,7 +682,7 @@ mod tests {
     fn a_non_finite_factor_fails_the_parse() {
         for literal in ["NaN", "inf", "-inf"] {
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Flesh": (resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, facts: None),"#
+                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, facts: None),"#
             )))
             .unwrap_err();
             assert!(
@@ -577,11 +698,17 @@ mod tests {
     #[test]
     fn negative_zero_is_canonicalized() {
         let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": (resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, facts: None),"#,
         ))
         .expect("zero resistance is legal, it is just nothing");
         assert_eq!(
-            registry.get("Void").unwrap().factor().to_bits(),
+            registry
+                .get("Void")
+                .unwrap()
+                .hard()
+                .unwrap()
+                .factor()
+                .to_bits(),
             0.0f32.to_bits()
         );
     }
@@ -614,7 +741,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Odd": (resistance: Effective((500.0, Tuned("fixture"))), paintable: true, facts: Some(({facts}))),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: true, facts: Some(({facts}))),"#
             )))
             .expect_err("facts out of domain must not parse");
             assert!(
@@ -629,19 +756,19 @@ mod tests {
     #[test]
     fn the_reference_is_exactly_one_entry_with_facts() {
         let factless = SubstanceRegistry::from_ron(
-            r#"(substances: { "Ref": (resistance: Reference, paintable: true, facts: None) })"#,
+            r#"(substances: { "Ref": Hard(resistance: Reference, paintable: true, facts: None) })"#,
         )
         .expect_err("a reference without facts must not parse");
         assert!(factless.to_string().contains("Ref"), "{factless}");
 
         let none = SubstanceRegistry::from_ron(
-            r#"(substances: { "Cast": (resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None) })"#,
+            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None) })"#,
         )
         .expect_err("a registry without a reference must not load");
         assert!(matches!(none, SubstanceError::Reference(_)), "{none}");
 
         let two = SubstanceRegistry::from_ron(&with(
-            r#""Other": (resistance: Reference, paintable: true, facts: Some((
+            r#""Other": Hard(resistance: Reference, paintable: true, facts: Some((
                 density: (7800.0, Tuned("fixture")),
                 flow_strength: (1.18e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")),

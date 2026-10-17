@@ -150,7 +150,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 33 (the pen cam's explanation): `ShotExplanation` rides a new recipient-private
 /// [`ShotExplanationChannel`] to the shooter and the struck tank's player, and `CombatantLife`
 /// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
-/// the one its tank is living. Surface, own-type graph and REV move.
+/// the one its tank is living. Surface, own-type graph and REV move. REV 33 has not shipped, so
+/// the round's `wound` rate (ADR-0039) joins `FireEvent` under it, the REV-19 precedent: a
+/// replica builds the round the authority fired from the event alone. Own-type graph moves.
 pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -304,6 +306,8 @@ pub struct FireEvent {
     pub caliber: f32,
     pub mass: f32,
     pub nose_factor: f32,
+    /// Reference-mm of dose per metre of chord through a witness (ADR-0039).
+    pub wound: f32,
     pub mechanism: crate::spec::FireMechanism,
     /// Authoritative tracer selection.
     pub tracer: bool,
@@ -891,7 +895,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xa0e3_ba93_4a49_58a4;
+const WIRE_TYPES_HASH: u64 = 0xdf25_b45a_5739_dca3;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1354,9 +1358,9 @@ mod tests {
             WIRE_DEP_LIGHTYEAR,
             PROTOCOL_REV,
         );
-        // Pins REV 33: the pen cam's `ShotExplanation` and the replicated `CombatantLife`, on the
-        // lightyear 0.30.1 wire dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xa75f_7de0_8dc6_0d59;
+        // Pins REV 33: the pen cam's `ShotExplanation`, the replicated `CombatantLife` and the
+        // round's `wound` rate on `FireEvent`, on the lightyear 0.30.1 wire dependency.
+        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xecff_3bbc_f30b_91c9;
         assert_eq!(
             wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
             "wire manifest changed: re-pin to {wire_manifest:#018x}",

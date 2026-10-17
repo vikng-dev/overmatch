@@ -49,8 +49,8 @@ use bevy::prelude::*;
 
 use super::resolve::{self, Decision, Flight, ResolveContext};
 use super::walk::{self, DiscFrame, DiscWalk, FaceHit, RayCorridor, Span, VolumeTable, WalkError};
-use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for};
-use crate::damage::{Ammo, CrewStation, hit_ancestor};
+use super::{Ahead, ProjectileMarchWorld, RoundBody, capability, next_surface, speed_for, wound};
+use crate::damage::{Ammo, CrewStation};
 use crate::substances::SubstanceId;
 use crate::tank::{TankSimSource, spawn_headless_tank};
 
@@ -634,6 +634,9 @@ fn prefix_cost(spans: &[Span], t: f64) -> f64 {
 pub(super) struct Drive {
     /// Every crossing decided, in order.
     pub decisions: Vec<Decision>,
+    /// Every witness (ADR-0039) the round's line put a positive chord into, in flight order (with
+    /// repeats): the witness pass over the decisions' legs and the open flight after the last.
+    pub wounded: Vec<Entity>,
 }
 
 impl Drive {
@@ -650,8 +653,9 @@ impl Drive {
     }
 
     /// THE ADMISSION RULE: some crossing put a positive chord into `target` before the round
-    /// stopped. Deposits are clipped at the embed progress, so a round that dies short of the target
-    /// never reaches it, however close.
+    /// stopped, or for a witness the line did. Deposits are clipped at the embed progress and a leg
+    /// ends at the rest point, so a round that dies short of the target never reaches it, however
+    /// close.
     ///
     /// TRANSIT DEPOSITS ONLY. The runtime also removes HP through a bounce's shock and through spall
     /// fragments (`resolve::apply`); neither puts the round's own chord into the volume, and neither
@@ -660,17 +664,21 @@ impl Drive {
         self.entered().any(|entity| entity == target)
     }
 
-    /// Every volume a crossing put a positive chord into, in decision order (with repeats).
+    /// Every volume a crossing put a positive chord into, in decision order (with repeats), then
+    /// every witness the line did.
     pub(super) fn entered(&self) -> impl Iterator<Item = Entity> + '_ {
-        self.decisions.iter().flat_map(|decision| match decision {
-            Decision::Bite(bite) => bite
-                .deposits
-                .iter()
-                .filter(|deposit| deposit.line_chord().is_some_and(|chord| chord > 0.0))
-                .map(|deposit| deposit.address)
-                .collect::<Vec<_>>(),
-            _ => Vec::new(),
-        })
+        self.decisions
+            .iter()
+            .flat_map(|decision| match decision {
+                Decision::Bite(bite) => bite
+                    .deposits
+                    .iter()
+                    .filter(|deposit| deposit.line_chord().is_some_and(|chord| chord > 0.0))
+                    .map(|deposit| deposit.address)
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .chain(self.wounded.iter().copied())
     }
 }
 
@@ -725,6 +733,18 @@ pub(super) fn drive(
     let radius = resolve::disc_radius(body.caliber);
     let mut budget = resolve::Budget::new(length);
     let mut out = Drive::default();
+    // The witness pass over `legs`: chord only, so the wound rate is a unit.
+    let wounded = |legs: &[resolve::Leg], flight: &Flight, out: &mut Drive| {
+        let (crossed, _) =
+            wound::line(context, &|_| true, legs, 1.0).map_err(|error| fail(error, flight))?;
+        out.wounded.extend(
+            crossed
+                .iter()
+                .filter(|crossed| crossed.chord > 0.0)
+                .map(|crossed| crossed.volume),
+        );
+        Ok::<(), DriveFailure>(())
+    };
     loop {
         flight
             .settle(context, &|_| true, radius)
@@ -732,26 +752,38 @@ pub(super) fn drive(
         if !budget.continues(&flight) {
             break;
         }
-        let contact =
-            match next_surface(context.world, &flight, radius, budget.remaining(), &|_| {
-                true
-            }) {
-                Ahead::Open | Ahead::Terrain { .. } => break,
-                Ahead::Held => 0.0,
-                Ahead::Armor(hit) => {
-                    if hit_ancestor(hit.entity, &context.world.volumes, &context.world.parents)
-                        .is_none()
-                    {
-                        break;
-                    }
-                    hit.distance
+        let ahead = next_surface(context.world, &flight, radius, budget.remaining(), &|_| {
+            true
+        });
+        let contact = match ahead {
+            Ahead::Open | Ahead::Terrain { .. } => {
+                let length = match ahead {
+                    Ahead::Terrain { distance, .. } => distance,
+                    _ => budget.remaining(),
+                };
+                let leg = resolve::Leg::new(
+                    flight.sweep_origin(),
+                    flight.direction,
+                    length,
+                    &flight.sample_offsets(radius),
+                );
+                wounded(&[leg], &flight, &mut out)?;
+                break;
+            }
+            Ahead::Held => 0.0,
+            Ahead::Armor(hit) => {
+                if context.world.armour(hit.entity).is_none() {
+                    break;
                 }
-            };
+                hit.distance
+            }
+        };
         let decision = resolve::decide(context, &|_| true, &round, &flight, contact)
             .map_err(|error| fail(error, &flight))?;
         budget
             .charge(decision.charged())
             .map_err(|error| fail(error, &flight))?;
+        wounded(decision.legs(), &flight, &mut out)?;
         out.decisions.push(decision.clone());
         if flight.follow(decision) {
             break;
@@ -1019,7 +1051,7 @@ fn tank_bounds(
     world.spatial.aabb_intersections_with_aabb_callback(
         ColliderAabb::from_min_max(Vec3::splat(-1.0e5), Vec3::splat(1.0e5)),
         |entity| {
-            if hit_ancestor(entity, &world.volumes, &world.parents).is_none() {
+            if world.armour(entity).is_none() {
                 return true;
             }
             let Ok(aabb) = aabbs.get(entity) else {
@@ -1159,6 +1191,26 @@ fn run_fuzz(
             }
         };
         let axis = &walked.walks[0];
+        // The straight axis's witnesses, read by the witness pass: never part of the hard walk.
+        let witnessed = match Dir3::new(ray.direction).map_or(Ok(Vec::new()), |dir| {
+            wound::entries(&pass.context, &|_| true, ray.origin, dir, ray.length)
+        }) {
+            Ok(witnessed) => witnessed,
+            Err(error) => {
+                record_failure(
+                    pass.drive_failure(
+                        index,
+                        DriveFailure {
+                            error,
+                            origin: ray.origin,
+                            direction: ray.direction,
+                        },
+                    ),
+                    &mut report,
+                );
+                Vec::new()
+            }
+        };
         let crossed = axis.presence.iter().any(|presence| presence.chord > 0.0);
         if crossed {
             report.rays_crossing += 1;
@@ -1167,7 +1219,7 @@ fn run_fuzz(
         if crossed && config.duplication_stride > 0 && index % config.duplication_stride == 0 {
             pass.duplication_gate(index, &ray, &mut report);
         }
-        survey_reach(axis, &pass, &mut report);
+        survey_reach(axis, &witnessed, &pass, &mut report);
         // ADMISSION: the floor probe, flown through the runtime's own mechanism along this line.
         match drive(
             &pass.context,
@@ -1181,6 +1233,7 @@ fn run_fuzz(
                 index,
                 &ray,
                 axis,
+                &witnessed,
                 &flown,
                 &pass,
                 &config,
@@ -1234,8 +1287,28 @@ fn check_ray_invariants(index: u64, crossed: bool, axis: &walk::RayWalk, report:
 }
 
 /// The straight axis's survey: the census of volumes it crossed and the cheapest straight-line cost
-/// to each crew/ammo volume. Reported, never admitting.
-fn survey_reach(axis: &walk::RayWalk, pass: &Pass<'_, '_, '_>, report: &mut Report) {
+/// to each crew/ammo volume, the witnesses it entered (`(witness, t)`) included. Reported, never
+/// admitting.
+fn survey_reach(
+    axis: &walk::RayWalk,
+    witnessed: &[(Entity, f64)],
+    pass: &Pass<'_, '_, '_>,
+    report: &mut Report,
+) {
+    for &(witness, t) in witnessed {
+        *report
+            .presence_census
+            .entry(pass.volume_name(witness))
+            .or_default() += 1;
+        if let Some(target) = pass.targets.get(&witness) {
+            let cost = prefix_cost(&axis.spans, t) as f32;
+            let thinnest = report
+                .min_reach
+                .entry(target.name.clone())
+                .or_insert(f32::INFINITY);
+            *thinnest = thinnest.min(cost);
+        }
+    }
     for presence in &axis.presence {
         if presence.chord > 0.0 {
             *report
@@ -1258,14 +1331,21 @@ fn survey_reach(axis: &walk::RayWalk, pass: &Pass<'_, '_, '_>, report: &mut Repo
     }
 }
 
-/// The straight-axis cost to `target`, or infinity when the axis never crosses it.
-fn axis_cost(axis: &walk::RayWalk, target: Entity) -> f32 {
+/// The straight-axis cost to `target`, a witness entered at `t` of `witnessed` included, or
+/// infinity when the axis never crosses it.
+fn axis_cost(axis: &walk::RayWalk, witnessed: &[(Entity, f64)], target: Entity) -> f32 {
     axis.presence
         .iter()
         .find(|presence| presence.entity == target)
-        .and_then(|presence| presence.spans.first())
-        .map_or(f32::INFINITY, |(reach, _)| {
-            prefix_cost(&axis.spans, *reach) as f32
+        .and_then(|presence| presence.spans.first().map(|(reach, _)| *reach))
+        .or_else(|| {
+            witnessed
+                .iter()
+                .find(|(witness, _)| *witness == target)
+                .map(|(_, t)| *t)
+        })
+        .map_or(f32::INFINITY, |reach| {
+            prefix_cost(&axis.spans, reach) as f32
         })
 }
 
@@ -1279,6 +1359,7 @@ fn cluster_findings(
     index: u64,
     ray: &FuzzRay,
     axis: &walk::RayWalk,
+    witnessed: &[(Entity, f64)],
     flown: &Drive,
     pass: &Pass<'_, '_, '_>,
     config: &FuzzConfig,
@@ -1291,7 +1372,7 @@ fn cluster_findings(
         .collect();
     for entity in reached {
         let target = &pass.targets[&entity];
-        let cost = axis_cost(axis, entity);
+        let cost = axis_cost(axis, witnessed, entity);
         let Some(entry_local) = pass.pierce_local(ray) else {
             continue;
         };

@@ -2440,7 +2440,7 @@ mod tests {
                 substance: Some(crate::bake::PrimitiveSubstance {
                     name: "RHA".into(),
                     id: crate::substances::SubstanceId::fixture(1000.0),
-                    factor: 1000.0,
+                    matter: crate::substances::Matter::Hard { factor: 1000.0 },
                 }),
                 certificate: None,
             },

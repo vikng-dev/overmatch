@@ -283,6 +283,9 @@ fn steps_of(
                 }
             }),
             ArmourMark::Failed => Some(PathStep::Failed),
+            // A witness's wound is a dose, never a step of the path: the hard world's marks alone
+            // decide the verdict, and a dose reaches it as `Dosed` below.
+            ArmourMark::Wound { .. } => None,
         };
         // A crossing has a step for the tank only where one of its volumes is the tank's.
         if let Some(step) = step
@@ -387,7 +390,9 @@ fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
     let owned = |volume: Entity| owned_by(world, volume, tank);
     match mark {
         ArmourMark::Bounce { struck, .. } => owned(*struck),
-        ArmourMark::Crossing { volumes, .. } => volumes.iter().any(|crossed| owned(crossed.volume)),
+        ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => {
+            volumes.iter().any(|crossed| owned(crossed.volume))
+        }
         ArmourMark::Failed => true,
     }
 }
@@ -440,7 +445,12 @@ fn timeline(
     last_touch: usize,
 ) -> Option<Timeline> {
     let marks = log.marks;
-    let start = match struck.from.checked_sub(1).map(|before| &marks[before]) {
+    // A wound mark moves nothing, so the path starts at the hard mark before the encounter.
+    let before = marks[..struck.from]
+        .iter()
+        .rev()
+        .find(|mark| !matches!(mark, ArmourMark::Wound { .. }));
+    let start = match before {
         None => facts.launch,
         Some(ArmourMark::Bounce { position, .. }) => *position,
         Some(ArmourMark::Crossing {
@@ -454,6 +464,7 @@ fn timeline(
     let mut legs: Vec<(Vec3, f32, usize)> = Vec::new();
     let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
+        ArmourMark::Wound { speed, .. } => *speed,
         ArmourMark::Failed => return None,
     };
     legs.push((start, speed, first_touch));
@@ -505,6 +516,7 @@ fn timeline(
                 }
             }
             ArmourMark::Failed => return None,
+            ArmourMark::Wound { .. } => {}
         }
     }
     if flying
@@ -694,6 +706,14 @@ pub(crate) fn report_from(
                     });
                 }
             }
+            ArmourMark::Wound { volumes, .. } => {
+                // The witness law's dose as it stands: no hard-world scale applies to it.
+                for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
+                    let t = time_at(crossed.entry);
+                    line.push((crossed.volume, crossed.cost, t, index));
+                    entered.push((crossed.volume, t, crossed.entry, index));
+                }
+            }
             ArmourMark::Failed => {}
         }
     }
@@ -716,6 +736,18 @@ pub(crate) fn report_from(
         } => (
             mine(first).map_or(*entrance, |share| share.entry),
             *normal,
+            *incoming,
+        ),
+        // Met first by the line inside a witness: no face, so the line's own direction stands for
+        // the normal.
+        ArmourMark::Wound {
+            volumes, incoming, ..
+        } => (
+            volumes
+                .iter()
+                .find(|crossed| owned(crossed.volume))
+                .map(|crossed| crossed.entry)?,
+            -*incoming,
             *incoming,
         ),
         ArmourMark::Failed => return None,

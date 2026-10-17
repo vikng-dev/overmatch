@@ -26,12 +26,12 @@
     // N, the number of directions the cone is sampled by, in equal-solid-angle strata of weight
     // 1/N. The emitted total is S/2 at every N, so N changes how finely a box's dose is resolved,
     // never how much the cone carries.
-    directions: (256, Resolution("sampling of the cone; changes how finely a box's dose is
-        resolved, never the emitted total. 256 with the even profile and full shadowing (owner
-        decision 2026-10-17, playtest fork F6), pending the cost decision. One throw under this
-        law MEASURED 2026-10-17 by ballistics::pen_cam::spall_law_cost (release, macOS arm64, best
-        of 9, the 6 cones of the penetrating scenarios): 0.42 ms at N = 24, 0.71 at 64, 1.22 at
-        128, 2.50 at 256")),
+    directions: (64, Tuned("owner decision 2026-10-17 ('64 for now'), the cost against the
+        resolution: one throw under this law MEASURED 2026-10-17 by
+        ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 6 cones of the
+        penetrating scenarios): 0.42 ms at N = 24, 0.71 at 64, 1.22 at 128, 2.50 at 256; the dose
+        step is 0.8 HP per direction on the s1 cone at 64 (DERIVED). The count changes how finely
+        a box's dose is resolved, never the emitted total")),
 
     // How the strength is spread over the directions. `Flat`: S/2 along every direction.
     // `Linear`: S·(cos θ − cos α)/(1 − cos α), greatest on the axis, zero at the rim, the same
@@ -41,10 +41,11 @@
         Linear, the measured fall-off of fragment fluence off the debris axis
         (research/cloud-angle-deep.md), is kept as the dial")),
 
-    // How a direction passes through what it meets. `FirstSolid`: stopped by the first solid it
-    // enters, a box there taking its whole strength, armour none. `Partial`: spent by chord × factor
-    // through every solid, dosing each box it enters at its strength there.
+    // How a direction passes through the hard bodies it meets. `FirstSolid`: stopped by the first
+    // hard body it enters, a box there taking its whole strength, armour none. `Partial`: spent by
+    // chord × factor through every hard body, dosing each box it enters at its strength there.
+    // Under either, a crew witness is dosed and stops nothing (ADR-0039).
     passage: (FirstSolid, Tuned("owner decision 2026-10-17 (playtest fork F6): full shadowing, so
-        a box shields what lies behind it whatever its material; Partial, graded by material, is
-        kept as the dial")),
+        a hard box shields what lies behind it whatever its material; Partial, graded by material,
+        is kept as the dial")),
 )

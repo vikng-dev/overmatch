@@ -171,9 +171,9 @@ The *structure* is the design; the magnitudes (k, ricochet angle, normalization 
 factors) are **live knobs the sandbox exists to tune** — built as adjustable
 constants, not baked.
 
-## 5. Spall — the spall cone (the primary crew-killer)
+## 5. Spall — the spall cone
 
-Spall is a **field**: strength over directions from an origin, stopped by the material it meets,
+Spall is a **field**: strength over directions from an origin, stopped by the hard bodies it meets,
 dosing the boxes it reaches (glossary: *Field*, *Spall cone*). Adopted by the owner 2026-10-12;
 decision record `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-direction-2026-10-10.md`
 ("The dose model"), evidence in `research/cloud-falloff.md`, `research/cloud-angle-deep.md` and
@@ -181,7 +181,7 @@ decision record `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-d
 
 **Which steps throw.** A cone is thrown at every **body exit** the round reaches, sized by that
 exit's own spend and speeds, whatever the round does afterwards. A body is a maximal stretch of
-material along the path (welded voids inside it included) over which no layer resists less than
+hard material along the path (a witness, §6, is no material of the walk) (welded voids inside it included) over which no layer resists less than
 the one before it. It exits where the next medium resists less — a lower factor, or air — and the
 next body starts there. A step to an equal or higher factor continues the body without a throw,
 whatever the substances: plates of equal factor in contact are one plate and throw once at the far
@@ -202,8 +202,7 @@ debris competence of the exit material (owner, 2026-10-17): `f_rear` the resista
 body's last layer before the exit — its highest, since a body never steps down — and `f_ref` the
 reference factor (RHA, 1000). κ is exactly 1 for the reference, so a steel exit's `S` keeps its
 bits; every other material scales by its own data, and soft bodies fall to noise on their own
-(a crewman exit 1.51 → 0.015 reference-mm, DERIVED in
-`.agents/scratch/damage-cam-2026-10-08/research/debris-strength-law.md`). A barely-through round
+(`.agents/scratch/damage-cam-2026-10-08/research/debris-strength-law.md`). A barely-through round
 has a small energy ratio. Calibre has no role.
 
 **Profile.** Shipped: **even** — every direction of the cone carries the same strength, `S/2`
@@ -223,19 +222,21 @@ of its own), `d_exit`. ENGINEERING ASSUMPTION with MEASURED support (Verolme 199
 **Sampling.** `N` directions in equal-solid-angle strata, `μ_k = cos θ_k = 1 − (1 − cos α)(k + ½)/N`,
 golden-angle azimuth, each standing for `1/N` of the cone. The emitted total `(1/N) Σ s_k` is `S/2`
 at every `N` under either profile (the midpoint rule is exact on a profile linear in `cos θ`): `N`
-is resolution, never balance. Shipped `N` = 256, pending the cost decision (one throw MEASURED in
-`assets/ballistics/spall_cone.ron`'s provenance). The strata are generated with `libm` so their
+is resolution, never balance. Shipped `N` = 64 (owner, 2026-10-17), the throw's cost against its
+resolution (one throw MEASURED at each count in `assets/ballistics/spall_cone.ron`'s provenance). The strata are generated with `libm` so their
 bits match on every shipped target.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
 doses only the struck tank's boxes (hitting another tank is a preserved alternative). Shipped:
-**full shadowing** (owner, 2026-10-17) — a direction stops at the first solid it enters: armour
-takes nothing and stops it, a box takes its whole strength and stops it, so whatever lies first
-shields everything behind it, whatever its material. Kept as a data dial (F6, `passage: Partial`):
-a direction spent by `chord × factor` through every solid, stopping where that exhausts it or where
-it leaves the struck tank, dosing each box it enters at its strength there — graded shadowing (a
-plate nearly always stops it, an engine block mostly, a crew station barely). Under either, the
-`1/r²` fall-off is not a parameter: a box farther away covers fewer directions.
+**full shadowing** (owner, 2026-10-17) — a direction stops at the first hard body it enters: armour
+takes nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard
+body lies first shields everything behind it, whatever its material. Kept as a data dial (F6,
+`passage: Partial`): a direction spent by `chord × factor` through every hard body, stopping where
+that exhausts it or where it leaves the struck tank, dosing each box it enters at its strength
+there — graded shadowing (a plate nearly always stops it, an engine block mostly). Under either, a
+witness (§6) never stops or spends a direction: each one it enters short of where it stops is
+dosed at its strength there, so crew never shield crew. The `1/r²` fall-off is not a parameter: a
+box farther away covers fewer directions.
 
 **Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
 the whole ray through the struck tank, from outside every candidate's bounds through the throw
@@ -247,8 +248,8 @@ that material). Under full shadowing a direction that starts inside another volu
 at the throw point.
 
 **Dose.** A box's dose from one cone is `D_b = (1/N) Σ s_i` over the directions that dose it —
-under full shadowing those stopped in it, under the partial passage those entering it, at their
-strength there — each direction dosing a box once, in the count unit (reference-mm), never scaled
+under full shadowing those stopped in it, under the partial passage those entering it, and a
+witness every one entering it, at their strength there — each direction dosing a box once, in the count unit (reference-mm), never scaled
 by the box's own factor; armour (no count) takes nothing. Doses go through the addressed `Dose`
 effect, like the line's. A box's dose from the whole shot (the line, a bounce's shock and every
 cone) becomes whole HP points once, on its total (§6). Dose summed over boxes is not conserved
@@ -272,7 +273,9 @@ the first volume it enters, a box there taking its whole strength, armour nothin
 passage: a dose never falls as the strength rises through a plate; shadowing monotone along one
 direction through randomized stacks; a direction pays for the material it starts inside, a nested
 shield shadows, a box inside a traversed volume is dosed, a plate thinner than any nudge is
-charged. The linear profile is maximal on the axis and zero at and past the rim. The shipped cone's
+charged. The linear profile is maximal on the axis and zero at and past the rim. Witnesses: adding one never
+changes the shell's state, any direction's reach or any hard box's dose; a witness behind a witness
+is dosed as it would be alone. The shipped cone's
 walks, and six whole main-gun shots at the bound tank (exit detection, spends and speeds, strength,
 axis, walks, HP points), are digested on every target by `src/ballistics/field_casts.rs`; the force
 law's transcendentals are `libm`'s, so a shot's spall sources are the same bits everywhere.
@@ -287,8 +290,22 @@ minimum steel-equivalent thickness, then detonates after a delay.
 Every component has its own **HP pool** in whole **HP points** (e.g. crewman 30, engine 100),
 authored as integers in the tank data. One point is 0.1 reference-mm of dose
 (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance value). A spall
-cone doses it by the strength reaching it (§5); the **main penetrator transiting** a module
-deposits what it spent crossing it; a bounce jars the face it struck. A box's dose from **one shot**
+cone doses it by the strength reaching it (§5); the **main penetrator transiting** a hard module
+deposits what it spent crossing it; a bounce jars the face it struck.
+
+**Witnesses** (ADR-0039) are dosed by a law of their own. A witness substance has no resistance and
+is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
+resolved the shot, each witness box takes:
+
+- **the line:** `chord × wound`, `chord` the disc-mean chord the shell's legs cut through it (the
+  walk's own k-sample disc, §13.5, each sample that misses counting zero; a leg ends at the rest
+  point of a shell stopped inside it), `wound` the **round's** wound rate (reference-mm per metre,
+  `rounds.ron`, TUNED);
+- **the field:** each spall direction entering it, at its strength there × its share (§5).
+
+Both go through the same `ShotDose` tally, units and once-per-box rounding as a hard box's, and a
+mark's deposits all land before its one settle. Crew carry a witness substance and only crew do,
+refused at bake otherwise. A box's dose from **one shot**
 — the line, a bounce's shock and every cone, summed — is converted once, rounded to the nearest
 point (ties away from zero, IEEE `roundToIntegralTiesToAway`, no transcendental), never per
 direction and never per source; the pool stops at zero. HP falls as the shot is resolved, each
@@ -296,8 +313,9 @@ step taking what the rounded running total has gained, so it lands on the rounde
 shot ends. HP replicates as whole points.
 This is *local function state*, not a global health bar — the kill condition is still crew < 2.
 
-- **Crew are soft** (low HP) — the kill currency; a graze chips, a faceful of cone or a clean
-  transit kills. (HP, not binary, so fire-over-time and near-misses have somewhere to accumulate.)
+- **Crew are witnesses** (low HP) — the kill currency; a graze or a faceful of cone wounds, a clean
+  main-gun transit kills (10 cm of chord at 30 reference-mm/m is 30 HP, DERIVED). (HP, not binary,
+  so fire-over-time and near-misses have somewhere to accumulate.)
 - **Modules are tougher and repairable** — one stray fragment scratches an engine; a faceful or a
   direct transit wrecks it.
 - **Degraded performance (later):** checkpoints preferred (e.g. ≤50% HP → −x% power) over continuous
@@ -707,23 +725,25 @@ the invariants, not chosen by taxonomy:
 
 This is CSG union evaluated lazily on the 1D ray (Roth '82): overlapping *individually-manifold*
 plates behave exactly as their boolean union, without ever building the merged mesh. Boolean union
-is the special case of `max` over {absent, factor}; "steel beats flesh" is `1.0 ≫ 0.02`, a
-consequence rather than a rule.
+is the special case of `max` over {absent, factor}; "steel beats rubber" is `1000 ≫ 50`, a
+consequence rather than a rule. A witness (§6) contributes no factor: it is no part of the field.
 
-**Damage law:** every HP-bearing volume deposits transit damage **over its own presence chords, at
-its own factor** — no ownership, no priority, no argmax. "A shell hurts you in proportion to the
-material *of yours* it chewed." The error a component clipped into armor introduces is bounded by
-`overlap_depth × its_factor` (flesh: sub-noise), and is only reachable if the shell actually
-penetrated that deep — at which point it was hitting the component anyway. Two crew overlapping
-each other: both deposit, cost charged once, nothing needs to win.
+**Damage law:** every HP-bearing hard volume deposits transit damage **over its own presence
+chords, at its own factor** — no ownership, no priority, no argmax. "A shell hurts you in
+proportion to the material *of yours* it chewed." The error a component clipped into armor
+introduces is bounded by `overlap_depth × its_factor`, and is only reachable if the shell actually
+penetrated that deep — at which point it was hitting the component anyway. Two modules overlapping
+each other: both deposit, cost charged once, nothing needs to win. A witness is dosed over its own
+chord by its own law (§6), so two crew overlapping each other, or a crewman overlapping a wall,
+each take their whole chord and charge the shell nothing.
 
 **Spall law:** at every **body exit** — a step to a lower factor, or to air — a spall cone is thrown
 with that body's own spend and speeds (§5), and its directions march under these same field laws.
 Everything on the wishlist emerges with no class rules:
 
-- Crew barely spall — flesh spends almost nothing (§5's strength, unchanged in shape).
-- Crew pressed against an inner wall (steel→flesh contact, no air gap): the cone throws off the
-  steel backface **directly into the body** — the overlap *created* that transition, correctly.
+- Crew never spall: a witness is no body (§6), so it throws nothing.
+- Crew pressed against an inner wall: the steel backface is a body exit into air as far as the
+  field is concerned, and the cone it throws doses the crewman leaning on it (§6).
 - Buried steel faces (overlapped plates) are no exits — no seam spall, no seam VFX.
 - A small drop into other steel (RHA→cast) throws a cone the material behind absorbs in
   millimetres — self-correcting, no suppression rule needed.
@@ -734,8 +754,8 @@ Everything on the wishlist emerges with no class rules:
 Classless union breaks here: an exposed forearm is ~80mm "thick" → not overmatched → past 70° **an
 arm ricochets an 88**. Amendment: overmatch, ricochet eligibility, and normalization consult
 **steel-equivalent thickness** (`thickness × factor`) and gate on a **meaningful factor step** at
-the surface. Flesh at 80mm ≈ 1.6mm-equivalent → overmatched by everything, never deflects, never
-bends the path. Bonus: fixes the latent thick-soft-volume bug (fuel, stowage, rubber) that exists
+the surface. Rubber at 80mm ≈ 4mm-equivalent (DERIVED, factor 50) → overmatched by everything,
+never deflects, never bends the path. (A crewman is a witness, §6, and has no surface law at all.) Bonus: fixes the latent thick-soft-volume bug (fuel, stowage, rubber) that exists
 today independent of unions.
 
 ### 13.4 The walk (per sample ray) — welded runs
@@ -832,7 +852,8 @@ samples. Per event:
   uncovered samples contributing 0 — automatically `η × mean covered chord cost`, where
   **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.
   Damage stays per-presence, now per-sample: each HP entity deposits for the samples crossing *it*
-  — a shell clipping the corner of a crew volume wounds fractionally. Emergent.
+  — a shell clipping the corner of a module damages it fractionally, and a witness reads the same
+  disc (§6), so a graze of a crew volume wounds fractionally. Emergent.
 - **Exit:** area-mean exit point/normal. Each body exit is grouped over the samples that reach
   it; its spend is the mechanism's readout drop across that body, shared among the samples by the
   factor each was resisted by, so it is η-weighted by construction (§5).
@@ -888,7 +909,7 @@ Revisit only if seam-threading shots ever matter.
   shell cannot detect the seam. (This is also why a neighboring plate on the disc near a seam
   contributes nothing extra: including it would make seams *anti*-weakspots.)
 - **Locality:** field laws are local to the overlap; boundary laws local to the overlap's *edges*
-  (an overlap deletes transitions — buried faces — and creates them — steel→flesh contact).
+  (an overlap deletes transitions — buried faces — and creates them — steel→rubber contact).
 - **No fabricated events:** a ray crossing no material produces no armor events (what makes gaps
   *detectable* rather than event-noise).
 

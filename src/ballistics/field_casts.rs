@@ -67,7 +67,7 @@ use super::spall_cone::ConeShape;
 use super::*;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x0a2d_c734_39cc_b85b;
+const PINNED_TOTAL: u64 = 0xc79f_83a2_f580_21c1;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -270,6 +270,7 @@ fn layout(app: &mut App) -> (Layout, Record) {
         .run_system_once(
             |aabbs: Query<(Entity, &ColliderAabb)>,
              volumes: Query<&BallisticVolume>,
+             witnesses: Query<(), With<WitnessSurface>>,
              health: Query<&ComponentHealth>,
              names: Query<&Name>,
              parents: Query<&ChildOf>| {
@@ -278,7 +279,9 @@ fn layout(app: &mut App) -> (Layout, Record) {
                 // The query's own order is archetype order; sorting by name below makes the
                 // layout independent of it, and min/max is order-free.
                 for (entity, aabb) in &aabbs {
-                    if hit_ancestor(entity, &volumes, &parents).is_none() {
+                    if !witnesses.contains(entity)
+                        && hit_ancestor(entity, &volumes, &parents).is_none()
+                    {
                         continue;
                     }
                     lo = lo.min(aabb.min - PROBE_TANK_AT);
@@ -398,7 +401,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                 };
                 let parents = &world.parents;
                 let within = |collider: Entity| {
-                    hit_ancestor(collider, &world.volumes, parents).is_some_and(|(node, _)| {
+                    world.volume_of(collider).is_some_and(|node| {
                         world.owners.get(node).ok().map(VolumeOf::tank) == Some(tank)
                     })
                 };
@@ -516,7 +519,7 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     bits3(&mut input, local_origin);
     input.push(' ');
     bits3(&mut input, local_direction);
-    for value in [round.0, round.1, round.2, round.3] {
+    for value in [round.0, round.1, round.2, round.3, round.4] {
         input.push(' ');
         bits(&mut input, value);
     }

@@ -55,8 +55,7 @@ use super::walk::{
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
     ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
-    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_hit_impulse, hit_ancestor,
-    throw_spall_cone,
+    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_hit_impulse, throw_spall_cone,
 };
 
 #[cfg(test)]
@@ -261,7 +260,7 @@ pub(crate) fn layout(frame: &DiscFrame, radius: f32) -> Vec<Vec3> {
 /// `collect::sitting_reach`), so no face of a candidate lies within reach of either end and the
 /// probe's own origin is never read as sitting on one, and no face within reach of a start belongs
 /// to a candidate the probe set aside.
-const PROBE_MARGIN: f32 = MARCH_EPS;
+pub(super) const PROBE_MARGIN: f32 = MARCH_EPS;
 
 /// Ceiling on the volumes one containment probe reads — a chosen resource limit, not a derived
 /// bound.
@@ -602,7 +601,8 @@ pub(crate) fn field_presence(
 }
 
 /// March one direction of a field thrown from the world point `at` through the volumes `within`
-/// admits (the struck tank's), from its ordered presence ([`field_presence`]).
+/// admits (the struck tank's), from its ordered presence ([`field_presence`]): the hard world's
+/// spend and reach first, then the witnesses along it ([`super::wound::entries`]).
 ///
 /// `strength` (reference-mm) is constant in air and spent by `chord × factor` through each SPAN in
 /// order: a maximal run of consecutive layers over which the governing factor — the union-field
@@ -618,6 +618,14 @@ pub(crate) fn field_presence(
 /// Under [`Passage::FirstSolid`] the direction instead stops at the first volume it enters
 /// (`exited` ones aside, while it is still leaving them): a box there takes `strength × weight`,
 /// armour takes nothing, and nothing beyond is reached. The span law below is [`Passage::Partial`]'s.
+///
+/// Every volume above is hard: a witness (ADR-0039) is never a layer of the presence, so it neither
+/// spends, nor stops, nor shadows. Each witness `within` admits that the direction's line enters
+/// short of where it stopped — exhausted, or under `FirstSolid` at the first hard body; a direction
+/// that left the last hard body goes on — takes the strength arriving at its first presence times
+/// `weight`, once, by the same arithmetic as a hard box at the same point (a witness holding `at`
+/// is entered there). `end` and every hard dose are what they would be with no witness present.
+/// The doses are in entry order, a hard box before a witness entered at the same point.
 ///
 /// MONOTONICITY, exactly as it holds. The strength arriving at a point, and the point where it is
 /// exhausted, are computed from the spans before it and the point's own position alone: a presence
@@ -645,28 +653,109 @@ pub(crate) fn field_direction(
     weight: f32,
     passage: Passage,
 ) -> Result<FieldRay, WalkError> {
-    let Some((start, walked)) = field_presence(context, within, at, dir)? else {
-        return Ok(FieldRay {
-            end: at,
-            doses: Vec::new(),
-        });
+    let (end, mut doses, profile) = match field_presence(context, within, at, dir)? {
+        None => (at, Vec::new(), Profile::air(strength, 0.0)),
+        Some((start, walked)) => {
+            let layers: Vec<&walk::Layer> = walked
+                .layers
+                .iter()
+                .filter(|layer| layer.end > start)
+                .collect();
+            if passage == Passage::FirstSolid {
+                first_solid(&layers, start, at, dir, strength, weight, is_box, exited)
+            } else {
+                partial(&layers, start, at, dir, strength, weight, is_box, exited)
+            }
+        }
     };
-    let layers: Vec<&walk::Layer> = walked
-        .layers
-        .iter()
-        .filter(|layer| layer.end > start)
-        .collect();
-    if passage == Passage::FirstSolid {
-        return Ok(first_solid(
-            &layers, start, at, dir, strength, weight, is_box, exited,
-        ));
+    let reach = if profile.reach.is_finite() {
+        (profile.reach - profile.start) as f32
+    } else {
+        MAX_CORRIDOR
+    };
+    for (witness, t) in super::wound::entries(context, within, at, dir, reach)? {
+        let t = profile.start + t;
+        let arriving = profile.at(t);
+        if t < profile.reach && arriving > 0.0 && is_box(witness) {
+            doses.push((
+                t,
+                Dose {
+                    address: witness,
+                    amount: (arriving * weight as f64) as f32,
+                    source: DoseSource::Field,
+                },
+            ));
+        }
     }
+    doses.sort_by(|a, b| a.0.total_cmp(&b.0));
+    Ok(FieldRay {
+        end,
+        doses: doses.into_iter().map(|(_, dose)| dose).collect(),
+    })
+}
+
+/// One field direction's strength along its walk, which starts `start` behind its throw point:
+/// `strength` at the start, falling by `factor` per metre through each `(from, to, factor)` span
+/// in order and constant between them, exhausted at `reach` (infinite for a direction that left
+/// the last hard body unspent).
+struct Profile {
+    start: f64,
+    strength: f64,
+    spans: Vec<(f64, f64, f64)>,
+    reach: f64,
+}
+
+impl Profile {
+    /// A constant strength, never exhausted.
+    fn air(strength: f32, start: f64) -> Self {
+        Profile {
+            start,
+            strength: strength as f64,
+            spans: Vec::new(),
+            reach: f64::INFINITY,
+        }
+    }
+
+    /// The strength arriving at `t`, by the arithmetic the partial law doses a hard box with: the
+    /// span's strength less `factor` times the progress into it.
+    fn at(&self, t: f64) -> f64 {
+        let mut strength = self.strength;
+        for &(from, to, factor) in &self.spans {
+            if t <= from {
+                break;
+            }
+            if t < to {
+                return strength - (t - from) * factor;
+            }
+            strength -= (to - from) * factor;
+        }
+        strength
+    }
+}
+
+/// One direction under [`Passage::Partial`] ([`field_direction`]): its end, its hard doses with
+/// their entry points, and its [`Profile`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the direction's walk and its throw, as `field_direction` holds them"
+)]
+fn partial(
+    layers: &[&walk::Layer],
+    start: f64,
+    at: Vec3,
+    dir: Dir3,
+    strength: f32,
+    weight: f32,
+    is_box: &dyn Fn(Entity) -> bool,
+    exited: &[Entity],
+) -> (Vec3, Vec<(f64, Dose)>, Profile) {
+    let mut profile = Profile::air(strength, start);
     let factor_of =
         |layer: &walk::Layer| overlap_of(layer.present.iter().map(|p| p.material.factor));
     // Strength at the start of the current span.
     let mut strength = strength as f64;
     let mut end = start;
-    let mut doses: Vec<Dose> = Vec::new();
+    let mut doses: Vec<(f64, Dose)> = Vec::new();
     let mut previous: &[walk::Presence] = &[];
     let mut first = 0;
     while first < layers.len() {
@@ -680,9 +769,11 @@ pub(crate) fn field_direction(
         let to = layers[last].end;
         let factor = governing as f64;
         let cost = (to - from) * factor;
+        profile.spans.push((from, to, factor));
         for (index, layer) in layers.iter().enumerate().take(last + 1).skip(first) {
             // The span's first layer is entered with the span's strength itself.
-            let arriving = strength - (layer.start.max(start) - from) * factor;
+            let entered_at = layer.start.max(start);
+            let arriving = strength - (entered_at - from) * factor;
             for presence in &layer.present {
                 let volume = presence.volume;
                 let entered = !previous.iter().any(|before| before.volume == volume)
@@ -690,13 +781,16 @@ pub(crate) fn field_direction(
                 if entered
                     && arriving > 0.0
                     && is_box(volume)
-                    && !doses.iter().any(|dose| dose.address == volume)
+                    && !doses.iter().any(|(_, dose)| dose.address == volume)
                 {
-                    doses.push(Dose {
-                        address: volume,
-                        amount: (arriving * weight as f64) as f32,
-                        source: DoseSource::Field,
-                    });
+                    doses.push((
+                        entered_at,
+                        Dose {
+                            address: volume,
+                            amount: (arriving * weight as f64) as f32,
+                            source: DoseSource::Field,
+                        },
+                    ));
                 }
             }
             if !layer.present.is_empty() {
@@ -706,21 +800,19 @@ pub(crate) fn field_direction(
         }
         if cost > 0.0 && cost >= strength {
             end = from + (to - from) * (strength / cost);
+            profile.reach = end;
             break;
         }
         strength -= cost;
         first = last + 1;
     }
-    Ok(FieldRay {
-        end: at + Vec3::from(dir) * (end - start) as f32,
-        doses,
-    })
+    (at + Vec3::from(dir) * (end - start) as f32, doses, profile)
 }
 
 /// One direction under [`Passage::FirstSolid`] ([`field_direction`]): stopped where it enters the
-/// first volume of `layers` that is not one of `exited` it is still leaving; that volume, when it
+/// first hard volume of `layers` that is not one of `exited` it is still leaving; that volume, when it
 /// `is_box`, takes `strength × weight`. A direction that enters none ends where the last presence
-/// it crossed ends, as under the partial law.
+/// it crossed ends, as under the partial law. Its [`Profile`] is constant up to that stop.
 #[expect(
     clippy::too_many_arguments,
     reason = "the direction's walk and its throw, as `field_direction` holds them"
@@ -734,7 +826,8 @@ fn first_solid(
     weight: f32,
     is_box: &dyn Fn(Entity) -> bool,
     exited: &[Entity],
-) -> FieldRay {
+) -> (Vec3, Vec<(f64, Dose)>, Profile) {
+    let mut profile = Profile::air(strength, start);
     let mut leaving: Vec<Entity> = exited.to_vec();
     let mut end = start;
     for layer in layers {
@@ -751,26 +844,30 @@ fn first_solid(
                 .iter()
                 .find(|volume| is_box(**volume))
                 .filter(|_| strength > 0.0)
-                .map(|volume| Dose {
-                    address: *volume,
-                    amount: strength * weight,
-                    source: DoseSource::Field,
+                .map(|volume| {
+                    (
+                        at_t,
+                        Dose {
+                            address: *volume,
+                            amount: strength * weight,
+                            source: DoseSource::Field,
+                        },
+                    )
                 })
                 .into_iter()
                 .collect();
-            return FieldRay {
-                end: at + Vec3::from(dir) * (at_t - start) as f32,
-                doses,
-            };
+            profile.reach = at_t;
+            return (at + Vec3::from(dir) * (at_t - start) as f32, doses, profile);
         }
         if !layer.present.is_empty() {
             end = layer.end;
         }
     }
-    FieldRay {
-        end: at + Vec3::from(dir) * (end - start) as f32,
-        doses: Vec::new(),
-    }
+    (
+        at + Vec3::from(dir) * (end - start) as f32,
+        Vec::new(),
+        profile,
+    )
 }
 
 /// The state successive crossings read and advance: where the round is, where it is going, and the
@@ -983,6 +1080,8 @@ pub(crate) enum Decision {
         /// Each sample at the far end of its own examined ray, with what its walk says it is inside
         /// there.
         continuation: Interior,
+        /// The examined corridor as the round flew it.
+        leg: Leg,
     },
     /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
     Bounce(Bounce),
@@ -999,6 +1098,44 @@ impl Decision {
             Decision::Clear { travel, .. } => *travel,
             Decision::Bounce(bounce) => bounce.travel,
             Decision::Bite(bite) => bite.travel,
+        }
+    }
+
+    /// The straight stretches the round's axis flies following this decision, in order, ending
+    /// where the next one starts or where it came to rest — what the witness pass intersects
+    /// ([`super::wound`]). A bounce's lift to its resume point repositions the body and is no leg.
+    pub(crate) fn legs(&self) -> &[Leg] {
+        match self {
+            Decision::Clear { leg, .. } => std::slice::from_ref(leg),
+            Decision::Bounce(bounce) => std::slice::from_ref(&bounce.approach),
+            Decision::Bite(bite) => &bite.legs,
+        }
+    }
+}
+
+/// One straight stretch of the round's flight (WORLD): the axis start, the direction, the metres
+/// flown, and each disc sample's offset from the axis square to it, in canonical sample order.
+#[derive(Clone, Debug)]
+pub(crate) struct Leg {
+    pub from: Vec3,
+    pub axis: Dir3,
+    pub length: f32,
+    pub offsets: Vec<Vec3>,
+}
+
+impl Leg {
+    /// A leg along `axis` from `from` for `length` m, sampled at `offsets` with any along-axis part
+    /// removed, so every sample's stretch spans the same `[0, length]` of the axis.
+    pub(crate) fn new(from: Vec3, axis: Dir3, length: f32, offsets: &[Vec3]) -> Self {
+        let along = Vec3::from(axis);
+        Leg {
+            from,
+            axis,
+            length: length.max(0.0),
+            offsets: offsets
+                .iter()
+                .map(|offset| *offset - along * offset.dot(along))
+                .collect(),
         }
     }
 }
@@ -1039,6 +1176,8 @@ pub(crate) struct Bounce {
     /// the fresh disc laid here can start inside neighbouring armour, and its membership is
     /// established before it sweeps ([`Flight::settle`]).
     pub resume: Vec3,
+    /// The way in: the flight's position to the face, along `incoming`.
+    pub approach: Leg,
 }
 
 /// An entry into the material (§§3–6).
@@ -1074,6 +1213,9 @@ pub(crate) struct Bite {
     /// across tick accounting boundaries.
     pub travel: f32,
     pub end: BiteEnd,
+    /// The approach to the axis hand-off along `incoming`, then the transit along the bend to the
+    /// rest point or the resume point.
+    pub legs: [Leg; 2],
 }
 
 /// How a bite ended.
@@ -1193,6 +1335,7 @@ pub(crate) fn decide(
                     origin: start + dir * examined,
                     seeds: entrance.resume_at(examined as f64, &context.laws),
                 },
+                leg: Leg::new(anchor + start, dir, examined, &entrance.offsets),
             })
         }
         Begin::Ricochet {
@@ -1204,6 +1347,7 @@ pub(crate) fn decide(
             let position = anchor + read.position;
             let out = Dir3::new(direction).unwrap_or(dir);
             let bled = speed * speed_scale;
+            let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
             Ok(Decision::Bounce(Bounce {
                 position,
                 normal: read.normal,
@@ -1216,8 +1360,9 @@ pub(crate) fn decide(
                 incoming: dir,
                 speed_in: speed,
                 impulse: body.mass * (v_in - Vec3::from(out) * bled),
-                travel: (read.position - from).dot(Vec3::from(dir)).max(0.0) + MARCH_EPS,
+                travel: approach + MARCH_EPS,
                 resume: position + read.normal * radius + out * MARCH_EPS,
+                approach: Leg::new(anchor + from, dir, approach, &entrance.offsets),
             }))
         }
         Begin::Transit(request) => {
@@ -1242,6 +1387,7 @@ pub(crate) fn decide(
                 body.mass,
                 from,
                 dir,
+                &entrance.offsets,
                 bent,
                 speed,
                 owner,
@@ -1264,6 +1410,8 @@ fn bite(
     // Where the flight's position is, RELATIVE to the transit's anchor.
     from: Vec3,
     incoming: Dir3,
+    // The entrance disc's sample offsets, for the approach leg.
+    entrance_offsets: &[Vec3],
     bent: Dir3,
     // m/s at the entrance.
     speed_in: f32,
@@ -1338,6 +1486,10 @@ fn bite(
             .collect(),
         travel: approach + flown,
         end,
+        legs: [
+            Leg::new(world(from), incoming, approach, entrance_offsets),
+            Leg::new(world(transit.origin), bent, flown, &transit.offsets),
+        ],
     }
 }
 
@@ -1451,9 +1603,9 @@ pub(super) fn candidates(
         collect::swept_aabb(origin, axis, length, radius),
         |entity| {
             // Ancestry IS the armour test: only a collider under a `BallisticVolume` node resolves,
-            // which is the same rule the march has always used to tell armour from terrain.
-            if let Some((node, _)) =
-                hit_ancestor(entity, &context.world.volumes, &context.world.parents)
+            // which is the same rule the march has always used to tell armour from terrain; a
+            // witness's collider never does (ADR-0039).
+            if let Some((node, _)) = context.world.armour(entity)
                 && not_own(entity)
             {
                 out.push((node, entity));

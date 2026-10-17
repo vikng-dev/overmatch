@@ -33,14 +33,14 @@ const SCENARIO_DIR: &str = "dev/pen_cam";
 const SCENARIO_LIST: &str = "scenarios.ron";
 
 /// Fixed-step length the march is driven at (s), as the goldens drive it.
-const STEP: Duration = Duration::from_millis(16);
+pub(super) const STEP: Duration = Duration::from_millis(16);
 /// The shooter every scenario names: fixture data, a player name no match produced. The shooter
 /// fires one of the bound tank's own weapons, so its vehicle is the bound tank's.
 const FIXTURE_SHOOTER: &str = "Fixture Gunner";
 
 /// Steps a shot is marched for: 8 × 16 ms carries a main-gun round ~100 m (DERIVED), the whole
 /// tank and the run-out past it.
-const STEPS: usize = 8;
+pub(super) const STEPS: usize = 8;
 
 /// One scripted shot. Positions are metres in the target's spawn frame: the probe tank's root at
 /// the origin, the world's axes (`-Z` its front, `+Y` up). The target's pose turns the tank under
@@ -136,7 +136,27 @@ fn record_timed(
     scenario: &Scenario,
     law: Option<&spall_cone::ConeShape>,
 ) -> (PenetrationReport, f64, usize) {
+    record_edited(scenario, law, |_| {})
+}
+
+/// The first scenario's record under `law`'s cones, with `edit` applied to the posed world before
+/// the shot: what an edited world makes of a recorded shot.
+pub(super) fn record_first_edited(
+    law: Option<&spall_cone::ConeShape>,
+    edit: impl FnOnce(&mut App),
+) -> PenetrationReport {
+    let scenario = scenarios().into_iter().next().expect("a scenario");
+    record_edited(&scenario, law, edit).0
+}
+
+/// [`record_timed`] with `edit` applied to the posed world before the shot.
+fn record_edited(
+    scenario: &Scenario,
+    law: Option<&spall_cone::ConeShape>,
+    edit: impl FnOnce(&mut App),
+) -> (PenetrationReport, f64, usize) {
     let mut app = scenario_world_under(scenario, law);
+    edit(&mut app);
     let tank = app.world().resource::<ProbeTank>().0;
     let spec = app
         .world()
@@ -155,7 +175,8 @@ fn record_timed(
     let origin = PROBE_TANK_AT + scenario.from;
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
-    let (projectile, readout) = fixture_round(body, direction * speed);
+    let (mut projectile, readout) = fixture_round(body, direction * speed);
+    projectile.wound = round.wound;
     let shell = app
         .world_mut()
         .spawn((
@@ -685,13 +706,15 @@ fn external_armour_marks_exactly_the_tagged_volumes() {
 
 /// What a fixture volume is.
 #[derive(Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Main,
     External,
-    /// A box with this HP pool, of a soft substance.
+    /// A box with this HP pool, of a soft hard substance: a layer of the walk.
     Box(u32),
     /// A box with this HP pool, of steel: an exposed component a round can glance off.
     SteelBox(u32),
+    /// A witness (ADR-0039) with this HP pool: no layer of the walk.
+    Witness(u32),
 }
 
 /// Reference-mm per metre: steel, and the box's soft substance. Fixture data.
@@ -699,12 +722,12 @@ const STEEL: f32 = 1000.0;
 const SOFT: f32 = 10.0;
 
 /// One fixture volume: name, full extents and centre (m), kind.
-type FixtureVolume = (&'static str, Vec3, Vec3, Kind);
+pub(super) type FixtureVolume = (&'static str, Vec3, Vec3, Kind);
 
 /// Static fixture tanks, each volume its own static cuboid turned by its rotation, on the `Armor`
-/// layer and owned by the tank its index names, and the real march driven on [`STEP`] with spent
-/// shells kept.
-fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>) {
+/// layer (a witness on the `Witness` layer) and owned by the tank its index names, and the real
+/// march driven on [`STEP`] with spent shells kept.
+pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>) {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -742,6 +765,25 @@ fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>)
         })
         .collect();
     for &((name, size, at, kind), owner, turn) in volumes {
+        if let Kind::Witness(hp) = kind {
+            app.world_mut().spawn((
+                Name::new(name),
+                Transform::from_translation(at).with_rotation(turn),
+                RigidBody::Static,
+                Collider::cuboid(size.x, size.y, size.z),
+                CollisionLayers::new([crate::Layer::Witness], LayerMask::ALL),
+                WitnessVolume {
+                    substance: "fixture".to_owned(),
+                },
+                WitnessSurface,
+                VolumeOf(tanks[owner]),
+                ComponentHealth {
+                    current: hp,
+                    max: hp,
+                },
+            ));
+            continue;
+        }
         let factor = if matches!(kind, Kind::Box(_)) {
             SOFT
         } else {
@@ -760,7 +802,7 @@ fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, Vec<Entity>)
             VolumeOf(tanks[owner]),
         ));
         match kind {
-            Kind::Main => {}
+            Kind::Main | Kind::Witness(_) => {}
             Kind::External => {
                 volume.insert(ExternalArmour);
             }
@@ -800,10 +842,35 @@ fn fixture_shot_at(
     direction: Vec3,
     struck: usize,
 ) -> PenetrationReport {
+    fixture_fire(volumes, from, direction, struck, |_| {}).report
+}
+
+/// One fixture shot as [`fixture_fire`] read it back.
+pub(super) struct FixtureFired {
+    pub report: PenetrationReport,
+    /// The march's armour log, in march order.
+    pub log: Vec<ArmourMark>,
+    /// The shell where the march left it: position, and velocity while it still flies.
+    pub at: Vec3,
+    pub velocity: Option<Vec3>,
+    /// Every fixture volume's name by entity.
+    pub names: BTreeMap<Entity, String>,
+}
+
+/// [`fixture_shot_at`] with the fixture 88's flight state edited by `round` before it is fired,
+/// read back with the march's log and the shell's final state.
+pub(super) fn fixture_fire(
+    volumes: &[(FixtureVolume, usize, Quat)],
+    from: Vec3,
+    direction: Vec3,
+    struck: usize,
+    round: impl FnOnce(&mut Projectile),
+) -> FixtureFired {
     let (mut app, tanks) = fixture_tanks(volumes);
     let tank = tanks[struck];
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the fixture has a rig");
-    let (projectile, readout) = fixture_round(FIXTURE_88, direction * 800.0);
+    let (mut projectile, readout) = fixture_round(FIXTURE_88, direction * 800.0);
+    round(&mut projectile);
     let shell = app
         .world_mut()
         .spawn((
@@ -845,18 +912,42 @@ fn fixture_shot_at(
         Some(report.impact.verdict),
         "the logged path reads its verdict"
     );
-    report
+    let world = app.world_mut();
+    let log = world
+        .get::<PenetrationMarks>(shell)
+        .expect("a retained shell keeps its marks")
+        .log
+        .clone();
+    let at = world
+        .get::<Transform>(shell)
+        .expect("a retained shell")
+        .translation;
+    let velocity = world
+        .get::<Projectile>(shell)
+        .map(|projectile| projectile.velocity);
+    let names = world
+        .query_filtered::<(Entity, &Name), With<VolumeOf>>()
+        .iter(world)
+        .map(|(entity, name)| (entity, name.as_str().to_owned()))
+        .collect();
+    FixtureFired {
+        report,
+        log,
+        at,
+        velocity,
+        names,
+    }
 }
 
 /// The head-on line every fixture fires down.
-const LINE_FROM: Vec3 = Vec3::new(0.0, 2.0, 2.0);
+pub(super) const LINE_FROM: Vec3 = Vec3::new(0.0, 2.0, 2.0);
 /// Plate faces 3 m square, centred on the line's height. A 50 mm steel plate is perforated by the
 /// fixture 88 and a 500 mm one stops it (fixture data, as the march's own plate tests use them).
 const FACE: f32 = 3.0;
-const THIN: f32 = 0.05;
-const THICK: f32 = 0.5;
+pub(super) const THIN: f32 = 0.05;
+pub(super) const THICK: f32 = 0.5;
 
-fn plate(name: &'static str, thickness: f32, z: f32, kind: Kind) -> FixtureVolume {
+pub(super) fn plate(name: &'static str, thickness: f32, z: f32, kind: Kind) -> FixtureVolume {
     (
         name,
         Vec3::new(FACE, FACE, thickness),

@@ -325,6 +325,7 @@ fn fire(
                 caliber: weapon.caliber,
                 mass: weapon.mass,
                 nose_factor: weapon.nose_factor,
+                wound: weapon.wound,
                 mechanism: weapon.fire_mode.mechanism(),
                 tracer,
                 // This shell belongs to a tank: name its root AND the firing weapon slot so the net
@@ -564,6 +565,7 @@ mod tests {
                 caliber: 0.0079,
                 mass: 0.0118,
                 nose_factor: 0.5,
+                wound: 10.0,
                 fire_mode: MG_MODE,
                 recoil: None,
                 barrel: None,
@@ -609,6 +611,7 @@ mod tests {
                 caliber: 0.088,
                 mass: 10.2,
                 nose_factor: 0.3,
+                wound: 30.0,
                 fire_mode: MAIN_GUN_MODE,
                 recoil: None,
                 barrel: None,

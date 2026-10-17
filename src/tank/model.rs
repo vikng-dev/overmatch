@@ -66,6 +66,8 @@ pub struct Weapon {
     pub caliber: f32,
     pub mass: f32,
     pub nose_factor: f32,
+    /// Wound rate of the round (reference-mm per metre of witness chord), from `rounds.ron`.
+    pub wound: f32,
     /// Reload/cyclic mechanism and its edge-versus-level input semantics.
     pub fire_mode: FireMode,
     pub recoil: Option<RecoilSpec>,

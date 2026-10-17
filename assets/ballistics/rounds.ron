@@ -5,8 +5,13 @@
 // A round states its display name (its historical designation, what a player reads; the key is
 // never shown, and a round without a name does not load), its core material (a substance in
 // `assets/materials/materials.ron` that carries material facts), its nose as geometry in calibres
-// (the nose factor is DERIVED from it at load), its mass (kg), its calibre (m) and its muzzle
-// speed (m/s).
+// (the nose factor is DERIVED from it at load), its mass (kg), its calibre (m), its muzzle
+// speed (m/s) and its wound rate.
+//
+// `wound` = what the round's line does to a witness (crew, ADR-0039): reference-mm of dose per
+// metre of disc-mean chord the shell cuts through the crew box. Balance data, read by nothing in
+// the hard walk. Scaled from a 30 HP crewman (3 reference-mm, `ballistics::HP_PER_REFERENCE_MM`):
+// a rate of `3 / L` kills at a chord of `L` metres.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
@@ -28,6 +33,9 @@
             caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
             muzzle_speed: (773.0, Unknown("no source recorded in the repo; settled by a cited
                 firing table")),
+            wound: (30.0, Tuned("a main-gun round lethal to a 30 HP crewman at ~10 cm of chord
+                (3 / 0.10), so a clean pass through a station kills and a graze of its edge wounds
+                (crew-model decision 2026-10-17)")),
         ),
         "7.9mm_AP": (
             name: ("7.92 mm S.m.K.", Measured("Spitzgeschoss mit Kern, the German 7.92 mm
@@ -45,6 +53,9 @@
                 bore or the bullet diameter is meant is not recorded")),
             muzzle_speed: (755.0, Unknown("no source recorded in the repo; settled by a cited
                 firing table")),
+            wound: (10.0, Tuned("a rifle-calibre bullet lethal to a 30 HP crewman at ~30 cm of
+                chord (3 / 0.30), so one torso pass wounds and two kill (crew-model decision
+                2026-10-17)")),
         ),
     },
 )

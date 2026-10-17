@@ -1,7 +1,7 @@
 //! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
 //! key. A weapon names its round by that key ([`crate::spec::WeaponSpec::round`]); the round states
-//! its display name, core material, nose geometry, mass, calibre and muzzle speed, each with its
-//! provenance ([`crate::provenance`]). The key is the data's handle and is never shown to a player;
+//! its display name, core material, nose geometry, mass, calibre, muzzle speed and wound rate, each
+//! with its provenance ([`crate::provenance`]). The key is the data's handle and is never shown to a player;
 //! the display name is ([`RoundRegistry::name`]).
 //!
 //! Parsed once from the embedded file and validated at parse: a missing display name or one the
@@ -35,6 +35,10 @@ pub(crate) struct Round {
     pub(crate) body: RoundBody,
     /// m/s.
     pub(crate) muzzle_speed: f32,
+    /// What the round's line does to a witness (crew): reference-mm of dose per metre of disc-mean
+    /// chord through it (`ballistics::wound`). Finite and positive. Balance data, never read by the
+    /// hard walk.
+    pub(crate) wound: f32,
     /// The core's material facts. The rigid regime models every core as rigid and reads none of
     /// them; a regime that deforms or erodes the round reads them.
     pub(crate) core: MaterialFacts,
@@ -51,6 +55,7 @@ struct RoundFile {
     mass: Sourced<f32>,
     caliber: Sourced<f32>,
     muzzle_speed: Sourced<f32>,
+    wound: Sourced<f32>,
 }
 
 #[derive(Deserialize)]
@@ -132,7 +137,8 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     let core = substances
         .get(&core_name)
         .map_err(|err| format!("core: {err}"))?
-        .facts
+        .hard()
+        .and_then(|core| core.facts)
         .ok_or_else(|| {
             format!(
                 "core {core_name:?} states no material facts — a round's core is a structural \
@@ -152,10 +158,18 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     round_in_domain(body, muzzle_speed).map_err(|reason| {
         format!("the round (nose {nose:?}) is outside the capability law's domain: {reason}")
     })?;
+    let wound = file.wound.0;
+    if !wound.is_finite() || wound <= 0.0 {
+        return Err(format!(
+            "wound rate must be finite and positive (got {wound}) — it is the dose per metre of \
+             chord the round's line deals a witness"
+        ));
+    }
     Ok((
         Round {
             body,
             muzzle_speed,
+            wound,
             core,
         },
         name,
@@ -240,13 +254,14 @@ mod tests {
     }
 
     /// The fixture round's fields: fixture data, not a shipped round.
-    const FIXTURE: [(&str, &str); 6] = [
+    const FIXTURE: [(&str, &str); 7] = [
         ("name", r#""Probe Mk. 1""#),
         ("core", r#""GunSteel""#),
         ("nose", "Ogive(crh: 1.0)"),
         ("mass", "5.0"),
         ("caliber", "0.05"),
         ("muzzle_speed", "700.0"),
+        ("wound", "20.0"),
     ];
 
     fn with(field: &str, value: &str) -> Result<RoundRegistry, RoundError> {
@@ -313,6 +328,34 @@ mod tests {
         assert_eq!(round.body.mass, 5.0);
         assert_eq!(round.body.caliber, 0.05);
         assert_eq!(round.muzzle_speed, 700.0);
+        assert_eq!(round.wound, 20.0);
+    }
+
+    /// A round's wound rate is finite and positive, refused naming the round otherwise; every
+    /// shipped round states one.
+    #[test]
+    fn a_wound_rate_is_finite_and_positive() {
+        for wound in ["0.0", "-5.0", "NaN", "inf"] {
+            let err = with("wound", wound).unwrap_err();
+            assert!(
+                matches!(&err, RoundError::Invalid { round, reason }
+                    if round == "Probe" && reason.contains("wound")),
+                "{wound}: {err}"
+            );
+        }
+        let unwounding: Vec<_> = FIXTURE
+            .iter()
+            .copied()
+            .filter(|(field, _)| *field != "wound")
+            .collect();
+        assert!(
+            one(&unwounding).is_err(),
+            "a round without a wound rate must not load"
+        );
+        for name in RoundRegistry::shipped().keys() {
+            let round = RoundRegistry::shipped().get(name).unwrap();
+            assert!(round.wound.is_finite() && round.wound > 0.0, "{name}");
+        }
     }
 
     /// An unknown name is an error naming the name and the vocabulary, never a default.
@@ -342,7 +385,7 @@ mod tests {
         let bare = r#"(rounds: { "Probe": (name: ("Probe", Tuned("fixture")),
             core: ("GunSteel", Tuned("fixture")),
             nose: (Flat, Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            muzzle_speed: (700.0, Tuned("fixture"))) })"#;
+            muzzle_speed: (700.0, Tuned("fixture")), wound: (20.0, Tuned("fixture"))) })"#;
         let err = RoundRegistry::from_ron(bare, substances).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 
