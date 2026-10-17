@@ -6,7 +6,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::damage::CrewStation;
+use crate::damage::{CrewStation, TankKnockedOut};
 use crate::firecontrol::Ranging;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::Controlled;
@@ -62,6 +62,15 @@ impl TankCommand {
     /// touch (and its change-detection churn) on a command with no edge to clear.
     pub fn has_edge(&self) -> bool {
         self.fire_primary || self.crew_swap.is_some() || self.respawn
+    }
+
+    /// The command of a tank whose death flow owns the device ([`DeviceOwner`]): the respawn edge
+    /// and nothing else.
+    pub(crate) fn neutral(self) -> Self {
+        Self {
+            respawn: self.respawn,
+            ..default()
+        }
     }
 }
 
@@ -156,11 +165,13 @@ pub struct Bindings {
 ///
 /// While the death flow (the death screen and the kill cam) is active for the controlled tank it
 /// owns the device: [`TankDeviceSet`] stands aside, so no drive, aim, fire, sight or crew swap
-/// command is taken from the device for that tank, and the respawn, map and kill cam keys are the death
-/// flow's alone. The death flow takes the device from the replicated knockout fact of the
-/// controlled tank, before the device is read in the frame, letting go of the dead tank's held
-/// controls; it hands the device back on the first frame a live tank is controlled, or none is (a
-/// respawn, a disconnect). Not a capability gate: the sim never reads it.
+/// command is taken from the device for that tank, and the respawn, map and kill cam keys are the
+/// death flow's alone. [`claim_device`] decides it from the controlled tank's knockout fact
+/// (`TankKnockedOut`) in [`DeviceClaim`], before each frame's device read and before each fixed
+/// tick's command is read, and while the death flow owns the device it writes the
+/// [neutral](TankCommand::neutral) command on every one of them, so no held, restored or delayed
+/// value outlives the knockout. It hands the device back on the first claim that finds a live tank
+/// controlled, or none (a respawn, a disconnect). Not a capability gate: the sim never reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DeviceOwner {
     #[default]
@@ -173,6 +184,36 @@ pub(crate) enum DeviceOwner {
 /// the tank owns the device ([`DeviceOwner`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TankDeviceSet;
+
+/// Where [`claim_device`] runs: in `RunFixedMainLoop` before [`TankDeviceSet`], and in
+/// `FixedPreUpdate` before every reader of the tick's command (the network client's feed to the
+/// wire). A knockout fact realized before the frame's ticks (the network client's replicated
+/// status) orders before it and is claimed from the frame it arrives in; one latched inside a tick
+/// (the offline sim) is claimed by the next tick, the latching tick having read its command before
+/// the fact existed.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct DeviceClaim;
+
+/// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
+/// the device, write the controlled tank's command [neutral](TankCommand::neutral). In
+/// [`DeviceClaim`].
+pub(crate) fn claim_device(
+    mut owner: ResMut<DeviceOwner>,
+    mut own: Query<(&mut TankCommand, Has<TankKnockedOut>), With<Controlled>>,
+) {
+    let dead = own.iter().any(|(_, knocked_out)| knocked_out);
+    owner.set_if_neq(if dead {
+        DeviceOwner::DeathFlow
+    } else {
+        DeviceOwner::Tank
+    });
+    if dead {
+        for (mut command, _) in &mut own {
+            let neutral = command.neutral();
+            command.set_if_neq(neutral);
+        }
+    }
+}
 
 /// Whether the controlled tank owns the player's device ([`DeviceOwner`]).
 fn tank_owns_device(owner: Option<Res<DeviceOwner>>) -> bool {
@@ -273,6 +314,14 @@ pub fn client_plugin(app: &mut App) {
         .init_resource::<DeviceOwner>()
         .configure_sets(RunFixedMainLoop, TankDeviceSet.run_if(tank_owns_device))
         .configure_sets(Update, TankDeviceSet.run_if(tank_owns_device))
+        .configure_sets(
+            RunFixedMainLoop,
+            DeviceClaim
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .before(TankDeviceSet),
+        )
+        .add_systems(RunFixedMainLoop, claim_device.in_set(DeviceClaim))
+        .add_systems(FixedPreUpdate, claim_device.in_set(DeviceClaim))
         // Once per render frame, before the fixed loop runs its 0..N sim ticks — so every tick
         // this frame sees the same, freshest command, and edge inputs latch here without being
         // missed or doubled by the fixed clock.

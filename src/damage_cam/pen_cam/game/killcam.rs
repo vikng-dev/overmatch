@@ -24,7 +24,7 @@
 //!   presentation clock (the orbit drifts on), replay plays the held record again from the lesson.
 //!   Respawn and the map are never blocked after the dead-zone: either ends the run.
 //! * **The device.** The death flow owns the player's device from the knockout fact to a live
-//!   tank ([`DeviceOwner`], taken and handed back by [`claim_device`] before the device is read).
+//!   tank (`command::DeviceOwner`), so the kill cam's keys may share a tank binding.
 //! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], before `overlay::OverlaySet::
 //!   Declare` and so before every reader of the [`KillCamGate`] it writes: the death screen there,
 //!   then the map's toggle and the respawn key, both after `OverlaySet::Toggle`. They read the gate
@@ -60,7 +60,7 @@ use crate::bake::TankBlueprint;
 use crate::camera::{
     CameraCaptive, CaptiveCameraPlaced, OrbitCamera, TurretPivot, orbit_body, orbit_pivot, view_fov,
 };
-use crate::command::{Bindings, ButtonBinding, DeviceOwner, TankCommand, TankDeviceSet};
+use crate::command::{Bindings, ButtonBinding, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::damage_cam::delivery::{ImpactPresence, ShotExplanations, StoredExplanation};
 use crate::damage_cam::wire::TankLife;
@@ -198,44 +198,10 @@ pub(super) fn wire(app: &mut App) {
     app.init_resource::<Victim>()
         .init_resource::<KillCamGate>()
         .init_resource::<CameraCaptive>()
-        .init_resource::<DeviceOwner>()
         .configure_sets(Update, KillCamGateSet.before(OverlaySet::Declare))
         .add_observer(disconnect)
-        .add_systems(
-            RunFixedMainLoop,
-            claim_device
-                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
-                .before(TankDeviceSet),
-        )
         .add_systems(PostUpdate, place.in_set(CaptiveCameraPlaced))
         .add_systems(Update, hud.after(drive));
-}
-
-/// Take the player's device for the death flow from the replicated knockout fact of the controlled
-/// tank, letting go of its held controls, and hand it back once a live tank is controlled or none
-/// is ([`DeviceOwner`]). Before [`TankDeviceSet`] in the frame.
-fn claim_device(
-    mut owner: ResMut<DeviceOwner>,
-    own: Query<Has<TankKnockedOut>, With<Controlled>>,
-    mut commands: Query<&mut TankCommand, With<Controlled>>,
-) {
-    let want = if own.iter().any(|knocked_out| knocked_out) {
-        DeviceOwner::DeathFlow
-    } else {
-        DeviceOwner::Tank
-    };
-    if *owner == want {
-        return;
-    }
-    *owner = want;
-    if want == DeviceOwner::DeathFlow {
-        for mut command in &mut commands {
-            command.throttle = 0.0;
-            command.steer = 0.0;
-            command.fire_primary = false;
-            command.fire_secondary = false;
-        }
-    }
 }
 
 /// Hand the camera back on the third-person profile, the lesson's mask owner gone, if the kill cam
@@ -265,12 +231,10 @@ fn disconnect(
     mut victim: ResMut<Victim>,
     mut captive: ResMut<CameraCaptive>,
     mut gate: ResMut<KillCamGate>,
-    mut owner: ResMut<DeviceOwner>,
     mut commands: Commands,
     camera: Query<(Entity, &CameraProfile), With<PlayerView>>,
     ui: Query<Entity, With<KillCamUi>>,
 ) {
-    *owner = DeviceOwner::Tank;
     victim.run = None;
     victim.dead = None;
     release(&mut captive, &mut commands, camera.single().ok());

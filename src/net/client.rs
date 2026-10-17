@@ -29,7 +29,7 @@ use crate::ballistics::{
     MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
     SanctionedTerminal, ShotSource, TerminalVerdict,
 };
-use crate::command::TankCommand;
+use crate::command::{DeviceClaim, TankCommand};
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
     Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
@@ -685,16 +685,7 @@ pub fn run() {
                     .in_set(InputSystems::WriteClientInputs),
             );
     } else {
-        app.add_systems(
-            FixedPreUpdate,
-            (
-                feed_action_state,
-                stamp_input_tick,
-                super::fire_presentation::record_own_intent,
-            )
-                .chain()
-                .in_set(InputSystems::WriteClientInputs),
-        );
+        install_device_feed(&mut app);
     }
     install_input_buffer_guard(&mut app);
     install_input_send_cadence(&mut app);
@@ -2188,12 +2179,30 @@ fn apply_pending_recoil_kicks(
     }
 }
 
+/// The windowed client's command onto the wire each tick: [`feed_action_state`], then the stamp and
+/// the client's own record of what it filed, after the tick's [`DeviceClaim`] has decided whose
+/// command the device's is.
+pub(super) fn install_device_feed(app: &mut App) {
+    app.add_systems(
+        FixedPreUpdate,
+        (
+            feed_action_state,
+            stamp_input_tick,
+            super::fire_presentation::record_own_intent,
+        )
+            .chain()
+            .after(DeviceClaim)
+            .in_set(InputSystems::WriteClientInputs),
+    );
+}
+
 /// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,
 /// `drive_gunner_aim`, the range dial, the crew bar) have already filled the `Controlled` tank's
 /// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
 /// input plugin buffers it for the wire. The reverse bridge (net::protocol)
 /// hands it straight back to the sim, so locally the round trip is an identity copy — the buffer is
-/// the point. When input is blocked = a default command: the tank coasts to a stop instead of holding
+/// the point. While the death flow owns the device the command is the neutral one `DeviceClaim`
+/// wrote this tick, over whatever the bridge restored. When input is blocked = a default command: the tank coasts to a stop instead of holding
 /// the last input, and clicks in the menu don't fire.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,

@@ -19,7 +19,7 @@ use bevy::audio::{DefaultSpatialScale, GlobalVolume, SpatialScale, Volume};
 use bevy::prelude::*;
 
 use crate::ballistics::{FireShell, STALE_FIRE_TICKS};
-use crate::command::Bindings;
+use crate::command::{Bindings, TankDeviceSet};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{EngineSound, Muzzle, TankRoot, Weapon, WeaponIndex};
 use crate::track::sim::TankTransmission;
@@ -70,12 +70,7 @@ pub fn plugin(app: &mut App) {
         .insert_resource(DefaultSpatialScale(SpatialScale::new(SPATIAL_SCALE)))
         .add_systems(Startup, setup_sfx_clips)
         .add_observer(on_weapon_report)
-        .add_systems(
-            Update,
-            // Gated exactly as `command::gather_commands` is: a click with the cursor released is
-            // menu input, not a trigger pull.
-            play_fire_click.in_set(PlayerInputSet).in_set(GameplaySet),
-        )
+        .add_systems(Update, fire_click())
         // Warm before attach so a tank's clips are already in flight when its emitter is born, and
         // attach before drive so a tank that appears this frame is already carrying one.
         .add_systems(
@@ -160,6 +155,26 @@ fn verify_sfx_clips(
             error!("sfx asset failed to load: {path}: {err}");
         }
     }
+}
+
+/// [`play_fire_click`], gated exactly as `command::gather_commands` is: a click with the cursor
+/// released is menu input, and one while the death flow owns the device is its key, not a trigger
+/// pull.
+fn fire_click() -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    play_fire_click
+        .in_set(PlayerInputSet)
+        .in_set(TankDeviceSet)
+        .in_set(GameplaySet)
+}
+
+/// [`play_fire_click`] on its production gate, with a stand-in clip.
+#[cfg(test)]
+pub(crate) fn mount_fire_click(app: &mut App) {
+    app.insert_resource(SfxClips {
+        click: Handle::default(),
+        tank: HashMap::new(),
+    })
+    .add_systems(Update, fire_click());
 }
 
 /// The trigger's own click, straight off the device edge. `TankCommand::fire_primary` is a latched

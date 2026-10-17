@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::disclosure::{NetTankStatus, apply_net_tank_status};
 use crate::ballistics::{ComponentHealth, Verdict};
-use crate::command::TankCommand;
+use crate::command::{DeviceClaim, TankCommand};
 use crate::damage::{
     CrewStation, Crewman, DamageConsequences, Dead, LaunchedTurret, PendingSwap, TankVolumes,
 };
@@ -1056,11 +1056,15 @@ pub(crate) fn plugin(app: &mut App) {
             .in_set(GameplaySet)
             .before(DamageConsequences),
     );
+    // Realized once a frame, after replication has received the status and before the device is
+    // claimed and read: every tick of the frame, and the device, see the knockout from the frame it
+    // arrives in.
     app.add_systems(
-        FixedUpdate,
+        RunFixedMainLoop,
         apply_net_tank_status
+            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
             .in_set(GameplaySet)
-            .before(DamageConsequences),
+            .before(DeviceClaim),
     );
     app.add_systems(FixedUpdate, mirror_swap_from_net_crew.in_set(GameplaySet));
     // The sim reads `TankCommand`; bridge it before all `GameplaySet` consumers, including replay.

@@ -7,6 +7,9 @@ mod client;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;
+/// Real-UDP probe of a dead tank's input path: the death flow's neutral command on every tick.
+#[cfg(test)]
+mod death_flow_input;
 mod death_screen;
 // The kill cam's composed schedule under test mounts the death screen, the reader of its gate.
 #[cfg(test)]

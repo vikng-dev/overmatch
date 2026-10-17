@@ -514,9 +514,18 @@ fn each_beats_channels_resolve_on_its_first_frame() {
     }
 }
 
+/// The controlled tank's command as the frame's device read leaves it, before the fixed ticks.
+#[derive(Resource, Default)]
+struct DeviceRead(Option<TankCommand>);
+
+fn read_device(mut read: ResMut<DeviceRead>, own: Query<&TankCommand, With<Controlled>>) {
+    read.0 = own.single().ok().copied();
+}
+
 /// The player's device on its real systems beside the kill cam: the gather, the sight toggle, the
-/// third-person aim commit and the crew swap. Mounted before the app finishes ([`app_with`]);
-/// [`device`] gives them their world.
+/// third-person aim commit, the crew swap and the trigger click, and what the frame's device read
+/// leaves ([`DeviceRead`]). Mounted before the app finishes ([`app_with`]); [`device`] gives them
+/// their world.
 fn mount_device(app: &mut App) {
     bevy::state::app::StatesPlugin.build(app);
     crate::flow::in_match_plugin(app);
@@ -526,6 +535,13 @@ fn mount_device(app: &mut App) {
     crate::sight::plugin(app);
     crate::aim::client_plugin(app);
     crate::crew_ui::plugin(app);
+    crate::sfx::mount_fire_click(app);
+    app.init_resource::<DeviceRead>().add_systems(
+        RunFixedMainLoop,
+        read_device
+            .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+            .after(crate::command::TankDeviceSet),
+    );
 }
 
 /// The world of [`mount_device`]'s systems: their resources, a window and the player's camera to
@@ -628,9 +644,10 @@ fn let_go(app: &mut App) {
 }
 
 /// From the knockout fact to a live tank the death flow owns the device, whichever key replays:
-/// drive, fire, aim, the view key and the crew bar held through the run and the death screen give
-/// no command and no view change, and the replay key replays. Alive before and after, the same
-/// keys drive, fire, aim, switch the view and swap crew, from the first frame of the new life.
+/// drive, fire, aim, the view key and the crew bar held through the run and the death screen leave
+/// the command neutral, the view unchanged and the trigger silent, and the replay key replays.
+/// Alive before and after, the same keys drive, fire, click, aim, switch the view and swap crew,
+/// from the first frame of the new life.
 #[test]
 fn the_death_flow_owns_the_device() {
     for replay in [
@@ -642,8 +659,15 @@ fn the_death_flow_owns_the_device() {
         device(&mut app, player, camera);
         let command = |app: &App| *app.world().get::<TankCommand>(player).unwrap();
         let mode = |app: &App| *app.world().resource::<SightMode>();
+        let clicks = |app: &mut App| {
+            app.world_mut()
+                .query_filtered::<(), With<AudioPlayer>>()
+                .iter(app.world())
+                .count()
+        };
 
         hold_all(&mut app, 1, |_| {});
+        assert_eq!(clicks(&mut app), 1, "{replay:?}: the trigger clicked");
         let alive = command(&app);
         assert_eq!((alive.throttle, alive.steer), (1.0, 1.0), "{replay:?}");
         assert!(alive.fire_primary && alive.fire_secondary, "{replay:?}");
@@ -658,18 +682,15 @@ fn the_death_flow_owns_the_device() {
         let swap = Some(CrewSwap::Start(CrewStation::Commander, CrewStation::Gunner));
         assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");
 
-        // Down with every control held from the knockout's frame: the death flow lets go of them,
-        // and a fresh aim or swap would show.
-        let mut taken = app.world_mut().get_mut::<TankCommand>(player).unwrap();
-        taken.aim = None;
-        taken.crew_swap = None;
+        // Down with every control held and the last aim and swap standing from the knockout's frame.
         let (mut app, ..) = killed_in((app, player, camera), -1.0);
         let silent = |app: &App| {
-            let dead = command(app);
-            assert_eq!((dead.throttle, dead.steer), (0.0, 0.0), "{replay:?}");
-            assert!(!dead.fire_primary && !dead.fire_secondary, "{replay:?}");
-            assert_eq!(dead.aim, None, "{replay:?}: no aim taken");
-            assert_eq!(dead.crew_swap, None, "{replay:?}: no swap taken");
+            assert_eq!(command(app), TankCommand::default(), "{replay:?}: neutral");
+            assert_eq!(
+                app.world().resource::<DeviceRead>().0,
+                Some(TankCommand::default()),
+                "{replay:?}: nothing read from the device"
+            );
             assert_eq!(
                 mode(app),
                 SightMode::ThirdPerson,
@@ -681,6 +702,11 @@ fn the_death_flow_owns_the_device() {
         assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
         hold_all(&mut app, 8, silent);
         assert_eq!(beat(&app), Some(Beat::Lesson), "{replay:?}: replayed");
+        assert_eq!(
+            clicks(&mut app),
+            1,
+            "{replay:?}: no trigger click while dead"
+        );
 
         let mut tank = app.world_mut().entity_mut(player);
         tank.remove::<TankKnockedOut>();
