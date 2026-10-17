@@ -276,20 +276,24 @@ pub(super) struct Keys<'w> {
 }
 
 impl Keys<'_> {
-    /// Whether `pick`'s binding was pressed this frame (`edge`) or is down.
-    fn read(&self, pick: fn(&Bindings) -> ButtonBinding, edge: bool) -> bool {
-        let (Some(keys), Some(mouse), Some(bindings)) = (
-            self.keys.as_deref(),
-            self.mouse.as_deref(),
-            self.bindings.as_deref(),
-        ) else {
-            return false;
-        };
-        if edge {
-            pick(bindings).just_pressed(keys, mouse)
-        } else {
-            pick(bindings).pressed(keys, mouse)
-        }
+    /// Whether `pick`'s binding was pressed this frame.
+    fn just_pressed(&self, pick: fn(&Bindings) -> ButtonBinding) -> bool {
+        self.devices()
+            .is_some_and(|(keys, mouse, bindings)| pick(bindings).just_pressed(keys, mouse))
+    }
+
+    /// Whether `pick`'s binding is down.
+    fn pressed(&self, pick: fn(&Bindings) -> ButtonBinding) -> bool {
+        self.devices()
+            .is_some_and(|(keys, mouse, bindings)| pick(bindings).pressed(keys, mouse))
+    }
+
+    fn devices(&self) -> Option<(&ButtonInput<KeyCode>, &ButtonInput<MouseButton>, &Bindings)> {
+        Some((
+            self.keys.as_deref()?,
+            self.mouse.as_deref()?,
+            self.bindings.as_deref()?,
+        ))
     }
 
     fn map(&self) -> bool {
@@ -461,9 +465,9 @@ pub(super) fn drive(
 
     // Input: the cursor's, past the dead-zone.
     let input = settled && crate::state::cursor_locked(cursor);
-    let skip = input && keys.read(|b| b.kill_cam_skip, true);
-    let hold = input && keys.read(|b| b.kill_cam_hold, false);
-    let replay = input && keys.read(|b| b.kill_cam_replay, true);
+    let skip = input && keys.just_pressed(|b| b.kill_cam_skip);
+    let hold = input && keys.pressed(|b| b.kill_cam_hold);
+    let replay = input && keys.just_pressed(|b| b.kill_cam_replay);
     let map = keys.map();
     let changed = death.by != by;
     death.by = by;
