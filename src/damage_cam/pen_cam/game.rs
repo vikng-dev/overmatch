@@ -1556,7 +1556,13 @@ mod tests {
                     (shooter, vocabulary, CornerKind::Glass)
                 };
                 receive(&mut app, explanation, &vocabulary);
-                let after = run(&mut app, close_end + timeline::OPEN_LATENCY_S);
+                let mut after = Vec::new();
+                for _ in 0..((close_end + timeline::OPEN_LATENCY_S) / STEP_S).ceil() as usize {
+                    after.extend(run(&mut app, STEP_S));
+                    if after.last().is_some_and(|&(turn, _)| turn != hold_turn) {
+                        break;
+                    }
+                }
                 let won = after.last().copied();
                 assert!(
                     won.is_some_and(|(turn, shown)| turn != hold_turn && shown == kind),
@@ -1566,11 +1572,30 @@ mod tests {
                     assert_eq!(exhibit(&app).kind, kind, "{case:?}: its own exhibit");
                 }
                 let (turn, _) = won.unwrap();
-                let rest = run(&mut app, kind.duration() - 2.0 * STEP_S);
+                // Every stepped frame from its open to its end, two frames short of it, draws the
+                // turn, visibly once it has begun to open.
+                let first = showing(&app).map(|shown| shown.c);
                 assert!(
-                    rest.iter().all(|&(t, _)| t == turn),
-                    "{case:?}: it keeps the slot for its turn, got {rest:?}"
+                    first.is_some_and(|c| c < timeline::OPEN_S),
+                    "{case:?}: caught at its open, got c = {first:?}"
                 );
+                for frame in 0.. {
+                    let shown = showing(&app);
+                    assert!(
+                        shown.is_some_and(|shown| shown.turn == turn
+                            && shown.kind == kind
+                            && (shown.c <= 0.0 || shown.opacity > 0.0)),
+                        "{case:?}: drawn on every frame of its turn, frame {frame}: {shown:?}"
+                    );
+                    if shown.is_some_and(|shown| shown.c >= kind.duration() - 2.0 * STEP_S) {
+                        break;
+                    }
+                    assert!(
+                        (frame as f32) * STEP_S < kind.duration(),
+                        "{case:?}: c advances"
+                    );
+                    run(&mut app, STEP_S);
+                }
                 run(&mut app, 2.0);
                 let (rigs, insets, _) = census(&mut app);
                 assert_eq!((rigs, insets), (0, 0), "{case:?}: then the slot closes");
