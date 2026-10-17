@@ -167,11 +167,10 @@ pub struct Bindings {
 /// owns the device: [`TankDeviceSet`] stands aside, so no drive, aim, fire, sight or crew swap
 /// command is taken from the device for that tank, and the respawn, map and kill cam keys are the
 /// death flow's alone. [`claim_device`] decides it from the controlled tank's knockout fact
-/// (`TankKnockedOut`) in [`DeviceClaim`], before each frame's device read and before each fixed
-/// tick's command is read, and while the death flow owns the device it writes the
-/// [neutral](TankCommand::neutral) command on every one of them, so no held, restored or delayed
-/// value outlives the knockout. It hands the device back on the first claim that finds a live tank
-/// controlled, or none (a respawn, a disconnect). Not a capability gate: the sim never reads it.
+/// (`TankKnockedOut`) in [`DeviceClaim`] and, while the death flow owns the device, writes the
+/// [neutral](TankCommand::neutral) command, so the frame's [`DeviceCommand`] is neutral. It hands
+/// the device back on the first claim that finds a live tank controlled, or none (a respawn, a
+/// disconnect). Not a capability gate: the sim never reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DeviceOwner {
     #[default]
@@ -186,13 +185,36 @@ pub(crate) enum DeviceOwner {
 pub(crate) struct TankDeviceSet;
 
 /// Where [`claim_device`] runs: in `RunFixedMainLoop` before [`TankDeviceSet`], and in
-/// `FixedPreUpdate` before every reader of the tick's command (the network client's feed to the
-/// wire). A knockout fact realized before the frame's ticks (the network client's replicated
-/// status) orders before it and is claimed from the frame it arrives in; one latched inside a tick
-/// (the offline sim) is claimed by the next tick, the latching tick having read its command before
-/// the fact existed.
+/// `FixedPreUpdate`. A knockout fact realized before the frame's ticks (the network client's
+/// replicated status) orders before the frame claim, so the device stands aside and the frame's
+/// [`DeviceCommand`] is neutral from the frame the fact arrives in. One latched inside a tick (the
+/// offline sim, whose input is [`TankCommand`] itself) is claimed by the next tick, so the frame's
+/// later ticks read the neutral command; the latching tick read its command before the fact
+/// existed. On the network client the input bridge rewrites [`TankCommand`] before any sim reader,
+/// so the tick claim changes nothing there.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct DeviceClaim;
+
+/// The controlled tank's command as the device said it this frame: taken once per frame after
+/// [`TankDeviceSet`] and the frame's [`DeviceClaim`], so it is neutral while the death flow owns
+/// the device, and default when no tank is controlled. The network client's feed files it on every
+/// tick of the frame and clears its edges after the first, so the wire carries the device's command
+/// and each edge once. [`TankCommand`] is the sim's input: on the network client the input bridge
+/// overwrites it every tick with lightyear's restored input, which never reaches the wire.
+///
+/// Invariant: the edges it takes are the device's alone, because [`consume_edges`] clears every
+/// edge the bridge restored by the end of its tick; the levels are re-authored every frame (the
+/// gather, and the aim commit per `aim::CommittedAim`).
+#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
+pub(crate) struct DeviceCommand(pub(crate) TankCommand);
+
+/// Take the frame's [`DeviceCommand`] from the controlled tank's command.
+fn snapshot_device_command(
+    mut device: ResMut<DeviceCommand>,
+    own: Query<&TankCommand, With<Controlled>>,
+) {
+    device.0 = own.single().copied().unwrap_or_default();
+}
 
 /// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
 /// the device, write the controlled tank's command [neutral](TankCommand::neutral). In
@@ -320,8 +342,16 @@ pub fn client_plugin(app: &mut App) {
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .before(TankDeviceSet),
         )
+        .init_resource::<DeviceCommand>()
         .add_systems(RunFixedMainLoop, claim_device.in_set(DeviceClaim))
         .add_systems(FixedPreUpdate, claim_device.in_set(DeviceClaim))
+        .add_systems(
+            RunFixedMainLoop,
+            snapshot_device_command
+                .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
+                .after(TankDeviceSet)
+                .after(DeviceClaim),
+        )
         // Once per render frame, before the fixed loop runs its 0..N sim ticks — so every tick
         // this frame sees the same, freshest command, and edge inputs latch here without being
         // missed or doubled by the fixed clock.
@@ -722,6 +752,83 @@ mod tests {
              {file}:{line}: {text}",
             start + 1,
             end + 1,
+        );
+    }
+
+    /// The controlled tank's command as each fixed tick's sim reads it.
+    #[derive(Resource, Default)]
+    struct TickReads(Vec<TankCommand>);
+
+    /// Latch the knockout inside the next tick, after that tick's command was read.
+    #[derive(Resource, Default)]
+    struct KnockOutNextTick(bool);
+
+    fn read_tick(own: Query<&TankCommand, With<Controlled>>, mut reads: ResMut<TickReads>) {
+        reads.0.extend(own.iter().copied());
+    }
+
+    fn latch_knockout(
+        mut arm: ResMut<KnockOutNextTick>,
+        own: Query<Entity, With<Controlled>>,
+        mut commands: Commands,
+    ) {
+        if std::mem::take(&mut arm.0) {
+            for tank in &own {
+                commands.entity(tank).insert(TankKnockedOut {
+                    reason: crate::damage::KnockoutReason::CrewLoss,
+                });
+            }
+        }
+    }
+
+    /// Offline the sim reads [`TankCommand`] itself: a knockout latched inside the first tick of a
+    /// frame of several leaves the command neutral for the frame's later ticks, and the device with
+    /// the death flow by the end of the frame.
+    #[test]
+    fn a_knockout_latched_in_a_tick_neutralizes_the_frames_later_ticks() {
+        const TICKS_PER_FRAME: u32 = 3;
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+                Time::<Fixed>::default().timestep() * TICKS_PER_FRAME,
+            ))
+            .add_plugins((core_plugin, client_plugin))
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>()
+            .init_resource::<Ranging>()
+            .init_resource::<TickReads>()
+            .init_resource::<KnockOutNextTick>()
+            .add_systems(FixedUpdate, (read_tick, latch_knockout).chain());
+        app.world_mut().spawn((TankCommand::default(), Controlled));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyW);
+        for _ in 0..2 {
+            app.update();
+        }
+        let alive = std::mem::take(&mut app.world_mut().resource_mut::<TickReads>().0);
+        assert!(
+            !alive.is_empty() && alive.iter().all(|command| command.throttle == 1.0),
+            "alive, every tick reads the gathered command: {alive:?}"
+        );
+
+        app.world_mut().resource_mut::<KnockOutNextTick>().0 = true;
+        app.update();
+        let reads = &app.world().resource::<TickReads>().0;
+        assert_eq!(reads.len(), TICKS_PER_FRAME as usize, "{reads:?}");
+        assert_eq!(
+            reads[0].throttle, 1.0,
+            "the latching tick read its command before the knockout: {reads:?}"
+        );
+        assert!(
+            reads[1..]
+                .iter()
+                .all(|command| *command == TankCommand::default()),
+            "the frame's later ticks read the neutral command: {reads:?}"
+        );
+        assert_eq!(
+            *app.world().resource::<DeviceOwner>(),
+            DeviceOwner::DeathFlow
         );
     }
 }

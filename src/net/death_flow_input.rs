@@ -1,9 +1,12 @@
-//! Real-UDP probe of a dead tank's input path through lightyear's native inputs and the input
-//! bridge: from the frame the replicated knockout arrives, every tick files the death flow's
-//! neutral command and the server receives nothing else; once the input delay has drained the
-//! bridge restores nothing else either; and from the frame a live status arrives the device's
-//! command is filed again, on that frame's first tick.
+//! Real-UDP probes of the controlled tank's input path through lightyear's native inputs and the
+//! input bridge, on frames of several ticks. Every tick of a frame files the device's command for
+//! that frame, never the bridge's restored input: its levels on every tick, each edge on one. From
+//! the frame the replicated knockout arrives that command is the death flow's neutral one, and the
+//! server receives nothing else; once the input delay has drained the bridge restores nothing else
+//! either; from the frame a live status arrives the device's command is filed, restored and
+//! received again on every tick.
 
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use bevy::prelude::*;
@@ -27,7 +30,9 @@ use super::client::{
 use super::disclosure::NetTankStatus;
 use super::protocol::{InputBridge, protocol_id};
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
-use crate::command::{AimIntent, CrewSwap, TankCommand, TankDeviceSet, gather_commands};
+use crate::command::{
+    AimIntent, ConsumeCommandEdges, CrewSwap, TankCommand, TankDeviceSet, gather_commands,
+};
 use crate::damage::CrewStation;
 use crate::tank::Controlled;
 
@@ -48,10 +53,10 @@ struct Filed(Vec<(u32, TankCommand)>);
 #[derive(Resource, Default)]
 struct Restored(Vec<(u32, TankCommand)>);
 
-/// The fresh state of every input message the server received, `(end_tick, command)`; `None` when
-/// that state is absent.
+/// Every tick's command the server received, by tick, as the latest message carrying the tick
+/// states it; `None` when that state is absent.
 #[derive(Resource, Default)]
-struct Received(Vec<(u32, Option<TankCommand>)>);
+struct Received(BTreeMap<u32, Option<TankCommand>>);
 
 /// Stand-in for the aim commit and the crew bar, read from the device with the gather.
 fn author_aim_and_swap(mut tanks: Query<&mut TankCommand, With<Controlled>>) {
@@ -89,7 +94,7 @@ fn record_restored(
     }
 }
 
-/// Record each message's fresh state and drop the message, so no target resolution runs.
+/// Record each message's states by tick and drop the message, so no target resolution runs.
 fn record_received(
     mut receivers: Query<&mut MessageReceiver<TankInputMessage>>,
     mut received: ResMut<Received>,
@@ -97,15 +102,21 @@ fn record_received(
     for mut receiver in &mut receivers {
         receiver.retain_messages(|message| {
             for target in &message.inputs {
-                let mut fresh = None;
-                for state in target.states.clone().get_snapshots_from_message(TICK) {
-                    match state {
-                        Compressed::Input(ActionState(command)) => fresh = Some(command),
-                        Compressed::Absent => fresh = None,
+                let states: Vec<_> = target
+                    .states
+                    .clone()
+                    .get_snapshots_from_message(TICK)
+                    .collect();
+                let start = message.end_tick.0 + 1 - states.len() as u32;
+                let mut state = None;
+                for (offset, snapshot) in states.into_iter().enumerate() {
+                    match snapshot {
+                        Compressed::Input(ActionState(command)) => state = Some(command),
+                        Compressed::Absent => state = None,
                         Compressed::SameAsPrecedent => {}
                     }
+                    received.0.insert(start + offset as u32, state);
                 }
-                received.0.push((message.end_tick.0, fresh));
             }
             false
         });
@@ -138,8 +149,9 @@ fn build_server(port: u16) -> App {
     app
 }
 
-/// The windowed client's device path on the wire: the gather, the death flow's claim, the feed and
-/// the bridge, for a controlled tank that carries its replicated status. The client and the tank.
+/// The windowed client's device path on the wire: the gather, the death flow's claim, the feed, the
+/// bridge and the edge consumption, for a controlled tank that carries its replicated status. The
+/// client and the tank.
 fn build_client(port: u16) -> (App, Entity) {
     let mut app = base_app();
     app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK * TICKS_PER_FRAME));
@@ -147,6 +159,7 @@ fn build_client(port: u16) -> (App, Entity) {
         tick_duration: TICK,
     });
     super::protocol::plugin(&mut app);
+    crate::command::core_plugin(&mut app);
     crate::command::client_plugin(&mut app);
     install_device_feed(&mut app);
     let mut overlays = crate::overlay::Overlays::default();
@@ -171,7 +184,12 @@ fn build_client(port: u16) -> (App, Entity) {
                 .after(stamp_input_tick)
                 .in_set(ClientInputSystems::WriteClientInputs),
         )
-        .add_systems(FixedUpdate, record_restored.after(InputBridge));
+        .add_systems(
+            FixedUpdate,
+            record_restored
+                .after(InputBridge)
+                .before(ConsumeCommandEdges),
+        );
     app.insert_resource(InputTimelineConfig::new(
         SyncConfig::default(),
         shipping_input_delay(),
@@ -235,29 +253,9 @@ fn step(server: &mut App, client: &mut App) -> Vec<(u32, TankCommand)> {
     client.world().resource::<Filed>().0[before..].to_vec()
 }
 
-fn neutral(command: &TankCommand) -> bool {
-    TankCommand {
-        for_tick: 0,
-        ..*command
-    } == TankCommand::default()
-}
-
-fn live(command: &TankCommand) -> bool {
-    command.throttle == 1.0
-        && command.steer == 1.0
-        && command.fire_secondary
-        && command.aim.is_some()
-        && command.crew_swap.is_some()
-}
-
-/// Drive, fire, aim and the crew bar held through a dead life, on frames of several ticks: from
-/// the frame the knockout status arrives, every tick files the neutral command and the server
-/// receives only it; once the commands filed before that frame have drained the input delay, the
-/// bridge restores only it. From the frame a live status arrives, its first tick files the
-/// device's command.
-#[test]
-fn a_dead_tank_files_only_the_neutral_command() {
-    let _udp = lock_real_udp_test();
+/// A connected server and client with W, D and Space held, once the client has filed more than
+/// twice the input delay and the server has received input. The server, the client and the tank.
+fn connected() -> (App, App, Entity) {
     let port = free_port();
     let mut server = build_server(port);
     let (mut client, tank) = build_client(port);
@@ -268,21 +266,79 @@ fn a_dead_tank_files_only_the_neutral_command() {
         keys.press(key);
     }
     let delay = usize::from(SHIPPING_INPUT_DELAY_TICKS);
-
-    let mut up = false;
     for _ in 0..CONNECT_STEPS {
         step(&mut server, &mut client);
         if client.world().resource::<Filed>().0.len() > 2 * delay
             && !server.world().resource::<Received>().0.is_empty()
         {
-            up = true;
-            break;
+            return (server, client, tank);
         }
     }
-    assert!(
-        up,
-        "the client never filed input within {CONNECT_STEPS} frames"
-    );
+    panic!("the client never filed input within {CONNECT_STEPS} frames");
+}
+
+fn ticks(filed: &[(u32, TankCommand)]) -> Vec<u32> {
+    filed.iter().map(|(tick, _)| *tick).collect()
+}
+
+/// What the bridge restored on each of `ticks`, each of which it must have restored.
+fn restored_on(client: &App, ticks: &[u32]) -> Vec<(u32, TankCommand)> {
+    let restored = &client.world().resource::<Restored>().0;
+    ticks
+        .iter()
+        .map(|tick| {
+            let (_, command) = restored
+                .iter()
+                .rev()
+                .find(|(at, _)| at == tick)
+                .unwrap_or_else(|| panic!("tick {tick} was never restored"));
+            (*tick, *command)
+        })
+        .collect()
+}
+
+/// What the server received for each of `ticks`, each of which must have arrived with its state.
+fn received_on(server: &App, ticks: &[u32]) -> Vec<(u32, TankCommand)> {
+    let received = &server.world().resource::<Received>().0;
+    ticks
+        .iter()
+        .map(|tick| {
+            let command = received
+                .get(tick)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| panic!("the server received no command for tick {tick}"));
+            (*tick, command)
+        })
+        .collect()
+}
+
+fn neutral(command: &TankCommand) -> bool {
+    TankCommand {
+        for_tick: 0,
+        ..*command
+    } == TankCommand::default()
+}
+
+/// The held levels: drive, sustained fire and the aim.
+fn live(command: &TankCommand) -> bool {
+    command.throttle == 1.0
+        && command.steer == 1.0
+        && command.fire_secondary
+        && command.aim.is_some()
+}
+
+/// Drive, fire, aim and the crew bar held through a dead life, on frames of several ticks: from
+/// the frame the knockout status arrives, every tick files the neutral command and the server
+/// receives only it; once the commands filed before that frame have drained the input delay, the
+/// bridge restores only it. From the frame a live status arrives, every tick of that frame files
+/// the device's command, the first with the frame's crew swap, and the bridge restores and the
+/// server receives it on each of them.
+#[test]
+fn a_dead_tank_files_only_the_neutral_command() {
+    let _udp = lock_real_udp_test();
+    let (mut server, mut client, tank) = connected();
+    let delay = usize::from(SHIPPING_INPUT_DELAY_TICKS);
     let mut alive = Vec::new();
     for _ in 0..PHASE_FRAMES {
         alive.extend(step(&mut server, &mut client));
@@ -325,40 +381,115 @@ fn a_dead_tank_files_only_the_neutral_command() {
         );
     }
 
-    // A live status: the device's command from the frame's first tick.
+    // A live status: the device's command on every tick of the frame.
     client
         .world_mut()
         .entity_mut(tank)
         .insert(NetTankStatus::Active);
     let respawned = step(&mut server, &mut client);
-    let (tick, command) = respawned
-        .first()
-        .expect("the live status's frame files a command");
     assert!(
-        live(command),
-        "the new life's first tick {tick} filed {command:?}"
+        respawned.len() > 1,
+        "the live status's frame runs several ticks: {respawned:?}"
+    );
+    for (tick, command) in &respawned {
+        assert!(
+            live(command),
+            "the new life's tick {tick} filed {command:?}"
+        );
+    }
+    assert!(
+        respawned[0].1.crew_swap.is_some(),
+        "the new life's first tick files the frame's crew swap: {respawned:?}"
     );
 
     for _ in 0..PHASE_FRAMES {
         step(&mut server, &mut client);
     }
-    let received: Vec<_> = server
+    for (tick, command) in restored_on(&client, &ticks(&respawned)) {
+        assert!(
+            live(&command),
+            "the new life's tick {tick} restored {command:?}"
+        );
+    }
+    for (tick, command) in received_on(&server, &ticks(&respawned)) {
+        assert!(
+            live(&command),
+            "the server received {command:?} for the new life's tick {tick}"
+        );
+    }
+    let dead_ticks: Vec<_> = (first_dead..=last_dead).collect();
+    for (tick, command) in received_on(&server, &dead_ticks) {
+        assert!(
+            neutral(&command),
+            "the server received {command:?} for tick {tick} while dead"
+        );
+    }
+}
+
+/// Alive, on frames of several ticks: a throttle changed between frames is filed, restored and
+/// received at its new value on every tick of the frame it changes in, and a click gathered in a
+/// frame is filed on exactly one of its ticks and reaches the server attested once.
+#[test]
+fn every_tick_of_a_frame_files_the_devices_command() {
+    let _udp = lock_real_udp_test();
+    let (mut server, mut client, _) = connected();
+    for _ in 0..PHASE_FRAMES {
+        step(&mut server, &mut client);
+    }
+
+    let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+    keys.release(KeyCode::KeyW);
+    keys.press(KeyCode::KeyS);
+    let reversed = step(&mut server, &mut client);
+    assert!(
+        reversed.len() > 1,
+        "the reversing frame runs several ticks: {reversed:?}"
+    );
+    for (tick, command) in &reversed {
+        assert_eq!(command.throttle, -1.0, "tick {tick} filed {command:?}");
+    }
+
+    client
+        .world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    let clicked = step(&mut server, &mut client);
+    client
+        .world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .clear_just_pressed(MouseButton::Left);
+    let filed_clicks = clicked
+        .iter()
+        .filter(|(_, command)| command.fire_primary)
+        .count();
+    assert_eq!(
+        filed_clicks, 1,
+        "the click is filed on one tick of its frame: {clicked:?}"
+    );
+
+    for _ in 0..PHASE_FRAMES {
+        step(&mut server, &mut client);
+    }
+    for (tick, command) in restored_on(&client, &ticks(&reversed)) {
+        assert_eq!(command.throttle, -1.0, "tick {tick} restored {command:?}");
+    }
+    for (tick, command) in received_on(&server, &ticks(&reversed)) {
+        assert_eq!(
+            command.throttle, -1.0,
+            "the server received {command:?} for tick {tick}"
+        );
+    }
+    let received_clicks = server
         .world()
         .resource::<Received>()
         .0
         .iter()
-        .filter(|(end, _)| (first_dead..=last_dead).contains(end))
-        .copied()
-        .collect();
-    assert!(
-        !received.is_empty(),
-        "the dead life's input reached the server"
+        .filter(|(tick, command)| {
+            command.is_some_and(|command| command.fire_primary && command.for_tick == **tick)
+        })
+        .count();
+    assert_eq!(
+        received_clicks, 1,
+        "the server receives the click attested on one tick"
     );
-    for (end, fresh) in &received {
-        let command = fresh.expect("a message carries its own tick's command");
-        assert!(
-            neutral(&command),
-            "the server received {command:?} for tick {end} while dead"
-        );
-    }
 }

@@ -144,8 +144,9 @@ fn toggle_death_screen(
 }
 
 /// Latch the respawn edge on the player's own dead tank when the respawn key is pressed. Writes the
-/// edge onto the `Controlled` tank's `TankCommand`; `net::client::feed_action_state` copies it into
-/// the networked `ActionState` next tick, the wire carries it, and the server validates it against the
+/// edge onto the `Controlled` tank's `TankCommand`; the next frame's `command::DeviceCommand` takes
+/// it, `net::client::feed_action_state` files it into the networked `ActionState` on that frame's
+/// first tick, the wire carries it, and the server validates it against the
 /// tank's own death before honoring it. Scoped `With<TankKnockedOut>` so the key does nothing while
 /// alive (there is no overlay up then either). `just_pressed` is one press = one edge; `consume_edges`
 /// (and, under starvation, the input bridge's `clear_edges`) drops it after one tick, so a held key

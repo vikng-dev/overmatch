@@ -29,7 +29,7 @@ use crate::ballistics::{
     MAX_COSMETIC_CATCH_UP_TICKS, SanctionedBounce, SanctionedBounceInsert, SanctionedShots,
     SanctionedTerminal, ShotSource, TerminalVerdict,
 };
-use crate::command::{DeviceClaim, TankCommand};
+use crate::command::{DeviceCommand, TankCommand};
 use crate::state::{AppState, GameplaySet};
 use crate::tank::{
     Controlled as GameControlled, Muzzle, PendingTankAssets, TankRoot, TankSim, Weapon,
@@ -392,8 +392,8 @@ pub fn run() {
     // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
     // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
-    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands that to
-    // lightyear each tick. Headless simulate mode keeps writing `ActionState` directly instead
+    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the frame's
+    // `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing `ActionState` directly instead
     // (`buffer_input`) — no devices, no window, no presentation.
     // Mounted for sim-windowed too: the device writers it brings fill `TankCommand` at render
     // rate, but in simulate mode the reverse bridge overwrites that whole struct from the scripted
@@ -2180,8 +2180,7 @@ fn apply_pending_recoil_kicks(
 }
 
 /// The windowed client's command onto the wire each tick: [`feed_action_state`], then the stamp and
-/// the client's own record of what it filed, after the tick's [`DeviceClaim`] has decided whose
-/// command the device's is.
+/// the client's own record of what it filed.
 pub(super) fn install_device_feed(app: &mut App) {
     app.add_systems(
         FixedPreUpdate,
@@ -2191,23 +2190,27 @@ pub(super) fn install_device_feed(app: &mut App) {
             super::fire_presentation::record_own_intent,
         )
             .chain()
-            .after(DeviceClaim)
             .in_set(InputSystems::WriteClientInputs),
     );
 }
 
-/// Windowed input path: the game's own client writers (`gather_commands`, `commit_aim`,
-/// `drive_gunner_aim`, the range dial, the crew bar) have already filled the `Controlled` tank's
-/// `TankCommand` at render rate — copy it into lightyear's `ActionState` slot each tick, where the
-/// input plugin buffers it for the wire. The reverse bridge (net::protocol)
-/// hands it straight back to the sim, so locally the round trip is an identity copy — the buffer is
-/// the point. While the death flow owns the device the command is the neutral one `DeviceClaim`
-/// wrote this tick, over whatever the bridge restored. When input is blocked = a default command: the tank coasts to a stop instead of holding
-/// the last input, and clicks in the menu don't fire.
+/// Windowed input path: file the frame's device command ([`DeviceCommand`]: what the game's own
+/// client writers — `gather_commands`, `commit_aim`, `drive_gunner_aim`, the range dial, the crew
+/// bar — wrote at render rate, neutral while the death flow owns the device) into the `Controlled`
+/// tank's `ActionState` slot each tick, where the input plugin buffers it for the wire; a slot
+/// without `Controlled` files the default command. Every tick of the frame files the device's
+/// levels; its edges are cleared after the first, so each edge is filed on exactly one tick. The
+/// reverse bridge (net::protocol) hands the buffered command back to the sim as `TankCommand`,
+/// which is never read here. When input is blocked = a default command: the tank coasts to a stop
+/// instead of holding the last input, and clicks in the menu don't fire.
 fn feed_action_state(
     overlays: Res<crate::overlay::Overlays>,
     window: Single<&Window, With<PrimaryWindow>>,
-    mut slots: Query<(&TankCommand, &mut ActionState<TankCommand>), With<InputMarker<TankCommand>>>,
+    mut device: ResMut<DeviceCommand>,
+    mut slots: Query<
+        (&mut ActionState<TankCommand>, Has<GameControlled>),
+        With<InputMarker<TankCommand>>,
+    >,
 ) {
     // The ONE license, `overlay::input_blocked` — the same authority that feeds the cursor owner and
     // (via the released cursor + `state::cursor_locked`) gates `PlayerInputSet`. Blocked (menu / connect
@@ -2217,13 +2220,14 @@ fn feed_action_state(
     // (drive gather, aim commit, respawn request) is already frozen whenever this zeroing is active —
     // no second inference to keep in sync.
     let idle = crate::overlay::input_blocked(&overlays, window.focused);
-    for (command, mut state) in &mut slots {
-        state.0 = if idle {
+    for (mut state, controlled) in &mut slots {
+        state.0 = if idle || !controlled {
             TankCommand::default()
         } else {
-            *command
+            device.0
         };
     }
+    device.0.clear_edges();
 }
 
 /// Stamp `TankCommand::for_tick` — **the one place input provenance is created**, and the reason the
