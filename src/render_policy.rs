@@ -79,6 +79,8 @@ use bevy::camera::visibility::{RenderLayers, VisibilitySystems};
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::prelude::*;
 
+use crate::camera::CaptiveCameraPlaced;
+
 // ---------------------------------------------------------------------------------------------
 // The private numbers
 // ---------------------------------------------------------------------------------------------
@@ -262,7 +264,7 @@ impl CameraProfile {
         )
     }
 
-    fn mask(self) -> RenderLayers {
+    pub(crate) fn mask(self) -> RenderLayers {
         match self {
             Self::BattlefieldThirdPerson => {
                 Channel::mask(&[Channel::BattlefieldWorld, Channel::ViewSubjectBody])
@@ -327,12 +329,13 @@ pub(crate) fn pen_cam_gizmo_layers() -> RenderLayers {
 /// `PostUpdate`, ahead of `VisibilitySystems::CheckVisibility` (and therefore ahead of
 /// `bevy_light`'s caster sweep, which is ordered after it): an entity spawned anywhere from
 /// `Startup` through the scene-spawner schedules is resolved in the SAME frame it appears, so
-/// nothing ever renders a frame on the wrong channel.
+/// nothing ever renders a frame on the wrong channel. A camera's profile resolves after
+/// [`CaptiveCameraPlaced`], whose captor changes it.
 pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         PostUpdate,
         (
-            resolve_camera_profiles,
+            resolve_camera_profiles.after(CaptiveCameraPlaced),
             resolve_light_profiles,
             resolve_visual_scopes,
         )

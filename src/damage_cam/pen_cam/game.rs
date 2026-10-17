@@ -95,7 +95,10 @@ fn wire(app: &mut App) {
             Update,
             (
                 drive,
-                killcam::drive.after(crate::state::PlayerInputSet),
+                killcam::drive.in_set(killcam::KillCamGateSet),
+                killcam::give_way
+                    .after(crate::state::PlayerInputSet)
+                    .after(crate::overlay::OverlaySet::Toggle),
                 (view::prepare_stage, view::pose_stage, super::present())
                     .chain()
                     .run_if(resource_exists::<StageView>),

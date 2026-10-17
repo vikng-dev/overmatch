@@ -6,7 +6,7 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::damage::CrewStation;
+use crate::damage::{CrewStation, TankKnockedOut};
 use crate::firecontrol::Ranging;
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::Controlled;
@@ -145,7 +145,8 @@ pub struct Bindings {
     pub own_tank_glass: ButtonBinding,
     /// The kill cam, while the player's own tank is knocked out: skip to the death screen, hold
     /// the clock while down, replay from the death screen. Views, not commands: none reaches
-    /// [`TankCommand`]. The replay key shares `fire_secondary`'s, which reads only a live tank.
+    /// [`TankCommand`]. The replay key shares `fire_secondary`'s, which [`gather_commands`] reads
+    /// for a live tank only.
     pub kill_cam_skip: ButtonBinding,
     pub kill_cam_hold: ButtonBinding,
     pub kill_cam_replay: ButtonBinding,
@@ -337,19 +338,22 @@ fn auto_fire(
 /// the sim path that reads a device. `pub(crate)` so the other `BeforeFixedMainLoop` command
 /// writers (`firecontrol::adjust_range`, `sight::drive_gunner_aim`) can pin an explicit order
 /// against it — both share the `Ranging`/`TankCommand` it touches.
+///
+/// A knocked-out tank's secondary trigger is not read: its key is the kill cam's replay
+/// ([`Bindings::kill_cam_replay`]) while the tank is dead.
 pub(crate) fn gather_commands(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Res<Bindings>,
     ranging: Res<Ranging>,
-    mut tanks: Query<&mut TankCommand, With<Controlled>>,
+    mut tanks: Query<(&mut TankCommand, Has<TankKnockedOut>), With<Controlled>>,
 ) {
-    for mut command in &mut tanks {
+    for (mut command, knocked_out) in &mut tanks {
         command.throttle = bindings.throttle.value(&keys);
         command.steer = bindings.steer.value(&keys);
         // `|=`: a click must survive frames the fixed loop skips, until a tick consumes it.
         command.fire_primary |= bindings.fire_primary.just_pressed(&keys, &mouse);
-        command.fire_secondary = bindings.fire_secondary.pressed(&keys, &mouse);
+        command.fire_secondary = !knocked_out && bindings.fire_secondary.pressed(&keys, &mouse);
         // The dial itself (`Ranging`, scroll in the optic) is client-side control state; the
         // command carries its absolute value. `aim` is written by the per-view commit systems.
         command.range = ranging.range;

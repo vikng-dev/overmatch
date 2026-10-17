@@ -21,7 +21,10 @@
 //!   pose) and before `TransformSystems::Propagate`; the gunner's, written as `GlobalTransform`
 //!   after propagation, runs before `VisibilitySystems::UpdateFrusta`;
 //! * every lens (`Projection`) writer runs before `CameraUpdateSystems`, where bevy derives the
-//!   projection matrices.
+//!   projection matrices;
+//! * a profile ([`CameraProfile`](crate::render_policy::CameraProfile)) is resolved into
+//!   `RenderLayers` after [`CaptiveCameraPlaced`] (`render_policy`), so a captor's profile draws on
+//!   the frame it is set.
 //!
 //! The copiers order after all three sets: `look::follow_lens` before `CameraUpdateSystems`,
 //! `look::follow_pose` before `UpdateFrusta`.
@@ -159,6 +162,12 @@ impl TurretPivot {
     /// The offset, once a controlled tank has supplied it.
     pub(crate) fn offset(&self) -> Option<Vec3> {
         self.0
+    }
+
+    /// A pivot at `offset`, for a test without a tank's skeleton.
+    #[cfg(test)]
+    pub(crate) fn at(offset: Vec3) -> Self {
+        Self(Some(offset))
     }
 }
 

@@ -2,6 +2,8 @@
 //!
 //! Life state comes from public `NetTankStatus`; private crew state must not drive an observer's UI.
 
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use crate::command::TankCommand;
@@ -49,23 +51,44 @@ pub fn plugin(app: &mut App) {
     app.init_resource::<GameDeathScreen>()
         .init_match_resource::<AwaitingRespawn>()
         .add_systems(OnEnter(Flow::InMatch), spawn_death_status_line)
-        .add_systems(
-            Update,
-            (
-                // All overlay reconcilers must read the same declared state. This is a state-driven
-                // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
-                toggle_death_screen.in_set(overlay::OverlaySet::Declare),
-                // Re-check the reconciled overlay input gate before latching a respawn edge — after
-                // `Toggle`, so a menu or spawn map opened this frame already counts.
-                request_respawn
-                    .in_set(PlayerInputSet)
-                    .after(overlay::OverlaySet::Toggle),
-                // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
-                // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
-                apply_death_status_line.after(overlay::OverlaySet::Toggle),
-            )
-                .in_set(InMatchSystems),
-        );
+        .add_systems(Update, systems().in_set(InMatchSystems));
+}
+
+/// The death screen's `Update` systems, placed among the overlay sets. Both read the kill cam's
+/// [`KillCamGate`], written before them (`KillCamGateSet`).
+fn systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        // All overlay reconcilers must read the same declared state. This is a state-driven
+        // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
+        toggle_death_screen.in_set(overlay::OverlaySet::Declare),
+        // Re-check the reconciled overlay input gate before latching a respawn edge — after
+        // `Toggle`, so a menu or spawn map opened this frame already counts.
+        request_respawn
+            .in_set(PlayerInputSet)
+            .after(overlay::OverlaySet::Toggle),
+        // The death STATUS LINE is the one one-scrim exemption; its tiny reconciler runs after
+        // `Toggle` alongside the generic `overlay::apply_overlay_visibility`.
+        apply_death_status_line.after(overlay::OverlaySet::Toggle),
+    )
+        .into_configs()
+}
+
+/// The death screen's resources and `Update` systems without the match flow, for a composed
+/// schedule under test.
+#[cfg(test)]
+pub(crate) fn mount_bare(app: &mut App) {
+    app.init_resource::<GameDeathScreen>()
+        .init_resource::<AwaitingRespawn>()
+        .add_systems(Update, systems());
+}
+
+/// Whether the death screen shows "YOU DIED" (not "RESPAWNING…").
+#[cfg(test)]
+pub(crate) fn shows_died(world: &mut World) -> bool {
+    world
+        .query::<&DeathScreenNode>()
+        .iter(world)
+        .any(|node| *node == DeathScreenNode::Died)
 }
 
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare

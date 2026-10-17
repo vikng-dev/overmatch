@@ -7,7 +7,8 @@ mod client;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;
-mod death_screen;
+// `pub(crate)` for the kill cam's composed schedule under test.
+pub(crate) mod death_screen;
 mod debug_hud;
 mod diagnostics;
 mod disclosure;

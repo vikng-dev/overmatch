@@ -23,6 +23,11 @@
 //!   map likewise ([`KillCamGate::settling`]): skip ends the run at the death screen, hold freezes the
 //!   presentation clock (the orbit drifts on), replay plays the held record again from the lesson.
 //!   Respawn and the map are never blocked after the dead-zone: either ends the run.
+//! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], before every reader of the
+//!   [`KillCamGate`] it writes: the overlay declarers and toggles (`overlay::OverlaySet`) and the
+//!   device readers ([`PlayerInputSet`]), so the death screen, respawn and the map read the gate of
+//!   the frame they run in. [`give_way`] runs after both: a respawn or a map opened this frame ends
+//!   the run there, and the gate follows on the next frame's drive.
 //! * **Teardown.** A new life, no tank, a disconnect ([`super::CloseCorner`]), the spawn map, a
 //!   change of the kill cam or reduce-motion setting: the run ends, the camera is handed back on
 //!   the third-person profile and the stage goes with the slot's [`super::Rig::teardown`]. The
@@ -57,11 +62,12 @@ use crate::command::{Bindings, ButtonBinding, TankCommand};
 use crate::damage::TankKnockedOut;
 use crate::damage_cam::delivery::{ImpactPresence, ShotExplanations, StoredExplanation};
 use crate::damage_cam::wire::TankLife;
-use crate::overlay::{Overlay, Overlays};
+use crate::overlay::{Overlay, OverlaySet, Overlays};
 use crate::render_policy::CameraProfile;
 use crate::settings::{KillCam as KillCamSetting, ReduceMotion, Settings};
 use crate::sight::SightMode;
 use crate::spec::{TankSpecHandle, ViewKind};
+use crate::state::PlayerInputSet;
 use crate::tank::{Controlled, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
@@ -75,7 +81,8 @@ pub(crate) const RECORD_WAIT_S: f32 = 1.0;
 /// The replay prompt. ASCII only — it reaches `Text`.
 const REPLAY: &str = "SPACE  REPLAY";
 
-/// What the kill cam asks of the game's death screen and of its respawn and map keys this frame.
+/// What the kill cam asks of the game's death screen and of its respawn and map keys this frame,
+/// written by [`drive`] in [`KillCamGateSet`] before any of them reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct KillCamGate {
     /// The death screen stays down: the cam waits for its record or plays its first three beats.
@@ -84,6 +91,11 @@ pub(crate) struct KillCamGate {
     /// nothing yet.
     pub(crate) settling: bool,
 }
+
+/// The kill cam's [`drive`]: before the readers of the [`KillCamGate`] it writes, the overlay
+/// declarers and toggles (`overlay::OverlaySet`) and the device readers ([`PlayerInputSet`]).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct KillCamGateSet;
 
 /// Present where the composition mounts the game's death screen (the network client's). Without
 /// it, the kill cam draws its own stand-in: the death tint and a panel naming the knockout.
@@ -160,6 +172,13 @@ pub(crate) struct Victim {
     ui: bool,
 }
 
+impl Victim {
+    /// The death screen stays down: a run plays, or the wait for one is open.
+    fn holds_death_screen(&self) -> bool {
+        self.run.is_some() || !self.resolved
+    }
+}
+
 /// The kill cam's UI roots.
 #[derive(Component)]
 struct KillCamUi;
@@ -169,15 +188,22 @@ struct KillCamUi;
 #[derive(Component)]
 struct StageAnchor;
 
-/// The kill cam's state and systems, beside the slot's ([`super::wire`]); its `drive` runs in the
-/// slot's chain.
+/// The kill cam's state and systems, beside the slot's ([`super::wire`]); its [`drive`] and
+/// [`give_way`] run in the slot's chain.
 pub(super) fn wire(app: &mut App) {
     app.init_resource::<Victim>()
         .init_resource::<KillCamGate>()
         .init_resource::<CameraCaptive>()
+        .configure_sets(
+            Update,
+            KillCamGateSet
+                .before(OverlaySet::Declare)
+                .before(OverlaySet::Toggle)
+                .before(PlayerInputSet),
+        )
         .add_observer(disconnect)
         .add_systems(PostUpdate, place.in_set(CaptiveCameraPlaced))
-        .add_systems(Update, hud.after(drive));
+        .add_systems(Update, hud.after(give_way));
 }
 
 /// Hand the camera back on the third-person profile, the lesson's mask owner gone, if the kill cam
@@ -227,11 +253,10 @@ type OwnTank<'a> = (
     &'a CombatantId,
     &'a CombatantLife,
     Option<&'a TankKnockedOut>,
-    Option<&'a TankCommand>,
     Option<&'a crate::tank::Rig>,
 );
 
-/// The kill cam's keys and what else ends a run: the spawn map.
+/// The kill cam's keys, and the spawn map (no replay under it).
 #[derive(SystemParam)]
 pub(super) struct Keys<'w> {
     keys: Option<Res<'w, ButtonInput<KeyCode>>>,
@@ -333,7 +358,7 @@ pub(super) fn drive(
     let by = (settings.kill_cam, settings.reduce_motion);
     let victim = &mut *victim;
     let tank = own.single().ok();
-    let dead_life = tank.and_then(|(_, &combatant, &life, knocked_out, _, _)| {
+    let dead_life = tank.and_then(|(_, &combatant, &life, knocked_out, _)| {
         knocked_out.map(|_| TankLife { combatant, life })
     });
     let camera_entity = scene
@@ -412,24 +437,17 @@ pub(super) fn drive(
     let skip = input && keys.read(|b| b.kill_cam_skip, true);
     let hold = input && keys.read(|b| b.kill_cam_hold, false);
     let replay = input && keys.read(|b| b.kill_cam_replay, true);
-    let respawning =
-        tank.is_some_and(|(_, _, _, _, command, _)| command.is_some_and(|c| c.respawn));
     let map = keys.map();
     let changed = victim.by != Some(by);
     victim.by = Some(by);
 
-    // What ends a run, or the wait for one: the death screen.
-    if victim.run.is_some() && (skip || respawning || map || changed) {
+    // What ends a run, or the wait for one, here: the death screen. The respawn and the map end
+    // them in `give_way`.
+    if victim.run.is_some() && (skip || changed) {
         end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
         victim.resolved = true;
     }
-    if !victim.resolved
-        && (skip
-            || respawning
-            || map
-            || !by.0.on()
-            || since >= RECORD_WAIT_S && victim.run.is_none())
-    {
+    if !victim.resolved && (skip || !by.0.on() || since >= RECORD_WAIT_S && victim.run.is_none()) {
         victim.resolved = true;
     }
 
@@ -461,7 +479,7 @@ pub(super) fn drive(
         let frame = match stored.explanation.hull_pose() {
             Ok(Some((at, turn))) => Some(Transform::from_translation(at).with_rotation(turn)),
             _ => tank
-                .and_then(|(_, _, _, _, _, tank_rig)| tank_rig)
+                .and_then(|(_, _, _, _, tank_rig)| tank_rig)
                 .and_then(|tank_rig| {
                     let node = scene.view_nodes.get(tank_rig.hull).ok();
                     scene
@@ -612,9 +630,37 @@ pub(super) fn drive(
     }
 
     *gate = KillCamGate {
-        holds_death_screen: victim.run.is_some() || !victim.resolved,
+        holds_death_screen: victim.holds_death_screen(),
         settling: !settled,
     };
+}
+
+/// The game's respawn or spawn map, taken while dead, ends the run and the wait for one: the death
+/// screen. After the respawn key ([`PlayerInputSet`]) and the map's toggle (`OverlaySet::Toggle`).
+pub(super) fn give_way(
+    overlays: Option<Res<Overlays>>,
+    own: Query<&TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
+    mut victim: ResMut<Victim>,
+    mut captive: ResMut<CameraCaptive>,
+    mut slot: ResMut<Slot>,
+    mut rig: SlotRig,
+    camera: Query<(Entity, &CameraProfile), With<PlayerView>>,
+) {
+    let respawning = own.iter().any(|command| command.respawn);
+    let map = overlays
+        .as_deref()
+        .is_some_and(|overlays| overlays.contains(Overlay::SpawnMap));
+    if victim.dead.is_none() || !(respawning || map) {
+        return;
+    }
+    end_run(
+        &mut victim,
+        &mut captive,
+        &mut rig,
+        &mut slot,
+        camera.single().ok(),
+    );
+    victim.resolved = true;
 }
 
 /// End the run: the camera handed back and the stage gone.
@@ -724,7 +770,6 @@ fn spawn_ui(commands: &mut Commands, fonts: &UiFonts) {
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn hud(
     victim: Res<Victim>,
-    gate: Res<KillCamGate>,
     settings: Option<Res<Settings>>,
     game_death_screen: Option<Res<GameDeathScreen>>,
     own: Query<&TankKnockedOut, With<Controlled>>,
@@ -761,7 +806,7 @@ fn hud(
         }
     };
     let dead = victim.dead.is_some();
-    let death_screen = dead && !gate.holds_death_screen;
+    let death_screen = dead && !victim.holds_death_screen();
     let reduce = settings.as_deref().is_some_and(|s| s.reduce_motion.on());
 
     // The killer card.

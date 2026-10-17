@@ -1,6 +1,8 @@
 use super::super::tests::{
     STEP_S, census, corner_app, default_image_kept, receive, stage_of, step,
 };
+use bevy::camera::visibility::RenderLayers;
+
 use super::*;
 use crate::damage::KnockoutReason;
 use crate::damage_cam::PenetrationReport;
@@ -123,7 +125,14 @@ fn run(app: &mut App, seconds: f32) {
 /// A knockout whose killing record arrives `record_after_s` after the fact (negative: before it),
 /// the struck tank's stage view stood in once the slot has closed. The app, the player, the camera.
 fn killed(record_after_s: f32) -> (App, Entity, Entity) {
-    let (mut app, player, camera) = app(Settings::default());
+    killed_in(app(Settings::default()), record_after_s)
+}
+
+/// [`killed`], in `app`.
+fn killed_in(
+    (mut app, player, camera): (App, Entity, Entity),
+    record_after_s: f32,
+) -> (App, Entity, Entity) {
     let (explanation, _, vocabulary, report) = shot(STRUCK, player_life(0), true);
     if record_after_s < 0.0 {
         receive(&mut app, explanation.clone(), &vocabulary);
@@ -387,4 +396,124 @@ fn the_slot_stays_closed_under_the_kill_cam() {
     receive(&mut app, shooter, &vocabulary);
     assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
     assert!(app.world().resource::<Corner>().showing.is_none());
+}
+
+/// The kill cam's app with the game's readers of its gate on their own sets: the network client's
+/// death screen and respawn key, and the spawn map, under the overlay sets' chain, in a match. The
+/// player's tank takes commands.
+fn composed() -> (App, Entity, Entity) {
+    let (mut app, player, camera) = app(Settings::default());
+    app.configure_sets(
+        Update,
+        (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
+    )
+    .init_resource::<Overlays>()
+    .insert_resource(UiFonts {
+        hud: Handle::default(),
+        body: Handle::default(),
+    });
+    crate::net::death_screen::mount_bare(&mut app);
+    crate::net::spawn_map::mount_bare(&mut app);
+    app.world_mut()
+        .resource_mut::<Overlays>()
+        .declare_in_match(true);
+    app.world_mut()
+        .entity_mut(player)
+        .insert(TankCommand::default());
+    step(&mut app);
+    (app, player, camera)
+}
+
+/// The death screen, the respawn key and the map read the gate of the frame they run in: from the
+/// knockout's own frame no "YOU DIED" while the cam waits, and R or M pressed every frame is taken
+/// on the first press at the dead-zone's end and on none before it.
+#[test]
+fn the_gate_is_read_on_the_frame_it_is_written() {
+    for key in [KeyCode::KeyR, KeyCode::KeyM] {
+        let (mut app, player, _) = composed();
+        knock_out(&mut app, player);
+        loop {
+            press(&mut app, key);
+            let zero = victim(&app).dead.expect("dead from the knockout's frame").1;
+            let now = app.world().resource::<Time>().elapsed_secs_f64();
+            let since = (now - zero) as f32;
+            let overlays = app.world().resource::<Overlays>();
+            let taken = match key {
+                KeyCode::KeyR => app.world().get::<TankCommand>(player).unwrap().respawn,
+                _ => overlays.contains(Overlay::SpawnMap),
+            };
+            assert_eq!(taken, since >= HIT_S, "{key:?} at {since} s");
+            if taken {
+                break;
+            }
+            assert!(!overlays.contains(Overlay::Death), "{key:?} at {since} s");
+            assert!(
+                !crate::net::death_screen::shows_died(app.world_mut()),
+                "{key:?} at {since} s"
+            );
+        }
+        // Given way: "RESPAWNING…" on R; on M, the death screen under the map.
+        step(&mut app);
+        assert_eq!(
+            crate::net::death_screen::shows_died(app.world_mut()),
+            key == KeyCode::KeyM,
+            "{key:?}"
+        );
+    }
+}
+
+/// The captor's profile draws on the frame its beat begins: the lesson's channels on the lesson's
+/// first frame, the third person's on the killer beat's first.
+#[test]
+fn each_beats_channels_resolve_on_its_first_frame() {
+    let (mut app, player, camera) = app(Settings::default());
+    crate::render_policy::plugin(&mut app);
+    app.init_resource::<avian3d::collider_tree::ColliderTrees>()
+        .insert_resource(TurretPivot::at(Vec3::Y));
+    app.world_mut()
+        .entity_mut(player)
+        .insert((Tank, Transform::IDENTITY));
+    app.world_mut()
+        .entity_mut(camera)
+        .insert((Transform::from_xyz(0.0, 3.0, 10.0), Projection::default()));
+    let (mut app, _, camera) = killed_in((app, player, camera), -1.0);
+    let layers = |app: &App| app.world().get::<RenderLayers>(camera).cloned();
+    for (beat_now, profile) in [
+        (Beat::Lesson, CameraProfile::KillCamLesson),
+        (Beat::Killer, CameraProfile::BattlefieldThirdPerson),
+    ] {
+        assert!(until(&mut app, 6.0, |app| beat(app) == Some(beat_now)));
+        assert_eq!(layers(&app), Some(profile.mask()), "{beat_now:?}");
+    }
+}
+
+/// Space is the dead tank's replay and the live tank's secondary trigger, never both.
+#[test]
+fn space_replays_for_a_dead_tank_and_fires_for_a_live_one() {
+    let gather = |app: &mut App, player: Entity| {
+        crate::command::client_plugin(app);
+        app.init_resource::<crate::firecontrol::Ranging>();
+        app.world_mut()
+            .entity_mut(player)
+            .insert(TankCommand::default());
+    };
+    let fires = |app: &App, player: Entity| {
+        app.world()
+            .get::<TankCommand>(player)
+            .unwrap()
+            .fire_secondary
+    };
+
+    let (mut app, player, _) = killed(-1.0);
+    gather(&mut app, player);
+    assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+    press(&mut app, KeyCode::Space);
+    assert_eq!(beat(&app), Some(Beat::Lesson), "replayed");
+    assert!(!fires(&app, player), "a knocked-out tank does not fire");
+
+    let (mut app, player, _) = self::app(Settings::default());
+    gather(&mut app, player);
+    press(&mut app, KeyCode::Space);
+    assert!(fires(&app, player), "a live tank fires");
+    assert!(victim(&app).run.is_none() && victim(&app).dead.is_none());
 }

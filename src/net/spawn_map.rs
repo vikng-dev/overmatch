@@ -8,6 +8,8 @@
 //! It joins the `overlay::Overlays` authority as [`Overlay::SpawnMap`], which is what releases the
 //! cursor (a click needs a cursor position) and zeroes the wire command while the map is up.
 
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use bevy::window::PrimaryWindow;
@@ -118,23 +120,33 @@ pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::spawn_map");
     app.init_match_resource::<SpawnMap>()
         .add_systems(Startup, spawn_map_overlay)
-        .add_systems(
-            Update,
-            (
-                // The `M` toggle is a GATED one — it reads the set to decide whether the map may
-                // open — so it runs in `OverlaySet::Toggle`, after every state-driven declarer has
-                // written this frame. Declaring it alongside them would let `M` pressed on the same
-                // frame a connect or death screen appears read a set that did not have that overlay
-                // in it yet, pass `may_open`, and latch an invisible map.
-                toggle_spawn_map.in_set(overlay::OverlaySet::Toggle),
-                // Everything below reads the reconciled set (`draws_scrim`), so a click can never
-                // land through a menu drawn on top of the map.
-                (size_spawn_map, click_spawn_map, place_markers)
-                    .chain()
-                    .after(overlay::OverlaySet::Toggle),
-            )
-                .in_set(InMatchSystems),
-        );
+        .add_systems(Update, systems().in_set(InMatchSystems));
+}
+
+/// The map's `Update` systems, placed among the overlay sets.
+fn systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        // The `M` toggle is a GATED one — it reads the set to decide whether the map may
+        // open — so it runs in `OverlaySet::Toggle`, after every state-driven declarer has
+        // written this frame. Declaring it alongside them would let `M` pressed on the same
+        // frame a connect or death screen appears read a set that did not have that overlay
+        // in it yet, pass `may_open`, and latch an invisible map.
+        toggle_spawn_map.in_set(overlay::OverlaySet::Toggle),
+        // Everything below reads the reconciled set (`draws_scrim`), so a click can never
+        // land through a menu drawn on top of the map.
+        (size_spawn_map, click_spawn_map, place_markers)
+            .chain()
+            .after(overlay::OverlaySet::Toggle),
+    )
+        .into_configs()
+}
+
+/// The map's state and `Update` systems without the match flow, for a composed schedule under
+/// test.
+#[cfg(test)]
+pub(crate) fn mount_bare(app: &mut App) {
+    app.init_resource::<SpawnMap>()
+        .add_systems(Update, systems());
 }
 
 /// `M` toggles the map; the declaration into [`Overlays`] is absolute and re-run every frame, so it
@@ -147,7 +159,8 @@ fn toggle_spawn_map(
     mut map: ResMut<SpawnMap>,
     mut overlays: ResMut<Overlays>,
 ) {
-    // Not in the kill cam's input dead-zone after a knockout ([`KillCamGate::settling`]).
+    // Not in the kill cam's input dead-zone after a knockout ([`KillCamGate::settling`], this
+    // frame's: `KillCamGateSet` runs before `OverlaySet::Toggle`).
     let settling = gate.is_some_and(|gate| gate.settling);
     if keys.just_pressed(SPAWN_MAP_KEY) && !(settling && !map.open) {
         // CLOSING is unconditional; OPENING requires that nothing latched outranks the map
