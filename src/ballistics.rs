@@ -39,6 +39,10 @@ pub(crate) mod spall_cone;
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
 
+/// The witness pass (ADR-0040): the round's line and the field's directions intersected with the
+/// witness volumes the hard world never sees.
+mod wound;
+
 /// The spatial half of the §13 walk: turning a corridor of world rays into EVERY face crossing along
 /// them, with each face's true (winding) orientation. Avian's own all-hits query cannot express it —
 /// see the module doc.
@@ -69,6 +73,11 @@ mod field_casts;
 /// scenario files the demo plays, checked current.
 #[cfg(test)]
 mod pen_cam;
+
+/// The crew-outcome sweep (ignored; run on demand): random main-gun hits on the bound tank under
+/// the witness law and the law it replaced, counted per crewman.
+#[cfg(test)]
+mod crew_sweep;
 
 /// The game's pen cam recorder on the fixed tick: rounds fired at fixture tanks read back as the
 /// records the authority emits.
@@ -407,6 +416,14 @@ impl ShotDose {
         }
     }
 
+    /// Add each witness's line dose of a [`ArmourMark::Wound`]: its `cost` as it stands, the wound
+    /// rate being the witness law's whole scale ([`TRANSIT_K`] is the hard world's).
+    fn add_wounds(&mut self, volumes: &[VolumeCrossing]) {
+        for crossed in volumes {
+            self.add(crossed.volume, crossed.cost);
+        }
+    }
+
     /// Add every dose of `doses`, a line dose scaled by [`TRANSIT_K`]; a field dose is already in
     /// the count unit.
     fn add_all(&mut self, doses: &[mechanism::Dose]) {
@@ -636,8 +653,7 @@ fn cast_disc_segment(
                 // walked regardless. An assignment therefore lets whatever is visited after the
                 // armour candidate overwrite the answer, and the static tree's terrain heightfield,
                 // whose AABB is the whole world box, is in every corridor there is.
-                near_armor |= hit_ancestor(entity, &world.volumes, &world.parents).is_some()
-                    && not_own(entity);
+                near_armor |= world.armour(entity).is_some() && not_own(entity);
                 // Stop this tree at the first candidate: this asks IF, not WHICH.
                 !near_armor
             },
@@ -804,6 +820,8 @@ pub struct FireShell {
     pub mass: f32,
     /// Nose factor (dimensionless, `0 < N ≤ 1`), read by the capability law.
     pub nose_factor: f32,
+    /// Wound rate: reference-mm of dose per metre of chord through a witness (ADR-0040).
+    pub wound: f32,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -826,6 +844,9 @@ pub(crate) struct Projectile {
     /// The round's mechanism, bound at spawn from its fire data and the substance registry
     /// ([`mechanism::SolidShot::bind`]) — data, never an asset.
     round: mechanism::SolidShot,
+    /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
+    /// Read only by the witness pass; the hard walk never sees it.
+    wound: f32,
     /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
     drag_k: f32,
     /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
@@ -880,6 +901,7 @@ impl Projectile {
                 caliber,
                 nose_factor: 0.3,
             }),
+            wound: 30.0,
             drag_k: 0.0,
             disc: walk::DiscFrame {
                 u: Vec3::X,
@@ -943,6 +965,24 @@ pub struct BallisticVolume {
     )]
     pub substance: String,
 }
+
+/// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
+/// resists the shell, never shadows a spall direction and never throws one. It is wounded by what
+/// the hard world sends through it ([`wound`]). Its colliders carry [`WitnessSurface`] and sit on
+/// [`crate::Layer::Witness`]; it carries a [`ComponentHealth`] pool like any box.
+#[derive(Component)]
+pub struct WitnessVolume {
+    /// The substance's registry name — identity, for diagnostics and inspection.
+    #[allow(
+        dead_code,
+        reason = "carried from the bake for the x-ray readout; no law reads it"
+    )]
+    pub substance: String,
+}
+
+/// A witness volume's collider: excluded from every armour broad phase, read by the witness pass.
+#[derive(Component)]
+pub struct WitnessSurface;
 
 /// The bake's manifold certificate, carried onto the collider entity so the corridor collector can
 /// name the surface and the welded feature a crossing came from (`walk::ShellKey`,
@@ -1040,6 +1080,16 @@ pub enum ArmourMark {
     },
     /// A walk that failed closed: the round stopped at contact with no crossing resolved.
     Failed,
+    /// The round's line through witness volumes (ADR-0040) along the legs it flew since the last
+    /// mark, logged before the mark of the decision whose legs they are: each witness's disc-mean
+    /// chord and its dose `chord × wound` as `cost`. No event of the flight; it moves nothing.
+    Wound {
+        /// Direction of travel and speed (m/s) on the first leg that met a witness.
+        incoming: Vec3,
+        speed: f32,
+        /// Every witness the line put a chord into, in order of first entry.
+        volumes: Vec<VolumeCrossing>,
+    },
 }
 
 /// How a crossing ended.
@@ -1059,7 +1109,8 @@ pub struct VolumeCrossing {
     pub end: Vec3,
     /// Disc-mean chord (m).
     pub chord: f32,
-    /// The line's dose to it (reference-mm): chord × factor.
+    /// The line's dose to it (reference-mm): chord × factor for hard matter, chord × the round's
+    /// wound rate for a witness ([`ArmourMark::Wound`]).
     pub cost: f32,
     /// The whole disc came out of it.
     pub perforated: bool,
@@ -1503,6 +1554,7 @@ fn on_fire_shell(
                 caliber: fire.caliber,
                 nose_factor: fire.nose_factor,
             }),
+            wound: fire.wound,
             drag_k: drag,
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
@@ -1640,6 +1692,32 @@ struct ProjectileMarchWorld<'w, 's> {
     // The cone shape the march throws when a world names one (the cost probe); the shipped shape
     // otherwise.
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
+    // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
+    // armour classification.
+    witnesses: Query<'w, 's, &'static WitnessVolume>,
+    witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
+}
+
+impl ProjectileMarchWorld<'_, '_> {
+    /// The armour volume a collider belongs to: its nearest [`BallisticVolume`] ancestor. `None`
+    /// for terrain and for a witness's collider, whatever node a witness is parented under — a
+    /// witness is never a layer of the walk (ADR-0040).
+    fn armour(&self, collider: Entity) -> Option<(Entity, &BallisticVolume)> {
+        if self.witness_surfaces.contains(collider) {
+            return None;
+        }
+        hit_ancestor(collider, &self.volumes, &self.parents)
+    }
+
+    /// The volume node a collider belongs to, of either kind: a witness's own node for a witness
+    /// collider, the armour volume otherwise. What a "the struck tank's" admission reads.
+    fn volume_of(&self, collider: Entity) -> Option<Entity> {
+        if self.witness_surfaces.contains(collider) {
+            hit_ancestor(collider, &self.witnesses, &self.parents).map(|(node, _)| node)
+        } else {
+            self.armour(collider).map(|(node, _)| node)
+        }
+    }
 }
 
 /// The one shell a march phase is resolving: its pose, flight state, and the per-flight record every
@@ -2350,6 +2428,48 @@ fn resume_from_catch_up(
     shell.readout.capability = capability(shell.projectile.body(), caught_up.velocity.length());
 }
 
+/// AUTHORITY: the witness pass over `legs` (ADR-0040, [`wound::line`]), through the witnesses
+/// `admit` keeps. Doses each witness the line put a chord into, logs one [`ArmourMark::Wound`] and
+/// settles it at its own index; returns the HP removed. A replica takes nothing.
+///
+/// The hard world is already resolved when this runs and nothing here reaches back into it, so a
+/// witness walk that fails closed doses nothing and leaves the round's flight as it was.
+fn wound_legs(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    admit: &dyn Fn(Entity) -> bool,
+    legs: &[resolve::Leg],
+    speed: f32,
+    health: &mut Query<&mut ComponentHealth>,
+) -> u32 {
+    if !context.deposit {
+        return 0;
+    }
+    let (volumes, incoming) = match wound::line(context, admit, legs, shell.projectile.wound) {
+        Ok(found) => found,
+        Err(error) => {
+            error!(
+                shot = ?shell.shot.map(|shot| shot.0),
+                shell = ?shell.entity,
+                ?error,
+                "ballistics: the witness pass failed along the round's line; it doses nothing"
+            );
+            return 0;
+        }
+    };
+    let Some(incoming) = incoming else {
+        return 0;
+    };
+    shell.dose.add_wounds(&volumes);
+    shell.marks.log.push(ArmourMark::Wound {
+        incoming: Vec3::from(incoming),
+        speed,
+        volumes,
+    });
+    let mark = shell.marks.log.len() - 1;
+    shell.dose.settle(health, true, mark)
+}
+
 /// Ray-march one tick's travel budget for a single shell, resolving every surface it reaches.
 ///
 /// Free flight until a surface, then resolve it — terrain stops the shell; a ballistic volume
@@ -2499,6 +2619,15 @@ fn march_shell_step(
                 } else {
                     stepped * dt
                 };
+                if let Ok(along) = Dir3::new(displacement) {
+                    let leg = resolve::Leg::new(
+                        origin,
+                        along,
+                        displacement.length(),
+                        &flight.sample_offsets(radius),
+                    );
+                    damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
+                }
                 flight.fly(displacement);
                 break;
             }
@@ -2507,6 +2636,8 @@ fn march_shell_step(
             // differs — the short-circuit records nothing, exactly as before.
             Ahead::Terrain { distance, normal } => {
                 let entry = origin + dir * distance;
+                let leg = resolve::Leg::new(origin, dir, distance, &flight.sample_offsets(radius));
+                damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 let shorted =
                     shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX;
                 commands.trigger(Impact {
@@ -2556,8 +2687,7 @@ fn march_shell_step(
                 // `hit_ancestor` rule the full march uses just below) so the read is honest even in
                 // the B-arm. The short-circuit stops dead without resolving penetration, so
                 // `Struck`.
-                let surface = if hit_ancestor(hit.entity, &world.volumes, &world.parents).is_some()
-                {
+                let surface = if world.armour(hit.entity).is_some() {
                     ImpactSurface::Armor
                 } else {
                     ImpactSurface::Terrain
@@ -2579,7 +2709,7 @@ fn march_shell_step(
             // Armor-layer entity without ownership — same rule as before the cast split). The
             // crossing itself finds every volume for itself; this read only tells armour from
             // terrain.
-            if hit_ancestor(hit.entity, &world.volumes, &world.parents).is_none() {
+            if world.armour(hit.entity).is_none() {
                 commands.trigger(Impact {
                     position: entry,
                     normal: hit.normal,
@@ -2686,7 +2816,17 @@ fn march_shell_step(
         let decided = resolve::decide(&context, &not_own, &round, &flight, contact)
             .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
         let decision = match decided {
-            Ok(decision) => decision,
+            Ok(decision) => {
+                damage_dealt += wound_legs(
+                    shell,
+                    &context,
+                    &not_own,
+                    decision.legs(),
+                    flight.speed,
+                    health,
+                );
+                decision
+            }
             Err(error) => {
                 error!(
                     shot = ?shell.shot.map(|shot| shot.0),
@@ -2987,7 +3127,8 @@ fn resolve_replica_armor_contact(
 /// direction `k` of the shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the
 /// cone, walked through the volumes of `tank`, the struck tank, alone
 /// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing, and
-/// the cone logs its first error.
+/// the cone logs its first error. A direction whose witness pass alone fails keeps its hard doses
+/// and reach and doses no witness; the cone logs that once too.
 fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
     dose: &mut Mut<ShotDose>,
@@ -3010,8 +3151,9 @@ fn throw_spall_cone(
     let axis = shape.axis(source.face, direction);
     let weight = 1.0 / shape.directions_count() as f32;
     let within = |collider: Entity| {
-        hit_ancestor(collider, &world.volumes, &world.parents)
-            .is_some_and(|(node, _)| world.owners.get(node).ok().map(VolumeOf::tank) == tank)
+        world
+            .volume_of(collider)
+            .is_some_and(|node| world.owners.get(node).ok().map(VolumeOf::tank) == tank)
     };
     let mut cone = SpallCone {
         origin: source.position,
@@ -3024,6 +3166,7 @@ fn throw_spall_cone(
         rays: Vec::with_capacity(shape.directions_count()),
     };
     let mut failed: Option<(usize, walk::WalkError)> = None;
+    let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
     for (ray_dir, profile) in shape.directions(axis) {
         let thrown = strength * profile;
         let walked = resolve::field_direction(
@@ -3044,9 +3187,13 @@ fn throw_spall_cone(
                 resolve::FieldRay {
                     end: source.position,
                     doses: Vec::new(),
+                    witness_error: None,
                 }
             }
         };
+        if let Some(error) = ray.witness_error.clone() {
+            unwitnessed = Some(unwitnessed.map_or((1, error), |(count, first)| (count + 1, first)));
+        }
         dose.add_all(&ray.doses);
         cone.rays.push(SpallRay {
             end: ray.end,
@@ -3064,6 +3211,14 @@ fn throw_spall_cone(
             origin = ?source.position,
             ?error,
             "ballistics: {count} spall cone direction(s) could not be walked; each doses nothing"
+        );
+    }
+    if let Some((count, error)) = unwitnessed {
+        error!(
+            origin = ?source.position,
+            ?error,
+            "ballistics: the witness pass failed on {count} spall cone direction(s); each doses no \
+             witness and keeps its hard doses and reach"
         );
     }
     spall.cones.push(cone);
@@ -3591,6 +3746,9 @@ mod march_tests {
         caliber: 0.0079,
         nose_factor: 0.5,
     };
+    /// Fixture wound rate (reference-mm per metre of witness chord) for [`fixture_round`]: the
+    /// main-gun value `rounds.ron` tunes, a labelled fixture number.
+    pub(super) const FIXTURE_WOUND: f32 = 30.0;
 
     /// A fixture round's flight state and its initial readout, both from one body, so the readout
     /// the march starts from is the capability of the round it marches.
@@ -3600,6 +3758,7 @@ mod march_tests {
             Projectile {
                 velocity,
                 round: bound(body),
+                wound: FIXTURE_WOUND,
                 drag_k: drag_k(body.caliber, body.mass),
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),
@@ -4116,6 +4275,7 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -4155,6 +4315,7 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
                 tank: shooter,
@@ -4233,6 +4394,7 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -4344,6 +4506,7 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,

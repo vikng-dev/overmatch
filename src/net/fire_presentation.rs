@@ -312,6 +312,7 @@ pub(super) struct ReleasedShot {
     pub(super) caliber: f32,
     pub(super) mass: f32,
     pub(super) nose_factor: f32,
+    pub(super) wound: f32,
     pub(super) tracer: bool,
     pub(super) mechanism: crate::spec::FireMechanism,
     pub(super) shooter: ShotSource,
@@ -367,6 +368,7 @@ pub(super) fn present_shot_at_age(
         caliber: shot.caliber,
         mass: shot.mass,
         nose_factor: shot.nose_factor,
+        wound: shot.wound,
         mechanism: shot.mechanism,
         tracer: shot.tracer,
         shooter: Some(shot.shooter),
@@ -589,6 +591,7 @@ fn recover_unannounced_rounds(
                 caliber: weapon.caliber,
                 mass: weapon.mass,
                 nose_factor: weapon.nose_factor,
+                wound: weapon.wound,
                 // The round's belt phase died with the announcement; a recovered round
                 // presents traced — the visible arm of the self-heal.
                 tracer: true,
@@ -1219,6 +1222,7 @@ mod tests {
             caliber: 0.0079,
             mass: 0.0118,
             nose_factor: 0.5,
+            wound: 10.0,
             mechanism: crate::spec::FireMechanism::Automatic,
             shooter: None,
             tracer: true,
@@ -1537,6 +1541,7 @@ mod tests {
                 caliber: 0.088,
                 mass: 10.2,
                 nose_factor: 0.3,
+                wound: 30.0,
                 fire_mode: crate::spec::FireMode::Single { reload_secs: 6.0 },
                 recoil: None,
                 barrel: None,
@@ -1635,6 +1640,7 @@ mod tests {
             caliber: 0.088,
             mass: 10.2,
             nose_factor: 0.3,
+            wound: 30.0,
             tracer: true,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: ShotSource {

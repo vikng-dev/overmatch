@@ -340,12 +340,19 @@ Deflection off a too-steep face without entering — spawns a new path segment a
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Field**:
-The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the material it meets, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — even across its angle, each direction stopped by the first solid it meets — and the primary crew-killer. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+The field of fragments thrown from a body exit when a round perforates — even across its angle, each direction stopped by the first hard body it meets — wounding every crewman it reaches. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
+
+**Witness**:
+A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. It is wounded by what the hard world sent through it — the shell's disc-mean chord times the round's **wound rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0040; law: design doc §6.
+_Avoid_: soft armour, flesh factor (a witness has no factor)
+
+**Wound rate**:
+A round's dose to a witness per metre of chord (reference-mm/m, `rounds.ron`, TUNED). Round data, never a material's.
 
 **Fragment cone**:
 The field of a bursting round's own fragments, which carry its velocity forward. Not built.

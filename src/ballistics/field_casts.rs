@@ -34,7 +34,12 @@
 //!    volumes present over it (stable identity and factor);
 //! 2. [`resolve::field_direction`] itself, through the probe tank's volumes under the shipped
 //!    passage: the ray's end and every dose it addresses (box and amount, in reference-mm) are
-//!    recorded, and each box's dose accumulates in f32 in ray order.
+//!    recorded, and each box's dose accumulates in f32 in ray order;
+//! 3. the witness pass's line ([`super::wound::line`]) along the ray, on a fixture disc at a
+//!    fixture wound rate: every witness's chord and raw dose, before any rounding to HP.
+//!
+//! A shot record also digests each witness's chord and raw dose of every
+//! [`ArmourMark::Wound`] the march logged.
 //!
 //! # Digest
 //!
@@ -66,8 +71,14 @@ use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world};
 use super::spall_cone::ConeShape;
 use super::*;
 
+/// The line pass's disc calibre (m), wound rate (reference-mm per metre) and reach (m): fixture
+/// data.
+const LINE_CALIBER: f32 = 0.088;
+const LINE_WOUND: f32 = 30.0;
+const LINE_REACH: f32 = 20.0;
+
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x0a2d_c734_39cc_b85b;
+const PINNED_TOTAL: u64 = 0xafa5_5ee8_a4c5_ae70;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -270,6 +281,7 @@ fn layout(app: &mut App) -> (Layout, Record) {
         .run_system_once(
             |aabbs: Query<(Entity, &ColliderAabb)>,
              volumes: Query<&BallisticVolume>,
+             witnesses: Query<(), With<WitnessSurface>>,
              health: Query<&ComponentHealth>,
              names: Query<&Name>,
              parents: Query<&ChildOf>| {
@@ -278,7 +290,9 @@ fn layout(app: &mut App) -> (Layout, Record) {
                 // The query's own order is archetype order; sorting by name below makes the
                 // layout independent of it, and min/max is order-free.
                 for (entity, aabb) in &aabbs {
-                    if hit_ancestor(entity, &volumes, &parents).is_none() {
+                    if !witnesses.contains(entity)
+                        && hit_ancestor(entity, &volumes, &parents).is_none()
+                    {
                         continue;
                     }
                     lo = lo.min(aabb.min - PROBE_TANK_AT);
@@ -398,7 +412,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                 };
                 let parents = &world.parents;
                 let within = |collider: Entity| {
-                    hit_ancestor(collider, &world.volumes, parents).is_some_and(|(node, _)| {
+                    world.volume_of(collider).is_some_and(|node| {
                         world.owners.get(node).ok().map(VolumeOf::tank) == Some(tank)
                     })
                 };
@@ -476,6 +490,29 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                         bits(&mut output, hit.amount);
                         dose[i] += hit.amount;
                     }
+
+                    // 3. The line through every witness along the ray.
+                    let frame = walk::DiscFrame::anchored(Vec3::from(ray.dir))
+                        .expect("a ray has a unit direction");
+                    let offsets = resolve::layout(&frame, resolve::disc_radius(LINE_CALIBER));
+                    let leg = resolve::Leg::new(ray.origin, ray.dir, LINE_REACH, &offsets);
+                    match super::wound::line(&context, &within, &[leg], LINE_WOUND) {
+                        Ok((crossed, _)) => {
+                            for crossing in &crossed {
+                                let _ = write!(
+                                    output,
+                                    " line {}=",
+                                    stable_id(crossing.volume, &names, parents, &children)
+                                );
+                                bits(&mut output, crossing.chord);
+                                output.push(',');
+                                bits(&mut output, crossing.cost);
+                            }
+                        }
+                        Err(error) => {
+                            let _ = write!(output, " line error {error:?}");
+                        }
+                    }
                     records.push(Record {
                         label: ray.label.clone(),
                         input,
@@ -516,7 +553,7 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     bits3(&mut input, local_origin);
     input.push(' ');
     bits3(&mut input, local_direction);
-    for value in [round.0, round.1, round.2, round.3] {
+    for value in [round.0, round.1, round.2, round.3, round.4] {
         input.push(' ');
         bits(&mut input, value);
     }
@@ -531,6 +568,20 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         output.push(' ');
         bits3(&mut output, event.exit);
         let _ = write!(output, " {};", event.overmatched);
+    }
+    for mark in &marks.log {
+        if let ArmourMark::Wound { volumes, .. } = mark {
+            for crossing in volumes {
+                let name = world
+                    .get::<Name>(crossing.volume)
+                    .map_or("?", |name| name.as_str());
+                let _ = write!(output, "wound {name}=");
+                bits(&mut output, crossing.chord);
+                output.push(',');
+                bits(&mut output, crossing.cost);
+                output.push(';');
+            }
+        }
     }
     for cone in &world
         .get::<SpallMarks>(shell)

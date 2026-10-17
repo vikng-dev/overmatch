@@ -213,7 +213,8 @@ impl FaceHit {
 }
 
 /// What a volume is made of, as the walk and the mechanisms read it: the substance's identity and
-/// its declared resistance, reference-mm per metre of chord (`crate::substances::Substance::factor`).
+/// its declared resistance, reference-mm per metre of chord (`crate::substances::HardSubstance::factor`).
+/// Hard matter only: a witness (ADR-0040) states no resistance and is never a walk volume.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct VolumeMaterial {
     pub substance: SubstanceId,
@@ -221,11 +222,11 @@ pub struct VolumeMaterial {
 }
 
 impl VolumeMaterial {
-    /// The substance named `name` in `registry`. Hard error on an unknown name.
+    /// The hard substance named `name` in `registry`. Hard error on an unknown name or a witness.
     pub fn of(registry: &SubstanceRegistry, name: &str) -> Result<Self, SubstanceError> {
         Ok(Self {
             substance: registry.id(name)?,
-            factor: registry.get(name)?.factor(),
+            factor: registry.hard(name)?.factor(),
         })
     }
 
@@ -1480,6 +1481,93 @@ fn entity_presence(
         });
     }
     Ok(out)
+}
+
+/// One witness's presence along one sample ray (ADR-0040): the union of its shells' intervals,
+/// disjoint and ordered. A witness has no factor, so nothing here integrates.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WitnessSpans {
+    pub witness: Entity,
+    pub spans: Vec<(f64, f64)>,
+}
+
+/// Pair the face claims of witness surfaces along a ray that starts and ends outside every one of
+/// them, into each witness's presence intervals.
+///
+/// The hard walk's pairing law exactly ([`canonical_crossings`], alternation per shell, an exit
+/// with nothing open or a shell left open is an error), with no union field: witnesses are never
+/// layers, so they neither weld, nor step a factor, nor emit events. `hits` past `length` are not
+/// this ray's.
+pub fn witness_spans(
+    sample: usize,
+    length: f64,
+    hits: &[FaceHit],
+) -> Result<Vec<WitnessSpans>, WalkError> {
+    let order: Vec<&FaceHit> = hits.iter().filter(|hit| hit.t < length).collect();
+    if order.iter().any(|hit| !hit.t.is_finite() || hit.t < 0.0) {
+        return Err(WalkError::BadCorridor {
+            sample,
+            reason: "a face hit is behind the corridor origin or non-finite",
+        });
+    }
+    let mut crossings = canonical_crossings(&order);
+    crossings.sort_by(|a, b| {
+        a.t.total_cmp(&b.t)
+            .then(a.key.cmp(&b.key))
+            .then(a.contact.cmp(&b.contact))
+    });
+    let mut open: BTreeMap<ShellKey, f64> = BTreeMap::new();
+    let mut by_entity: BTreeMap<Entity, Vec<(f64, f64)>> = BTreeMap::new();
+    for crossing in &crossings {
+        let key = crossing.key;
+        if crossing.sign > 0 {
+            if open.insert(key, crossing.t).is_some() {
+                return Err(WalkError::UnexpectedEntry {
+                    sample,
+                    key,
+                    t: crossing.t,
+                    triangles: crossing.triangles.clone(),
+                });
+            }
+        } else {
+            let Some(opened) = open.remove(&key) else {
+                return Err(WalkError::UnexpectedExit {
+                    sample,
+                    key,
+                    t: crossing.t,
+                    triangles: crossing.triangles.clone(),
+                });
+            };
+            by_entity
+                .entry(key.volume)
+                .or_default()
+                .push((opened, crossing.t));
+        }
+    }
+    if !open.is_empty() {
+        return Err(WalkError::IncompleteCorridor {
+            sample,
+            open: open.keys().copied().collect(),
+            length: length as f32,
+        });
+    }
+    Ok(by_entity
+        .into_iter()
+        .map(|(witness, mut spans)| {
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            let mut merged: Vec<(f64, f64)> = Vec::new();
+            for span in spans {
+                match merged.last_mut() {
+                    Some(last) if span.0 <= last.1 => last.1 = last.1.max(span.1),
+                    _ => merged.push(span),
+                }
+            }
+            WitnessSpans {
+                witness,
+                spans: merged,
+            }
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------------------------

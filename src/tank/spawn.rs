@@ -20,12 +20,13 @@ use crate::Layer;
 use crate::bake::{TankBlueprint, TankGeometry};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
-    ExternalArmour, VolumeMaterial,
+    ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
 };
 use crate::damage::{Ammo, Crewman, TankCapabilities, VolumeOf};
 use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
+use crate::substances::Matter;
 use crate::track::sim::{TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
@@ -585,6 +586,7 @@ fn insert_weapons(
             caliber: round.body.caliber,
             mass: round.body.mass,
             nose_factor: round.body.nose_factor,
+            wound: round.wound,
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),
             barrel,
@@ -646,6 +648,10 @@ fn insert_weapons(
 /// hands the role down to its per-primitive collider entities — one glTF primitive is one material
 /// by construction, so each is a volume of exactly one substance, and the walk (which already tracks
 /// presence per primitive) sees two honest volumes instead of one averaged lie.
+///
+/// A witness node (ADR-0040) carries `WitnessVolume` instead of `BallisticVolume`, and its colliders
+/// `WitnessSurface` on [`Layer::Witness`]: no walk reads it, and the witness pass finds it by that
+/// marker. It is never split — L2.WITNESS_ROLE certifies a witness node one substance and crew.
 ///
 /// The cost is that a mixed node cannot address damage: `hp` lives on the node, the deposits name
 /// the shard. That is REFUSED here rather than silently dropped. Lifting it means keying the walk's
@@ -715,15 +721,32 @@ fn insert_ballistic_volumes(
                     .substance
                     .as_ref()
                     .expect("grouped by substance");
-                entity.insert(BallisticVolume {
-                    material: VolumeMaterial {
-                        substance: resolved.id,
-                        factor: resolved.factor,
-                    },
-                    substance: (*substance).to_owned(),
-                });
+                match resolved.matter {
+                    Matter::Hard { factor } => {
+                        entity.insert(BallisticVolume {
+                            material: VolumeMaterial {
+                                substance: resolved.id,
+                                factor,
+                            },
+                            substance: (*substance).to_owned(),
+                        });
+                    }
+                    Matter::Witness => {
+                        entity.insert(WitnessVolume {
+                            substance: (*substance).to_owned(),
+                        });
+                    }
+                }
             }
         }
+        // L2.WITNESS_ROLE certified a witness node single-substance and crew, so `split` is hard.
+        let witness = !split
+            && groups.values().next().is_some_and(|primitives| {
+                primitives[0]
+                    .substance
+                    .as_ref()
+                    .is_some_and(|resolved| resolved.matter == Matter::Witness)
+            });
 
         for (substance, primitives) in &groups {
             for primitive in primitives {
@@ -772,8 +795,18 @@ fn insert_ballistic_volumes(
                         shells: certificate.shells.as_slice().into(),
                         corners: certificate.corners.as_slice().into(),
                     },
-                    CollisionLayers::new([Layer::Armor], LayerMask::NONE),
+                    CollisionLayers::new(
+                        [if witness {
+                            Layer::Witness
+                        } else {
+                            Layer::Armor
+                        }],
+                        LayerMask::NONE,
+                    ),
                 ));
+                if witness {
+                    collider.insert(WitnessSurface);
+                }
                 if split {
                     // The primitive IS the volume here (see the doc above): it carries the factor
                     // the walk reads and the ownership the impulse path resolves.
@@ -782,9 +815,12 @@ fn insert_ballistic_volumes(
                             material: {
                                 let resolved =
                                     primitive.substance.as_ref().expect("grouped by substance");
+                                let Matter::Hard { factor } = resolved.matter else {
+                                    unreachable!("L2.WITNESS_ROLE: a witness node is one substance")
+                                };
                                 VolumeMaterial {
                                     substance: resolved.id,
-                                    factor: resolved.factor,
+                                    factor,
                                 }
                             },
                             substance: (*substance).to_owned(),

@@ -5,6 +5,13 @@
 // datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
 // the model, §13.7: substance is authored per-plate, paint is a runtime livery).
 //
+// Every entry is one of two KINDS (ADR-0040). `Hard(..)` is matter: a layer of the §13 walk that
+// resists the shell, is charged its spend and shadows the spall field. `Witness` is not matter: it
+// states no resistance (none, not zero), never enters the walk, and is wounded by what the hard
+// world sends through it — the shell's line at the ROUND's wound rate (`rounds.ron`), each spall
+// direction at its strength. A witness substance sits only on a crew volume and a crew volume wears
+// only a witness substance; the bake refuses a tank file that breaks either.
+//
 // `resistance` = how the substance resists a round's force law. Exactly one entry is `Reference`:
 // the reference steel, whose `facts` are the force law's reference constants and one metre of which
 // is 1000 reference-mm by definition. Every other entry declares `Effective(factor)`: reference-mm
@@ -12,8 +19,8 @@
 // force at every speed. Declared, never inferred from facts or from a fill fraction.
 //
 // `facts` = the material facts of a structural metal (density kg/m³, flow strength Pa at large
-// strain, Young's modulus Pa, Poisson's ratio). `None` where no row is sourced; non-metals (crew,
-// ammunition, rubber, engine block) never carry facts. Facts on an `Effective` entry are recorded
+// strain, Young's modulus Pa, Poisson's ratio). `None` where no row is sourced; non-metals
+// (ammunition, rubber, engine block) never carry facts. Facts on an `Effective` entry are recorded
 // for the mechanisms that will read them; the force law does not read them yet, and the strength
 // ratio they give (DERIVED, at the strength-limited end) differs from the declared factor:
 //   - GunSteel, 4340-class quenched-and-tempered analogue: a / a_ref ≈ 1.129 (≈ 1129), ρ / ρ_ref ≈ 0.994.
@@ -31,8 +38,8 @@
 // Effective factors: baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
 // material research pass 2026-08-07 (Tiger metallurgy, sources in the session record):
 // DOCTRINE (Yan ruling 2026-08-07): factors are PHYSICS-HONEST, never bent for gameplay.
-// If flesh is 0.01 and a 7.92 penetrates, it penetrates, period. Feel belongs to the laws
-// and the hp/damage model, not to material constants. (Sibling of the VFX honesty doctrine.)
+// Feel belongs to the laws and the hp/damage model, not to material constants. (Sibling of the
+// VFX honesty doctrine.)
 // THE PRINCIPLE (research pass 2026-08-07): a factor tracks ALLOY AND HEAT TREATMENT, never the
 // FORMING PROCESS. "It was cast" says nothing ballistic on its own — what resists a shell is what
 // the steel is made of and what was done to it afterwards. Casting, rolling and forging only matter
@@ -65,11 +72,9 @@
 //     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
 //     the substance for now (denser gear mass — split only if the sandbox ever cares).
-//   - `Flesh` = 10: ballistic-gelatin equivalence ~0.010-0.015, AP toward the low end.
-//     Through-and-through torso hits are the physical truth.
 //
 // `paintable` = whether the runtime livery composes onto this substance (§ paint-scheme
-// discussion 2026-08-06): exterior steels yes, interior/organic substances no.
+// discussion 2026-08-06): exterior steels yes, interior substances no.
 //
 // THIS FILE IS THE CLASSIFIER (slice 3, 2026-08-07). A glTF primitive is a ballistic volume iff
 // its material name is a key here; per-node material_factor in the tank RON is gone. Adding a key
@@ -79,7 +84,7 @@
 // those counts, because a second vehicle is a different model and not a broken one.
 (
     substances: {
-        "RHA": (
+        "RHA": Hard(
             resistance: Reference,
             paintable: true,
             facts: Some((
@@ -96,7 +101,7 @@
                     RHA-specific value. Moves results about 1 % (Q5)")),
             )),
         ),
-        "GunSteel": (
+        "GunSteel": Hard(
             resistance: Effective((1000.0, Tuned("declared effective factor: forged autofrettaged
                 gun steel taken as RHA quality, unified at the reference (research pass
                 2026-08-07). Not derived from the facts below, which give ≈ 1129 (DERIVED)"))),
@@ -110,13 +115,13 @@
                 poisson_ratio: (0.29, Measured("Q&T 4340, MakeItFrom (read, secondary), Q2")),
             )),
         ),
-        "Cast": (
+        "Cast": Hard(
             resistance: Effective((900.0, Derived("mid of cast armour running ~5–15 % below rolled
                 ballistically (research pass 2026-08-07)"))),
             paintable: true,
             facts: None,
         ),
-        "MildSteel": (
+        "MildSteel": Hard(
             resistance: Effective((800.0, Tuned("non-armour structural and machinery steel taken
                 at ~0.8× RHA (research pass 2026-08-07). Not derived from the facts below, which
                 give ≈ 460 (DERIVED)"))),
@@ -131,32 +136,30 @@
                 poisson_ratio: (0.29, Measured("1020, MakeItFrom via search excerpt, Q2")),
             )),
         ),
-        "EngineBlock": (
+        "EngineBlock": Hard(
             resistance: Effective((150.0, Derived("grey cast iron ~0.4× RHA times a ~30–40 % metal
                 fraction along a shot line ≈ 140, rounded to 150 (research pass 2026-08-07). The
                 fill scaling is an assumption, not a fact"))),
             paintable: false,
             facts: None,
         ),
-        "Ammunition": (
+        "Ammunition": Hard(
             resistance: Effective((200.0, Unknown("no derivation recorded; carried from the
                 per-node factors of the first tank file (2026-08-06). Settled by an effective
                 resistance for stowed rounds and propellant"))),
             paintable: false,
             facts: None,
         ),
-        "Rubber": (
+        "Rubber": Hard(
             resistance: Effective((50.0, Unknown("no derivation recorded; carried from the
                 per-node factors of the first tank file (2026-08-06). Settled by a penetration
                 equivalence for road-wheel rubber"))),
             paintable: false,
             facts: None,
         ),
-        "Flesh": (
-            resistance: Effective((10.0, Tuned("low end of a ballistic-gelatin equivalence
-                ~0.010–0.015 of RHA, taken low for AP (research pass 2026-08-07)"))),
-            paintable: false,
-            facts: None,
-        ),
+        // Crew. A WITNESS, not matter: a body neither stops a shell nor shadows a fragment, so it
+        // has no resistance to state. What wounds it is the round's wound rate along the chord the
+        // shell's disc cut through it, and each spall direction's strength entering it.
+        "Flesh": Witness,
     },
 )

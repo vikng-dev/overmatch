@@ -283,6 +283,9 @@ fn steps_of(
                 }
             }),
             ArmourMark::Failed => Some(PathStep::Failed),
+            // A witness's wound is a dose, never a step of the path: the hard world's marks alone
+            // decide the verdict, and a dose reaches it as `Dosed` below.
+            ArmourMark::Wound { .. } => None,
         };
         // A crossing has a step for the tank only where one of its volumes is the tank's.
         if let Some(step) = step
@@ -387,7 +390,9 @@ fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
     let owned = |volume: Entity| owned_by(world, volume, tank);
     match mark {
         ArmourMark::Bounce { struck, .. } => owned(*struck),
-        ArmourMark::Crossing { volumes, .. } => volumes.iter().any(|crossed| owned(crossed.volume)),
+        ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => {
+            volumes.iter().any(|crossed| owned(crossed.volume))
+        }
         ArmourMark::Failed => true,
     }
 }
@@ -419,6 +424,38 @@ fn share_of(world: &World, mark: &ArmourMark, tank: Entity) -> Option<Share> {
     }
 }
 
+/// The first mark of `marks[from..=last_touch]` past its last hard one: every wound mark from here
+/// on lies beyond the hard world's last point of the encounter, so it extends the path and states
+/// the round's end. `from` when the encounter has no hard mark.
+fn wound_tail(marks: &[ArmourMark], from: usize, last_touch: usize) -> usize {
+    marks[..=last_touch]
+        .iter()
+        .enumerate()
+        .skip(from)
+        .rfind(|(_, mark)| !matches!(mark, ArmourMark::Wound { .. }))
+        .map_or(from, |(index, _)| index + 1)
+}
+
+/// The struck tank's witnesses a wound mark crossed: where the line first entered one and where it
+/// last left one (or the leg ended), and whether it left every one.
+fn wound_span(
+    world: &World,
+    volumes: &[VolumeCrossing],
+    tank: Entity,
+) -> Option<(Vec3, Vec3, bool)> {
+    let mut owned = volumes
+        .iter()
+        .filter(|crossed| owned_by(world, crossed.volume, tank));
+    let first = owned.next()?;
+    let (mut far, mut left) = (first.end, first.perforated);
+    for crossed in owned {
+        if crossed.end.distance(first.entry) >= far.distance(first.entry) {
+            (far, left) = (crossed.end, crossed.perforated);
+        }
+    }
+    Some((first.entry, far, left))
+}
+
 /// The encounter's path, from its start up to the struck tank's last mark `last_touch`.
 struct Timeline {
     /// Timed nodes, t = 0 at the struck tank's first contact.
@@ -440,7 +477,12 @@ fn timeline(
     last_touch: usize,
 ) -> Option<Timeline> {
     let marks = log.marks;
-    let start = match struck.from.checked_sub(1).map(|before| &marks[before]) {
+    // A wound mark moves nothing, so the path starts at the hard mark before the encounter.
+    let before = marks[..struck.from]
+        .iter()
+        .rev()
+        .find(|mark| !matches!(mark, ArmourMark::Wound { .. }));
+    let start = match before {
         None => facts.launch,
         Some(ArmourMark::Bounce { position, .. }) => *position,
         Some(ArmourMark::Crossing {
@@ -454,12 +496,17 @@ fn timeline(
     let mut legs: Vec<(Vec3, f32, usize)> = Vec::new();
     let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
+        ArmourMark::Wound { speed, .. } => *speed,
         ArmourMark::Failed => return None,
     };
     legs.push((start, speed, first_touch));
     let mut last = start;
+    // The farthest point a wound mark past the hard world put on the path, on the straight flight
+    // from `last`.
+    let mut beyond: Option<Vec3> = None;
     let mut flying = true;
     let mut contact = 0;
+    let tail = wound_tail(marks, struck.from, last_touch);
     let span = marks[..=last_touch].iter().enumerate().skip(struck.from);
     for (index, mark) in span {
         if index == first_touch {
@@ -505,11 +552,26 @@ fn timeline(
                 }
             }
             ArmourMark::Failed => return None,
+            ArmourMark::Wound { volumes, speed, .. } => {
+                if index >= tail
+                    && let Some((entry, exit, _)) = wound_span(world, volumes, struck.tank)
+                {
+                    legs.push((entry, *speed, index));
+                    legs.push((exit, *speed, index));
+                    beyond = Some(exit);
+                }
+            }
         }
     }
+    // The flight runs on to the next point of the path past everything the encounter reached.
     if flying
         && let Some(index) = log.path.iter().rposition(|point| *point == last)
-        && let Some(next) = log.path.get(index + 1)
+        && let Some(next) = match beyond {
+            None => log.path.get(index + 1),
+            Some(reached) => log.path[index + 1..]
+                .iter()
+                .find(|point| point.distance(last) > reached.distance(last)),
+        }
     {
         legs.push((*next, speed, last_touch));
     }
@@ -580,6 +642,7 @@ pub(crate) fn report_from(
     // Where the line reached each component, with its time and the mark that reached it.
     let mut entered: Vec<(Entity, f32, Vec3, usize)> = Vec::new();
     let mut end = None;
+    let tail = wound_tail(marks, struck.from, last_touch);
     let mut thrown = log.cones.iter();
     let first = &marks[first_touch];
     let owned = |volume: Entity| owned_by(world, volume, struck.tank);
@@ -694,6 +757,31 @@ pub(crate) fn report_from(
                     });
                 }
             }
+            ArmourMark::Wound { volumes, .. } => {
+                // The witness law's dose as it stands: no hard-world scale applies to it.
+                for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
+                    let t = time_at(crossed.entry);
+                    line.push((crossed.volume, crossed.cost, t, index));
+                    entered.push((crossed.volume, t, crossed.entry, index));
+                }
+                // Past the hard world, the round ends where it last left a witness, or at rest
+                // inside the one its flight ended in.
+                if index >= tail
+                    && let Some((_, exit, left)) = wound_span(world, volumes, struck.tank)
+                {
+                    end = Some(if left {
+                        RoundEnd::Left { at: point(exit) }
+                    } else {
+                        RoundEnd::Rest {
+                            volume: volumes
+                                .iter()
+                                .filter(|crossed| owned(crossed.volume))
+                                .find(|crossed| crossed.end == exit)
+                                .map_or_else(String::new, |crossed| name_of(world, crossed.volume)),
+                        }
+                    });
+                }
+            }
             ArmourMark::Failed => {}
         }
     }
@@ -716,6 +804,18 @@ pub(crate) fn report_from(
         } => (
             mine(first).map_or(*entrance, |share| share.entry),
             *normal,
+            *incoming,
+        ),
+        // Met first by the line inside a witness: no face, so the line's own direction stands for
+        // the normal.
+        ArmourMark::Wound {
+            volumes, incoming, ..
+        } => (
+            volumes
+                .iter()
+                .find(|crossed| owned(crossed.volume))
+                .map(|crossed| crossed.entry)?,
+            -*incoming,
             *incoming,
         ),
         ArmourMark::Failed => return None,

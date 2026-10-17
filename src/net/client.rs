@@ -2003,6 +2003,7 @@ fn spawn_reconstructed_fire(
         caliber: event.caliber,
         mass: event.mass,
         nose_factor: event.nose_factor,
+        wound: event.wound,
         tracer: event.tracer,
         mechanism: event.mechanism,
         shooter: ShotSource {
@@ -2759,6 +2760,7 @@ mod tests {
             caliber: 0.088,
             mass: 10.2,
             nose_factor: 0.3,
+            wound: 30.0,
             fire_mode: FireMode::Single { reload_secs: 8.0 },
             recoil,
             barrel,
@@ -3147,6 +3149,7 @@ mod tests {
             caliber: 0.0079,
             mass: 0.0118,
             nose_factor: 0.5,
+            wound: 10.0,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shooter,

@@ -58,29 +58,29 @@
 //! # Encoded sizes
 //!
 //! MEASURED with the serializer Lightyear 0.30 sends messages with (postcard), every recorded
-//! scenario, N = 256 rays per cone (`wire::tests::encoded_sizes`). Total is the victim's message,
+//! scenario, N = 64 rays per cone (`wire::tests::encoded_sizes`). Total is the victim's message,
 //! fields its cones alone:
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |
 //! |---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 1513 | 1481 | 1182 | 1 | 256 | 214 | 1182 |
-//! | s2_stopped_mantlet | 181 | 139 | 0 | 0 | 0 | 0 | – |
-//! | s3_ricochet | 187 | 145 | 0 | 0 | 0 | 0 | – |
-//! | s4_spaced_then_stopped | 1356 | 1314 | 1070 | 2 | 512 | 0 | 535 |
-//! | s5_oblique_through | 1283 | 1243 | 1052 | 1 | 256 | 256 | 1052 |
-//! | s6_overpen | 1173 | 1131 | 934 | 2 | 512 | 0 | 467 |
-//! | s7_engine_shadow | 1243 | 1209 | 984 | 1 | 256 | 211 | 984 |
-//! | s8a_mg_ricochet | 187 | 145 | 0 | 0 | 0 | 0 | – |
-//! | s8b_mg_stopped | 179 | 137 | 0 | 0 | 0 | 0 | – |
-//! | s9_one_box_lost | 1354 | 1322 | 1083 | 1 | 256 | 181 | 1083 |
-//! | s10_gun_barrel_struck | 1549 | 1509 | 1340 | 2 | 512 | 256 | 670 |
-//! | s11_mg_barrel_struck | 181 | 141 | 0 | 0 | 0 | 0 | – |
+//! | s1_through_crew | 719 | 691 | 394 | 1 | 64 | 80 | 394 |
+//! | s2_stopped_mantlet | 183 | 141 | 0 | 0 | 0 | 0 | – |
+//! | s3_ricochet | 189 | 147 | 0 | 0 | 0 | 0 | – |
+//! | s4_spaced_then_stopped | 588 | 546 | 300 | 2 | 128 | 0 | 150 |
+//! | s5_oblique_through | 515 | 475 | 282 | 1 | 64 | 64 | 282 |
+//! | s6_overpen | 505 | 463 | 264 | 2 | 128 | 0 | 132 |
+//! | s7_engine_shadow | 514 | 478 | 265 | 1 | 64 | 53 | 265 |
+//! | s8a_mg_ricochet | 189 | 147 | 0 | 0 | 0 | 0 | – |
+//! | s8b_mg_stopped | 181 | 139 | 0 | 0 | 0 | 0 | – |
+//! | s9_one_box_lost | 559 | 525 | 298 | 1 | 64 | 48 | 298 |
+//! | s10_gun_barrel_struck | 580 | 540 | 369 | 2 | 128 | 64 | 184 |
+//! | s11_mg_barrel_struck | 183 | 143 | 0 | 0 | 0 | 0 | – |
 //!
-//! The DERIVED estimate `36 + 2 + 2N` per cone (550 B at N = 256) counts a cone's metadata and its
-//! reaches; a cone that reaches no component measures 467–535 B (a reach under 128 mm takes one
+//! The DERIVED estimate `36 + 2 + 2N` per cone (166 B at N = 64) counts a cone's metadata and its
+//! reaches; a cone that reaches no component measures 132–150 B (a reach under 128 mm takes one
 //! varint byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume,
 //! dose palette index, a varint each) and each distinct dose four, so a cone that lights the
-//! fighting compartment measures 1.0–1.2 KB, and its message past 1.1 KB.
+//! fighting compartment measures 260–400 B, and every recorded message stays under 0.75 KB.
 
 use std::collections::BTreeMap;
 

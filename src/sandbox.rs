@@ -51,6 +51,7 @@ struct ShotParams {
     caliber: f32,
     mass: f32,
     nose_factor: f32,
+    wound: f32,
 }
 
 impl Default for ShotParams {
@@ -70,6 +71,7 @@ impl Default for ShotParams {
             caliber: round.body.caliber,
             mass: round.body.mass,
             nose_factor: round.body.nose_factor,
+            wound: round.wound,
         }
     }
 }
@@ -851,6 +853,7 @@ fn fire(
         caliber: shot.caliber,
         mass: shot.mass,
         nose_factor: shot.nose_factor,
+        wound: shot.wound,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
         // spent shells and draws its own path gizmos, and the default calibre is main-gun-sized so it keeps the

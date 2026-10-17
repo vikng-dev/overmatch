@@ -314,7 +314,8 @@ fn a_reach_past_u16_millimetres_overflows() {
         .expect("a recorded scenario throws a cone");
     let cone = &mut report.spall[0];
     let origin = Vec3::from(cone.origin);
-    for (ray, far) in [(3, 70.0), (200, 4_000.25)] {
+    let last = cone.fragments.len() - 1;
+    for (ray, far) in [(3, 70.0), (last, 4_000.25)] {
         let span = Vec3::from(cone.fragments[ray].end) - origin;
         cone.fragments[ray].end = (origin + span.normalize() * far).to_array();
     }

@@ -143,7 +143,12 @@ fn stored(client: &App) -> Vec<ShotExplanation> {
 #[test]
 fn each_explanation_reaches_only_its_recipient() {
     let _udp = lock_real_udp_test();
-    let report = report("s1_through_crew");
+    let mut report = report("s1_through_crew");
+    // Fixture: the record's cone repeated, so the struck player's explanation spans more than one
+    // transport fragment; a one-cone record at the shipped direction count fits in one (MEASURED
+    // in `damage_cam::wire`).
+    let cone = report.spall[0].clone();
+    report.spall.extend(std::iter::repeat_n(cone, 3));
     let vocabulary = vocabulary(&report);
     let struck = TankLife {
         combatant: STRUCK,

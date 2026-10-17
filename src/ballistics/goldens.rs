@@ -118,15 +118,15 @@ struct Outcome {
     gated: usize,
 }
 
-/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed)`) at a tank-local origin
+/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed, wound)`) at a tank-local origin
 /// along a tank-local direction, ready for the march.
 pub(super) fn spawn_golden_round(
     app: &mut App,
     local_origin: Vec3,
     local_direction: Vec3,
-    round: (f32, f32, f32, f32),
+    round: (f32, f32, f32, f32, f32),
 ) -> Entity {
-    let (caliber, mass, nose_factor, speed) = round;
+    let (caliber, mass, nose_factor, speed, wound) = round;
     let origin = world_at(local_origin);
     let direction = local_direction.normalize();
     app.world_mut()
@@ -138,6 +138,7 @@ pub(super) fn spawn_golden_round(
                     caliber,
                     nose_factor,
                 }),
+                wound,
                 drag_k: drag_k(caliber, mass),
                 disc: walk::DiscFrame::anchored(direction)
                     .expect("a golden fires along a real axis"),
@@ -174,7 +175,7 @@ fn fire(
     app: &mut App,
     local_origin: Vec3,
     local_direction: Vec3,
-    round: (f32, f32, f32, f32),
+    round: (f32, f32, f32, f32, f32),
 ) -> Outcome {
     spawn_golden_round(app, local_origin, local_direction, round);
     // Eight ticks at 16 ms: ~100 m of flight for a main-gun round, which is far more than the whole
@@ -246,9 +247,9 @@ impl Outcome {
     }
 }
 
-/// `(caliber, mass, nose_factor, speed)` of the round one of the bound tank's own weapons names in
+/// `(caliber, mass, nose_factor, speed, wound)` of the round one of the bound tank's own weapons names in
 /// its authored spec sheet, so a golden fires the round the asset declares.
-fn authored_round(weapon: &str) -> (f32, f32, f32, f32) {
+fn authored_round(weapon: &str) -> (f32, f32, f32, f32, f32) {
     let spec: crate::spec::TankSpec =
         ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
             .expect("the shipped sheet parses");
@@ -260,21 +261,22 @@ fn authored_round(weapon: &str) -> (f32, f32, f32, f32) {
         round.body.mass,
         round.body.nose_factor,
         round.muzzle_speed,
+        round.wound,
     )
 }
 
 /// The main gun.
-pub(super) fn eighty_eight() -> (f32, f32, f32, f32) {
+pub(super) fn eighty_eight() -> (f32, f32, f32, f32, f32) {
     authored_round("MainGun")
 }
 
 /// The coaxial machine gun.
-fn mg() -> (f32, f32, f32, f32) {
+fn mg() -> (f32, f32, f32, f32, f32) {
     authored_round("Coax")
 }
 
 /// Reference-mm `round` carries at its muzzle speed, by the capability law.
-fn muzzle_capability((caliber, mass, nose_factor, speed): (f32, f32, f32, f32)) -> f32 {
+fn muzzle_capability((caliber, mass, nose_factor, speed, _): (f32, f32, f32, f32, f32)) -> f32 {
     capability(
         RoundBody {
             mass,
@@ -321,9 +323,8 @@ const DRIVER_LINE_DIR: Vec3 = Vec3::Z;
 /// GOLDEN 1 — the 88 through the driver's plate.
 ///
 /// The reference shot of the whole model: a main-gun round meets the sloped front plate head on,
-/// perforates it, kills the driver behind it, bites three more plates and stops in the rear one. It
-/// also carries the §13.3 half of "an arm does not ricochet an 88": the crewman the round crosses on
-/// the way through deflects nothing, so the flight records no bounce at all.
+/// perforates it, kills the driver behind it and stops in the rear plate. The crew it crosses are
+/// witnesses (ADR-0040): no impact, no bounce and no bend of the flight, only a wound.
 ///
 /// DERIVED: the front plate is perforated because the law's muzzle capability exceeds its cost (both
 /// read from fixture data, asserted below). FIXTURE CHARACTERISATION: the count of plates read and
@@ -367,9 +368,9 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     );
     assert_eq!(
         armor.len(),
-        4,
+        2,
         "PHYSICS CHANGED — diff consciously. Fixture characterisation: the 88 reads the front \
-         plate, two plates inside the hull and the rear plate: {armor:?}"
+         plate and the rear plate; the crew between them are no armour to read: {armor:?}"
     );
     assert_eq!(
         out.survivors, 0,
@@ -379,8 +380,8 @@ fn eighty_eight_through_the_driver_plate_perforates_and_wounds_him() {
     );
     assert_eq!(
         out.ricochets, 0,
-        "PHYSICS CHANGED — diff consciously. Nothing on a head-on line deflects an 88, least of all \
-         the crewman it crosses (§13.3's factor-weighted overmatch)"
+        "PHYSICS CHANGED — diff consciously. Nothing on a head-on line deflects an 88, and a \
+         crewman is no surface to deflect it at all (ADR-0040)"
     );
     assert_eq!(
         out.health_of("Driver"),
@@ -586,11 +587,11 @@ fn a_grazing_mg_round_ricochets_off_the_hull_side_at_full_angle() {
 /// clamp was bounded. That golden pins the whole outcome tuple; this one pins the two facts the
 /// defect destroyed, so a regression names itself.
 ///
-/// FIXTURE CHARACTERISATION: three body exits, one cone and no survivor are this asset's geometry
+/// FIXTURE CHARACTERISATION: one body exit, one cone and no survivor are this asset's geometry
 /// against the 88's law capability, not an invariant; the exit face and its cone are. Every body
-/// exit the round reaches throws a cone above the HP quantum (design doc §5): on this line the front
-/// plate's, in path order before two inside the hull whose soft material keeps theirs below it, and
-/// the round stops in the rear plate, which throws nothing.
+/// exit the round reaches throws a cone above the HP quantum (design doc §5): on this line only the
+/// front plate's, since the crew the round crosses inside the hull are witnesses with no exit to
+/// throw from (ADR-0040), and the round stops in the rear plate, which throws nothing.
 ///
 /// PHYSICS CHANGED — diff consciously, like every golden here. If this goes red, the question is
 /// whether the exit face came back or the spall model moved, not which number to re-bake.
@@ -645,10 +646,9 @@ fn a_sloped_plate_perforates_and_throws_spall_from_its_exit_face() {
     );
     assert_eq!(
         (out.spall_origins.len(), out.gated),
-        (1, 2),
-        "PHYSICS CHANGED — diff consciously. Fixture characterisation: the round reaches three \
-         body exits on this line — the front plate's, which throws, and two soft ones inside the \
-         hull below the HP quantum — and stops in the rear plate: {:?}",
+        (1, 0),
+        "PHYSICS CHANGED — diff consciously. Fixture characterisation: the round reaches one body \
+         exit on this line — the front plate's, which throws — and stops in the rear plate: {:?}",
         out.spall_origins
     );
     assert!(

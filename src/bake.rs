@@ -49,6 +49,13 @@ static L2_ROLE_COHERENCE: Check = Check {
           armour and carries usable mesh data; every declared component and roadwheel is a \
           ballistic node",
 };
+static L2_WITNESS_ROLE: Check = Check {
+    id: "L2.WITNESS_ROLE",
+    stage: Stage::Consumer,
+    severity: Severity::Error,
+    law: "a volume declared crew wears only witness substances, and a witness substance is worn \
+          only by a volume declared crew (ADR-0040)",
+};
 static L2_PRIMITIVE_FORM: Check = Check {
     id: "L2.PRIMITIVE_FORM",
     stage: Stage::Consumer,
@@ -178,8 +185,9 @@ pub(crate) struct PrimitiveSubstance {
     pub name: String,
     /// The substance's identity in the registry it was resolved against.
     pub id: crate::substances::SubstanceId,
-    /// The §13.2 field value: reference-mm of armour per metre of chord.
-    pub factor: f32,
+    /// Hard matter with its §13.2 field value (reference-mm per metre of chord), or a witness
+    /// (ADR-0040), which states none.
+    pub matter: crate::substances::Matter,
 }
 
 impl MeshGeometry {
@@ -304,7 +312,7 @@ fn classify(
     Some(PrimitiveSubstance {
         name: material.to_owned(),
         id: registry.id(material).ok()?,
-        factor: substance.factor(),
+        matter: substance.matter(),
     })
 }
 
@@ -1123,10 +1131,57 @@ pub(crate) fn extract_tank_geometry(
         ballistic_volumes,
     };
     findings.extend(declared_roles_resolve(&geometry, spec));
+    findings.extend(witness_roles(&geometry, spec));
     if report::has_error(&findings) {
         return Err(sorted(findings));
     }
     Ok(geometry)
+}
+
+/// The two classes stay apart (ADR-0040): a crew volume is a witness, and only a crew volume is.
+///
+/// A crew box wearing a hard substance would resist the shell and shadow the field as matter; a
+/// witness substance on anything else would be a volume no law wounds and no walk sees. Both are
+/// refused here, naming the node, before anything spawns.
+fn witness_roles(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for &index in &geometry.ballistic_volumes {
+        let node = &geometry.nodes[index];
+        let crew = spec
+            .volumes
+            .get(&node.name)
+            .and_then(|volume| volume.component())
+            .and_then(|component| component.crew);
+        let (mut witness, mut hard) = (Vec::new(), Vec::new());
+        for substance in node.primitives.iter().filter_map(|p| p.substance.as_ref()) {
+            match substance.matter {
+                crate::substances::Matter::Witness => witness.push(substance.name.as_str()),
+                crate::substances::Matter::Hard { .. } => hard.push(substance.name.as_str()),
+            }
+        }
+        let refusal = match (crew, witness.is_empty(), hard.is_empty()) {
+            (Some(station), _, false) => Some((
+                format!("declared crew ({station:?}) and wearing hard substance(s) {hard:?}"),
+                "give every primitive of the crew box a witness substance — a crewman \
+                 neither resists the shell nor shadows the spall",
+            )),
+            (None, false, _) => Some((
+                format!("wearing witness substance(s) {witness:?} without a crew declaration"),
+                "declare the volume `crew: <station>` in the tank file, or give it a hard \
+                 substance — only crew are witnesses",
+            )),
+            _ => None,
+        };
+        if let Some((evidence, repair)) = refusal {
+            findings.push(Finding::new(
+                &L2_WITNESS_ROLE,
+                Subject::node(&node.name),
+                evidence,
+                repair,
+            ));
+        }
+    }
+    findings
 }
 
 /// What the spec DECLARED, met with what the model turned out to hold: every typed reference
@@ -1458,7 +1513,7 @@ mod tests {
             substance: Some(PrimitiveSubstance {
                 name: SUBSTANCE.into(),
                 id: crate::substances::SubstanceId::fixture(1000.0),
-                factor: 1000.0,
+                matter: crate::substances::Matter::Hard { factor: 1000.0 },
             }),
             certificate: None,
         }
@@ -1536,7 +1591,7 @@ mod tests {
         // which is the whole reason the file has to come from the right revision.
         std::fs::write(
             &elsewhere,
-            r#"SubstanceRegistry(substances: {"Cheese": (resistance: Reference, paintable: false,
+            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, paintable: false,
                 facts: Some((density: (1000.0, Tuned("fixture")),
                     flow_strength: (1.0e6, Tuned("fixture")),
                     youngs_modulus: (1.0e9, Tuned("fixture")),
@@ -1674,7 +1729,7 @@ mod tests {
                             primitive
                                 .substance
                                 .as_ref()
-                                .map(|s| (s.name.as_str(), s.factor.to_bits())),
+                                .map(|s| (s.name.as_str(), s.matter)),
                         );
                     }
                     row
@@ -1739,8 +1794,11 @@ mod tests {
                         .as_ref()
                         .expect("a volume holds only substance primitives");
                     assert!(
-                        substance.factor > 0.0,
-                        "`{}` wears `{}`, whose factor is not positive",
+                        match substance.matter {
+                            crate::substances::Matter::Hard { factor } => factor > 0.0,
+                            crate::substances::Matter::Witness => true,
+                        },
+                        "`{}` wears `{}`, a hard substance whose factor is not positive",
                         volume.name,
                         substance.name
                     );
@@ -1766,11 +1824,12 @@ mod tests {
     }
 
     /// THE MATERIAL-IMPLIED LINTS, over every shipped asset. A substance whose whole meaning is a
-    /// consequence must have the facet that states it: Flesh that no one can kill, an Ammunition
-    /// rack that cannot cook off, and an EngineBlock with no hp are each a plate pretending to be
-    /// a module. The declared collision proxies and the structural singletons the assembler
-    /// resolves by name are the same kind of claim — about the class "tank", asserted here rather
-    /// than at spawn, where a bad asset would only surface as a panic.
+    /// consequence must have the facet that states it: an Ammunition rack that cannot cook off and
+    /// an EngineBlock with no hp are each a plate pretending to be a module. (A witness without a
+    /// crew facet is refused at load, `L2.WITNESS_ROLE`.) The declared collision proxies and the
+    /// structural singletons the assembler resolves by name are the same kind of claim — about the
+    /// class "tank", asserted here rather than at spawn, where a bad asset would only surface as a
+    /// panic.
     ///
     /// The substance names are the GLOBAL registry's, shared by every vehicle, and the loop is
     /// discovery: nothing here is one model's count, and a second tank adds no line.
@@ -1815,14 +1874,6 @@ mod tests {
                     .get(&node.name)
                     .and_then(crate::spec::VolumeSpec::component);
                 let worn = node.substance_groups();
-                if worn.contains_key("Flesh") {
-                    assert!(
-                        facets.is_some_and(|facets| facets.crew.is_some()),
-                        "{} is made of Flesh and declares no crew facet — a crewman nobody can \
-                         kill, and a seat nothing can knock out",
-                        named(&node.name)
-                    );
-                }
                 if worn.contains_key("Ammunition") {
                     assert!(
                         facets.is_some_and(|facets| facets.ammo),
@@ -2047,6 +2098,62 @@ mod tests {
             render(&findings)
         );
         assert_eq!(findings[0].subject.name, "Proxy");
+    }
+
+    /// L2.WITNESS_ROLE — crew and witness substances name one class: each without the other is
+    /// refused by node, and the pair together certifies.
+    #[test]
+    fn crew_and_witness_substance_come_together_or_not_at_all() {
+        let registry = SubstanceRegistry::shipped();
+        let witness = registry
+            .keys()
+            .into_iter()
+            .find(|name| registry.get(name).is_ok_and(|s| s.hard().is_none()))
+            .expect("the shipped registry declares a witness substance");
+        let seat = |material: &str| {
+            Node::new("Seat")
+                .child_of("Hull")
+                .holding(solid(material, [0.0, 3.0, 0.0]))
+        };
+        let wheels = [("Station_L", "Left"), ("Station_R", "Right")];
+        let declared = |entry: &str| {
+            fixture::spec(&["Proxy"], &wheels, &[])
+                .replace("volumes: {}", &format!("volumes: {{\"Seat\": {entry}}}"))
+        };
+        let crew = declared("(hp: 10, crew: Driver)");
+        let with = |extra: Node| {
+            let (mut nodes, _) = sound_vehicle();
+            nodes.push(extra);
+            nodes
+        };
+
+        let findings = verify("witness-crew", &with(seat(witness)), &crew);
+        assert!(findings.is_empty(), "{}", render(&findings));
+
+        let cases = [
+            ("hard-crew", seat(SUBSTANCE), crew.clone()),
+            (
+                "mixed-crew",
+                seat(witness).holding(solid(SUBSTANCE, [0.0, 3.0, 0.0])),
+                crew.clone(),
+            ),
+            ("witness-module", seat(witness), declared("(hp: 10)")),
+            (
+                "witness-plate",
+                seat(witness),
+                fixture::spec(&["Proxy"], &wheels, &[]),
+            ),
+        ];
+        for (id, node, spec) in cases {
+            let findings = verify(id, &with(node), &spec);
+            assert_eq!(
+                refusals(&findings),
+                ["L2.WITNESS_ROLE"],
+                "{id}: {}",
+                render(&findings)
+            );
+            assert_eq!(findings[0].subject.name, "Seat", "{id}");
+        }
     }
 
     /// L2.PRIMITIVE_FORM — what the sim reads has to be there, and has to be triangles.

@@ -1752,9 +1752,7 @@ fn field_rays_under(
                     deposit: false,
                     laws: WalkLaws::default(),
                 };
-                let within = |collider: Entity| {
-                    hit_ancestor(collider, &world.volumes, &world.parents).is_some()
-                };
+                let within = |collider: Entity| world.volume_of(collider).is_some();
                 rays.iter()
                     .map(|&(origin, dir, strength)| {
                         field_direction(
