@@ -47,6 +47,23 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
+  # The supply-chain gate: advisories, licenses, the glam split ban and sources, per `deny.toml`.
+  # No compile and no LFS — it reads `Cargo.lock` and the advisory database. `-W unmaintained` is the
+  # warn level `deny.toml` cannot express (there `unmaintained` is only a scope).
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo deny
+        run: cargo deny --locked check -W unmaintained
+
   # Compile-heavy checks share one matrix but run independently.
   checks:
     runs-on: ubuntu-24.04
@@ -473,7 +490,7 @@ jobs:
   # design decision, and its red is a finding, not a broken tree.
   check:
     name: check
-    needs: [fmt, checks, assets]
+    needs: [fmt, deny, checks, assets]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -481,9 +498,11 @@ jobs:
       - name: Require all check lanes
         env:
           FMT_RESULT: ${{ needs.fmt.result }}
+          DENY_RESULT: ${{ needs.deny.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           ASSETS_RESULT: ${{ needs.assets.result }}
         run: |
           test "${FMT_RESULT}" = success
+          test "${DENY_RESULT}" = success
           test "${CHECKS_RESULT}" = success
           test "${ASSETS_RESULT}" = success

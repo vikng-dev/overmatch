@@ -3,6 +3,7 @@ name = "overmatch"
 version = "0.6.0"
 edition = "2024"
 default-run = "overmatch"
+publish = false
 
 [dependencies]
 # `basis-universal`: the terrain surface maps ship as KTX2 holding UASTC 4x4 blocks
