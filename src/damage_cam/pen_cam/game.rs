@@ -12,9 +12,11 @@
 //!   [`timeline::MIN_SHOWN_S`]; one arriving sooner waits, and only the latest waiting is kept. A
 //!   replacement keeps the frame open and crossfades ([`timeline::turn_presence`]). Never two
 //!   corners. The timings are the UX spec's, TUNED.
-//! * **Which is newer.** Explanation identity ([`ExplanationKey`], fire tick first), never
-//!   arrival: the store's channel is unordered. One older than any record the corner has admitted
-//!   since it last held nothing is dropped.
+//! * **Which is newer.** The encounter's first contact, then its record's completion, identity
+//!   breaking ties ([`Recency`]); never arrival, as the store's channel is unordered. One older
+//!   than any the corner has admitted since it last held nothing, or than any the setting admits
+//!   that still waits on its impact, is dropped; of several presented together only the newest
+//!   opens.
 //! * **What it draws.** The struck tank's stage view, of the tank file the record names, and the
 //!   record's plan over the same tank asset the demo stages ([`TankAsset`]); a component the
 //!   shooter's projection does not list is drawn as the base layout, untinted.
@@ -42,7 +44,7 @@ use super::{Corner, CornerRig, Exhibit, Exhibits, Knobs, Showing, Surface};
 use crate::bake::TankBlueprint;
 use crate::damage_cam::delivery::{ExplanationKey, ImpactPresence, ShotExplanations};
 use crate::damage_cam::shapes::TankAsset;
-use crate::damage_cam::wire::{Audience, TankLife};
+use crate::damage_cam::wire::{Audience, ShotExplanation, TankLife};
 use crate::settings::{PenCamCorner, Settings};
 use crate::spec::TankSpec;
 use crate::tank::Controlled;
@@ -95,6 +97,26 @@ struct Turn {
     replacing: bool,
 }
 
+/// An explanation's place in time for replacement: its encounter's first contact, then its
+/// record's completion, its identity breaking ties. A shot's later encounter is newer whichever
+/// tank it struck.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Recency {
+    contact_tick: u32,
+    completion_tick: u32,
+    key: ExplanationKey,
+}
+
+impl Recency {
+    fn of(key: ExplanationKey, explanation: &ShotExplanation) -> Self {
+        Self {
+            contact_tick: explanation.contact_tick,
+            completion_tick: explanation.completion_tick,
+            key,
+        }
+    }
+}
+
 /// What the corner holds between frames.
 #[derive(Resource, Default)]
 pub(crate) struct ShooterCorner {
@@ -104,7 +126,7 @@ pub(crate) struct ShooterCorner {
     seen: BTreeSet<ExplanationKey>,
     lineup: Lineup<Queued>,
     /// The newest explanation admitted to the lineup since the corner last held nothing.
-    newest: Option<ExplanationKey>,
+    newest: Option<Recency>,
     serials: usize,
     turn: Option<Turn>,
     /// Virtual seconds at the corner's clock zero, while it holds anything.
@@ -269,6 +291,11 @@ fn drive(
 
     let stored: BTreeSet<ExplanationKey> = store.iter().map(|(key, _)| *key).collect();
     state.seen.retain(|key| stored.contains(key));
+    // Every newly presented explanation the corner admits, and the floor no admission may fall
+    // below: the newest admitted since the corner last held nothing, or still waiting on its
+    // impact.
+    let mut presented = Vec::new();
+    let mut floor = state.newest;
     for (key, entry) in store.iter() {
         if state.seen.contains(key) {
             continue;
@@ -277,39 +304,50 @@ fn drive(
         let mine = explanation.audience == Audience::Shooter
             && explanation.shot.combatant == me.combatant
             && explanation.struck.combatant != me.combatant;
-        let vehicle = entry.report.vehicle.as_deref().filter(|_| mine);
-        if let Some(vehicle) = vehicle
-            && !state.loaded.contains_key(vehicle)
-        {
+        let Some(vehicle) = entry.report.vehicle.as_deref().filter(|_| mine) else {
+            state.seen.insert(*key);
+            continue;
+        };
+        if !state.loaded.contains_key(vehicle) {
             // Loaded while the impact is still to draw, so the stage view can spawn by the time
             // the corner opens.
             let assets = StageView::load(&rig.asset_server, vehicle);
             state.loaded.insert(vehicle.to_owned(), assets);
         }
-        if entry.presence == ImpactPresence::Pending {
-            continue;
+        let admitted = settings.pen_cam_corner.opens(entry.report.impact.verdict);
+        let recency = Recency::of(*key, explanation);
+        match entry.presence {
+            ImpactPresence::Pending => {
+                if admitted {
+                    floor = floor.max(Some(recency));
+                }
+                continue;
+            }
+            ImpactPresence::TimedOut => {}
+            ImpactPresence::Presented if admitted => presented.push((recency, entry, vehicle)),
+            ImpactPresence::Presented => {}
         }
         state.seen.insert(*key);
-        let opens = entry.presence == ImpactPresence::Presented
-            && settings.pen_cam_corner.opens(entry.report.impact.verdict);
-        let Some(vehicle) = vehicle.filter(|_| opens).map(str::to_owned) else {
-            continue;
-        };
-        if state.newest.is_some_and(|newest| *key < newest) {
+    }
+    // Newest first: of explanations presented together only the newest opens.
+    presented.sort_by(|a, b| b.0.cmp(&a.0));
+    for (recency, entry, vehicle) in presented {
+        if floor.is_some_and(|floor| recency < floor) {
             continue;
         }
-        let Some(tank) = state.tank(&vehicle, blueprint.as_deref()) else {
+        let Some(tank) = state.tank(vehicle, blueprint.as_deref()) else {
             continue;
         };
         let plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
         let epoch = *state.epoch.get_or_insert(time.elapsed_secs_f64());
         let now = (time.elapsed_secs_f64() - epoch) as f32;
         state.serials += 1;
-        state.newest = Some(*key);
+        state.newest = Some(recency);
+        floor = Some(recency);
         let queued = Queued {
             serial: state.serials,
             kind: plan.kind,
-            vehicle,
+            vehicle: vehicle.to_owned(),
             exhibit: Exhibit {
                 plan: Arc::new(plan),
                 servo_deg: entry.report.servo_deg.clone(),
@@ -398,7 +436,7 @@ mod tests {
     use crate::damage_cam::PenetrationReport;
     use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, recorded, report, vocabulary};
     use crate::damage_cam::pen_cam::stage::StageCamera;
-    use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary};
+    use crate::damage_cam::wire::{BuiltExplanation, ShotVocabulary};
 
     /// The test's frame step (s), a 30 Hz frame: fixture data.
     const STEP_S: f32 = 1.0 / 30.0;
@@ -484,15 +522,34 @@ mod tests {
         ShotVocabulary,
         PenetrationReport,
     ) {
+        encounter(name, fire_tick, STRUCK, fire_tick + 1, 0)
+    }
+
+    /// [`explained`] for an encounter of the shot fired on `fire_tick` with `struck`'s first life,
+    /// opened on `contact_tick`, drawn at the shot's outcome `outcome`.
+    fn encounter(
+        name: &str,
+        fire_tick: u32,
+        struck: CombatantId,
+        contact_tick: u32,
+        outcome: u32,
+    ) -> (
+        ShotExplanation,
+        ShotExplanation,
+        ShotVocabulary,
+        PenetrationReport,
+    ) {
         let report = report(name);
         let vocabulary = vocabulary(&report);
         let struck = TankLife {
-            combatant: STRUCK,
+            combatant: struck,
             life: CombatantLife(0),
         };
-        let built =
-            BuiltExplanation::build(&vocabulary, &recorded(&report, SHOOTER, fire_tick, struck))
-                .unwrap();
+        let mut recorded = recorded(&report, SHOOTER, fire_tick, struck);
+        recorded.contact_tick = contact_tick;
+        recorded.completion_tick = contact_tick + 2;
+        recorded.outcome = Some(outcome);
+        let built = BuiltExplanation::build(&vocabulary, &recorded).unwrap();
         let mut projections = built.projections().into_iter().map(|(_, e)| e);
         let victim = projections.next().unwrap();
         let shooter = projections.next().unwrap();
@@ -684,7 +741,7 @@ mod tests {
     fn the_corner_rides_on_the_drawn_impact() {
         let (mut app, _) = corner_app(Settings::default());
         let (first, _, vocabulary, report) = explained("s1_through_crew", 1200);
-        let (waiting, _, _, _) = explained("s1_through_crew", 1300);
+        let (waiting, _, _, _) = explained("s1_through_crew", 1100);
         let (released, _, _, _) = explained("s1_through_crew", 1400);
         stage_ready(&mut app, &report);
         receive(&mut app, first, &vocabulary);
@@ -779,5 +836,89 @@ mod tests {
         shown.dedup();
         let kinds: Vec<CornerKind> = shown.into_iter().map(|(_, kind)| kind).collect();
         assert_eq!(kinds, [CornerKind::Glass]);
+    }
+
+    /// A newer explanation still waiting on its impact holds the order across the corner closing:
+    /// an older one presented meanwhile never opens, and the newer opens once drawn.
+    #[test]
+    fn a_pending_newer_explanation_keeps_an_older_one_out_across_a_close() {
+        let (mut app, _) = corner_app(Settings::default());
+        let (a, _, a_vocabulary, report) = explained("s1_through_crew", 1200);
+        let (b, _, b_vocabulary, _) = explained("s2_stopped_mantlet", 1400);
+        let (c, _, c_vocabulary, _) = explained("s3_ricochet", 1100);
+        stage_ready(&mut app, &report);
+        receive(&mut app, a, &a_vocabulary);
+        let mut shown = run(&mut app, CornerKind::Glass.duration());
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .receive(b.clone(), &b_vocabulary, now);
+        shown.extend(run(&mut app, 1.0));
+        assert_eq!(census(&mut app).0, 0, "the first corner closed");
+        stage_ready(&mut app, &report);
+        receive(&mut app, c, &c_vocabulary);
+        shown.extend(run(&mut app, 1.0));
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .drew(b.shot, b.outcome.unwrap());
+        let drawn = shown.len();
+        let after = run(&mut app, timeline::OPEN_LATENCY_S + 4.0 * STEP_S);
+        assert_eq!(
+            after.first().map(|(_, kind)| *kind),
+            Some(CornerKind::Slice),
+            "the newer opens once drawn, at once"
+        );
+        shown.extend(after);
+        shown.extend(run(&mut app, 5.0));
+        shown.dedup();
+        let kinds: Vec<CornerKind> = shown.iter().map(|(_, kind)| *kind).collect();
+        assert_eq!(
+            kinds,
+            [CornerKind::Glass, CornerKind::Slice],
+            "drawn at {drawn}"
+        );
+    }
+
+    /// Two encounters of one shot, a ricochet off one tank and the later contact with a tank of a
+    /// lower id: the later contact is the one that shows, whichever arrives first.
+    #[test]
+    fn a_shots_later_encounter_shows_whichever_tank_it_struck() {
+        const LOWER: CombatantId = CombatantId(STRUCK.0 - 1);
+        assert!(LOWER != SHOOTER);
+        for later_first in [true, false] {
+            let (mut app, _) = corner_app(Settings::default());
+            let (bounce, _, bounce_vocabulary, report) =
+                encounter("s3_ricochet", 1200, STRUCK, 1201, 0);
+            let (later, _, later_vocabulary, _) =
+                encounter("s1_through_crew", 1200, LOWER, 1204, 1);
+            stage_ready(&mut app, &report);
+            let mut arrivals = [(bounce, bounce_vocabulary), (later, later_vocabulary)];
+            if later_first {
+                arrivals.reverse();
+            }
+            let mut shown = Vec::new();
+            for (explanation, vocabulary) in arrivals {
+                receive(&mut app, explanation, &vocabulary);
+                shown.extend(run(&mut app, 1.0));
+            }
+            shown.extend(run(&mut app, 6.0));
+            shown.dedup();
+            let kinds: Vec<CornerKind> = shown.iter().map(|(_, kind)| *kind).collect();
+            let expected: &[CornerKind] = if later_first {
+                &[CornerKind::Glass]
+            } else {
+                &[CornerKind::Ricochet, CornerKind::Glass]
+            };
+            assert_eq!(kinds, expected, "later first: {later_first}");
+        }
+        let (mut app, _) = corner_app(Settings::default());
+        let (bounce, _, bounce_vocabulary, report) =
+            encounter("s3_ricochet", 1200, STRUCK, 1201, 0);
+        let (later, _, later_vocabulary, _) = encounter("s1_through_crew", 1200, LOWER, 1204, 1);
+        stage_ready(&mut app, &report);
+        receive(&mut app, bounce, &bounce_vocabulary);
+        receive(&mut app, later, &later_vocabulary);
+        let kinds: Vec<CornerKind> = run(&mut app, 6.0).into_iter().map(|(_, k)| k).collect();
+        assert_eq!(kinds, [CornerKind::Glass], "arriving together");
     }
 }
