@@ -230,8 +230,8 @@ impl ShotExplanations {
     fn evict_early(&mut self) {
         if self.evicted_early == 0 {
             warn!(
-                "pen cam: an explanation was dropped within {READ_WINDOW_S} s of its arrival, \
-                 more than {RETAINED} arriving in that window; further drops are counted"
+                "pen cam: an explanation was dropped within {READ_WINDOW_S} s of its arrival \
+                 (the store keeps {RETAINED}); further drops are counted"
             );
         }
         self.evicted_early += 1;
