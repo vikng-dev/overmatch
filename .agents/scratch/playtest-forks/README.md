@@ -217,3 +217,41 @@ often or too rarely, and whether a sloped plate's spall goes where a player expe
 **Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
 `src/ballistics/spall_cone.rs` (shape, axis rule, directions) and `throw_spall_cone` in
 `src/ballistics.rs`.
+
+## F6 — Spall field profile and passage (balance dials)
+
+**Status:** default chosen 2026-10-17 (owner) · revisit when spall reads too strong or too weak
+
+**The question.** How is a spall cone's strength spread across its angle, and what happens when a
+direction meets material? Together they decide how much a box behind a perforation takes, and
+whether internals shield what lies behind them. Crew are witnesses under either dial: dosed by
+every direction entering them, never stopping one (ADR-0040).
+
+**Default — even profile, full shadowing.** Every direction of the cone carries the same strength
+(`profile: Flat`), and a direction stops at the first hard body it enters: an armour face (no
+dose) or a hard HP-bearing box (that box takes its whole strength) (`passage: FirstSolid`). Owner's reasoning: the
+player controls the shell and learns the cone's *shape*; a fade across the angle and fragments
+pushing through material are nuance the player can never control, so the game stays consistent and
+learnable without them. The cone's half-angle and axis stay F5.
+
+**Alternatives kept alive (rebalance dials):**
+- **`profile: Linear`** — `s(θ) = S·(cos θ − cos α)/(1 − cos α)`, strongest on the axis and zero
+  at the rim. MEASURED support: per solid angle, hole density peaks at 0–5° up to ~1.5 km/s
+  (Verolme, DERIVED from its annex); deeper witness plates hold only the core (Diederen).
+  Evidence: `.agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md`.
+- **`passage: Partial`** — a direction spends `chord × resistance` through every hard body and doses
+  each box it enters at its entry strength, then continues. Graded shadowing (a plate stops it, an
+  engine mostly); depends on material data, two values of which are Unknown.
+- **Absorbed dose** (not built) — like Partial, but a box takes only the strength it spends
+  inside it, so dose is conserved and materials still matter.
+
+**Why it's a playtest call.** Spall feeling too strong (whole crews lost to one perforation) or too
+weak (perforations that do nothing visible) is the trigger; each dial moves that balance in a
+different way.
+
+**Revert cost.** Low — data: `profile` and `passage` in `assets/ballistics/spall_cone.ron` (both
+laws stay in code behind the data). Records and box-count tuning want the feel pass again.
+
+**Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
+`src/ballistics/spall_cone.rs` and `field_direction` in `src/ballistics/resolve.rs`. Captures of
+the shipped law: `.agents/scratch/damage-cam-2026-10-08/demo/capture/looktest/field-final.*`.
