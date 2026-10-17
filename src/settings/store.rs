@@ -171,8 +171,9 @@ fn config_dir_from(
     }
 }
 
-/// The `video.ron` path for this process, or `None` when the platform home is unreadable.
-/// Exposed so the report line can name the file the player would edit.
+/// The `video.ron` path for this process, or `None` when the platform home is unreadable. The one
+/// reader of the process environment in this module: the production callers resolve it and hand it
+/// to [`load`], [`save`] and [`reset`], which read nothing but their `path`.
 pub(super) fn location() -> Option<PathBuf> {
     config_dir_from(
         std::env::consts::OS,
@@ -206,15 +207,16 @@ fn keep_aside(path: &Path, suffix: &str) -> Option<PathBuf> {
     std::fs::rename(path, &kept).ok().map(|()| kept)
 }
 
-/// Read the settings, or return defaults. Logs NOTHING — see [`LoadNote`].
-pub(super) fn load() -> Load {
-    let Some(path) = location() else {
+/// Read the settings at `path` (`None`: no platform config directory), or return defaults. Logs
+/// NOTHING — see [`LoadNote`].
+pub(super) fn load(path: Option<&Path>) -> Load {
+    let Some(path) = path else {
         return Load {
             settings: Settings::default(),
             note: LoadNote::NoLocation,
         };
     };
-    let text = match std::fs::read_to_string(&path) {
+    let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Load {
@@ -240,14 +242,14 @@ pub(super) fn load() -> Load {
             settings: Settings::default(),
             note: LoadNote::FutureVersion {
                 version,
-                kept: keep_aside(&path, "newer"),
+                kept: keep_aside(path, "newer"),
             },
         },
         Parsed::Corrupt(error) => Load {
             settings: Settings::default(),
             note: LoadNote::Corrupt {
                 error,
-                kept: keep_aside(&path, "bad"),
+                kept: keep_aside(path, "bad"),
             },
         },
     }
@@ -313,7 +315,8 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Write the settings ATOMICALLY. Returns whether the write landed.
+/// Write the settings to `path` (`None`: no platform config directory) ATOMICALLY. Returns whether
+/// the write landed.
 ///
 /// The sequence, each step answering a specific documented failure:
 /// 1. serialize (sparse — see [`Settings`]'s `skip_serializing_if` note);
@@ -332,12 +335,12 @@ fn rename_with_retry(from: &Path, to: &Path) -> std::io::Result<()> {
 /// Errors are logged, never propagated: failing to save a graphics preference must not interrupt
 /// play. Unlike [`load`] this DOES log directly, and may — it only ever runs long after boot, from a
 /// settings-page edit.
-pub(super) fn save(settings: &Settings) -> bool {
+pub(super) fn save(path: Option<&Path>, settings: &Settings) -> bool {
     use std::io::Write;
 
     use bevy::prelude::{error, info, warn};
 
-    let Some(path) = location() else {
+    let Some(path) = path else {
         warn!("settings: no platform config directory — not saved");
         return false;
     };
@@ -374,7 +377,7 @@ pub(super) fn save(settings: &Settings) -> bool {
         std::fs::remove_file(&temporary).ok();
         return false;
     }
-    if let Err(err) = rename_with_retry(&temporary, &path) {
+    if let Err(err) = rename_with_retry(&temporary, path) {
         warn!(
             "settings: cannot replace {} ({err}) — not saved",
             path.display()
@@ -392,7 +395,8 @@ pub(super) fn save(settings: &Settings) -> bool {
     true
 }
 
-/// Delete the settings file — the `--reset-display` escape hatch's implementation.
+/// Delete the settings file at `path` (`None`: no platform config directory) — the
+/// `--reset-display` escape hatch's implementation.
 ///
 /// The failure it exists for: a persisted display choice that makes the game unlaunchable on THIS
 /// machine (bevy panics on a `Fullscreen` whose monitor is unresolvable, so a config written while a
@@ -401,14 +405,14 @@ pub(super) fn save(settings: &Settings) -> bool {
 ///
 /// Deleting rather than rewriting defaults keeps this honest: the next launch takes the ordinary
 /// first-launch path, which is already proven.
-pub(super) fn reset() -> bool {
+pub(super) fn reset(path: Option<&Path>) -> bool {
     use bevy::prelude::{info, warn};
 
-    let Some(path) = location() else {
+    let Some(path) = path else {
         warn!("settings: no platform config directory — nothing to reset");
         return false;
     };
-    match std::fs::remove_file(&path) {
+    match std::fs::remove_file(path) {
         Ok(()) => {
             info!("settings: reset — deleted {}", path.display());
             true
@@ -436,7 +440,7 @@ mod tests {
         VictimGlassPeek, VsyncMode, WindowModeSetting,
     };
 
-    /// The env override wins on every platform — the hook a test or a packaged run needs so it
+    /// The env override wins on every platform — the hook a packaged or scripted run needs so it
     /// cannot touch the developer's real settings.
     #[test]
     fn config_env_override_wins_everywhere() {
@@ -926,23 +930,14 @@ mod tests {
         assert!(!error.is_empty());
     }
 
-    /// A scratch config dir via the same override a packaged/CI run would use. Serialized by
-    /// [`ENV_LEASE`] because `set_var` is process-global.
+    /// A scratch config directory, removed on drop. The tests hand [`ScratchDir::file`] to the store
+    /// directly, so nothing here touches the process environment.
     struct ScratchDir {
         dir: PathBuf,
-        previous: Option<String>,
-        _lease: std::sync::MutexGuard<'static, ()>,
     }
-
-    /// Serializes every test that writes `OVERMATCH_CONFIG_DIR` — the variable is process-global, so
-    /// two of these running at once would each see the other's directory.
-    static ENV_LEASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     impl ScratchDir {
         fn new(tag: &str) -> Self {
-            let lease = ENV_LEASE
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = std::env::temp_dir().join(format!(
                 "overmatch-settings-{tag}-{}-{}",
                 std::process::id(),
@@ -951,32 +946,21 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-            let previous = std::env::var(CONFIG_DIR_ENV).ok();
-            // SAFETY: test-only. The lease serializes every test that writes this variable, and
-            // reads through `std::env` take std's environment lock, so no Rust-side access races
-            // this write. A reader outside `std::env` on another test thread (libc, DNS resolution)
-            // is not excluded: `set_var`'s contract says no multi-threaded program can rule that
-            // out on Unix, and this harness accepts it.
-            unsafe { std::env::set_var(CONFIG_DIR_ENV, &dir) };
-            Self {
-                dir,
-                previous,
-                _lease: lease,
-            }
+            Self { dir }
+        }
+
+        /// The `video.ron` inside this directory: where [`location`] would point with the
+        /// directory as the override.
+        fn file(&self) -> PathBuf {
+            config_dir_from(std::env::consts::OS, self.dir.to_str(), None, None, None)
+                .expect("the override always resolves")
+                .join(CONFIG_FILE_NAME)
         }
     }
 
     impl Drop for ScratchDir {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.dir).ok();
-            // SAFETY: as for the write in `new`, whose lease is still held here: a struct's fields
-            // drop after its `Drop` body.
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var(CONFIG_DIR_ENV, value),
-                    None => std::env::remove_var(CONFIG_DIR_ENV),
-                }
-            }
         }
     }
 
@@ -985,8 +969,9 @@ mod tests {
     #[test]
     fn save_then_load_round_trips_and_leaves_no_temp_file() {
         let scratch = ScratchDir::new("roundtrip");
+        let path = scratch.file();
         assert_eq!(
-            load().note,
+            load(Some(&path)).note,
             LoadNote::FirstLaunch,
             "an empty directory is a first launch, not an error"
         );
@@ -1012,8 +997,8 @@ mod tests {
             victim_glass_peek: VictimGlassPeek::Off,
             reduce_motion: ReduceMotion::On,
         };
-        assert!(save(&wanted), "the save must land");
-        let reloaded = load();
+        assert!(save(Some(&path), &wanted), "the save must land");
+        let reloaded = load(Some(&path));
         assert_eq!(reloaded.settings, wanted);
         assert_eq!(reloaded.note, LoadNote::Loaded);
 
@@ -1035,10 +1020,10 @@ mod tests {
     fn a_corrupt_file_is_kept_aside_and_survives_the_next_save() {
         let scratch = ScratchDir::new("corrupt");
         std::fs::create_dir_all(&scratch.dir).unwrap();
-        let path = location().unwrap();
+        let path = scratch.file();
         std::fs::write(&path, "not ron at all {{{").unwrap();
 
-        let loaded = load();
+        let loaded = load(Some(&path));
         assert_eq!(loaded.settings, Settings::default());
         let LoadNote::Corrupt { kept, .. } = loaded.note else {
             panic!("a damaged file must report Corrupt");
@@ -1048,7 +1033,7 @@ mod tests {
         assert!(!path.exists(), "the damaged file is moved, not copied");
 
         // And the next save cannot destroy the evidence.
-        assert!(save(&Settings::default()));
+        assert!(save(Some(&path), &Settings::default()));
         assert!(kept.exists(), "the .bad copy must survive a save");
     }
 
@@ -1058,10 +1043,10 @@ mod tests {
     fn a_future_file_is_kept_aside_before_falling_back() {
         let scratch = ScratchDir::new("future");
         std::fs::create_dir_all(&scratch.dir).unwrap();
-        let path = location().unwrap();
+        let path = scratch.file();
         std::fs::write(&path, "(version: 9999, shadow_distance: M100)").unwrap();
 
-        let loaded = load();
+        let loaded = load(Some(&path));
         assert_eq!(loaded.settings, Settings::default());
         let LoadNote::FutureVersion { version, kept } = loaded.note else {
             panic!("a newer file must report FutureVersion");
@@ -1082,15 +1067,19 @@ mod tests {
     fn reset_deletes_the_file_and_is_idempotent() {
         let scratch = ScratchDir::new("reset");
         std::fs::create_dir_all(&scratch.dir).unwrap();
-        assert!(save(&Settings {
-            shadow_distance: ShadowDistance::M350,
-            ..Settings::default()
-        }));
-        assert!(location().unwrap().exists());
+        let path = scratch.file();
+        assert!(save(
+            Some(&path),
+            &Settings {
+                shadow_distance: ShadowDistance::M350,
+                ..Settings::default()
+            }
+        ));
+        assert!(path.exists());
 
-        assert!(reset());
-        assert!(!location().unwrap().exists());
-        assert!(reset(), "resetting twice must not be an error");
-        assert_eq!(load().note, LoadNote::FirstLaunch);
+        assert!(reset(Some(&path)));
+        assert!(!path.exists());
+        assert!(reset(Some(&path)), "resetting twice must not be an error");
+        assert_eq!(load(Some(&path)).note, LoadNote::FirstLaunch);
     }
 }

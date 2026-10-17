@@ -1795,12 +1795,12 @@ const RESET_FLAG: &str = "--reset-display";
 /// missing or corrupt file yields defaults.
 pub(crate) fn load_at_boot(app: &mut App) -> Settings {
     let (settings, note) = if std::env::args().any(|arg| arg == RESET_FLAG) {
-        store::reset();
+        store::reset(store::location().as_deref());
         // Deliberately reports as a first launch rather than inventing a note: after the reset that
         // is exactly what the next read would see, and it is what the player asked for.
         (Settings::default(), store::LoadNote::FirstLaunch)
     } else {
-        let store::Load { settings, note } = store::load();
+        let store::Load { settings, note } = store::load(store::location().as_deref());
         (settings, note)
     };
     app.insert_resource(settings);
@@ -2543,7 +2543,7 @@ fn save_on_request(mut requests: MessageReader<SaveSettings>, settings: Res<Sett
     if requests.read().count() == 0 {
         return;
     }
-    store::save(&settings);
+    store::save(store::location().as_deref(), &settings);
 }
 
 /// Name where a superseded file was preserved, or say plainly that it was not. Never silently omits
