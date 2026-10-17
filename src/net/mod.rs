@@ -7,8 +7,9 @@ mod client;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
 mod cursor_queue;
-/// Real-UDP probes of the controlled tank's input path on frames of several ticks: the device's
-/// command filed on every tick, and the death flow's neutral one while dead.
+/// Real-UDP probes of the controlled tank's input path: the device's command filed on every tick of
+/// a frame, the death flow's neutral one while dead, and a click the bridge restores never filed
+/// again.
 #[cfg(test)]
 mod death_flow_input;
 mod death_screen;

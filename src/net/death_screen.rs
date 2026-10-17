@@ -59,7 +59,7 @@ pub fn plugin(app: &mut App) {
 fn systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         // All overlay reconcilers must read the same declared state. This is a state-driven
-        // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
+        // owner (crew + respawn deadline + the kill cam's gate), not a gated toggle.
         toggle_death_screen.in_set(overlay::OverlaySet::Declare),
         // Re-check the reconciled overlay input gate before latching a respawn edge — after
         // `Toggle`, so a menu or spawn map opened this frame already counts.
