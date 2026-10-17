@@ -190,7 +190,7 @@ fn target_kills(
                 .filter_map(|entity| bounds.get(entity).ok())
                 .filter(|aabb| aabb.min.cmple(aabb.max).all())
                 .fold(None, |union: Option<(Vec3, Vec3)>, aabb| {
-                    let (min, max) = (Vec3::from(aabb.min), Vec3::from(aabb.max));
+                    let (min, max) = (aabb.min, aabb.max);
                     Some(union.map_or((min, max), |(a, b)| (a.min(min), b.max(max))))
                 })?;
             Some((min + max) * 0.5)
