@@ -252,6 +252,16 @@ pub(crate) enum CameraProfile {
 }
 
 impl CameraProfile {
+    /// Whether the camera draws the battlefield: the player's view in each of its modes. The
+    /// player's render settings and the world's environment light are the battlefield's; a pen
+    /// cam camera keeps its own.
+    pub(crate) const fn draws_battlefield(self) -> bool {
+        matches!(
+            self,
+            Self::BattlefieldThirdPerson | Self::BattlefieldOptic | Self::KillCamLesson
+        )
+    }
+
     fn mask(self) -> RenderLayers {
         match self {
             Self::BattlefieldThirdPerson => {
@@ -289,6 +299,11 @@ pub(crate) enum LightProfile {
 }
 
 impl LightProfile {
+    /// Whether the light lights the battlefield, whose shadow settings are the player's.
+    pub(crate) const fn lights_battlefield(self) -> bool {
+        matches!(self, Self::BattlefieldSun | Self::BattlefieldMuzzleFlash)
+    }
+
     fn mask(self) -> RenderLayers {
         match self {
             Self::BattlefieldSun | Self::BattlefieldMuzzleFlash => Channel::mask(&[

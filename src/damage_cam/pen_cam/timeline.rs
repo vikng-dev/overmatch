@@ -136,31 +136,127 @@ pub struct Turn {
 
 /// The corner's turns for records arriving at `arrivals` (run seconds, ascending): the newest
 /// record wins once the current one has shown [`MIN_SHOWN_S`]; one that arrives sooner waits until
-/// then, and only the latest waiting record is kept.
+/// then, and only the latest waiting record is kept ([`Lineup`]).
 pub fn turns(arrivals: &[f32]) -> Vec<Turn> {
-    let mut out: Vec<Turn> = Vec::new();
-    let mut waiting: Option<usize> = None;
-    let flush = |out: &mut Vec<Turn>, waiting: &mut Option<usize>, before: f32| {
-        if let (Some(record), Some(current)) = (*waiting, out.last()) {
-            let free = current.start + MIN_SHOWN_S;
-            if free <= before {
-                out.push(Turn {
-                    record,
-                    start: free,
-                });
-                *waiting = None;
-            }
-        }
-    };
+    let mut lineup = Lineup::default();
     for (record, &at) in arrivals.iter().enumerate() {
-        flush(&mut out, &mut waiting, at);
-        match out.last() {
-            Some(current) if at < current.start + MIN_SHOWN_S => waiting = Some(record),
-            _ => out.push(Turn { record, start: at }),
+        lineup.arrive(record, at);
+    }
+    let mut out = Vec::new();
+    lineup.advance(f32::INFINITY, |&record, start| {
+        out.push(Turn { record, start });
+    });
+    out
+}
+
+/// The replacement rule on a running clock: records arrive, each to open at its own time, and
+/// [`Self::advance`] starts their turns as the clock reaches them. A record whose time comes while
+/// the current turn is inside its first [`MIN_SHOWN_S`] waits until that minimum is out, displacing
+/// any record already waiting; otherwise it starts at its own time. Never more than one turn is
+/// current. [`turns`] is this rule over a whole run.
+#[derive(Clone, Debug)]
+pub struct Lineup<T> {
+    /// Records not yet due, ascending by the time each opens at.
+    arriving: Vec<(T, f32)>,
+    waiting: Option<T>,
+    /// The current turn's record and start; it stays current after its own end until another
+    /// starts or [`Self::clear`].
+    current: Option<(T, f32)>,
+}
+
+impl<T> Default for Lineup<T> {
+    fn default() -> Self {
+        Self {
+            arriving: Vec::new(),
+            waiting: None,
+            current: None,
         }
     }
-    flush(&mut out, &mut waiting, f32::INFINITY);
-    out
+}
+
+impl<T> Lineup<T> {
+    /// `record` opens at `at` (clock seconds), by the rule.
+    pub fn arrive(&mut self, record: T, at: f32) {
+        let index = self.arriving.partition_point(|(_, due)| *due <= at);
+        self.arriving.insert(index, (record, at));
+    }
+
+    /// Run the rule up to `now`, calling `started` with each turn that starts on the way and its
+    /// start, in order.
+    pub fn advance(&mut self, now: f32, mut started: impl FnMut(&T, f32)) {
+        loop {
+            let due = self
+                .arriving
+                .first()
+                .map(|(_, at)| *at)
+                .filter(|at| *at <= now);
+            let before = due.unwrap_or(now);
+            if let Some((_, start)) = &self.current
+                && self.waiting.is_some()
+            {
+                let free = start + MIN_SHOWN_S;
+                if free <= before
+                    && let Some(record) = self.waiting.take()
+                {
+                    started(&record, free);
+                    self.current = Some((record, free));
+                }
+            }
+            let Some(at) = due else {
+                return;
+            };
+            let (record, _) = self.arriving.remove(0);
+            match &self.current {
+                Some((_, start)) if at < start + MIN_SHOWN_S => self.waiting = Some(record),
+                _ => {
+                    started(&record, at);
+                    self.current = Some((record, at));
+                }
+            }
+        }
+    }
+
+    /// The current turn's record and start.
+    pub fn current(&self) -> Option<(&T, f32)> {
+        self.current
+            .as_ref()
+            .map(|(record, start)| (record, *start))
+    }
+
+    /// Whether a record is still to start: due later, or waiting on the current turn's minimum.
+    pub fn pending(&self) -> bool {
+        self.waiting.is_some() || !self.arriving.is_empty()
+    }
+
+    /// The record to start next, if one is still to start.
+    pub fn next(&self) -> Option<&T> {
+        self.waiting
+            .as_ref()
+            .or_else(|| self.arriving.first().map(|(record, _)| record))
+    }
+
+    /// Hold the current turn's start at `now` or later: a turn whose stage cannot draw yet waits.
+    pub fn hold_until(&mut self, now: f32) {
+        if let Some((_, start)) = &mut self.current {
+            *start = start.max(now);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// A turn's look at corner time `c` of `duration`: opacity, scale and, while it replaces a turn
+/// that is still open, the replaced turn's opacity in the crossfade. A replacement keeps the frame
+/// open and crossfades its content over [`CROSSFADE_S`]; any other turn opens and closes by
+/// [`presence`].
+pub fn turn_presence(c: f32, duration: f32, replacing: bool) -> (f32, f32, Option<f32>) {
+    if replacing && (0.0..OPEN_S).contains(&c) {
+        return (1.0, 1.0, Some(1.0 - progress(c, 0.0, CROSSFADE_S)));
+    }
+    let (opacity, scale) = presence(c, duration);
+    (opacity, scale, None)
 }
 
 /// The verdict colours (`ux-spec.md` §4): CIEDE2000 ≥ 24 between every pair under normal, protan,
@@ -348,6 +444,34 @@ mod tests {
             ]
         );
         assert!(turns(&[]).is_empty());
+    }
+
+    /// On a live clock the rule starts the same turns as over the whole run, a record arriving
+    /// before its time is not shown early, and a held start waits for the stage.
+    #[test]
+    fn the_running_lineup_is_the_rule() {
+        let arrivals = [1.0, 1.2, 1.4, 3.0, 3.3, 9.0];
+        let mut lineup = Lineup::default();
+        let mut live = Vec::new();
+        let mut fed = 0;
+        for frame in 0..400 {
+            let now = frame as f32 / 30.0;
+            while fed < arrivals.len() && arrivals[fed] <= now + 0.2 {
+                lineup.arrive(fed, arrivals[fed]);
+                fed += 1;
+            }
+            lineup.advance(now, |&record, start| live.push(Turn { record, start }));
+            if let Some((_, start)) = lineup.current() {
+                assert!(start <= now + 1e-6);
+            }
+        }
+        assert_eq!(live, turns(&arrivals));
+        let mut held = Lineup::default();
+        held.arrive(0, 1.0);
+        held.advance(1.0, |_, _| {});
+        held.hold_until(1.5);
+        assert_eq!(held.current().map(|(_, start)| start), Some(1.5));
+        assert!(!held.pending());
     }
 
     #[test]

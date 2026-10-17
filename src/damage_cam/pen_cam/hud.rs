@@ -1,22 +1,23 @@
 //! The flat half: the corner's frame over the stage camera's picture — a 1 px border, the accent
-//! bar in the verdict colour, the verdict glyph, the progress hairline — the sight's reticle, and
-//! the demo's own labels.
+//! bar in the verdict colour, the verdict glyph, the progress hairline.
 //!
 //! The corner sits top-right, 16 px in, 16:10, 30 % of the window's logical width clamped to
 //! 384–640 px, on [`Overlay::PEN_CAM_CORNER_Z`]. The stage camera renders into an image the corner
 //! shows, so the corner can fade and scale as a whole; a replacement crossfades from the last frame
 //! of the old image while the camera draws the new record into the other one. The corner draws no
-//! text: the glyphs are rasterized shapes. The demo's labels use Bevy's default font, ASCII only.
+//! text: the glyphs are rasterized shapes. It is sized from the default UI camera, the one its node
+//! lays out on.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use bevy::ui::DefaultUiCamera;
+
 use super::stage::StageCamera;
 use super::timeline::{self, CornerKind};
-use super::world::MainCamera;
-use super::{CornerSetting, Library, PLAYLIST, Run, Settings};
+use super::{CornerRig, Knobs};
 use crate::overlay::Overlay;
 
 const INSET_PX: f32 = 16.0;
@@ -45,12 +46,6 @@ pub(super) struct Hairline;
 #[derive(Component)]
 pub(super) struct Glyph;
 
-#[derive(Component)]
-pub(super) struct Reticle;
-
-#[derive(Component)]
-pub(super) struct Label;
-
 /// The two render images, which one the camera draws into, and their physical size.
 #[derive(Resource)]
 pub(super) struct CornerImages {
@@ -68,6 +63,11 @@ pub(super) struct Glyphs {
 }
 
 pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    spawn_corner(&mut commands, &mut images);
+}
+
+/// The corner's nodes, hidden, and its images and glyphs.
+pub fn spawn_corner(commands: &mut Commands, images: &mut Assets<Image>) {
     let glyphs = Glyphs {
         images: [
             CornerKind::Glass,
@@ -101,6 +101,7 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             GlobalZIndex(Overlay::PEN_CAM_CORNER_Z),
             UiTransform::from_scale(Vec2::splat(0.96)),
             Visibility::Hidden,
+            CornerRig,
         ))
         .with_children(|corner| {
             for index in 0..2 {
@@ -162,60 +163,6 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.55)),
             ));
         });
-    // The reticle: four bars around the screen's centre.
-    commands
-        .spawn((
-            Reticle,
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-        ))
-        .with_children(|root| {
-            root.spawn(Node {
-                width: Val::Px(64.0),
-                height: Val::Px(64.0),
-                ..default()
-            })
-            .with_children(|cross| {
-                let bar = |left: f32, top: f32, w: f32, h: f32| {
-                    (
-                        Node {
-                            position_type: PositionType::Absolute,
-                            left: Val::Px(left),
-                            top: Val::Px(top),
-                            width: Val::Px(w),
-                            height: Val::Px(h),
-                            ..default()
-                        },
-                        BackgroundColor(Color::srgba(0.05, 0.05, 0.05, 0.85)),
-                    )
-                };
-                cross.spawn(bar(0.0, 31.0, 24.0, 2.0));
-                cross.spawn(bar(40.0, 31.0, 24.0, 2.0));
-                cross.spawn(bar(31.0, 40.0, 2.0, 24.0));
-                cross.spawn(bar(31.0, 0.0, 2.0, 18.0));
-            });
-        });
-    commands.spawn((
-        Label,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(13.0),
-            ..default()
-        },
-        TextColor(Color::srgba(0.95, 0.96, 0.98, 0.85)),
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Px(14.0),
-            bottom: Val::Px(12.0),
-            ..default()
-        },
-    ));
     commands.insert_resource(CornerImages {
         images: [blank.clone(), blank],
         live: 0,
@@ -226,26 +173,28 @@ pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(glyphs);
 }
 
-/// Size the corner from the window's logical width, (re)make its render images at that size in
-/// physical pixels, and point the stage camera at the live one; a replacement swaps them.
+/// Size the corner from the default UI camera's logical target width, (re)make its render images
+/// at that size in physical pixels, and point the stage camera at the live one; a replacement swaps
+/// them.
+#[allow(clippy::too_many_arguments)]
 pub fn layout(
-    settings: Res<Settings>,
+    knobs: Res<Knobs>,
     corner: Res<super::Corner>,
-    main: Query<&Camera, With<MainCamera>>,
-    mut stage_camera: Query<&mut RenderTarget, With<StageCamera>>,
+    mut targets: ParamSet<(DefaultUiCamera, Query<&mut RenderTarget, With<StageCamera>>)>,
+    cameras: Query<&Camera>,
     mut root: Query<&mut Node, With<CornerRoot>>,
     mut nodes: Query<(&CornerImage, &mut ImageNode)>,
     mut target: ResMut<CornerImages>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    let Ok(main) = main.single() else {
+    let Some(main) = targets.p0().get().and_then(|ui| cameras.get(ui).ok()) else {
         return;
     };
     let (Some(window), Some(scale)) = (main.logical_target_size(), main.target_scaling_factor())
     else {
         return;
     };
-    let (width, height) = if settings.expanded {
+    let (width, height) = if knobs.expanded {
         (window.x - 2.0 * INSET_PX, window.y - 2.0 * INSET_PX)
     } else {
         let width = (window.x * WIDTH_FRACTION).clamp(WIDTH_PX.0, WIDTH_PX.1);
@@ -284,7 +233,7 @@ pub fn layout(
         target.turn = turn;
     }
     if retarget {
-        if let Ok(mut render_target) = stage_camera.single_mut() {
+        if let Ok(mut render_target) = targets.p1().single_mut() {
             *render_target = RenderTarget::Image(bevy::camera::ImageRenderTarget {
                 handle: target.images[target.live].clone(),
                 scale_factor: scale,
@@ -296,22 +245,10 @@ pub fn layout(
     }
 }
 
-/// What `R` does on this run, as the legend names it: on a kill run it respawns, the game's
-/// binding, and a drag looks while the camera is free.
-pub(super) fn legend_r(kill: bool) -> &'static str {
-    if kill {
-        "R respawn  drag look"
-    } else {
-        "R replay"
-    }
-}
-
-/// The corner's presence, accent, glyph and hairline; the reticle; the labels.
+/// The corner's presence, accent, glyph and hairline.
+#[allow(clippy::too_many_arguments)]
 pub fn animate(
     corner: Res<super::Corner>,
-    run: Res<Run>,
-    library: Res<Library>,
-    settings: Res<Settings>,
     target: Res<CornerImages>,
     glyphs: Res<Glyphs>,
     mut root: Query<(&mut Visibility, &mut UiTransform), With<CornerRoot>>,
@@ -319,55 +256,7 @@ pub fn animate(
     mut accent: Query<(&mut Node, &mut BackgroundColor), (With<Accent>, Without<Hairline>)>,
     mut hairline: Query<(&mut Node, &mut BackgroundColor), (With<Hairline>, Without<Accent>)>,
     mut glyph: Query<&mut ImageNode, With<Glyph>>,
-    mut reticle: Query<&mut Visibility, (With<Reticle>, Without<CornerRoot>)>,
-    mut label: Query<&mut Text, With<Label>>,
 ) {
-    let entry = &PLAYLIST[run.entry];
-    if let Ok(mut visibility) = reticle.single_mut() {
-        visibility.set_if_neq(if entry.victim {
-            Visibility::Hidden
-        } else {
-            Visibility::Inherited
-        });
-    }
-    if let Ok(mut text) = label.single_mut() {
-        let verdicts: Vec<String> = run
-            .shots
-            .iter()
-            .map(|shot| format!("{:?}", library.records[shot.record].report.impact.verdict))
-            .collect();
-        let corner_setting = match settings.corner {
-            CornerSetting::All => "all",
-            CornerSetting::ThroughOnly => "through only",
-            CornerSetting::Off => "off",
-        };
-        let line = format!(
-            "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  slice {}{}\n\
-             1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
-             X dismiss  C hold  V own tank  P setting  F expand  O ortho  L axis  M reduce motion",
-            entry.label,
-            verdicts.join(", "),
-            run.t,
-            super::SPEEDS[run.speed],
-            if run.paused { "  paused" } else { "" },
-            if run.auto { "  auto" } else { "" },
-            corner_setting,
-            if settings.slice_ortho {
-                "ortho"
-            } else {
-                "perspective"
-            },
-            if settings.reduce_motion {
-                "  reduce motion"
-            } else {
-                ""
-            },
-            legend_r(run.kill.is_some()),
-        );
-        if text.0 != line {
-            text.0 = line;
-        }
-    }
     let Ok((mut visibility, mut transform)) = root.single_mut() else {
         return;
     };

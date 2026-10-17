@@ -262,7 +262,8 @@ fn mark_view_subject_body(
     }
 }
 
-/// Point every 3D camera at the channel set the current view wants.
+/// Point every camera of the player's view at the channel set the current view wants. A camera
+/// with another profile (the pen cam's inset and masks) keeps its own.
 ///
 /// This is the entire "hide the player's own tank in the gunner optic" mechanism now: ONE
 /// component per camera, O(1) in the size of the world. The optic profile drops
@@ -277,7 +278,12 @@ fn apply_sight_camera_profile(
         SightMode::ThirdPerson => CameraProfile::BattlefieldThirdPerson,
     };
     for mut profile in &mut cameras {
-        profile.set_if_neq(want);
+        if matches!(
+            *profile,
+            CameraProfile::BattlefieldOptic | CameraProfile::BattlefieldThirdPerson
+        ) {
+            profile.set_if_neq(want);
+        }
     }
 }
 

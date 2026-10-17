@@ -110,6 +110,7 @@ use bevy::core_pipeline::{Core3d, Core3dSystems, FullscreenShader};
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
 use bevy::render::diagnostic::RecordDiagnostics;
+use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer};
 use bevy::render::render_resource::{
@@ -173,14 +174,22 @@ impl RenderScale {
     }
 }
 
+/// A camera whose main pass renders at its target's full size whatever [`RenderScale`] says: the
+/// pen cam's inset and its mask cameras, whose images are sampled against one another pixel for
+/// pixel, so one scaled alone would misregister them.
+#[derive(Component, Clone, Copy, Default, ExtractComponent)]
+pub(crate) struct NativeResolution;
+
 /// The resource + the render-app half. Mounted BY `settings::plugin`, not beside it: `apply_settings`
 /// is the one writer of [`RenderScale`], so the writer mounts the owner and a root cannot compose a
 /// settings page whose render-scale row reaches nothing. Never the headless server (which has no
 /// render app at all — the `get_sub_app_mut` below would simply find nothing, but the server never
 /// composes this).
 pub(crate) fn plugin(app: &mut App) {
-    app.init_resource::<RenderScale>()
-        .add_plugins(ExtractResourcePlugin::<RenderScale>::default());
+    app.init_resource::<RenderScale>().add_plugins((
+        ExtractResourcePlugin::<RenderScale>::default(),
+        ExtractComponentPlugin::<NativeResolution>::default(),
+    ));
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
@@ -361,7 +370,7 @@ fn prepare_render_scale(
             Option<&MainPassResolutionOverride>,
             Option<&RenderScaleUpscaleId>,
         ),
-        With<Camera3d>,
+        (With<Camera3d>, Without<NativeResolution>),
     >,
 ) {
     for (entity, camera, target, override_now, id_now) in &views {

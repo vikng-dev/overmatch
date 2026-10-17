@@ -27,8 +27,7 @@ use super::plan::BoxPlan;
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
-use super::world::MainCamera;
-use super::{Corner, Surface};
+use super::{Corner, CornerRig, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
 /// The field's brightness per unit of its column density `∫ ds / (r² + ε²)` (m⁻¹) at full level
@@ -256,6 +255,19 @@ struct MaskOwner {
 }
 
 impl Masks {
+    /// Take the set away: its cameras despawned and its images removed.
+    pub fn release(&mut self, commands: &mut Commands, images: &mut Assets<Image>) {
+        if let Some(old) = self.owner.take() {
+            for camera in old.cameras {
+                commands.entity(camera).despawn();
+            }
+        }
+        images.remove(self.hull.id());
+        images.remove(self.part.id());
+        self.hull = Handle::default();
+        self.part = Handle::default();
+    }
+
     /// The camera the masks are drawn for, if a set exists.
     #[cfg(test)]
     pub(super) fn viewer(&self) -> Option<Entity> {
@@ -294,7 +306,7 @@ pub fn own(
     mut commands: Commands,
     corner: Res<Corner>,
     inset: Query<Entity, With<StageCamera>>,
-    main: Query<Entity, With<MainCamera>>,
+    main: Query<Entity, With<WorldViewer>>,
     cameras: Query<(&Camera, &RenderTarget), Without<MaskCamera>>,
     windows: Query<&Window>,
     primary: Query<Entity, With<PrimaryWindow>>,
@@ -318,14 +330,8 @@ pub fn own(
     if want.map(|(viewer, size, scale, _)| (viewer, size, scale)) == have {
         return;
     }
-    if let Some(old) = masks.owner.take() {
-        for camera in old.cameras {
-            commands.entity(camera).despawn();
-        }
-        images.remove(masks.hull.id());
-        images.remove(masks.part.id());
-        masks.hull = Handle::default();
-        masks.part = Handle::default();
+    if masks.owner.is_some() {
+        masks.release(&mut commands, &mut images);
     }
     stage.invalidate();
     let Some((viewer, size, scale, order)) = want else {
@@ -361,6 +367,8 @@ pub fn own(
                 Transform::IDENTITY,
                 profile,
                 MaskCamera { viewer },
+                CornerRig,
+                crate::render_scale::NativeResolution,
             ))
             .id();
     }
@@ -412,7 +420,7 @@ fn viewport_now(
 /// matrices ([`bevy::camera::CameraUpdateSystems`]), so a mask draws with the lens its viewer has
 /// this frame; bevy then fits the aspect to the mask's own target, the viewer's size. Every
 /// system that writes a viewer's [`Projection`] must run before this one, or the mask draws last
-/// frame's lens.
+/// frame's lens: the edges are named where it is mounted ([`super::presentation`]).
 pub fn follow_lens(
     viewers: Query<&Projection, Without<MaskCamera>>,
     mut followers: Query<(&MaskCamera, &mut Projection)>,
@@ -427,7 +435,8 @@ pub fn follow_lens(
 /// Pose each mask camera as its viewer, from the viewer's `GlobalTransform`. Runs after transform
 /// propagation and before the frusta are taken. Every system that sets a viewer's final pose,
 /// its `Transform` before propagation or its `GlobalTransform` after, must run before this one,
-/// or the mask draws last frame's pose.
+/// or the mask draws last frame's pose: the edges are named where it is mounted
+/// ([`super::presentation`]).
 pub fn follow_pose(
     viewers: Query<&GlobalTransform, Without<MaskCamera>>,
     mut followers: Query<(&MaskCamera, &mut Transform, &mut GlobalTransform)>,
@@ -715,7 +724,7 @@ mod tests {
     /// directions in any than it reads.
     #[test]
     fn every_record_fits_the_footprint() {
-        for record in &super::super::Library::load().records {
+        for record in &super::super::demo::Library::load().records {
             let cones = &record.plan.cones;
             assert!(
                 cones.len() <= FOOTPRINT_FIELDS,

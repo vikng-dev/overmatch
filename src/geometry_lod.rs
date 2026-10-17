@@ -96,6 +96,12 @@ pub(crate) struct GeometryLodLevel {
 #[derive(Component)]
 struct GeometryLodScanned;
 
+/// Every scene primitive under this entity renders at source detail: scanned, never banded. A view
+/// whose own camera frames it at a scale the battlefield's bands do not measure (the pen cam's
+/// stage) carries it on its root.
+#[derive(Component, Clone, Copy, Default)]
+pub(crate) struct SourceDetail;
+
 /// AN INSTRUMENT DRAWS WHAT IT MEASURES: this composition renders every certified surface at the
 /// level the artist authored, at every distance.
 ///
@@ -381,10 +387,18 @@ fn attach_rungs(
         ),
         (With<GltfMeshName>, Without<GeometryLodScanned>),
     >,
+    parents: Query<&ChildOf>,
+    source_detail: Query<(), With<SourceDetail>>,
 ) {
     for (entity, mesh, material, name) in &fresh {
         let mut primitive = commands.entity(entity);
         primitive.insert(GeometryLodScanned);
+        if parents
+            .iter_ancestors(entity)
+            .any(|ancestor| source_detail.contains(ancestor))
+        {
+            continue;
+        }
         let Some(chain) = chains.of_mesh(mesh.0.id()) else {
             continue;
         };

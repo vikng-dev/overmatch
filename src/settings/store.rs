@@ -431,9 +431,9 @@ pub(super) fn reset() -> bool {
 mod tests {
     use super::*;
     use crate::settings::{
-        DebugPanel, DisplaySelection, FrameCap, MsaaLevel, PixelBudget, RenderScaleLevel,
-        ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode,
-        WindowModeSetting,
+        DebugPanel, DisplaySelection, FrameCap, MsaaLevel, PenCamCorner, PixelBudget, ReduceMotion,
+        RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent,
+        VsyncMode, WindowModeSetting,
     };
 
     /// The env override wins on every platform — the hook a test or a packaged run needs so it
@@ -777,6 +777,8 @@ mod tests {
                 frame_cap: FrameCap(120),
                 ui_scale: UiScalePercent(125),
                 debug_panel: DebugPanel::Off,
+                pen_cam_corner: PenCamCorner::ThroughOnly,
+                reduce_motion: ReduceMotion::On,
             },
             // The FAST rung — the value the retired bool field could not carry, i.e. the whole
             // reason the key moved.
@@ -1001,6 +1003,8 @@ mod tests {
             frame_cap: FrameCap(60),
             ui_scale: UiScalePercent(110),
             debug_panel: DebugPanel::Off,
+            pen_cam_corner: PenCamCorner::Off,
+            reduce_motion: ReduceMotion::On,
         };
         assert!(save(&wanted), "the save must land");
         let reloaded = load();

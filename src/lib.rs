@@ -709,6 +709,9 @@ impl Plugin for ClientPlugin {
             ballistics::view_plugin,
         ));
         app.add_plugins(drive_hud::plugin);
+        // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
+        // is mounted by `GamePlugin`).
+        app.add_plugins(damage_cam::pen_cam::game::plugin);
         // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
         // each weapon's authored report on the fire seam, and the per-tank engine loop.
         app.add_plugins(sfx::plugin);
@@ -812,6 +815,9 @@ impl Plugin for NetClientPlugin {
         // and the engine loop on own AND remote tanks — `TankTransmission` is replicated, so one
         // code path.
         app.add_plugins(sfx::plugin);
+        // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
+        // is the link's, `net::shot_explanation`).
+        app.add_plugins(damage_cam::pen_cam::game::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
         // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:

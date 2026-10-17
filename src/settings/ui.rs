@@ -56,9 +56,9 @@ use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
 use super::{
-    DebugPanel, FrameCap, MsaaLevel, PixelBudget, PresentCaps, RenderScaleLevel, SaveSettings,
-    Settings, ShadowCascades, ShadowDistance, ShadowResolution, UiScalePercent, VsyncMode,
-    WindowModeSetting,
+    DebugPanel, FrameCap, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
+    RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution,
+    UiScalePercent, VsyncMode, WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -117,6 +117,10 @@ enum Row {
     UiScale,
     /// The online debug card in a match's corner — see `settings::DebugPanel`.
     DebugPanel,
+    /// Which of the player's hits open the pen cam's corner — see `settings::PenCamCorner`.
+    PenCamCorner,
+    /// See `settings::ReduceMotion`.
+    ReduceMotion,
 }
 
 /// How a row's control renders and responds: a `< VALUE >` stepper or a draggable slider.
@@ -127,7 +131,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 12] = [
+    const ORDER: [Row; 14] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -140,6 +144,8 @@ impl Row {
         Row::FrameCap,
         Row::UiScale,
         Row::DebugPanel,
+        Row::PenCamCorner,
+        Row::ReduceMotion,
     ];
 
     /// The row's name. ASCII only — it reaches `Text`.
@@ -159,6 +165,8 @@ impl Row {
             Row::FrameCap => "FRAME CAP",
             Row::UiScale => "UI SCALE",
             Row::DebugPanel => "DEBUG PANEL",
+            Row::PenCamCorner => "PEN CAM CORNER",
+            Row::ReduceMotion => "REDUCE MOTION",
         }
     }
 
@@ -226,6 +234,11 @@ impl Row {
             Row::DebugPanel => {
                 "Ping, jitter, frame rate and version in the corner during an online match."
             }
+            Row::PenCamCorner => {
+                "Which of your hits open the inset that shows what the round did: \
+                 all, penetrations only, or none."
+            }
+            Row::ReduceMotion => "Holds the pen cam's camera still and shortens its animations.",
         }
     }
 
@@ -301,6 +314,8 @@ impl Row {
             Row::FrameCap => settings.frame_cap.label(),
             Row::UiScale => settings.ui_scale.label(),
             Row::DebugPanel => settings.debug_panel.label().to_string(),
+            Row::PenCamCorner => settings.pen_cam_corner.label().to_string(),
+            Row::ReduceMotion => settings.reduce_motion.label().to_string(),
         }
     }
 
@@ -352,6 +367,14 @@ impl Row {
             Row::UiScale => settings.ui_scale = settings.ui_scale.step(delta),
             Row::DebugPanel => {
                 settings.debug_panel = step_in(&DebugPanel::ORDER, settings.debug_panel, delta);
+            }
+            Row::PenCamCorner => {
+                settings.pen_cam_corner =
+                    step_in(&PenCamCorner::ORDER, settings.pen_cam_corner, delta);
+            }
+            Row::ReduceMotion => {
+                settings.reduce_motion =
+                    step_in(&ReduceMotion::ORDER, settings.reduce_motion, delta);
             }
         }
     }

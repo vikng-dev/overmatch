@@ -64,6 +64,8 @@ use bevy::window::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::render_policy::{CameraProfile, LightProfile};
+
 /// The display row's OFFERED ladder: one rung per monitor bevy has synchronised, named the way the
 /// OS names it. Reads the [`Monitor`] entities this module only counts, and is the one thing that
 /// decides what the row shows and what a step lands on — never what [`DisplaySelection`] means.
@@ -831,6 +833,67 @@ impl DebugPanel {
     }
 }
 
+/// Which of the player's own hits open the pen cam's corner: every one, penetrations only, or
+/// none. Read by `damage_cam::pen_cam::game`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum PenCamCorner {
+    #[default]
+    All,
+    ThroughOnly,
+    Off,
+}
+
+impl PenCamCorner {
+    pub(crate) const ORDER: [PenCamCorner; 3] = [
+        PenCamCorner::All,
+        PenCamCorner::ThroughOnly,
+        PenCamCorner::Off,
+    ];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            PenCamCorner::All => "ALL",
+            PenCamCorner::ThroughOnly => "THROUGH ONLY",
+            PenCamCorner::Off => "OFF",
+        }
+    }
+
+    /// Whether a hit of verdict `verdict` opens the corner.
+    pub(crate) fn opens(self, verdict: crate::damage_cam::ShotVerdict) -> bool {
+        match self {
+            PenCamCorner::All => true,
+            PenCamCorner::ThroughOnly => verdict == crate::damage_cam::ShotVerdict::Penetration,
+            PenCamCorner::Off => false,
+        }
+    }
+}
+
+/// Whether the pen cam's views hold their camera still and land their events with short fades
+/// instead of travelling.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum ReduceMotion {
+    #[default]
+    Off,
+    On,
+}
+
+impl ReduceMotion {
+    pub(crate) const ORDER: [ReduceMotion; 2] = [ReduceMotion::Off, ReduceMotion::On];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            ReduceMotion::Off => "OFF",
+            ReduceMotion::On => "ON",
+        }
+    }
+
+    pub(crate) const fn on(self) -> bool {
+        matches!(self, ReduceMotion::On)
+    }
+}
+
 /// Which monitor the window is put on — the row that stops a two-display machine opening the game
 /// wherever the window manager last felt like.
 ///
@@ -1522,6 +1585,12 @@ pub(crate) struct Settings {
     /// The online debug card — see [`DebugPanel`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) debug_panel: DebugPanel,
+    /// Which of the player's hits open the pen cam's corner — see [`PenCamCorner`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) pen_cam_corner: PenCamCorner,
+    /// See [`ReduceMotion`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) reduce_motion: ReduceMotion,
 }
 
 impl Default for Settings {
@@ -1541,6 +1610,8 @@ impl Default for Settings {
             frame_cap: FrameCap::default(),
             ui_scale: UiScalePercent::default(),
             debug_panel: DebugPanel::default(),
+            pen_cam_corner: PenCamCorner::default(),
+            reduce_motion: ReduceMotion::default(),
         }
     }
 }
@@ -1852,8 +1923,14 @@ pub(crate) struct CaptureWindowPinned;
 fn apply_settings(
     settings: Res<Settings>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
-    mut cameras: Query<&mut Msaa, With<Camera3d>>,
-    mut lights: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    // A camera or light with a profile that is not the battlefield's (the pen cam's inset, masks
+    // and key lights) keeps its own: the masks must not multisample, and the stage casts nothing.
+    mut cameras: Query<(&mut Msaa, Option<&CameraProfile>), With<Camera3d>>,
+    mut lights: Query<(
+        &mut DirectionalLight,
+        &mut CascadeShadowConfig,
+        Option<&LightProfile>,
+    )>,
     // Optional because a headless/simulate root has no primary window at all — the present mode is
     // then simply nothing to apply, not a missing dependency.
     window: Option<Single<&mut Window, With<PrimaryWindow>>>,
@@ -1882,8 +1959,10 @@ fn apply_settings(
     mut placement: ResMut<WindowPlacement>,
 ) {
     let msaa = settings.msaa.to_msaa();
-    for mut camera_msaa in &mut cameras {
-        camera_msaa.set_if_neq(msaa);
+    for (mut camera_msaa, profile) in &mut cameras {
+        if profile.is_none_or(|profile| profile.draws_battlefield()) {
+            camera_msaa.set_if_neq(msaa);
+        }
     }
 
     // The three shadow rows are reconciled independently, because they are independent settings:
@@ -1898,7 +1977,10 @@ fn apply_settings(
         shadow_map.size = size;
     }
     let distance = settings.shadow_distance;
-    for (mut light, mut config) in &mut lights {
+    for (mut light, mut config, profile) in &mut lights {
+        if profile.is_some_and(|profile| !profile.lights_battlefield()) {
+            continue;
+        }
         // `Off` deliberately leaves the cascade config at its LAST value rather than rebuilding it
         // to something degenerate: nothing samples it while casting is disabled, and re-enabling
         // must not depend on a zero-metre envelope having been repaired first. A cascade-count
@@ -4487,6 +4569,8 @@ mod tests {
         assert!(is_default(&settings.frame_cap));
         assert!(is_default(&settings.ui_scale));
         assert!(is_default(&settings.debug_panel));
+        assert!(is_default(&settings.pen_cam_corner));
+        assert!(is_default(&settings.reduce_motion));
         assert!(
             settings.debug_panel.shown(),
             "the debug card is on by default during the beta"

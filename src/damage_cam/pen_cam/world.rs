@@ -11,9 +11,10 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::ui::IsDefaultUiCamera;
 
+use super::WorldViewer;
+use super::demo::{Library, PLAYLIST, Record, Run, ShotRun};
 use super::material::GlowMaterial;
 use super::view::Views;
-use super::{Library, PLAYLIST, Record, Run, ShotRun};
 use crate::render_policy::{CameraProfile, LightProfile, VisualScope};
 
 /// The staged range from shooter to target (m), inside the spec's 600–1000 m.
@@ -47,7 +48,9 @@ const FLASH: LinearRgba = LinearRgba::rgb(1.0, 0.62, 0.3);
 pub const SKY: Color = Color::srgb(0.66, 0.73, 0.80);
 const GROUND: Color = Color::srgb(0.30, 0.31, 0.24);
 
+/// The demo's battlefield camera: the shooter's sight, the victim's chase view, the kill cam.
 #[derive(Component)]
+#[require(WorldViewer)]
 pub struct MainCamera;
 
 #[derive(Component)]
@@ -351,8 +354,8 @@ pub fn face_mark(point: Vec3, normal: Vec3, travel: Vec3, calibre: f32) -> Trans
 
 #[cfg(test)]
 mod tests {
+    use super::super::demo::{Settings, ShotRun};
     use super::super::plan::Plan;
-    use super::super::{Settings, ShotRun};
     use super::*;
     use crate::damage_cam::RoundEnd;
 

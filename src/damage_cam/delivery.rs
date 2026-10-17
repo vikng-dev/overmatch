@@ -122,13 +122,6 @@ fn shot_key(shot: ShotId) -> ShotKey {
 #[derive(Clone, Debug)]
 pub(crate) struct StoredExplanation {
     pub explanation: ShotExplanation,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its readers, the pen cam's views, are not yet built"
-        )
-    )]
     pub report: PenetrationReport,
     pub presence: ImpactPresence,
     /// Virtual seconds at arrival.
@@ -296,15 +289,8 @@ impl ShotExplanations {
         self.stored.get(key)
     }
 
-    /// Every stored explanation, in tick order, whatever life it struck: the kill cam's and the
-    /// history's.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "its readers, the pen cam's views, are not yet built"
-        )
-    )]
+    /// Every stored explanation, in tick order, whatever life it struck: the corner's, the kill
+    /// cam's and the history's.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&ExplanationKey, &StoredExplanation)> {
         self.stored.iter()
     }

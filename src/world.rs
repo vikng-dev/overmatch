@@ -8,6 +8,7 @@ use avian3d::prelude::{
 use bevy::prelude::*;
 
 use crate::Layer;
+use crate::render_policy::CameraProfile;
 
 /// The world's static terrain as DATA (track architecture §5): every terrain block in authoring
 /// form — a unit cube posed/scaled by its Transform (the Avian collider idiom). Colliders are
@@ -199,7 +200,8 @@ fn sky_cubemap() -> Image {
     )
 }
 
-/// Give every 3-D view image-based lighting, once, from the shared sky.
+/// Give every 3-D view of the battlefield image-based lighting, once, from the shared sky. A view
+/// whose profile draws no battlefield (the pen cam's inset and masks) lights its own stage.
 ///
 /// Attached to VIEWS rather than spawned as a light: an environment map on a camera lights that
 /// whole view, which is what "the sky" means here — as opposed to a `LightProbe`, which bounds it
@@ -210,13 +212,21 @@ fn attach_environment_light(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut sky: Local<Option<Handle<Image>>>,
-    views: Query<Entity, (With<Camera3d>, Without<GeneratedEnvironmentMapLight>)>,
+    views: Query<
+        (Entity, Option<&CameraProfile>),
+        (With<Camera3d>, Without<GeneratedEnvironmentMapLight>),
+    >,
 ) {
-    if views.is_empty() {
+    let mut views = views
+        .iter()
+        .filter(|(_, profile)| profile.is_none_or(|profile| profile.draws_battlefield()))
+        .map(|(view, _)| view)
+        .peekable();
+    if views.peek().is_none() {
         return;
     }
     let sky = sky.get_or_insert_with(|| images.add(sky_cubemap()));
-    for view in &views {
+    for view in views {
         commands.entity(view).insert(GeneratedEnvironmentMapLight {
             environment_map: sky.clone(),
             intensity: SKY_ENVIRONMENT_INTENSITY,

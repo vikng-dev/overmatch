@@ -33,8 +33,8 @@ use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
-use super::view::{Proxy, ViewMesh, ViewRoot, Views};
-use super::{Corner, Library, Run, Settings};
+use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
+use super::{Corner, CornerRig, Exhibits, Knobs};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -224,6 +224,17 @@ pub fn spawn(
     mut images: ResMut<Assets<Image>>,
     mut stage: ResMut<Stage>,
 ) {
+    spawn_inset(&mut commands, &asset_server, &mut images, &mut stage);
+}
+
+/// The inset camera, inactive, into a placeholder image until the corner's layout sizes one; the
+/// stage's two key lights; the shell, hidden.
+pub fn spawn_inset(
+    commands: &mut Commands,
+    asset_server: &AssetServer,
+    images: &mut Assets<Image>,
+    stage: &mut Stage,
+) {
     let placeholder = images.add(Image::new_target_texture(
         16,
         10,
@@ -248,6 +259,8 @@ pub fn spawn(
         Transform::from_xyz(6.0, 4.0, 6.0).looking_at(Vec3::ZERO, Vec3::Y),
         CameraProfile::PenCamInset,
         StageCamera,
+        crate::render_scale::NativeResolution,
+        CornerRig,
     ));
     stage.camera = Some(camera.id());
     for (illuminance, toward) in [
@@ -262,6 +275,7 @@ pub fn spawn(
             },
             Transform::from_translation(toward).looking_at(Vec3::ZERO, Vec3::Y),
             LightProfile::PenCamKey,
+            CornerRig,
         ));
     }
     let shell: Handle<WorldAsset> =
@@ -272,6 +286,7 @@ pub fn spawn(
         Visibility::Hidden,
         VisualScope::PEN_CAM_STAGE,
         StageShell,
+        CornerRig,
     ));
 }
 
@@ -279,10 +294,10 @@ pub fn spawn(
 pub fn rebuild(
     mut commands: Commands,
     corner: Res<Corner>,
-    library: Res<Library>,
+    exhibits: Res<Exhibits>,
     mut stage: ResMut<Stage>,
     items: Query<Entity, With<StageItem>>,
-    views: Res<Views>,
+    view: Res<StageView>,
     tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -300,7 +315,7 @@ pub fn rebuild(
     if key == stage.key && !stage.stale {
         return;
     }
-    let Some(hull) = views.hull[1] else {
+    let Some(hull) = view.hull else {
         return;
     };
     stage.key = key.clone();
@@ -324,7 +339,10 @@ pub fn rebuild(
     let Some(key) = key else {
         return;
     };
-    let plan = &library.records[key.record].plan;
+    let Some(exhibit) = exhibits.0.get(key.record) else {
+        return;
+    };
+    let plan = &*exhibit.plan;
     let kind = key.kind;
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
     let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, MaskLayer)> =
@@ -838,8 +856,8 @@ fn inset_active(showing: &super::Showing) -> bool {
 /// Animate the stage from the corner's clock and frame the corner camera.
 pub fn animate(
     corner: Res<Corner>,
-    settings: Res<Settings>,
-    (library, run): (Res<Library>, Res<Run>),
+    knobs: Res<Knobs>,
+    exhibits: Res<Exhibits>,
     stage: Res<Stage>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -905,11 +923,16 @@ pub fn animate(
         shell_visibility.set_if_neq(Visibility::Hidden);
         return;
     };
+    let Some(exhibit) = exhibits.0.get(showing.record) else {
+        camera.is_active = false;
+        shell_visibility.set_if_neq(Visibility::Hidden);
+        return;
+    };
     camera.is_active = inset_active(&showing);
-    let plan = &library.records[showing.record].plan;
+    let plan = &*exhibit.plan;
     let kind = showing.kind;
     let c = showing.c;
-    let reduce = settings.reduce_motion;
+    let reduce = knobs.reduce_motion;
     let fade_from = |start: f32| {
         let span = if reduce {
             timeline::REDUCED_FADE_S
@@ -1071,7 +1094,7 @@ pub fn animate(
         });
     }
 
-    if settings.axis_line {
+    if knobs.axis_line {
         for (index, cone) in plan.cones.iter().enumerate() {
             if c >= cone_start(plan, kind, index, reduce) {
                 let reach = cone.max_reach();
@@ -1096,7 +1119,7 @@ pub fn animate(
         }
     }
 
-    let (want, want_projection) = framing(plan, kind, c, &settings, &stage, run.orbit);
+    let (want, want_projection) = framing(plan, kind, c, &knobs, &stage);
     if *eye != want {
         *eye = want;
     }
@@ -1108,13 +1131,13 @@ fn framing(
     plan: &Plan,
     kind: CornerKind,
     c: f32,
-    settings: &Settings,
+    knobs: &Knobs,
     stage: &Stage,
-    orbit: Vec2,
 ) -> (Transform, Projection) {
+    let orbit = knobs.orbit;
     let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
     let motion = |rate_deg: f32, from: f32| {
-        if settings.reduce_motion {
+        if knobs.reduce_motion {
             0.0
         } else {
             rate_deg.to_radians() * (c - from).max(0.0)
@@ -1159,7 +1182,7 @@ fn framing(
                 plan.reach(SLICE_LEAD_M),
                 plan.reach(SLICE_MIN_HEIGHT_M),
             );
-            if settings.slice_ortho {
+            if knobs.slice_ortho {
                 (
                     Transform::from_translation(tight.center + yawed * 10.0).looking_to(-yawed, up),
                     Projection::Orthographic(OrthographicProjection {
@@ -1357,6 +1380,7 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::demo::Library;
     use super::super::material::Blend;
     use super::super::plan::LEG_EPS_M;
     use super::*;
@@ -1670,9 +1694,8 @@ mod tests {
                     plan,
                     CornerKind::Ricochet,
                     c,
-                    &Settings::default(),
+                    &Knobs::default(),
                     &Stage::default(),
-                    Vec2::ZERO,
                 );
                 for ring in &rings {
                     let sight = (ring.translation - eye.translation).normalize();
@@ -1716,18 +1739,12 @@ mod tests {
                 let wide = slice_frame(&plan, normal, up, SLICE_LEAD_M, SLICE_MIN_HEIGHT_M);
                 let wide_distance = 0.55 * wide.height / (0.5 * CORNER_FOV_DEG.to_radians()).tan();
                 let cap = 2.0 * FRAME_CALIBRES * plan.calibre * 1.1 + 1e-5;
-                let perspective = Settings {
+                let perspective = Knobs {
                     slice_ortho: false,
-                    ..Settings::default()
+                    ..Knobs::default()
                 };
-                let (eye, projection) = framing(
-                    &plan,
-                    CornerKind::Slice,
-                    0.0,
-                    &perspective,
-                    &stage,
-                    Vec2::ZERO,
-                );
+                let (eye, projection) =
+                    framing(&plan, CornerKind::Slice, 0.0, &perspective, &stage);
                 let off_plane = (eye.translation - wide.center).dot(normal);
                 assert!(
                     (off_plane - wide_distance).abs() < 1e-3,
@@ -1740,14 +1757,8 @@ mod tests {
                 assert!(lens.fov <= CORNER_FOV_DEG.to_radians() + 1e-6);
                 let seen = 2.0 * off_plane * (0.5 * lens.fov).tan();
                 assert!(seen <= cap / 1.6 + 1e-3, "{}: {seen} m tall", record.stem);
-                let (_, projection) = framing(
-                    &plan,
-                    CornerKind::Slice,
-                    0.0,
-                    &Settings::default(),
-                    &stage,
-                    Vec2::ZERO,
-                );
+                let (_, projection) =
+                    framing(&plan, CornerKind::Slice, 0.0, &Knobs::default(), &stage);
                 let Projection::Orthographic(ortho) = projection else {
                     panic!("orthographic");
                 };
@@ -1822,14 +1833,7 @@ mod tests {
                         ALONG_SHOT
                             .iter()
                             .map(|&kind| {
-                                framing(
-                                    &plan,
-                                    kind,
-                                    0.0,
-                                    &Settings::default(),
-                                    &Stage::default(),
-                                    Vec2::ZERO,
-                                )
+                                framing(&plan, kind, 0.0, &Knobs::default(), &Stage::default())
                             })
                             .collect()
                     })
@@ -1882,14 +1886,8 @@ mod tests {
             }
             let (_, hi) = plan.tank_bounds.expect("the tank asset has bounds");
             for kind in ALONG_SHOT {
-                let (eye, projection) = framing(
-                    plan,
-                    kind,
-                    2.0,
-                    &Settings::default(),
-                    &Stage::default(),
-                    Vec2::ZERO,
-                );
+                let (eye, projection) =
+                    framing(plan, kind, 2.0, &Knobs::default(), &Stage::default());
                 assert!(
                     eye.translation.is_finite() && eye.rotation.is_finite(),
                     "{}",
@@ -1935,11 +1933,11 @@ mod tests {
                 ),
             ] {
                 let at = |c: f32, reduce: bool| {
-                    let settings = Settings {
+                    let knobs = Knobs {
                         reduce_motion: reduce,
                         ..default()
                     };
-                    framing(plan, kind, c, &settings, &Stage::default(), Vec2::ZERO)
+                    framing(plan, kind, c, &knobs, &Stage::default())
                 };
                 let (start, _) = at(from, false);
                 let (later, projection) = at(from + elapsed, false);
@@ -2027,10 +2025,9 @@ mod tests {
                 .id();
             placed.push((entity, name.to_owned(), corners(local).map(|p| p + offset)));
         }
-        let mut views = Views::fixture();
-        views.stage = root;
-        views.hull[1] = Some(hull);
-        app.insert_resource(library)
+        let mut view = StageView::standing_in(Handle::default(), root);
+        view.hull = Some(hull);
+        app.insert_resource(library.exhibits())
             .insert_resource(Corner {
                 showing: Some(super::super::Showing {
                     record: index,
@@ -2045,7 +2042,7 @@ mod tests {
                 fading: None,
             })
             .insert_resource(Stage::default())
-            .insert_resource(views)
+            .insert_resource(view)
             .insert_resource(meshes)
             .insert_resource(Assets::<GlowMaterial>::default())
             .insert_resource(Assets::<OutlineMaterial>::default())

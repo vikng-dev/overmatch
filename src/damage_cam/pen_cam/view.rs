@@ -1,14 +1,18 @@
-//! The struck tank's two views: one on the battlefield, seen through the shooter's sight, and one
-//! on the pen cam stage. Both are the vehicle's view glb, named by the record's tank file, placed
-//! so the hull node sits at the origin (the record's frame), with collision proxies hidden and every
-//! servo the tank file declares turned to the record's angle for it, posed as the sim poses it
-//! ([`servo_pose`] of the node's authored rotation).
+//! The struck tank's views: the stage's ([`StageView`]), which the corner draws, and the demo
+//! harness's battlefield view ([`Views`]). Each is the vehicle's view glb, named by the record's
+//! tank file, placed so the hull node sits at the origin (the record's frame), with collision
+//! proxies hidden and every servo the tank file declares turned to the record's angle for it,
+//! posed as the sim poses it ([`servo_pose`] of the node's authored rotation).
+
+use std::collections::BTreeMap;
 
 use bevy::camera::primitives::Aabb;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::{Corner, Library, Ready, Run};
+use super::demo::{Library, Ready, Run};
+use super::{Corner, CornerRig, Exhibits};
+use crate::geometry_lod::SourceDetail;
 use crate::render_policy::VisualScope;
 use crate::spec::{TankSpec, ViewKind};
 use crate::tank::{ServoRole, servo_pose};
@@ -85,98 +89,81 @@ struct ServoNode {
     rest: Quat,
 }
 
+/// The stage's view of the struck tank: the vehicle's view glb, named by the record's tank file,
+/// placed so its hull node sits at the origin (the record's frame), drawn by the stage's cameras
+/// alone ([`VisualScope::PEN_CAM_STAGE`]) and at source detail ([`SourceDetail`]): a band derived
+/// from the battlefield's view measures nothing about a tank its own camera frames close.
 #[derive(Resource)]
-pub struct Views {
+pub struct StageView {
+    /// The tank file it shows.
+    pub vehicle: String,
     spec: Handle<TankSpec>,
-    pub world: Entity,
-    pub stage: Entity,
-    /// Every servo node, per root.
-    servos: [Vec<ServoNode>; 2],
-    /// The hull node, per root (world, stage): its frame is the record's.
-    pub hull: [Option<Entity>; 2],
-    placed: [bool; 2],
-    /// The ground's height under the battlefield view, once measured.
-    pub ground_y: Option<f32>,
-    /// The shooter's tank file, once the kill cam stages a shooter: its view's proxies are its own.
-    pub(super) shooter_spec: Option<Handle<TankSpec>>,
+    pub root: Entity,
+    servos: Vec<ServoNode>,
+    /// The hull node, once placed: its frame is the record's.
+    pub hull: Option<Entity>,
 }
 
-pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Res<Library>) {
-    let glb = view_glb(&library.vehicle);
-    let scene: Handle<WorldAsset> = asset_server.load(GltfAssetLabel::Scene(0).from_asset(glb));
-    let world = commands
-        .spawn((
-            WorldAssetRoot(scene.clone()),
-            Transform::IDENTITY,
-            Visibility::Hidden,
-            ViewRoot::World,
-        ))
-        .id();
-    let stage = commands
-        .spawn((
-            WorldAssetRoot(scene),
-            Transform::IDENTITY,
-            Visibility::Hidden,
-            ViewRoot::Stage,
-            VisualScope::PEN_CAM_STAGE,
-        ))
-        .id();
-    commands.insert_resource(Views {
-        spec: asset_server.load(library.vehicle.clone()),
-        world,
-        stage,
-        servos: [Vec::new(), Vec::new()],
-        hull: [None, None],
-        placed: [false, false],
-        ground_y: None,
-        shooter_spec: None,
-    });
+impl StageView {
+    /// Spawn the stage view of the tank file `vehicle` (relative to the asset root).
+    pub fn spawn(commands: &mut Commands, asset_server: &AssetServer, vehicle: &str) -> Self {
+        let (scene, spec) = Self::load(asset_server, vehicle);
+        let root = commands
+            .spawn((
+                WorldAssetRoot(scene),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                ViewRoot::Stage,
+                VisualScope::PEN_CAM_STAGE,
+                SourceDetail,
+                CornerRig,
+            ))
+            .id();
+        Self {
+            vehicle: vehicle.to_owned(),
+            spec,
+            root,
+            servos: Vec::new(),
+            hull: None,
+        }
+    }
+
+    /// The assets a stage view of the tank file `vehicle` is spawned from: its scene and its tank
+    /// file. A holder of these handles keeps them loaded between views.
+    pub fn load(
+        asset_server: &AssetServer,
+        vehicle: &str,
+    ) -> (Handle<WorldAsset>, Handle<TankSpec>) {
+        (
+            asset_server.load(GltfAssetLabel::Scene(0).from_asset(view_glb(vehicle))),
+            asset_server.load(vehicle.to_owned()),
+        )
+    }
+
+    /// The stage view of the tank file `spec` at `root`, for tests that stand a scene in for the
+    /// glb.
+    #[cfg(test)]
+    pub(super) fn standing_in(spec: Handle<TankSpec>, root: Entity) -> Self {
+        Self {
+            vehicle: String::new(),
+            spec,
+            root,
+            servos: Vec::new(),
+            hull: None,
+        }
+    }
+
+    /// Whether the view is placed: its scene spawned, classified and moved into the record's
+    /// frame.
+    pub fn placed(&self) -> bool {
+        self.hull.is_some()
+    }
 }
 
 /// The view glb beside a tank file: `<dir>/<id>.tank.ron` → `<dir>/<id>.glb`.
 pub(super) fn view_glb(vehicle: &str) -> String {
     let stem = vehicle.strip_suffix(".tank.ron").unwrap_or(vehicle);
     format!("{stem}.glb")
-}
-
-impl Views {
-    /// Views of no scene, for tests of systems that read the resource.
-    #[cfg(test)]
-    pub(super) fn fixture() -> Self {
-        Self {
-            spec: Handle::default(),
-            world: Entity::PLACEHOLDER,
-            stage: Entity::PLACEHOLDER,
-            servos: [Vec::new(), Vec::new()],
-            hull: [None, None],
-            placed: [false, false],
-            ground_y: None,
-            shooter_spec: None,
-        }
-    }
-
-    /// Views of the tank file `spec` at the roots `world` and `stage`, on ground at `ground_y`, for
-    /// tests that stand a scene in for the glb.
-    #[cfg(test)]
-    pub(super) fn standing_in(
-        spec: Handle<TankSpec>,
-        world: Entity,
-        stage: Entity,
-        ground_y: f32,
-    ) -> Self {
-        Self {
-            spec,
-            world,
-            stage,
-            ground_y: Some(ground_y),
-            ..Self::fixture()
-        }
-    }
-
-    /// The staged vehicle's tank file.
-    pub(super) fn spec(&self) -> &Handle<TankSpec> {
-        &self.spec
-    }
 }
 
 /// The pose of `node` under its ancestor `root`, from local transforms (globals lag a frame).
@@ -198,11 +185,280 @@ pub(super) fn pose_under(
     pose
 }
 
-/// Classify new meshes, place each view once its hull node exists, measure the ground, and
-/// declare the demo ready when both views are placed.
+/// What the view mesh `entity` of the view `root` is, whose vehicle's tank file is `spec`: the
+/// names of its node chain up to the view's root (where `is_root` holds), nearest first, its
+/// authored material `original` named `material`, and its tier; and whether it is a collision
+/// proxy.
+#[allow(clippy::too_many_arguments)]
+fn classify(
+    entity: Entity,
+    root: ViewRoot,
+    original: Handle<StandardMaterial>,
+    material: Option<&str>,
+    spec: &TankSpec,
+    parents: &Query<&ChildOf>,
+    is_root: impl Fn(Entity) -> bool,
+    names: &Query<&Name>,
+) -> (ViewMesh, bool) {
+    let mut chain = Vec::new();
+    for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
+        if is_root(node) {
+            break;
+        }
+        if let Ok(name) = names.get(node) {
+            chain.push(name.as_str().to_owned());
+        }
+    }
+    let proxy = chain.iter().any(|name| spec.colliders.contains(name));
+    let tier = Tier::of(material, &chain, &spec.volumes);
+    (
+        ViewMesh {
+            root,
+            names: chain,
+            original,
+            tier,
+        },
+        proxy,
+    )
+}
+
+/// Place the view at `root` once its hull node exists: the root moved so the hull sits at the
+/// origin, and every servo the tank file `spec` declares found under it. `None` until the scene
+/// has spawned.
+fn place(
+    root: Entity,
+    spec: &TankSpec,
+    children: &Query<&Children>,
+    names: &Query<&Name>,
+    parents: &Query<&ChildOf>,
+    transforms: &mut Query<&mut Transform>,
+) -> Option<(Entity, Vec<ServoNode>)> {
+    let named = |wanted: &str| {
+        children
+            .iter_descendants(root)
+            .find(|node| names.get(*node).is_ok_and(|n| n.as_str() == wanted))
+    };
+    let hull = named(HULL_NODE)?;
+    let hull_pose = pose_under(hull, root, parents, |node| {
+        transforms.get(node).ok().copied()
+    });
+    if let Ok(mut root_transform) = transforms.get_mut(root) {
+        *root_transform = Transform::from_matrix(hull_pose.inverse());
+    }
+    let mut servos = Vec::new();
+    for (name, servo) in &spec.servos {
+        let Some(node) = named(name) else {
+            warn!("pen cam: no node {name} for the tank file's servo; it is drawn at rest");
+            continue;
+        };
+        if let Ok(transform) = transforms.get(node) {
+            servos.push(ServoNode {
+                entity: node,
+                name: name.clone(),
+                role: servo.role(),
+                rest: transform.rotation,
+            });
+        }
+    }
+    Some((hull, servos))
+}
+
+/// Turn `servos` to the angles `servo_deg` (degrees, by node name); a servo it does not name is at
+/// rest.
+fn pose_servos(
+    servos: &[ServoNode],
+    servo_deg: &BTreeMap<String, f32>,
+    transforms: &mut Query<&mut Transform>,
+) {
+    for servo in servos {
+        let angle = servo_deg
+            .get(&servo.name)
+            .copied()
+            .unwrap_or(0.0)
+            .to_radians();
+        if let Ok(mut transform) = transforms.get_mut(servo.entity) {
+            let want = servo_pose(servo.role, servo.rest, angle);
+            if transform.rotation != want {
+                transform.rotation = want;
+            }
+        }
+    }
+}
+
+/// Place the stage view once its scene has spawned and its tank file has loaded: every mesh under
+/// its root classified at once, since a scene spawns whole, and the root placed. Idle once placed.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_stage(
+    mut commands: Commands,
+    mut view: ResMut<StageView>,
+    specs: Res<Assets<TankSpec>>,
+    meshes: Query<
+        (
+            &MeshMaterial3d<StandardMaterial>,
+            Option<&bevy::gltf::GltfMaterialName>,
+        ),
+        (With<Mesh3d>, Without<ViewMesh>),
+    >,
+    parents: Query<&ChildOf>,
+    children: Query<&Children>,
+    names: Query<&Name>,
+    mut transforms: Query<&mut Transform>,
+) {
+    if view.placed() {
+        return;
+    }
+    let Some(spec) = specs.get(&view.spec) else {
+        return;
+    };
+    let root = view.root;
+    let Some((hull, servos)) = place(root, spec, &children, &names, &parents, &mut transforms)
+    else {
+        return;
+    };
+    for entity in children.iter_descendants(root) {
+        let Ok((material, material_name)) = meshes.get(entity) else {
+            continue;
+        };
+        let (mesh, proxy) = classify(
+            entity,
+            ViewRoot::Stage,
+            material.0.clone(),
+            material_name.map(|name| name.0.as_str()),
+            spec,
+            &parents,
+            |node| node == root,
+            &names,
+        );
+        let mut entity_commands = commands.entity(entity);
+        entity_commands.insert(mesh);
+        if proxy {
+            entity_commands.insert((Proxy, Visibility::Hidden));
+        }
+    }
+    view.hull = Some(hull);
+    view.servos = servos;
+}
+
+/// Turn the stage view's servos to the corner's record, and show the view while the corner shows
+/// one.
+pub fn pose_stage(
+    view: Res<StageView>,
+    exhibits: Res<Exhibits>,
+    corner: Res<Corner>,
+    mut transforms: Query<&mut Transform>,
+    mut visibility: Query<&mut Visibility>,
+) {
+    let exhibit = corner
+        .showing
+        .and_then(|showing| exhibits.0.get(showing.record));
+    if let Some(exhibit) = exhibit {
+        pose_servos(&view.servos, &exhibit.servo_deg, &mut transforms);
+    }
+    if let Ok(mut v) = visibility.get_mut(view.root) {
+        v.set_if_neq(if exhibit.is_some() && view.placed() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+}
+
+/// The yaw servo above the gunner view's node.
+pub(super) fn turret_node(
+    spec: &TankSpec,
+    named: &impl Fn(&str) -> Option<Entity>,
+    parents: &Query<&ChildOf>,
+    names: &Query<&Name>,
+) -> Option<Entity> {
+    let gunner = named(&spec.views.get(&ViewKind::Gunner)?.node)?;
+    std::iter::once(gunner)
+        .chain(parents.iter_ancestors(gunner))
+        .find(|node| {
+            names.get(*node).is_ok_and(|name| {
+                spec.servos
+                    .get(name.as_str())
+                    .is_some_and(|servo| servo.role() == ServoRole::Yaw)
+            })
+        })
+}
+
+/// The demo's battlefield view of the struck tank, seen through the shooter's sight, and the
+/// tank file of the shooter's tank the kill cam stages.
+#[derive(Resource)]
+pub struct Views {
+    spec: Handle<TankSpec>,
+    pub world: Entity,
+    servos: Vec<ServoNode>,
+    placed: bool,
+    /// The ground's height under the battlefield view, once measured.
+    pub ground_y: Option<f32>,
+    /// The shooter's tank file, once the kill cam stages a shooter: its view's proxies are its own.
+    pub(super) shooter_spec: Option<Handle<TankSpec>>,
+}
+
+/// The demo's views of the library's vehicle: the battlefield's and the stage's.
+pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Res<Library>) {
+    let scene: Handle<WorldAsset> =
+        asset_server.load(GltfAssetLabel::Scene(0).from_asset(view_glb(&library.vehicle)));
+    let world = commands
+        .spawn((
+            WorldAssetRoot(scene),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            ViewRoot::World,
+        ))
+        .id();
+    let stage = StageView::spawn(&mut commands, &asset_server, &library.vehicle);
+    commands.insert_resource(stage);
+    commands.insert_resource(Views {
+        spec: asset_server.load(library.vehicle.clone()),
+        world,
+        servos: Vec::new(),
+        placed: false,
+        ground_y: None,
+        shooter_spec: None,
+    });
+}
+
+impl Views {
+    /// Views of no scene, for tests of systems that read the resource.
+    #[cfg(test)]
+    pub(super) fn fixture() -> Self {
+        Self {
+            spec: Handle::default(),
+            world: Entity::PLACEHOLDER,
+            servos: Vec::new(),
+            placed: false,
+            ground_y: None,
+            shooter_spec: None,
+        }
+    }
+
+    /// Views of the tank file `spec` at the root `world`, on ground at `ground_y`, for tests that
+    /// stand a scene in for the glb.
+    #[cfg(test)]
+    pub(super) fn standing_in(spec: Handle<TankSpec>, world: Entity, ground_y: f32) -> Self {
+        Self {
+            spec,
+            world,
+            ground_y: Some(ground_y),
+            ..Self::fixture()
+        }
+    }
+
+    /// The staged vehicle's tank file.
+    pub(super) fn spec(&self) -> &Handle<TankSpec> {
+        &self.spec
+    }
+}
+
+/// Classify the battlefield views' new meshes, place the struck tank's once its hull node exists,
+/// measure the ground, and declare the demo ready once the stage view is placed too.
+#[allow(clippy::too_many_arguments)]
 pub fn prepare(
     mut commands: Commands,
     mut views: ResMut<Views>,
+    stage: Res<StageView>,
     specs: Res<Assets<TankSpec>>,
     fresh: Query<
         (
@@ -224,84 +480,49 @@ pub fn prepare(
         return;
     };
     for (entity, material, material_name) in &fresh {
-        let mut chain = Vec::new();
-        let mut root = None;
-        for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
-            if let Ok(found) = roots.get(node) {
-                root = Some(*found);
-                break;
-            }
-            if let Ok(name) = names.get(node) {
-                chain.push(name.as_str().to_owned());
-            }
-        }
-        let Some(root) = root else {
-            continue;
-        };
+        let root = std::iter::once(entity)
+            .chain(parents.iter_ancestors(entity))
+            .find_map(|node| roots.get(node).ok().copied());
         // Each view's proxies are named by its own vehicle's tank file; a shooter's mesh waits
-        // for the shooter's.
+        // for the shooter's. The stage view's meshes are [`prepare_stage`]'s.
         let root_spec = match root {
-            ViewRoot::Shooter => views.shooter_spec.as_ref().and_then(|h| specs.get(h)),
-            ViewRoot::World | ViewRoot::Stage => Some(spec),
+            Some(ViewRoot::Shooter) => views.shooter_spec.as_ref().and_then(|h| specs.get(h)),
+            Some(ViewRoot::World) => Some(spec),
+            Some(ViewRoot::Stage) | None => None,
         };
-        let Some(root_spec) = root_spec else {
+        let (Some(root), Some(root_spec)) = (root, root_spec) else {
             continue;
         };
-        let proxy = chain.iter().any(|name| root_spec.colliders.contains(name));
-        let tier = Tier::of(
+        let (mesh, proxy) = classify(
+            entity,
+            root,
+            material.0.clone(),
             material_name.map(|name| name.0.as_str()),
-            &chain,
-            &root_spec.volumes,
+            root_spec,
+            &parents,
+            |node| roots.contains(node),
+            &names,
         );
         let mut entity_commands = commands.entity(entity);
-        entity_commands.insert(ViewMesh {
-            root,
-            names: chain,
-            original: material.0.clone(),
-            tier,
-        });
+        entity_commands.insert(mesh);
         if proxy {
             entity_commands.insert((Proxy, Visibility::Hidden));
         }
     }
-    for (index, entity) in [(0, views.world), (1, views.stage)] {
-        if views.placed[index] {
-            continue;
-        }
-        let named = |wanted: &str| {
-            children
-                .iter_descendants(entity)
-                .find(|node| names.get(*node).is_ok_and(|n| n.as_str() == wanted))
-        };
-        let Some(hull) = named(HULL_NODE) else {
-            continue;
-        };
-        let hull_pose = pose_under(hull, entity, &parents, |node| {
-            transforms.get(node).ok().copied()
-        });
-        if let Ok(mut root_transform) = transforms.get_mut(entity) {
-            *root_transform = Transform::from_matrix(hull_pose.inverse());
-        }
-        views.hull[index] = Some(hull);
-        let mut servos = Vec::new();
-        for (name, servo) in &spec.servos {
-            let Some(node) = named(name) else {
-                warn!("pen cam: no node {name} for the tank file's servo; it is drawn at rest");
-                continue;
-            };
-            if let Ok(transform) = transforms.get(node) {
-                servos.push(ServoNode {
-                    entity: node,
-                    name: name.clone(),
-                    role: servo.role(),
-                    rest: transform.rotation,
-                });
-            }
-        }
-        views.servos[index] = servos;
-        views.placed[index] = true;
+    if !views.placed
+        && let Some((_, servos)) = place(
+            views.world,
+            spec,
+            &children,
+            &names,
+            &parents,
+            &mut transforms,
+        )
+    {
+        views.servos = servos;
+        views.placed = true;
     }
-    if views.placed.iter().all(|placed| *placed) && views.ground_y.is_none() {
+    if views.placed && stage.placed() && views.ground_y.is_none() {
         let lowest = bounds
             .iter()
             .filter(|(mesh, ..)| mesh.root == ViewRoot::World)
@@ -327,62 +548,21 @@ pub fn prepare(
     }
 }
 
-/// The yaw servo above the gunner view's node.
-pub(super) fn turret_node(
-    spec: &TankSpec,
-    named: &impl Fn(&str) -> Option<Entity>,
-    parents: &Query<&ChildOf>,
-    names: &Query<&Name>,
-) -> Option<Entity> {
-    let gunner = named(&spec.views.get(&ViewKind::Gunner)?.node)?;
-    std::iter::once(gunner)
-        .chain(parents.iter_ancestors(gunner))
-        .find(|node| {
-            names.get(*node).is_ok_and(|name| {
-                spec.servos
-                    .get(name.as_str())
-                    .is_some_and(|servo| servo.role() == ServoRole::Yaw)
-            })
-        })
-}
-
-/// Turn each view's servos to the record it shows: the run's first shot on the battlefield, the
-/// corner's record on the stage.
+/// Turn the battlefield view's servos to the run's first shot, and show it once placed.
 pub fn pose(
     views: Res<Views>,
     library: Res<Library>,
     run: Res<Run>,
-    corner: Res<Corner>,
     mut transforms: Query<&mut Transform>,
     mut visibility: Query<&mut Visibility>,
 ) {
-    let world_record = run.shots.first().map(|shot| shot.record);
-    let stage_record = corner.showing.map(|showing| showing.record);
-    for (index, record) in [(0, world_record), (1, stage_record)] {
-        let Some(record) = record else {
-            continue;
-        };
-        let angles = &library.records[record].report.servo_deg;
-        for servo in &views.servos[index] {
-            let angle = angles.get(&servo.name).copied().unwrap_or(0.0).to_radians();
-            if let Ok(mut transform) = transforms.get_mut(servo.entity) {
-                let want = servo_pose(servo.role, servo.rest, angle);
-                if transform.rotation != want {
-                    transform.rotation = want;
-                }
-            }
-        }
+    if let Some(shot) = run.shots.first() {
+        let angles = &library.records[shot.record].report.servo_deg;
+        pose_servos(&views.servos, angles, &mut transforms);
     }
-    if views.placed[0]
+    if views.placed
         && let Ok(mut v) = visibility.get_mut(views.world)
     {
         v.set_if_neq(Visibility::Inherited);
-    }
-    if let Ok(mut v) = visibility.get_mut(views.stage) {
-        v.set_if_neq(if corner.showing.is_some() && views.placed[1] {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
     }
 }

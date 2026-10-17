@@ -10,13 +10,14 @@
 //! nothing here names a vehicle.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Affine3A;
 use bevy::mesh::{Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
-use crate::bake::{TankGeometry, extract_tank_geometry};
+use crate::bake::{TankBlueprint, TankGeometry, extract_tank_geometry};
 use crate::spec::TankSpec;
 use crate::substances::SubstanceRegistry;
 use crate::tank::{ServoRole, servo_pose};
@@ -68,8 +69,8 @@ impl ComponentShape {
 
 /// A tank file and the geometry it names, read once.
 pub struct TankAsset {
-    geometry: TankGeometry,
-    spec: TankSpec,
+    geometry: Arc<TankGeometry>,
+    spec: Arc<TankSpec>,
 }
 
 impl TankAsset {
@@ -85,7 +86,18 @@ impl TankAsset {
         let glb = root.join(format!("{stem}.sim.glb"));
         let geometry = extract_tank_geometry(&glb, &spec, &SubstanceRegistry::shipped())
             .map_err(|findings| format!("{}: {} findings", glb.display(), findings.len()))?;
-        Ok(Self { geometry, spec })
+        Ok(Self {
+            geometry: Arc::new(geometry),
+            spec: Arc::new(spec),
+        })
+    }
+
+    /// The tank the blueprint holds: its tank file and sim artifact, already read.
+    pub(crate) fn of_blueprint(blueprint: &TankBlueprint) -> Self {
+        Self {
+            geometry: blueprint.geometry.clone(),
+            spec: blueprint.spec.clone(),
+        }
     }
 
     /// The extracted sim artifact.

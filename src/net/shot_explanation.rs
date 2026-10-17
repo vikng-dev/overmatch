@@ -17,6 +17,7 @@ use super::protocol::{NetTank, ShotExplanationChannel};
 use crate::CombatantId;
 use crate::ballistics::AuthorityOutcomeDrawn;
 use crate::damage_cam::delivery::{ShotExplanations, expire_explanations};
+use crate::damage_cam::pen_cam::game::CloseCorner;
 use crate::damage_cam::recorder::RecordedShot;
 use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary};
 use crate::state::GameplaySet;
@@ -29,6 +30,7 @@ pub(super) fn install_server(app: &mut App) {
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<ShotExplanations>()
         .add_observer(reset_shot_explanations)
+        .add_observer(close_corner)
         .add_observer(note_outcome_drawn)
         .add_systems(
             Update,
@@ -112,6 +114,11 @@ fn note_outcome_drawn(drawn: On<AuthorityOutcomeDrawn>, mut store: ResMut<ShotEx
 /// A new connection is a new match: its shots are not the last one's.
 fn reset_shot_explanations(_connected: On<Add, Connected>, mut store: ResMut<ShotExplanations>) {
     *store = default();
+}
+
+/// The link ended: a corner explaining one of its shots closes with it.
+fn close_corner(_ended: On<Remove, Connected>, mut commands: Commands) {
+    commands.trigger(CloseCorner);
 }
 
 #[cfg(test)]

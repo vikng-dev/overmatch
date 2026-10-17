@@ -31,10 +31,11 @@ use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
+use super::demo::{Library, PLAYLIST, Run, Settings};
 use super::timeline::{self, CornerKind};
 use super::view::{self, ViewRoot, Views};
 use super::world::MainCamera;
-use super::{Library, PLAYLIST, Run, Settings, Showing, Surface};
+use super::{Showing, Surface};
 use crate::camera::{ORBIT_FAR, orbit_body, orbit_pivot, orbit_rotation};
 use crate::damage::{KnockoutReason, knockout_from_counts};
 use crate::damage_cam::{ConsequenceState, PenetrationReport, Role, Shooter};
@@ -147,6 +148,7 @@ pub enum Beat {
 
 impl Beat {
     /// Whether the camera is the kill cam's, not the player's.
+    #[cfg(test)]
     pub fn captive(self) -> bool {
         matches!(self, Self::Lesson | Self::Killer)
     }
@@ -1373,7 +1375,7 @@ mod tests {
         Unloadable,
     }
 
-    /// The demo's own frame ([`super::super::sequence`]) on a headless app: the run of `entry` over
+    /// The demo's own frame ([`super::super::demo::sequence`]) on a headless app: the run of `entry` over
     /// the library as `edit` leaves it, the left button held with a drag, and the main camera. The
     /// battlefield is staged by the stage's own systems from views standing in for the glbs: the
     /// victim's and the stage's, and the shooter's as `shooting` says. Systems whose scene
@@ -1418,7 +1420,8 @@ mod tests {
             .id();
         stand_in(world, stage, &victim);
         let spec = world.resource_mut::<Assets<TankSpec>>().add(victim);
-        world.insert_resource(Views::standing_in(spec, battlefield, stage, GROUND_Y));
+        world.insert_resource(Views::standing_in(spec.clone(), battlefield, GROUND_Y));
+        world.insert_resource(view::StageView::standing_in(spec, stage));
 
         let mut cam = KillCam::default();
         let shooter = run.kill.and_then(|(shot, _)| {
@@ -1463,8 +1466,7 @@ mod tests {
             })
             .init_resource::<Time>()
             .add_systems(Startup, (spawn, super::super::stage::spawn));
-        super::super::stage::plugin(&mut app);
-        super::super::sequence(&mut app);
+        super::super::demo::sequence(&mut app);
         app.world_mut().spawn((
             Transform::IDENTITY,
             Projection::Perspective(PerspectiveProjection::default()),
@@ -1859,7 +1861,7 @@ mod tests {
         app.world_mut().resource_mut::<Run>().t = beats.lesson() + 1.0;
         app.update();
         assert_eq!(camera(&mut app).1, CameraProfile::KillCamLesson);
-        press(&mut app, super::super::ENTRY_KEYS[0]);
+        press(&mut app, super::super::demo::ENTRY_KEYS[0]);
         app.update();
         release(&mut app);
         app.update();
@@ -2144,7 +2146,7 @@ mod tests {
         assert!(line.starts_with(&format!("{range:.0} m")), "{line}");
         let mut unstaged = report.clone();
         unstaged.muzzle = None;
-        let staged = super::super::staged_muzzle(&unstaged);
+        let staged = super::super::demo::staged_muzzle(&unstaged);
         assert!((staged.distance(impact) - staging).abs() < 1e-2);
     }
 
@@ -2244,7 +2246,7 @@ mod tests {
     /// The legend names `=` and what `R` does on the run.
     #[test]
     fn the_legend_names_the_kill_keys() {
-        assert!(super::super::hud::legend_r(true).contains("respawn"));
-        assert!(super::super::hud::legend_r(false).contains("replay"));
+        assert!(super::super::demo::legend_r(true).contains("respawn"));
+        assert!(super::super::demo::legend_r(false).contains("replay"));
     }
 }
