@@ -137,6 +137,15 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 
             continue;
         }
         let dir = d / r;
+        let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
+        let angle = acos(c);
+        // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
+        let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
+        let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
+        // Off the outline band nothing marks, whatever the reach: the direction scan is skipped.
+        if abs(angle - at.w) >= 0.5 * look.foot.x * per_px {
+            continue;
+        }
         var best = -2.0;
         var reach = along.w;
         for (var j = 0; j < 256; j = j + 1) {
@@ -150,15 +159,7 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> f32 
                 reach = ray.w;
             }
         }
-        if r > reach {
-            continue;
-        }
-        let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
-        let angle = acos(c);
-        // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
-        let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
-        let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
-        if abs(angle - at.w) < 0.5 * look.foot.x * per_px {
+        if r <= reach {
             mark = max(mark, look.prints[3 * field + 2].z);
         }
     }
