@@ -1,3 +1,5 @@
+use std::f32::consts::FRAC_PI_2;
+
 use avian3d::prelude::RigidBody;
 use bevy::prelude::*;
 
@@ -15,7 +17,54 @@ pub fn sp_spawn_plugin(app: &mut App) {
         Update,
         spawn_tank_when_loaded.run_if(in_state(AppState::Loading)),
     );
+    if target_ahead() {
+        app.add_systems(Update, aim_camera_at_target);
+    }
 }
+
+/// Is this process running the target-ahead placement (`OVERMATCH_TARGET_AHEAD=1`)?
+///
+/// A dev lever on the offline path only, for captures of the player's own hits (the pen cam's
+/// corner): the duel stands on the FAR pad ([`PROBE_FAR_DUEL_XZ`], both points measured flat),
+/// Tiger A facing Tiger B 17 m down its own −Z, B broadside across the line, and the camera turned
+/// once to look level down it ([`aim_camera_at_target`]), so the aim point is on B and
+/// `SPIKE_AUTO_FIRE`'s windows hit it with no input. Unset is every normal run.
+pub(crate) fn target_ahead() -> bool {
+    crate::env_flag("OVERMATCH_TARGET_AHEAD", false)
+}
+
+/// How long the target-ahead camera keeps re-aiming after the tanks spawn, s (TUNED: the duel
+/// settles on its suspension well inside it).
+const TARGET_AIM_S: f32 = 5.0;
+
+/// Turn the player's camera to look just above the target-ahead placement's other tank's origin, every
+/// frame for [`TARGET_AIM_S`] after the tanks spawn. The orbit camera reads its yaw and pitch back
+/// off the rotation each frame and writes only the translation (from the rotation), so the look is
+/// re-aimed from wherever the orbit put the camera; afterwards it holds until the mouse moves.
+fn aim_camera_at_target(
+    time: Res<Time>,
+    mut since: Local<Option<f32>>,
+    mut camera: Query<&mut Transform, With<crate::view::PlayerView>>,
+    player: Query<(), (With<Tank>, With<Controlled>)>,
+    target: Query<&GlobalTransform, (With<Tank>, Without<Controlled>)>,
+) {
+    let (Ok(mut transform), Some(target)) = (camera.single_mut(), target.iter().next()) else {
+        return;
+    };
+    if player.is_empty() {
+        return;
+    }
+    let since = *since.get_or_insert(time.elapsed_secs());
+    if time.elapsed_secs() - since > TARGET_AIM_S {
+        return;
+    }
+    let aim = target.translation() + Vec3::Y * TARGET_AIM_RISE_M;
+    transform.rotation = transform.looking_at(aim, Vec3::Y).rotation;
+}
+
+/// How far above the target's origin the target-ahead camera looks, m: fixture data, putting the
+/// aim on the hull side above the running gear rather than into the wheels.
+const TARGET_AIM_RISE_M: f32 = 1.2;
 
 /// Install the local duel's possession switch.
 pub fn client_plugin(app: &mut App) {
@@ -157,14 +206,21 @@ fn spawn_tank_when_loaded(
         next.set(AppState::Playing);
         return;
     }
-    let far = probe_far();
+    let target = target_ahead();
+    let far = probe_far() || target;
     let duel = duel_spawn_xz(far);
+    let (a_turn, b_turn) = if target {
+        // A faces its own −Z, down the line to B; B stands broadside across it.
+        (Quat::IDENTITY, Quat::from_rotation_y(FRAC_PI_2))
+    } else {
+        (Quat::from_rotation_z(0.7), Quat::IDENTITY)
+    };
     spawn_tank(
         &mut commands,
         content,
         pending.presentation(),
         Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[0]))
-            .with_rotation(Quat::from_rotation_z(0.7)),
+            .with_rotation(a_turn),
         "Tiger I (A)",
         0,
         true,
@@ -173,7 +229,8 @@ fn spawn_tank_when_loaded(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1])),
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[1]))
+            .with_rotation(b_turn),
         "Tiger I (B)",
         1,
         false,

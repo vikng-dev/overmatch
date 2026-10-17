@@ -135,11 +135,17 @@ impl ShooterCorner {
         Some(tank)
     }
 
-    /// Forget every queued and shown record, and consider none of `store`'s again.
-    fn forget(&mut self, store: Option<&ShotExplanations>) {
+    /// Drop every queued and shown record and the corner's clock.
+    fn reset(&mut self) {
         self.lineup.clear();
         self.turn = None;
         self.epoch = None;
+    }
+
+    /// [`Self::reset`], and consider none of `store`'s explanations again, those still waiting on
+    /// their impact included.
+    fn forget(&mut self, store: Option<&ShotExplanations>) {
+        self.reset();
         self.seen = store
             .map(|store| store.iter().map(|(key, _)| *key).collect())
             .unwrap_or_default();
@@ -314,14 +320,15 @@ fn drive(
     let ended = current.as_ref().is_none_or(|(_, _, ended)| *ended);
     if ended && !state.lineup.pending() {
         rig.teardown(&mut state);
-        state.forget(Some(store));
+        state.reset();
         return;
     }
-    let wanted = match (&current, state.lineup.next()) {
-        (Some((queued, _, false)), _) => queued.vehicle.clone(),
-        (_, Some(next)) => next.vehicle.clone(),
-        (Some((queued, _, true)), None) => queued.vehicle.clone(),
-        (None, None) => return,
+    let showing = current.as_ref().filter(|(_, _, ended)| !ended);
+    let wanted = showing
+        .map(|(queued, _, _)| queued.vehicle.clone())
+        .or_else(|| state.lineup.next().map(|next| next.vehicle.clone()));
+    let Some(wanted) = wanted else {
+        return;
     };
     let placed = rig.ready(&mut state, &wanted);
     let Some((queued, _, false)) = current else {
@@ -348,6 +355,11 @@ fn drive(
     };
     if state.turn.is_none_or(|shown| shown.serial != turn.serial) {
         rig.exhibits.0 = vec![queued.exhibit.clone()];
+        debug!(
+            "pen cam: the corner shows {:?} at {:.2} s",
+            turn.kind,
+            time.elapsed_secs_f64()
+        );
     }
     state.turn = Some(turn);
     let duration = turn.kind.duration();
@@ -642,6 +654,36 @@ mod tests {
             // The explanation already shown never reopens.
             assert!(run(&mut app, 2.0).is_empty(), "ending {ending}");
         }
+    }
+
+    /// An explanation waits for its impact, across a corner closing; one released undrawn never
+    /// opens.
+    #[test]
+    fn the_corner_rides_on_the_drawn_impact() {
+        let (mut app, _) = corner_app(Settings::default());
+        let (first, _, vocabulary, report) = explained("s1_through_crew", 1200);
+        let (waiting, _, _, _) = explained("s1_through_crew", 1300);
+        let (released, _, _, _) = explained("s1_through_crew", 1400);
+        stage_ready(&mut app, &report);
+        receive(&mut app, first, &vocabulary);
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        let mut store = app.world_mut().resource_mut::<ShotExplanations>();
+        store.receive(released, &vocabulary, now);
+        let later = now + crate::damage_cam::delivery::IMPACT_TIMEOUT_S;
+        store.expire(later);
+        store.receive(waiting.clone(), &vocabulary, later);
+        assert_eq!(run(&mut app, 5.0).len(), 1, "only the drawn impact opens");
+        assert_eq!(census(&mut app).0, 0, "the corner closed");
+
+        stage_ready(&mut app, &report);
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .drew(waiting.shot, waiting.outcome.unwrap());
+        assert_eq!(
+            run(&mut app, 5.0).len(),
+            1,
+            "the waiting one opens once drawn"
+        );
     }
 
     /// Two shots inside one turn's minimum: the second replaces the first once the first has
