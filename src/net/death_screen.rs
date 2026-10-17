@@ -54,12 +54,12 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, systems().in_set(InMatchSystems));
 }
 
-/// The death screen's `Update` systems, placed among the overlay sets. Both read the kill cam's
-/// [`KillCamGate`], written before them (`KillCamGateSet`).
+/// The death screen's `Update` systems, placed among the overlay sets. The declarer and the
+/// respawn key read the kill cam's [`KillCamGate`], written before them (`KillCamGateSet`).
 fn systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         // All overlay reconcilers must read the same declared state. This is a state-driven
-        // owner (crew + respawn deadline), not a gated toggle: it reads nothing.
+        // owner (crew + respawn deadline + the kill cam's gate), not a gated toggle.
         toggle_death_screen.in_set(overlay::OverlaySet::Declare),
         // Re-check the reconciled overlay input gate before latching a respawn edge — after
         // `Toggle`, so a menu or spawn map opened this frame already counts.
