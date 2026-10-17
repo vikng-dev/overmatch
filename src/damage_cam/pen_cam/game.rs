@@ -24,8 +24,10 @@
 //! * **The hold.** While the own-tank key is down ([`GlassHold`],
 //!   `command::Bindings::own_tank_glass`) the glass holds the slot, with or without a record and
 //!   whatever the settings: it crossfades over a turn on show, which never resumes, and the
-//!   slot admits nothing presented while it holds. Released, it closes over
-//!   [`timeline::CLOSE_S`]. A teardown other than its own close is final for the press holding
+//!   slot admits nothing presented while the key is down. Released, it closes over
+//!   [`timeline::CLOSE_S`], and what is presented from the release on queues by the rule: a turn
+//!   that starts before the close ends crossfades over the closing glass, one due later opens
+//!   after it. Pressed again before the close ends, it holds on and drops what queued. A teardown other than its own close is final for the press holding
 //!   it: the key opens the glass again only once let go. TUNED.
 //! * **What it draws.** The corner: the struck tank's stage view, of the tank file the record
 //!   names, under the record's plan over the same tank asset the demo stages ([`TankAsset`]); a
@@ -244,6 +246,18 @@ impl Slot {
         self.epoch = None;
     }
 
+    /// The released `held` gives the slot to the lineup at `now`, its glass standing as the turn on
+    /// show: a turn starting while the glass still draws crossfades over it.
+    fn hand_over(&mut self, held: Hold, now: f32) {
+        self.hold = None;
+        self.turn = Some(Turn {
+            serial: held.serial,
+            kind: CornerKind::Victim,
+            start: now,
+            replacing: held.replacing,
+        });
+    }
+
     /// [`Self::reset`], and consider none of `store`'s explanations again, those still waiting on
     /// their impact included.
     fn forget(&mut self, store: Option<&ShotExplanations>) {
@@ -458,7 +472,6 @@ fn drive(
     if let Some(own) = &own {
         state.preload(&rig.asset_server, own);
     }
-    let holding = held_down || state.hold.is_some_and(|held| held.released.is_none());
 
     // Every newly presented explanation the slot admits, and the floor no admission may fall
     // below: the newest admitted since the slot last held nothing, or still waiting on its impact.
@@ -503,7 +516,7 @@ fn drive(
                     continue;
                 }
                 ImpactPresence::TimedOut => {}
-                ImpactPresence::Presented if admitted && !holding => {
+                ImpactPresence::Presented if admitted && !held_down => {
                     presented.push((recency, entry, vehicle, peek));
                 }
                 ImpactPresence::Presented => {}
@@ -546,8 +559,13 @@ fn drive(
     let record = latest.map(|(key, stored)| (key, &stored.report));
     if held_down || state.hold.is_some() {
         let now = state.clock(&time);
-        match &mut state.hold {
-            Some(held) if held_down => held.released = None,
+        let slot = &mut *state;
+        match &mut slot.hold {
+            Some(held) if held_down => {
+                if held.released.take().is_some() {
+                    slot.lineup.clear();
+                }
+            }
             Some(held) => {
                 held.released.get_or_insert(now);
             }
@@ -563,16 +581,23 @@ fn drive(
                 });
             }
         }
-        let Some(mut held) = state.hold else {
+        let Some(held) = state.hold else {
             return;
         };
-        if let Some(released) = held.released
-            && (held.start.is_none() || now - released >= timeline::CLOSE_S)
-        {
-            rig.teardown(&mut state);
-            state.reset();
-            return;
+        if let Some(released) = held.released {
+            state.lineup.advance(now, |_, _| {});
+            let closed = held.start.is_none() || now - released >= timeline::CLOSE_S;
+            if state.lineup.current().is_some() || closed && state.lineup.pending() {
+                state.hand_over(held, now);
+            } else if closed {
+                rig.teardown(&mut state);
+                state.reset();
+                return;
+            }
         }
+    }
+    if let Some(mut held) = state.hold {
+        let now = state.clock(&time);
         let Some(vehicle) = own.as_deref() else {
             warn_once!("pen cam: the glass has no tank file for the player's tank");
             rig.corner.set_if_neq(Corner::default());
@@ -1497,6 +1522,60 @@ mod tests {
         shown.dedup();
         assert_eq!(shown, [CornerKind::Glass, CornerKind::Victim]);
         assert_eq!(census(&mut app).0, 0);
+    }
+
+    /// What is presented from the hold's release on, on the release frame or during the close,
+    /// queues by the rule and shows once the glass has closed: the event itself, in its own turn,
+    /// for its whole turn; with nothing presented the close ends empty.
+    #[test]
+    fn what_is_presented_from_the_release_on_shows_after_the_close() {
+        let close_end = timeline::CLOSE_S + 2.0 * STEP_S;
+        for delay in [None, Some(0.0), Some(timeline::CLOSE_S * 0.5)] {
+            for peek in [false, true] {
+                let case = (delay, peek);
+                let (mut app, _) = glass_app(Settings::default());
+                stage_of(&mut app, OWN);
+                hold(&mut app, true);
+                let held = run(&mut app, 1.0);
+                assert_eq!(held.len(), 1, "{case:?}");
+                let (hold_turn, _) = held[0];
+                hold(&mut app, false);
+                let Some(delay) = delay else {
+                    run(&mut app, close_end);
+                    assert_eq!(showing(&app), None, "the close ends empty");
+                    let (rigs, insets, _) = census(&mut app);
+                    assert_eq!((rigs, insets), (0, 0), "nothing left of the glass");
+                    continue;
+                };
+                run(&mut app, delay);
+                let (explanation, vocabulary, kind) = if peek {
+                    let (_, victim, vocabulary, _) = incoming("s1_through_crew", 1300);
+                    (victim, vocabulary, CornerKind::Victim)
+                } else {
+                    let (shooter, _, vocabulary, _) = explained("s1_through_crew", 1300);
+                    (shooter, vocabulary, CornerKind::Glass)
+                };
+                receive(&mut app, explanation, &vocabulary);
+                let after = run(&mut app, close_end + timeline::OPEN_LATENCY_S);
+                let won = after.last().copied();
+                assert!(
+                    won.is_some_and(|(turn, shown)| turn != hold_turn && shown == kind),
+                    "{case:?}: the event presented from the release on shows, got {after:?}"
+                );
+                if !peek {
+                    assert_eq!(exhibit(&app).kind, kind, "{case:?}: its own exhibit");
+                }
+                let (turn, _) = won.unwrap();
+                let rest = run(&mut app, kind.duration() - 2.0 * STEP_S);
+                assert!(
+                    rest.iter().all(|&(t, _)| t == turn),
+                    "{case:?}: it keeps the slot for its turn, got {rest:?}"
+                );
+                run(&mut app, 2.0);
+                let (rigs, insets, _) = census(&mut app);
+                assert_eq!((rigs, insets), (0, 0), "{case:?}: then the slot closes");
+            }
+        }
     }
 
     /// Between the corner and the peek the newer event takes the slot by the crossfade, either way
