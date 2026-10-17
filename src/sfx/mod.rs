@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use bevy::audio::{DefaultSpatialScale, SpatialScale, Volume};
+use bevy::audio::{DefaultSpatialScale, GlobalVolume, SpatialScale, Volume};
 use bevy::prelude::*;
 
 use crate::ballistics::{FireShell, STALE_FIRE_TICKS};
@@ -56,7 +56,14 @@ const ENGINE_SPEED_TAU: f32 = 0.12;
 const ENGINE_LUG_FRACTION: f32 = 0.8;
 const ENGINE_OVERSHOOT_FRACTION: f32 = 1.05;
 
+/// Set to `1` to run the whole game silent: the global volume is zero from startup, so no clip is
+/// audible from any emitter. For unattended runs and captures on a shared machine.
+const MUTE_ENV: &str = "OVERMATCH_MUTE";
+
 pub fn plugin(app: &mut App) {
+    if std::env::var(MUTE_ENV).is_ok_and(|value| value == "1") {
+        app.insert_resource(GlobalVolume::new(Volume::Linear(0.0)));
+    }
     app.init_resource::<ViewRng>()
         .init_resource::<LastReportVariant>()
         // The one falloff law for every spatial emitter in the game.
