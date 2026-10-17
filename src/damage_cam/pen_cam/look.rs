@@ -255,15 +255,17 @@ struct MaskOwner {
 }
 
 impl Masks {
-    /// Take the set away: its cameras despawned and its images removed.
+    /// Take the set away: its cameras despawned and its images removed. Without a set the two
+    /// handles are `Handle::default()`, the id bevy keeps its shared white image at, so only an
+    /// owned set's images are removed.
     pub fn release(&mut self, commands: &mut Commands, images: &mut Assets<Image>) {
         if let Some(old) = self.owner.take() {
             for camera in old.cameras {
                 commands.entity(camera).despawn();
             }
+            images.remove(self.hull.id());
+            images.remove(self.part.id());
         }
-        images.remove(self.hull.id());
-        images.remove(self.part.id());
         self.hull = Handle::default();
         self.part = Handle::default();
     }

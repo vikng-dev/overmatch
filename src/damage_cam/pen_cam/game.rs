@@ -12,6 +12,9 @@
 //!   [`timeline::MIN_SHOWN_S`]; one arriving sooner waits, and only the latest waiting is kept. A
 //!   replacement keeps the frame open and crossfades ([`timeline::turn_presence`]). Never two
 //!   corners. The timings are the UX spec's, TUNED.
+//! * **Which is newer.** Explanation identity ([`ExplanationKey`], fire tick first), never
+//!   arrival: the store's channel is unordered. One older than any record the corner has admitted
+//!   since it last held nothing is dropped.
 //! * **What it draws.** The struck tank's stage view, of the tank file the record names, and the
 //!   record's plan over the same tank asset the demo stages ([`TankAsset`]); a component the
 //!   shooter's projection does not list is drawn as the base layout, untinted.
@@ -100,6 +103,8 @@ pub(crate) struct ShooterCorner {
     /// Every stored explanation already considered.
     seen: BTreeSet<ExplanationKey>,
     lineup: Lineup<Queued>,
+    /// The newest explanation admitted to the lineup since the corner last held nothing.
+    newest: Option<ExplanationKey>,
     serials: usize,
     turn: Option<Turn>,
     /// Virtual seconds at the corner's clock zero, while it holds anything.
@@ -138,6 +143,7 @@ impl ShooterCorner {
     /// Drop every queued and shown record and the corner's clock.
     fn reset(&mut self) {
         self.lineup.clear();
+        self.newest = None;
         self.turn = None;
         self.epoch = None;
     }
@@ -289,6 +295,9 @@ fn drive(
         let Some(vehicle) = vehicle.filter(|_| opens).map(str::to_owned) else {
             continue;
         };
+        if state.newest.is_some_and(|newest| *key < newest) {
+            continue;
+        }
         let Some(tank) = state.tank(&vehicle, blueprint.as_deref()) else {
             continue;
         };
@@ -296,6 +305,7 @@ fn drive(
         let epoch = *state.epoch.get_or_insert(time.elapsed_secs_f64());
         let now = (time.elapsed_secs_f64() - epoch) as f32;
         state.serials += 1;
+        state.newest = Some(*key);
         let queued = Queued {
             serial: state.serials,
             kind: plan.kind,
@@ -393,8 +403,8 @@ mod tests {
     /// The test's frame step (s), a 30 Hz frame: fixture data.
     const STEP_S: f32 = 1.0 / 30.0;
 
-    /// The corner's systems over a headless app, the player's tank (the shooter's combatant) and
-    /// an empty store, one frame run.
+    /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
+    /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
     fn corner_app(settings: Settings) -> (App, Entity) {
         let mut app = App::new();
         app.set_error_handler(bevy::ecs::error::ignore);
@@ -420,6 +430,10 @@ mod tests {
             .init_resource::<Time>()
             .init_resource::<ShotExplanations>()
             .insert_resource(settings);
+        app.world_mut()
+            .resource_mut::<Assets<Image>>()
+            .insert(&Handle::<Image>::default(), Image::default())
+            .unwrap();
         wire(&mut app);
         let player = app
             .world_mut()
@@ -493,6 +507,14 @@ mod tests {
         app.world_mut()
             .resource_mut::<ShotExplanations>()
             .receive_drawn(explanation, vocabulary, now);
+    }
+
+    /// Whether bevy's shared image, the one `ImagePlugin` keeps at `Handle::default()` for
+    /// untextured UI, is still stored.
+    fn default_image_kept(app: &App) -> bool {
+        app.world()
+            .resource::<Assets<Image>>()
+            .contains(&Handle::<Image>::default())
     }
 
     fn step(app: &mut App) {
@@ -711,5 +733,51 @@ mod tests {
         }
         assert_eq!(shown, [CornerKind::Glass, CornerKind::Ricochet]);
         assert!(faded, "the replacement crossfades");
+    }
+
+    /// Closing the corner of every frame, by its end or by a disconnect, leaves bevy's shared
+    /// default image stored: a frame without masks owns no image to remove.
+    #[test]
+    fn closing_the_corner_keeps_the_shared_default_image() {
+        for name in ["s1_through_crew", "s2_stopped_mantlet", "s3_ricochet"] {
+            for disconnect in [false, true] {
+                let (mut app, _) = corner_app(Settings::default());
+                let (shooter, _, vocabulary, report) = explained(name, 1200);
+                stage_ready(&mut app, &report);
+                receive(&mut app, shooter, &vocabulary);
+                assert!(!run(&mut app, 1.0).is_empty(), "{name}: the corner opened");
+                if disconnect {
+                    app.world_mut().trigger(CloseCorner);
+                }
+                run(&mut app, 5.0);
+                assert_eq!(census(&mut app).0, 0, "{name}: the corner closed");
+                assert!(default_image_kept(&app), "{name}, disconnect {disconnect}");
+            }
+        }
+        let (mut app, _) = corner_app(Settings::default());
+        app.world_mut().trigger(CloseCorner);
+        step(&mut app);
+        assert!(default_image_kept(&app), "a disconnect with nothing open");
+    }
+
+    /// A newer shot on show is not replaced by an older one whose explanation arrives later:
+    /// order is the explanation's identity, never its arrival.
+    #[test]
+    fn an_older_explanation_arriving_late_never_replaces_a_newer_one() {
+        let (mut app, _) = corner_app(Settings::default());
+        let (newer, _, vocabulary, report) = explained("s1_through_crew", 1300);
+        let (older, _, ricochet_vocabulary, _) = explained("s3_ricochet", 1200);
+        stage_ready(&mut app, &report);
+        receive(&mut app, newer, &vocabulary);
+        let mut shown = run(
+            &mut app,
+            timeline::OPEN_LATENCY_S + timeline::MIN_SHOWN_S + 0.2,
+        );
+        assert_eq!(shown.len(), 1, "the newer shot is on show");
+        receive(&mut app, older, &ricochet_vocabulary);
+        shown.extend(run(&mut app, 8.0));
+        shown.dedup();
+        let kinds: Vec<CornerKind> = shown.into_iter().map(|(_, kind)| kind).collect();
+        assert_eq!(kinds, [CornerKind::Glass]);
     }
 }
