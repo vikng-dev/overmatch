@@ -2,9 +2,14 @@
 //! under the law it replaced, counted per crewman as dead, wounded and untouched, and per hit as a
 //! tank knocked out under each [`Rule`]; over the same random hits, the crew outcomes that change
 //! with the spall cone's direction count; and aimed shots fired in sequence at one tank until it is
-//! knocked out, as shots and perforations to the kill. A measurement, run on demand:
+//! knocked out, as shots and pen verdicts to the kill. A measurement, run on demand:
 //!
 //! `cargo test --release --lib crew_sweep -- --ignored --nocapture`
+//!
+//! A PEN VERDICT is a shot whose whole-shot verdict is [`ShotVerdict::Penetration`]: the round
+//! exited the main armour. A shot stopped in the armour is not one, whatever it damaged inside, so
+//! a knockout with zero pen verdicts is possible (a box that reaches into a plate is crossed by a
+//! round stopping there).
 //!
 //! The hits are [`PER_BEARING`] per bearing of [`BEARINGS`], each a horizontal shot aimed
 //! uniformly at random over the rectangle an [`Aim`]'s colliders span across the line of fire and
@@ -108,7 +113,7 @@ impl Rule {
 struct Hit {
     /// Each crewman's outcome, in station order.
     crew: Vec<(CrewStation, Outcome)>,
-    /// The shot's verdict on the tank was a penetration.
+    /// A pen verdict (module doc).
     penetrated: bool,
     /// An ammunition volume stands at zero hit points.
     cooked: bool,
@@ -420,8 +425,8 @@ fn fire_hits(app: &mut App, hits: &[(Vec3, Vec3)]) -> Outcomes {
 #[derive(Clone, Copy)]
 struct Kill {
     shots: usize,
-    /// The perforations among `shots`.
-    perforations: usize,
+    /// The pen verdicts among `shots`.
+    pen_verdicts: usize,
     /// The knockout was a cook-off.
     cooked: bool,
 }
@@ -439,17 +444,17 @@ fn sequences(app: &mut App) -> Vec<[ToKill; 2]> {
     for _ in 0..TRIALS {
         restore(app);
         let mut kills: [ToKill; 2] = [None; 2];
-        let mut perforations = 0;
+        let mut pen_verdicts = 0;
         for shot in 1..=SHOT_CAP {
             let bearing = BEARINGS[(next(&mut state) % BEARINGS.len() as u64) as usize];
             let (origin, direction) = aimer.draw(app, bearing, &mut state);
             let hit = fire_one(app, &round, origin, direction);
-            perforations += usize::from(hit.penetrated);
+            pen_verdicts += usize::from(hit.penetrated);
             for (kill, rule) in kills.iter_mut().zip(Rule::ALL) {
                 if kill.is_none() && hit.knocked_out(rule) {
                     *kill = Some(Kill {
                         shots: shot,
-                        perforations,
+                        pen_verdicts,
                         cooked: hit.cooked,
                     });
                 }
@@ -463,7 +468,7 @@ fn sequences(app: &mut App) -> Vec<[ToKill; 2]> {
     out
 }
 
-/// Each rule's shots-to-kill and perforations-to-kill, as counts per value.
+/// Each rule's shots-to-kill and pen-verdicts-to-kill, as counts per value.
 fn print_sequences(label: &str, runs: &[[ToKill; 2]]) {
     println!("\n{label}: {} trials, cap {SHOT_CAP} shots", runs.len());
     for (i, rule) in Rule::ALL.into_iter().enumerate() {
@@ -497,10 +502,10 @@ fn print_sequences(label: &str, runs: &[[ToKill; 2]]) {
             histogram(|kill| kill.shots)
         );
         println!(
-            "    perforations to kill: mean {:.2}, median {}, {:?}",
-            mean(|kill| kill.perforations),
-            median(|kill| kill.perforations),
-            histogram(|kill| kill.perforations)
+            "    pen verdicts to kill: mean {:.2}, median {}, {:?}",
+            mean(|kill| kill.pen_verdicts),
+            median(|kill| kill.pen_verdicts),
+            histogram(|kill| kill.pen_verdicts)
         );
     }
 }
@@ -545,14 +550,14 @@ fn print_law(label: &str, outcomes: &Outcomes) {
     for rule in Rule::ALL {
         let k = killed(outcomes, rule);
         println!(
-            "  tanks killed, {}: {k}/{hits} = {:.3} per hit, {:.3} per penetration",
+            "  tanks killed, {}: {k}/{hits} = {:.3} per hit, {:.3} per pen verdict",
             rule.label(),
             k as f64 / hits as f64,
             killed(&penetrating, rule) as f64 / penetrating.len().max(1) as f64
         );
     }
     println!(
-        "  penetrations {}/{hits}; per penetration: crew dead {:.3}, a crewman touched {:.3}",
+        "  pen verdicts {}/{hits}; per pen verdict: crew dead {:.3}, a crewman touched {:.3}",
         penetrating.len(),
         dead_pen as f64 / penetrating.len().max(1) as f64,
         touched_pen as f64 / penetrating.len().max(1) as f64
@@ -563,7 +568,7 @@ fn print_law(label: &str, outcomes: &Outcomes) {
         spread[dead.min(3)] += 1;
     }
     println!(
-        "  crew killed per penetration: 0: {}, 1: {}, 2: {}, 3+: {}",
+        "  crew killed per pen verdict: 0: {}, 1: {}, 2: {}, 3+: {}",
         spread[0], spread[1], spread[2], spread[3]
     );
 }
@@ -675,7 +680,7 @@ fn sweep(aim: Aim) {
     for (bearing, chunk) in BEARINGS.iter().zip(new.chunks(PER_BEARING)) {
         let dead: usize = per_crewman(chunk).values().map(|row| row[0]).sum();
         println!(
-            "  {bearing:>5}°  {:.2}  {}  penetrations {}",
+            "  {bearing:>5}°  {:.2}  {}  pen verdicts {}",
             dead as f64 / chunk.len() as f64,
             killed(chunk, Rule::ZeroCrew),
             chunk.iter().filter(|hit| hit.penetrated).count()
