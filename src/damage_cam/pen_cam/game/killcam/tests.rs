@@ -88,7 +88,7 @@ fn gate(app: &App) -> KillCamGate {
 }
 
 fn beat(app: &App) -> Option<Beat> {
-    victim(app).run.map(|run| run.beat())
+    victim(app).run().map(|run| run.beat())
 }
 
 fn captive(app: &App) -> bool {
@@ -161,7 +161,7 @@ fn killed_in(
 fn either_arrival_order_plays_the_four_beats() {
     for record_after_s in [-1.0, 0.0, 0.3, 0.8] {
         let (mut app, _, _) = killed(record_after_s);
-        assert!(until(&mut app, 0.1, |app| victim(app).run.is_some()));
+        assert!(until(&mut app, 0.1, |app| victim(app).run().is_some()));
         // A record later than the hit beat's end opens the lesson at once.
         let first = if record_after_s + 2.0 * STEP_S < HIT_S {
             Beat::Hit
@@ -170,8 +170,8 @@ fn either_arrival_order_plays_the_four_beats() {
         };
         assert_eq!(beat(&app), Some(first), "{record_after_s}");
         assert!(gate(&app).holds_death_screen);
-        let zero = victim(&app).dead.unwrap().1;
-        let lesson = victim(&app).run.unwrap().beats.lesson();
+        let zero = victim(&app).death.as_ref().unwrap().zero;
+        let lesson = victim(&app).run().unwrap().beats.lesson();
         assert!(lesson >= HIT_S, "{record_after_s}: lesson at {lesson}");
         assert!(lesson + 1e-3 >= record_after_s, "{record_after_s}");
 
@@ -192,7 +192,7 @@ fn either_arrival_order_plays_the_four_beats() {
         assert!(app.world().resource::<Corner>().showing.is_none());
         assert!(gate(&app).holds_death_screen);
 
-        assert!(until(&mut app, 5.0, |app| victim(app).run.is_none()));
+        assert!(until(&mut app, 5.0, |app| victim(app).run().is_none()));
         assert!(!captive(&app));
         assert!(!gate(&app).holds_death_screen, "the death screen");
         assert!(victim(&app).record.is_some(), "the replay is held");
@@ -238,10 +238,10 @@ fn a_knockout_without_its_killing_record_goes_to_the_death_screen_in_the_window(
         assert!(!gate(&app).settling, "{case}: respawn is live");
         run(&mut app, RECORD_WAIT_S - HIT_S + 2.0 * STEP_S);
         assert!(!gate(&app).holds_death_screen, "{case}: the death screen");
-        assert!(victim(&app).run.is_none(), "{case}");
+        assert!(victim(&app).run().is_none(), "{case}");
         assert!(victim(&app).record.is_none(), "{case}: no replay");
         press(&mut app, KeyCode::Space);
-        assert!(victim(&app).run.is_none(), "{case}");
+        assert!(victim(&app).run().is_none(), "{case}");
     }
 }
 
@@ -251,13 +251,13 @@ fn a_knockout_without_its_killing_record_goes_to_the_death_screen_in_the_window(
 fn a_late_record_is_offered_for_replay() {
     let (mut app, _, _) = killed(RECORD_WAIT_S + 0.5);
     step(&mut app);
-    assert!(victim(&app).run.is_none());
+    assert!(victim(&app).run().is_none());
     assert!(!gate(&app).holds_death_screen);
     assert!(victim(&app).record.is_some());
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson));
     assert!(gate(&app).holds_death_screen);
-    assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
     assert!(!gate(&app).holds_death_screen);
 }
 
@@ -267,11 +267,11 @@ fn a_late_record_is_offered_for_replay() {
 fn skip_hold_and_replay() {
     let (mut app, _, _) = killed(-1.0);
     press(&mut app, KeyCode::KeyX);
-    assert!(victim(&app).run.is_some(), "no key in the dead-zone");
+    assert!(victim(&app).run().is_some(), "no key in the dead-zone");
     assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
     run(&mut app, 0.2);
 
-    let before = victim(&app).run.unwrap();
+    let before = victim(&app).run().unwrap();
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .press(KeyCode::KeyC);
@@ -279,19 +279,19 @@ fn skip_hold_and_replay() {
     app.world_mut()
         .resource_mut::<ButtonInput<KeyCode>>()
         .release(KeyCode::KeyC);
-    let after = victim(&app).run.unwrap();
+    let after = victim(&app).run().unwrap();
     assert!(after.real - before.real >= 1.0 - STEP_S);
     assert!(after.t - before.t < STEP_S * 1.5, "the clock held");
     assert_eq!(after.beat(), Beat::Lesson);
 
     press(&mut app, KeyCode::KeyX);
-    assert!(victim(&app).run.is_none(), "skipped");
+    assert!(victim(&app).run().is_none(), "skipped");
     assert!(!captive(&app));
     assert!(!gate(&app).holds_death_screen);
 
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson), "replayed");
-    assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
     assert!(victim(&app).record.is_some());
 }
 
@@ -309,14 +309,14 @@ fn the_setting_off_goes_straight_to_the_death_screen() {
     knock_out(&mut app, player);
     step(&mut app);
     assert!(!gate(&app).holds_death_screen);
-    assert!(victim(&app).run.is_none());
+    assert!(victim(&app).run().is_none());
     assert!(victim(&app).record.is_some());
 
     let (mut app, _, _) = killed(-1.0);
     assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
     app.world_mut().resource_mut::<Settings>().kill_cam = KillCamSetting::Off;
     step(&mut app);
-    assert!(victim(&app).run.is_none());
+    assert!(victim(&app).run().is_none());
     assert!(!captive(&app));
 }
 
@@ -353,9 +353,9 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
                     ..default()
                 });
                 step(&mut app);
-                assert!(victim(&app).run.is_some(), "{case} at {at:?}: marked");
+                assert!(victim(&app).run().is_some(), "{case} at {at:?}: marked");
                 step(&mut app);
-                assert!(victim(&app).run.is_none(), "{case} at {at:?}");
+                assert!(victim(&app).run().is_none(), "{case} at {at:?}");
                 let mut player = app.world_mut().entity_mut(player);
                 player.remove::<(TankKnockedOut, TankCommand)>();
                 player.insert(CombatantLife(1));
@@ -365,7 +365,7 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
             }
         }
         run(&mut app, 0.5);
-        assert!(victim(&app).run.is_none(), "{case} at {at:?}");
+        assert!(victim(&app).run().is_none(), "{case} at {at:?}");
         assert!(!captive(&app), "{case} at {at:?}");
         let world = app.world();
         assert_eq!(
@@ -403,7 +403,7 @@ fn the_slot_stays_closed_under_the_kill_cam() {
     };
     let (_, shooter, vocabulary, _) = shot(SHOOTER, struck, false);
     receive(&mut app, shooter, &vocabulary);
-    assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
     assert!(app.world().resource::<Corner>().showing.is_none());
 }
 
@@ -452,7 +452,11 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
                 stage_of(&mut app, report.vehicle.as_deref().unwrap());
                 staged = true;
             }
-            let zero = victim(&app).dead.expect("dead from the knockout's frame").1;
+            let zero = victim(&app)
+                .death
+                .as_ref()
+                .expect("dead from the knockout's frame")
+                .zero;
             let now = app.world().resource::<Time>().elapsed_secs_f64();
             let since = (now - zero) as f32;
             let overlays = app.world().resource::<Overlays>();
@@ -461,7 +465,7 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
                 _ => overlays.contains(Overlay::SpawnMap),
             };
             assert_eq!(taken, since >= HIT_S, "{key:?} at {since} s");
-            assert!(victim(&app).run.is_some(), "{key:?} at {since} s");
+            assert!(victim(&app).run().is_some(), "{key:?} at {since} s");
             assert!(gate(&app).holds_death_screen, "{key:?} at {since} s");
             if taken {
                 break;
@@ -473,7 +477,7 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
             );
         }
         step(&mut app);
-        assert!(victim(&app).run.is_none(), "{key:?}");
+        assert!(victim(&app).run().is_none(), "{key:?}");
         assert!(!captive(&app), "{key:?}");
         assert!(!gate(&app).holds_death_screen, "{key:?}");
         assert!(
@@ -699,7 +703,7 @@ fn the_death_flow_owns_the_device() {
         };
         hold_all(&mut app, 8, silent);
         let_go(&mut app);
-        assert!(until(&mut app, 10.0, |app| victim(app).run.is_none()));
+        assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
         hold_all(&mut app, 8, silent);
         assert_eq!(beat(&app), Some(Beat::Lesson), "{replay:?}: replayed");
         assert_eq!(

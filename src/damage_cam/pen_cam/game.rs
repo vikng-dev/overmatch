@@ -793,7 +793,7 @@ mod tests {
 
     /// The corner's systems over a headless app, the player's tank (the shooter's combatant), an
     /// empty store and bevy's shared default image ([`default_image_kept`]), one frame run.
-    pub(super) fn corner_app(settings: Settings) -> (App, Entity) {
+    fn corner_app(settings: Settings) -> (App, Entity) {
         corner_app_with(settings, |_| {})
     }
 

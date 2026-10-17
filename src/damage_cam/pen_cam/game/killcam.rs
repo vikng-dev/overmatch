@@ -77,7 +77,7 @@ use crate::{CombatantId, CombatantLife};
 
 /// How long the kill cam waits for the killing record from the knockout fact, real seconds. TUNED:
 /// delivery's impact timeout (`delivery::IMPACT_TIMEOUT_S`), the reference.
-pub(crate) const RECORD_WAIT_S: f32 = 1.0;
+const RECORD_WAIT_S: f32 = 1.0;
 
 /// The replay prompt. ASCII only — it reaches `Text`.
 const REPLAY: &str = "SPACE  REPLAY";
@@ -96,7 +96,7 @@ pub(crate) struct KillCamGate {
 /// The kill cam's [`drive`]: before `overlay::OverlaySet::Declare`, where the first reader of the
 /// [`KillCamGate`] it writes runs; the others run after `OverlaySet::Toggle`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct KillCamGateSet;
+pub(super) struct KillCamGateSet;
 
 /// Present where the composition mounts the game's death screen (the network client's). Without
 /// it, the kill cam draws its own stand-in: the death tint and a panel naming the knockout.
@@ -160,23 +160,36 @@ impl Run {
 
 /// The kill cam's state between frames.
 #[derive(Resource, Default)]
-pub(crate) struct Victim {
-    /// The knocked-out life served, and app seconds at its knockout fact.
-    dead: Option<(TankLife, f64)>,
+pub(super) struct Victim {
+    /// The knocked-out life served.
+    death: Option<Death>,
     record: Option<Killing>,
+    /// The kill cam's UI exists.
+    ui: bool,
+}
+
+impl Victim {
+    fn run(&self) -> Option<Run> {
+        self.death.as_ref().and_then(|death| death.run)
+    }
+}
+
+/// A knocked-out life the kill cam serves.
+struct Death {
+    life: TankLife,
+    /// App seconds at its knockout fact.
+    zero: f64,
     run: Option<Run>,
     /// Whether this life's cam has played on its own, or will not.
     resolved: bool,
     /// The settings the run plays by: a change ends it.
-    by: Option<(KillCamSetting, ReduceMotion)>,
-    /// The kill cam's UI exists.
-    ui: bool,
+    by: (KillCamSetting, ReduceMotion),
     /// A respawn or the spawn map was taken ([`give_way`]): the next drive ends the run and the
     /// wait for one.
     yielded: bool,
 }
 
-impl Victim {
+impl Death {
     /// The death screen stays down: a run plays, or the wait for one is open.
     fn holds_death_screen(&self) -> bool {
         self.run.is_some() || !self.resolved
@@ -235,8 +248,7 @@ fn disconnect(
     camera: Query<(Entity, &CameraProfile), With<PlayerView>>,
     ui: Query<Entity, With<KillCamUi>>,
 ) {
-    victim.run = None;
-    victim.dead = None;
+    victim.death = None;
     release(&mut captive, &mut commands, camera.single().ok());
     for entity in &ui {
         commands.entity(entity).despawn();
@@ -264,20 +276,24 @@ pub(super) struct Keys<'w> {
 }
 
 impl Keys<'_> {
-    /// Whether `pick`'s binding was pressed this frame (`edge`) or is down.
-    fn read(&self, pick: fn(&Bindings) -> ButtonBinding, edge: bool) -> bool {
-        let (Some(keys), Some(mouse), Some(bindings)) = (
-            self.keys.as_deref(),
-            self.mouse.as_deref(),
-            self.bindings.as_deref(),
-        ) else {
-            return false;
-        };
-        if edge {
-            pick(bindings).just_pressed(keys, mouse)
-        } else {
-            pick(bindings).pressed(keys, mouse)
-        }
+    /// Whether `pick`'s binding was pressed this frame.
+    fn just_pressed(&self, pick: fn(&Bindings) -> ButtonBinding) -> bool {
+        self.devices()
+            .is_some_and(|(keys, mouse, bindings)| pick(bindings).just_pressed(keys, mouse))
+    }
+
+    /// Whether `pick`'s binding is down.
+    fn pressed(&self, pick: fn(&Bindings) -> ButtonBinding) -> bool {
+        self.devices()
+            .is_some_and(|(keys, mouse, bindings)| pick(bindings).pressed(keys, mouse))
+    }
+
+    fn devices(&self) -> Option<(&ButtonInput<KeyCode>, &ButtonInput<MouseButton>, &Bindings)> {
+        Some((
+            self.keys.as_deref()?,
+            self.mouse.as_deref()?,
+            self.bindings.as_deref()?,
+        ))
     }
 
     fn map(&self) -> bool {
@@ -369,10 +385,11 @@ pub(super) fn drive(
         .map(|(entity, _, profile, _)| (entity, profile));
 
     // Whose death this is.
-    if dead_life != victim.dead.map(|(life, _)| life) {
-        end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
-        victim.yielded = false;
-        match dead_life {
+    if dead_life != victim.death.as_ref().map(|death| death.life) {
+        if let Some(death) = victim.death.as_mut() {
+            end_run(death, &mut captive, &mut rig, &mut slot, camera_entity);
+        }
+        victim.death = match dead_life {
             Some(life) => {
                 // Back on a life whose record is in hand (a reconnect): the death screen, the
                 // replay offered, nothing played on its own.
@@ -380,20 +397,25 @@ pub(super) fn drive(
                 if !known {
                     victim.record = None;
                 }
-                victim.dead = Some((life, now));
-                victim.resolved = known;
-                victim.by = Some(by);
+                Some(Death {
+                    life,
+                    zero: now,
+                    run: None,
+                    resolved: known,
+                    by,
+                    yielded: false,
+                })
             }
             None => {
-                victim.dead = None;
                 if tank.is_some() {
                     // A live tank: that death is over.
                     victim.record = None;
                 }
+                None
             }
-        }
+        };
     }
-    let Some((life, zero)) = victim.dead else {
+    let Some(death) = victim.death.as_mut() else {
         for entity in &scene.ui {
             rig.commands.entity(entity).despawn();
         }
@@ -407,13 +429,14 @@ pub(super) fn drive(
         spawn_ui(&mut rig.commands, fonts);
         victim.ui = true;
     }
+    let (life, zero) = (death.life, death.zero);
     let since = (now - zero) as f32;
     let settled = since >= HIT_S;
 
     // A respawn or the map taken last frame ([`give_way`]): the run and the wait for one end here.
-    if std::mem::take(&mut victim.yielded) {
-        end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
-        victim.resolved = true;
+    if std::mem::take(&mut death.yielded) {
+        end_run(death, &mut captive, &mut rig, &mut slot, camera_entity);
+        death.resolved = true;
     }
 
     // The killing record, once in hand.
@@ -442,27 +465,27 @@ pub(super) fn drive(
 
     // Input: the cursor's, past the dead-zone.
     let input = settled && crate::state::cursor_locked(cursor);
-    let skip = input && keys.read(|b| b.kill_cam_skip, true);
-    let hold = input && keys.read(|b| b.kill_cam_hold, false);
-    let replay = input && keys.read(|b| b.kill_cam_replay, true);
+    let skip = input && keys.just_pressed(|b| b.kill_cam_skip);
+    let hold = input && keys.pressed(|b| b.kill_cam_hold);
+    let replay = input && keys.just_pressed(|b| b.kill_cam_replay);
     let map = keys.map();
-    let changed = victim.by != Some(by);
-    victim.by = Some(by);
+    let changed = death.by != by;
+    death.by = by;
 
     // What ends a run, or the wait for one, here: the death screen. The respawn and the map end
     // them in `give_way`.
-    if victim.run.is_some() && (skip || changed) {
-        end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
-        victim.resolved = true;
+    if death.run.is_some() && (skip || changed) {
+        end_run(death, &mut captive, &mut rig, &mut slot, camera_entity);
+        death.resolved = true;
     }
-    if !victim.resolved && (skip || !by.0.on() || since >= RECORD_WAIT_S && victim.run.is_none()) {
-        victim.resolved = true;
+    if !death.resolved && (skip || !by.0.on() || since >= RECORD_WAIT_S && death.run.is_none()) {
+        death.resolved = true;
     }
 
     // A run starts: on its own once, or on the replay key at the death screen.
-    let start = match (&victim.record, victim.run) {
-        (Some(record), None) if !victim.resolved && record.timely => {
-            victim.resolved = true;
+    let start = match (&victim.record, death.run) {
+        (Some(record), None) if !death.resolved && record.timely => {
+            death.resolved = true;
             // The lesson opens no sooner than the hit beat's end and the record's arrival.
             Some((
                 zero,
@@ -472,7 +495,7 @@ pub(super) fn drive(
                 },
             ))
         }
-        (Some(_), None) if victim.resolved && replay && !map => Some((
+        (Some(_), None) if death.resolved && replay && !map => Some((
             now,
             Beats {
                 impact: -HIT_S,
@@ -525,7 +548,7 @@ pub(super) fn drive(
             .ok()
             .and_then(|(_, _, _, orbit)| orbit)
             .map_or(crate::camera::ORBIT_FAR, OrbitCamera::radius);
-        victim.run = Some(Run {
+        death.run = Some(Run {
             zero: run_zero,
             beats,
             held: 0.0,
@@ -539,9 +562,9 @@ pub(super) fn drive(
             radius,
         });
         // The lesson's record, on the stage the slot keeps.
-        let vehicle = report.vehicle.clone();
         rig.exhibits.0.clear();
-        if let Some(tank_asset) = vehicle
+        if let Some(tank_asset) = report
+            .vehicle
             .as_deref()
             .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
         {
@@ -560,7 +583,7 @@ pub(super) fn drive(
 
     // The run's clocks, and its end.
     let delta = time.delta_secs();
-    if let Some(run) = victim.run.as_mut() {
+    if let Some(run) = death.run.as_mut() {
         let real = (now - run.zero) as f32;
         if hold {
             run.held += delta;
@@ -568,14 +591,14 @@ pub(super) fn drive(
         run.real = real;
         run.t = (real - run.held).max(0.0);
     }
-    if victim.run.is_some_and(|run| run.beat() == Beat::Death) {
-        end_run(victim, &mut captive, &mut rig, &mut slot, camera_entity);
+    if death.run.is_some_and(|run| run.beat() == Beat::Death) {
+        end_run(death, &mut captive, &mut rig, &mut slot, camera_entity);
     }
 
     // The camera: taken for the lesson and the killer beat, on the third-person view.
-    let wants = victim.run.is_some_and(|run| run.captive());
+    let wants = death.run.is_some_and(|run| run.captive());
     if wants && !captive.0 {
-        if let Some(run) = victim.run.as_mut()
+        if let Some(run) = death.run.as_mut()
             && run.hit.is_none()
         {
             run.hit = scene
@@ -596,17 +619,15 @@ pub(super) fn drive(
     }
 
     // The stage, from the run's start through its lesson.
-    let staging = victim
+    let staging = death
         .run
         .filter(|run| matches!(run.beat(), Beat::Hit | Beat::Lesson));
     match staging {
         Some(run) => {
-            let vehicle = victim
+            let placed = victim
                 .record
                 .as_ref()
-                .and_then(|record| record.stored.report.vehicle.clone());
-            let placed = vehicle
-                .as_deref()
+                .and_then(|record| record.stored.report.vehicle.as_deref())
                 .is_some_and(|vehicle| rig.ready(&mut slot, vehicle));
             if let Some(view) = rig.view.as_deref() {
                 let anchor = match scene.anchors.iter().next() {
@@ -638,7 +659,7 @@ pub(super) fn drive(
     }
 
     *gate = KillCamGate {
-        holds_death_screen: victim.holds_death_screen(),
+        holds_death_screen: death.holds_death_screen(),
         settling: !settled,
     };
 }
@@ -655,20 +676,22 @@ pub(super) fn give_way(
     let map = overlays
         .as_deref()
         .is_some_and(|overlays| overlays.contains(Overlay::SpawnMap));
-    if victim.dead.is_some() && (respawning || map) {
-        victim.yielded = true;
+    if (respawning || map)
+        && let Some(death) = victim.death.as_mut()
+    {
+        death.yielded = true;
     }
 }
 
 /// End the run: the camera handed back and the stage gone.
 fn end_run(
-    victim: &mut Victim,
+    death: &mut Death,
     captive: &mut CameraCaptive,
     rig: &mut SlotRig,
     slot: &mut Slot,
     camera: Option<(Entity, &CameraProfile)>,
 ) {
-    if victim.run.take().is_none() {
+    if death.run.take().is_none() {
         return;
     }
     release(captive, &mut rig.commands, camera);
@@ -700,7 +723,7 @@ fn place(
     if !captive.0 {
         return;
     }
-    let (Some(run), Some(turret)) = (victim.run, pivot.offset()) else {
+    let (Some(run), Some(turret)) = (victim.run(), pivot.offset()) else {
         return;
     };
     let (Ok(tank), Ok((entity, mut transform, mut projection, profile))) =
@@ -808,13 +831,17 @@ fn hud(
             Visibility::Hidden
         }
     };
-    let dead = victim.dead.is_some();
-    let death_screen = dead && !victim.holds_death_screen();
+    let dead = victim.death.is_some();
+    let death_screen = victim
+        .death
+        .as_ref()
+        .is_some_and(|death| !death.holds_death_screen());
+    let run = victim.run();
     let reduce = settings.as_deref().is_some_and(|s| s.reduce_motion.on());
 
     // The killer card.
     let record = victim.record.as_ref().filter(|_| dead);
-    let enter = match (record, victim.run) {
+    let enter = match (record, run) {
         (Some(_), Some(run)) if run.t >= run.beats.arrive() => timeline::ease_enter(
             timeline::progress(run.t, run.beats.arrive(), demo::CARD_ENTER_S),
         ),
@@ -838,11 +865,11 @@ fn hud(
         let lines = card_lines(&record.killer, record.range_m);
         for (index, mut text, mut color) in &mut card_text {
             let line = match index.0 {
-                0 => "KNOCKED OUT BY".to_owned(),
-                row => lines[row - 1].clone(),
+                0 => "KNOCKED OUT BY",
+                row => lines[row - 1].as_str(),
             };
             if text.0 != line {
-                text.0 = line;
+                text.0 = line.to_owned();
             }
             color.0 = color.0.with_alpha(enter);
         }
@@ -853,11 +880,11 @@ fn hud(
     let reason = own.single().ok().map(|knocked_out| knocked_out.reason);
     for (index, mut text) in &mut panel_text {
         let line = match index.0 {
-            0 => "KNOCKED OUT".to_owned(),
-            _ => reason.map(|r| r.label().to_owned()).unwrap_or_default(),
+            0 => "KNOCKED OUT",
+            _ => reason.map_or("", |r| r.label()),
         };
         if text.0 != line {
-            text.0 = line;
+            text.0 = line.to_owned();
         }
     }
     for mut v in panel.iter_mut().chain(tint.iter_mut()) {
@@ -865,7 +892,7 @@ fn hud(
     }
 
     // The replay prompt.
-    let replay = death_screen && victim.run.is_none() && victim.record.is_some();
+    let replay = death_screen && run.is_none() && victim.record.is_some();
     for (parent, mut text) in &mut prompt {
         if text.0 != REPLAY {
             text.0 = REPLAY.to_owned();

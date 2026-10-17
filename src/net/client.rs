@@ -393,9 +393,9 @@ pub fn run() {
     // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
     // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
-    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the frame's
-    // `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing `ActionState` directly instead
-    // (`buffer_input`) — no devices, no window, no presentation.
+    // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the
+    // frame's `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing
+    // `ActionState` directly instead (`buffer_input`) — no devices, no window, no presentation.
     // Mounted for sim-windowed too: the device writers it brings fill `TankCommand` at render
     // rate, but in simulate mode the reverse bridge overwrites that whole struct from the scripted
     // `ActionState` every tick before any sim system reads it — the script rules, the presentation
@@ -1611,8 +1611,8 @@ pub(super) fn receive_fire_events(
     // Nested: the optional lifecycle recorder for wire arrivals/dedup results, the impulse
     // ledger for the buffer-edge gap∧impulse coincidence instrument (a fire announcement marks
     // the tick the shooter's hull surged), and the own-fire ledger + counters for swallowing a
-    // late echo the fallback already presented. A tuple param keeps the system under Bevy's
-    // 16-param bound.
+    // late echo the fallback already presented. A tuple param keeps the system within clippy's
+    // `too_many_arguments` limit.
     (mut shot_trace, mut impulses, mut own_ledgers, mut own_diag): (
         Option<ResMut<crate::shot_trace::ShotTrace>>,
         ResMut<super::extrapolate::ImpulseTicks>,

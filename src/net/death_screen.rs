@@ -54,8 +54,8 @@ pub fn plugin(app: &mut App) {
         .add_systems(Update, systems().in_set(InMatchSystems));
 }
 
-/// The death screen's `Update` systems, placed among the overlay sets. Both read the kill cam's
-/// [`KillCamGate`], written before them (`KillCamGateSet`).
+/// The death screen's `Update` systems, placed among the overlay sets. The declarer and the
+/// respawn key read the kill cam's [`KillCamGate`], written before them (`KillCamGateSet`).
 fn systems() -> ScheduleConfigs<ScheduleSystem> {
     (
         // All overlay reconcilers must read the same declared state. This is a state-driven
