@@ -149,7 +149,6 @@ const TARGET_KILL_EVERY_S: f32 = 10.0;
 /// nearest it (the union of its colliders' bounds), a pull every [`TARGET_KILL_EVERY_S`] until the
 /// player's tank is knocked out.
 #[cfg(feature = "dev_tools")]
-#[allow(clippy::type_complexity)]
 fn target_kills(
     time: Res<Time<Real>>,
     player: Query<
@@ -328,6 +327,10 @@ pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
 
 /// Admit the local duel after presentation preloading, then construct both roots completely. This
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "admission spans the loader, assets, sim source, terrain, certificate, view profile and app state"
+)]
 fn spawn_tank_when_loaded(
     mut commands: Commands,
     asset_server: Res<AssetServer>,

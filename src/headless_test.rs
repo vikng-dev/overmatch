@@ -2783,19 +2783,19 @@ fn capture_scripted_determinism_tick(
     {
         digests.push((
             name.as_str().to_owned(),
-            crate::trace::canonical_tank_state_digest(
-                position.0,
-                rotation.0,
-                linear.0,
-                angular.0,
+            crate::trace::canonical_tank_state_digest(&crate::trace::TankState {
+                position: position.0,
+                rotation: rotation.0,
+                linvel: linear.0,
+                angvel: angular.0,
                 drive,
                 grip,
-                elements,
+                elements: Some(elements),
                 transmission,
-                weapon_gate,
-                servos,
+                weapon_gate: Some(weapon_gate),
+                servos: &servos.states,
                 sim,
-            ),
+            }),
         ));
         if is_controlled {
             controlled = Some((

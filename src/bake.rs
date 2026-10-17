@@ -1264,6 +1264,10 @@ fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Findi
 /// guard (module doc). Read-only, so it is order-independent with respect to the view binder
 /// (`tank::bind_tank_view`, an entity-scoped observer of this same event; this one is global and
 /// writes nothing).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an observer comparing the blueprint with an instantiated scene: hierarchy, names, transforms and meshes are separate reads"
+)]
 fn shadow_compare_on_instance_ready(
     ready: On<WorldInstanceReady>,
     blueprint: Option<Res<TankBlueprint>>,
@@ -2135,7 +2139,7 @@ mod tests {
             (
                 "mixed-crew",
                 seat(witness).holding(solid(SUBSTANCE, [0.0, 3.0, 0.0])),
-                crew.clone(),
+                crew,
             ),
             ("witness-module", seat(witness), declared("(hp: 10)")),
             (
@@ -2374,7 +2378,7 @@ mod tests {
         let plate = solid(SUBSTANCE, [0.0, 0.0, 0.0]);
         let mut positions = plate.positions.clone();
         positions.push([2.0, 0.0, 0.0]);
-        let mut indices = plate.indices.clone();
+        let mut indices = plate.indices;
         indices.extend_from_slice(&[0, 1, (positions.len() - 1) as u32]);
         nodes[1] = Node::new("Plate").child_of("Hull").holding(Primitive {
             material: SUBSTANCE.into(),

@@ -4,13 +4,6 @@
 //! Direct-simulation sandboxes are analytical tools, not alternate player runtimes. See
 //! `.agents/PRODUCT.md` and ADR-0024 for the current product topology.
 
-// Two clippy lints fight Bevy's ECS paradigm and are allowed crate-wide (as Bevy's own codebase
-// does): `type_complexity` fires on ordinary multi-component query tuples, and `too_many_arguments`
-// on systems that legitimately need many params. We de-duplicate the genuinely-repeated query shapes
-// behind named `QueryData`/`SystemParam` (e.g. `damage::VolumeFacets`, `damage::ControlledTank`);
-// what remains is irreducible ECS shape, not a smell.
-#![allow(clippy::type_complexity, clippy::too_many_arguments)]
-
 use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -291,6 +291,10 @@ pub fn spawn_inset(
 }
 
 /// Rebuild the stage when the corner's record or frame changes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "rebuilds the stage from the corner, exhibits and view into the mesh store and four material stores"
+)]
 pub fn rebuild(
     mut commands: Commands,
     corner: Res<Corner>,
@@ -441,7 +445,10 @@ pub struct LookCtx<'a> {
 /// tank's own meshes of the components the record names, spawned under that mesh. `clip` is the
 /// slice plane (unit normal toward the eye, a point on it) the cones are cut by. Everything spawned
 /// is a [`StageItem`], hidden until [`animate`] places it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components and the look are separate inputs"
+)]
 pub fn spawn_glass(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -855,6 +862,10 @@ fn inset_active(showing: &super::Showing) -> bool {
 }
 
 /// Animate the stage from the corner's clock and frame the corner camera.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one query per disjoint stage element plus four material stores, the queries kept disjoint by their `Without` filters"
+)]
 pub fn animate(
     corner: Res<Corner>,
     knobs: Res<Knobs>,
@@ -2373,11 +2384,8 @@ mod tests {
             (e(1), vec![outer.clone()]),
             (e(2), vec![none.clone(), outer.clone()]),
             (e(3), vec![inner.clone(), outer.clone()]),
-            (
-                e(4),
-                vec![none.clone(), inner.clone(), none.clone(), outer.clone()],
-            ),
-            (e(5), vec![none.clone()]),
+            (e(4), vec![none.clone(), inner, none.clone(), outer]),
+            (e(5), vec![none]),
         ];
         let found = component_meshes(
             plan,

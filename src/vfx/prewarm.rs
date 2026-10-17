@@ -41,6 +41,10 @@ impl PrewarmRig {
 /// Spawn the warm-up set: the shell scene + one billboard per blend mode + one trail ribbon + one
 /// impact puff. Ordered after the other vfx Startup setups (see `vfx::plugin`) so their preloaded
 /// assets exist.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "warms every vfx pipeline: one parameter per asset set and store"
+)]
 pub(super) fn spawn_prewarm_rig(
     mut commands: Commands,
     asset_server: Res<AssetServer>,

@@ -189,7 +189,10 @@ pub(super) fn pose_under(
 /// names of its node chain up to the view's root (where `is_root` holds), nearest first, its
 /// authored material `original` named `material`, and its tier; and whether it is a collision
 /// proxy.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "classifies one mesh: its entity, root, materials and spec, and the hierarchy reads with the root predicate"
+)]
 fn classify(
     entity: Entity,
     root: ViewRoot,
@@ -287,7 +290,10 @@ fn pose_servos(
 
 /// Place the stage view once its scene has spawned and its tank file has loaded: every mesh under
 /// its root classified at once, since a scene spawns whole, and the root placed. Idle once placed.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "places the stage view: its scene's meshes, hierarchy, names, transforms and the tank file are separate reads"
+)]
 pub fn prepare_stage(
     mut commands: Commands,
     mut view: ResMut<StageView>,
@@ -454,7 +460,10 @@ impl Views {
 
 /// Classify the battlefield views' new meshes, place the struck tank's once its hull node exists,
 /// measure the ground, and declare the demo ready once the stage view is placed too.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "classifies the battlefield views: fresh meshes, roots, hierarchy, names, transforms, bounds and readiness"
+)]
 pub fn prepare(
     mut commands: Commands,
     mut views: ResMut<Views>,

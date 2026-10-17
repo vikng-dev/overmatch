@@ -574,7 +574,7 @@ mod tests {
         );
 
         // Same wheel, plus a handful of detached scraps flung well clear of it.
-        let mut greebled = clean.clone();
+        let mut greebled = clean;
         greebled.extend([
             axle + Vec3::new(0.0, 1.4, 0.0),
             axle + Vec3::new(0.0, -1.1, 0.9),

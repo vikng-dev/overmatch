@@ -2150,7 +2150,7 @@ fn the_handoff_seeds_every_sample_that_starts_inside_material() {
             .collect(),
     };
     assert!(walk_disc(&transit, &volumes, &laws).is_ok());
-    let mut unseeded = transit.clone();
+    let mut unseeded = transit;
     for sample in &mut unseeded.samples {
         sample.initial_presence.clear();
     }
@@ -2182,7 +2182,7 @@ fn finish_rejects_a_corridor_that_is_not_the_one_it_asked_for() {
     ));
 
     // A re-derived frame instead of the transported one.
-    let mut rolled = honest.clone();
+    let mut rolled = honest;
     rolled.frame = DiscFrame::from_axis_and_reference(request.axis, Vec3::X).unwrap();
     assert!(matches!(
         finish_at(&rolled, &request, AP_88_CAPABILITY, &laws),

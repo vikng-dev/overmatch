@@ -546,7 +546,11 @@ impl HeightGrid {
     /// `[t_lo, t_hi]` is the EPS-padded per-cell window (boundary-ownership slop only);
     /// `hard` is the unpadded global clip `[t0, t1] ⊆ [0, t_max]` — a root outside it is
     /// rejected outright, never clamped onto an endpoint.
-    #[expect(clippy::too_many_arguments, reason = "private kernel of cast_ray")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the cell (i, j), the ray's height, direction and u/v lines, and two windows that \
+                  differ on purpose (EPS-padded per cell, unpadded global clip)"
+    )]
     fn cell_crossing(
         &self,
         i: usize,

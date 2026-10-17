@@ -94,7 +94,10 @@ pub(crate) fn shows_died(world: &mut World) -> bool {
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
 /// death only for a controlled tank carrying `TankKnockedOut`, once the kill cam lets it
 /// ([`KillCamGate::holds_death_screen`]).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the clock, the kill cam gate, two controlled-tank states, the overlay, the respawn wait, the overlay registry and fonts"
+)]
 fn toggle_death_screen(
     time: Res<Time>,
     gate: Option<Res<KillCamGate>>,

@@ -871,8 +871,9 @@ fn edge_area(p: (f32, f32), q: (f32, f32)) -> f32 {
     q.0 * p.1 - q.1 * p.0
 }
 
-/// The same area with the products carried in f64 — reached when, and only when, the f32 form
-/// cancels to exactly zero.
+/// The same area with the products carried in f64: the reference the sign-exactness test holds
+/// [`edge_area`] to. The walk's own fallback, taken when, and only when, the f32 form cancels to
+/// exactly zero, is [`edge_area_f64`] over exactly projected points.
 ///
 /// EXACT ZERO IS THE WHOLE OF THE UNRECOVERABLE SET *GIVEN THE PROJECTED POINTS*, which is what
 /// fixes this trigger's width. Round-to-nearest is monotone, so `q₀·p₁ ≥ q₁·p₀` implies
@@ -887,7 +888,7 @@ fn edge_area(p: (f32, f32), q: (f32, f32)) -> f32 {
 ///
 /// Antisymmetric on the same grounds as the f32 form, so widening one triangle's edge widens its
 /// neighbour's identically.
-#[inline]
+#[cfg(test)]
 fn edge_area_exact(p: (f32, f32), q: (f32, f32)) -> f64 {
     q.0 as f64 * p.1 as f64 - q.1 as f64 * p.0 as f64
 }

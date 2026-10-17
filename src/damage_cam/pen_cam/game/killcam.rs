@@ -334,7 +334,10 @@ fn killing(store: &ShotExplanations, life: TankLife) -> Option<&StoredExplanatio
 
 /// Follow the player's tank's knockout, take its killing record, run the beats on the real clock,
 /// read the keys, keep the stage for the lesson, and say what the death screen may show.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the kill cam's driver: the clock, the settings, the record store, the blueprint, the keys, the cursor, the run, the gate, the captive camera, the sight, the corner slot and its rig, the own tank and the scene"
+)]
 pub(super) fn drive(
     time: Res<Time>,
     settings: Option<Res<Settings>>,
@@ -678,7 +681,10 @@ fn end_run(
 /// The captive camera: the game's orbit about the victim's pivot, posed by the beat, at the radius
 /// the player's zoom set, pulled in by the ground; the commander's naked-eye field; the lesson's
 /// profile in the lesson.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the captive camera's pose: the run, the settings, the turret pivot, the ground query, the victim and the other tanks, the views and the camera"
+)]
 fn place(
     captive: Res<CameraCaptive>,
     victim: Res<Victim>,
@@ -761,7 +767,10 @@ fn spawn_ui(commands: &mut Commands, fonts: &UiFonts) {
 /// Show the kill cam's UI: the killer card from the killer beat's arrival and on the death screen,
 /// the replay prompt on the death screen with a record in hand, and the death screen's stand-in
 /// where the composition has none of its own.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the kill cam's UI: the run, the settings, the composition's death screen, the knockout, and the card, accent, text, prompt, panel, tint and root nodes"
+)]
 fn hud(
     victim: Res<Victim>,
     settings: Option<Res<Settings>>,

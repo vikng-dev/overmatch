@@ -89,7 +89,9 @@ fn resolve_dep<'a>(entry: &'a str, versions: &'a [String]) -> Option<&'a str> {
 }
 
 /// Packages AUDITED to legitimately carry a private, split glam instance that never feeds the
-/// deterministic sim's float path. Keep this list SHORT and justified:
+/// deterministic sim's float path. MUST AGREE with the glam `wrappers` in `deny.toml`'s
+/// `[bans] deny`, which CI's `deny` job enforces on the same graph; a change to either list
+/// changes both. Keep this list SHORT and justified:
 ///
 /// * `obvhs` — avian's internal BVH (broadphase acceleration). It pins its own older glam and
 ///   never touches parry's raycast/narrowphase arithmetic nor bevy_math; audited 2026-07-26.

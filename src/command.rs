@@ -376,14 +376,18 @@ pub fn client_plugin(app: &mut App) {
 /// absent from every network-client app: there is no env var, no config and no build flag that can
 /// reach it, because the systems are never added to that `App` at all.
 ///
-/// Two tests pin the boundary in both directions: the shared mount never arms the trigger even with
-/// the env var set (`the_shared_device_gather_never_arms_auto_fire_even_when_the_env_var_is_set`),
+/// Two tests pin the boundary in both directions: the shared mount never arms the trigger even in
+/// an armed app (`the_shared_device_gather_never_arms_auto_fire_even_when_armed`),
 /// and `run_offline` is the crate's ONLY mount site
 /// (`offline_auto_fire_plugin_is_mounted_only_inside_run_offline`, a source scan — "no other plugin
 /// mounts this" is not expressible in the type system).
 #[cfg(feature = "dev_tools")]
 pub fn offline_auto_fire_plugin(app: &mut App) {
-    if !crate::env_flag("SPIKE_AUTO_FIRE", false) {
+    let armed = app.world().get_resource::<AutoFireArmed>().map_or_else(
+        || crate::env_flag("SPIKE_AUTO_FIRE", false),
+        |armed| armed.0,
+    );
+    if !armed {
         return;
     }
     info!("auto_fire: armed — {AUTO_FIRE_SCHEDULE}");
@@ -399,6 +403,13 @@ pub fn offline_auto_fire_plugin(app: &mut App) {
             .in_set(GameplaySet),
     );
 }
+
+/// Whether [`offline_auto_fire_plugin`] arms the scripted trigger. Read once, at that mount: an
+/// `App` already carrying it is taken at its word, and otherwise `SPIKE_AUTO_FIRE` decides. Nothing
+/// in production inserts it.
+#[cfg(feature = "dev_tools")]
+#[derive(Resource, Clone, Copy)]
+struct AutoFireArmed(bool);
 
 /// The hardcoded auto-fire timeline, in `Time<Real>` seconds — the SAME clock `frame_cost` stamps
 /// its rows with, so a capture can be split into windows by these boundaries alone. Stated as one
@@ -574,49 +585,6 @@ mod tests {
         assert_eq!(AimIntent::HullLocal(local).point(), local);
     }
 
-    /// Serializes the tests that write `SPIKE_AUTO_FIRE` — the variable is process-global, so two
-    /// of these at once would each see the other's value (the same discipline `settings::store`'s
-    /// `ENV_LEASE` applies to `OVERMATCH_CONFIG_DIR`).
-    #[cfg(feature = "dev_tools")]
-    static AUTO_FIRE_ENV_LEASE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// `SPIKE_AUTO_FIRE=1` for the body's lifetime, restored on drop.
-    #[cfg(feature = "dev_tools")]
-    struct ArmedEnv {
-        previous: Option<String>,
-        _lease: std::sync::MutexGuard<'static, ()>,
-    }
-
-    #[cfg(feature = "dev_tools")]
-    impl ArmedEnv {
-        fn new() -> Self {
-            let lease = AUTO_FIRE_ENV_LEASE
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let previous = std::env::var("SPIKE_AUTO_FIRE").ok();
-            // SAFETY: the lease makes this body single-threaded with respect to the variable, and
-            // `Drop` restores it.
-            unsafe { std::env::set_var("SPIKE_AUTO_FIRE", "1") };
-            Self {
-                previous,
-                _lease: lease,
-            }
-        }
-    }
-
-    #[cfg(feature = "dev_tools")]
-    impl Drop for ArmedEnv {
-        fn drop(&mut self) {
-            // SAFETY: as above.
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var("SPIKE_AUTO_FIRE", value),
-                    None => std::env::remove_var("SPIKE_AUTO_FIRE"),
-                }
-            }
-        }
-    }
-
     /// Every system name registered in `RunFixedMainLoop`, read off the schedule GRAPH so no
     /// initialization or `update()` is needed (`Schedule::systems` requires a run first; the graph
     /// holds the nodes from `add_systems` onward — vendored bevy_ecs-0.19.0 `ScheduleGraph`).
@@ -638,19 +606,18 @@ mod tests {
 
     /// SECURITY BOUNDARY (the reason [`offline_auto_fire_plugin`] is a separate mount): the shared
     /// device-gather plugin — the one `NetClientPlugin` composes into every packaged network client
-    /// — must not register the scripted trigger, *even with `SPIKE_AUTO_FIRE` set*. A release client
-    /// builds `dev_tools` (a default feature), so if the hook rode along in `client_plugin` a player
-    /// could arm it with an env var and have scripted trigger edges sent to a live server as
-    /// genuine input.
+    /// — must not register the scripted trigger, *even in an app armed for it* ([`AutoFireArmed`],
+    /// which stands in for `SPIKE_AUTO_FIRE`). A release client builds `dev_tools` (a default feature), so
+    /// if the hook rode along in `client_plugin` a player could arm it with an env var and have
+    /// scripted trigger edges sent to a live server as genuine input.
     ///
     /// The second half is the control: the same probe DOES see `auto_fire` once the offline mount is
     /// added, so the first assertion is proof of absence rather than proof of a blind probe.
     #[test]
     #[cfg(feature = "dev_tools")]
-    fn the_shared_device_gather_never_arms_auto_fire_even_when_the_env_var_is_set() {
-        let _armed = ArmedEnv::new();
-
+    fn the_shared_device_gather_never_arms_auto_fire_even_when_armed() {
         let mut shared = App::new();
+        shared.insert_resource(AutoFireArmed(true));
         shared.add_plugins(client_plugin);
         let names = run_fixed_main_loop_systems(&shared);
         assert!(
@@ -660,10 +627,11 @@ mod tests {
         assert!(
             !names.iter().any(|name| name.contains("auto_fire")),
             "the shared client mount (which NetClientPlugin composes) armed the scripted trigger \
-             from an env var — a packaged client could then drive a live server: {names:?}",
+             — a packaged client could then drive a live server: {names:?}",
         );
 
         let mut offline = App::new();
+        offline.insert_resource(AutoFireArmed(true));
         offline.add_plugins((client_plugin, offline_auto_fire_plugin));
         assert!(
             run_fixed_main_loop_systems(&offline)

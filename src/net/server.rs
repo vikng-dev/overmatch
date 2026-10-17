@@ -651,6 +651,10 @@ fn spawn_pending_tanks(
 
 /// Construct an authoritative player tank. Initial join and respawn share this exact ownership
 /// bundle so reacquisition cannot drift from first spawn.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the authoritative tank's construction inputs: content, assets, link, peer, pose and combatant identity"
+)]
 fn spawn_player_tank(
     commands: &mut Commands,
     content: TankContent<'_>,
@@ -883,6 +887,10 @@ struct BotRespawnAt(f32);
 /// `tank::sweep_launched_turret_on_root_despawn` (`On<Remove, Rig>`, mounted in `SimPlugin` on both
 /// ends) sweeps a cooked-off turret that detached from the root, so no launched turret leaks — the same
 /// guarantee `respawn_dead_bots` relies on.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, assets, sim source, spawn lane, overrides, terrain and ids"
+)]
 fn respawn_player_tanks(
     dead: Query<(Entity, &TankCommand, &ControlledBy, &CombatantId), With<TankKnockedOut>>,
     remotes: Query<&RemoteId>,

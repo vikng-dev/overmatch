@@ -176,7 +176,10 @@ pub fn spawn_corner(commands: &mut Commands, images: &mut Assets<Image>) {
 /// Size the corner from the default UI camera's logical target width, (re)make its render images
 /// at that size in physical pixels, and point the stage camera at the live one; a replacement swaps
 /// them.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the UI camera, the stage camera's target, the corner's nodes and the image store"
+)]
 pub fn layout(
     knobs: Res<Knobs>,
     corner: Res<super::Corner>,
@@ -246,7 +249,10 @@ pub fn layout(
 }
 
 /// The corner's presence, accent, glyph and hairline.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one query per disjoint corner element, kept disjoint by their `Without` filters"
+)]
 pub fn animate(
     corner: Res<super::Corner>,
     target: Res<CornerImages>,

@@ -1825,12 +1825,12 @@ const RESET_FLAG: &str = "--reset-display";
 /// missing or corrupt file yields defaults.
 pub(crate) fn load_at_boot(app: &mut App) -> Settings {
     let (settings, note) = if std::env::args().any(|arg| arg == RESET_FLAG) {
-        store::reset();
+        store::reset(store::location().as_deref());
         // Deliberately reports as a first launch rather than inventing a note: after the reset that
         // is exactly what the next read would see, and it is what the player asked for.
         (Settings::default(), store::LoadNote::FirstLaunch)
     } else {
-        let store::Load { settings, note } = store::load();
+        let store::Load { settings, note } = store::load(store::location().as_deref());
         (settings, note)
     };
     app.insert_resource(settings);
@@ -1980,6 +1980,10 @@ pub(crate) struct CaptureWindowPinned;
 
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one writer of every rendering knob: each parameter is one knob's world target"
+)]
 fn apply_settings(
     settings: Res<Settings>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
@@ -2458,6 +2462,10 @@ impl RoundTrip {
 ///
 /// The target is resolved through `bevy_winit`'s OWN `select_monitor`, so this comparison cannot
 /// drift from the monitor `changed_windows` would actually pick.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the window, settings, the save channel, both monitor sources, placement and a local"
+)]
 fn observe_window_placement(
     _non_send_marker: bevy::ecs::system::NonSendMarker,
     window: Option<Single<(Entity, &mut Window), With<PrimaryWindow>>>,
@@ -2565,7 +2573,7 @@ fn save_on_request(mut requests: MessageReader<SaveSettings>, settings: Res<Sett
     if requests.read().count() == 0 {
         return;
     }
-    store::save(&settings);
+    store::save(store::location().as_deref(), &settings);
 }
 
 /// Name where a superseded file was preserved, or say plainly that it was not. Never silently omits

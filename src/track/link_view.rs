@@ -418,6 +418,10 @@ fn hide_link_template(mut commands: Commands, fresh: Query<(Entity, &Name), Adde
 /// does not wait for it), and latches on inserting [`LinkTemplate`]. The name scan is global rather
 /// than a walk from a root because `Link` is a SCENE ROOT — a sibling of the hull node, not a
 /// descendant of it — and both tools spawn exactly one template.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "reads the template once: names, hierarchy, transforms, meshes, materials, LOD chains, view profile and rig"
+)]
 fn bind_link_template(
     mut commands: Commands,
     named: Query<(Entity, &Name)>,

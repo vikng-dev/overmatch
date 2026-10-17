@@ -465,6 +465,10 @@ fn flush_removed_shell_path(
 /// Per-frame trail upkeep: consume new `ShellPath` points while the shell lives, age + expire
 /// points, rebuild the camera-facing ribbon mesh, and despawn the trail once its shell is gone and
 /// its smoke has fully dissolved.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "per-frame trail upkeep spanning the clock, camera, shells, trails, meshes, rng, net clock, trace and evidence"
+)]
 fn update_trails(
     time: Res<Time>,
     camera: Query<&GlobalTransform, With<PlayerView>>,

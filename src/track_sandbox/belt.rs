@@ -88,6 +88,10 @@ impl PinBelt {
 ///   finds the lift-off point between stations;
 /// - support + traction applied at the profile centroid on the terrain surface
 ///   (`+ out·(t/2 − pen_c)`), so the lever arm includes the shoe.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sandbox's belt contact: hull, field, drive input, belt state, grip, transmission and rig"
+)]
 pub(super) fn apply_belt_support_field(
     // Tick-truth Position/Rotation, NEVER GlobalTransform: the render pose updates once per
     // FRAME, so on a multi-tick frame the second tick would probe terrain against a stale
@@ -431,7 +435,10 @@ impl WrapMemory {
 ///
 /// The field is read only by the `dev_ui` panel, so it reads as dead on the default-feature lane.
 #[derive(Resource, Default)]
-#[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "dev_ui"),
+    allow(dead_code, reason = "its field is read only by the dev_ui panel")
+)]
 pub(super) struct ViewPerf {
     /// Kinematic wrap ([`conform_belts_field`]).
     pub(super) wrap_us: f32,
@@ -465,6 +472,10 @@ pub(super) struct ViewPerf {
 /// articulated circles off the sandbox rig and writes the drawn joints into the sandbox draw
 /// resources. It additionally asks the wrap for the taut REFERENCE loop, which the game never does
 /// — that is the sandbox's `-` diagnostic layer, not a view option.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the sandbox's track view: hull, wheels, field, belt state, wrap memory, perf and the rig"
+)]
 pub(super) fn conform_belts_field(
     hull: Single<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &Suspension)>,
@@ -556,6 +567,10 @@ pub(super) fn conform_belts_field(
 /// per-position [`TravelField`] the live law probes from: full droop over the road-wheel span,
 /// tapering to zero at the unsprung sprocket/idler). Grey when clear of terrain, orange when
 /// penetrating — the whole oracle, visible, at the law's ACTUAL probe points.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a gizmo layer spanning the hull, the belt, the field, the rig and the envelope"
+)]
 pub(super) fn draw_sample_points(
     mut gizmos: Gizmos,
     viz: Res<VizLayers>,

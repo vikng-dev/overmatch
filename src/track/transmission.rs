@@ -1460,6 +1460,21 @@ fn refresh_hill_hold(
     }
 }
 
+/// The crank's side of one tick, fixed before the coupling solve and shared by
+/// [`clutch_coupling`] and [`settle_crank`]: the pre-tick crank speed `omega_e` and free torque
+/// `tau_free` (rad/s, N·m), the crank-to-belt ratio `k` (gear / sprocket radius) and direction sign
+/// `dir`, the guard band `[omega_floor, omega_over]` (rad/s) and the step `dt` (s).
+#[derive(Clone, Copy)]
+struct CrankTick {
+    omega_e: f32,
+    tau_free: f32,
+    k: f32,
+    dir: f32,
+    omega_floor: f32,
+    omega_over: f32,
+    dt: f32,
+}
+
 /// THE COUPLING-LAW SLOT (stage B): the engaged main clutch between crank and geared shaft,
 /// solved semi-implicitly and capacity-clamped; returns the transmitted clutch torque τ_c.
 /// This is deliberately ONE seamed function — a torque-converter characteristic replaces
@@ -1513,22 +1528,24 @@ fn refresh_hill_hold(
 /// OVERREV_MARGIN_RPM above the rescue trigger
 /// ([`TransmissionParams::max_curve_rpm`]), so the protective upshift's crank
 /// corroboration still reads past the ceiling and fires before the guard saturates.
-#[allow(clippy::too_many_arguments)]
 fn clutch_coupling(
+    crank: CrankTick,
     j_e: f32,
     capacity: f32,
-    k: f32,
-    s: f32,
-    omega_e: f32,
     m: f32,
-    tau_free: f32,
     i_m: f32,
     f_other: f32,
-    omega_floor: f32,
-    omega_over: f32,
-    dt: f32,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) -> f32 {
+    let CrankTick {
+        omega_e,
+        tau_free,
+        k,
+        dir: s,
+        omega_floor,
+        omega_over,
+        dt,
+    } = crank;
     let tau_star = ((omega_e - k * s * m) / dt + tau_free / j_e - k * s * f_other / i_m)
         / (1.0 / j_e + k * k / i_m);
     let mut tau_c = tau_star.clamp(-capacity, capacity);
@@ -2295,7 +2312,10 @@ fn update_clutch_latch(st: &mut TransmissionState, propulsive: f32, m: f32) {
 /// stall resistance, bounded by the clutch capacity and charged by the power gate. Power follows
 /// the crank, not the input slew: a standstill pivot's power SPOOLS as the crank revs (the
 /// measured spin-up), and a lugged crank offers lug power.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the free-torque law's inputs: params, input, engagement, throttle, belt speed, ratio and both crank speeds"
+)]
 fn crank_free_torque(
     tp: &TransmissionParams,
     inp: &TransmissionInput,
@@ -2357,6 +2377,10 @@ fn crank_free_torque(
 /// masked). The difference-axis bound is 2× the per-output capacity: `F_s` splits `±F_s/2` onto
 /// the outputs, and each output's share is what the per-output datum caps (see
 /// [`TransmissionParams::steer_capacity_n`] — the pivot-dead convention fix).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the steering law reads the mode, both parameter sets, state, input and three axis forces"
+)]
 fn steering_force(
     mode: TransmissionMode,
     tp: &TransmissionParams,
@@ -2648,21 +2672,23 @@ fn apply_brake_stop_forces(
 /// unmodeled; the field-measured ~9000 rpm belt-following crank is exactly what this backstops).
 /// `max` first also self-heals a NaN (f32::max drops the NaN operand; the floor then rides
 /// through the `min` unchanged, since `ω_floor < ω_over` for every validated spec).
-#[allow(clippy::too_many_arguments)]
 fn settle_crank(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
     engaged: bool,
     next: [f32; 2],
-    k: f32,
-    dir: f32,
-    omega_e: f32,
-    tau_free: f32,
-    omega_floor: f32,
-    omega_over: f32,
-    dt: f32,
+    crank: CrankTick,
     #[cfg(feature = "bitprobe")] probe: &mut TransmissionProbe,
 ) {
+    let CrankTick {
+        omega_e,
+        tau_free,
+        k,
+        dir,
+        omega_floor,
+        omega_over,
+        dt,
+    } = crank;
     if engaged {
         let m_next = (next[0] + next[1]) / 2.0;
         let locked = k * dir * m_next;
@@ -2852,20 +2878,23 @@ fn regenerative(
     // through the gear (in place of the old f_p + f_drag — drag reaches the belt only
     // through the coupling now). Declutched, the belt gets NOTHING from the engine.
     let i_m = 2.0 * fp.inertia;
+    let crank = CrankTick {
+        omega_e,
+        tau_free,
+        k,
+        dir,
+        omega_floor,
+        omega_over,
+        dt,
+    };
     let tau_c = if engaged {
         clutch_coupling(
+            crank,
             tp.engine_inertia,
             tp.clutch_capacity,
-            k,
-            dir,
-            omega_e,
             m,
-            tau_free,
             i_m,
             -(inp.reactions[0] + inp.reactions[1]),
-            omega_floor,
-            omega_over,
-            dt,
             #[cfg(feature = "bitprobe")]
             &mut bitprobe,
         )
@@ -2940,13 +2969,7 @@ fn regenerative(
         tp,
         engaged,
         next,
-        k,
-        dir,
-        omega_e,
-        tau_free,
-        omega_floor,
-        omega_over,
-        dt,
+        crank,
         #[cfg(feature = "bitprobe")]
         &mut bitprobe,
     );

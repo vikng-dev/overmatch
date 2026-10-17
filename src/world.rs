@@ -351,6 +351,10 @@ fn report_failed_terrain_map(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "spawns the environment: three asset stores, terrain, map, window, view profile and loader"
+)]
 fn spawn_environment(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

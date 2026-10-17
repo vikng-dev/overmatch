@@ -1,0 +1,66 @@
+# Supply-chain gate: `cargo deny check`, run by CI's `deny` job (cargo-deny 0.20.2).
+
+[graph]
+# The shipped platforms (client + server); a crate reachable only on another target is not ours.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+# The feature set CI's clippy and test lanes build.
+features = ["dev_ui", "bitprobe"]
+
+[advisories]
+# Vulnerabilities are always an error. `yanked` is a level; `unmaintained` is only a scope, so
+# its warn level is set on the command line (`-W unmaintained`), in CI and locally alike.
+yanked = "warn"
+unmaintained = "all"
+ignore = [
+    { id = "RUSTSEC-2026-0344", reason = "ruzstd 0.8 is pinned by bevy_image 0.19, which decodes only our own shipped KTX2 textures with it" },
+]
+
+[licenses]
+# Exactly the licenses the dependency tree uses (`cargo deny list -l license`); a new one fails
+# the gate until it is read and added here.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+exceptions = [
+    # egui's bundled default fonts, linked by the `dev_ui` panel only.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
+]
+
+[licenses.private]
+# Our own package carries no license field; it is `publish = false`.
+ignore = true
+
+[bans]
+# Duplicate versions are banned only where they break an invariant: the glam entries below.
+multiple-versions = "allow"
+wildcards = "warn"
+# The glam split guard. MUST AGREE with `tests/determinism_deps.rs` (`AUDITED_SPLIT_GLAM`): the
+# glam that carries Cargo.toml's `scalar-math` pin (0.32.1) is the one glam the graph may hold,
+# except a second, private glam under an audited package. `wrappers` is that audited list; a
+# change to either list changes both, and a glam bump moves both version bounds here. While no
+# glam newer than ours is in the graph, the second entry reports `unused-wrapper`; that is expected.
+deny = [
+    { crate = "glam:<0.32.1", wrappers = ["obvhs"], reason = "a second glam escapes the scalar-math pin; only audited obvhs may hold one" },
+    { crate = "glam:>0.32.1", wrappers = ["obvhs"], reason = "a second glam escapes the scalar-math pin; only audited obvhs may hold one" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

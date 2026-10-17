@@ -282,8 +282,8 @@ fn a_fabricated_gap_fill_is_indistinguishable_from_a_held_trigger() {
 
     // A delay JUMP (2→3): buffer tick 11 is never authored — `set_raw` gap-fills it.
     let mut jump: PlainBuf = PlainBuf::default();
-    jump.set(tk(10), pressed.clone());
-    jump.set(tk(12), released.clone());
+    jump.set(tk(10), pressed);
+    jump.set(tk(12), released);
 
     assert_eq!(
         held.get(tk(11)),
@@ -397,7 +397,7 @@ fn the_encoder_never_compresses_across_an_absent_entry() {
     buf.set(tk(10), held.clone());
     buf.set_empty(tk(11));
     buf.set(tk(12), held.clone());
-    buf.set(tk(13), held.clone());
+    buf.set(tk(13), held);
 
     let wire = format!(
         "{:?}",

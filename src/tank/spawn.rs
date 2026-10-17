@@ -876,6 +876,10 @@ fn insert_collision_proxies(
 
 /// The root's own authored body: ADR-0011 mass, inertia extents, and center of mass (proxies add
 /// no mass), the capability + view configuration, the per-slot sim state, and the rig handles.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the root's authored body: each argument is a separate input of its construction"
+)]
 fn insert_root_components(
     commands: &mut Commands,
     root: Entity,

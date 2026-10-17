@@ -202,6 +202,10 @@ fn jitter_readout(spread: Duration, tick: Duration, horizon: Duration) -> (Strin
     (format!("+{:.0} ms", excess.as_secs_f64() * 1000.0), color)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a debug readout of time, diagnostics, tick, arrival delay and links, with two locals"
+)]
 fn update_debug_hud(
     time: Res<Time>,
     mut since_refresh: Local<f32>,

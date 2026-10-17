@@ -129,7 +129,10 @@ enum MeshState {
 impl MeshState {
     /// The three states in tap order, for the panel's segmented control. `allow(dead_code)`: only
     /// the `dev_ui` panel references it, and the module compiles without that feature.
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel")
+    )]
     const ALL: [MeshState; 3] = [MeshState::Solid, MeshState::Xray, MeshState::Hidden];
 
     fn next(self) -> Self {
@@ -141,7 +144,10 @@ impl MeshState {
     }
 
     /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel")
+    )]
     fn label(self) -> &'static str {
         match self {
             MeshState::Solid => "solid",
@@ -164,7 +170,10 @@ enum VolumeState {
 impl VolumeState {
     /// The four states in tap order, for the panel's segmented control. `allow(dead_code)`: see
     /// [`MeshState::ALL`].
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel")
+    )]
     const ALL: [VolumeState; 4] = [
         VolumeState::Hidden,
         VolumeState::OnTop,
@@ -182,7 +191,10 @@ impl VolumeState {
     }
 
     /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel")
+    )]
     fn label(self) -> &'static str {
         match self {
             VolumeState::Hidden => "off",
@@ -614,6 +626,10 @@ fn spawn_impact_marker(
 /// — armor blue, component amber. The volume components live on the sim skeleton (spawned from
 /// data, no meshes); the renderable copies of the volume geometry live in the glb view tree, and
 /// `ViewOf` is the name-keyed join between the two.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an observer classifying a bound view node: bindings, two volume roles, hierarchy, meshes and materials"
+)]
 fn paint_view_volumes(
     add: On<Add, ViewOf>,
     views: Query<&ViewOf>,
@@ -908,6 +924,10 @@ fn toggle_full_pause(
 
 /// `c` wipes the board: every shell (in-flight or frozen) with its tracer + penetration marks, and
 /// every impact marker — so you can start a clean shot.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a sandbox command sweeping shells, health and three damage-state markers"
+)]
 fn clear_shots(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ClearRequested>,

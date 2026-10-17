@@ -243,6 +243,10 @@ fn rebind_on_reinstance(
 /// then — no ordering coupling to the `WorldInstanceReady` observer. All numeric geometry (pitch,
 /// plate, sprocket/idler/wheel circles) comes from `RigGeom`; the GLB scan only finds the entities
 /// to spin.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "attaches a rig: blueprint, rig, template, tanks, hierarchy, names, wheels, transforms and meshes"
+)]
 fn bind_track_rigs(
     blueprint: Res<TankBlueprint>,
     geom: Option<Res<RigGeom>>,
@@ -570,6 +574,10 @@ fn attach_shadow_proxies(
 /// The per-frame seam: read each tank's presented root pose and replicated belt phase, lift the
 /// view wheels off the terrain field, fit the wrap, and write every view transform — all before
 /// propagation, so the whole tank renders one consistent frame.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the per-frame track view: clock, field, gear, blueprint, proxy mode and meshes, tanks and views"
+)]
 fn drive_track_views(
     time: Res<Time>,
     track: Res<TrackField>,

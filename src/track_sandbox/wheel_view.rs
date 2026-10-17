@@ -163,6 +163,10 @@ pub(super) fn gear_slot(name: &str) -> Option<(Side, GearRole)> {
 /// scene ever instantiates on a frame this system cannot complete, the wheels are dead for the whole
 /// session with nothing on screen to say so. A few hundred string-prefix compares a frame is not a
 /// price worth a race, and the scan re-binds a hot-reloaded scene for free.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "binds glb gear nodes: unbound nodes, hierarchy, transforms, meshes, stations, hull, rig and viz flags"
+)]
 fn bind_gear_nodes(
     mut commands: Commands,
     unbound: Query<(Entity, &Name, &Transform), Without<GearNode>>,

@@ -109,6 +109,24 @@ pub(super) struct TankStateHash {
     pub(super) elm: u64,
 }
 
+/// One tank root's canonical sim state, borrowed for [`hash_tank_state`]. `elements` is `None`
+/// where the element field is not disclosed (a remote client's replica); `weapon_gate` is `None`
+/// where the root carries none.
+#[derive(Clone, Copy)]
+pub(crate) struct TankState<'a> {
+    pub(crate) position: Vec3,
+    pub(crate) rotation: Quat,
+    pub(crate) linvel: Vec3,
+    pub(crate) angvel: Vec3,
+    pub(crate) drive: &'a TrackDrive,
+    pub(crate) grip: &'a TrackGrip,
+    pub(crate) elements: Option<&'a TrackGripElements>,
+    pub(crate) transmission: &'a TankTransmission,
+    pub(crate) weapon_gate: Option<&'a WeaponGate>,
+    pub(crate) servos: &'a [ServoState],
+    pub(crate) sim: &'a TankSim,
+}
+
 /// Hash a tank root's canonical sim state (see the module-level note on world-independence). Pure and
 /// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
@@ -117,19 +135,20 @@ pub(super) struct TankStateHash {
 /// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
 /// deadline, pause-present, pause tick, belt count), `TankServos` in slot order with each slot's
 /// `current, previous, velocity`, then `TankSim::weapons` in slot order.
-pub(super) fn hash_tank_state_with_elements(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
-    drive: &TrackDrive,
-    grip: &TrackGrip,
-    elements: Option<&TrackGripElements>,
-    transmission: &TankTransmission,
-    weapon_gate: Option<&WeaponGate>,
-    servos: &[ServoState],
-    sim: &TankSim,
-) -> TankStateHash {
+pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
+    let &TankState {
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        elements,
+        transmission,
+        weapon_gate,
+        servos,
+        sim,
+    } = state;
     let mut hp = Fnv64::new();
     hp.write_vec3(position);
     let pos = hp.finish();
@@ -269,7 +288,7 @@ pub(super) fn hash_tank_state_with_elements(
 }
 
 /// Test convenience for hashes whose element field is intentionally absent. Production always
-/// calls [`hash_tank_state_with_elements`] explicitly so omission cannot be accidental.
+/// builds a [`TankState`] explicitly so omission cannot be accidental.
 #[cfg(test)]
 fn test_weapon_gate() -> WeaponGate {
     WeaponGate {
@@ -288,23 +307,46 @@ fn test_servos() -> TankServos {
     }
 }
 
+/// A root's rigid-body state in hash order: position, rotation, linear and angular velocity.
 #[cfg(test)]
-fn hash_tank_state_with_gate(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
+type Pose = (Vec3, Quat, Vec3, Vec3);
+
+#[cfg(test)]
+fn hash_sample_with_gate_and_servos(
+    (position, rotation, linvel, angvel): Pose,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    transmission: &TankTransmission,
+    weapon_gate: &WeaponGate,
+    servos: &TankServos,
+    sim: &TankSim,
+) -> TankStateHash {
+    hash_tank_state(&TankState {
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        elements: None,
+        transmission,
+        weapon_gate: Some(weapon_gate),
+        servos: &servos.states,
+        sim,
+    })
+}
+
+#[cfg(test)]
+fn hash_sample_with_gate(
+    pose: Pose,
     drive: &TrackDrive,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
     sim: &TankSim,
 ) -> TankStateHash {
-    hash_tank_state_with_gate_and_servos(
-        position,
-        rotation,
-        linvel,
-        angvel,
+    hash_sample_with_gate_and_servos(
+        pose,
         drive,
         grip,
         transmission,
@@ -315,56 +357,14 @@ fn hash_tank_state_with_gate(
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn hash_tank_state_with_gate_and_servos(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
-    drive: &TrackDrive,
-    grip: &TrackGrip,
-    transmission: &TankTransmission,
-    weapon_gate: &WeaponGate,
-    servos: &TankServos,
-    sim: &TankSim,
-) -> TankStateHash {
-    hash_tank_state_with_elements(
-        position,
-        rotation,
-        linvel,
-        angvel,
-        drive,
-        grip,
-        None,
-        transmission,
-        Some(weapon_gate),
-        &servos.states,
-        sim,
-    )
-}
-
-#[cfg(test)]
-fn hash_tank_state(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
+fn hash_sample(
+    pose: Pose,
     drive: &TrackDrive,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     sim: &TankSim,
 ) -> TankStateHash {
-    hash_tank_state_with_gate(
-        position,
-        rotation,
-        linvel,
-        angvel,
-        drive,
-        grip,
-        transmission,
-        &test_weapon_gate(),
-        sim,
-    )
+    hash_sample_with_gate(pose, drive, grip, transmission, &test_weapon_gate(), sim)
 }
 
 /// In-memory fresh-App digest. `simulation` is exactly the production trace's cross-world hash;
@@ -391,34 +391,10 @@ pub(crate) struct CanonicalTankStateDigest {
 }
 
 #[cfg(test)]
-pub(crate) fn canonical_tank_state_digest(
-    position: Vec3,
-    rotation: Quat,
-    linvel: Vec3,
-    angvel: Vec3,
-    drive: &TrackDrive,
-    grip: &TrackGrip,
-    elements: &TrackGripElements,
-    transmission: &TankTransmission,
-    weapon_gate: &WeaponGate,
-    servos: &TankServos,
-    sim: &TankSim,
-) -> CanonicalTankStateDigest {
-    let hash = hash_tank_state_with_elements(
-        position,
-        rotation,
-        linvel,
-        angvel,
-        drive,
-        grip,
-        Some(elements),
-        transmission,
-        Some(weapon_gate),
-        &servos.states,
-        sim,
-    );
+pub(crate) fn canonical_tank_state_digest(state: &TankState) -> CanonicalTankStateDigest {
+    let hash = hash_tank_state(state);
     let mut phase = Fnv64::new();
-    for weapon in &sim.weapons {
+    for weapon in &state.sim.weapons {
         phase.write_u32(weapon.rounds_fired);
     }
     let rounds_fired = phase.finish();
@@ -515,8 +491,8 @@ mod tests {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let transmission = sample_transmission();
-        let a = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        let b = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let a = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
+        let b = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
         // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
         // never folded into `combined` or `sim`, so every remaining stream's bytes are unchanged.
         assert_eq!(
@@ -555,7 +531,7 @@ mod tests {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let transmission = sample_transmission();
-        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let base = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
 
         let mut av2 = av;
         av2.z = f32::from_bits(av.z.to_bits() ^ 1);
@@ -564,7 +540,7 @@ mod tests {
             av.z.to_bits(),
             "the bit flip must change the bits"
         );
-        let flipped = hash_tank_state(p, q, lv, av2, &drive, &grip, &transmission, &sim);
+        let flipped = hash_sample((p, q, lv, av2), &drive, &grip, &transmission, &sim);
 
         assert_ne!(
             base.combined, flipped.combined,
@@ -585,21 +561,15 @@ mod tests {
         let (p, q, _lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let transmission = sample_transmission();
-        let pos_zero = hash_tank_state(
-            p,
-            q,
-            Vec3::new(0.0, 0.0, 0.0),
-            av,
+        let pos_zero = hash_sample(
+            (p, q, Vec3::new(0.0, 0.0, 0.0), av),
             &drive,
             &grip,
             &transmission,
             &sim,
         );
-        let neg_zero = hash_tank_state(
-            p,
-            q,
-            Vec3::new(-0.0, 0.0, 0.0),
-            av,
+        let neg_zero = hash_sample(
+            (p, q, Vec3::new(-0.0, 0.0, 0.0), av),
             &drive,
             &grip,
             &transmission,
@@ -617,8 +587,8 @@ mod tests {
         let transmission = sample_transmission();
         let mut shifted = drive;
         shifted.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
-        let hn = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        let hs = hash_tank_state(p, q, lv, av, &shifted, &grip, &transmission, &sim);
+        let hn = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
+        let hs = hash_sample((p, q, lv, av), &shifted, &grip, &transmission, &sim);
         assert_ne!(hn.sim, hs.sim);
         assert_ne!(hn.blt, hs.blt);
         // The other carried-state streams are untouched by a belt flip.
@@ -637,12 +607,12 @@ mod tests {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let transmission = sample_transmission();
-        let base = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
+        let base = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
 
         // Drive: steer one ULP off.
         let mut drive2 = drive;
         drive2.steer = f32::from_bits(drive.steer.to_bits() ^ 1);
-        let d = hash_tank_state(p, q, lv, av, &drive2, &grip, &transmission, &sim);
+        let d = hash_sample((p, q, lv, av), &drive2, &grip, &transmission, &sim);
         assert_ne!(base.drv, d.drv);
         assert_ne!(base.sim, d.sim);
         assert_ne!(base.combined, d.combined);
@@ -660,11 +630,8 @@ mod tests {
         let [cur, prev, vel] = servo_states.states[0].hash_fields();
         servo_states.states[0] =
             crate::tank::ServoState::test_new(cur, prev, f32::from_bits(vel.to_bits() ^ 1));
-        let s = hash_tank_state_with_gate_and_servos(
-            p,
-            q,
-            lv,
-            av,
+        let s = hash_sample_with_gate_and_servos(
+            (p, q, lv, av),
             &drive,
             &grip,
             &transmission,
@@ -682,7 +649,7 @@ mod tests {
         // Readiness deadline: one tick off — must NOT touch recoil despite sharing a weapon slot.
         let mut gate = test_weapon_gate();
         gate.weapons[0].ready_tick = gate.weapons[0].ready_tick.map(|tick| tick + 1);
-        let r = hash_tank_state_with_gate(p, q, lv, av, &drive, &grip, &transmission, &gate, &sim);
+        let r = hash_sample_with_gate((p, q, lv, av), &drive, &grip, &transmission, &gate, &sim);
         assert_ne!(base.rld, r.rld);
         assert_ne!(base.sim, r.sim);
         assert_eq!(
@@ -693,11 +660,8 @@ mod tests {
         // Crew-work pause tick: discrete phase within the same atomic gate stream.
         let mut paused_gate = test_weapon_gate();
         paused_gate.weapons[0].paused_at_tick = Some(1_200);
-        let pause_hash = hash_tank_state_with_gate(
-            p,
-            q,
-            lv,
-            av,
+        let pause_hash = hash_sample_with_gate(
+            (p, q, lv, av),
             &drive,
             &grip,
             &transmission,
@@ -721,8 +685,14 @@ mod tests {
         // has no such case: it is cosmetic and deliberately unhashed.)
         let mut belt_gate = test_weapon_gate();
         belt_gate.weapons[0].belt_remaining = belt_gate.weapons[0].belt_remaining.wrapping_add(1);
-        let b =
-            hash_tank_state_with_gate(p, q, lv, av, &drive, &grip, &transmission, &belt_gate, &sim);
+        let b = hash_sample_with_gate(
+            (p, q, lv, av),
+            &drive,
+            &grip,
+            &transmission,
+            &belt_gate,
+            &sim,
+        );
         assert_ne!(base.rld, b.rld);
         assert_ne!(base.sim, b.sim);
         assert_ne!(base.combined, b.combined);
@@ -734,7 +704,7 @@ mod tests {
         // Recoil: offset one ULP off — must NOT touch the reload stream.
         let mut sim4 = sim.clone();
         sim4.weapons[0].recoil_offset = f32::from_bits(sim.weapons[0].recoil_offset.to_bits() ^ 1);
-        let c = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim4);
+        let c = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim4);
         assert_ne!(base.rec, c.rec);
         assert_ne!(base.sim, c.sim);
         assert_eq!(
@@ -745,7 +715,7 @@ mod tests {
         // Belt state: the left side's speed one ULP off — localizes to the `blt` stream.
         let mut drive5 = drive;
         drive5.sides[0].speed = f32::from_bits(drive.sides[0].speed.to_bits() ^ 1);
-        let a = hash_tank_state(p, q, lv, av, &drive5, &grip, &transmission, &sim);
+        let a = hash_sample((p, q, lv, av), &drive5, &grip, &transmission, &sim);
         assert_ne!(base.blt, a.blt);
         assert_ne!(base.sim, a.sim);
         assert_eq!(
@@ -756,7 +726,7 @@ mod tests {
         // Transmission: one crank bit off — localizes to the atomic `trn` stream.
         let mut transmission2 = transmission;
         transmission2.0.omega_e = f32::from_bits(transmission.0.omega_e.to_bits() ^ 1);
-        let t = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission2, &sim);
+        let t = hash_sample((p, q, lv, av), &drive, &grip, &transmission2, &sim);
         assert_ne!(base.trn, t.trn);
         assert_ne!(base.sim, t.sim);
         assert_ne!(base.combined, t.combined);
@@ -772,7 +742,7 @@ mod tests {
         let (p, q, lv, av, drive, sim) = sample();
         let grip = TrackGrip::default();
         let base = sample_transmission();
-        let base_hash = hash_tank_state(p, q, lv, av, &drive, &grip, &base, &sim).trn;
+        let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
         let mut variants = [base; 16];
         variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
         variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
@@ -792,7 +762,7 @@ mod tests {
         variants[15].0.hold_reengage_ticks = variants[15].0.hold_reengage_ticks.wrapping_add(1);
 
         for (index, variant) in variants.iter().enumerate() {
-            let hash = hash_tank_state(p, q, lv, av, &drive, &grip, variant, &sim).trn;
+            let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
             assert_ne!(
                 base_hash, hash,
                 "transmission inventory field {index} was not hashed"
@@ -808,35 +778,28 @@ mod tests {
         let grip = TrackGrip::default();
         let transmission = sample_transmission();
         let elements = TrackGripElements::for_links(2);
-        let base = hash_tank_state_with_elements(
-            p,
-            q,
-            lv,
-            av,
-            &drive,
-            &grip,
-            Some(&elements),
-            &transmission,
-            Some(&test_weapon_gate()),
-            &test_servos().states,
-            &sim,
-        );
+        let (gate, servos) = (test_weapon_gate(), test_servos());
+        let state = TankState {
+            position: p,
+            rotation: q,
+            linvel: lv,
+            angvel: av,
+            drive: &drive,
+            grip: &grip,
+            elements: Some(&elements),
+            transmission: &transmission,
+            weapon_gate: Some(&gate),
+            servos: &servos.states,
+            sim: &sim,
+        };
+        let base = hash_tank_state(&state);
 
         let mut strain = elements.clone();
         strain.sides[1].strain[4].z = f32::from_bits(1);
-        let strain_hash = hash_tank_state_with_elements(
-            p,
-            q,
-            lv,
-            av,
-            &drive,
-            &grip,
-            Some(&strain),
-            &transmission,
-            Some(&test_weapon_gate()),
-            &test_servos().states,
-            &sim,
-        );
+        let strain_hash = hash_tank_state(&TankState {
+            elements: Some(&strain),
+            ..state
+        });
         assert_ne!(base.elm, strain_hash.elm);
         assert_ne!(base.sim, strain_hash.sim);
         assert_eq!(
@@ -853,19 +816,10 @@ mod tests {
 
         let mut dwell = elements.clone();
         dwell.sides[0].dwell[0] = 1;
-        let dwell_hash = hash_tank_state_with_elements(
-            p,
-            q,
-            lv,
-            av,
-            &drive,
-            &grip,
-            Some(&dwell),
-            &transmission,
-            Some(&test_weapon_gate()),
-            &test_servos().states,
-            &sim,
-        );
+        let dwell_hash = hash_tank_state(&TankState {
+            elements: Some(&dwell),
+            ..state
+        });
         assert_ne!(base.elm, dwell_hash.elm);
     }
 
@@ -878,20 +832,22 @@ mod tests {
         let grip = TrackGrip::default();
         let elements = TrackGripElements::for_links(2);
         let transmission = sample_transmission();
-        let base_trace = hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &sim);
-        let base = canonical_tank_state_digest(
-            p,
-            q,
-            lv,
-            av,
-            &drive,
-            &grip,
-            &elements,
-            &transmission,
-            &test_weapon_gate(),
-            &test_servos(),
-            &sim,
-        );
+        let base_trace = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
+        let (gate, servos) = (test_weapon_gate(), test_servos());
+        let state = TankState {
+            position: p,
+            rotation: q,
+            linvel: lv,
+            angvel: av,
+            drive: &drive,
+            grip: &grip,
+            elements: Some(&elements),
+            transmission: &transmission,
+            weapon_gate: Some(&gate),
+            servos: &servos.states,
+            sim: &sim,
+        };
+        let base = canonical_tank_state_digest(&state);
         // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
         // never folded into `combined`, so `simulation` and `rollback` are unchanged.
         assert_eq!(
@@ -918,20 +874,11 @@ mod tests {
         phase_shifted.weapons[0].rounds_fired =
             phase_shifted.weapons[0].rounds_fired.wrapping_add(1);
         let shifted_trace =
-            hash_tank_state(p, q, lv, av, &drive, &grip, &transmission, &phase_shifted);
-        let shifted = canonical_tank_state_digest(
-            p,
-            q,
-            lv,
-            av,
-            &drive,
-            &grip,
-            &elements,
-            &transmission,
-            &test_weapon_gate(),
-            &test_servos(),
-            &phase_shifted,
-        );
+            hash_sample((p, q, lv, av), &drive, &grip, &transmission, &phase_shifted);
+        let shifted = canonical_tank_state_digest(&TankState {
+            sim: &phase_shifted,
+            ..state
+        });
 
         assert_eq!(base_trace.combined, shifted_trace.combined);
         assert_eq!(base.simulation, shifted.simulation);

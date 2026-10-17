@@ -341,6 +341,10 @@ fn hull_frame(
 /// net input buffer recirculate a stale sweep); [`CommittedAim::as_intent`] is what it re-authors.
 /// The servos themselves are driven by `drive_aim_servos`, shared with the gunner optic. No
 /// commitment yet (first frame, or right after a possession change): author nothing.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning mouse input, the player camera and window, the controlled tank, aim-ray geometry and the committed aim"
+)]
 fn commit_aim(
     mouse: Res<ButtonInput<MouseButton>>,
     spatial: SpatialQuery,
@@ -505,6 +509,10 @@ fn place_indicator(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning the player camera, the controlled rig's muzzle, aim-ray geometry and one UI node"
+)]
 fn update_bore_indicator(
     spatial: SpatialQuery,
     camera_query: Single<(&Camera, &GlobalTransform), With<PlayerView>>,

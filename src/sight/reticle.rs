@@ -8,6 +8,7 @@
 //! The interface is [`plugin`] (mount the whole layer) plus [`Toast`], the one widget the input half
 //! needs to raise ("X unavailable" on a refused view switch).
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -389,6 +390,10 @@ fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>
 /// (`aim::update_bore_indicator`): the sim chain steps at tick rate and the graticule would stutter
 /// against the rendered view. Reprojected after the gunner camera has placed itself this frame, so
 /// mark and view share one pose.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and two UI elements"
+)]
 fn update_ranging_reticle(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
@@ -609,6 +614,10 @@ fn optic_glass(
 /// Reads the same VIEW gun node and the same [`sight_line`] the graticule and the optic camera do,
 /// after the camera has placed itself this frame — the mask, the zero mark and the view are one
 /// pose, so the glass cannot drift against the marks inside it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a system spanning sight mode, ranging, the controlled gun, range tables, the camera and the mask material"
+)]
 fn update_optic_mask(
     mode: Res<SightMode>,
     ranging: Res<Ranging>,
@@ -705,6 +714,20 @@ fn update_intent_reticle(
     }
 }
 
+/// Whether the kill cam owns the controlled tank's view: the kill cam is mounted ([`KillCamGate`])
+/// and the controlled tank is knocked out.
+#[derive(SystemParam)]
+struct KillCamView<'w, 's> {
+    gate: Option<Res<'w, KillCamGate>>,
+    knocked_out: Query<'w, 's, (), (With<Controlled>, With<TankKnockedOut>)>,
+}
+
+impl KillCamView<'_, '_> {
+    fn owns(&self) -> bool {
+        self.gate.is_some() && !self.knocked_out.is_empty()
+    }
+}
+
 /// Show/hide the black overlay + prompt when the active view's crewman is dead. The prompt tells
 /// the player to press Lshift to switch to the other view if its crewman is alive; if both are
 /// dead, the prompt says so (the tank is effectively dead — 0 living crew imminent).
@@ -723,8 +746,7 @@ fn update_intent_reticle(
 fn update_view_death_overlay(
     mode: Res<SightMode>,
     controlled: ControlledTank,
-    kill_cam: Option<Res<KillCamGate>>,
-    knocked_out: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
+    kill_cam: KillCamView,
     views: Query<&TankViews, With<Controlled>>,
     overlays: Option<ResMut<Overlays>>,
     mut overlay_vis: Query<&mut Visibility, With<ViewDeathOverlay>>,
@@ -739,9 +761,8 @@ fn update_view_death_overlay(
 
     // The active view's crewman is down — the standalone condition for wanting this overlay. Gated on a
     // controlled tank existing (no station to be dead without one).
-    let kill_cam_owns = kill_cam.is_some() && !knocked_out.is_empty();
     let crewman_down =
-        has_controlled && !kill_cam_owns && !view_available(&controlled, &views, active_view);
+        has_controlled && !kill_cam.owns() && !view_available(&controlled, &views, active_view);
 
     // Net client: DECLARE presence only; the shared reconciler owns visibility from the fully-declared
     // set (suppressed under any higher overlay). We must not also write `Visibility` here — that would

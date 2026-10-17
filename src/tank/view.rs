@@ -33,6 +33,10 @@ pub struct ViewServo;
 /// Join an instantiated GLB view to the already-complete sim skeleton by node name. This hides
 /// declared collision proxies, seeds moving parts from current sim pose, and repairs a turret view
 /// whose sim part detached before presentation arrived. It never creates simulation state.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "an observer joining a view to its skeleton: hierarchy, names, transforms and five part-role filters"
+)]
 pub fn bind_tank_view(
     ready: On<WorldInstanceReady>,
     blueprint: Option<Res<crate::bake::TankBlueprint>>,

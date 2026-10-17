@@ -282,6 +282,10 @@ pub(super) fn harness_drive(
 }
 
 /// Record one `k` line per fixed tick (after the model force systems), then exit when done.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one log line per tick reads every model output it records"
+)]
 pub(super) fn harness_record(
     harness: Res<Harness>,
     mut log: ResMut<HarnessLog>,

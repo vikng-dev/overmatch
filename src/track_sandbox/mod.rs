@@ -1603,6 +1603,10 @@ struct ResetRequested(bool);
 /// `R` (or the panel's Reset button) cycles the rig through the reset spots (flat → narrow trench →
 /// wide trench → pit), dropping it at rest — the test tour in one key. The two triggers share this
 /// one executor; the button raises [`ResetRequested`] and this consumes it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a reset spanning input, the hull, belt, drive, transmission, rig and wheels"
+)]
 fn reset_rig(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,

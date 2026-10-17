@@ -43,30 +43,52 @@ If a candidate needs a design conversation, it is not this brief's work. Hand it
 
 Establish this before hunting, or you will file findings the compiler already rejects.
 
-CI runs, on every push and every PR (`.github/workflows/ci.yml`; the local `pre-push` hook is the
-git-lfs upload and nothing else):
+CI runs, on every push and every PR (`.github/workflows/ci.yml`, aggregated into the one `check`
+context; the local `pre-push` hook is the git-lfs upload and nothing else):
 
 ```
-cargo fmt --all --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo fmt --all --check                                                # job `fmt`
+cargo deny --locked check -W unmaintained                              # job `deny`
+cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings   # `check (clippy)`
+cargo test --locked -- --skip <the UDP probe> --skip ballistics::field_casts::  # `check (tests)`
 ```
 
-`Cargo.toml` has **no `[lints]` table**. So clippy runs stock: categories `correctness` (deny),
-`suspicious`, `style`, `complexity`, `perf` (warn) — all promoted to hard errors by `-D warnings`.
-`pedantic`, `nursery`, `restriction` and `cargo` are allow-by-default and are **not** enabled.
-(VERIFIED against the clippy lint index — §E.)
+**Clippy.** `Cargo.toml`'s `[lints.clippy]` table is the one home for lint policy (this package
+only; `vendor/` is never linted). On top of stock clippy — `correctness` (deny), `suspicious`,
+`style`, `complexity`, `perf` (warn) — it sets:
+
+| Lint | Level | Category | What it enforces |
+|---|---|---|---|
+| `type_complexity` | allow | complexity | Bevy query and `SystemParam` types are the engine's language |
+| `allow_attributes_without_reason` | warn | restriction | every `#[allow]`/`#[expect]` carries a `reason` stating its invariant |
+| `undocumented_unsafe_blocks` | warn | restriction | every `unsafe` block carries a `// SAFETY:` comment |
+| `redundant_clone` | warn | nursery | a clone whose source is never used again |
+| `needless_collect` | warn | nursery | a `collect` feeding a single iteration |
+
+Levels are `warn` so local iteration is never blocked; CI's `-D warnings` makes every one an
+error, as it does every stock warning. `too_many_arguments` (stock `complexity`) is no longer
+allowed crate-wide: each function past its limit either takes a `SystemParam` bundle or an
+argument struct, or carries an `#[expect(clippy::too_many_arguments, reason = "…")]` naming what
+its parameters are. The two nursery lints were enabled on their findings, MEASURED: 17 for
+`redundant_clone`, all real and fixed; 0 for `needless_collect`. `pedantic`, the rest of
+`nursery`, `restriction` and `cargo` stay off. (VERIFIED against the clippy lint index — §E.)
+
+**cargo-deny** (`deny.toml`, job `deny`): a vulnerability advisory fails; an unmaintained or yanked
+crate warns; a license outside the allow-list fails; a second glam outside the audited split fails
+(the same rule `tests/determinism_deps.rs` asserts; the two must agree); an unknown registry or
+git source fails. Mutation testing (`.github/workflows/mutants.yml`) is an on-demand instrument,
+never a gate.
 
 Two binding consequences:
 
-1. **Everything in those five categories is already gone from `src/`.** `redundant_clone`,
+1. **Everything those lints name is already gone from `src/`.** `redundant_clone`,
    `needless_collect`, `manual_map`, `useless_vec`, `needless_range_loop`, `clone_on_copy`,
-   `large_enum_variant` — the whole stock list is clean on a green tree. A "finding" naming one of
-   these is either wrong, or sits somewhere a human deliberately `#[allow]`ed. **Hunt what a
+   `large_enum_variant` — the whole list is clean on a green tree. A "finding" naming one of
+   these is either wrong, or sits behind an `#[expect]` whose reason says why. **Hunt what a
    linter cannot see.** That is the entire value you add over `cargo clippy`.
-2. **Do not enable `pedantic` or `nursery` as part of a simplification pass.** That is a policy
-   change with a huge diff and it is not yours to make. If you think a specific lint earns its
-   place, name the lint, count the sites it fires on, and stop. *(That ordering — propose, never
+2. **Do not enable `pedantic` or more of `nursery` as part of a simplification pass.** That is a
+   policy change with a huge diff and it is not yours to make. If you think a specific lint earns
+   its place, name the lint, count the sites it fires on, and stop. *(That ordering — propose, never
    enable — is house rule §C.7. The specific opinion that pedantic-wholesale is wrong for this
    repo is **my preference**, flagged as such.)*
 
@@ -188,7 +210,7 @@ setup, spawn, asset-load or UI-construction paths is not a finding; say so and m
 - `.clone()` of a large struct or `Vec` per tick where a borrow or `std::mem::take` works.
 - `.collect()` into a temporary that is iterated exactly once.
 
-Remember §1: stock clippy already caught the mechanical instances. What remains is the semantic
+Remember §1: clippy already caught the mechanical instances. What remains is the semantic
 kind — a clone that is cheap per call but sits inside a **194-element track-link loop**. So: **say
 which loop, and say what its N is.** A per-tick allocation with N = 1 is not worth a commit.
 
@@ -412,9 +434,9 @@ prohibited is a pattern arriving as a side effect of a cleanup commit, where nob
 
 ### C3. Leave the suite green at every commit
 
-`cargo test --locked` and `cargo clippy --locked --all-targets -- -D warnings` pass at *each*
-commit, not merely at the end of the branch. If a commit needs a follow-up to be green, it is one
-commit, not two.
+`cargo test --locked` and `cargo clippy --locked --all-targets --features dev_ui,bitprobe --
+-D warnings` pass at *each* commit, not merely at the end of the branch. If a commit needs a
+follow-up to be green, it is one commit, not two.
 
 ### C4. Commit to the working branch; never push
 

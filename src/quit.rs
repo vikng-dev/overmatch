@@ -287,7 +287,10 @@ mod terminate {
         // `BOOL` is a plain `bool` on aarch64-apple and an `i8` on x86_64-apple, so this comparison
         // against the runtime's own `NO` is the one shape that reads correctly on both — and it is
         // a `bool` comparison on exactly one of them, which is what the allow is for.
-        #[allow(clippy::bool_comparison)]
+        #[allow(
+            clippy::bool_comparison,
+            reason = "`BOOL` is `bool` on aarch64-apple only; this comparison is the one shape correct on both"
+        )]
         let failed = added == NO;
         if failed {
             error!("quit: could not install the applicationShouldTerminate: handler");

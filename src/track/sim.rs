@@ -404,7 +404,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     let circles = geom.rest.get(Side::Right).clone();
     let belt_len = geom.belt_len();
     let route = build_route(&circles, belt_len);
-    let mut loop_pts = route.pts.clone();
+    let mut loop_pts = route.pts;
     if loop_pts.first() != loop_pts.last()
         && let Some(&first) = loop_pts.first()
     {
@@ -538,6 +538,10 @@ pub(crate) struct BeltRig<'a> {
 /// Returns the per-side reports (force applications in emission order — the caller applies or
 /// integrates them, left then right, verbatim) and the transmission report. Belt state
 /// (`drive.sides`, `grip.sides`) is committed in here; forces/telemetry stay with the caller.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one tank's drivetrain tick: gear, oracle, mode, target, pose, clock, velocity field and rig"
+)]
 pub(crate) fn belt_tick<O: TerrainOracle>(
     gear: &TrackGear,
     oracle: &O,

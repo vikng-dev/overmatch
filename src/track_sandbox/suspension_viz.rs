@@ -69,7 +69,10 @@ impl GripDetail {
     /// Advance the tap-loop. Used by the `dev_ui` panel's grip-detail cycle button and by the unit
     /// test; the gated `allow` covers the default (no-`dev_ui`) build, where only the
     /// always-compiled draw code references this type.
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel and tests")
+    )]
     pub(crate) fn next(self) -> Self {
         match self {
             Self::Off => Self::Columns,
@@ -79,7 +82,10 @@ impl GripDetail {
     }
 
     /// The panel's label for this detail level. See [`Self::next`] for the gated `allow`.
-    #[cfg_attr(not(feature = "dev_ui"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "dev_ui"),
+        allow(dead_code, reason = "read only by the dev_ui panel and tests")
+    )]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Off => "off",

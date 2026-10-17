@@ -441,7 +441,10 @@ fn close(
 /// Queue each newly presented explanation the slot admits, hold the glass while the key is down,
 /// run the replacement rule on the slot's clock, keep the rig for what is on show and write the
 /// corner.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the slot's clock, store, settings, blueprint and hold key are separate inputs; `Player` and `Rig` already bundle what belongs together"
+)]
 fn drive(
     time: Res<Time>,
     mut state: ResMut<Slot>,

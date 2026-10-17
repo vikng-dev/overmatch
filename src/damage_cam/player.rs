@@ -997,6 +997,10 @@ fn rebuild_internals(
 
 /// Classify each view mesh once its spec has loaded: collision proxies and the volumes the record
 /// draws itself are hidden, everything else may ghost.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "classifies view meshes: fixture, specs, scenarios, candidates, hierarchy, names and two role filters"
+)]
 fn prepare_view(
     mut commands: Commands,
     fixture: Res<TankFixture>,
@@ -1088,6 +1092,10 @@ fn apply_ghost(
 /// While section view is on, every ghost-swap mesh wears the cut material: its own material
 /// extended by the plane, culling nothing. Off, it gets its own material back for [`apply_ghost`]
 /// to settle.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "swaps cut materials: the section toggle, the clip, two material stores, the cache and the cut and uncut sets"
+)]
 fn apply_cut(
     mut commands: Commands,
     section: Res<SectionView>,

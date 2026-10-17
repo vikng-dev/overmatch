@@ -406,6 +406,10 @@ fn resolve(
 /// tank the local player just took control of, with no view-mode event anywhere), and
 /// `Changed`/`Removed` `ChildOf` (a turret that has just been blown off its own hull and is no
 /// longer part of anybody's body).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "three dirty sources plus hierarchy, scope and mesh reads; each source is a separate change filter"
+)]
 fn resolve_visual_scopes(
     added_meshes: Query<Entity, Added<Mesh3d>>,
     changed_scopes: Query<Entity, Changed<VisualScope>>,

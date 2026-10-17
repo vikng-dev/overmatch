@@ -193,6 +193,10 @@ fn tick_weapon_gate(
 /// a held level and cycles at 60/rpm from a finite belt. Each weapon fires from its *own* muzzle
 /// and ballistics, gated by its `fire` requirement + fire timer (+ belt for an `Automatic`) — the
 /// gate lives here in the sim, where the server will enforce it, not in the input path.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the one fire system: tanks, volumes, weapons, sims, gates, bodies, hierarchy, net role and clocks"
+)]
 fn fire(
     tanks: Query<
         (

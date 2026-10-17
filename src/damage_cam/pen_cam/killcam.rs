@@ -668,7 +668,10 @@ pub fn input(
 /// names none, its tank file or scene failed to load, or it is still unstaged after
 /// [`SHOOTER_WAIT_S`] of held clock — loses beat 3 ([`Run::drop_killer_beat`]) and is staged
 /// about the victim alone.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "stages the battlefield: run, library, views, specs, loader, clock, camera and the view hierarchy reads"
+)]
 pub fn stage(
     mut run: ResMut<Run>,
     library: Res<Library>,
@@ -900,7 +903,10 @@ pub fn place(
 }
 
 /// The killer card, the death panel, the death tint and the respawn prompt.
-#[allow(clippy::type_complexity)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one query per disjoint death-screen element, kept disjoint by their `Without` filters"
+)]
 pub fn hud(
     run: Res<Run>,
     library: Res<Library>,

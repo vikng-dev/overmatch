@@ -242,7 +242,7 @@ mod tests {
         let b = hurt.0.iter_mut().find(|b| b.max > 1).unwrap();
         b.current = b.max - 1;
         assert_ne!(tints(&plan(Some(&record), &hurt, &shapes)), base);
-        let mut killed = live.clone();
+        let mut killed = live;
         killed.0[0].dead = true;
         assert_ne!(tints(&plan(Some(&record), &killed, &shapes)), base);
     }
