@@ -66,7 +66,7 @@ impl TankCommand {
 
     /// The command of a tank whose death flow owns the device ([`DeviceOwner`]): the respawn edge
     /// and nothing else.
-    pub(crate) fn neutral(self) -> Self {
+    fn neutral(self) -> Self {
         Self {
             respawn: self.respawn,
             ..default()
@@ -172,7 +172,7 @@ pub struct Bindings {
 /// the device back on the first claim that finds a live tank controlled, or none (a respawn, a
 /// disconnect). Not a capability gate: the sim never reads it.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DeviceOwner {
+enum DeviceOwner {
     #[default]
     Tank,
     DeathFlow,
@@ -219,7 +219,7 @@ fn snapshot_device_command(
 /// Decide [`DeviceOwner`] from the controlled tank's knockout fact and, while the death flow owns
 /// the device, write the controlled tank's command [neutral](TankCommand::neutral). In
 /// [`DeviceClaim`].
-pub(crate) fn claim_device(
+fn claim_device(
     mut owner: ResMut<DeviceOwner>,
     mut own: Query<(&mut TankCommand, Has<TankKnockedOut>), With<Controlled>>,
 ) {

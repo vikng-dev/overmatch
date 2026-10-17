@@ -77,7 +77,7 @@ use crate::{CombatantId, CombatantLife};
 
 /// How long the kill cam waits for the killing record from the knockout fact, real seconds. TUNED:
 /// delivery's impact timeout (`delivery::IMPACT_TIMEOUT_S`), the reference.
-pub(crate) const RECORD_WAIT_S: f32 = 1.0;
+const RECORD_WAIT_S: f32 = 1.0;
 
 /// The replay prompt. ASCII only — it reaches `Text`.
 const REPLAY: &str = "SPACE  REPLAY";
@@ -96,7 +96,7 @@ pub(crate) struct KillCamGate {
 /// The kill cam's [`drive`]: before `overlay::OverlaySet::Declare`, where the first reader of the
 /// [`KillCamGate`] it writes runs; the others run after `OverlaySet::Toggle`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct KillCamGateSet;
+pub(super) struct KillCamGateSet;
 
 /// Present where the composition mounts the game's death screen (the network client's). Without
 /// it, the kill cam draws its own stand-in: the death tint and a panel naming the knockout.
@@ -160,7 +160,7 @@ impl Run {
 
 /// The kill cam's state between frames.
 #[derive(Resource, Default)]
-pub(crate) struct Victim {
+pub(super) struct Victim {
     /// The knocked-out life served.
     death: Option<Death>,
     record: Option<Killing>,
