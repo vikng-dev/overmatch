@@ -41,6 +41,10 @@ type TankInputMessage = InputMessage<NativeStateSequence<TankCommand>>;
 /// Fixed ticks per client frame: every frame catches up several ticks (fixture data).
 const TICKS_PER_FRAME: u32 = 3;
 const CONNECT_STEPS: u32 = 2_000;
+
+/// The client's fixed ticks per frame.
+#[derive(Resource, Clone, Copy)]
+struct FrameTicks(u32);
 /// Frames of each phase once the input path is up: more than twice the input delay in ticks
 /// (fixture data).
 const PHASE_FRAMES: u32 = 4;
@@ -150,11 +154,12 @@ fn build_server(port: u16) -> App {
 }
 
 /// The windowed client's device path on the wire: the gather, the death flow's claim, the feed, the
-/// bridge and the edge consumption, for a controlled tank that carries its replicated status. The
-/// client and the tank.
-fn build_client(port: u16) -> (App, Entity) {
+/// bridge and the edge consumption, for a controlled tank that carries its replicated status, on
+/// frames of `frame_ticks` fixed ticks. The client and the tank.
+fn build_client(port: u16, frame_ticks: u32) -> (App, Entity) {
     let mut app = base_app();
-    app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK * TICKS_PER_FRAME));
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK * frame_ticks))
+        .insert_resource(FrameTicks(frame_ticks));
     app.add_plugins(ClientPlugins {
         tick_duration: TICK,
     });
@@ -240,10 +245,10 @@ fn build_client(port: u16) -> (App, Entity) {
     (app, tank)
 }
 
-/// One client frame of [`TICKS_PER_FRAME`] ticks, and the server's ticks that keep pace with it.
-/// The commands the client filed in the frame.
+/// One client frame of [`FrameTicks`] ticks, and the server's ticks that keep pace with it. The
+/// commands the client filed in the frame.
 fn step(server: &mut App, client: &mut App) -> Vec<(u32, TankCommand)> {
-    for _ in 0..TICKS_PER_FRAME {
+    for _ in 0..client.world().resource::<FrameTicks>().0 {
         server.update();
     }
     std::thread::sleep(std::time::Duration::from_micros(300));
@@ -254,11 +259,12 @@ fn step(server: &mut App, client: &mut App) -> Vec<(u32, TankCommand)> {
 }
 
 /// A connected server and client with W, D and Space held, once the client has filed more than
-/// twice the input delay and the server has received input. The server, the client and the tank.
-fn connected() -> (App, App, Entity) {
+/// twice the input delay and the server has received input, on frames of `frame_ticks` fixed
+/// ticks. The server, the client and the tank.
+fn connected(frame_ticks: u32) -> (App, App, Entity) {
     let port = free_port();
     let mut server = build_server(port);
-    let (mut client, tank) = build_client(port);
+    let (mut client, tank) = build_client(port, frame_ticks);
     finish(&mut server);
     finish(&mut client);
     let mut keys = client.world_mut().resource_mut::<ButtonInput<KeyCode>>();
@@ -313,6 +319,19 @@ fn received_on(server: &App, ticks: &[u32]) -> Vec<(u32, TankCommand)> {
         .collect()
 }
 
+/// The ticks the server received a click attested for.
+fn received_clicks(server: &App) -> usize {
+    server
+        .world()
+        .resource::<Received>()
+        .0
+        .iter()
+        .filter(|(tick, command)| {
+            command.is_some_and(|command| command.fire_primary && command.for_tick == **tick)
+        })
+        .count()
+}
+
 fn neutral(command: &TankCommand) -> bool {
     TankCommand {
         for_tick: 0,
@@ -337,7 +356,7 @@ fn live(command: &TankCommand) -> bool {
 #[test]
 fn a_dead_tank_files_only_the_neutral_command() {
     let _udp = lock_real_udp_test();
-    let (mut server, mut client, tank) = connected();
+    let (mut server, mut client, tank) = connected(TICKS_PER_FRAME);
     let delay = usize::from(SHIPPING_INPUT_DELAY_TICKS);
     let mut alive = Vec::new();
     for _ in 0..PHASE_FRAMES {
@@ -432,7 +451,7 @@ fn a_dead_tank_files_only_the_neutral_command() {
 #[test]
 fn every_tick_of_a_frame_files_the_devices_command() {
     let _udp = lock_real_udp_test();
-    let (mut server, mut client, _) = connected();
+    let (mut server, mut client, _) = connected(TICKS_PER_FRAME);
     for _ in 0..PHASE_FRAMES {
         step(&mut server, &mut client);
     }
@@ -479,17 +498,57 @@ fn every_tick_of_a_frame_files_the_devices_command() {
             "the server received {command:?} for tick {tick}"
         );
     }
-    let received_clicks = server
-        .world()
-        .resource::<Received>()
-        .0
-        .iter()
-        .filter(|(tick, command)| {
-            command.is_some_and(|command| command.fire_primary && command.for_tick == **tick)
-        })
-        .count();
     assert_eq!(
-        received_clicks, 1,
+        received_clicks(&server),
+        1,
+        "the server receives the click attested on one tick"
+    );
+}
+
+/// On frames of one tick, where every tick is a frame's last: the click the bridge restores, on
+/// the last tick of its frame, is consumed with that tick, so no later frame's device command
+/// carries it, and the server receives it attested once across the run.
+#[test]
+fn a_restored_click_is_never_filed_again() {
+    let _udp = lock_real_udp_test();
+    let (mut server, mut client, _) = connected(1);
+    for _ in 0..PHASE_FRAMES {
+        step(&mut server, &mut client);
+    }
+
+    client
+        .world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .press(MouseButton::Left);
+    let clicked = step(&mut server, &mut client);
+    client
+        .world_mut()
+        .resource_mut::<ButtonInput<MouseButton>>()
+        .clear_just_pressed(MouseButton::Left);
+    let [(click_tick, click)] = clicked[..] else {
+        panic!("a frame of one tick files one command: {clicked:?}");
+    };
+    assert!(click.fire_primary, "the click's frame files it: {click:?}");
+
+    let delay = u32::from(SHIPPING_INPUT_DELAY_TICKS);
+    let mut later = Vec::new();
+    for _ in 0..2 * delay + PHASE_FRAMES {
+        later.extend(step(&mut server, &mut client));
+    }
+    let [(_, restored)] = restored_on(&client, &[click_tick])[..] else {
+        unreachable!("one tick asked, one restored");
+    };
+    assert!(
+        restored.fire_primary,
+        "the bridge restores the click on its tick, {click_tick}: {restored:?}"
+    );
+    assert!(
+        later.iter().all(|(_, command)| !command.fire_primary),
+        "no frame after the click's files it again: {later:?}"
+    );
+    assert_eq!(
+        received_clicks(&server),
+        1,
         "the server receives the click attested on one tick"
     );
 }
