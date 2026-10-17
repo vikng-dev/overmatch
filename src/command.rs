@@ -179,8 +179,8 @@ pub(crate) enum DeviceOwner {
 }
 
 /// The systems that turn the player's device into the controlled tank's commands and view: the
-/// gather, the range dial, the aim commits, the sight toggle and the crew swap. They run only while
-/// the tank owns the device ([`DeviceOwner`]).
+/// gather, the range dial, the aim commits, the sight toggle, the crew swap and the trigger click.
+/// They run only while the tank owns the device ([`DeviceOwner`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TankDeviceSet;
 
