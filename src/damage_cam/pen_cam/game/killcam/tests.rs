@@ -4,7 +4,8 @@ use super::super::tests::{
 use bevy::camera::visibility::RenderLayers;
 
 use super::*;
-use crate::damage::KnockoutReason;
+use crate::command::CrewSwap;
+use crate::damage::{CrewStation, KnockoutReason};
 use crate::damage_cam::PenetrationReport;
 use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, recorded, report, vocabulary};
 use crate::damage_cam::pen_cam::{Exhibits, Surface};
@@ -513,9 +514,9 @@ fn each_beats_channels_resolve_on_its_first_frame() {
     }
 }
 
-/// The player's device on its real systems beside the kill cam: the gather, the sight toggle and
-/// the third-person aim commit. Mounted before the app finishes ([`app_with`]); [`device`] gives
-/// them their world.
+/// The player's device on its real systems beside the kill cam: the gather, the sight toggle, the
+/// third-person aim commit and the crew swap. Mounted before the app finishes ([`app_with`]);
+/// [`device`] gives them their world.
 fn mount_device(app: &mut App) {
     bevy::state::app::StatesPlugin.build(app);
     crate::flow::in_match_plugin(app);
@@ -524,10 +525,12 @@ fn mount_device(app: &mut App) {
     app.init_asset::<bevy::shader::Shader>();
     crate::sight::plugin(app);
     crate::aim::client_plugin(app);
+    crate::crew_ui::plugin(app);
 }
 
 /// The world of [`mount_device`]'s systems: their resources, a window and the player's camera to
-/// pick through, and a player tank whose views are all open (empty requirements: fixture data).
+/// pick through, and a player tank whose views are all open and whose first two crew bar keys are
+/// the commander's and the gunner's seats (fixture data).
 fn device(app: &mut App, player: Entity, camera: Entity) {
     app.init_resource::<crate::firecontrol::Ranging>()
         .init_resource::<avian3d::collider_tree::ColliderTrees>()
@@ -536,7 +539,9 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
     world.spawn(Window::default());
     let [hull, turret, gun, muzzle] =
         std::array::from_fn(|_| world.spawn((Transform::IDENTITY, ChildOf(player))).id());
-    world.spawn(crate::damage::VolumeOf(player));
+    for seat in [CrewStation::Commander, CrewStation::Gunner] {
+        world.spawn((seat, crate::damage::VolumeOf(player)));
+    }
     let open = || crate::tank::ViewConfig {
         fov: 0.8,
         requires: Vec::new(),
@@ -574,16 +579,28 @@ fn device(app: &mut App, player: Entity, camera: Entity) {
     ));
 }
 
-/// Every drive, fire and view key down for `frames` frames, the view key pressed anew on each.
+/// [`hold_all`]'s frames so far: its crew bar key alternates across calls.
+#[derive(Resource, Default)]
+struct Held(usize);
+
+/// Every drive, fire and view key down for `frames` frames, the view key pressed anew on each, and
+/// the crew bar's `1` and `2` tapped in turn: a swap from the first seat to the second every two
+/// frames the swap is read.
 fn hold_all(app: &mut App, frames: usize, each: impl Fn(&App)) {
     for _ in 0..frames {
+        let mut held = app.world_mut().get_resource_or_insert_with(Held::default);
+        let tap = [KeyCode::Digit1, KeyCode::Digit2][held.0 % 2];
+        held.0 += 1;
         let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-        keys.release(KeyCode::ShiftLeft);
+        for key in [KeyCode::ShiftLeft, KeyCode::Digit1, KeyCode::Digit2] {
+            keys.release(key);
+        }
         for key in [
             KeyCode::KeyW,
             KeyCode::KeyD,
             KeyCode::Space,
             KeyCode::ShiftLeft,
+            tap,
         ] {
             keys.press(key);
         }
@@ -611,9 +628,9 @@ fn let_go(app: &mut App) {
 }
 
 /// From the knockout fact to a live tank the death flow owns the device, whichever key replays:
-/// drive, fire, aim and the view key held through the run and the death screen give no command
-/// and no view change, and the replay key replays. Alive before and after, the same keys drive,
-/// fire, aim and switch the view, from the first frame of the new life.
+/// drive, fire, aim, the view key and the crew bar held through the run and the death screen give
+/// no command and no view change, and the replay key replays. Alive before and after, the same
+/// keys drive, fire, aim, switch the view and swap crew, from the first frame of the new life.
 #[test]
 fn the_death_flow_owns_the_device() {
     for replay in [
@@ -638,16 +655,21 @@ fn the_death_flow_owns_the_device() {
         );
         hold_all(&mut app, 1, |_| {});
         assert_eq!(mode(&app), SightMode::ThirdPerson, "{replay:?}");
+        let swap = Some(CrewSwap::Start(CrewStation::Commander, CrewStation::Gunner));
+        assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");
 
         // Down with every control held from the knockout's frame: the death flow lets go of them,
-        // and a fresh aim would show.
-        app.world_mut().get_mut::<TankCommand>(player).unwrap().aim = None;
+        // and a fresh aim or swap would show.
+        let mut taken = app.world_mut().get_mut::<TankCommand>(player).unwrap();
+        taken.aim = None;
+        taken.crew_swap = None;
         let (mut app, ..) = killed_in((app, player, camera), -1.0);
         let silent = |app: &App| {
             let dead = command(app);
             assert_eq!((dead.throttle, dead.steer), (0.0, 0.0), "{replay:?}");
             assert!(!dead.fire_primary && !dead.fire_secondary, "{replay:?}");
             assert_eq!(dead.aim, None, "{replay:?}: no aim taken");
+            assert_eq!(dead.crew_swap, None, "{replay:?}: no swap taken");
             assert_eq!(
                 mode(app),
                 SightMode::ThirdPerson,
@@ -670,5 +692,8 @@ fn the_death_flow_owns_the_device() {
             "{replay:?}: the new life's first frame drives"
         );
         assert!(alive.fire_secondary, "{replay:?}");
+        // The first frame's `1` picked the seat the second frame's `2` swaps with.
+        hold_all(&mut app, 1, |_| {});
+        assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");
     }
 }

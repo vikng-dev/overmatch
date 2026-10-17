@@ -155,8 +155,8 @@ pub struct Bindings {
 /// Who the player's device speaks for.
 ///
 /// While the death flow (the death screen and the kill cam) is active for the controlled tank it
-/// owns the device: [`TankDeviceSet`] stands aside, so no drive, aim, fire or sight command is
-/// taken from the device for that tank, and the respawn, map and kill cam keys are the death
+/// owns the device: [`TankDeviceSet`] stands aside, so no drive, aim, fire, sight or crew swap
+/// command is taken from the device for that tank, and the respawn, map and kill cam keys are the death
 /// flow's alone. The death flow takes the device from the replicated knockout fact of the
 /// controlled tank, before the device is read in the frame, letting go of the dead tank's held
 /// controls; it hands the device back on the first frame a live tank is controlled, or none is (a
@@ -169,8 +169,8 @@ pub(crate) enum DeviceOwner {
 }
 
 /// The systems that turn the player's device into the controlled tank's commands and view: the
-/// gather, the range dial, the aim commits and the sight toggle. They run only while the tank owns
-/// the device ([`DeviceOwner`]).
+/// gather, the range dial, the aim commits, the sight toggle and the crew swap. They run only while
+/// the tank owns the device ([`DeviceOwner`]).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TankDeviceSet;
 
