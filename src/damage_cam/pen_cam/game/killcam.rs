@@ -562,9 +562,9 @@ pub(super) fn drive(
             radius,
         });
         // The lesson's record, on the stage the slot keeps.
-        let vehicle = report.vehicle.clone();
         rig.exhibits.0.clear();
-        if let Some(tank_asset) = vehicle
+        if let Some(tank_asset) = report
+            .vehicle
             .as_deref()
             .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
         {
@@ -624,12 +624,10 @@ pub(super) fn drive(
         .filter(|run| matches!(run.beat(), Beat::Hit | Beat::Lesson));
     match staging {
         Some(run) => {
-            let vehicle = victim
+            let placed = victim
                 .record
                 .as_ref()
-                .and_then(|record| record.stored.report.vehicle.clone());
-            let placed = vehicle
-                .as_deref()
+                .and_then(|record| record.stored.report.vehicle.as_deref())
                 .is_some_and(|vehicle| rig.ready(&mut slot, vehicle));
             if let Some(view) = rig.view.as_deref() {
                 let anchor = match scene.anchors.iter().next() {
@@ -867,11 +865,11 @@ fn hud(
         let lines = card_lines(&record.killer, record.range_m);
         for (index, mut text, mut color) in &mut card_text {
             let line = match index.0 {
-                0 => "KNOCKED OUT BY".to_owned(),
-                row => lines[row - 1].clone(),
+                0 => "KNOCKED OUT BY",
+                row => lines[row - 1].as_str(),
             };
             if text.0 != line {
-                text.0 = line;
+                text.0 = line.to_owned();
             }
             color.0 = color.0.with_alpha(enter);
         }
@@ -882,11 +880,11 @@ fn hud(
     let reason = own.single().ok().map(|knocked_out| knocked_out.reason);
     for (index, mut text) in &mut panel_text {
         let line = match index.0 {
-            0 => "KNOCKED OUT".to_owned(),
-            _ => reason.map(|r| r.label().to_owned()).unwrap_or_default(),
+            0 => "KNOCKED OUT",
+            _ => reason.map_or("", |r| r.label()),
         };
         if text.0 != line {
-            text.0 = line;
+            text.0 = line.to_owned();
         }
     }
     for mut v in panel.iter_mut().chain(tint.iter_mut()) {
