@@ -330,7 +330,7 @@ fn drive(
         state.seen.insert(*key);
     }
     // Newest first: of explanations presented together only the newest opens.
-    presented.sort_by(|a, b| b.0.cmp(&a.0));
+    presented.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (recency, entry, vehicle) in presented {
         if floor.is_some_and(|floor| recency < floor) {
             continue;
