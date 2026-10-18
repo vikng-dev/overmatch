@@ -158,6 +158,7 @@ pub(super) fn presentation(app: &mut App) {
         .init_resource::<Exhibits>()
         .init_resource::<Knobs>()
         .init_resource::<look::Masks>()
+        .init_resource::<look::MaskNeed>()
         .add_systems(
             PostUpdate,
             (
@@ -177,16 +178,13 @@ pub(super) fn presentation(app: &mut App) {
     stage::plugin(app);
 }
 
-/// The corner's drawing, in order, from [`Corner`] as its driver left it this frame: the corner's
-/// size and images, the masks, the stage, its animation and the corner's frame.
+/// The corner's drawing after its masks, in order, from [`Corner`] as its driver left it this
+/// frame: the stage, its animation and the corner's frame. A driver runs the corner's size and
+/// images (`hud::layout`) first, then [`look::own`], which gives every viewer that draws the base
+/// look this frame its masks — the corner's inset and the own glass's camera alike — and then
+/// this; the game gates the corner's halves on its stage view, the glass draws beside them.
 pub(super) fn present() -> ScheduleConfigs<ScheduleSystem> {
-    (
-        hud::layout,
-        look::own,
-        stage::rebuild,
-        stage::animate,
-        hud::animate,
-    )
+    (stage::rebuild, stage::animate, hud::animate)
         .chain()
         .into_configs()
 }

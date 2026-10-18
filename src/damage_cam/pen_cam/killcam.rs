@@ -1758,11 +1758,12 @@ mod tests {
             .collect()
     }
 
-    /// The mask images' ids and sizes, where they exist.
-    fn mask_images(app: &App) -> [(AssetId<Image>, Option<UVec2>); 2] {
+    /// The ids and sizes of the mask images drawn for `viewer`, which has a set.
+    fn mask_images(app: &App, viewer: Entity) -> [(AssetId<Image>, Option<UVec2>); 2] {
         let masks = app.world().resource::<super::super::look::Masks>();
+        let set = masks.of(viewer).expect("a mask set for the viewer");
         let images = app.world().resource::<Assets<Image>>();
-        [masks.hull.id(), masks.part.id()].map(|id| (id, images.get(id).map(Image::size)))
+        [set.hull.id(), set.part.id()].map(|id| (id, images.get(id).map(Image::size)))
     }
 
     /// The kill cam's lesson owns the one mask set, drawn for the main camera: two mask cameras
@@ -1784,13 +1785,13 @@ mod tests {
         let follows = |app: &mut App, size: UVec2, scale: f32| {
             let masks = mask_cameras(app);
             assert_eq!(masks.len(), 2, "one set");
-            for (_, size_now) in mask_images(app) {
+            for (_, size_now) in mask_images(app, main) {
                 assert_eq!(size_now, Some(size));
             }
             let world = app.world();
             assert_eq!(
-                world.resource::<super::super::look::Masks>().viewer(),
-                Some(main)
+                world.resource::<super::super::look::Masks>().viewers(),
+                vec![main]
             );
             let pose = *world.get::<GlobalTransform>(main).unwrap();
             let Projection::Perspective(lens) = world.get::<Projection>(main).unwrap() else {
@@ -1821,7 +1822,7 @@ mod tests {
         let after = follows(&mut app, UVec2::new(1600, 900), 2.0);
         assert_ne!(before, after, "the lesson's camera moves");
 
-        let old = mask_images(&app);
+        let old = mask_images(&app, main);
         window(&mut app, UVec2::new(1280, 720), 1.0);
         app.update();
         follows(&mut app, UVec2::new(1280, 720), 1.0);
@@ -1829,14 +1830,16 @@ mod tests {
             assert!(app.world().resource::<Assets<Image>>().get(id).is_none());
         }
 
-        let old = mask_images(&app);
+        let old = mask_images(&app, main);
         app.world_mut().resource_mut::<Run>().t = beats.killer() + 1.0;
         app.update();
         app.update();
         assert!(mask_cameras(&mut app).is_empty());
         assert_eq!(
-            app.world().resource::<super::super::look::Masks>().viewer(),
-            None
+            app.world()
+                .resource::<super::super::look::Masks>()
+                .viewers(),
+            Vec::<Entity>::new()
         );
         for (id, _) in old {
             assert!(app.world().resource::<Assets<Image>>().get(id).is_none());
@@ -1885,12 +1888,12 @@ mod tests {
             let masks = mask_cameras(app);
             assert_eq!(masks.len(), 2);
             assert!(masks.iter().all(|(_, viewer)| *viewer == inset));
-            for (_, now) in mask_images(app) {
+            for (_, now) in mask_images(app, inset) {
                 assert_eq!(now, Some(size));
             }
         };
         owned(&mut app, UVec2::new(480, 270));
-        let old = mask_images(&app);
+        let old = mask_images(&app, inset);
         retarget(&mut app, inset, UVec2::new(960, 540), 2.0);
         app.world_mut().resource_mut::<Run>().t = start + 0.6;
         app.update();

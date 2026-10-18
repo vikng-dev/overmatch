@@ -29,7 +29,7 @@ use bevy::time::TimeUpdateStrategy;
 use super::plan::Plan;
 use super::timeline::{self, CornerKind, Turn};
 use super::{Corner, Exhibit, Exhibits, Knobs, Showing, Surface};
-use super::{hud, killcam, stage, view, world};
+use super::{hud, killcam, look, stage, view, world};
 use crate::damage_cam::shapes::TankAsset;
 use crate::damage_cam::{PenetrationReport, ShotVerdict};
 
@@ -525,6 +525,8 @@ pub(super) fn sequence(app: &mut App) {
                 view::pose,
                 killcam::stage,
                 camera_writers(),
+                hud::layout,
+                look::own,
                 super::present(),
                 world::animate,
                 labels,

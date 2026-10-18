@@ -52,11 +52,13 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
+#[cfg(feature = "dev_tools")]
+pub(crate) use self::glass::scripted_glass_plugin;
 pub(crate) use self::glass::{GlassHold, OwnGlass};
 use self::glass::{LiveState, LiveVolume};
 pub(crate) use self::killcam::{GameDeathScreen, KillCamGate};
 use super::hud::{self, CornerImages, Glyphs};
-use super::look::{MaskCamera, Masks};
+use super::look;
 use super::plan::Plan;
 use super::stage::{self, Stage};
 use super::timeline::{self, CornerKind, Lineup};
@@ -70,7 +72,7 @@ use crate::damage_cam::shapes::TankAsset;
 use crate::damage_cam::wire::{Audience, ShotExplanation, TankLife};
 use crate::settings::{PenCamCorner, Settings, VictimGlassPeek};
 use crate::spec::{TankSpec, TankSpecHandle};
-use crate::tank::Controlled;
+use crate::tank::{Controlled, Rig as TankRig};
 use crate::{CombatantId, CombatantLife};
 
 /// The corner slot on a client composition: the stage's materials and [`wire`].
@@ -90,6 +92,7 @@ fn wire(app: &mut App) {
     app.init_resource::<Slot>()
         .init_resource::<GlassHold>()
         .init_resource::<OwnGlass>()
+        .init_resource::<glass::Glass>()
         .add_observer(close)
         .add_systems(
             Update,
@@ -100,9 +103,17 @@ fn wire(app: &mut App) {
                 killcam::give_way
                     .after(crate::state::PlayerInputSet)
                     .after(crate::overlay::OverlaySet::Toggle),
-                (view::prepare_stage, view::pose_stage, super::present())
+                // The glass reads this frame's kill cam run, so after its drive; it states its
+                // mask need before the masks are owned.
+                glass::drive,
+                (view::prepare_stage, view::pose_stage, hud::layout)
                     .chain()
                     .run_if(resource_exists::<StageView>),
+                look::own,
+                super::present().run_if(resource_exists::<StageView>),
+                glass::build,
+                glass::animate,
+                glass::follow_mesh,
             )
                 .chain(),
         );
@@ -208,26 +219,35 @@ pub(crate) struct Slot {
     loaded: HashMap<String, (Handle<WorldAsset>, Handle<TankSpec>)>,
 }
 
+/// The tank file `vehicle`'s asset, read once into `cache`: the blueprint's when it names that
+/// file, else read from disk. `None`, warned once, when it cannot be read.
+pub(super) fn tank_asset(
+    cache: &mut HashMap<String, Arc<TankAsset>>,
+    vehicle: &str,
+    blueprint: Option<&TankBlueprint>,
+) -> Option<Arc<TankAsset>> {
+    if let Some(tank) = cache.get(vehicle) {
+        return Some(tank.clone());
+    }
+    let tank = match blueprint.filter(|blueprint| blueprint.file == vehicle) {
+        Some(blueprint) => TankAsset::of_blueprint(blueprint),
+        None => match TankAsset::load(vehicle) {
+            Ok(tank) => tank,
+            Err(error) => {
+                warn_once!("pen cam: cannot stage {vehicle}: {error}");
+                return None;
+            }
+        },
+    };
+    let tank = Arc::new(tank);
+    cache.insert(vehicle.to_owned(), tank.clone());
+    Some(tank)
+}
+
 impl Slot {
-    /// The tank file `vehicle`'s asset: the blueprint's when it names that file, else read from
-    /// disk. `None`, warned once, when it cannot be read.
+    /// The tank file `vehicle`'s asset ([`tank_asset`]).
     fn tank(&mut self, vehicle: &str, blueprint: Option<&TankBlueprint>) -> Option<Arc<TankAsset>> {
-        if let Some(tank) = self.tanks.get(vehicle) {
-            return Some(tank.clone());
-        }
-        let tank = match blueprint.filter(|blueprint| blueprint.file == vehicle) {
-            Some(blueprint) => TankAsset::of_blueprint(blueprint),
-            None => match TankAsset::load(vehicle) {
-                Ok(tank) => tank,
-                Err(error) => {
-                    warn_once!("pen cam: the corner cannot stage {vehicle}: {error}");
-                    return None;
-                }
-            },
-        };
-        let tank = Arc::new(tank);
-        self.tanks.insert(vehicle.to_owned(), tank.clone());
-        Some(tank)
+        tank_asset(&mut self.tanks, vehicle, blueprint)
     }
 
     /// Hold `vehicle`'s view assets loaded, so a stage view of it can spawn by the time the slot
@@ -278,7 +298,8 @@ impl Slot {
     }
 }
 
-/// The corner's entities and the presentation resources they feed.
+/// The corner's entities and the presentation resources they feed. The corner's mask set is not
+/// among them: `look::own` releases it once the corner no longer shows a frame that needs one.
 #[derive(SystemParam)]
 pub(crate) struct Rig<'w, 's> {
     commands: Commands<'w, 's>,
@@ -288,9 +309,7 @@ pub(crate) struct Rig<'w, 's> {
     stage: ResMut<'w, Stage>,
     corner: ResMut<'w, Corner>,
     exhibits: ResMut<'w, Exhibits>,
-    masks: ResMut<'w, Masks>,
-    entities:
-        Query<'w, 's, (Entity, Option<&'static ChildOf>), (With<CornerRig>, Without<MaskCamera>)>,
+    entities: Query<'w, 's, (Entity, Option<&'static ChildOf>), With<CornerRig>>,
     rigged: Query<'w, 's, (), With<CornerRig>>,
 }
 
@@ -326,7 +345,6 @@ impl Rig<'_, '_> {
     /// Despawn every entity of the corner and drop every image and resource it holds. One under
     /// another of the corner's goes with it.
     fn teardown(&mut self, state: &mut Slot) {
-        self.masks.release(&mut self.commands, &mut self.images);
         for (entity, parent) in &self.entities {
             if parent.is_none_or(|parent| !self.rigged.contains(parent.parent())) {
                 self.commands.entity(entity).despawn();
@@ -386,17 +404,19 @@ impl Rig<'_, '_> {
     }
 }
 
-/// The player's tank: who it is this life, its file and its components' live state.
+/// The player's tank: who it is this life, its body, its file and its components' live state.
 #[derive(SystemParam)]
 struct Player<'w, 's> {
     tank: Query<
         'w,
         's,
         (
+            Entity,
             &'static CombatantId,
             &'static CombatantLife,
             Option<&'static TankVolumes>,
             Option<&'static TankSpecHandle>,
+            Option<&'static TankRig>,
             Has<TankKnockedOut>,
         ),
         With<Controlled>,
@@ -407,13 +427,20 @@ struct Player<'w, 's> {
 impl Player<'_, '_> {
     /// The tank's life, while it has one and is not knocked out.
     fn life(&self) -> Option<TankLife> {
-        let (&combatant, &life, _, _, knocked_out) = self.tank.single().ok()?;
+        let (_, &combatant, &life, _, _, _, knocked_out) = self.tank.single().ok()?;
         (!knocked_out).then_some(TankLife { combatant, life })
+    }
+
+    /// The tank's body — its entity and rig — while it has a life and is not knocked out.
+    fn body(&self) -> Option<(Entity, &TankRig)> {
+        let (entity, _, _, _, _, rig, knocked_out) = self.tank.single().ok()?;
+        (!knocked_out).then_some(())?;
+        Some((entity, rig?))
     }
 
     /// The tank's file, as a record names it.
     fn vehicle(&self) -> Option<String> {
-        let (_, _, _, spec, _) = self.tank.single().ok()?;
+        let (_, _, _, _, spec, _, _) = self.tank.single().ok()?;
         let path = spec?.0.path()?;
         Some(path.path().to_string_lossy().into_owned())
     }
@@ -422,7 +449,7 @@ impl Player<'_, '_> {
         self.tank
             .single()
             .ok()
-            .and_then(|(_, _, volumes, _, _)| volumes)
+            .and_then(|(_, _, _, volumes, _, _, _)| volumes)
             .map(|volumes| LiveState::read(volumes, &self.volumes))
             .unwrap_or_default()
     }
@@ -781,8 +808,10 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::command::Bindings;
     use crate::damage_cam::PenetrationReport;
     use crate::damage_cam::delivery::tests::{SHOOTER, STRUCK, recorded, report, vocabulary};
+    use crate::damage_cam::pen_cam::look::{LookMaterial, Masks};
     use crate::damage_cam::pen_cam::stage::StageCamera;
     use crate::damage_cam::wire::{BuiltExplanation, ShotVocabulary};
 
@@ -1471,29 +1500,45 @@ mod tests {
         assert!(kinds(&mut app, 4.0).is_empty(), "released undrawn");
     }
 
-    /// Of the player's records, a ricochet that tells nothing is the latest only while none that
-    /// tells is stored; a newer one never displaces a crossing, and the glass draws the crossing's
-    /// path.
+    /// Of the player's records the glass draws strictly the newest by recency, whatever it tells:
+    /// a later clean ricochet replaces an earlier penetration, whichever arrives first, and the
+    /// glass then draws the bounce and no crossing.
     #[test]
-    fn a_ricochet_never_displaces_a_crossing_as_latest() {
-        let (mut app, _) = glass_app(Settings::default());
+    fn a_later_ricochet_replaces_an_earlier_penetration() {
+        let (mut app, _, _, _) = world_glass_app();
         let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
         let (_, ricochet, ricochet_vocabulary, _) = incoming("s3_ricochet", 1300);
+        assert!(ricochet.contact_tick > crossing.contact_tick);
         let latest = |app: &App| {
             glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
         };
+        press_x(&mut app);
+        receive(&mut app, crossing.clone(), &vocabulary);
+        assert_eq!(latest(&app), Some(ExplanationKey::of(&crossing)));
+        run(&mut app, 0.2);
+        let plan = |app: &App| {
+            let glass = app.world().resource::<glass::Glass>();
+            let plan = glass.plan().expect("the glass is built");
+            (plan.kind, !plan.crossings.is_empty(), plan.bounce.is_some())
+        };
+        assert_eq!(
+            plan(&app),
+            (CornerKind::Victim, true, false),
+            "the crossing's path"
+        );
         receive(&mut app, ricochet.clone(), &ricochet_vocabulary);
         assert_eq!(latest(&app), Some(ExplanationKey::of(&ricochet)));
-        receive(&mut app, crossing.clone(), &vocabulary);
-        assert!(ricochet.contact_tick > crossing.contact_tick);
-        assert_eq!(latest(&app), Some(ExplanationKey::of(&crossing)));
-        run(&mut app, 4.0);
-        stage_of(&mut app, OWN);
-        hold(&mut app, true);
-        run(&mut app, 0.5);
-        let plan = exhibit(&app);
-        assert_eq!(plan.kind, CornerKind::Victim);
-        assert!(!plan.crossings.is_empty(), "the crossing's path");
+        run(&mut app, 0.2);
+        assert_eq!(plan(&app), (CornerKind::Victim, false, true), "the bounce");
+
+        let (mut app, _, _, _) = world_glass_app();
+        receive(&mut app, ricochet.clone(), &ricochet_vocabulary);
+        receive(&mut app, crossing, &vocabulary);
+        assert_eq!(
+            latest(&app),
+            Some(ExplanationKey::of(&ricochet)),
+            "arrival never orders"
+        );
     }
 
     /// The hold opens the glass with no record: the base look, no path, held open for as long as
@@ -1788,5 +1833,399 @@ mod tests {
                 assert!(kinds(&mut app, 2.0).is_empty(), "{case:?}: nothing reopens");
             }
         }
+    }
+
+    // --- The own glass -------------------------------------------------------------------------
+
+    /// [`glass_app`] with the player's tank as a live body — a rig whose hull and turret nodes
+    /// carry one mesh each in a standard material, the turret's mesh node named after the
+    /// fixture's first component — the player's camera drawing an image, and the keys. The app,
+    /// the tank, its hull and turret meshes, and the camera.
+    fn world_glass_app() -> (App, Entity, [Entity; 2], Entity) {
+        use bevy::camera::{ImageRenderTarget, RenderTarget};
+        use bevy::render::render_resource::TextureFormat;
+
+        let (mut app, player) = glass_app(Settings {
+            victim_glass_peek: VictimGlassPeek::Off,
+            ..Settings::default()
+        });
+        app.insert_resource(Bindings::default())
+            .init_resource::<ButtonInput<KeyCode>>()
+            .init_resource::<ButtonInput<MouseButton>>();
+        let component = report("s9_one_box_lost").components[0].name.clone();
+        let world = app.world_mut();
+        let standard = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let hull = world
+            .spawn((
+                Name::new(view::HULL_NODE),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(player),
+            ))
+            .id();
+        let turret = world
+            .spawn((
+                Name::new("Turret"),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(hull),
+            ))
+            .id();
+        let gun = world.spawn((Transform::IDENTITY, ChildOf(turret))).id();
+        let muzzle = world.spawn((Transform::IDENTITY, ChildOf(gun))).id();
+        let mesh = |world: &mut World, parent: Entity, name: Option<String>| {
+            let mut mesh = world.spawn((
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(standard.clone()),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(parent),
+            ));
+            if let Some(name) = name {
+                mesh.insert(Name::new(name));
+            }
+            mesh.id()
+        };
+        let hull_mesh = mesh(world, hull, None);
+        let turret_mesh = mesh(world, turret, Some(component));
+        world.entity_mut(player).insert((
+            crate::tank::Rig {
+                hull,
+                turret,
+                gun,
+                muzzle,
+            },
+            Transform::IDENTITY,
+            Visibility::default(),
+        ));
+        let image = world
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_target_texture(
+                64,
+                32,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            ));
+        let camera = world
+            .spawn((
+                crate::view::PlayerView,
+                crate::render_policy::CameraProfile::BattlefieldThirdPerson,
+                RenderTarget::Image(ImageRenderTarget {
+                    handle: image,
+                    scale_factor: 1.0,
+                }),
+                Transform::from_xyz(0.0, 3.0, 10.0),
+            ))
+            .id();
+        app.update();
+        (app, player, [hull_mesh, turret_mesh], camera)
+    }
+
+    /// Press the own-glass key for one frame.
+    fn press_x(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::KeyX);
+        step(app);
+        let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::KeyX);
+        keys.clear();
+    }
+
+    /// The glass's footprint: dressed meshes, its items, mask-set viewers, images and look
+    /// materials stored, and every entity but the resources'.
+    fn glass_census(app: &mut App) -> (usize, usize, Vec<Entity>, usize, usize, usize) {
+        let viewers = app.world().resource::<Masks>().viewers();
+        let images = app.world().resource::<Assets<Image>>().len();
+        let looks = app.world().resource::<Assets<LookMaterial>>().len();
+        let world = app.world_mut();
+        let dressed = world
+            .query_filtered::<(), With<glass::Dressed>>()
+            .iter(world)
+            .count();
+        let items = world
+            .query_filtered::<(), With<glass::GlassItem>>()
+            .iter(world)
+            .count();
+        let all = world
+            .query_filtered::<(), Without<bevy::ecs::resource::IsResource>>()
+            .iter(world)
+            .count();
+        (dressed, items, viewers, images, looks, all)
+    }
+
+    /// Whether `mesh` wears the look: its look material on, its standard material off, and the
+    /// glass's mask copy under it.
+    fn wears_the_look(app: &mut App, mesh: Entity) -> bool {
+        let copies: Vec<Entity> = {
+            let world = app.world_mut();
+            let mut query = world.query::<(&glass::MaskCopy, &ChildOf)>();
+            query
+                .iter(world)
+                .filter(|(copy, parent)| copy.of() == mesh && parent.parent() == mesh)
+                .map(|(_, parent)| parent.parent())
+                .collect()
+        };
+        let entity = app.world().entity(mesh);
+        entity.contains::<glass::Dressed>()
+            && entity.contains::<MeshMaterial3d<LookMaterial>>()
+            && !entity.contains::<MeshMaterial3d<StandardMaterial>>()
+            && copies.len() == 1
+    }
+
+    /// X dresses the player's live tank — every one of its meshes wears the look, the turret's
+    /// under the live servo node — and owns one mask set, the player's camera's; another tank's
+    /// meshes are untouched, and the record's elements hang under the live hull.
+    #[test]
+    fn x_dresses_the_live_tank_for_the_players_camera() {
+        let (mut app, player, meshes, camera) = world_glass_app();
+        let other = app
+            .world_mut()
+            .spawn((
+                STRUCK,
+                CombatantLife(0),
+                Transform::IDENTITY,
+                Visibility::default(),
+            ))
+            .id();
+        let standard = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(meshes[0])
+            .unwrap()
+            .0
+            .clone();
+        let other_mesh = app
+            .world_mut()
+            .spawn((
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(standard),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(other),
+            ))
+            .id();
+        let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+        receive(&mut app, crossing, &vocabulary);
+        assert_eq!(glass_census(&mut app).0, 0, "off until the key");
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert!(app.world().resource::<OwnGlass>().on);
+        for mesh in meshes {
+            assert!(wears_the_look(&mut app, mesh), "{mesh:?}");
+        }
+        let turret = app.world().get::<crate::tank::Rig>(player).unwrap().turret;
+        assert_eq!(
+            app.world().get::<ChildOf>(meshes[1]).map(ChildOf::parent),
+            Some(turret),
+            "the dressed turret mesh is the one under the live servo node"
+        );
+        assert!(!wears_the_look(&mut app, other_mesh));
+        assert!(
+            app.world()
+                .get::<MeshMaterial3d<StandardMaterial>>(other_mesh)
+                .is_some()
+        );
+        let (dressed, items, viewers, ..) = glass_census(&mut app);
+        assert_eq!(dressed, 2);
+        assert!(
+            items > 2,
+            "the record's elements beyond the two mask copies"
+        );
+        assert_eq!(viewers, vec![camera], "the player's camera owns the masks");
+        let hull = app.world().get::<crate::tank::Rig>(player).unwrap().hull;
+        let world = app.world_mut();
+        let under_hull = world
+            .query_filtered::<&ChildOf, With<glass::GlassItem>>()
+            .iter(world)
+            .filter(|parent| parent.parent() == hull)
+            .count();
+        assert!(under_hull > 0, "the record hangs under the live hull");
+    }
+
+    /// Every deactivation — the key, a knockout, the gunner's optic, the tank gone — puts every
+    /// mesh back in exactly the material it wore and leaves nothing of the glass: no tag, no
+    /// item, no mask set, no image and no look material beyond what stood before.
+    #[test]
+    fn every_deactivation_restores_the_tank_exactly() {
+        for ending in ["key", "knockout", "sight", "gone"] {
+            let (mut app, player, meshes, _) = world_glass_app();
+            let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+            receive(&mut app, crossing, &vocabulary);
+            // A struck component, so a tint hangs under a dressed mesh.
+            {
+                let world = app.world_mut();
+                let mut volumes = world.query::<&mut crate::ballistics::ComponentHealth>();
+                let mut health = volumes
+                    .iter_mut(world)
+                    .find(|health| health.max > 1)
+                    .expect("fixture data: a component with a pool to lose points of");
+                health.current -= 1;
+            }
+            let originals: Vec<AssetId<StandardMaterial>> = meshes
+                .iter()
+                .map(|mesh| {
+                    app.world()
+                        .get::<MeshMaterial3d<StandardMaterial>>(*mesh)
+                        .unwrap()
+                        .id()
+                })
+                .collect();
+            let before = glass_census(&mut app);
+            press_x(&mut app);
+            run(&mut app, 0.2);
+            let (dressed, items, ..) = glass_census(&mut app);
+            assert_eq!(dressed, 2, "{ending}");
+            assert!(items > 2, "{ending}");
+            let mut gone = 0;
+            match ending {
+                "key" => press_x(&mut app),
+                "knockout" => {
+                    app.world_mut().entity_mut(player).insert(TankKnockedOut {
+                        reason: crate::damage::KnockoutReason::CrewLoss,
+                    });
+                }
+                "sight" => {
+                    app.insert_resource(crate::sight::SightMode::Gunner);
+                }
+                _ => {
+                    let world = app.world_mut();
+                    gone = world
+                        .query_filtered::<(), Without<bevy::ecs::resource::IsResource>>()
+                        .iter(world)
+                        .count();
+                    world.despawn(player);
+                    gone -= world
+                        .query_filtered::<(), Without<bevy::ecs::resource::IsResource>>()
+                        .iter(world)
+                        .count();
+                    // The glass's own went with the tank; the rest is the tank's.
+                    gone -= items;
+                }
+            }
+            run(&mut app, 0.2);
+            let after = glass_census(&mut app);
+            assert_eq!((after.0, after.1), (0, 0), "{ending}: nothing of the glass");
+            assert!(after.2.is_empty(), "{ending}: no mask set");
+            assert_eq!(after.3, before.3, "{ending}: images");
+            assert_eq!(after.4, before.4, "{ending}: look materials");
+            assert_eq!(after.5, before.5 - gone, "{ending}: entities");
+            if ending != "gone" {
+                for (mesh, original) in meshes.iter().zip(&originals) {
+                    let entity = app.world().entity(*mesh);
+                    assert_eq!(
+                        entity
+                            .get::<MeshMaterial3d<StandardMaterial>>()
+                            .map(|m| m.id()),
+                        Some(*original),
+                        "{ending}: the same handle"
+                    );
+                    assert!(!entity.contains::<MeshMaterial3d<LookMaterial>>());
+                }
+            }
+            assert!(app.world().resource::<OwnGlass>().on == (ending != "key"));
+        }
+    }
+
+    /// A corner that needs masks opening while the glass is on: two mask sets, each on its own
+    /// viewer; the corner's close releases its own and the glass keeps the other, dressed
+    /// throughout.
+    #[test]
+    fn the_corner_and_the_glass_each_own_their_viewers_masks() {
+        let (mut app, _, _, camera) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert_eq!(glass_census(&mut app).2, vec![camera]);
+        stage_of(&mut app, OWN);
+        let (shooter, _, vocabulary, report) = explained("s1_through_crew", 1200);
+        let kind = CornerKind::of(report.impact.verdict);
+        assert_eq!(
+            kind,
+            CornerKind::Glass,
+            "fixture data: a frame that needs masks"
+        );
+        receive(&mut app, shooter, &vocabulary);
+        let mut both = false;
+        for _ in 0..(1.0 / STEP_S) as usize {
+            step(&mut app);
+            let mut viewers = glass_census(&mut app).2;
+            viewers.sort();
+            let inset = app
+                .world_mut()
+                .query_filtered::<Entity, With<StageCamera>>()
+                .iter(app.world())
+                .next();
+            if let Some(inset) = inset {
+                let mut want = vec![camera, inset];
+                want.sort();
+                both |= viewers == want;
+            }
+            assert!(viewers.contains(&camera), "the glass keeps its set");
+            assert_eq!(glass_census(&mut app).0, 2, "and stays dressed");
+        }
+        assert!(both, "two sets, each on its own viewer");
+        run(&mut app, kind.duration() + 1.0);
+        assert_eq!(census(&mut app).0, 0, "the corner closed");
+        assert_eq!(glass_census(&mut app).2, vec![camera], "its set alone went");
+        assert_eq!(glass_census(&mut app).0, 2);
+    }
+
+    /// `name`'s record of another tank's round striking the player's first life and knocking it
+    /// out: the player's projection and the vocabulary.
+    fn killing(name: &str) -> (ShotExplanation, ShotVocabulary) {
+        let mut report = report(name);
+        report.killed = Some(crate::damage::KnockoutReason::CrewLoss);
+        let vocabulary = vocabulary(&report);
+        let mut recorded = recorded(&report, STRUCK, 1200, me());
+        recorded.contact_tick = 1201;
+        recorded.completion_tick = 1203;
+        recorded.outcome = Some(0);
+        let built = BuiltExplanation::build(&vocabulary, &recorded).unwrap();
+        let victim = built
+            .projections()
+            .into_iter()
+            .map(|(_, e)| e)
+            .next()
+            .unwrap();
+        assert_ne!(victim.audience, Audience::Shooter);
+        (victim, vocabulary)
+    }
+
+    /// A knockout suspends the glass and X during the run it starts changes nothing; the glass
+    /// returns on the respawn, the preference untouched.
+    #[test]
+    fn x_during_a_run_is_a_no_op_and_the_glass_returns_after_respawn() {
+        let (mut app, player, _, _) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert_eq!(glass_census(&mut app).0, 2);
+        let (explanation, vocabulary) = killing("s1_through_crew");
+        receive(&mut app, explanation, &vocabulary);
+        app.world_mut().entity_mut(player).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        step(&mut app);
+        assert_eq!(glass_census(&mut app).0, 0, "suspended at the knockout");
+        let running = |app: &App| app.world().resource::<killcam::Victim>().running();
+        for _ in 0..(1.0 / STEP_S) as usize {
+            if running(&app) {
+                break;
+            }
+            step(&mut app);
+        }
+        assert!(running(&app), "the run plays");
+        press_x(&mut app);
+        assert!(
+            app.world().resource::<OwnGlass>().on,
+            "the press changed nothing"
+        );
+        assert_eq!(glass_census(&mut app).0, 0);
+        let mut tank = app.world_mut().entity_mut(player);
+        tank.remove::<TankKnockedOut>();
+        tank.insert(CombatantLife(1));
+        run(&mut app, 0.2);
+        assert!(!running(&app));
+        assert_eq!(glass_census(&mut app).0, 2, "back on the new life");
     }
 }

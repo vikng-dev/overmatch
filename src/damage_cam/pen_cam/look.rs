@@ -8,9 +8,11 @@
 //! The stacking is cut by two offscreen masks drawn from the viewing camera's own pose, lens and
 //! size before it: the hull mask (each pixel's nearest hull surface: view normal and distance) and
 //! the part mask (each pixel's nearest component surface). A surface draws only where its fragment
-//! is its mask's nearest, and its edges come from that mask. The masks hold the stage's copies
-//! alone, never the battlefield, so over the world the base surface composites by straight alpha
-//! on whatever the viewer drew behind it, under the world's own depth.
+//! is its mask's nearest, and its edges come from that mask. The masks hold the looked-at tank's
+//! mask copies alone, never the battlefield, so over the world the base surface composites by
+//! straight alpha on whatever the viewer drew behind it, under the world's own depth. Each viewer
+//! that draws the look has its own set ([`Masks`]), and every material of a look is built on the
+//! set of the viewer that draws it.
 //!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
@@ -27,7 +29,7 @@ use super::plan::BoxPlan;
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
-use super::{Corner, CornerRig, Surface, WorldViewer};
+use super::{Corner, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
 /// The field's brightness per unit of its column density `∫ ds / (r² + ε²)` (m⁻¹) at full level
@@ -147,7 +149,7 @@ pub struct LookMaterial {
 }
 
 impl LookMaterial {
-    fn new(mode: f32, color: LinearRgba, alpha: f32, blend: Blend, masks: &Masks) -> Self {
+    fn new(mode: f32, color: LinearRgba, alpha: f32, blend: Blend, masks: &MaskSet) -> Self {
         Self {
             params: LookParams {
                 color: Vec4::new(color.red, color.green, color.blue, alpha),
@@ -231,17 +233,24 @@ impl Material for LookMaterial {
     }
 }
 
-/// The two mask images, and the camera they are drawn for. A set exists only while a frame that
-/// draws the base look's hull ([`needs_masks`]) is on show, and belongs to the one camera drawing
-/// the stage then: the corner's inset camera, or the main camera in the kill cam's lesson. The two
-/// never draw at once: [`Corner::showing`] holds one record on one [`Surface`], and a kill run
-/// opens no corner. Every mask camera names its viewer ([`MaskCamera`]); [`own`] makes and
-/// unmakes the set.
-#[derive(Resource, Default)]
-pub struct Masks {
+/// The two mask images one viewer's base look is drawn against. Without a set the handles are
+/// `Handle::default()`, the id bevy keeps its shared white image at: a material built on that set
+/// draws against no mask.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct MaskSet {
     pub hull: Handle<Image>,
     pub part: Handle<Image>,
-    owner: Option<MaskOwner>,
+}
+
+/// The mask sets, one per viewer whose frame draws the base look's hull this frame: the corner's
+/// inset camera or, for the kill cam's lesson, the main camera ([`Corner::showing`],
+/// [`needs_masks`]); and the own glass's camera, stated by that presentation ([`MaskNeed`]). The
+/// corner and the glass show at once, each against its own set; the lesson and the glass never
+/// do (a kill run suspends the glass). Every mask camera names its viewer ([`MaskCamera`]);
+/// [`own`] makes and unmakes each set, and nothing else despawns its cameras.
+#[derive(Resource, Default)]
+pub struct Masks {
+    sets: Vec<(MaskOwner, MaskSet)>,
 }
 
 /// The camera a mask set is drawn for, at that camera's physical viewport size and scale factor,
@@ -255,27 +264,36 @@ struct MaskOwner {
 }
 
 impl Masks {
-    /// Take the set away: its cameras despawned and its images removed. Without a set the two
-    /// handles are `Handle::default()`, the id bevy keeps its shared white image at, so only an
-    /// owned set's images are removed.
-    pub fn release(&mut self, commands: &mut Commands, images: &mut Assets<Image>) {
-        if let Some(old) = self.owner.take() {
-            for camera in old.cameras {
-                commands.entity(camera).despawn();
-            }
-            images.remove(self.hull.id());
-            images.remove(self.part.id());
-        }
-        self.hull = Handle::default();
-        self.part = Handle::default();
+    /// The set drawn for `viewer`, if one exists.
+    pub fn of(&self, viewer: Entity) -> Option<&MaskSet> {
+        self.sets
+            .iter()
+            .find(|(owner, _)| owner.viewer == viewer)
+            .map(|(_, set)| set)
     }
 
-    /// The camera the masks are drawn for, if a set exists.
+    /// Take `index`'s set away: its cameras despawned and its images removed.
+    fn release(&mut self, index: usize, commands: &mut Commands, images: &mut Assets<Image>) {
+        let (owner, set) = self.sets.remove(index);
+        for camera in owner.cameras {
+            commands.entity(camera).despawn();
+        }
+        images.remove(set.hull.id());
+        images.remove(set.part.id());
+    }
+
+    /// The cameras the sets are drawn for.
     #[cfg(test)]
-    pub(super) fn viewer(&self) -> Option<Entity> {
-        self.owner.map(|owner| owner.viewer)
+    pub(super) fn viewers(&self) -> Vec<Entity> {
+        self.sets.iter().map(|(owner, _)| owner.viewer).collect()
     }
 }
+
+/// A viewer whose frame draws the base look's hull outside the corner this frame — the own
+/// glass's camera — stated by that presentation before [`own`] runs, which reads it beside
+/// [`Corner`].
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct MaskNeed(pub Option<Entity>);
 
 /// A mask camera, drawing its mask from `viewer`'s pose and lens.
 #[derive(Component)]
@@ -297,19 +315,21 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
     ))
 }
 
-/// Give the masks to the camera that draws the stage this frame, at the physical viewport size
-/// and scale factor it renders at this frame ([`viewport_now`]), and take them away when no frame
-/// that needs them is on show: the old set's cameras are despawned and its images removed. A new
-/// viewer, size or scale makes a new set and rebuilds the stage, whose materials hold the images.
-/// The set's cameras draw just before their viewer. Runs after every system that retargets or
-/// resizes a viewer this frame. A viewer whose target cannot be resolved gets no set until it is.
+/// Give a mask set to each camera that draws the base look this frame, at the physical viewport
+/// size and scale factor it renders at this frame ([`viewport_now`]), and take a set away when
+/// its viewer's need ends: the set's cameras are despawned and its images removed. A new viewer,
+/// size or scale makes a new set and rebuilds the stage, whose materials hold the images; the
+/// glass compares its set's images itself. The set's cameras draw just before their viewer. Runs
+/// after every system that retargets or resizes a viewer this frame. A viewer whose target cannot
+/// be resolved gets no set until it is.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning the corner, three camera roles, the window, the masks and their images, and the stage"
+    reason = "a system spanning the corner, the glass's need, three camera roles, the window, the masks and their images, and the stage"
 )]
 pub fn own(
     mut commands: Commands,
     corner: Res<Corner>,
+    need: Res<MaskNeed>,
     inset: Query<Entity, With<StageCamera>>,
     main: Query<Entity, With<WorldViewer>>,
     cameras: Query<(&Camera, &RenderTarget), Without<MaskCamera>>,
@@ -319,70 +339,93 @@ pub fn own(
     mut images: ResMut<Assets<Image>>,
     mut stage: ResMut<Stage>,
 ) {
-    let viewer = corner
+    let corners = corner
         .showing
         .filter(|showing| needs_masks(showing.kind))
         .and_then(|showing| match showing.surface {
             Surface::Corner => inset.single().ok(),
             Surface::World => main.single().ok(),
         });
-    let want = viewer.and_then(|viewer| {
-        let (camera, target) = cameras.get(viewer).ok()?;
-        let (size, scale) = viewport_now(camera, target, &windows, primary.single().ok(), &images)?;
-        Some((viewer, size.max(UVec2::ONE), scale, camera.order))
-    });
-    let have = masks.owner.map(|o| (o.viewer, o.size, o.scale));
-    if want.map(|(viewer, size, scale, _)| (viewer, size, scale)) == have {
-        return;
+    let mut wanted: Vec<(Entity, UVec2, f32, isize)> = Vec::new();
+    for viewer in corners.into_iter().chain(need.0) {
+        if wanted.iter().any(|(have, ..)| *have == viewer) {
+            continue;
+        }
+        let Ok((camera, target)) = cameras.get(viewer) else {
+            continue;
+        };
+        let Some((size, scale)) =
+            viewport_now(camera, target, &windows, primary.single().ok(), &images)
+        else {
+            continue;
+        };
+        wanted.push((viewer, size.max(UVec2::ONE), scale, camera.order));
     }
-    if masks.owner.is_some() {
-        masks.release(&mut commands, &mut images);
+    // A set whose viewer no longer needs one, or needs one at another size or scale, goes.
+    let mut index = 0;
+    while index < masks.sets.len() {
+        let owner = masks.sets[index].0;
+        let kept = wanted.iter().any(|&(viewer, size, scale, _)| {
+            (viewer, size, scale) == (owner.viewer, owner.size, owner.scale)
+        });
+        if kept {
+            index += 1;
+        } else {
+            masks.release(index, &mut commands, &mut images);
+            stage.invalidate();
+        }
     }
-    stage.invalidate();
-    let Some((viewer, size, scale, order)) = want else {
-        return;
-    };
-    masks.hull = mask_image(&mut images, size);
-    masks.part = mask_image(&mut images, size);
-    let mut cameras = [Entity::PLACEHOLDER; 2];
-    for (index, (image, profile)) in [
-        (masks.hull.clone(), CameraProfile::PenCamHullMask),
-        (masks.part.clone(), CameraProfile::PenCamPartMask),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        cameras[index] = commands
-            .spawn((
-                Camera3d::default(),
-                Camera {
-                    order: order - 2 + index as isize,
-                    clear_color: ClearColorConfig::Custom(Color::NONE),
-                    ..default()
-                },
-                RenderTarget::Image(ImageRenderTarget {
-                    handle: image,
-                    scale_factor: scale,
-                }),
-                Hdr,
-                Tonemapping::None,
-                DebandDither::Disabled,
-                Msaa::Off,
-                Projection::Perspective(default()),
-                Transform::IDENTITY,
-                profile,
-                MaskCamera { viewer },
-                CornerRig,
-                crate::render_scale::NativeResolution,
-            ))
-            .id();
+    for (viewer, size, scale, order) in wanted {
+        if masks.of(viewer).is_some() {
+            continue;
+        }
+        stage.invalidate();
+        let set = MaskSet {
+            hull: mask_image(&mut images, size),
+            part: mask_image(&mut images, size),
+        };
+        let mut set_cameras = [Entity::PLACEHOLDER; 2];
+        for (index, (image, profile)) in [
+            (set.hull.clone(), CameraProfile::PenCamHullMask),
+            (set.part.clone(), CameraProfile::PenCamPartMask),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            set_cameras[index] = commands
+                .spawn((
+                    Camera3d::default(),
+                    Camera {
+                        order: order - 2 + index as isize,
+                        clear_color: ClearColorConfig::Custom(Color::NONE),
+                        ..default()
+                    },
+                    RenderTarget::Image(ImageRenderTarget {
+                        handle: image,
+                        scale_factor: scale,
+                    }),
+                    Hdr,
+                    Tonemapping::None,
+                    DebandDither::Disabled,
+                    Msaa::Off,
+                    Projection::Perspective(default()),
+                    Transform::IDENTITY,
+                    profile,
+                    MaskCamera { viewer },
+                    crate::render_scale::NativeResolution,
+                ))
+                .id();
+        }
+        masks.sets.push((
+            MaskOwner {
+                viewer,
+                size,
+                scale,
+                cameras: set_cameras,
+            },
+            set,
+        ));
     }
-    masks.owner = Some(MaskOwner {
-        viewer,
-        size,
-        scale,
-        cameras,
-    });
 }
 
 /// The physical viewport size and scale factor `camera` renders at this frame, read from the
@@ -472,13 +515,15 @@ pub struct FieldPrint {
     pub rays: Vec<(Vec3, f32)>,
 }
 
-/// Outline `prints` on every surface the base look draws, the hull's and the components'. A
-/// surface is inside a field's footprint where it faces the field's origin, lies inside its cone,
-/// behind its front and no farther than the reach of the recorded direction nearest it: the field
-/// met it there, which says nothing of what stopped. The outline is where the angle from the axis
+/// Outline `prints` on every surface the base look drawn against `masks` draws, the hull's and
+/// the components': a base or state material is one look's by the mask set it holds, so another
+/// look's surfaces (the corner's beside the glass's) keep their own footprints. A surface is
+/// inside a field's footprint where it faces the field's origin, lies inside its cone, behind its
+/// front and no farther than the reach of the recorded direction nearest it: the field met it
+/// there, which says nothing of what stopped. The outline is where the angle from the axis
 /// crosses the half-angle, its opacity [`FOOTPRINT_ALPHA`] times the field's level, at most 1, so a
 /// weak field's outline is as faint as its body.
-pub fn set_footprints(looks: &mut Assets<LookMaterial>, prints: &[FieldPrint]) {
+pub fn set_footprints(looks: &mut Assets<LookMaterial>, masks: &MaskSet, prints: &[FieldPrint]) {
     let mut lanes = [Vec4::ZERO; 3 * FOOTPRINT_FIELDS];
     let mut rays = [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS];
     let (share, metres) = FOOTPRINT_REACH_SLACK;
@@ -495,7 +540,9 @@ pub fn set_footprints(looks: &mut Assets<LookMaterial>, prints: &[FieldPrint]) {
     let hue = LinearRgba::from(timeline::FIELD);
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
-        if mode != MODE_BASE && mode != MODE_STATE {
+        if mode != MODE_BASE && mode != MODE_STATE
+            || material.hull_mask.as_ref() != Some(&masks.hull)
+        {
             continue;
         }
         material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, 0.0, 0.0, 0.0);
@@ -521,7 +568,7 @@ pub enum MaskLayer {
 }
 
 /// How a hull mesh of tier `tier` is drawn in the base look.
-pub fn hull(tier: Tier, masks: &Masks) -> HullDraw {
+pub fn hull(tier: Tier, masks: &MaskSet) -> HullDraw {
     match tier {
         Tier::Component => HullDraw {
             material: component_base(masks),
@@ -535,7 +582,7 @@ pub fn hull(tier: Tier, masks: &Masks) -> HullDraw {
 }
 
 /// The base look's one material for every hull part it draws: armour, running gear and detail.
-fn base(masks: &Masks) -> LookMaterial {
+fn base(masks: &MaskSet) -> LookMaterial {
     let edge = LinearRgba::from(BASE_EDGE);
     let mut material = LookMaterial::new(
         MODE_BASE,
@@ -553,7 +600,7 @@ fn base(masks: &Masks) -> LookMaterial {
 
 /// The base look's material for every component mesh: the hull's surface darkened, tested
 /// against the part mask. A struck component's fill covers it.
-fn component_base(masks: &Masks) -> LookMaterial {
+fn component_base(masks: &MaskSet) -> LookMaterial {
     let mut material = base(masks);
     let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
     material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
@@ -564,7 +611,7 @@ fn component_base(masks: &Masks) -> LookMaterial {
 }
 
 /// The masks' material: view normal and distance, drawn into either mask.
-pub fn hull_mask(masks: &Masks) -> LookMaterial {
+pub fn hull_mask(masks: &MaskSet) -> LookMaterial {
     LookMaterial::new(MODE_MASK, LinearRgba::BLACK, 1.0, Blend::Opaque, masks)
 }
 
@@ -586,7 +633,7 @@ fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
 /// red from the bottom up, the rest in the untouched grey, a crisp lighter line between them; a
 /// dead component charcoal under a red hatch. Its frame is set each frame
 /// ([`LookMaterial::set_fill_span`]) and its fade raises the fill.
-fn state(condition: Condition, masks: &Masks) -> LookMaterial {
+fn state(condition: Condition, masks: &MaskSet) -> LookMaterial {
     let (color, hatch) = match condition {
         Condition::Damaged(_) => (timeline::STATE_RED, false),
         Condition::Dead => (timeline::STATE_DEAD, true),
@@ -612,7 +659,7 @@ fn state(condition: Condition, masks: &Masks) -> LookMaterial {
 
 /// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]), drawn under a
 /// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn.
-pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<LookMaterial> {
+pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookMaterial> {
     condition(b, kind).map(|condition| state(condition, masks))
 }
 
@@ -621,7 +668,7 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &Masks) -> Option<LookMat
 /// eye ray as light. `cap` is the radius ε (m) the density is capped within at the origin,
 /// `strength` the cone's on-axis strength (ref-mm), drawn linearly ([`timeline::field_level`]), and
 /// `profile` its profile law in the mesh's frame ([`super::field::profile`]). Drawn over everything.
-pub fn field(cap: f32, strength: f32, profile: Vec4, masks: &Masks) -> LookMaterial {
+pub fn field(cap: f32, strength: f32, profile: Vec4, masks: &MaskSet) -> LookMaterial {
     let mut m = LookMaterial::new(
         MODE_VOLUME,
         timeline::FIELD.into(),
@@ -639,7 +686,7 @@ mod tests {
     use super::*;
 
     fn base_draw(tier: Tier) -> HullDraw {
-        hull(tier, &Masks::default())
+        hull(tier, &MaskSet::default())
     }
 
     /// The base look draws every non-component tier with one material in the hull mask, at one
@@ -676,7 +723,7 @@ mod tests {
     /// hatched when dead.
     #[test]
     fn a_struck_component_draws_the_state_scale() {
-        let masks = Masks::default();
+        let masks = MaskSet::default();
         for condition in [Condition::Damaged(0.05), Condition::Dead] {
             let m = state(condition, &masks);
             assert_eq!(m.params.mode.x, MODE_STATE);
@@ -694,7 +741,7 @@ mod tests {
     /// fills, with every field's frame, level and directions; the field itself carries none.
     #[test]
     fn the_footprint_marks_the_base_looks_surfaces() {
-        let masks = Masks::default();
+        let masks = MaskSet::default();
         let mut looks = Assets::<LookMaterial>::default();
         let base = looks.add(base(&masks));
         let component = looks.add(component_base(&masks));
@@ -712,7 +759,7 @@ mod tests {
                 (Vec3::new(0.0, 0.4, -0.9).normalize(), 1.5),
             ],
         };
-        set_footprints(&mut looks, std::slice::from_ref(&print));
+        set_footprints(&mut looks, &masks, std::slice::from_ref(&print));
         for handle in [&base, &component, &fill] {
             let p = looks.get(handle).unwrap().params;
             assert_eq!(p.foot.x, FOOTPRINT_LINE_PX);
@@ -751,7 +798,7 @@ mod tests {
     /// The field's brightness is linear in its strength through one fixed gain.
     #[test]
     fn the_field_is_linear_in_its_strength() {
-        let masks = Masks::default();
+        let masks = MaskSet::default();
         let gain = |strength: f32| field(0.04, strength, Vec4::W, &masks).params.color.w;
         assert_eq!(gain(0.0), 0.0);
         assert!((gain(7.0) / gain(1.0) - 7.0).abs() < 1e-5);

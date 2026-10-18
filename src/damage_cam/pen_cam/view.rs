@@ -185,6 +185,32 @@ pub(super) fn pose_under(
     pose
 }
 
+/// What the mesh `entity` of a tank is, whose tank file is `spec`: the names of its node chain up
+/// to the tank's root (where `is_root` holds), nearest first; its tier, wearing the material named
+/// `material` (its datablock name); and whether it is a collision proxy. The one classification of
+/// a tank's mesh, for a view's ([`classify`]) and the live tank's alike.
+pub(super) fn chain_and_tier(
+    entity: Entity,
+    material: Option<&str>,
+    spec: &TankSpec,
+    parents: &Query<&ChildOf>,
+    is_root: impl Fn(Entity) -> bool,
+    names: &Query<&Name>,
+) -> (Vec<String>, Tier, bool) {
+    let mut chain = Vec::new();
+    for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
+        if is_root(node) {
+            break;
+        }
+        if let Ok(name) = names.get(node) {
+            chain.push(name.as_str().to_owned());
+        }
+    }
+    let proxy = chain.iter().any(|name| spec.colliders.contains(name));
+    let tier = Tier::of(material, &chain, &spec.volumes);
+    (chain, tier, proxy)
+}
+
 /// What the view mesh `entity` of the view `root` is, whose vehicle's tank file is `spec`: the
 /// names of its node chain up to the view's root (where `is_root` holds), nearest first, its
 /// authored material `original` named `material`, and its tier; and whether it is a collision
@@ -203,17 +229,7 @@ fn classify(
     is_root: impl Fn(Entity) -> bool,
     names: &Query<&Name>,
 ) -> (ViewMesh, bool) {
-    let mut chain = Vec::new();
-    for node in std::iter::once(entity).chain(parents.iter_ancestors(entity)) {
-        if is_root(node) {
-            break;
-        }
-        if let Ok(name) = names.get(node) {
-            chain.push(name.as_str().to_owned());
-        }
-    }
-    let proxy = chain.iter().any(|name| spec.colliders.contains(name));
-    let tier = Tier::of(material, &chain, &spec.volumes);
+    let (chain, tier, proxy) = chain_and_tier(entity, material, spec, parents, is_root, names);
     (
         ViewMesh {
             root,

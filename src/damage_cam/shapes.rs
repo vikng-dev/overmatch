@@ -107,7 +107,6 @@ impl TankAsset {
     }
 
     /// The tank file.
-    #[cfg(test)]
     pub(crate) fn spec(&self) -> &TankSpec {
         &self.spec
     }

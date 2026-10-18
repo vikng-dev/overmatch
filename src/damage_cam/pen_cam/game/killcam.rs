@@ -181,6 +181,11 @@ impl Victim {
     fn run(&self) -> Option<Run> {
         self.death.as_ref().and_then(|death| death.run)
     }
+
+    /// Whether a run plays.
+    pub(super) fn running(&self) -> bool {
+        self.run().is_some()
+    }
 }
 
 /// A knocked-out life the kill cam serves.
