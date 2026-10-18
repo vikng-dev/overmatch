@@ -19,17 +19,21 @@
 //!   pivot, the lesson's profile [`CameraProfile::KillCamLesson`] with the stage over the live world
 //!   in the record's frame (the struck hull's pose at contact); death, the camera handed back where
 //!   the killer beat left it, under the death screen.
-//! * **Keys** (`command::Bindings`), none before [`HIT_S`] from the fact, and the game's respawn and
-//!   map likewise ([`KillCamGate::settling`]): skip ends the run at the death screen, hold freezes the
-//!   presentation clock (the orbit drifts on), replay plays the held record again from the lesson.
+//! * **Keys**, none before [`HIT_S`] from the fact, and the game's respawn and map likewise
+//!   ([`KillCamGate::settling`]): Esc ends the run at the death screen (the Esc router's first arm,
+//!   `state::EscapeAction::SkipKillCam`, which the menu then does not take), hold
+//!   (`command::Bindings::kill_cam_hold`) freezes the presentation clock (the orbit drifts on),
+//!   replay (`command::Bindings::kill_cam_replay`) plays the held record again from the lesson.
 //!   Respawn and the map are never blocked after the dead-zone: either ends the run.
 //! * **The device.** The death flow owns the player's device from the knockout fact to a live
 //!   tank (`command::DeviceOwner`), so the kill cam's keys may share a tank binding.
-//! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], before `overlay::OverlaySet::
-//!   Declare` and so before every reader of the [`KillCamGate`] it writes: the death screen there,
-//!   then the map's toggle and the respawn key, both after `OverlaySet::Toggle`. They read the gate
-//!   of the frame they run in. [`give_way`] runs after them and marks a respawn or a map taken; the
-//!   next frame's drive ends the run, so the camera, the gate and the HUD turn together.
+//! * **Order** (`Update`). [`drive`] runs in [`KillCamGateSet`], after the Esc router
+//!   (`state::EscapeRouted`, whose decision it consumes) and before `overlay::OverlaySet::Declare`,
+//!   so before every reader of the [`KillCamGate`] it writes: the death screen there, then the
+//!   map's toggle and the respawn key, both after `OverlaySet::Toggle`. They read the gate of the
+//!   frame they run in; the router reads the gate of the frame before. [`give_way`] runs after
+//!   them and marks a respawn or a map taken; the next frame's drive ends the run, so the camera,
+//!   the gate and the HUD turn together.
 //! * **Teardown.** A new life, no tank, a disconnect ([`super::CloseCorner`]), the spawn map, a
 //!   change of the kill cam or reduce-motion setting: the run ends, the camera is handed back on
 //!   the third-person profile and the stage goes with the slot's [`super::Rig::teardown`]. The
@@ -69,6 +73,7 @@ use crate::render_policy::CameraProfile;
 use crate::settings::{KillCam as KillCamSetting, ReduceMotion, Settings};
 use crate::sight::SightMode;
 use crate::spec::{TankSpecHandle, ViewKind};
+use crate::state::{EscapeAction, EscapeRouted};
 use crate::tank::{Controlled, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
@@ -82,8 +87,9 @@ const RECORD_WAIT_S: f32 = 1.0;
 /// The replay prompt. ASCII only — it reaches `Text`.
 const REPLAY: &str = "SPACE  REPLAY";
 
-/// What the kill cam asks of the game's death screen and of its respawn and map keys this frame,
-/// written by [`drive`] in [`KillCamGateSet`] before any of them reads it.
+/// What the kill cam asks of the game's death screen, of its respawn and map keys and of the Esc
+/// router this frame, written by [`drive`] in [`KillCamGateSet`] before any of them reads it (the
+/// router reads the last frame's).
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct KillCamGate {
     /// The death screen stays down: the cam waits for its record or plays its first three beats.
@@ -91,10 +97,13 @@ pub(crate) struct KillCamGate {
     /// The knockout is younger than the input dead-zone ([`HIT_S`]): respawn and the map do
     /// nothing yet.
     pub(crate) settling: bool,
+    /// A run plays: Esc is its skip, not the menu's.
+    pub(crate) running: bool,
 }
 
-/// The kill cam's [`drive`]: before `overlay::OverlaySet::Declare`, where the first reader of the
-/// [`KillCamGate`] it writes runs; the others run after `OverlaySet::Toggle`.
+/// The kill cam's [`drive`]: after the Esc router ([`EscapeRouted`]) and before
+/// `overlay::OverlaySet::Declare`, where the first reader of the [`KillCamGate`] it writes runs;
+/// the others run after `OverlaySet::Toggle`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct KillCamGateSet;
 
@@ -211,7 +220,12 @@ pub(super) fn wire(app: &mut App) {
     app.init_resource::<Victim>()
         .init_resource::<KillCamGate>()
         .init_resource::<CameraCaptive>()
-        .configure_sets(Update, KillCamGateSet.before(OverlaySet::Declare))
+        .configure_sets(
+            Update,
+            KillCamGateSet
+                .after(EscapeRouted)
+                .before(OverlaySet::Declare),
+        )
         .add_observer(disconnect)
         .add_systems(PostUpdate, place.in_set(CaptiveCameraPlaced))
         .add_systems(Update, hud.after(drive));
@@ -352,7 +366,7 @@ fn killing(store: &ShotExplanations, life: TankLife) -> Option<&StoredExplanatio
 /// read the keys, keep the stage for the lesson, and say what the death screen may show.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the kill cam's driver: the clock, the settings, the record store, the blueprint, the keys, the cursor, the run, the gate, the captive camera, the sight, the corner slot and its rig, the own tank and the scene"
+    reason = "the kill cam's driver: the clock, the settings, the record store, the blueprint, the keys, the Esc router's decision, the cursor, the run, the gate, the captive camera, the sight, the corner slot and its rig, the own tank and the scene"
 )]
 pub(super) fn drive(
     time: Res<Time>,
@@ -360,6 +374,7 @@ pub(super) fn drive(
     store: Option<Res<ShotExplanations>>,
     blueprint: Option<Res<TankBlueprint>>,
     keys: Keys,
+    escape: Option<Res<EscapeAction>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut victim: ResMut<Victim>,
     mut gate: ResMut<KillCamGate>,
@@ -463,9 +478,10 @@ pub(super) fn drive(
         });
     }
 
-    // Input: the cursor's, past the dead-zone.
+    // Input: the cursor's, past the dead-zone. The skip is the Esc router's decision, taken with
+    // the cursor already checked there; inside the dead-zone the press does nothing.
     let input = settled && crate::state::cursor_locked(cursor);
-    let skip = input && keys.just_pressed(|b| b.kill_cam_skip);
+    let skip = settled && escape.is_some_and(|action| *action == EscapeAction::SkipKillCam);
     let hold = input && keys.pressed(|b| b.kill_cam_hold);
     let replay = input && keys.just_pressed(|b| b.kill_cam_replay);
     let map = keys.map();
@@ -661,6 +677,7 @@ pub(super) fn drive(
     *gate = KillCamGate {
         holds_death_screen: death.holds_death_screen(),
         settling: !settled,
+        running: death.run.is_some(),
     };
 }
 

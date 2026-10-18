@@ -2,31 +2,24 @@
 //! decoupled from `debug_assertions` so an optimized/`--release` playtest build still carries these
 //! keys; see `Cargo.toml`). Press `G` to toggle the debug
 //! gizmos: belt-contact force arrows (cyan = support load along the contact normal, orange =
-//! traction) plus Avian's collider wireframes. Press `X` for the X-ray toggle: the tank
-//! turns translucent so the gizmos that sit *inside* the model show through (Blend materials stop
-//! writing depth, so the depth-tested gizmos behind them become visible). `F` detaches the camera.
+//! traction) plus Avian's collider wireframes. `F` detaches the camera. A see-through tank is the
+//! pen cam's own glass (`X`, `damage_cam::pen_cam::game`), not a debug key.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
 //! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers
 //! the `PhysicsGizmos` group this module configures). Strictly view-only: every system reads sim
 //! state (`&TrackContacts`, `&GlobalTransform`) immutably and writes only render-side things (gizmos,
-//! materials, camera follow), so it is safe on a predicting net client; the headless server never
-//! mounts it.
+//! camera follow), so it is safe on a predicting net client; the headless server never mounts it.
 
 use std::collections::VecDeque;
 
 use avian3d::prelude::PhysicsGizmos;
-use bevy::color::Alpha;
 use bevy::prelude::*;
 
 use crate::ballistics::{Impact, ImpactMarker};
 use crate::camera::CameraFollow;
-use crate::damage::TankKnockedOut;
-use crate::tank::{Controlled, Tank};
 use crate::track::sim::TrackContacts;
 
-/// How opaque the tank is in x-ray mode (0 = invisible, 1 = solid).
-const XRAY_ALPHA: f32 = 0.2;
 /// Metres of arrow per newton of contact force (so ~35 kN reads as a ~1.75 m arrow).
 const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 /// How many impact markers the game client keeps on screen before the oldest is despawned — the
@@ -35,15 +28,14 @@ const FORCE_VIZ_SCALE: f32 = 1.0 / 20_000.0;
 const IMPACT_MARKER_CAP: usize = 32;
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<XRay>()
-        .init_resource::<ImpactMarkerRing>()
-        // Off by default, like the x-ray — press G to bring all debug gizmos up.
+    app.init_resource::<ImpactMarkerRing>()
+        // Off by default — press G to bring all debug gizmos up.
         .insert_resource(ShowGizmos(false))
         .add_systems(Startup, (configure_physics_gizmos, setup_impact_marker))
         // The debug impact marker: a view-side subscriber to `ballistics`' sim `Impact` event
         // (ADR-0014), gated on `ShowGizmos` and ring-buffered to `IMPACT_MARKER_CAP`.
         .add_observer(spawn_impact_marker)
-        .add_systems(Update, (toggle_xray, toggle_camera_follow, toggle_gizmos))
+        .add_systems(Update, (toggle_camera_follow, toggle_gizmos))
         // Mirror the on/off state onto Avian's own gizmos (collider wireframes).
         .add_systems(
             Update,
@@ -108,42 +100,6 @@ fn draw_wheel_forces(tanks: Query<&TrackContacts>, mut gizmos: Gizmos) {
                     gizmos.arrow(c.point, tip, Color::srgb(1.0, 0.55, 0.1));
                 }
             }
-        }
-    }
-}
-
-/// Whether the tank is currently rendered translucent for debug viewing.
-#[derive(Resource, Default)]
-struct XRay(bool);
-
-fn toggle_xray(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut xray: ResMut<XRay>,
-    // Not while knocked out: X is then the kill cam's skip.
-    tank: Single<Entity, (With<Tank>, With<Controlled>, Without<TankKnockedOut>)>,
-    children: Query<&Children>,
-    mesh_mats: Query<&MeshMaterial3d<StandardMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    if !keys.just_pressed(KeyCode::KeyX) {
-        return;
-    }
-    xray.0 = !xray.0;
-    let (alpha, mode) = if xray.0 {
-        (XRAY_ALPHA, AlphaMode::Blend)
-    } else {
-        (1.0, AlphaMode::Opaque)
-    };
-
-    // Walk the tank's mesh descendants and retint their (shared) materials. Mutating an asset
-    // touches every entity using it, which is exactly what we want — the whole tank fades.
-    for entity in children.iter_descendants(*tank) {
-        let Ok(handle) = mesh_mats.get(entity) else {
-            continue;
-        };
-        if let Some(mut material) = materials.get_mut(&handle.0) {
-            material.base_color = material.base_color.with_alpha(alpha);
-            material.alpha_mode = mode;
         }
     }
 }

@@ -21,14 +21,14 @@
 //!   breaking ties ([`Recency`]); never arrival, as the store's channel is unordered. One older
 //!   than any the slot has admitted since it last held nothing, or than any admitted one still
 //!   waiting on its impact, is dropped; of several presented together only the newest opens.
-//! * **The hold.** While the own-tank key is down ([`GlassHold`],
-//!   `command::Bindings::own_tank_glass`) the glass holds the slot, with or without a record and
-//!   whatever the settings: it crossfades over a turn on show, which never resumes, and the
-//!   slot admits nothing presented while the key is down. Released, it closes over
-//!   [`timeline::CLOSE_S`], and what is presented from the release on queues by the rule: a turn
-//!   that starts before the close ends crossfades over the closing glass, one due later opens
-//!   after it. Pressed again before the close ends, it holds on and drops what queued. A teardown other than its own close is final for the press holding
-//!   it: the key opens the glass again only once let go. TUNED.
+//! * **The hold.** While [`GlassHold`] holds (the scripted hold, `OVERMATCH_GLASS_HOLD`; its key
+//!   is gone) the glass holds the slot, with or without a record and whatever the settings: it
+//!   crossfades over a turn on show, which never resumes, and the slot admits nothing presented
+//!   while it holds. Released, it closes over [`timeline::CLOSE_S`], and what is presented from the
+//!   release on queues by the rule: a turn that starts before the close ends crossfades over the
+//!   closing glass, one due later opens after it. Held again before the close ends, it holds on
+//!   and drops what queued. A teardown other than its own close is final for the hold: it opens the
+//!   glass again only once let go. TUNED.
 //! * **What it draws.** The corner: the struck tank's stage view, of the tank file the record
 //!   names, under the record's plan over the same tank asset the demo stages ([`TankAsset`]); a
 //!   component the shooter's projection does not list is the base layout, untinted. The glass: the
@@ -39,8 +39,8 @@
 //!   either setting, or a [`CloseCorner`] (the network client's disconnect). Every one goes at
 //!   once ([`Rig::teardown`]): the cameras, lights, stage view, UI and the images they own.
 //!
-//! No input reaches the corner; the hold key only opens the glass. While the player's tank is
-//! knocked out the slot holds nothing and its rig is the kill cam's ([`killcam`]).
+//! No input reaches the corner. While the player's tank is knocked out the slot holds nothing and
+//! its rig is the kill cam's ([`killcam`]).
 
 mod glass;
 mod killcam;
@@ -52,7 +52,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
-pub(crate) use self::glass::GlassHold;
+pub(crate) use self::glass::{GlassHold, OwnGlass};
 use self::glass::{LiveState, LiveVolume};
 pub(crate) use self::killcam::{GameDeathScreen, KillCamGate};
 use super::hud::{self, CornerImages, Glyphs};
@@ -73,27 +73,28 @@ use crate::spec::{TankSpec, TankSpecHandle};
 use crate::tank::Controlled;
 use crate::{CombatantId, CombatantLife};
 
-/// The corner slot on a client composition: the stage's materials, the own-tank key and [`wire`].
+/// The corner slot on a client composition: the stage's materials and [`wire`].
 pub fn plugin(app: &mut App) {
     super::materials(app);
     wire(app);
-    app.add_systems(Update, glass::read_hold.before(drive));
 }
 
 /// Close the slot now and drop everything it holds.
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct CloseCorner;
 
-/// The slot's state and systems, without the materials and the key (a headless test registers the
-/// materials' assets alone and sets [`GlassHold`] itself).
+/// The slot's state and systems, without the materials (a headless test registers the materials'
+/// assets alone and sets [`GlassHold`] itself).
 fn wire(app: &mut App) {
     super::presentation(app);
     app.init_resource::<Slot>()
         .init_resource::<GlassHold>()
+        .init_resource::<OwnGlass>()
         .add_observer(close)
         .add_systems(
             Update,
             (
+                glass::toggle,
                 drive,
                 killcam::drive.in_set(killcam::KillCamGateSet),
                 killcam::give_way
@@ -749,8 +750,8 @@ fn drive(
 }
 
 /// Dev-only, offline: `OVERMATCH_GLASS_HOLD=<from>-<to>` holds the victim glass from `from` to `to`
-/// app seconds (`Time` as `Update` sees it), as the own-tank key would, for captures of the hold.
-/// Mounted only by the offline composition.
+/// app seconds (`Time` as `Update` sees it), for captures of the hold. Mounted only by the offline
+/// composition.
 #[cfg(feature = "dev_tools")]
 pub(crate) fn scripted_hold_plugin(app: &mut App) {
     let Ok(window) = std::env::var("OVERMATCH_GLASS_HOLD") else {
@@ -769,11 +770,8 @@ pub(crate) fn scripted_hold_plugin(app: &mut App) {
     app.add_systems(
         Update,
         (move |time: Res<Time>, mut hold: ResMut<GlassHold>| {
-            if (from..to).contains(&time.elapsed_secs()) {
-                hold.0 = true;
-            }
+            hold.set_if_neq(GlassHold((from..to).contains(&time.elapsed_secs())));
         })
-        .after(glass::read_hold)
         .before(drive),
     );
 }

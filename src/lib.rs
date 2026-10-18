@@ -816,7 +816,7 @@ impl Plugin for NetClientPlugin {
         app.add_plugins(damage_cam::pen_cam::game::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
-        // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
+        // (`G` = force arrows + collider wireframes, `F` = camera detach). View-only:
         // it reads `TrackContacts`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
         // safe on a predicting client and is never mounted by the headless server (which composes
         // `SimPlugin` only, never this plugin). Behind the `dev_tools` feature (default-on).

@@ -1,4 +1,4 @@
-//! The victim glass's two layers and its key: the player's own tank as its replicated state stands
+//! The victim glass's two layers: the player's own tank as its replicated state stands
 //! ([`LiveState`]), under the latest record that struck it ([`latest`]).
 //!
 //! * **The tint reads live state only.** Each component's fill is its live HP points over its pool
@@ -18,30 +18,41 @@ use super::super::timeline::CornerKind;
 use super::Recency;
 use crate::ballistics::ComponentHealth;
 use crate::command::Bindings;
-use crate::damage::{Ammo, CrewStation, Dead, FunctionRole, TankVolumes};
+use crate::damage::{Ammo, CrewStation, Dead, FunctionRole, TankKnockedOut, TankVolumes};
 use crate::damage_cam::delivery::{
     ExplanationKey, ImpactPresence, ShotExplanations, StoredExplanation,
 };
 use crate::damage_cam::shapes::TankShapes;
 use crate::damage_cam::wire::{Audience, TankLife};
 use crate::damage_cam::{PenetrationReport, Role};
+use crate::tank::Controlled;
 
-/// Whether the own-tank key holds the victim glass open this frame.
+/// Whether the victim glass is held open this frame: by the scripted hold alone (its key is gone).
 #[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
 pub(crate) struct GlassHold(pub(crate) bool);
 
-/// Read [`Bindings::own_tank_glass`] into [`GlassHold`]: held while the key is down and the cursor
-/// is captured, so a menu or a pause lets go of it.
-pub(super) fn read_hold(
+/// The player's own-glass preference, which [`Bindings::own_glass`] toggles: kept across lives,
+/// respawn, the map and a disconnect, so the glass returns on the next live tank.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct OwnGlass {
+    pub(crate) on: bool,
+}
+
+/// Flip [`OwnGlass`] on the key, while the cursor is captured (a menu or a pause takes the key)
+/// and the player's tank is live: knocked out, the death flow owns the device and a press changes
+/// nothing, so a kill cam run never flips it.
+pub(super) fn toggle(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    bindings: Res<Bindings>,
+    bindings: Option<Res<Bindings>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
-    mut hold: ResMut<GlassHold>,
+    live: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
+    mut glass: ResMut<OwnGlass>,
 ) {
-    let held =
-        crate::state::cursor_locked(cursor) && bindings.own_tank_glass.pressed(&keys, &mouse);
-    hold.set_if_neq(GlassHold(held));
+    let pressed = bindings.is_some_and(|bindings| bindings.own_glass.just_pressed(&keys, &mouse));
+    if pressed && !live.is_empty() && crate::state::cursor_locked(cursor) {
+        glass.on = !glass.on;
+    }
 }
 
 /// One health-bearing volume of the player's tank as its replicated state stands.
