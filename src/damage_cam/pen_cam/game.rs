@@ -101,6 +101,7 @@ fn wire(app: &mut App) {
                 glass::animate,
                 glass::follow_mesh,
                 log_presence,
+                glass::log_presence,
             )
                 .chain(),
         );

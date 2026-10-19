@@ -603,6 +603,22 @@ pub(super) fn animate(
     }
 }
 
+/// Log each edge of the glass's drawing, on `Time<Real>` — the frame-cost stream's clock
+/// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by the glass.
+pub(super) fn log_presence(state: Res<Glass>, time: Res<Time<Real>>, mut on: Local<bool>) {
+    let now = state.built.is_some();
+    if now == *on {
+        return;
+    }
+    let t = time.elapsed_secs_f64();
+    if now {
+        debug!("pen cam: the own glass is on at t={t:.3} s (Time<Real>)");
+    } else {
+        debug!("pen cam: the own glass is off at t={t:.3} s (Time<Real>)");
+    }
+    *on = now;
+}
+
 /// A mask copy follows its source's mesh handle: a pooled shoe draws the rung its belt writes.
 pub(super) fn follow_mesh(
     sources: Query<&Mesh3d, (Changed<Mesh3d>, With<Dressed>)>,

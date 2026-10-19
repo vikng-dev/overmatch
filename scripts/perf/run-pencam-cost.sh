@@ -1,9 +1,10 @@
 #!/bin/zsh
 # =============================== RUNBOOK ===============================
 # The pen cam's frame cost in the game: what each surface costs while it is on screen — the
-# shooter's corner, the victim's glass, the kill cam — offline and over the network. Every stream
+# shooter's corner, the own glass, the kill cam — offline and over the network. Every stream
 # carries its own surface marks (debug lines the client writes on the frame stream's clock,
-# `Time<Real>`; src/damage_cam/pen_cam/game.rs `log_presence`, game/killcam.rs `log_run`), so each
+# `Time<Real>`; src/damage_cam/pen_cam/game.rs `log_presence`, game/glass.rs `log_presence`,
+# game/killcam.rs `log_run`), so each
 # number is a same-session comparison: frames with the surface on screen against frames without,
 # same clock, same thermals, same background load. The paired `-off` condition runs the same
 # scripted schedule with the surface's setting Off, and the analyzer applies the `-on` run's
@@ -14,8 +15,9 @@
 #   corner-on/off   offline target-ahead duel; the scripted trigger fires the player's guns
 #                   (SPIKE_AUTO_FIRE: MG 20-50 s, main gun 60-75 s). PEN CAM CORNER All / Off.
 #   glass-on/off    offline target-fires: the target's main gun into the player's flank at
-#                   25/40/55 s. VICTIM GLASS PEEK On + the glass held 65-95 s
-#                   (OVERMATCH_GLASS_HOLD) / Off and no hold.
+#                   25/40/55 s. The own glass on 65-95 s (OVERMATCH_OWN_GLASS, the scripted
+#                   preference: the live tank dressed in the look under the latest shot, the
+#                   full-viewport base look) / never on.
 #   killcam-on/off  offline target-kills: the target fires into the player's ammunition from 25 s
 #                   every 10 s until the knockout. KILL CAM On / Off. Reported twice: the whole
 #                   run (`killcam`: hit beat, lesson, killer beat) and the lesson alone
@@ -23,12 +25,13 @@
 #                   respawns, so the stream ends on the death screen.
 #   mp-on/off       a local dedicated server and the latency runner's duel
 #                   (scripts/shot/run-pencam-latency.sh): the MEASURED client connects first and
-#                   runs VISIBLE (SPIKE_SIM_VISIBLE=1), the opponent hidden. All three settings
+#                   runs VISIBLE (SPIKE_SIM_VISIBLE=1), the opponent hidden. Both settings
 #                   On / Off. The opponent's rounds knock the measured tank out about 30 s in
 #                   (MEASURED 2026-10-19), and the scripted client never respawns: the analysis
 #                   stops at the kill cam run's start (the on-run's mark, for both runs), where
-#                   the frames turn into the death screen. The MP numbers are the corner's and
-#                   the glass's over the net before that, nothing more.
+#                   the frames turn into the death screen. The MP numbers are the corner's over
+#                   the net before that, nothing more: the own glass is a player's key with an
+#                   offline-only scripted preference, so it is measured offline.
 #
 # Validity conditions are the frame sweep's (scripts/perf/run-frame-sweep.sh): release binaries,
 # the game window VISIBLE, frontmost and unoccluded on the primary display at 2560x1440 physical,
@@ -130,19 +133,19 @@ wait_span() {
 
 for cond in "${CONDITIONS[@]}"; do
   # Per-condition shape.
-  mode=offline; corner=Off; glass=Off; killcam=Off; hold=""; armed=""; surfaces=(); scen=()
+  mode=offline; corner=Off; killcam=Off; glass=""; armed=""; surfaces=(); scen=()
   case "$cond" in
     corner-*)  run_s=82;  scen=(OVERMATCH_TARGET_AHEAD=1 SPIKE_AUTO_FIRE=1);        armed="auto_fire: armed";    surfaces=(corner) ;;
     glass-*)   run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_FIRES=1); armed="target fires: armed"; surfaces=(glass) ;;
     killcam-*) run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_KILLS=1); armed="target kills: armed"; surfaces=(killcam lesson) ;;
-    mp-*)      run_s=120; mode=mp;                                                  surfaces=(corner glass) ;;
+    mp-*)      run_s=120; mode=mp;                                                  surfaces=(corner) ;;
   esac
   if [[ "$cond" == *-on ]]; then
     case "$cond" in
       corner-on)  corner=All ;;
-      glass-on)   glass=On; hold="65-95" ;;
+      glass-on)   glass="65-95" ;;
       killcam-on) killcam=On ;;
-      mp-on)      corner=All; glass=On; killcam=On ;;
+      mp-on)      corner=All; killcam=On ;;
     esac
   fi
 
@@ -150,18 +153,18 @@ for cond in "${CONDITIONS[@]}"; do
   mkdir -p "$cfg"
   # The shipped shadow default (M350) so the measurement is of the game as played; vsync Off so
   # frame times are the workload's, not the display's; the primary display (the surface gate).
-  printf '(\n    version: 1,\n    shadow_distance: M350,\n    vsync_mode: Off,\n    display: Primary,\n    pen_cam_corner: %s,\n    victim_glass_peek: %s,\n    kill_cam: %s,\n)\n' \
-    "$corner" "$glass" "$killcam" >"$cfg/video.ron"
+  printf '(\n    version: 1,\n    shadow_distance: M350,\n    vsync_mode: Off,\n    display: Primary,\n    pen_cam_corner: %s,\n    kill_cam: %s,\n)\n' \
+    "$corner" "$killcam" >"$cfg/video.ron"
 
   stream="$OUT/$cond.client.jsonl"
   log="$OUT/$cond.log"
-  echo "== $cond: $mode, corner $corner, glass $glass, kill cam $killcam${hold:+, glass held $hold s} (${run_s}s) =="
+  echo "== $cond: $mode, corner $corner, kill cam $killcam${glass:+, own glass on $glass s} (${run_s}s) =="
 
   if [[ "$mode" == offline ]]; then
-    hold_env=()
-    [[ -n "$hold" ]] && hold_env=(OVERMATCH_GLASS_HOLD="$hold")
+    glass_env=()
+    [[ -n "$glass" ]] && glass_env=(OVERMATCH_OWN_GLASS="$glass")
     env -u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE \
-      OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR="$cfg" "${scen[@]}" "${hold_env[@]}" \
+      OVERMATCH_MUTE=1 OVERMATCH_CONFIG_DIR="$cfg" "${scen[@]}" "${glass_env[@]}" \
       SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" --offline >"$log" 2>&1 &
     CLIENT_PID=$!
@@ -253,7 +256,7 @@ for cond in "${CONDITIONS[@]}"; do
     || invalid "$cond" "frame stream failed the analyzer's validity gates (see above)"
 
   # The surface marks: an -on run must carry its own; an -off run takes its paired -on run's.
-  marks="$(grep -c "the slot shows\|kill cam: the run" "$log" || true)"
+  marks="$(grep -c "the slot shows\|the own glass is\|kill cam: the run" "$log" || true)"
   surface_args=()
   for s in "${surfaces[@]}"; do surface_args+=(--surface "$s"); done
   windows_args=()

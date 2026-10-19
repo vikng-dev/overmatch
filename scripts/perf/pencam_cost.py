@@ -59,10 +59,12 @@ SHOWS = re.compile(
 )
 CLEARS = re.compile(r"pen cam: the slot shows nothing at t=(?P<t>[0-9.]+) s")
 RUN = re.compile(r"kill cam: the run (?P<edge>starts|ends) at t=(?P<t>[0-9.]+) s")
+GLASS = re.compile(r"pen cam: the own glass is (?P<edge>on|off) at t=(?P<t>[0-9.]+) s")
 
 # The slot's kinds by surface class. The shooter's corner frames (src/damage_cam/pen_cam/timeline.rs
 # `CornerKind`): Glass is the penetration frame, Slice the non-penetration, Ricochet and Damaged the
-# rest; Victim is the victim's glass (game/glass.rs).
+# rest; Victim is the victim frame's drawing mode, which the slot no longer runs. The own glass
+# (game/glass.rs) draws beside the slot and writes its own marks (`glass::log_presence`).
 CORNER_KINDS = frozenset({"Glass", "Slice", "Ricochet", "Damaged"})
 GLASS_KINDS = frozenset({"Victim"})
 SURFACES = ("corner", "glass", "lesson", "killcam")
@@ -71,7 +73,8 @@ STATS = (("p50", 50), ("p95", 95), ("p99", 99), ("worst", 100))
 
 class Mark(NamedTuple):
     t: float
-    # One of: corner, glass, lesson, none (the slot); run-start, run-end (the kill cam).
+    # One of: corner, glass, lesson, none (the slot); run-start, run-end (the kill cam);
+    # glass-on, glass-off (the own glass).
     label: str
 
 
@@ -102,23 +105,33 @@ def parse_marks(lines) -> list[Mark]:
             marks.append(Mark(float(m["t"]), "none"))
         elif m := RUN.search(line):
             marks.append(Mark(float(m["t"]), "run-start" if m["edge"] == "starts" else "run-end"))
+        elif m := GLASS.search(line):
+            marks.append(Mark(float(m["t"]), f"glass-{m['edge']}"))
     return marks
 
 
 def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
     """Each class's on-screen segments. A slot mark closes the previous slot segment and opens its
     own; `none` only closes. The run's start and end bracket a killcam segment; a lesson lives only
-    inside a run (the run's end closes it, one outside a run is a contract break). Anything still
-    open at `end_t` (the stream's last frame) closes there."""
+    inside a run (the run's end closes it, one outside a run is a contract break). The own glass's
+    on and off bracket a glass segment, beside the slot's. Anything still open at `end_t` (the
+    stream's last frame) closes there."""
     out: dict[str, list[Segment]] = {s: [] for s in SURFACES}
     slot: Mark | None = None
     run_start: float | None = None
+    glass_start: float | None = None
 
     def close_slot(at: float) -> None:
         nonlocal slot
         if slot is not None and at > slot.t:
             out[slot.label].append(Segment(slot.t, at))
         slot = None
+
+    def close_glass(at: float) -> None:
+        nonlocal glass_start
+        if glass_start is not None and at > glass_start:
+            out["glass"].append(Segment(glass_start, at))
+        glass_start = None
 
     for mark in marks:
         if mark.label == "run-start":
@@ -129,6 +142,10 @@ def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
             run_start = None
             if slot is not None and slot.label == "lesson":
                 close_slot(mark.t)
+        elif mark.label == "glass-on":
+            glass_start = mark.t
+        elif mark.label == "glass-off":
+            close_glass(mark.t)
         elif mark.label == "none":
             close_slot(mark.t)
         else:
@@ -137,6 +154,7 @@ def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
             close_slot(mark.t)
             slot = mark
     close_slot(end_t)
+    close_glass(end_t)
     if run_start is not None and end_t > run_start:
         out["killcam"].append(Segment(run_start, end_t))
     return out
