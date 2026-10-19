@@ -221,6 +221,7 @@ pub(crate) fn template_plugin(app: &mut App) {
     app.add_systems(
         PostUpdate,
         select_belt_rungs
+            .in_set(ShoeRungSelected)
             .run_if(resource_exists::<LinkTemplate>)
             // "No view yet" is SCHEDULING, not a value the selector has to encode: a composition
             // declares its player view in `Startup`, and the frames before that are frames this
@@ -904,6 +905,11 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 // ---------------------------------------------------------------------------------------------
 // The pool
 // ---------------------------------------------------------------------------------------------
+
+/// Where the belt writes each shoe's rung mesh handle, in `PostUpdate`: anything that copies a
+/// shoe's handle for the same frame (the own glass's mask copies) orders after it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ShoeRungSelected;
 
 /// Spawn one side's BELT under `parent` (a hull-local frame in both consumers): the entity every
 /// shoe on that side hangs from, and the one that selects their rung.

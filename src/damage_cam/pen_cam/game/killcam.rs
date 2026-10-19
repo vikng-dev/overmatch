@@ -395,7 +395,7 @@ pub(super) fn drive(
     store: Option<Res<ShotExplanations>>,
     blueprint: Option<Res<TankBlueprint>>,
     keys: Keys,
-    escape: Option<Res<EscapeAction>>,
+    mut escape: Option<ResMut<EscapeAction>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     mut victim: ResMut<Victim>,
     mut gate: ResMut<KillCamGate>,
@@ -502,7 +502,10 @@ pub(super) fn drive(
     // Input: the cursor's, past the dead-zone. The skip is the Esc router's decision, taken with
     // the cursor already checked there; inside the dead-zone the press does nothing.
     let input = settled && crate::state::cursor_locked(cursor);
-    let skip = settled && escape.is_some_and(|action| *action == EscapeAction::SkipKillCam);
+    let skip = settled
+        && escape
+            .as_deref()
+            .is_some_and(|action| *action == EscapeAction::SkipKillCam);
     let hold = input && keys.pressed(|b| b.kill_cam_hold);
     let replay = input && keys.just_pressed(|b| b.kill_cam_replay);
     let map = keys.map();
@@ -598,6 +601,13 @@ pub(super) fn drive(
             shooter,
             radius,
         });
+        // A press the router gave the menu this frame — it routed on the gate as the frame
+        // entered, before this run existed — is the run's: it reaches no menu and no pause.
+        if let Some(escape) = escape.as_deref_mut()
+            && *escape == EscapeAction::Menu
+        {
+            *escape = EscapeAction::None;
+        }
         // The lesson's record, on the stage the slot keeps.
         rig.exhibits.0.clear();
         if let Some(tank_asset) = report

@@ -164,6 +164,9 @@ struct Built {
     /// Meshes were dressed this frame: the record's elements are built again next frame, once
     /// their tints can hang under them.
     settle: bool,
+    /// A primitive was left undressed for the LOD ladder's scan ([`dress`]): looked at again next
+    /// frame, until none is.
+    rescan: bool,
 }
 
 /// The tank's hierarchy and the classification reads.
@@ -307,8 +310,11 @@ pub(super) fn build(
         .as_ref()
         .is_some_and(|built| built.masks != *set || built.hull != hull)
     {
+        // The restore lands with this frame's commands; the next frame dresses afresh, every
+        // mesh undressed by then.
         held.restore(&mut commands);
         state.built = None;
+        return;
     }
     let now = time.elapsed_secs_f64();
     let fresh = state.built.is_none();
@@ -323,6 +329,7 @@ pub(super) fn build(
         tiers: HashMap::new(),
         mask: stores.looks.add(look::hull_mask(set)),
         settle: false,
+        rescan: false,
     });
 
     // The tank's primitives, dressed as they stand or as they land.
@@ -331,8 +338,8 @@ pub(super) fn build(
         .iter()
         .any(|added| scene.parents.iter_ancestors(added).any(|a| a == tank));
     let mut dressed_now = false;
-    if fresh || landed {
-        dressed_now = dress(
+    if fresh || landed || built.rescan {
+        let (dressed, skipped) = dress(
             &mut commands,
             tank,
             asset.spec(),
@@ -341,6 +348,8 @@ pub(super) fn build(
             &scene,
             &held,
         );
+        dressed_now = dressed;
+        built.rescan = skipped;
     }
 
     // The record's elements, over the components as they are dressed.
@@ -409,10 +418,11 @@ pub(super) fn build(
 }
 
 /// Dress every undressed render primitive under `root` in its tier's look, against `built`'s
-/// masks, with a mask copy under it; whether any was. Left as it is: a glTF primitive the LOD
-/// ladder has not scanned yet (it binds the primitive's rungs off the handle this would take),
-/// the shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision proxy,
-/// and the glass's own meshes.
+/// masks, with a mask copy under it: whether any was, and whether one was left for the LOD
+/// ladder's scan — a glTF primitive the ladder has not scanned yet (it binds the primitive's rungs
+/// off the handle this would take), which the next frame looks at again. Left as they are: the
+/// shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision proxy, and
+/// the glass's own meshes.
 fn dress(
     commands: &mut Commands,
     root: Entity,
@@ -421,13 +431,15 @@ fn dress(
     looks: &mut Assets<LookMaterial>,
     scene: &Hierarchy,
     held: &Held,
-) -> bool {
+) -> (bool, bool) {
     let mut any = false;
+    let mut skipped = false;
     for entity in scene.children.iter_descendants(root) {
         let Ok((entity, mesh, material, range)) = held.undressed.get(entity) else {
             continue;
         };
         if scene.primitives.contains(entity) && !scene.scanned.contains(entity) {
+            skipped = true;
             continue;
         }
         if scene
@@ -488,7 +500,7 @@ fn dress(
         }
         any = true;
     }
-    any
+    (any, skipped)
 }
 
 /// Play the record's elements from the glass's clock: corner seconds since the record first

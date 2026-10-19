@@ -99,11 +99,15 @@ fn wire(app: &mut App) {
                 super::present().run_if(resource_exists::<StageView>),
                 glass::build,
                 glass::animate,
-                glass::follow_mesh,
                 log_presence,
                 glass::log_presence,
             )
                 .chain(),
+        )
+        // A mask copy takes its shoe's rung in the frame the belt writes it.
+        .add_systems(
+            PostUpdate,
+            glass::follow_mesh.after(crate::track::link_view::ShoeRungSelected),
         );
     killcam::wire(app);
 }
@@ -1624,5 +1628,228 @@ mod tests {
         run(&mut app, 0.2);
         assert!(!running(&app));
         assert_eq!(glass_census(&mut app).0, 2, "back on the new life");
+    }
+    /// A new mask set for the player's camera (a resize) rebuilds the whole glass: every mesh is
+    /// dressed again, in materials holding the new set's images, and the old set's are gone.
+    #[test]
+    fn a_new_mask_set_dresses_the_tank_afresh() {
+        use bevy::camera::{ImageRenderTarget, RenderTarget};
+        use bevy::render::render_resource::TextureFormat;
+
+        let (mut app, _, meshes, camera) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let hull_mask = |app: &App, mesh: Entity| {
+            let handle = app
+                .world()
+                .get::<MeshMaterial3d<LookMaterial>>(mesh)
+                .expect("dressed")
+                .0
+                .clone();
+            app.world()
+                .resource::<Assets<LookMaterial>>()
+                .get(&handle)
+                .expect("stored")
+                .hull_mask
+                .clone()
+        };
+        let set_hull = |app: &App| {
+            app.world()
+                .resource::<Masks>()
+                .of(camera)
+                .unwrap()
+                .hull
+                .clone()
+        };
+        let old = set_hull(&app);
+        assert_eq!(hull_mask(&app, meshes[0]), Some(old.clone()));
+
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_target_texture(
+                128,
+                64,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            ));
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(RenderTarget::Image(ImageRenderTarget {
+                handle: image,
+                scale_factor: 1.0,
+            }));
+        run(&mut app, 0.2);
+        let new = set_hull(&app);
+        assert_ne!(new, old, "a new set");
+        let (dressed, items, viewers, ..) = glass_census(&mut app);
+        assert_eq!((dressed, items), (2, 2), "dressed afresh");
+        assert_eq!(viewers, vec![camera]);
+        for mesh in meshes {
+            assert!(wears_the_look(&mut app, mesh));
+            assert_eq!(
+                hull_mask(&app, mesh),
+                Some(new.clone()),
+                "the new set's images"
+            );
+        }
+        assert!(
+            !app.world().resource::<Assets<Image>>().contains(&old),
+            "the old set's images are gone"
+        );
+    }
+
+    /// A glTF primitive landing under a dressed tank is dressed once the LOD ladder has scanned
+    /// it, and not before: the ladder binds the primitive's rungs off the handle the look takes.
+    #[test]
+    fn a_late_primitive_is_dressed_once_the_ladder_scanned_it() {
+        let (mut app, player, meshes, _) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert!(wears_the_look(&mut app, meshes[0]));
+        let standard = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let hull = app.world().get::<crate::tank::Rig>(player).unwrap().hull;
+        let late = app
+            .world_mut()
+            .spawn((
+                bevy::gltf::GltfMeshName("Late".into()),
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(standard),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(hull),
+            ))
+            .id();
+        run(&mut app, 0.2);
+        assert!(
+            !wears_the_look(&mut app, late),
+            "left for the ladder's scan"
+        );
+        assert_eq!(glass_census(&mut app).0, 2);
+        app.world_mut()
+            .entity_mut(late)
+            .insert(crate::geometry_lod::GeometryLodScanned);
+        run(&mut app, 0.2);
+        assert!(wears_the_look(&mut app, late), "dressed once scanned");
+        assert_eq!(glass_census(&mut app).0, 3);
+    }
+
+    /// The glass's materials hold the images of the player's camera's set and no other: with the
+    /// corner open on its own set beside it, the two sets' images differ and every dressed mesh's
+    /// look is masked by the camera's.
+    #[test]
+    fn the_glass_materials_hold_its_own_viewers_masks() {
+        let (mut app, _, meshes, camera) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        stage_of(&mut app, OWN);
+        let (shooter, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        receive(&mut app, shooter, &vocabulary);
+        let mut checked = false;
+        for _ in 0..(1.0 / STEP_S) as usize {
+            step(&mut app);
+            let inset = app
+                .world_mut()
+                .query_filtered::<Entity, With<StageCamera>>()
+                .iter(app.world())
+                .next();
+            let masks = app.world().resource::<Masks>();
+            let (Some(inset), Some(own)) =
+                (inset.and_then(|inset| masks.of(inset)), masks.of(camera))
+            else {
+                continue;
+            };
+            assert_ne!(inset.hull, own.hull, "two sets, two images");
+            for mesh in meshes {
+                let handle = app
+                    .world()
+                    .get::<MeshMaterial3d<LookMaterial>>(mesh)
+                    .expect("dressed")
+                    .0
+                    .clone();
+                let material = app
+                    .world()
+                    .resource::<Assets<LookMaterial>>()
+                    .get(&handle)
+                    .expect("stored");
+                assert_eq!(
+                    material.hull_mask.as_ref(),
+                    Some(&own.hull),
+                    "the camera's set"
+                );
+                assert_eq!(material.part_mask.as_ref(), Some(&own.part));
+            }
+            checked = true;
+            break;
+        }
+        assert!(checked, "both sets existed at once");
+    }
+
+    /// `name`'s record of another tank's round striking the player's first life, its encounter
+    /// opened on `contact_tick` and completed on `completion_tick`: the player's projection and
+    /// the vocabulary.
+    fn incoming_at(
+        name: &str,
+        contact_tick: u32,
+        completion_tick: u32,
+    ) -> (ShotExplanation, ShotVocabulary) {
+        let report = report(name);
+        let vocabulary = vocabulary(&report);
+        let mut recorded = recorded(&report, STRUCK, contact_tick - 1, me());
+        recorded.contact_tick = contact_tick;
+        recorded.completion_tick = completion_tick;
+        recorded.outcome = Some(0);
+        let built = BuiltExplanation::build(&vocabulary, &recorded).unwrap();
+        let victim = built
+            .projections()
+            .into_iter()
+            .map(|(_, e)| e)
+            .next()
+            .unwrap();
+        assert_ne!(victim.audience, Audience::Shooter);
+        (victim, vocabulary)
+    }
+
+    /// The latest record is the newest by recency entire: of two encounters opened on the same
+    /// tick the later completed is newer; one still waiting on its impact is never the latest,
+    /// however new.
+    #[test]
+    fn the_latest_record_is_the_newest_completed_whose_impact_is_drawn() {
+        let (mut app, _, _, _) = world_glass_app();
+        let latest = |app: &App| {
+            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+        };
+        let (early, early_vocabulary) = incoming_at("s1_through_crew", 1300, 1302);
+        let (late, late_vocabulary) = incoming_at("s3_ricochet", 1300, 1305);
+        receive(&mut app, late.clone(), &late_vocabulary);
+        receive(&mut app, early.clone(), &early_vocabulary);
+        assert_eq!(
+            latest(&app),
+            Some(ExplanationKey::of(&late)),
+            "the later completed of one contact tick"
+        );
+        let (pending, pending_vocabulary) = incoming_at("s9_one_box_lost", 1400, 1402);
+        let now = app.world().resource::<Time>().elapsed_secs_f64();
+        app.world_mut().resource_mut::<ShotExplanations>().receive(
+            pending.clone(),
+            &pending_vocabulary,
+            now,
+        );
+        assert_eq!(
+            latest(&app),
+            Some(ExplanationKey::of(&late)),
+            "a newer record still waiting on its impact is not the latest"
+        );
+        app.world_mut()
+            .resource_mut::<ShotExplanations>()
+            .drew(pending.shot, pending.outcome.unwrap());
+        assert_eq!(
+            latest(&app),
+            Some(ExplanationKey::of(&pending)),
+            "drawn, it is"
+        );
     }
 }

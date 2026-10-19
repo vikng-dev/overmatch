@@ -1122,8 +1122,8 @@ pub(crate) fn plugin(app: &mut App) {
 /// The dev key that cycles the terrain rung clamp: ADAPTIVE → EXACT → each rung the map actually
 /// keeps → back to ADAPTIVE.
 ///
-/// `K` because it is free — `G` gizmos, `X` x-ray, `F` camera detach, `M` spawn map, `T` optic, `L`
-/// and the digits are taken (`debug`, `command`, `sight`, `net::spawn_map`).
+/// `K` because it is free — `G` gizmos, `X` the own glass, `F` camera detach, `M` spawn map, `T`
+/// optic, `L` and the digits are taken (`debug`, `command`, `sight`, `net::spawn_map`).
 #[cfg(feature = "dev_tools")]
 const CLAMP_CYCLE_KEY: KeyCode = KeyCode::KeyK;
 

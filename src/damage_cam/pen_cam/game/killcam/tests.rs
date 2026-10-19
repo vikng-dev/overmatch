@@ -749,3 +749,29 @@ fn the_death_flow_owns_the_device() {
         assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");
     }
 }
+
+/// Esc pressed on the very frame a run starts is the run's: the router gave it to the menu on the
+/// gate as the frame entered (no run yet), and the run starting takes it back — no menu online, no
+/// pause offline, no skip inside the dead-zone.
+#[test]
+fn esc_on_the_frame_a_run_starts_is_the_runs() {
+    let (mut app, player, _) = composed();
+    crate::overlay::mount_bare(&mut app);
+    let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
+    receive(&mut app, explanation, &vocabulary);
+    knock_out(&mut app, player);
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        victim(&app).run().is_some(),
+        "the run started on that frame"
+    );
+    assert!(
+        !app.world().resource::<Overlays>().contains(Overlay::Menu),
+        "and the press opened no menu"
+    );
+    assert_eq!(
+        *app.world().resource::<crate::state::EscapeAction>(),
+        crate::state::EscapeAction::None,
+        "the press was taken"
+    );
+}
