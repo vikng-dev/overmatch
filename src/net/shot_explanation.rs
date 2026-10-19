@@ -140,7 +140,7 @@ fn send_traced_shot_explanations(mut send: ExplanationSend, mut trace: ResMut<Sh
 }
 
 /// A client link connected (`up`) or ended (`down`). `scripts/shot/pencam_latency.py` reads these
-/// rows for the run's precondition: each client connects once and stays connected.
+/// rows for the run's precondition: exactly one `up` per client, and no `down` before the last send.
 fn trace_link_up(
     add: On<Add, Connected>,
     links: Query<(), With<ClientOf>>,

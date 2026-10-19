@@ -233,7 +233,23 @@ pub(super) fn wire(app: &mut App) {
         )
         .add_observer(disconnect)
         .add_systems(PostUpdate, place.in_set(CaptiveCameraPlaced))
-        .add_systems(Update, hud.after(drive));
+        .add_systems(Update, (hud, log_run).after(drive));
+}
+
+/// Log the run's start and end on `Time<Real>` — the frame-cost stream's clock
+/// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by the run.
+fn log_run(victim: Res<Victim>, time: Res<Time<Real>>, mut running: Local<bool>) {
+    let now = victim.run().is_some();
+    if now == *running {
+        return;
+    }
+    let t = time.elapsed_secs_f64();
+    if now {
+        debug!("kill cam: the run starts at t={t:.3} s (Time<Real>)");
+    } else {
+        debug!("kill cam: the run ends at t={t:.3} s (Time<Real>)");
+    }
+    *running = now;
 }
 
 /// Hand the camera back on the third-person profile, the lesson's mask owner gone, if the kill cam

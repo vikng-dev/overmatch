@@ -2,7 +2,7 @@
 //! bystander.
 
 use core::time::Duration;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use lightyear::connection::client_of::ClientOf;
@@ -229,11 +229,11 @@ fn each_explanation_reaches_only_its_recipient() {
     }
 }
 
-/// Every system the app registers, in any schedule, as `<schedule> <name>`, and every observer as
-/// `observer <name>`.
-fn registered(app: &mut App) -> BTreeSet<String> {
+/// How many times the app registers each system, in any schedule, as `<schedule> <name>`, and
+/// each observer as `observer <name>`.
+fn registered(app: &mut App) -> BTreeMap<String, usize> {
     let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
-    let mut names: BTreeSet<String> = schedules
+    let mut names: Vec<String> = schedules
         .iter()
         .flat_map(|(label, schedule)| {
             schedule
@@ -251,10 +251,29 @@ fn registered(app: &mut App) -> BTreeSet<String> {
             .iter(world)
             .map(|observer| format!("observer {}", observer.system_name())),
     );
-    names
+    let mut counts = BTreeMap::new();
+    for name in names {
+        *counts.entry(name).or_insert(0) += 1;
+    }
+    counts
 }
 
-fn mounted(armed: Option<&std::path::Path>) -> BTreeSet<String> {
+/// Each registration count that differs between `on` and `off`, as `on - off`.
+fn registration_delta(
+    on: &BTreeMap<String, usize>,
+    off: &BTreeMap<String, usize>,
+) -> BTreeMap<String, isize> {
+    on.keys()
+        .chain(off.keys())
+        .map(|name| {
+            let count = |side: &BTreeMap<String, usize>| side.get(name).copied().unwrap_or(0);
+            (name.clone(), count(on) as isize - count(off) as isize)
+        })
+        .filter(|(_, delta)| *delta != 0)
+        .collect()
+}
+
+fn mounted(armed: Option<&std::path::Path>) -> BTreeMap<String, usize> {
     let mut app = App::new();
     if let Some(path) = armed {
         app.insert_resource(ShotTrace::for_test(path));
@@ -277,8 +296,9 @@ fn trace_path(name: &str) -> std::path::PathBuf {
 
 /// Unarmed, the delivery mounts register no trace system and no trace observer in any schedule:
 /// tracing off costs the shipping schedule nothing. Arming changes exactly the five trace entries
-/// and the sender swap, whatever they are named, so an unarmed closure or a system in another
-/// schedule cannot slip through.
+/// and the sender swap, counted per registration, so a second registration under a shared name or
+/// a system in another schedule cannot slip through. A system mounted in both and checking the
+/// recorder at run time is outside this probe: that is a review invariant, not a tested one.
 #[test]
 fn an_unarmed_mount_registers_no_delivery_trace() {
     let off = mounted(None);
@@ -286,22 +306,19 @@ fn an_unarmed_mount_registers_no_delivery_trace() {
     let on = mounted(Some(&path));
     std::fs::remove_file(&path).unwrap();
     let module = module_path!().trim_end_matches("::tests");
-    let entry = |owner: &str, name: &str| format!("{owner} {module}::{name}");
+    let entry =
+        |owner: &str, name: &str, delta: isize| (format!("{owner} {module}::{name}"), delta);
     assert_eq!(
-        on.difference(&off).cloned().collect::<BTreeSet<_>>(),
-        BTreeSet::from([
-            entry("Update", "trace_presence"),
-            entry("FixedUpdate", "send_traced_shot_explanations"),
-            entry("observer", "trace_outcome_drawn"),
-            entry("observer", "trace_link_up"),
-            entry("observer", "trace_link_down"),
+        registration_delta(&on, &off),
+        BTreeMap::from([
+            entry("Update", "trace_presence", 1),
+            entry("FixedUpdate", "send_traced_shot_explanations", 1),
+            entry("FixedUpdate", "send_shot_explanations", -1),
+            entry("observer", "trace_outcome_drawn", 1),
+            entry("observer", "trace_link_up", 1),
+            entry("observer", "trace_link_down", 1),
         ]),
-        "arming must add exactly the delivery trace",
-    );
-    assert_eq!(
-        off.difference(&on).cloned().collect::<BTreeSet<_>>(),
-        BTreeSet::from([entry("FixedUpdate", "send_shot_explanations")]),
-        "arming must drop exactly the untraced sender",
+        "arming must add exactly the delivery trace and swap the sender",
     );
 }
 

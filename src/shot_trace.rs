@@ -80,9 +80,10 @@ fn merge_extra(row: &mut Value, extra: Value) {
     }
 }
 
-/// Record one row through an OPTIONAL recorder — the shape every call site uses, so an unarmed run
-/// pays exactly one `Option` check (the hot path is the ballistics march and `receive_fire_events`;
-/// see the module doc). A no-op when the recorder is absent.
+/// Record one row through an OPTIONAL recorder — the shape of every call site that runs armed or
+/// not, so an unarmed run pays exactly one `Option` check (the hot path is the ballistics march and
+/// `receive_fire_events`; see the module doc). A no-op when the recorder is absent. Systems mounted
+/// only when armed (delivery's trace systems) take the recorder itself and call [`ShotTrace::row`].
 ///
 /// The row's fields arrive as a CLOSURE, not a built `Value`: the `json!` at each call site is then
 /// evaluated only in an armed run, so an unrecorded run allocates nothing — the "zero cost when off"
